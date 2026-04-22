@@ -1813,18 +1813,11 @@ async fn pipeline_processes_concurrent_inserts_during_startup() {
         destination.clone(),
     );
 
-    // Start the pipeline after spawning the insert task.
-    pipeline.start().await.unwrap();
-
-    // Spawn a task that inserts data concurrently using a separate connection.
-    // This creates a race condition where some rows may be captured during table
-    // copy and others during streaming replication.
     let rows_to_insert = 10;
-    let users_table_name = database_schema.users_schema().name.clone();
-    let orders_table_name = database_schema.orders_schema().name.clone();
-    let mut duplicate_database = database.duplicate().await;
 
-    // Wait for both tables to reach Ready state.
+    // Register notifications before starting the pipeline so we do not miss
+    // state transitions or events that happen during startup. `notify_on_*`
+    // and `wait_for_*` only fire on updates that occur after registration.
     let users_ready_notify = store
         .notify_on_table_state_type(
             database_schema.users_schema().id,
@@ -1847,6 +1840,15 @@ async fn pipeline_processes_concurrent_inserts_during_startup() {
             (rows_to_insert * 2) as u64,
         )])
         .await;
+
+    pipeline.start().await.unwrap();
+
+    // Spawn a task that inserts data concurrently using a separate connection.
+    // This creates a race condition where some rows may be captured during table
+    // copy and others during streaming replication.
+    let users_table_name = database_schema.users_schema().name.clone();
+    let orders_table_name = database_schema.orders_schema().name.clone();
+    let mut duplicate_database = database.duplicate().await;
 
     // Use a JoinHandle to ensure the task completes and the database isn't dropped
     // prematurely.
