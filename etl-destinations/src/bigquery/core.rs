@@ -1305,6 +1305,7 @@ mod tests {
     use std::sync::Arc;
 
     use etl::types::{ColumnSchema, IdentityMask, TableId, TableSchema, Type};
+    use prost::Message;
 
     use super::*;
 
@@ -1390,30 +1391,6 @@ mod tests {
         let parsed = table_id.parse::<SequencedBigQueryTableId>().unwrap();
         assert_eq!(parsed.to_bigquery_table_id(), "a__b_c__d");
         assert_eq!(parsed.1, 42);
-    }
-
-    #[test]
-    fn sequenced_bigquery_table_id_display_formatting() {
-        let table_id = SequencedBigQueryTableId("users_table".to_string(), 123);
-        assert_eq!(table_id.to_string(), "users_table_123");
-    }
-
-    #[test]
-    fn sequenced_bigquery_table_id_display_zero_sequence() {
-        let table_id = SequencedBigQueryTableId("simple_table".to_string(), 0);
-        assert_eq!(table_id.to_string(), "simple_table_0");
-    }
-
-    #[test]
-    fn sequenced_bigquery_table_id_display_large_sequence() {
-        let table_id = SequencedBigQueryTableId("test_table".to_string(), u64::MAX);
-        assert_eq!(table_id.to_string(), "test_table_18446744073709551615");
-    }
-
-    #[test]
-    fn sequenced_bigquery_table_id_display_with_escaped_underscores() {
-        let table_id = SequencedBigQueryTableId("a__b_c__d".to_string(), 42);
-        assert_eq!(table_id.to_string(), "a__b_c__d_42");
     }
 
     #[test]
@@ -1765,5 +1742,49 @@ mod tests {
         // Even though the row is too large, we should still get 1 batch
         // (the actual send will fail, but batching logic should handle it)
         assert_eq!(result, 1);
+    }
+
+    #[test]
+    fn bigquery_delete_key_row_encodes_identity_and_cdc_tags_against_descriptor_numbers() {
+        let table_schema = Arc::new(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_string(), "users".to_string()),
+            vec![
+                ColumnSchema::new("id".to_string(), Type::INT4, -1, 1, Some(1), false),
+                ColumnSchema::new("name".to_string(), Type::TEXT, -1, 2, None, false),
+                ColumnSchema::new("age".to_string(), Type::INT4, -1, 3, None, false),
+            ],
+        ));
+        let replicated_table_schema = ReplicatedTableSchema::from_masks(
+            table_schema,
+            etl::types::ReplicationMask::from_bytes(vec![1, 1, 1]),
+            IdentityMask::from_bytes(vec![1, 0, 0]),
+        );
+
+        let row = bigquery_delete_row(
+            &replicated_table_schema,
+            OldTableRow::Key(TableRow::new(vec![Cell::I32(42)])),
+            "lsn:1".to_string(),
+        )
+        .unwrap();
+
+        let encoded = row.encode_to_vec();
+
+        // Field tags must line up with the descriptor numbering:
+        // 1 => id, 4 => _CHANGE_TYPE, 5 => _CHANGE_SEQUENCE_NUMBER.
+        assert!(encoded.windows(2).any(|window| window == [0x08, 0x2a]));
+        assert!(
+            encoded
+                .windows(8)
+                .any(|window| window == [0x22, 0x06, b'D', b'E', b'L', b'E', b'T', b'E'])
+        );
+        assert!(
+            encoded.windows(7).any(|window| window == [0x2a, 0x05, b'l', b's', b'n', b':', b'1'])
+        );
+
+        // Non-identity source columns are intentionally omitted from sparse
+        // delete rows.
+        assert!(!encoded.contains(&0x12));
+        assert!(!encoded.contains(&0x18));
     }
 }

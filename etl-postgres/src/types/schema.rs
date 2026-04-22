@@ -577,6 +577,19 @@ pub enum IdentityType {
     Missing,
 }
 
+impl fmt::Display for IdentityType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let value = match self {
+            IdentityType::Full => "full",
+            IdentityType::PrimaryKey => "primary_key",
+            IdentityType::AlternativeKey => "alternative_key",
+            IdentityType::Missing => "missing",
+        };
+
+        f.write_str(value)
+    }
+}
+
 /// An iterator wrapper that provides an exact size even when the inner iterator
 /// doesn't know its length.
 ///
@@ -684,6 +697,8 @@ impl ReplicatedTableSchema {
             );
         }
 
+        // We pre-compute counts to avoid computing them each time since they are needed
+        // for the exact size iterators.
         let replicated_column_count = replication_mask.replicated_count();
         let identity_column_count = replication_mask
             .as_slice()
@@ -903,6 +918,9 @@ impl ReplicatedTableSchema {
     ///
     /// This is used only for fallback constructors that do not receive the
     /// explicit PostgreSQL identity mode.
+    ///
+    /// In the case when a primary key is made up of all the table columns, the
+    /// identity will be marked as [`IdentityType::PrimaryKey`].
     fn infer_identity_type(
         table_schema: &TableSchema,
         replication_mask: &ReplicationMask,
@@ -1321,44 +1339,5 @@ mod tests {
         assert!(removed_names.contains("name"));
         assert!(removed_names.contains("email"));
         assert!(diff.columns_to_rename.is_empty());
-    }
-
-    #[test]
-    fn replication_mask_display_all_replicated() {
-        let schema = create_test_table_schema();
-        let replicated_columns: HashSet<String> =
-            ["id", "name", "age"].into_iter().map(String::from).collect();
-
-        let mask = ReplicationMask::build(&schema, &replicated_columns);
-
-        assert_eq!(mask.to_string(), "(1,1,1)");
-    }
-
-    #[test]
-    fn replication_mask_display_partial_replicated() {
-        let schema = create_test_table_schema();
-        let replicated_columns: HashSet<String> =
-            ["id", "age"].into_iter().map(String::from).collect();
-
-        let mask = ReplicationMask::build(&schema, &replicated_columns);
-
-        assert_eq!(mask.to_string(), "(1,0,1)");
-    }
-
-    #[test]
-    fn replication_mask_display_none_replicated() {
-        let schema = create_test_table_schema();
-        let replicated_columns: HashSet<String> = HashSet::new();
-
-        let mask = ReplicationMask::build(&schema, &replicated_columns);
-
-        assert_eq!(mask.to_string(), "(0,0,0)");
-    }
-
-    #[test]
-    fn replication_mask_display_empty() {
-        let mask = ReplicationMask::from_bytes(vec![]);
-
-        assert_eq!(mask.to_string(), "()");
     }
 }

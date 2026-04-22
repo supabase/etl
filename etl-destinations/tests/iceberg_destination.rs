@@ -34,6 +34,22 @@ async fn run_table_copy_test(destination_namespace: DestinationNamespace) {
     let mut database = spawn_source_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
 
+    // Iceberg now fails fast unless source tables use replica identity full.
+    database
+        .run_sql(&format!(
+            "alter table {} replica identity full",
+            database_schema.users_schema().name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "alter table {} replica identity full",
+            database_schema.orders_schema().name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
     // Insert initial test data.
     insert_mock_data(
         &mut database,
@@ -379,11 +395,11 @@ async fn run_cdc_streaming_test(destination_namespace: DestinationNamespace) {
             Cell::I32(42),
             IcebergOperationType::Update.into(),
         ]),
-        // Delete of user with id 1
+        // Delete of user with id 1 preserves the full old row image.
         TableRow::new(vec![
             Cell::I64(1),
-            Cell::String("".to_string()),
-            Cell::I32(0),
+            Cell::String("updated_name".to_string()),
+            Cell::I32(42),
             IcebergOperationType::Delete.into(),
         ]),
     ];
@@ -430,10 +446,10 @@ async fn run_cdc_streaming_test(destination_namespace: DestinationNamespace) {
             Cell::String("updated_description".to_string()),
             IcebergOperationType::Update.into(),
         ]),
-        // Delete of order 2
+        // Delete of order 2 preserves the full old row image.
         TableRow::new(vec![
             Cell::I64(2),
-            Cell::String("".to_string()),
+            Cell::String("updated_description".to_string()),
             IcebergOperationType::Delete.into(),
         ]),
     ];
@@ -464,6 +480,22 @@ async fn run_cdc_streaming_with_truncate_test(destination_namespace: Destination
 
     let mut database = spawn_source_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
+
+    // Iceberg now fails fast unless source tables use replica identity full.
+    database
+        .run_sql(&format!(
+            "alter table {} replica identity full",
+            database_schema.users_schema().name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "alter table {} replica identity full",
+            database_schema.orders_schema().name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
 
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
