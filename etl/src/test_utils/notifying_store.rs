@@ -152,7 +152,13 @@ impl NotifyingStore {
     }
 
     /// Registers a notification that fires when a table reaches a specific
-    /// state type after this method is called.
+    /// state type.
+    ///
+    /// If the condition is already satisfied at registration time, the
+    /// returned [`TimedNotify`] is pre-armed so the next `.notified()` call
+    /// returns immediately. Otherwise it fires on the next matching state
+    /// transition. This avoids a race where the transition of interest
+    /// happens between pipeline startup and condition registration.
     ///
     /// Returns a [`TimedNotify`] that will automatically timeout after the
     /// specified timeout if the expected state is not reached. This
@@ -165,12 +171,18 @@ impl NotifyingStore {
         let notify = Arc::new(Notify::new());
         let mut inner = self.inner.write().await;
         inner.table_state_type_conditions.push((table_id, expected_state, notify.clone()));
+        inner.check_conditions();
 
         TimedNotify::new(notify)
     }
 
     /// Registers a notification that fires when a table state matches a custom
-    /// condition after this method is called.
+    /// condition.
+    ///
+    /// If the condition is already satisfied at registration time, the
+    /// returned [`TimedNotify`] is pre-armed so the next `.notified()` call
+    /// returns immediately. Otherwise it fires on the next state transition
+    /// that satisfies the condition.
     ///
     /// Returns a [`TimedNotify`] that will automatically timeout after the
     /// specified timeout if the condition is not met. This prevents tests
@@ -182,12 +194,18 @@ impl NotifyingStore {
         let notify = Arc::new(Notify::new());
         let mut inner = self.inner.write().await;
         inner.table_state_conditions.push((table_id, notify.clone(), Box::new(condition)));
+        inner.check_conditions();
 
         TimedNotify::new(notify)
     }
 
-    /// Registers a notification that fires when a table has stored at least the
-    /// expected number of schema snapshots after this method is called.
+    /// Registers a notification that fires when a table has stored at least
+    /// the expected number of schema snapshots.
+    ///
+    /// If the condition is already satisfied at registration time, the
+    /// returned [`TimedNotify`] is pre-armed so the next `.notified()` call
+    /// returns immediately. Otherwise it fires on the next schema update
+    /// that reaches the expected count.
     ///
     /// Returns a [`TimedNotify`] that will automatically timeout after the
     /// specified timeout if the expected schema count is not reached. This
@@ -200,6 +218,7 @@ impl NotifyingStore {
         let notify = Arc::new(Notify::new());
         let mut inner = self.inner.write().await;
         inner.table_schema_count_conditions.push((table_id, expected_count, notify.clone()));
+        inner.check_conditions();
 
         TimedNotify::new(notify)
     }
