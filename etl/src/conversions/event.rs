@@ -310,6 +310,7 @@ pub(crate) fn parse_replicated_column_names(
 /// `REPLICA IDENTITY FULL`, every replicated column belongs to the old-row
 /// identity. Otherwise the low bit of the column flags marks identity
 /// membership.
+#[allow(dead_code)]
 pub(crate) fn parse_replica_identity_column_names(
     relation_body: &protocol::RelationBody,
 ) -> EtlResult<HashSet<String>> {
