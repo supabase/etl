@@ -235,6 +235,20 @@ fn count_table_files(data: &Path, table_name: &str) -> usize {
     }
 }
 
+fn flush_inlined_rows(conn: &Connection, table_name: &str) -> i64 {
+    conn.query_row(
+        &format!(
+            "SELECT COALESCE(SUM(rows_flushed), 0) FROM ducklake_flush_inlined_data({}, \
+             table_name => {})",
+            quote_literal("lake"),
+            quote_literal(table_name),
+        ),
+        [],
+        |r| r.get(0),
+    )
+    .expect("inlined data flush query failed")
+}
+
 /// Forces DuckLake to checkpoint catalog metadata before cross-connection
 /// verification.
 ///
@@ -1254,6 +1268,10 @@ async fn write_events_restart_overlap_rebatches_only_pending_suffix() {
         )
         .await
         .unwrap();
+
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
+    assert_eq!(flush_inlined_rows(&conn, &table_name), 8);
+    drop(conn);
     destination.shutdown().await.unwrap();
     drop(destination);
     checkpoint_lake(&catalog_url, &data_url);
