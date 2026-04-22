@@ -1707,11 +1707,13 @@ async fn empty_tables_are_created_at_destination() {
         destination.clone(),
     );
 
-    pipeline.start().await.unwrap();
-
-    // Wait for the table to be ready.
+    // Register the ready notifier before starting the pipeline so we do not
+    // miss the Init -> Ready transition driven by the apply worker during
+    // startup.
     let table_ready_notify =
         state_store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
+
+    pipeline.start().await.unwrap();
 
     table_ready_notify.notified().await;
 
@@ -1941,9 +1943,11 @@ async fn pipeline_processes_concurrent_inserts_during_startup() {
         destination.clone(),
     );
 
-    // Wait for both tables to reach Ready state.
-    // We purposefully register these after having started the pipeline,
-    // to avoid driving workers behavior artificially.
+    let rows_to_insert = 10;
+
+    // Register notifications before starting the pipeline so we do not miss
+    // state transitions or events that happen during startup. `notify_on_*`
+    // and `wait_for_*` only fire on updates that occur after registration.
     let users_ready_notify = store
         .notify_on_table_state_type(
             database_schema.users_schema().id,
@@ -1960,7 +1964,6 @@ async fn pipeline_processes_concurrent_inserts_during_startup() {
     // Wait for all rows to be processed (either as table copy or streaming
     // inserts). This waits for 20 total inserts across both tables (10 users +
     // 10 orders).
-    let rows_to_insert = 10;
     let all_events_notify = destination
         .wait_for_all_events(vec![EventCondition::Any(
             EventType::Insert,

@@ -8,6 +8,7 @@ pub(crate) enum RetryDirective {
     /// The operation should only be retried after manual intervention.
     Manual,
     /// The operation should not be retried.
+    #[cfg_attr(not(feature = "failpoints"), allow(dead_code))]
     NoRetry,
 }
 
