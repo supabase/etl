@@ -497,9 +497,10 @@ where
         let approx_bytes = table_rows.iter().map(|row| row.size_hint() as u64).sum::<u64>();
         let inserted_rows = table_rows.len() as u64;
 
-        // Here we can have concurrent table writers because it's INSERTs only and CDC
-        // (write_events) won't start before the copy phase is complete
+        // Copy batches for the same table must still serialize so concurrent
+        // callers do not race each other inside DuckDB.
         self.ensure_applied_batches_table_exists().await?;
+        let _table_write_permit = self.acquire_table_write_slot(&table_name).await?;
         let _checkpoint_guard = self.acquire_mutation_guard().await;
         let prepared_batch =
             prepare_copy_table_batch(replicated_table_schema.inner(), table_name, table_rows)?;
