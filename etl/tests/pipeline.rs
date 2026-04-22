@@ -1939,17 +1939,6 @@ async fn pipeline_processes_concurrent_inserts_during_startup() {
         destination.clone(),
     );
 
-    // Start the pipeline after spawning the insert task.
-    pipeline.start().await.unwrap();
-
-    // Spawn a task that inserts data concurrently using a separate connection.
-    // This creates a race condition where some rows may be captured during table
-    // copy and others during streaming replication.
-    let rows_to_insert = 10;
-    let users_table_name = database_schema.users_schema().name.clone();
-    let orders_table_name = database_schema.orders_schema().name.clone();
-    let mut duplicate_database = database.duplicate().await;
-
     // Wait for both tables to reach Ready state.
     let users_ready_notify = store
         .notify_on_table_state_type(
@@ -1967,12 +1956,24 @@ async fn pipeline_processes_concurrent_inserts_during_startup() {
     // Wait for all rows to be processed (either as table copy or streaming
     // inserts). This waits for 20 total inserts across both tables (10 users +
     // 10 orders).
+    let rows_to_insert = 10;
     let all_events_notify = destination
         .wait_for_all_events(vec![EventCondition::Any(
             EventType::Insert,
             (rows_to_insert * 2) as u64,
         )])
         .await;
+
+    // Start the pipeline only after all notifications are registered so we
+    // cannot miss fast Ready transitions on CI.
+    pipeline.start().await.unwrap();
+
+    // Spawn a task that inserts data concurrently using a separate connection.
+    // This creates a race condition where some rows may be captured during table
+    // copy and others during streaming replication.
+    let users_table_name = database_schema.users_schema().name.clone();
+    let orders_table_name = database_schema.orders_schema().name.clone();
+    let mut duplicate_database = database.duplicate().await;
 
     // Use a JoinHandle to ensure the task completes and the database isn't dropped
     // prematurely.
