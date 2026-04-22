@@ -10,12 +10,21 @@ use sqlx::PgPool;
 use thiserror::Error;
 use utoipa::ToSchema;
 
-use crate::configs::destination::FullApiDestinationConfig;
-use crate::configs::encryption::EncryptionKey;
-use crate::db::destinations::DestinationsDbError;
-use crate::routes::{ErrorMessage, TenantIdError, extract_tenant_id};
-use crate::validation::{FailureType, ValidationContext, ValidationError, ValidationFailure};
-use crate::{db, validation};
+use crate::{
+    configs::{destination::FullApiDestinationConfig, encryption::EncryptionKey},
+    db,
+    db::{
+        destinations::{DestinationsDbError, destination_exists},
+        pipelines::{PipelinesDbError, read_pipelines_for_destination_for_deletion},
+    },
+    k8s::{
+        K8sClient,
+        core::{K8sCoreError, first_active_pipeline_id},
+    },
+    routes::{ErrorMessage, TenantIdError, extract_tenant_id},
+    validation,
+    validation::{FailureType, ValidationContext, ValidationError, ValidationFailure},
+};
 
 #[derive(Debug, Error)]
 pub enum DestinationError {
@@ -29,19 +38,33 @@ pub enum DestinationError {
     DestinationsDb(#[from] DestinationsDbError),
 
     #[error(transparent)]
+    PipelinesDb(#[from] PipelinesDbError),
+
+    #[error(transparent)]
     Validation(#[from] ValidationError),
 
     #[error("Failed to load environment: {0}")]
     Environment(#[from] std::io::Error),
+
+    #[error(transparent)]
+    K8sCore(#[from] K8sCoreError),
+
+    #[error("The pipeline with id {0} is active. Stop it before deleting it.")]
+    ActivePipeline(i64),
+
+    #[error(
+        "The destination with id {0} is still used by pipelines. Delete those pipelines first."
+    )]
+    DestinationInUse(i64),
 }
 
 impl DestinationError {
     pub fn to_message(&self) -> String {
         match self {
             // Do not expose internal database details in error messages.
-            DestinationError::DestinationsDb(DestinationsDbError::Database(_)) => {
-                "internal server error".to_string()
-            }
+            DestinationError::DestinationsDb(DestinationsDbError::Database(_))
+            | DestinationError::PipelinesDb(PipelinesDbError::Database(_))
+            | DestinationError::K8sCore(_) => "internal server error".to_string(),
             // Do not expose validation error details as they may contain credential info.
             DestinationError::Validation(ValidationError::BigQuery(_)) => {
                 "BigQuery validation failed".to_string()
@@ -62,22 +85,23 @@ impl ResponseError for DestinationError {
     fn status_code(&self) -> StatusCode {
         match self {
             DestinationError::DestinationsDb(_)
+            | DestinationError::PipelinesDb(_)
             | DestinationError::Validation(_)
-            | DestinationError::Environment(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            | DestinationError::Environment(_)
+            | DestinationError::K8sCore(_) => StatusCode::INTERNAL_SERVER_ERROR,
             DestinationError::DestinationNotFound(_) => StatusCode::NOT_FOUND,
+            DestinationError::ActivePipeline(_) | DestinationError::DestinationInUse(_) => {
+                StatusCode::CONFLICT
+            }
             DestinationError::TenantId(_) => StatusCode::BAD_REQUEST,
         }
     }
 
     fn error_response(&self) -> HttpResponse {
-        let error_message = ErrorMessage {
-            error: self.to_message(),
-        };
+        let error_message = ErrorMessage { error: self.to_message() };
         let body =
             serde_json::to_string(&error_message).expect("failed to serialize error message");
-        HttpResponse::build(self.status_code())
-            .insert_header(ContentType::json())
-            .body(body)
+        HttpResponse::build(self.status_code()).insert_header(ContentType::json()).body(body)
     }
 }
 
@@ -139,11 +163,7 @@ pub struct ValidationFailureResponse {
 
 impl From<ValidationFailure> for ValidationFailureResponse {
     fn from(failure: ValidationFailure) -> Self {
-        Self {
-            name: failure.name,
-            reason: failure.reason,
-            failure_type: failure.failure_type,
-        }
+        Self { name: failure.name, reason: failure.reason, failure_type: failure.failure_type }
     }
 }
 
@@ -278,6 +298,7 @@ pub async fn update_destination(
     ),
     responses(
         (status = 200, description = "Destination deleted successfully"),
+        (status = 409, description = "Destination has an active pipeline or is still used by pipelines", body = ErrorMessage),
         (status = 404, description = "Destination not found", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
@@ -288,10 +309,32 @@ pub async fn delete_destination(
     req: HttpRequest,
     pool: Data<PgPool>,
     destination_id: Path<i64>,
+    k8s_client: Data<dyn K8sClient>,
 ) -> Result<impl Responder, DestinationError> {
     let tenant_id = extract_tenant_id(&req)?;
     let destination_id = destination_id.into_inner();
 
+    if !destination_exists(&**pool, tenant_id, destination_id).await? {
+        return Err(DestinationError::DestinationNotFound(destination_id));
+    }
+
+    let pipelines =
+        read_pipelines_for_destination_for_deletion(&**pool, tenant_id, destination_id).await?;
+    if let Some(pipeline_id) =
+        first_active_pipeline_id(k8s_client.as_ref(), tenant_id, &pipelines).await?
+    {
+        return Err(DestinationError::ActivePipeline(pipeline_id));
+    }
+
+    if !pipelines.is_empty() {
+        return Err(DestinationError::DestinationInUse(destination_id));
+    }
+
+    // We intentionally keep this endpoint simple: the checks above provide the
+    // normal user-facing guard rails, but we do not try to serialize against
+    // concurrent pipeline creation here. A pipeline can still appear between
+    // the check and the final delete, in which case the database constraints
+    // are the last line of defense.
     db::destinations::delete_destination(&**pool, tenant_id, destination_id)
         .await?
         .ok_or(DestinationError::DestinationNotFound(destination_id))?;

@@ -12,7 +12,8 @@ use crate::environment::Environment;
 /// Directory containing configuration files relative to the application root.
 const CONFIGURATION_DIR: &str = "configuration";
 
-/// Environment variable for specifying an absolute path to the configuration directory.
+/// Environment variable for specifying an absolute path to the configuration
+/// directory.
 const CONFIG_DIR_ENV_VAR: &str = "APP_CONFIG_DIR";
 
 /// Supported extensions for base and environment configuration files.
@@ -30,9 +31,11 @@ const ENV_SEPARATOR: &str = "__";
 /// Separator for list elements in environment variables.
 const LIST_SEPARATOR: &str = ",";
 
-/// Trait implemented by configuration structures that require list parsing help.
+/// Trait implemented by configuration structures that require list parsing
+/// help.
 pub trait Config {
-    /// Keys whose values should be parsed as lists when loading the configuration.
+    /// Keys whose values should be parsed as lists when loading the
+    /// configuration.
     const LIST_PARSE_KEYS: &'static [&'static str];
 }
 
@@ -53,7 +56,8 @@ impl ConfigFileKind {
         }
     }
 
-    /// Returns a static string describing this configuration file kind for error messages.
+    /// Returns a static string describing this configuration file kind for
+    /// error messages.
     fn as_str(&self) -> &'static str {
         match self {
             ConfigFileKind::Base => "base",
@@ -77,11 +81,7 @@ pub enum LoadConfigError {
 
     /// Could not locate one of the required configuration files.
     #[error("could not locate {kind} configuration in `{directory}`; attempted: {attempted}")]
-    ConfigurationFileMissing {
-        kind: &'static str,
-        directory: PathBuf,
-        attempted: String,
-    },
+    ConfigurationFileMissing { kind: &'static str, directory: PathBuf, attempted: String },
 
     /// Environment variable overrides failed to merge into the configuration.
     #[error("failed to load configuration from environment variables")]
@@ -100,16 +100,19 @@ pub enum LoadConfigError {
     Builder(#[source] config::ConfigError),
 }
 
-/// Loads hierarchical configuration from base, environment, and environment-variable sources.
+/// Loads hierarchical configuration from base, environment, and
+/// environment-variable sources.
 ///
 /// The configuration directory is determined by:
-/// - First checking the `APP_CONFIG_DIR` environment variable for an absolute path
+/// - First checking the `APP_CONFIG_DIR` environment variable for an absolute
+///   path
 /// - If not set, using `<current_dir>/configuration`
 ///
 /// Loads files from `base.(yaml|yml|json)` and `{environment}.(yaml|yml|json)`
 /// before applying overrides from `APP_`-prefixed environment variables.
 ///
-/// Nested keys use double underscores (`APP_SERVICE__HOST`), and list values are comma-separated.
+/// Nested keys use double underscores (`APP_SERVICE__HOST`), and list values
+/// are comma-separated.
 pub fn load_config<T>() -> Result<T, LoadConfigError>
 where
     T: Config + DeserializeOwned,
@@ -124,9 +127,7 @@ where
     };
 
     if !configuration_directory.is_dir() {
-        return Err(LoadConfigError::MissingConfigurationDirectory(
-            configuration_directory,
-        ));
+        return Err(LoadConfigError::MissingConfigurationDirectory(configuration_directory));
     }
 
     let environment = Environment::load().map_err(LoadConfigError::Environment)?;
@@ -142,17 +143,15 @@ where
         .separator(ENV_SEPARATOR);
 
     if !T::LIST_PARSE_KEYS.is_empty() {
-        environment_source = environment_source
-            .try_parsing(true)
-            .list_separator(LIST_SEPARATOR);
+        environment_source = environment_source.try_parsing(true).list_separator(LIST_SEPARATOR);
 
         for key in <T as Config>::LIST_PARSE_KEYS {
             environment_source = environment_source.with_list_parse_key(key);
         }
     }
 
-    let base_file_source = config::File::from(base_file.clone());
-    let environment_file_source = config::File::from(environment_file.clone());
+    let base_file_source = config::File::from(base_file);
+    let environment_file_source = config::File::from(environment_file);
 
     let builder = config::Config::builder()
         .add_source(base_file_source)
@@ -161,12 +160,11 @@ where
 
     let settings = builder.build().map_err(LoadConfigError::Builder)?;
 
-    settings
-        .try_deserialize::<T>()
-        .map_err(LoadConfigError::Deserialization)
+    settings.try_deserialize::<T>().map_err(LoadConfigError::Deserialization)
 }
 
-/// Finds the configuration file that matches the requested kind and supported extensions.
+/// Finds the configuration file that matches the requested kind and supported
+/// extensions.
 fn find_configuration_file(
     directory: &Path,
     kind: ConfigFileKind,
@@ -198,13 +196,18 @@ fn find_configuration_file(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::{
+        fs,
+        sync::{Mutex, OnceLock},
+    };
+
     use serde::{Deserialize, Serialize};
-    use std::fs;
-    use std::sync::{Mutex, OnceLock};
     use tempfile::TempDir;
 
-    /// Mutex to serialize tests that modify environment variables or current directory.
+    use super::*;
+
+    /// Mutex to serialize tests that modify environment variables or current
+    /// directory.
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
@@ -232,10 +235,7 @@ mod tests {
     fn create_mock_config() -> ApplicationConfig {
         ApplicationConfig {
             name: "test-app".to_string(),
-            mode: StorageMode::Disk {
-                path: "/tmp/data".to_string(),
-                max_size: 1024,
-            },
+            mode: StorageMode::Disk { path: "/tmp/data".to_string(), max_size: 1024 },
         }
     }
 
@@ -262,8 +262,9 @@ mod tests {
         let env_content = match extension {
             "json" => serde_json::to_string_pretty(&original_config).unwrap(),
             "yaml" | "yml" => {
-                // YAML serialization for externally tagged enums doesn't match what config crate expects
-                // For now, manually construct YAML that config crate can deserialize
+                // YAML serialization for externally tagged enums doesn't match what config
+                // crate expects For now, manually construct YAML that config
+                // crate can deserialize
                 format!(
                     "name: \"{}\"\nmode:\n  disk:\n    path: \"{}\"\n    max_size: {}\n",
                     original_config.name,
@@ -296,22 +297,22 @@ mod tests {
     }
 
     #[test]
-    fn test_roundtrip_json() {
+    fn roundtrip_json() {
         test_roundtrip_with_extension("json");
     }
 
     #[test]
-    fn test_roundtrip_yaml() {
+    fn roundtrip_yaml() {
         test_roundtrip_with_extension("yaml");
     }
 
     #[test]
-    fn test_roundtrip_yml() {
+    fn roundtrip_yml() {
         test_roundtrip_with_extension("yml");
     }
 
     #[test]
-    fn test_all_supported_extensions_detected() {
+    fn all_supported_extensions_detected() {
         let temp_dir = TempDir::new().unwrap();
         let config_dir = temp_dir.path().join("configuration");
         fs::create_dir(&config_dir).unwrap();
@@ -331,7 +332,7 @@ mod tests {
     }
 
     #[test]
-    fn test_app_config_dir_env_var() {
+    fn app_config_dir_env_var() {
         let _guard = env_lock().lock().unwrap();
 
         let temp_dir = TempDir::new().unwrap();
@@ -368,7 +369,7 @@ mod tests {
     }
 
     #[test]
-    fn test_fallback_to_current_dir_when_app_config_dir_not_set() {
+    fn fallback_to_current_dir_when_app_config_dir_not_set() {
         let _guard = env_lock().lock().unwrap();
 
         let temp_dir = TempDir::new().unwrap();

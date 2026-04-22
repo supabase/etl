@@ -40,6 +40,22 @@ cargo install --version='~0.8.6' sqlx-cli --no-default-features --features rustl
   - [Install OrbStack](https://orbstack.dev)
   - Enable Kubernetes in OrbStack settings
 
+## Formatting
+
+The workspace stays on the stable toolchain pinned in `rust-toolchain.toml` for builds, tests, and linting.
+Formatting is the only workflow that uses nightly Rust, because the repository relies on nightly-only
+`rustfmt` options for import grouping and layout.
+
+Use the pinned formatter scripts from the project root:
+
+```bash
+./scripts/fmt
+./scripts/fmt-check
+```
+
+Both scripts default to `nightly-2026-04-15`. You can temporarily override the formatter toolchain with
+`RUSTFMT_NIGHTLY_TOOLCHAIN`, but CI and the repository defaults should stay pinned so formatting does not drift.
+
 ## Quick Start
 
 The fastest way to get started is using the setup script:
@@ -101,14 +117,13 @@ If you prefer manual setup or have an existing PostgreSQL instance:
 
 #### Single Database Setup
 
-If using one database for both the API and replicator state:
+If using one database for both the API and etl state:
 
 ```bash
 export DATABASE_URL=postgres://USER:PASSWORD@HOST:PORT/DB
 
-# Run both migrations on the same database
-./etl-api/scripts/run_migrations.sh
-./etl-replicator/scripts/run_migrations.sh
+# Run all migrations on the same database
+./scripts/run_migrations.sh
 ```
 
 #### Separate Database Setup
@@ -118,16 +133,16 @@ If using separate databases (recommended for production):
 ```bash
 # API migrations on the control plane database
 export DATABASE_URL=postgres://USER:PASSWORD@API_HOST:PORT/API_DB
-./etl-api/scripts/run_migrations.sh
+./scripts/run_migrations.sh etl-api
 
-# Replicator migrations on the source database
+# ETL migrations on the source database
 export DATABASE_URL=postgres://USER:PASSWORD@SOURCE_HOST:PORT/SOURCE_DB
-./etl-replicator/scripts/run_migrations.sh
+./scripts/run_migrations.sh etl
 ```
 
 This separation allows you to:
 - Scale the control plane independently from replication workloads
-- Keep the replicator state close to the source data
+- Keep the etl state close to the source data
 - Isolate concerns between infrastructure management and data replication
 
 ## Database Migrations
@@ -142,7 +157,7 @@ Located in `etl-api/migrations/`, these create the control plane schema (`app` s
 
 ```bash
 # From project root
-./etl-api/scripts/run_migrations.sh
+./scripts/run_migrations.sh etl-api
 
 # Or manually with SQLx CLI
 sqlx migrate run --source etl-api/migrations
@@ -171,13 +186,13 @@ cargo sqlx prepare
 
 ### Postgres State Store Migrations
 
-Located in `etl/migrations/`, these create the Postgres state store schema (`etl` schema) that ETL uses to persist the replication state, table schemas, and mappings required to run and resume replication.
+Located in `etl/migrations/`, these create the Postgres state store schema (`etl` schema) that ETL uses to persist replication state, versioned table schemas, and destination table metadata required to run and resume replication.
 
 **Running Postgres state store migrations:**
 
 ```bash
 # From project root
-./etl-replicator/scripts/run_migrations.sh
+./scripts/run_migrations.sh etl
 
 # Or manually with SQLx CLI (requires setting search_path)
 psql $DATABASE_URL -c "create schema if not exists etl;"

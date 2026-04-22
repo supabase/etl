@@ -1,19 +1,21 @@
 //! Tokio runtime metrics for Prometheus monitoring.
 //!
-//! Exposes Tokio runtime metrics provided by [`tokio::runtime::Handle::metrics`] as
-//! Prometheus gauges. This includes stable metrics and additional unstable metrics
-//! when compiled with `tokio_unstable`.
+//! Exposes Tokio runtime metrics provided by
+//! [`tokio::runtime::Handle::metrics`] as Prometheus gauges. This includes
+//! stable metrics and additional unstable metrics when compiled with
+//! `tokio_unstable`.
 //!
-//! Metrics are polled on a fixed interval from a background task to match the existing
-//! jemalloc reporting pattern. Monotonic runtime totals are exported as gauges because
-//! Tokio exposes them as absolute snapshots rather than deltas.
+//! Metrics are polled on a fixed interval from a background task to match the
+//! existing jemalloc reporting pattern. Monotonic runtime totals are exported
+//! as gauges because Tokio exposes them as absolute snapshots rather than
+//! deltas.
 
 use std::time::Duration;
 
 use metrics::{Unit, describe_gauge, gauge};
 use tracing::debug;
 
-use crate::metrics::{APP_TYPE_LABEL, APP_TYPE_VALUE, PIPELINE_ID_LABEL};
+use crate::metrics::{APP_TYPE_LABEL, APP_TYPE_VALUE};
 
 /// Current number of worker threads used by the runtime.
 const TOKIO_METRICS_WORKERS: &str = "tokio_metrics_workers";
@@ -65,7 +67,8 @@ const TOKIO_METRICS_WORKER_PARK_UNPARK_TOTAL: &str = "tokio_metrics_worker_park_
 #[cfg(all(tokio_unstable, target_has_atomic = "64"))]
 const TOKIO_METRICS_WORKER_STEAL_TOTAL: &str = "tokio_metrics_worker_steal_total";
 
-/// Total number of steal operations performed by a worker since runtime startup.
+/// Total number of steal operations performed by a worker since runtime
+/// startup.
 #[cfg(all(tokio_unstable, target_has_atomic = "64"))]
 const TOKIO_METRICS_WORKER_STEAL_OPERATIONS_TOTAL: &str =
     "tokio_metrics_worker_steal_operations_total";
@@ -125,22 +128,17 @@ fn log_runtime_metrics(
 /// Emits a structured debug log for the current Tokio runtime metrics snapshot.
 #[cfg(all(not(tokio_unstable), target_has_atomic = "64"))]
 fn log_runtime_metrics(num_workers: usize, alive_tasks: f64, global_queue_depth: f64) {
-    debug!(
-        num_workers,
-        alive_tasks, global_queue_depth, "tokio runtime stats updated"
-    );
+    debug!(num_workers, alive_tasks, global_queue_depth, "tokio runtime stats updated");
 }
 
 /// Emits a structured debug log for the current Tokio runtime metrics snapshot.
 #[cfg(all(not(tokio_unstable), not(target_has_atomic = "64")))]
 fn log_runtime_metrics(num_workers: usize, alive_tasks: f64, global_queue_depth: f64) {
-    debug!(
-        num_workers,
-        alive_tasks, global_queue_depth, "tokio runtime stats updated"
-    );
+    debug!(num_workers, alive_tasks, global_queue_depth, "tokio runtime stats updated");
 }
 
-/// Registers Tokio runtime metric descriptions with the global metrics recorder.
+/// Registers Tokio runtime metric descriptions with the global metrics
+/// recorder.
 fn register_metrics() {
     describe_gauge!(
         TOKIO_METRICS_WORKERS,
@@ -210,7 +208,8 @@ fn register_metrics() {
     describe_gauge!(
         TOKIO_METRICS_WORKER_PARK_UNPARK_TOTAL,
         Unit::Count,
-        "Total number of park and unpark transitions for a tokio runtime worker since runtime startup"
+        "Total number of park and unpark transitions for a tokio runtime worker since runtime \
+         startup"
     );
     #[cfg(all(tokio_unstable, target_has_atomic = "64"))]
     describe_gauge!(
@@ -228,16 +227,17 @@ fn register_metrics() {
 
 /// Spawns a background task that periodically polls Tokio runtime statistics.
 ///
-/// This function should be called after the metrics recorder is installed and from
-/// within the target Tokio runtime so the task observes the correct runtime handle.
+/// This function should be called after the metrics recorder is installed and
+/// from within the target Tokio runtime so the task observes the correct
+/// runtime handle.
 ///
-/// Stable metrics are always exported. Additional metrics guarded by `tokio_unstable`
-/// are exported only when the binary is compiled with that cfg enabled.
-pub fn spawn_tokio_metrics_task(pipeline_id: u64) {
+/// Stable metrics are always exported. Additional metrics guarded by
+/// `tokio_unstable` are exported only when the binary is compiled with that cfg
+/// enabled.
+pub(super) fn spawn_tokio_metrics_task() {
     register_metrics();
 
     let handle = tokio::runtime::Handle::current();
-    let pipeline_id_str = pipeline_id.to_string();
 
     tokio::spawn(async move {
         loop {
@@ -255,87 +255,49 @@ pub fn spawn_tokio_metrics_task(pipeline_id: u64) {
             let remote_schedule_total = runtime_metrics.remote_schedule_count() as f64;
             #[cfg(all(tokio_unstable, target_has_atomic = "64"))]
             let budget_forced_yield_total = runtime_metrics.budget_forced_yield_count() as f64;
-            gauge!(
-                TOKIO_METRICS_WORKERS,
-                PIPELINE_ID_LABEL => pipeline_id_str.clone(),
-                APP_TYPE_LABEL => APP_TYPE_VALUE,
-            )
-            .set(num_workers as f64);
-            gauge!(
-                TOKIO_METRICS_ALIVE_TASKS,
-                PIPELINE_ID_LABEL => pipeline_id_str.clone(),
-                APP_TYPE_LABEL => APP_TYPE_VALUE,
-            )
-            .set(alive_tasks);
-            gauge!(
-                TOKIO_METRICS_GLOBAL_QUEUE_DEPTH,
-                PIPELINE_ID_LABEL => pipeline_id_str.clone(),
-                APP_TYPE_LABEL => APP_TYPE_VALUE,
-            )
-            .set(global_queue_depth);
+            gauge!(TOKIO_METRICS_WORKERS, APP_TYPE_LABEL => APP_TYPE_VALUE).set(num_workers as f64);
+            gauge!(TOKIO_METRICS_ALIVE_TASKS, APP_TYPE_LABEL => APP_TYPE_VALUE).set(alive_tasks);
+            gauge!(TOKIO_METRICS_GLOBAL_QUEUE_DEPTH, APP_TYPE_LABEL => APP_TYPE_VALUE)
+                .set(global_queue_depth);
             #[cfg(all(tokio_unstable, target_has_atomic = "64"))]
-            gauge!(
-                TOKIO_METRICS_REMOTE_SCHEDULE_TOTAL,
-                PIPELINE_ID_LABEL => pipeline_id_str.clone(),
-                APP_TYPE_LABEL => APP_TYPE_VALUE,
-            )
-            .set(remote_schedule_total);
+            gauge!(TOKIO_METRICS_REMOTE_SCHEDULE_TOTAL, APP_TYPE_LABEL => APP_TYPE_VALUE)
+                .set(remote_schedule_total);
             #[cfg(all(tokio_unstable, target_has_atomic = "64"))]
-            gauge!(
-                TOKIO_METRICS_BUDGET_FORCED_YIELD_TOTAL,
-                PIPELINE_ID_LABEL => pipeline_id_str.clone(),
-                APP_TYPE_LABEL => APP_TYPE_VALUE,
-            )
-            .set(budget_forced_yield_total);
+            gauge!(TOKIO_METRICS_BUDGET_FORCED_YIELD_TOTAL, APP_TYPE_LABEL => APP_TYPE_VALUE)
+                .set(budget_forced_yield_total);
             #[cfg(tokio_unstable)]
-            gauge!(
-                TOKIO_METRICS_BLOCKING_THREADS,
-                PIPELINE_ID_LABEL => pipeline_id_str.clone(),
-                APP_TYPE_LABEL => APP_TYPE_VALUE,
-            )
-            .set(blocking_threads);
+            gauge!(TOKIO_METRICS_BLOCKING_THREADS, APP_TYPE_LABEL => APP_TYPE_VALUE)
+                .set(blocking_threads);
             #[cfg(tokio_unstable)]
-            gauge!(
-                TOKIO_METRICS_IDLE_BLOCKING_THREADS,
-                PIPELINE_ID_LABEL => pipeline_id_str.clone(),
-                APP_TYPE_LABEL => APP_TYPE_VALUE,
-            )
-            .set(idle_blocking_threads);
+            gauge!(TOKIO_METRICS_IDLE_BLOCKING_THREADS, APP_TYPE_LABEL => APP_TYPE_VALUE)
+                .set(idle_blocking_threads);
             #[cfg(tokio_unstable)]
-            gauge!(
-                TOKIO_METRICS_BLOCKING_QUEUE_DEPTH,
-                PIPELINE_ID_LABEL => pipeline_id_str.clone(),
-                APP_TYPE_LABEL => APP_TYPE_VALUE,
-            )
-            .set(blocking_queue_depth);
+            gauge!(TOKIO_METRICS_BLOCKING_QUEUE_DEPTH, APP_TYPE_LABEL => APP_TYPE_VALUE)
+                .set(blocking_queue_depth);
 
             #[cfg(target_has_atomic = "64")]
             for worker_id in 0..num_workers {
                 let worker_id_str = worker_id.to_string();
-                let worker_busy_duration = runtime_metrics
-                    .worker_total_busy_duration(worker_id)
-                    .as_secs_f64();
+                let worker_busy_duration =
+                    runtime_metrics.worker_total_busy_duration(worker_id).as_secs_f64();
                 let worker_park_count = runtime_metrics.worker_park_count(worker_id) as f64;
                 let worker_park_unpark_count =
                     runtime_metrics.worker_park_unpark_count(worker_id) as f64;
 
                 gauge!(
                     TOKIO_METRICS_WORKER_BUSY_DURATION_SECONDS,
-                    PIPELINE_ID_LABEL => pipeline_id_str.clone(),
                     APP_TYPE_LABEL => APP_TYPE_VALUE,
                     WORKER_ID_LABEL => worker_id_str.clone(),
                 )
                 .set(worker_busy_duration);
                 gauge!(
                     TOKIO_METRICS_WORKER_PARK_TOTAL,
-                    PIPELINE_ID_LABEL => pipeline_id_str.clone(),
                     APP_TYPE_LABEL => APP_TYPE_VALUE,
                     WORKER_ID_LABEL => worker_id_str.clone(),
                 )
                 .set(worker_park_count);
                 gauge!(
                     TOKIO_METRICS_WORKER_PARK_UNPARK_TOTAL,
-                    PIPELINE_ID_LABEL => pipeline_id_str.clone(),
                     APP_TYPE_LABEL => APP_TYPE_VALUE,
                     WORKER_ID_LABEL => worker_id_str,
                 )
@@ -346,7 +308,6 @@ pub fn spawn_tokio_metrics_task(pipeline_id: u64) {
                         runtime_metrics.worker_local_queue_depth(worker_id) as f64;
                     gauge!(
                         TOKIO_METRICS_WORKER_LOCAL_QUEUE_DEPTH,
-                        PIPELINE_ID_LABEL => pipeline_id_str.clone(),
                         APP_TYPE_LABEL => APP_TYPE_VALUE,
                         WORKER_ID_LABEL => worker_id.to_string(),
                     )
@@ -358,14 +319,12 @@ pub fn spawn_tokio_metrics_task(pipeline_id: u64) {
                             runtime_metrics.worker_steal_operations(worker_id) as f64;
                         gauge!(
                             TOKIO_METRICS_WORKER_STEAL_TOTAL,
-                            PIPELINE_ID_LABEL => pipeline_id_str.clone(),
                             APP_TYPE_LABEL => APP_TYPE_VALUE,
                             WORKER_ID_LABEL => worker_id.to_string(),
                         )
                         .set(steal_total);
                         gauge!(
                             TOKIO_METRICS_WORKER_STEAL_OPERATIONS_TOTAL,
-                            PIPELINE_ID_LABEL => pipeline_id_str.clone(),
                             APP_TYPE_LABEL => APP_TYPE_VALUE,
                             WORKER_ID_LABEL => worker_id.to_string(),
                         )

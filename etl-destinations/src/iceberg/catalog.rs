@@ -12,15 +12,18 @@ use iceberg_catalog_rest::RestCatalog;
 use reqwest::{Client, Response, StatusCode};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-/// A REST catalog implementation that handles Supabase-specific API incompatibilities.
+/// A REST catalog implementation that handles Supabase-specific API
+/// incompatibilities.
 ///
-/// This catalog acts as a compatibility layer between the standard Iceberg catalog interface
-/// and Supabase's REST API endpoints. For standard-compliant endpoints, it delegates to
-/// the inner [`RestCatalog`]. For endpoints with non-standard behavior, it uses a custom
-/// HTTP client ([`SupabaseClient`]) to ensure proper communication with Supabase services.
+/// This catalog acts as a compatibility layer between the standard Iceberg
+/// catalog interface and Supabase's REST API endpoints. For standard-compliant
+/// endpoints, it delegates to the inner [`RestCatalog`]. For endpoints with
+/// non-standard behavior, it uses a custom HTTP client ([`SupabaseClient`]) to
+/// ensure proper communication with Supabase services.
 ///
-/// The catalog maintains both a standard REST catalog instance and a Supabase-specific
-/// client to provide seamless operation across different endpoint types.
+/// The catalog maintains both a standard REST catalog instance and a
+/// Supabase-specific client to provide seamless operation across different
+/// endpoint types.
 #[derive(Debug)]
 pub(crate) struct SupabaseCatalog {
     /// Standard REST catalog for compatible endpoints.
@@ -32,18 +35,19 @@ pub(crate) struct SupabaseCatalog {
 impl SupabaseCatalog {
     /// Creates a new Supabase catalog instance.
     ///
-    /// Combines a standard REST catalog with a Supabase-specific client to handle
-    /// both compatible and incompatible API endpoints.
-    pub fn new(inner: RestCatalog, client: SupabaseClient) -> Self {
+    /// Combines a standard REST catalog with a Supabase-specific client to
+    /// handle both compatible and incompatible API endpoints.
+    pub(super) fn new(inner: RestCatalog, client: SupabaseClient) -> Self {
         SupabaseCatalog { inner, client }
     }
 }
 
 /// Implementation of the [`Catalog`] trait for Supabase.
 ///
-/// Routes operations to either the standard REST catalog or the Supabase-specific
-/// client based on endpoint compatibility. Table creation and deletion use the
-/// custom client, while other operations delegate to the standard implementation.
+/// Routes operations to either the standard REST catalog or the
+/// Supabase-specific client based on endpoint compatibility. Table creation and
+/// deletion use the custom client, while other operations delegate to the
+/// standard implementation.
 #[async_trait]
 impl Catalog for SupabaseCatalog {
     /// Lists all namespaces under the specified parent namespace.
@@ -120,7 +124,8 @@ impl Catalog for SupabaseCatalog {
         self.client.drop_table(identifier).await
     }
 
-    /// Renames a table from the source identifier to the destination identifier.
+    /// Renames a table from the source identifier to the destination
+    /// identifier.
     ///
     /// Delegates to the standard REST catalog as this endpoint is compatible.
     async fn rename_table(&self, src: &TableIdent, dest: &TableIdent) -> Result<()> {
@@ -136,7 +141,8 @@ impl Catalog for SupabaseCatalog {
 
     /// Creates a new table in the specified namespace.
     ///
-    /// Uses the Supabase-specific client due to non-standard request format requirements.
+    /// Uses the Supabase-specific client due to non-standard request format
+    /// requirements.
     async fn create_table(
         &self,
         namespace: &NamespaceIdent,
@@ -152,7 +158,8 @@ impl Catalog for SupabaseCatalog {
         self.inner.update_table(commit).await
     }
 
-    /// Registers an existing table with the catalog using its metadata location.
+    /// Registers an existing table with the catalog using its metadata
+    /// location.
     ///
     /// Delegates to the standard REST catalog as this endpoint is compatible.
     async fn register_table(
@@ -160,17 +167,16 @@ impl Catalog for SupabaseCatalog {
         identifier: &TableIdent,
         metadata_location: String,
     ) -> Result<Table> {
-        self.inner
-            .register_table(identifier, metadata_location)
-            .await
+        self.inner.register_table(identifier, metadata_location).await
     }
 }
 
 /// HTTP client for Supabase-specific catalog operations.
 ///
-/// Handles authentication and request formatting for Supabase catalog REST endpoints
-/// that deviate from the standard Iceberg catalog API. Maintains connection details
-/// and provides methods for table creation and deletion operations.
+/// Handles authentication and request formatting for Supabase catalog REST
+/// endpoints that deviate from the standard Iceberg catalog API. Maintains
+/// connection details and provides methods for table creation and deletion
+/// operations.
 #[derive(Debug)]
 pub(crate) struct SupabaseClient {
     /// HTTP client for making requests.
@@ -188,14 +194,9 @@ impl SupabaseClient {
     ///
     /// Initializes an HTTP client with the provided connection details for
     /// communicating with Supabase catalog REST endpoints.
-    pub fn new(base_uri: String, warehouse: String, auth_token: String) -> Self {
+    pub(super) fn new(base_uri: String, warehouse: String, auth_token: String) -> Self {
         let client = Client::new();
-        Self {
-            client,
-            base_uri,
-            warehouse,
-            auth_token,
-        }
+        Self { client, base_uri, warehouse, auth_token }
     }
 
     /// Constructs the API URL for a specific table.
@@ -204,10 +205,7 @@ impl SupabaseClient {
     /// warehouse identifier, namespace, and table name.
     fn table_url(&self, namespace: &str, table: &str) -> String {
         let base = self.base_uri.trim_end_matches('/');
-        format!(
-            "{base}/v1/{}/namespaces/{namespace}/tables/{table}",
-            self.warehouse
-        )
+        format!("{base}/v1/{}/namespaces/{namespace}/tables/{table}", self.warehouse)
     }
 
     /// Constructs the API URL for namespace table operations.
@@ -216,18 +214,16 @@ impl SupabaseClient {
     /// namespace, such as listing or creating tables.
     fn tables_url(&self, namespace_path: &str) -> String {
         let base = self.base_uri.trim_end_matches('/');
-        format!(
-            "{base}/v1/{}/namespaces/{namespace_path}/tables",
-            self.warehouse
-        )
+        format!("{base}/v1/{}/namespaces/{namespace_path}/tables", self.warehouse)
     }
 
     /// Creates a new table using Supabase-specific API format.
     ///
-    /// Converts the standard [`TableCreation`] request to Supabase's expected format
-    /// and handles the non-standard response structure. Returns a fully configured
-    /// [`Table`] instance with metadata and file I/O capabilities.
-    pub async fn create_table(
+    /// Converts the standard [`TableCreation`] request to Supabase's expected
+    /// format and handles the non-standard response structure. Returns a
+    /// fully configured [`Table`] instance with metadata and file I/O
+    /// capabilities.
+    async fn create_table(
         &self,
         namespace: &NamespaceIdent,
         creation: TableCreation,
@@ -250,15 +246,11 @@ impl SupabaseClient {
         let url = self.tables_url(&namespace_path);
 
         let body = serde_json::to_value(supabase_request).map_err(|e| {
-            Error::new(
-                ErrorKind::DataInvalid,
-                format!("JSON serialization failed: {e}"),
-            )
+            Error::new(ErrorKind::DataInvalid, format!("JSON serialization failed: {e}"))
         })?;
 
-        let http_response = self
-            .send_request(reqwest::Method::POST, &url, Some(body), None)
-            .await?;
+        let http_response =
+            self.send_request(reqwest::Method::POST, &url, Some(body), None).await?;
 
         let response = match http_response.status() {
             StatusCode::OK => {
@@ -271,10 +263,7 @@ impl SupabaseClient {
                 ));
             }
             StatusCode::CONFLICT => {
-                return Err(Error::new(
-                    ErrorKind::Unexpected,
-                    "The table already exists",
-                ));
+                return Err(Error::new(ErrorKind::Unexpected, "The table already exists"));
             }
             _ => return Err(deserialize_unexpected_catalog_error(http_response).await),
         };
@@ -288,12 +277,10 @@ impl SupabaseClient {
 
         let file_io = self.load_file_io(Some(metadata_location), Some(config))?;
 
-        let table_ident = TableIdent::new(namespace.clone(), creation.name.to_string());
+        let table_ident = TableIdent::new(namespace.clone(), creation.name.clone());
 
-        let table_builder = Table::builder()
-            .identifier(table_ident.clone())
-            .file_io(file_io)
-            .metadata(response.metadata);
+        let table_builder =
+            Table::builder().identifier(table_ident).file_io(file_io).metadata(response.metadata);
 
         if let Some(metadata_location) = response.metadata_location {
             table_builder.metadata_location(metadata_location).build()
@@ -316,16 +303,16 @@ impl SupabaseClient {
                 reqwest::Method::DELETE,
                 &url,
                 None,
-                Some(&[("purgeRequested", "true")]), // S3 tables doesn't support dropping tables without purging
+                Some(&[("purgeRequested", "true")]), /* S3 tables doesn't support dropping
+                                                      * tables without purging */
             )
             .await?;
 
         match http_response.status() {
             StatusCode::NO_CONTENT | StatusCode::OK => Ok(()),
-            StatusCode::NOT_FOUND => Err(Error::new(
-                ErrorKind::Unexpected,
-                "Tried to drop a table that does not exist",
-            )),
+            StatusCode::NOT_FOUND => {
+                Err(Error::new(ErrorKind::Unexpected, "Tried to drop a table that does not exist"))
+            }
             _ => Err(deserialize_unexpected_catalog_error(http_response).await),
         }
     }
@@ -360,9 +347,9 @@ impl SupabaseClient {
 
     /// Sends an authenticated HTTP request to the Supabase catalog API.
     ///
-    /// Configures the request with bearer token authentication and JSON content type.
-    /// Includes optional request body and query parameters. Returns an error for
-    /// non-successful HTTP status codes.
+    /// Configures the request with bearer token authentication and JSON content
+    /// type. Includes optional request body and query parameters. Returns
+    /// an error for non-successful HTTP status codes.
     async fn send_request(
         &self,
         method: reqwest::Method,
@@ -381,7 +368,7 @@ impl SupabaseClient {
         }
 
         if let Some(query) = query {
-            request = request.query(query)
+            request = request.query(query);
         }
 
         let response = request
@@ -413,27 +400,21 @@ pub(crate) async fn deserialize_catalog_response<R: DeserializeOwned>(
     let bytes = response.bytes().await?;
 
     serde_json::from_slice::<R>(&bytes).map_err(|e| {
-        Error::new(
-            ErrorKind::Unexpected,
-            "Failed to parse response from rest catalog server",
-        )
-        .with_context("json", String::from_utf8_lossy(&bytes))
-        .with_source(e)
+        Error::new(ErrorKind::Unexpected, "Failed to parse response from rest catalog server")
+            .with_context("json", String::from_utf8_lossy(&bytes))
+            .with_source(e)
     })
 }
 
 /// Converts an unexpected HTTP response into a detailed error.
 ///
 /// Extracts status code, headers, and response body to create a comprehensive
-/// error message for debugging failed catalog operations. Handles empty response
-/// bodies gracefully.
+/// error message for debugging failed catalog operations. Handles empty
+/// response bodies gracefully.
 pub(crate) async fn deserialize_unexpected_catalog_error(response: Response) -> Error {
-    let err = Error::new(
-        ErrorKind::Unexpected,
-        "Received response with unexpected status code",
-    )
-    .with_context("status", response.status().to_string())
-    .with_context("headers", format!("{:?}", response.headers()));
+    let err = Error::new(ErrorKind::Unexpected, "Received response with unexpected status code")
+        .with_context("status", response.status().to_string())
+        .with_context("headers", format!("{:?}", response.headers()));
 
     let bytes = match response.bytes().await {
         Ok(bytes) => bytes,

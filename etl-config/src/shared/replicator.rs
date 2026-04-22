@@ -1,10 +1,12 @@
 use serde::{Deserialize, Serialize};
 
-use crate::Config;
-use crate::shared::pipeline::PipelineConfig;
-use crate::shared::{
-    DestinationConfig, DestinationConfigWithoutSecrets, PipelineConfigWithoutSecrets, SentryConfig,
-    SupabaseConfig, SupabaseConfigWithoutSecrets, ValidationError,
+use crate::{
+    Config,
+    shared::{
+        DestinationConfig, DestinationConfigWithoutSecrets, PipelineConfigWithoutSecrets,
+        SentryConfig, SupabaseConfig, SupabaseConfigWithoutSecrets, ValidationError,
+        pipeline::PipelineConfig,
+    },
 };
 
 /// Complete configuration for the replicator service.
@@ -23,11 +25,13 @@ pub struct ReplicatorConfig {
     pub pipeline: PipelineConfig,
     /// Optional Sentry configuration for error tracking.
     ///
-    /// If provided, enables Sentry error reporting and performance monitoring. If `None`, the replicator operates without Sentry integration.
+    /// If provided, enables Sentry error reporting and performance monitoring.
+    /// If `None`, the replicator operates without Sentry integration.
     pub sentry: Option<SentryConfig>,
     /// Optional Supabase-specific configuration.
     ///
-    /// If provided, enables Supabase-specific features or reporting. If `None`, the replicator operates independently of Supabase.
+    /// If provided, enables Supabase-specific features or reporting. If `None`,
+    /// the replicator operates independently of Supabase.
     pub supabase: Option<SupabaseConfig>,
 }
 
@@ -61,7 +65,8 @@ pub struct ReplicatorConfigWithoutSecrets {
     pub pipeline: PipelineConfigWithoutSecrets,
     /// Optional Supabase-specific configuration.
     ///
-    /// If provided, enables Supabase-specific features or reporting. If `None`, the replicator operates independently of Supabase.
+    /// If provided, enables Supabase-specific features or reporting. If `None`,
+    /// the replicator operates independently of Supabase.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supabase: Option<SupabaseConfigWithoutSecrets>,
 }

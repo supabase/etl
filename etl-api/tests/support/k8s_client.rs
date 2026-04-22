@@ -1,13 +1,21 @@
 #![allow(dead_code)]
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::{
+    collections::BTreeMap,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 
 use async_trait::async_trait;
-use etl_api::configs::log::LogLevel;
-use etl_api::k8s::http::{TRUSTED_ROOT_CERT_CONFIG_MAP_NAME, TRUSTED_ROOT_CERT_KEY_NAME};
-use etl_api::k8s::{DestinationType, K8sClient, K8sError, PodStatus, ReplicatorConfigMapFile};
+use etl_api::{
+    configs::log::LogLevel,
+    k8s::{
+        DestinationType, K8sClient, K8sError, PodStatus, ReplicatorConfigMapFile,
+        http::{TRUSTED_ROOT_CERT_CONFIG_MAP_NAME, TRUSTED_ROOT_CERT_KEY_NAME},
+    },
+};
 use etl_config::Environment;
 use k8s_openapi::api::core::v1::ConfigMap;
 use tokio::sync::RwLock;
@@ -118,10 +126,7 @@ impl K8sClient for MockK8sClient {
                 TRUSTED_ROOT_CERT_KEY_NAME.to_string(),
                 "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----".to_string(),
             );
-            let cm = ConfigMap {
-                data: Some(map),
-                ..ConfigMap::default()
-            };
+            let cm = ConfigMap { data: Some(map), ..ConfigMap::default() };
             Ok(cm)
         } else {
             Ok(ConfigMap::default())

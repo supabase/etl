@@ -1,15 +1,20 @@
+use std::{num::NonZeroI32, time::Duration};
+
 use etl_config::shared::{IntoConnectOptions, PgConnectionConfig};
-use std::num::NonZeroI32;
-use std::time::Duration;
+use pg_escape::quote_identifier;
 use tokio::runtime::Handle;
-use tokio_postgres::types::{FromSql, ToSql, Type};
-use tokio_postgres::{Client, GenericClient, NoTls, Transaction};
+use tokio_postgres::{
+    Client, GenericClient, NoTls, Transaction,
+    types::{FromSql, ToSql, Type},
+};
 use tracing::info;
 
-use crate::replication::extract_server_version;
-use crate::requires_version;
-use crate::types::{ColumnSchema, TableId, TableName};
-use crate::version::POSTGRES_15;
+use crate::{
+    replication::extract_server_version,
+    requires_version,
+    types::{ColumnSchema, TableId, TableName},
+    version::POSTGRES_15,
+};
 
 /// Table modification operations for ALTER TABLE statements.
 pub enum TableModification<'a> {
@@ -22,10 +27,16 @@ pub enum TableModification<'a> {
     DropColumn {
         name: &'a str,
     },
-    /// Alter an existing column with the specified alteration.
+    /// Alter an existing column. The `alteration` field is a SQL fragment
+    /// describing how the column should be altered.
     AlterColumn {
         name: &'a str,
         alteration: &'a str,
+    },
+    /// Rename an existing column.
+    RenameColumn {
+        old_name: &'a str,
+        new_name: &'a str,
     },
     ReplicaIdentity {
         value: &'a str,
@@ -34,11 +45,12 @@ pub enum TableModification<'a> {
 
 /// State of a PostgreSQL replication slot.
 ///
-/// Represents the combined existence, activity, and validity state of a replication slot
-/// as queried from `pg_replication_slots`.
+/// Represents the combined existence, activity, and validity state of a
+/// replication slot as queried from `pg_replication_slots`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReplicationSlotState {
-    /// Slot exists and is currently active (being used by a replication connection).
+    /// Slot exists and is currently active (being used by a replication
+    /// connection).
     Active,
     /// Slot exists, is inactive, and is valid for replication.
     Inactive,
@@ -48,8 +60,8 @@ pub enum ReplicationSlotState {
 
 /// Postgres database wrapper for testing operations.
 ///
-/// Provides a unified interface for database operations across different client types
-/// with automatic cleanup functionality.
+/// Provides a unified interface for database operations across different client
+/// types with automatic cleanup functionality.
 pub struct PgDatabase<G> {
     pub config: PgConnectionConfig,
     pub client: Option<G>,
@@ -62,33 +74,29 @@ impl<G: GenericClient> PgDatabase<G> {
         self.server_version
     }
 
-    /// Creates a Postgres publication for the specified tables with an optional configuration
-    /// parameter.
+    /// Creates a Postgres publication for the specified tables with an optional
+    /// configuration parameter.
     ///
-    /// This method is used for specific cases which should mutate the defaults when creating a
-    /// publication which is done only for a small subset of tests.
+    /// This method is used for specific cases which should mutate the defaults
+    /// when creating a publication which is done only for a small subset of
+    /// tests.
     pub async fn create_publication_with_config(
         &self,
         publication_name: &str,
         table_names: &[TableName],
         publish_via_partition_root: bool,
     ) -> Result<(), tokio_postgres::Error> {
-        let table_names = table_names
-            .iter()
-            .map(TableName::as_quoted_identifier)
-            .collect::<Vec<_>>();
+        let quoted_publication_name = quote_identifier(publication_name);
+        let table_names =
+            table_names.iter().map(TableName::as_quoted_identifier).collect::<Vec<_>>();
 
         let create_publication_query = format!(
             "create publication {} for table {} with (publish_via_partition_root = {})",
-            publication_name,
+            quoted_publication_name,
             table_names.join(", "),
             publish_via_partition_root
         );
-        self.client
-            .as_ref()
-            .unwrap()
-            .execute(&create_publication_query, &[])
-            .await?;
+        self.client.as_ref().unwrap().execute(&create_publication_query, &[]).await?;
 
         Ok(())
     }
@@ -99,8 +107,7 @@ impl<G: GenericClient> PgDatabase<G> {
         publication_name: &str,
         table_names: &[TableName],
     ) -> Result<(), tokio_postgres::Error> {
-        self.create_publication_with_config(publication_name, table_names, true)
-            .await
+        self.create_publication_with_config(publication_name, table_names, true).await
     }
 
     pub async fn create_publication_for_all(
@@ -109,15 +116,19 @@ impl<G: GenericClient> PgDatabase<G> {
         schema: Option<&str>,
     ) -> Result<(), tokio_postgres::Error> {
         let client = self.client.as_ref().unwrap();
+        let quoted_publication_name = quote_identifier(publication_name);
 
         if requires_version!(self.server_version, POSTGRES_15) {
             // PostgreSQL 15+ supports FOR ALL TABLES IN SCHEMA syntax
             let create_publication_query = match schema {
                 Some(schema_name) => format!(
-                    "create publication {publication_name} for tables in schema {schema_name} with (publish_via_partition_root = true)"
+                    "create publication {quoted_publication_name} for tables in schema {} with \
+                     (publish_via_partition_root = true)",
+                    quote_identifier(schema_name),
                 ),
                 None => format!(
-                    "create publication {publication_name} for all tables with (publish_via_partition_root = true)"
+                    "create publication {quoted_publication_name} for all tables with \
+                     (publish_via_partition_root = true)"
                 ),
             };
 
@@ -126,26 +137,30 @@ impl<G: GenericClient> PgDatabase<G> {
             // PostgreSQL 14 and earlier: create publication and add tables individually
             match schema {
                 Some(schema_name) => {
-                    let create_pub_query = format!("create publication {publication_name}");
+                    let create_pub_query = format!("create publication {quoted_publication_name}");
                     client.execute(&create_pub_query, &[]).await?;
 
-                    let tables_query = format!(
-                        "select schemaname, tablename from pg_tables where schemaname = '{schema_name}'"
-                    );
-                    let rows = client.query(&tables_query, &[]).await?;
+                    let rows = client
+                        .query(
+                            "select schemaname, tablename from pg_tables where schemaname = $1",
+                            &[&schema_name],
+                        )
+                        .await?;
 
                     for row in rows {
                         let schema: String = row.get(0);
                         let table: String = row.get(1);
                         let add_table_query = format!(
-                            "alter publication {publication_name} add table {schema}.{table}"
+                            "alter publication {quoted_publication_name} add table {}",
+                            TableName::new(schema, table).as_quoted_identifier()
                         );
                         client.execute(&add_table_query, &[]).await?;
                     }
                 }
                 None => {
                     let create_publication_query = format!(
-                        "create publication {publication_name} for all tables with (publish_via_partition_root = true)"
+                        "create publication {quoted_publication_name} for all tables with \
+                         (publish_via_partition_root = true)"
                     );
                     client.execute(&create_publication_query, &[]).await?;
                 }
@@ -171,21 +186,11 @@ impl<G: GenericClient> PgDatabase<G> {
             .collect::<Vec<_>>()
             .join(", ");
 
-        let pk_col = if add_pk_col {
-            "id bigserial primary key, "
-        } else {
-            ""
-        };
+        let pk_col = if add_pk_col { "id bigserial primary key, " } else { "" };
 
-        let create_table_query = format!(
-            "create table {} ({pk_col}{columns_str})",
-            table_name.as_quoted_identifier(),
-        );
-        self.client
-            .as_ref()
-            .unwrap()
-            .execute(&create_table_query, &[])
-            .await?;
+        let create_table_query =
+            format!("create table {} ({pk_col}{columns_str})", table_name.as_quoted_identifier(),);
+        self.client.as_ref().unwrap().execute(&create_table_query, &[]).await?;
 
         // Get the OID of the newly created table
         let row = self
@@ -193,8 +198,8 @@ impl<G: GenericClient> PgDatabase<G> {
             .as_ref()
             .unwrap()
             .query_one(
-                "select c.oid from pg_class c join pg_namespace n on n.oid = c.relnamespace \
-            where n.nspname = $1 and c.relname = $2",
+                "select c.oid from pg_class c join pg_namespace n on n.oid = c.relnamespace where \
+                 n.nspname = $1 and c.relname = $2",
                 &[&table_name.schema, &table_name.name],
             )
             .await?;
@@ -206,8 +211,8 @@ impl<G: GenericClient> PgDatabase<G> {
 
     /// Modifies an existing table using ALTER TABLE operations.
     ///
-    /// Applies the specified modifications (add/drop/alter columns) to the table
-    /// in a single ALTER TABLE statement.
+    /// Applies the specified modifications (add/drop/alter columns) to the
+    /// table in a single ALTER TABLE statement.
     pub async fn alter_table(
         &self,
         table_name: TableName,
@@ -225,6 +230,9 @@ impl<G: GenericClient> PgDatabase<G> {
                 TableModification::AlterColumn { name, alteration } => {
                     format!("alter column {name} {alteration}")
                 }
+                TableModification::RenameColumn { old_name, new_name } => {
+                    format!("rename column {old_name} to {new_name}")
+                }
                 TableModification::ReplicaIdentity { value } => {
                     format!("replica identity {value}")
                 }
@@ -232,16 +240,9 @@ impl<G: GenericClient> PgDatabase<G> {
             .collect::<Vec<_>>()
             .join(", ");
 
-        let alter_table_query = format!(
-            "alter table {} {}",
-            table_name.as_quoted_identifier(),
-            modifications_str
-        );
-        self.client
-            .as_ref()
-            .unwrap()
-            .execute(&alter_table_query, &[])
-            .await?;
+        let alter_table_query =
+            format!("alter table {} {}", table_name.as_quoted_identifier(), modifications_str);
+        self.client.as_ref().unwrap().execute(&alter_table_query, &[]).await?;
 
         Ok(())
     }
@@ -267,11 +268,7 @@ impl<G: GenericClient> PgDatabase<G> {
             placeholders_str
         );
 
-        self.client
-            .as_ref()
-            .unwrap()
-            .execute(&insert_query, values)
-            .await
+        self.client.as_ref().unwrap().execute(&insert_query, values).await
     }
 
     /// Inserts multiple rows using Postgres's `generate_series` function.
@@ -297,48 +294,34 @@ impl<G: GenericClient> PgDatabase<G> {
             table_name.as_quoted_identifier(),
         );
 
-        self.client
-            .as_ref()
-            .unwrap()
-            .execute(&insert_query, &[])
-            .await
+        self.client.as_ref().unwrap().execute(&insert_query, &[]).await
     }
 
     /// Updates rows in the table with new values.
     ///
-    /// Sets the specified columns to new values for rows matching the WHERE clause.
-    /// If no WHERE clause is provided, updates all rows in the table.
-    /// Returns the number of rows affected.
+    /// Sets the specified columns to new values for rows matching the WHERE
+    /// clause. If no WHERE clause is provided, updates all rows in the
+    /// table. Returns the number of rows affected.
     pub async fn update_values(
         &self,
         table_name: TableName,
         columns: &[&str],
         values: &[&(dyn ToSql + Sync)],
     ) -> Result<u64, tokio_postgres::Error> {
-        let set_clauses: Vec<String> = columns
-            .iter()
-            .enumerate()
-            .map(|(i, col)| format!("{col} = ${}", i + 1))
-            .collect();
+        let set_clauses: Vec<String> =
+            columns.iter().enumerate().map(|(i, col)| format!("{col} = ${}", i + 1)).collect();
         let set_clause = set_clauses.join(", ");
 
-        let update_query = format!(
-            "update {} set {}",
-            table_name.as_quoted_identifier(),
-            set_clause
-        );
+        let update_query =
+            format!("update {} set {}", table_name.as_quoted_identifier(), set_clause);
 
-        self.client
-            .as_ref()
-            .unwrap()
-            .execute(&update_query, values)
-            .await
+        self.client.as_ref().unwrap().execute(&update_query, values).await
     }
 
     /// Updates rows in the table with new values that match a WHERE clause.
     ///
-    /// Sets the specified columns to new values for rows matching the WHERE conditions.
-    /// Returns the number of rows affected.
+    /// Sets the specified columns to new values for rows matching the WHERE
+    /// conditions. Returns the number of rows affected.
     pub async fn update_values_where(
         &self,
         table_name: TableName,
@@ -348,11 +331,8 @@ impl<G: GenericClient> PgDatabase<G> {
         where_expressions: &[&str],
         where_operator: &str,
     ) -> Result<u64, tokio_postgres::Error> {
-        let set_clauses: Vec<String> = columns
-            .iter()
-            .enumerate()
-            .map(|(i, col)| format!("{col} = ${}", i + 1))
-            .collect();
+        let set_clauses: Vec<String> =
+            columns.iter().enumerate().map(|(i, col)| format!("{col} = ${}", i + 1)).collect();
         let set_clause = set_clauses.join(", ");
 
         let where_clauses: Vec<String> = where_columns
@@ -369,18 +349,15 @@ impl<G: GenericClient> PgDatabase<G> {
             where_clause
         );
 
-        self.client
-            .as_ref()
-            .unwrap()
-            .execute(&update_query, values)
-            .await
+        self.client.as_ref().unwrap().execute(&update_query, values).await
     }
 
     /// Updates rows in the table using raw SQL expressions.
     ///
-    /// Sets columns using raw SQL expressions for rows matching the WHERE conditions.
-    /// This is useful for updates like `age = age + 100` or `description = description || '_updated'`.
-    /// Returns the number of rows affected.
+    /// Sets columns using raw SQL expressions for rows matching the WHERE
+    /// conditions. This is useful for updates like `age = age + 100` or
+    /// `description = description || '_updated'`. Returns the number of
+    /// rows affected.
     pub async fn update_with_expressions(
         &self,
         table_name: TableName,
@@ -405,11 +382,7 @@ impl<G: GenericClient> PgDatabase<G> {
             where_clause
         );
 
-        self.client
-            .as_ref()
-            .unwrap()
-            .execute(&update_query, &[])
-            .await
+        self.client.as_ref().unwrap().execute(&update_query, &[]).await
     }
 
     /// Deletes rows from the table based on column conditions.
@@ -430,17 +403,10 @@ impl<G: GenericClient> PgDatabase<G> {
             .collect();
         let delete_clauses = delete_clauses.join(operator);
 
-        let delete_query = format!(
-            "delete from {} where {}",
-            table_name.as_quoted_identifier(),
-            delete_clauses
-        );
+        let delete_query =
+            format!("delete from {} where {}", table_name.as_quoted_identifier(), delete_clauses);
 
-        self.client
-            .as_ref()
-            .unwrap()
-            .execute(&delete_query, &[])
-            .await
+        self.client.as_ref().unwrap().execute(&delete_query, &[]).await
     }
 
     /// Queries values from a single column with optional WHERE clause.
@@ -457,12 +423,8 @@ impl<G: GenericClient> PgDatabase<G> {
         T: for<'a> FromSql<'a>,
     {
         let where_str = where_clause.map_or(String::new(), |w| format!("where {w}"));
-        let query = format!(
-            "select {} from {} {}",
-            column,
-            table_name.as_quoted_identifier(),
-            where_str
-        );
+        let query =
+            format!("select {} from {} {}", column, table_name.as_quoted_identifier(), where_str);
 
         let rows = self.client.as_ref().unwrap().query(&query, &[]).await?;
         Ok(rows.iter().map(|row| row.get(0)).collect())
@@ -481,21 +443,17 @@ impl<G: GenericClient> PgDatabase<G> {
 
     /// Gets the state of a replication slot.
     ///
-    /// Queries the `pg_replication_slots` system catalog to determine the slot's
-    /// existence, activity, and validity status in a single call.
+    /// Queries the `pg_replication_slots` system catalog to determine the
+    /// slot's existence, activity, and validity status in a single call.
     ///
-    /// Returns `None` if the slot does not exist, otherwise returns the slot state.
+    /// Returns `None` if the slot does not exist, otherwise returns the slot
+    /// state.
     pub async fn get_replication_slot_state(
         &self,
         slot_name: &str,
     ) -> Result<Option<ReplicationSlotState>, tokio_postgres::Error> {
         let query = "select active, wal_status from pg_replication_slots where slot_name = $1";
-        let row = self
-            .client
-            .as_ref()
-            .unwrap()
-            .query_opt(query, &[&slot_name])
-            .await?;
+        let row = self.client.as_ref().unwrap().query_opt(query, &[&slot_name]).await?;
 
         let Some(row) = row else {
             return Ok(None);
@@ -518,9 +476,10 @@ impl<G: GenericClient> PgDatabase<G> {
 
     /// Waits for a replication slot to become inactive.
     ///
-    /// Polls the slot status every 100ms until it becomes inactive, invalidated,
-    /// or no longer exists. This is useful in tests after shutting down a pipeline
-    /// to ensure the slot is released before performing operations on it.
+    /// Polls the slot status every 100ms until it becomes inactive,
+    /// invalidated, or no longer exists. This is useful in tests after
+    /// shutting down a pipeline to ensure the slot is released before
+    /// performing operations on it.
     pub async fn wait_for_slot_inactive(&self, slot_name: &str) {
         while matches!(
             self.get_replication_slot_state(slot_name).await,
@@ -537,29 +496,28 @@ impl<G: GenericClient> PgDatabase<G> {
 
     /// Invalidates a replication slot by exceeding the WAL retention limit.
     ///
-    /// This method temporarily sets `max_slot_wal_keep_size` to a small value (64kB),
-    /// generates WAL until the slot becomes invalidated, and forces checkpoints to trigger
-    /// WAL cleanup. The configuration is reset and temporary tables are cleaned up
-    /// after invalidation succeeds.
+    /// This method temporarily sets `max_slot_wal_keep_size` to a small value
+    /// (64kB), generates WAL until the slot becomes invalidated, and forces
+    /// checkpoints to trigger WAL cleanup. The configuration is reset and
+    /// temporary tables are cleaned up after invalidation succeeds.
     ///
     /// # Panics
     ///
-    /// Panics if the ALTER SYSTEM command fails (requires superuser privileges).
+    /// Panics if the ALTER SYSTEM command fails (requires superuser
+    /// privileges).
     pub async fn invalidate_slot(&self, slot_name: &str) {
         let client = self.client.as_ref().unwrap();
 
-        // Try to set max_slot_wal_keep_size very low, this requires superuser privileges.
-        if let Err(e) = client
-            .execute("ALTER SYSTEM SET max_slot_wal_keep_size = '64kB'", &[])
-            .await
+        // Try to set max_slot_wal_keep_size very low, this requires superuser
+        // privileges.
+        if let Err(e) =
+            client.execute("ALTER SYSTEM SET max_slot_wal_keep_size = '64kB'", &[]).await
         {
             panic!("invalidate_slot: ALTER SYSTEM failed (requires superuser privileges): {e}");
         }
 
         if let Err(e) = client.execute("SELECT pg_reload_conf()", &[]).await {
-            let _ = client
-                .execute("ALTER SYSTEM RESET max_slot_wal_keep_size", &[])
-                .await;
+            let _ = client.execute("ALTER SYSTEM RESET max_slot_wal_keep_size", &[]).await;
             panic!("invalidate_slot: pg_reload_conf failed: {e}");
         }
 
@@ -573,12 +531,8 @@ impl<G: GenericClient> PgDatabase<G> {
 
         // Helper closure to reset config and clean up.
         let cleanup = || async {
-            let _ = client
-                .execute("DROP TABLE IF EXISTS _etl_wal_generator", &[])
-                .await;
-            let _ = client
-                .execute("ALTER SYSTEM RESET max_slot_wal_keep_size", &[])
-                .await;
+            let _ = client.execute("DROP TABLE IF EXISTS _etl_wal_generator", &[]).await;
+            let _ = client.execute("ALTER SYSTEM RESET max_slot_wal_keep_size", &[]).await;
             let _ = client.execute("SELECT pg_reload_conf()", &[]).await;
         };
 
@@ -590,7 +544,8 @@ impl<G: GenericClient> PgDatabase<G> {
             for _ in 0..20 {
                 let _ = client
                     .execute(
-                        "INSERT INTO _etl_wal_generator (data) SELECT repeat('x', 10000) FROM generate_series(1, 100)",
+                        "INSERT INTO _etl_wal_generator (data) SELECT repeat('x', 10000) FROM \
+                         generate_series(1, 100)",
                         &[],
                     )
                     .await;
@@ -604,15 +559,13 @@ impl<G: GenericClient> PgDatabase<G> {
             // Check if slot is invalidated.
             if let Ok(Some(_)) = client
                 .query_opt(
-                    "SELECT 1 FROM pg_replication_slots WHERE slot_name = $1 AND wal_status = 'lost'",
+                    "SELECT 1 FROM pg_replication_slots WHERE slot_name = $1 AND wal_status = \
+                     'lost'",
                     &[&slot_name],
                 )
                 .await
             {
-                info!(
-                    slot_name,
-                    iteration, "slot invalidated successfully"
-                );
+                info!(slot_name, iteration, "slot invalidated successfully");
                 break;
             }
         }
@@ -627,16 +580,12 @@ impl PgDatabase<Client> {
     /// Creates a new test database with automatic cleanup.
     ///
     /// Creates a new Postgres database and establishes a client connection.
-    /// The database will be dropped automatically when this instance is dropped.
+    /// The database will be dropped automatically when this instance is
+    /// dropped.
     pub async fn new(config: PgConnectionConfig) -> Self {
         let client = create_pg_database(&config).await;
 
-        Self {
-            config,
-            client: Some(client.0),
-            server_version: client.1,
-            destroy_on_drop: true,
-        }
+        Self { config, client: Some(client.0), server_version: client.1, destroy_on_drop: true }
     }
 
     /// Creates a duplicate connection to the same database.
@@ -645,25 +594,22 @@ impl PgDatabase<Client> {
     /// without creating a new database.
     pub async fn duplicate(&self) -> Self {
         let config = self.config.clone();
-        // This connects to the database assuming it already exists since this is meant to be
-        // a duplicate connection.
+        // This connects to the database assuming it already exists since this is meant
+        // to be a duplicate connection.
         let client = connect_to_pg_database(&config).await;
 
-        Self {
-            config,
-            client: Some(client.0),
-            server_version: client.1,
-            destroy_on_drop: true,
-        }
+        Self { config, client: Some(client.0), server_version: client.1, destroy_on_drop: true }
     }
 
     /// Begins a new database transaction.
     ///
-    /// Returns a [`PgDatabase`] wrapping a [`Transaction`] for executing queries
-    /// within a transaction context. The transaction must be committed or rolled back.
+    /// Returns a [`PgDatabase`] wrapping a [`Transaction`] for executing
+    /// queries within a transaction context. The transaction must be
+    /// committed or rolled back.
     ///
     /// # Panics
-    /// Panics if the client is not available or if starting the transaction fails.
+    /// Panics if the client is not available or if starting the transaction
+    /// fails.
     pub async fn begin_transaction(&mut self) -> PgDatabase<Transaction<'_>> {
         let transaction = self
             .client
@@ -685,7 +631,8 @@ impl PgDatabase<Client> {
 impl PgDatabase<Transaction<'_>> {
     /// Commits the current transaction.
     ///
-    /// Finalizes all changes made within the transaction and releases the transaction.
+    /// Finalizes all changes made within the transaction and releases the
+    /// transaction.
     ///
     /// This function will not panic on errors - it logs them and continues.
     /// This ensures transaction cleanup doesn't fail unexpectedly.
@@ -701,8 +648,9 @@ impl PgDatabase<Transaction<'_>> {
 impl<G> Drop for PgDatabase<G> {
     fn drop(&mut self) {
         if self.destroy_on_drop {
-            // To use `block_in_place,` we need a multithreaded runtime since when a blocking
-            // task is issued, the runtime will offload existing tasks to another worker.
+            // To use `block_in_place,` we need a multithreaded runtime since when a
+            // blocking task is issued, the runtime will offload existing tasks
+            // to another worker.
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 tokio::task::block_in_place(move || {
                     Handle::current().block_on(async move { drop_pg_database(&self.config).await });
@@ -717,13 +665,7 @@ impl<G> Drop for PgDatabase<G> {
 /// Creates a [`ColumnSchema`] for a non-nullable, primary key column named "id"
 /// of type `INT8` that is added by default to tables created by [`PgDatabase`].
 pub fn id_column_schema() -> ColumnSchema {
-    ColumnSchema {
-        name: "id".to_string(),
-        typ: Type::INT8,
-        modifier: -1,
-        nullable: false,
-        primary: true,
-    }
+    ColumnSchema::new("id".to_string(), Type::INT8, -1, 1, Some(1), false)
 }
 
 /// Creates a new Postgres database and returns a connected client.
@@ -737,16 +679,13 @@ pub async fn create_pg_database(config: &PgConnectionConfig) -> (Client, Option<
     // Create the database via a single connection
     let (client, connection) = {
         let config: tokio_postgres::Config = config.without_db(None);
-        config
-            .connect(NoTls)
-            .await
-            .expect("failed to connect to Postgres")
+        config.connect(NoTls).await.expect("failed to connect to Postgres")
     };
 
     // Spawn the connection on a new task
     tokio::spawn(async move {
         if let Err(e) = connection.await {
-            info!("connection error: {e}");
+            info!(error = %e, "connection error");
         }
     });
 
@@ -764,8 +703,8 @@ pub async fn create_pg_database(config: &PgConnectionConfig) -> (Client, Option<
 
 /// Connects to an existing Postgres database.
 ///
-/// Establishes a client connection to the database specified in the configuration.
-/// Assumes the database already exists.
+/// Establishes a client connection to the database specified in the
+/// configuration. Assumes the database already exists.
 ///
 /// # Panics
 /// Panics if connection fails.
@@ -773,19 +712,14 @@ pub async fn connect_to_pg_database(config: &PgConnectionConfig) -> (Client, Opt
     // Create a new client connected to the created database
     let (client, connection) = {
         let config: tokio_postgres::Config = config.with_db(None);
-        config
-            .connect(NoTls)
-            .await
-            .expect("failed to connect to Postgres")
+        config.connect(NoTls).await.expect("failed to connect to Postgres")
     };
-    let server_version = connection
-        .parameter("server_version")
-        .and_then(extract_server_version);
+    let server_version = connection.parameter("server_version").and_then(extract_server_version);
 
     // Spawn the connection on a new task
     tokio::spawn(async move {
         if let Err(e) = connection.await {
-            info!("connection error: {e}");
+            info!(error = %e, "connection error");
         }
     });
 
@@ -816,7 +750,7 @@ pub async fn drop_pg_database(config: &PgConnectionConfig) {
     // Spawn the connection on a new task
     tokio::spawn(async move {
         if let Err(e) = connection.await {
-            info!("connection error: {e}");
+            info!(error = %e, "connection error");
         }
     });
 
@@ -835,10 +769,7 @@ pub async fn drop_pg_database(config: &PgConnectionConfig) {
         )
         .await
     {
-        eprintln!(
-            "warning: failed to terminate connections for database {}: {}",
-            config.name, e
-        );
+        eprintln!("warning: failed to terminate connections for database {}: {}", config.name, e);
     }
 
     // Give PostgreSQL time to mark slots as inactive after terminating connections.
@@ -858,19 +789,12 @@ pub async fn drop_pg_database(config: &PgConnectionConfig) {
         )
         .await
     {
-        eprintln!(
-            "warning: failed to drop replication slots for database {}: {}",
-            config.name, e
-        );
+        eprintln!("warning: failed to drop replication slots for database {}: {}", config.name, e);
     }
 
     // Drop the database
-    if let Err(e) = client
-        .execute(
-            &format!(r#"drop database if exists "{}";"#, config.name),
-            &[],
-        )
-        .await
+    if let Err(e) =
+        client.execute(&format!(r#"drop database if exists "{}";"#, config.name), &[]).await
     {
         eprintln!("warning: failed to drop database {}: {}", config.name, e);
     }

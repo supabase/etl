@@ -2,7 +2,7 @@
 
 **15 minutes**: Learn the fundamentals by building a working pipeline.
 
-By the end of this tutorial, you'll have a complete ETL pipeline that streams data changes from Postgres to a memory destination in real-time.
+By the end of this tutorial, you'll have a complete ETL pipeline that streams data changes from Postgres to a tiny custom destination in real-time.
 
 ## What You'll Build
 
@@ -10,7 +10,7 @@ A real-time data pipeline that:
 
 - Monitors a Postgres table for changes
 - Streams INSERT, UPDATE, and DELETE operations
-- Stores replicated data in memory for immediate access
+- Prints copied rows and streaming events through your own destination implementation
 
 ## Prerequisites
 
@@ -67,25 +67,74 @@ CREATE PUBLICATION my_publication FOR TABLE users;
 Replace `src/main.rs`:
 
 ```rust
-use etl::config::{BatchConfig, PgConnectionConfig, PipelineConfig, TlsConfig};
-use etl::pipeline::Pipeline;
-use etl::store::both::memory::MemoryStore;
-use etl_destinations::bigquery::BigQueryDestination;
+use etl::{
+    config::{
+        BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PgConnectionConfig,
+        PipelineConfig, TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
+    },
+    destination::{Destination, TruncateTableResult, WriteEventsResult, WriteTableRowsResult},
+    error::EtlResult,
+    pipeline::Pipeline,
+    store::MemoryStore,
+    types::{Event, ReplicatedTableSchema, TableRow},
+};
 use std::error::Error;
+
+#[derive(Clone)]
+struct LoggingDestination;
+
+impl Destination for LoggingDestination {
+    fn name() -> &'static str {
+        "logging"
+    }
+
+    async fn truncate_table(
+        &self,
+        _replicated_table_schema: &ReplicatedTableSchema,
+        async_result: TruncateTableResult<()>,
+    ) -> EtlResult<()> {
+        println!("starting initial table copy");
+        async_result.send(Ok(()));
+        Ok(())
+    }
+
+    async fn write_table_rows(
+        &self,
+        _replicated_table_schema: &ReplicatedTableSchema,
+        rows: Vec<TableRow>,
+        async_result: WriteTableRowsResult<()>,
+    ) -> EtlResult<()> {
+        println!("copied {} rows", rows.len());
+        async_result.send(Ok(()));
+        Ok(())
+    }
+
+    async fn write_events(
+        &self,
+        events: Vec<Event>,
+        async_result: WriteEventsResult<()>,
+    ) -> EtlResult<()> {
+        println!("received {} streaming events", events.len());
+        async_result.send(Ok(()));
+        Ok(())
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    tracing_subscriber::fmt::init();
+
     let pg_config = PgConnectionConfig {
         host: "localhost".to_string(),
         port: 5432,
         name: "etl_tutorial".to_string(),
         username: "postgres".to_string(),
-        password: Some("your_password".to_string().into()),  // Update this
+        password: Some("your_password".to_string().into()),
         tls: TlsConfig {
             enabled: false,
             trusted_root_certs: String::new(),
         },
-        keepalive: None,
+        keepalive: TcpKeepaliveConfig::default(),
     };
 
     let config = PipelineConfig {
@@ -93,25 +142,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
         publication_name: "my_publication".to_string(),
         pg_connection: pg_config,
         batch: BatchConfig {
-            max_size: 1000,
             max_fill_ms: 5000,
+            memory_budget_ratio: 0.2,
         },
         table_error_retry_delay_ms: 10000,
         table_error_retry_max_attempts: 5,
         max_table_sync_workers: 4,
+        max_copy_connections_per_table: PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE,
+        memory_refresh_interval_ms: 100,
+        memory_backpressure: Some(MemoryBackpressureConfig::default()),
+        table_sync_copy: TableSyncCopyConfig::default(),
+        invalidated_slot_behavior: InvalidatedSlotBehavior::default(),
     };
 
     let store = MemoryStore::new();
-    let destination = BigQueryDestination::new_with_key_path(
-        "my-gcp-project".into(),
-        "my_dataset".into(),
-        "/path/to/service-account-key.json",
-        None,
-        1,
-        1,
-        store.clone(),
-    )
-    .await?;
+    let destination = LoggingDestination;
 
     println!("Starting pipeline...");
     let mut pipeline = Pipeline::new(config, store, destination);
@@ -130,7 +175,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 RUST_LOG=info cargo run
 ```
 
-You should see the initial table data being copied (the two users from Step 2), then the pipeline continues running, waiting for changes.
+You should see ETL startup logs plus messages from `LoggingDestination` as the initial rows are copied. After that, the pipeline continues running and prints the size of each streaming event batch.
 
 ## Step 5: Test Real-Time Replication
 
@@ -144,7 +189,7 @@ UPDATE users SET name = 'Alice Cooper' WHERE email = 'alice@example.com';
 DELETE FROM users WHERE email = 'bob@example.com';
 ```
 
-Your pipeline terminal should show these changes being captured in real-time.
+Your pipeline terminal should show new streaming batches being received in real-time.
 
 ## Cleanup
 
@@ -160,7 +205,7 @@ DROP DATABASE etl_tutorial;
 
 - **Publications** define which tables to replicate via Postgres logical replication
 - **Pipeline configuration** controls batching behavior and error retry policies
-- **Memory destinations** store data in-memory, useful for testing and development
+- **Custom destinations** are normal Rust types that implement the `Destination` trait
 - The pipeline performs an initial table copy, then streams changes in real-time
 
 ## Next Steps

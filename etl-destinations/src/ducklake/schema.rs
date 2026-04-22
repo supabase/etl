@@ -54,7 +54,7 @@ fn postgres_array_type_to_ducklake_sql(typ: &Type) -> &'static str {
 }
 
 /// Returns the DuckLake SQL type string for a Postgres column type.
-pub fn postgres_column_type_to_ducklake_sql(typ: &Type) -> &'static str {
+fn postgres_column_type_to_ducklake_sql(typ: &Type) -> &'static str {
     if is_array_type(typ) {
         postgres_array_type_to_ducklake_sql(typ)
     } else {
@@ -62,12 +62,13 @@ pub fn postgres_column_type_to_ducklake_sql(typ: &Type) -> &'static str {
     }
 }
 
-/// Builds a `CREATE TABLE IF NOT EXISTS` DDL statement for the given table name and schema.
+/// Builds a `CREATE TABLE IF NOT EXISTS` DDL statement for the given table name
+/// and schema.
 ///
-/// CDC columns (`cdc_operation` and `cdc_lsn`) are appended at the end and must already
-/// be included in `column_schemas` (added by `modify_schema_with_cdc_columns` before calling
-/// this function).
-pub fn build_create_table_sql_ducklake(
+/// CDC columns (`cdc_operation` and `cdc_lsn`) are appended at the end and must
+/// already be included in `column_schemas` (added by
+/// `modify_schema_with_cdc_columns` before calling this function).
+pub(super) fn build_create_table_sql_ducklake(
     table_name: &str,
     column_schemas: &[ColumnSchema],
 ) -> String {
@@ -82,10 +83,7 @@ pub fn build_create_table_sql_ducklake(
         })
         .collect();
 
-    format!(
-        "CREATE TABLE IF NOT EXISTS {table_name} ({})",
-        col_defs.join(",\n")
-    )
+    format!("CREATE TABLE IF NOT EXISTS {table_name} ({})", col_defs.join(",\n"))
 }
 
 #[cfg(test)]
@@ -93,34 +91,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_scalar_type_mapping() {
+    fn scalar_type_mapping() {
         assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::BOOL), "BOOLEAN");
         assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::TEXT), "VARCHAR");
-        assert_eq!(
-            postgres_scalar_type_to_ducklake_sql(&Type::INT2),
-            "SMALLINT"
-        );
+        assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::INT2), "SMALLINT");
         assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::INT4), "INTEGER");
         assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::INT8), "BIGINT");
         assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::FLOAT4), "FLOAT");
-        assert_eq!(
-            postgres_scalar_type_to_ducklake_sql(&Type::FLOAT8),
-            "DOUBLE"
-        );
-        assert_eq!(
-            postgres_scalar_type_to_ducklake_sql(&Type::NUMERIC),
-            "VARCHAR"
-        );
+        assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::FLOAT8), "DOUBLE");
+        assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::NUMERIC), "VARCHAR");
         assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::DATE), "DATE");
         assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::TIME), "TIME");
-        assert_eq!(
-            postgres_scalar_type_to_ducklake_sql(&Type::TIMESTAMP),
-            "TIMESTAMP"
-        );
-        assert_eq!(
-            postgres_scalar_type_to_ducklake_sql(&Type::TIMESTAMPTZ),
-            "TIMESTAMPTZ"
-        );
+        assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::TIMESTAMP), "TIMESTAMP");
+        assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::TIMESTAMPTZ), "TIMESTAMPTZ");
         assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::UUID), "UUID");
         assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::JSON), "JSON");
         assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::JSONB), "JSON");
@@ -129,40 +112,19 @@ mod tests {
     }
 
     #[test]
-    fn test_array_type_mapping() {
-        assert_eq!(
-            postgres_array_type_to_ducklake_sql(&Type::BOOL_ARRAY),
-            "BOOLEAN[]"
-        );
-        assert_eq!(
-            postgres_array_type_to_ducklake_sql(&Type::TEXT_ARRAY),
-            "VARCHAR[]"
-        );
-        assert_eq!(
-            postgres_array_type_to_ducklake_sql(&Type::INT4_ARRAY),
-            "INTEGER[]"
-        );
-        assert_eq!(
-            postgres_array_type_to_ducklake_sql(&Type::FLOAT8_ARRAY),
-            "DOUBLE[]"
-        );
-        assert_eq!(
-            postgres_array_type_to_ducklake_sql(&Type::UUID_ARRAY),
-            "UUID[]"
-        );
+    fn array_type_mapping() {
+        assert_eq!(postgres_array_type_to_ducklake_sql(&Type::BOOL_ARRAY), "BOOLEAN[]");
+        assert_eq!(postgres_array_type_to_ducklake_sql(&Type::TEXT_ARRAY), "VARCHAR[]");
+        assert_eq!(postgres_array_type_to_ducklake_sql(&Type::INT4_ARRAY), "INTEGER[]");
+        assert_eq!(postgres_array_type_to_ducklake_sql(&Type::FLOAT8_ARRAY), "DOUBLE[]");
+        assert_eq!(postgres_array_type_to_ducklake_sql(&Type::UUID_ARRAY), "UUID[]");
     }
 
     #[test]
-    fn test_build_create_table_sql_quotes_identifiers() {
+    fn build_create_table_sql_quotes_identifiers() {
         let sql = build_create_table_sql_ducklake(
             "odd\"table",
-            &[ColumnSchema::new(
-                "select".to_string(),
-                Type::INT4,
-                -1,
-                false,
-                true,
-            )],
+            &[ColumnSchema::new("select".to_string(), Type::INT4, -1, 1, Some(1), false)],
         );
 
         assert!(sql.starts_with("CREATE TABLE IF NOT EXISTS \"odd\"\"table\""));

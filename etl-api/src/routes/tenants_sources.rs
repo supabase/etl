@@ -10,16 +10,17 @@ use thiserror::Error;
 use tracing_actix_web::RootSpan;
 use utoipa::ToSchema;
 
-use crate::configs::source::FullApiSourceConfig;
-use crate::db::tenants_sources::TenantSourceDbError;
-use crate::k8s::TrustedRootCertsCache;
-use crate::routes::ErrorMessage;
-use crate::validation::ValidationError;
 use crate::{
-    config::ApiConfig, configs::encryption::EncryptionKey, configs::source::StoredSourceConfig,
-    db::tenants::TenantsDbError,
+    config::ApiConfig,
+    configs::{
+        encryption::EncryptionKey,
+        source::{FullApiSourceConfig, StoredSourceConfig},
+    },
+    db::{self, tenants::TenantsDbError, tenants_sources::TenantSourceDbError},
+    k8s::TrustedRootCertsCache,
+    routes::{ErrorMessage, common, utils},
+    validation::ValidationError,
 };
-use crate::{db, routes::common, routes::utils};
 
 #[derive(Debug, Error)]
 enum TenantSourceError {
@@ -40,9 +41,11 @@ impl TenantSourceError {
     fn to_message(&self) -> String {
         match self {
             // Do not expose internal database details in error messages
-            TenantSourceError::TenantSourceDb(TenantSourceDbError::Database(_))
-            | TenantSourceError::TenantSourceDb(TenantSourceDbError::Sources(_))
-            | TenantSourceError::TenantSourceDb(TenantSourceDbError::Tenants(_))
+            TenantSourceError::TenantSourceDb(
+                TenantSourceDbError::Database(_)
+                | TenantSourceDbError::Sources(_)
+                | TenantSourceDbError::Tenants(_),
+            )
             | TenantSourceError::Database(_)
             | TenantSourceError::Validation(_) => "internal server error".to_string(),
             // Every other message is ok, as they do not divulge sensitive information
@@ -65,14 +68,10 @@ impl ResponseError for TenantSourceError {
     }
 
     fn error_response(&self) -> HttpResponse {
-        let error_message = ErrorMessage {
-            error: self.to_message(),
-        };
+        let error_message = ErrorMessage { error: self.to_message() };
         let body =
             serde_json::to_string(&error_message).expect("failed to serialize error message");
-        HttpResponse::build(self.status_code())
-            .insert_header(ContentType::json())
-            .body(body)
+        HttpResponse::build(self.status_code()).insert_header(ContentType::json()).body(body)
     }
 }
 
@@ -85,9 +84,9 @@ async fn validate_source_config(
         common::validate_source_config(source_config, api_config, trusted_root_certs_cache).await?;
 
     if !failures.is_empty() {
-        return Err(TenantSourceError::ValidationFailed(
-            utils::format_validation_failures(failures),
-        ));
+        return Err(TenantSourceError::ValidationFailed(utils::format_validation_failures(
+            failures,
+        )));
     }
 
     Ok(())
@@ -160,10 +159,7 @@ pub async fn create_tenant_and_source(
     .await?;
     txn.commit().await?;
 
-    let response = CreateTenantSourceResponse {
-        tenant_id,
-        source_id,
-    };
+    let response = CreateTenantSourceResponse { tenant_id, source_id };
 
     Ok(Json(response))
 }

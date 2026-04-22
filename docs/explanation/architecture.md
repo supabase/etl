@@ -68,8 +68,9 @@ Where replicated data goes. Implement the `Destination` trait to send data anywh
 ```rust
 pub trait Destination {
     fn name() -> &'static str;
-    fn truncate_table(&self, table_id: TableId, async_result: TruncateTableResult<()>) -> impl Future<Output = EtlResult<()>> + Send;
-    fn write_table_rows(&self, table_id: TableId, rows: Vec<TableRow>, async_result: WriteTableRowsResult<()>) -> impl Future<Output = EtlResult<()>> + Send;
+    fn shutdown(&self) -> impl Future<Output = EtlResult<()>> + Send { async { Ok(()) } }
+    fn truncate_table(&self, replicated_table_schema: &ReplicatedTableSchema, async_result: TruncateTableResult<()>) -> impl Future<Output = EtlResult<()>> + Send;
+    fn write_table_rows(&self, replicated_table_schema: &ReplicatedTableSchema, rows: Vec<TableRow>, async_result: WriteTableRowsResult<()>) -> impl Future<Output = EtlResult<()>> + Send;
     fn write_events(&self, events: Vec<Event>, async_result: WriteEventsResult<()>) -> impl Future<Output = EtlResult<()>> + Send;
 }
 ```
@@ -77,8 +78,8 @@ pub trait Destination {
 | Method | When called | Purpose |
 |--------|-------------|---------|
 | `name()` | On initialization | Identify the destination |
-| `truncate_table()` | Before initial copy | Clear destination table |
-| `write_table_rows()` | During initial copy | Receive bulk rows |
+| `truncate_table()` | Before initial copy | Clear destination table using the current replicated schema |
+| `write_table_rows()` | During initial copy | Receive bulk rows for the current replicated schema |
 | `write_events()` | After initial copy | Receive streaming changes |
 
 Each write-like method receives an async result handle. The intent is different per method:
@@ -90,8 +91,8 @@ Each write-like method receives an async result handle. The intent is different 
 
 Persists pipeline state so replication can resume after restarts. Three traits work together:
 
-- **StateStore**: Tracks replication phase per table and source-to-destination table mappings
-- **SchemaStore**: Stores table schema information (columns, types, primary keys)
+- **StateStore**: Tracks replication phase per table and destination table metadata
+- **SchemaStore**: Stores versioned table schema information (columns, types, primary keys, snapshot IDs)
 - **CleanupStore**: Removes stored state when a table is dropped from the publication
 
 `StateStore` and `SchemaStore` use a cache-first pattern: reads hit an in-memory cache, writes go to both the cache and persistent storage.

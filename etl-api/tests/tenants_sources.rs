@@ -1,24 +1,23 @@
-use etl_api::configs::source::FullApiSourceConfig;
-use etl_api::routes::sources::ReadSourceResponse;
-use etl_api::routes::tenants::ReadTenantResponse;
-use etl_api::routes::tenants_sources::{CreateTenantSourceRequest, CreateTenantSourceResponse};
-use etl_config::SerializableSecretString;
-use etl_config::shared::PgConnectionConfig;
+use etl_api::{
+    configs::source::FullApiSourceConfig,
+    routes::{
+        sources::ReadSourceResponse,
+        tenants::ReadTenantResponse,
+        tenants_sources::{CreateTenantSourceRequest, CreateTenantSourceResponse},
+    },
+};
+use etl_config::{SerializableSecretString, shared::PgConnectionConfig};
 use etl_postgres::sqlx::test_utils::{create_pg_database, drop_pg_database};
 use etl_telemetry::tracing::init_test_tracing;
 use reqwest::StatusCode;
 use secrecy::ExposeSecret;
 use uuid::Uuid;
 
-use crate::{
-    support::database::{
-        create_trusted_source_database, drop_trusted_source_database, get_test_db_config,
-    },
-    support::mocks::sources::{new_name, new_source_config},
-    support::test_app::{spawn_test_app, spawn_test_app_with_trusted_username},
+use crate::support::{
+    database::{create_trusted_source_database, drop_trusted_source_database, get_test_db_config},
+    mocks::sources::{new_name, new_source_config},
+    test_app::{spawn_test_app, spawn_test_app_with_trusted_username},
 };
-
-mod support;
 
 fn source_config_from_db_config(source_db_config: &PgConnectionConfig) -> FullApiSourceConfig {
     FullApiSourceConfig {
@@ -50,10 +49,8 @@ async fn tenant_and_source_can_be_created() {
 
     // Assert
     assert!(response.status().is_success());
-    let response: CreateTenantSourceResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: CreateTenantSourceResponse =
+        response.json().await.expect("failed to deserialize response");
     assert_eq!(response.tenant_id, "abcdefghijklmnopqrst");
     assert_eq!(response.source_id, 1);
 
@@ -61,18 +58,14 @@ async fn tenant_and_source_can_be_created() {
     let source_id = response.source_id;
 
     let response = app.read_tenant(tenant_id).await;
-    let response: ReadTenantResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: ReadTenantResponse =
+        response.json().await.expect("failed to deserialize response");
     assert_eq!(&response.id, tenant_id);
     assert_eq!(response.name, tenant_source.tenant_name);
 
     let response = app.read_source(tenant_id, source_id).await;
-    let response: ReadSourceResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: ReadSourceResponse =
+        response.json().await.expect("failed to deserialize response");
     assert_eq!(response.id, source_id);
     assert_eq!(&response.tenant_id, tenant_id);
     assert_eq!(response.name, tenant_source.source_name);

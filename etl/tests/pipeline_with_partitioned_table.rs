@@ -1,22 +1,25 @@
-#![cfg(feature = "test-utils")]
-
-use etl::error::ErrorKind;
-use etl::state::table::TableReplicationPhaseType;
-use etl::test_utils::database::{spawn_source_database, test_table_name};
-use etl::test_utils::event::group_events_by_type_and_table_id;
-use etl::test_utils::memory_destination::MemoryDestination;
-use etl::test_utils::notifying_store::NotifyingStore;
-use etl::test_utils::pipeline::create_pipeline;
-use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
-use etl::test_utils::test_schema::create_partitioned_table;
-use etl::types::EventType;
-use etl::types::PipelineId;
-use etl::types::TableId;
-use etl_postgres::below_version;
-use etl_postgres::version::POSTGRES_15;
+use etl::{
+    error::ErrorKind,
+    state::table::TableReplicationPhaseType,
+    test_utils::{
+        database::{spawn_source_database, test_table_name},
+        event::group_events_by_type_and_table_id,
+        memory_destination::MemoryDestination,
+        notifying_store::NotifyingStore,
+        pipeline::create_pipeline,
+        test_destination_wrapper::TestDestinationWrapper,
+        test_schema::create_partitioned_table,
+    },
+    types::{EventType, PipelineId, TableId},
+};
+use etl_postgres::{below_version, types::TableName, version::POSTGRES_15};
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
 use tokio_postgres::types::Type;
+
+fn quoted_qualified_table_name(schema: &str, table: &str) -> String {
+    TableName::new(schema.to_string(), table.to_string()).as_quoted_identifier()
+}
 
 /// Tests that initial COPY replicates all rows from a partitioned table.
 /// Only the parent table is tracked, not individual child partitions.
@@ -26,20 +29,16 @@ async fn partitioned_table_copy_replicates_existing_data() {
     let database = spawn_source_database().await;
 
     let table_name = test_table_name("partitioned_events");
-    let partition_specs = [
-        ("p1", "from (1) to (100)"),
-        ("p2", "from (100) to (200)"),
-        ("p3", "from (200) to (300)"),
-    ];
+    let partition_specs =
+        [("p1", "from (1) to (100)"), ("p2", "from (100) to (200)"), ("p3", "from (200) to (300)")];
 
     let (parent_table_id, _partition_table_ids) =
-        create_partitioned_table(&database, table_name.clone(), &partition_specs)
-            .await
-            .unwrap();
+        create_partitioned_table(&database, table_name.clone(), &partition_specs).await.unwrap();
 
     database
         .run_sql(&format!(
-            "insert into {} (data, partition_key) values ('event1', 50), ('event2', 150), ('event3', 250)",
+            "insert into {} (data, partition_key) values ('event1', 50), ('event2', 150), \
+             ('event3', 250)",
             table_name.as_quoted_identifier()
         ))
         .await
@@ -75,7 +74,7 @@ async fn partitioned_table_copy_replicates_existing_data() {
     let _ = pipeline.shutdown_and_wait().await;
 
     // Verify table schema was discovered correctly.
-    let table_schemas = state_store.get_table_schemas().await;
+    let table_schemas = state_store.get_latest_table_schemas().await;
     assert!(table_schemas.contains_key(&parent_table_id));
 
     let parent_schema = &table_schemas[&parent_table_id];
@@ -90,24 +89,24 @@ async fn partitioned_table_copy_replicates_existing_data() {
     assert_eq!(id_column.name, "id");
     assert_eq!(id_column.typ, Type::INT8);
     assert!(!id_column.nullable);
-    assert!(id_column.primary);
+    assert!(id_column.primary_key());
 
     // Check data column.
     let data_column = &parent_schema.column_schemas[1];
     assert_eq!(data_column.name, "data");
     assert_eq!(data_column.typ, Type::TEXT);
     assert!(!data_column.nullable);
-    assert!(!data_column.primary);
+    assert!(!data_column.primary_key());
 
     // Check partition_key column.
     let partition_key_column = &parent_schema.column_schemas[2];
     assert_eq!(partition_key_column.name, "partition_key");
     assert_eq!(partition_key_column.typ, Type::INT4);
     assert!(!partition_key_column.nullable);
-    assert!(partition_key_column.primary);
+    assert!(partition_key_column.primary_key());
 
     let table_rows = destination.get_table_rows().await;
-    let total_rows: usize = table_rows.values().map(|rows| rows.len()).sum();
+    let total_rows: usize = table_rows.values().map(Vec::len).sum();
     assert_eq!(total_rows, 3);
 
     let table_states = state_store.get_table_replication_states().await;
@@ -173,7 +172,8 @@ async fn partitioned_table_copy_and_streams_new_data_from_new_partition() {
     parent_ready_notify.notified().await;
 
     let new_partition_name = format!("{}_{}", table_name.name, "p3");
-    let new_partition_qualified_name = format!("{}.{}", table_name.schema, new_partition_name);
+    let new_partition_qualified_name =
+        quoted_qualified_table_name(&table_name.schema, &new_partition_name);
     database
         .run_sql(&format!(
             "create table {} partition of {} for values from (200) to (300)",
@@ -184,9 +184,7 @@ async fn partitioned_table_copy_and_streams_new_data_from_new_partition() {
         .unwrap();
 
     // Wait for CDC to deliver the new row.
-    let inserts_notify = destination
-        .wait_for_events_count(vec![(EventType::Insert, 1)])
-        .await;
+    let inserts_notify = destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
 
     database
         .run_sql(&format!(
@@ -210,15 +208,14 @@ async fn partitioned_table_copy_and_streams_new_data_from_new_partition() {
 
     let events = destination.get_events().await;
     let grouped = group_events_by_type_and_table_id(&events);
-    let parent_inserts = grouped
-        .get(&(EventType::Insert, parent_table_id))
-        .cloned()
-        .unwrap_or_default();
+    let parent_inserts =
+        grouped.get(&(EventType::Insert, parent_table_id)).cloned().unwrap_or_default();
     assert_eq!(parent_inserts.len(), 1);
 }
 
-/// Tests that detaching and dropping a partition does not emit DELETE or TRUNCATE events.
-/// Partition management is a DDL operation, not DML, so no data events should be generated.
+/// Tests that detaching and dropping a partition does not emit DELETE or
+/// TRUNCATE events. Partition management is a DDL operation, not DML, so no
+/// data events should be generated.
 #[tokio::test(flavor = "multi_thread")]
 async fn partition_drop_does_not_emit_delete_or_truncate() {
     init_test_tracing();
@@ -228,9 +225,7 @@ async fn partition_drop_does_not_emit_delete_or_truncate() {
     let partition_specs = [("p1", "from (1) to (100)"), ("p2", "from (100) to (200)")];
 
     let (parent_table_id, _partition_table_ids) =
-        create_partitioned_table(&database, table_name.clone(), &partition_specs)
-            .await
-            .unwrap();
+        create_partitioned_table(&database, table_name.clone(), &partition_specs).await.unwrap();
 
     database
         .run_sql(&format!(
@@ -267,18 +262,15 @@ async fn partition_drop_does_not_emit_delete_or_truncate() {
 
     let events_before = destination.get_events().await;
     let grouped_before = group_events_by_type_and_table_id(&events_before);
-    let delete_count_before = grouped_before
-        .get(&(EventType::Delete, parent_table_id))
-        .map(|v| v.len())
-        .unwrap_or(0);
-    let truncate_count_before = grouped_before
-        .get(&(EventType::Truncate, parent_table_id))
-        .map(|v| v.len())
-        .unwrap_or(0);
+    let delete_count_before =
+        grouped_before.get(&(EventType::Delete, parent_table_id)).map_or(0, Vec::len);
+    let truncate_count_before =
+        grouped_before.get(&(EventType::Truncate, parent_table_id)).map_or(0, Vec::len);
 
     // Detach and drop one child partition (DDL should not generate DML events).
     let partition_p1_name = format!("{}_{}", table_name.name, "p1");
-    let partition_p1_qualified = format!("{}.{}", table_name.schema, partition_p1_name);
+    let partition_p1_qualified =
+        quoted_qualified_table_name(&table_name.schema, &partition_p1_name);
     database
         .run_sql(&format!(
             "alter table {} detach partition {}",
@@ -287,15 +279,11 @@ async fn partition_drop_does_not_emit_delete_or_truncate() {
         ))
         .await
         .unwrap();
-    database
-        .run_sql(&format!("drop table {partition_p1_qualified}"))
-        .await
-        .unwrap();
+    database.run_sql(&format!("drop table {partition_p1_qualified}")).await.unwrap();
 
-    // Insert a row into an existing partition to ensure the pipeline is still processing events.
-    let inserts_notify = destination
-        .wait_for_events_count(vec![(EventType::Insert, 1)])
-        .await;
+    // Insert a row into an existing partition to ensure the pipeline is still
+    // processing events.
+    let inserts_notify = destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
 
     database
         .run_sql(&format!(
@@ -311,21 +299,17 @@ async fn partition_drop_does_not_emit_delete_or_truncate() {
 
     let events_after = destination.get_events().await;
     let grouped_after = group_events_by_type_and_table_id(&events_after);
-    let delete_count_after = grouped_after
-        .get(&(EventType::Delete, parent_table_id))
-        .map(|v| v.len())
-        .unwrap_or(0);
-    let truncate_count_after = grouped_after
-        .get(&(EventType::Truncate, parent_table_id))
-        .map(|v| v.len())
-        .unwrap_or(0);
+    let delete_count_after =
+        grouped_after.get(&(EventType::Delete, parent_table_id)).map_or(0, Vec::len);
+    let truncate_count_after =
+        grouped_after.get(&(EventType::Truncate, parent_table_id)).map_or(0, Vec::len);
 
     assert_eq!(delete_count_after, delete_count_before);
     assert_eq!(truncate_count_after, truncate_count_before);
 }
 
-/// Tests that issuing a TRUNCATE at the parent table level does emit a TRUNCATE event in the
-/// replication stream.
+/// Tests that issuing a TRUNCATE at the parent table level does emit a TRUNCATE
+/// event in the replication stream.
 #[tokio::test(flavor = "multi_thread")]
 async fn parent_table_truncate_does_emit_truncate_event() {
     init_test_tracing();
@@ -335,9 +319,7 @@ async fn parent_table_truncate_does_emit_truncate_event() {
     let partition_specs = [("p1", "from (1) to (100)"), ("p2", "from (100) to (200)")];
 
     let (parent_table_id, _partition_table_ids) =
-        create_partitioned_table(&database, table_name.clone(), &partition_specs)
-            .await
-            .unwrap();
+        create_partitioned_table(&database, table_name.clone(), &partition_specs).await.unwrap();
 
     database
         .run_sql(&format!(
@@ -374,16 +356,11 @@ async fn parent_table_truncate_does_emit_truncate_event() {
     parent_ready_notify.notified().await;
 
     // Wait for the parent table truncate to be replicated.
-    let truncate_notify = destination
-        .wait_for_events_count(vec![(EventType::Truncate, 1)])
-        .await;
+    let truncate_notify = destination.wait_for_events_count(vec![(EventType::Truncate, 1)]).await;
 
     // We truncate the parent table.
     database
-        .run_sql(&format!(
-            "truncate table {}",
-            table_name.as_quoted_identifier(),
-        ))
+        .run_sql(&format!("truncate table {}", table_name.as_quoted_identifier(),))
         .await
         .unwrap();
 
@@ -393,16 +370,14 @@ async fn parent_table_truncate_does_emit_truncate_event() {
 
     let events = destination.get_events().await;
     let grouped_events = group_events_by_type_and_table_id(&events);
-    let truncate_count = grouped_events
-        .get(&(EventType::Truncate, parent_table_id))
-        .map(|v| v.len())
-        .unwrap_or(0);
+    let truncate_count =
+        grouped_events.get(&(EventType::Truncate, parent_table_id)).map_or(0, Vec::len);
 
     assert_eq!(truncate_count, 1);
 }
 
-/// Tests that issuing a TRUNCATE at the child table level does NOT emit a TRUNCATE event in the
-/// replication stream.
+/// Tests that issuing a TRUNCATE at the child table level does NOT emit a
+/// TRUNCATE event in the replication stream.
 #[tokio::test(flavor = "multi_thread")]
 async fn child_table_truncate_does_not_emit_truncate_event() {
     init_test_tracing();
@@ -412,9 +387,7 @@ async fn child_table_truncate_does_not_emit_truncate_event() {
     let partition_specs = [("p1", "from (1) to (100)"), ("p2", "from (100) to (200)")];
 
     let (parent_table_id, _partition_table_ids) =
-        create_partitioned_table(&database, table_name.clone(), &partition_specs)
-            .await
-            .unwrap();
+        create_partitioned_table(&database, table_name.clone(), &partition_specs).await.unwrap();
 
     database
         .run_sql(&format!(
@@ -452,16 +425,13 @@ async fn child_table_truncate_does_not_emit_truncate_event() {
 
     // We truncate the child table.
     let partition_p1_name = format!("{}_{}", table_name.name, "p1");
-    let partition_p1_qualified = format!("{}.{}", table_name.schema, partition_p1_name);
-    database
-        .run_sql(&format!("truncate table {partition_p1_qualified}"))
-        .await
-        .unwrap();
+    let partition_p1_qualified =
+        quoted_qualified_table_name(&table_name.schema, &partition_p1_name);
+    database.run_sql(&format!("truncate table {partition_p1_qualified}")).await.unwrap();
 
-    // Insert a row into an existing partition to ensure the pipeline is still processing events.
-    let inserts_notify = destination
-        .wait_for_events_count(vec![(EventType::Insert, 1)])
-        .await;
+    // Insert a row into an existing partition to ensure the pipeline is still
+    // processing events.
+    let inserts_notify = destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
 
     database
         .run_sql(&format!(
@@ -477,17 +447,16 @@ async fn child_table_truncate_does_not_emit_truncate_event() {
 
     let events = destination.get_events().await;
     let grouped_events = group_events_by_type_and_table_id(&events);
-    let truncate_count = grouped_events
-        .get(&(EventType::Truncate, parent_table_id))
-        .map(|v| v.len())
-        .unwrap_or(0);
+    let truncate_count =
+        grouped_events.get(&(EventType::Truncate, parent_table_id)).map_or(0, Vec::len);
 
     assert_eq!(truncate_count, 0);
 }
 
-/// Tests that detached partitions are not replicated with explicit publications.
-/// Once detached, the partition becomes independent and is not in the publication since
-/// only the parent table was explicitly added. Inserts to detached partitions are not replicated.
+/// Tests that detached partitions are not replicated with explicit
+/// publications. Once detached, the partition becomes independent and is not in
+/// the publication since only the parent table was explicitly added. Inserts to
+/// detached partitions are not replicated.
 #[tokio::test(flavor = "multi_thread")]
 async fn partition_detach_with_explicit_publication_does_not_replicate_detached_inserts() {
     init_test_tracing();
@@ -497,9 +466,7 @@ async fn partition_detach_with_explicit_publication_does_not_replicate_detached_
     let partition_specs = [("p1", "from (1) to (100)"), ("p2", "from (100) to (200)")];
 
     let (parent_table_id, partition_table_ids) =
-        create_partitioned_table(&database, table_name.clone(), &partition_specs)
-            .await
-            .unwrap();
+        create_partitioned_table(&database, table_name.clone(), &partition_specs).await.unwrap();
 
     let p1_table_id = partition_table_ids[0];
 
@@ -541,15 +508,13 @@ async fn partition_detach_with_explicit_publication_does_not_replicate_detached_
     // Verify initial sync copied both rows.
     let table_rows = destination.get_table_rows().await;
     assert_eq!(table_rows.len(), 1);
-    let parent_rows: usize = table_rows
-        .get(&parent_table_id)
-        .map(|rows| rows.len())
-        .unwrap_or(0);
+    let parent_rows: usize = table_rows.get(&parent_table_id).map_or(0, Vec::len);
     assert_eq!(parent_rows, 2);
 
     // Detach partition p1 from parent.
     let partition_p1_name = format!("{}_{}", table_name.name, "p1");
-    let partition_p1_qualified = format!("{}.{}", table_name.schema, partition_p1_name);
+    let partition_p1_qualified =
+        quoted_qualified_table_name(&table_name.schema, &partition_p1_name);
     database
         .run_sql(&format!(
             "alter table {} detach partition {}",
@@ -562,17 +527,17 @@ async fn partition_detach_with_explicit_publication_does_not_replicate_detached_
     // Insert into the detached partition (should NOT be replicated).
     database
         .run_sql(&format!(
-            "insert into {partition_p1_qualified} (data, partition_key) values ('detached_event', 25)"
+            "insert into {partition_p1_qualified} (data, partition_key) values ('detached_event', \
+             25)"
         ))
         .await
         .unwrap();
 
     // Wait for the parent table insert to be replicated.
-    let inserts_notify = destination
-        .wait_for_events_count(vec![(EventType::Insert, 1)])
-        .await;
+    let inserts_notify = destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
 
-    // Insert into the parent table (should be replicated to remaining partition p2).
+    // Insert into the parent table (should be replicated to remaining partition
+    // p2).
     database
         .run_sql(&format!(
             "insert into {} (data, partition_key) values ('parent_event', 125)",
@@ -590,23 +555,20 @@ async fn partition_detach_with_explicit_publication_does_not_replicate_detached_
     let grouped = group_events_by_type_and_table_id(&events);
 
     // Parent table should have 1 insert event (the insert after detachment).
-    let parent_inserts = grouped
-        .get(&(EventType::Insert, parent_table_id))
-        .cloned()
-        .unwrap_or_default();
+    let parent_inserts =
+        grouped.get(&(EventType::Insert, parent_table_id)).cloned().unwrap_or_default();
     assert_eq!(parent_inserts.len(), 1);
 
     // Detached partition should have NO insert events.
-    let detached_inserts = grouped
-        .get(&(EventType::Insert, p1_table_id))
-        .cloned()
-        .unwrap_or_default();
+    let detached_inserts =
+        grouped.get(&(EventType::Insert, p1_table_id)).cloned().unwrap_or_default();
     assert_eq!(detached_inserts.len(), 0);
 }
 
-/// Tests catalog state when a partition is detached with FOR ALL TABLES publication.
-/// The detached partition appears in pg_publication_tables but is not automatically discovered
-/// by the running pipeline. Table discovery only happens at pipeline startup, not during execution.
+/// Tests catalog state when a partition is detached with FOR ALL TABLES
+/// publication. The detached partition appears in pg_publication_tables but is
+/// not automatically discovered by the running pipeline. Table discovery only
+/// happens at pipeline startup, not during execution.
 #[tokio::test(flavor = "multi_thread")]
 async fn partition_detach_with_all_tables_publication_does_not_replicate_detached_inserts() {
     init_test_tracing();
@@ -616,9 +578,7 @@ async fn partition_detach_with_all_tables_publication_does_not_replicate_detache
     let partition_specs = [("p1", "from (1) to (100)"), ("p2", "from (100) to (200)")];
 
     let (parent_table_id, partition_table_ids) =
-        create_partitioned_table(&database, table_name.clone(), &partition_specs)
-            .await
-            .unwrap();
+        create_partitioned_table(&database, table_name.clone(), &partition_specs).await.unwrap();
 
     let p1_table_id = partition_table_ids[0];
 
@@ -633,10 +593,7 @@ async fn partition_detach_with_all_tables_publication_does_not_replicate_detache
 
     // Create FOR ALL TABLES publication.
     let publication_name = "test_all_tables_pub_detach".to_string();
-    database
-        .create_publication_for_all(&publication_name, None)
-        .await
-        .unwrap();
+    database.create_publication_for_all(&publication_name, None).await.unwrap();
 
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
@@ -664,7 +621,8 @@ async fn partition_detach_with_all_tables_publication_does_not_replicate_detache
 
     // Detach partition p1.
     let partition_p1_name = format!("{}_{}", table_name.name, "p1");
-    let partition_p1_qualified = format!("{}.{}", table_name.schema, partition_p1_name);
+    let partition_p1_qualified =
+        quoted_qualified_table_name(&table_name.schema, &partition_p1_name);
     database
         .run_sql(&format!(
             "alter table {} detach partition {}",
@@ -679,16 +637,14 @@ async fn partition_detach_with_all_tables_publication_does_not_replicate_detache
         .client
         .as_ref()
         .unwrap()
-        .query(
-            "select count(*) as cnt from pg_inherits where inhrelid = $1",
-            &[&p1_table_id.0],
-        )
+        .query("select count(*) as cnt from pg_inherits where inhrelid = $1", &[&p1_table_id.0])
         .await
         .unwrap();
     let inherits_count: i64 = inherits_check[0].get("cnt");
     assert_eq!(inherits_count, 0);
 
-    // Check pg_publication_tables. With FOR ALL TABLES, the detached partition should appear.
+    // Check pg_publication_tables. With FOR ALL TABLES, the detached partition
+    // should appear.
     let pub_tables_check = database
         .client
         .as_ref()
@@ -706,19 +662,20 @@ async fn partition_detach_with_all_tables_publication_does_not_replicate_detache
     // Insert into detached partition.
     database
         .run_sql(&format!(
-            "insert into {partition_p1_qualified} (data, partition_key) values ('detached_event', 25)"
+            "insert into {partition_p1_qualified} (data, partition_key) values ('detached_event', \
+             25)"
         ))
         .await
         .unwrap();
 
-    // Note: The running pipeline won't automatically discover the detached partition
-    // without re-scanning for new tables. This is expected behavior, the table discovery
-    // happens at pipeline start or explicit refresh.
+    // Note: The running pipeline won't automatically discover the detached
+    // partition without re-scanning for new tables. This is expected behavior,
+    // the table discovery happens at pipeline start or explicit refresh.
 
     let _ = pipeline.shutdown_and_wait().await;
 
-    // The pipeline state should still only track the parent table (not the detached partition)
-    // because it hasn't re-scanned for new tables.
+    // The pipeline state should still only track the parent table (not the detached
+    // partition) because it hasn't re-scanned for new tables.
     let table_states_after = state_store.get_table_replication_states().await;
     assert!(table_states_after.contains_key(&parent_table_id));
 
@@ -726,16 +683,14 @@ async fn partition_detach_with_all_tables_publication_does_not_replicate_detache
     // because the pipeline hasn't discovered it as a new table.
     let events = destination.get_events().await;
     let grouped = group_events_by_type_and_table_id(&events);
-    let detached_inserts = grouped
-        .get(&(EventType::Insert, p1_table_id))
-        .cloned()
-        .unwrap_or_default();
+    let detached_inserts =
+        grouped.get(&(EventType::Insert, p1_table_id)).cloned().unwrap_or_default();
     assert_eq!(detached_inserts.len(), 0);
 }
 
-/// Tests that a detached partition is discovered as a new table after pipeline restart.
-/// With FOR ALL TABLES publication, the detached partition is re-discovered during table
-/// scanning at startup and its data is replicated.
+/// Tests that a detached partition is discovered as a new table after pipeline
+/// restart. With FOR ALL TABLES publication, the detached partition is
+/// re-discovered during table scanning at startup and its data is replicated.
 #[tokio::test(flavor = "multi_thread")]
 async fn partition_detach_with_all_tables_publication_does_replicate_detached_inserts_on_restart() {
     init_test_tracing();
@@ -745,9 +700,7 @@ async fn partition_detach_with_all_tables_publication_does_replicate_detached_in
     let partition_specs = [("p1", "from (1) to (100)"), ("p2", "from (100) to (200)")];
 
     let (parent_table_id, partition_table_ids) =
-        create_partitioned_table(&database, table_name.clone(), &partition_specs)
-            .await
-            .unwrap();
+        create_partitioned_table(&database, table_name.clone(), &partition_specs).await.unwrap();
 
     let p1_table_id = partition_table_ids[0];
 
@@ -762,10 +715,7 @@ async fn partition_detach_with_all_tables_publication_does_replicate_detached_in
 
     // Create FOR ALL TABLES publication.
     let publication_name = "test_all_tables_restart".to_string();
-    database
-        .create_publication_for_all(&publication_name, None)
-        .await
-        .unwrap();
+    database.create_publication_for_all(&publication_name, None).await.unwrap();
 
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
@@ -794,7 +744,8 @@ async fn partition_detach_with_all_tables_publication_does_replicate_detached_in
 
     // Detach partition p1.
     let partition_p1_name = format!("{}_{}", table_name.name, "p1");
-    let partition_p1_qualified = format!("{}.{}", table_name.schema, partition_p1_name);
+    let partition_p1_qualified =
+        quoted_qualified_table_name(&table_name.schema, &partition_p1_name);
     database
         .run_sql(&format!(
             "alter table {} detach partition {}",
@@ -807,7 +758,8 @@ async fn partition_detach_with_all_tables_publication_does_replicate_detached_in
     // Insert into detached partition (while pipeline is stopped).
     database
         .run_sql(&format!(
-            "insert into {partition_p1_qualified} (data, partition_key) values ('detached_event', 25)"
+            "insert into {partition_p1_qualified} (data, partition_key) values ('detached_event', \
+             25)"
         ))
         .await
         .unwrap();
@@ -815,10 +767,10 @@ async fn partition_detach_with_all_tables_publication_does_replicate_detached_in
     // Shutdown the pipeline.
     let _ = pipeline.shutdown_and_wait().await;
 
-    // Restart the pipeline. It should now discover the detached partition as a new table.
-    let detached_ready_notify = state_store
-        .notify_on_table_state_type(p1_table_id, TableReplicationPhaseType::Ready)
-        .await;
+    // Restart the pipeline. It should now discover the detached partition as a new
+    // table.
+    let detached_ready_notify =
+        state_store.notify_on_table_state_type(p1_table_id, TableReplicationPhaseType::Ready).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -841,22 +793,17 @@ async fn partition_detach_with_all_tables_publication_does_replicate_detached_in
 
     // Verify the data from the detached partition was copied.
     let table_rows = destination.get_table_rows().await;
-    let parent_rows: usize = table_rows
-        .get(&parent_table_id)
-        .map(|rows| rows.len())
-        .unwrap_or(0);
+    let parent_rows: usize = table_rows.get(&parent_table_id).map_or(0, Vec::len);
     assert_eq!(parent_rows, 2);
-    let detached_rows: usize = table_rows
-        .get(&p1_table_id)
-        .map(|rows| rows.len())
-        .unwrap_or(0);
+    let detached_rows: usize = table_rows.get(&p1_table_id).map_or(0, Vec::len);
     assert_eq!(detached_rows, 2);
 }
 
-/// Tests that detached partitions are not automatically discovered with FOR TABLES IN SCHEMA publication.
-/// Similar to FOR ALL TABLES, the detached partition appears in pg_publication_tables but is not
-/// automatically discovered by the running pipeline without restart.
-/// Requires PostgreSQL 15+ for FOR TABLES IN SCHEMA support.
+/// Tests that detached partitions are not automatically discovered with FOR
+/// TABLES IN SCHEMA publication. Similar to FOR ALL TABLES, the detached
+/// partition appears in pg_publication_tables but is not automatically
+/// discovered by the running pipeline without restart. Requires PostgreSQL 15+
+/// for FOR TABLES IN SCHEMA support.
 #[tokio::test(flavor = "multi_thread")]
 async fn partition_detach_with_schema_publication_does_not_replicate_detached_inserts() {
     init_test_tracing();
@@ -872,9 +819,7 @@ async fn partition_detach_with_schema_publication_does_not_replicate_detached_in
     let partition_specs = [("p1", "from (1) to (100)"), ("p2", "from (100) to (200)")];
 
     let (parent_table_id, partition_table_ids) =
-        create_partitioned_table(&database, table_name.clone(), &partition_specs)
-            .await
-            .unwrap();
+        create_partitioned_table(&database, table_name.clone(), &partition_specs).await.unwrap();
 
     let p1_table_id = partition_table_ids[0];
 
@@ -888,10 +833,7 @@ async fn partition_detach_with_schema_publication_does_not_replicate_detached_in
 
     // Create FOR TABLES IN SCHEMA publication.
     let publication_name = "test_schema_pub_detach".to_string();
-    database
-        .create_publication_for_all(&publication_name, Some(&table_name.schema))
-        .await
-        .unwrap();
+    database.create_publication_for_all(&publication_name, Some(&table_name.schema)).await.unwrap();
 
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
@@ -919,7 +861,8 @@ async fn partition_detach_with_schema_publication_does_not_replicate_detached_in
 
     // Detach partition p1.
     let partition_p1_name = format!("{}_{}", table_name.name, "p1");
-    let partition_p1_qualified = format!("{}.{}", table_name.schema, partition_p1_name);
+    let partition_p1_qualified =
+        quoted_qualified_table_name(&table_name.schema, &partition_p1_name);
     database
         .run_sql(&format!(
             "alter table {} detach partition {}",
@@ -929,7 +872,8 @@ async fn partition_detach_with_schema_publication_does_not_replicate_detached_in
         .await
         .unwrap();
 
-    // Verify catalog state. The detached partition should appear in pg_publication_tables.
+    // Verify catalog state. The detached partition should appear in
+    // pg_publication_tables.
     let pub_tables_check = database
         .client
         .as_ref()
@@ -947,15 +891,14 @@ async fn partition_detach_with_schema_publication_does_not_replicate_detached_in
     // Insert into detached partition.
     database
         .run_sql(&format!(
-            "insert into {partition_p1_qualified} (data, partition_key) values ('detached_event', 25)"
+            "insert into {partition_p1_qualified} (data, partition_key) values ('detached_event', \
+             25)"
         ))
         .await
         .unwrap();
 
     // Wait for the parent table insert to be replicated.
-    let inserts_notify = destination
-        .wait_for_events_count(vec![(EventType::Insert, 1)])
-        .await;
+    let inserts_notify = destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
 
     // Insert into parent table (should be replicated).
     database
@@ -979,23 +922,20 @@ async fn partition_detach_with_schema_publication_does_not_replicate_detached_in
     let grouped = group_events_by_type_and_table_id(&events);
 
     // Parent table should have 1 insert event.
-    let parent_inserts = grouped
-        .get(&(EventType::Insert, parent_table_id))
-        .cloned()
-        .unwrap_or_default();
+    let parent_inserts =
+        grouped.get(&(EventType::Insert, parent_table_id)).cloned().unwrap_or_default();
     assert_eq!(parent_inserts.len(), 1);
 
-    // Detached partition inserts should NOT be replicated without table re-discovery.
-    let detached_inserts = grouped
-        .get(&(EventType::Insert, p1_table_id))
-        .cloned()
-        .unwrap_or_default();
+    // Detached partition inserts should NOT be replicated without table
+    // re-discovery.
+    let detached_inserts =
+        grouped.get(&(EventType::Insert, p1_table_id)).cloned().unwrap_or_default();
     assert_eq!(detached_inserts.len(), 0);
 }
 
-/// Tests that a detached partition is discovered as a new table after pipeline restart
-/// with FOR TABLES IN SCHEMA publication. After restart, the detached partition in the same
-/// schema should be discovered and its data replicated.
+/// Tests that a detached partition is discovered as a new table after pipeline
+/// restart with FOR TABLES IN SCHEMA publication. After restart, the detached
+/// partition in the same schema should be discovered and its data replicated.
 /// Requires PostgreSQL 15+ for FOR TABLES IN SCHEMA support.
 #[tokio::test(flavor = "multi_thread")]
 async fn partition_detach_with_schema_publication_does_replicate_detached_inserts_on_restart() {
@@ -1012,9 +952,7 @@ async fn partition_detach_with_schema_publication_does_replicate_detached_insert
     let partition_specs = [("p1", "from (1) to (100)"), ("p2", "from (100) to (200)")];
 
     let (parent_table_id, partition_table_ids) =
-        create_partitioned_table(&database, table_name.clone(), &partition_specs)
-            .await
-            .unwrap();
+        create_partitioned_table(&database, table_name.clone(), &partition_specs).await.unwrap();
 
     let p1_table_id = partition_table_ids[0];
 
@@ -1028,10 +966,7 @@ async fn partition_detach_with_schema_publication_does_replicate_detached_insert
 
     // Create FOR TABLES IN SCHEMA publication.
     let publication_name = "test_schema_pub_restart".to_string();
-    database
-        .create_publication_for_all(&publication_name, Some(&table_name.schema))
-        .await
-        .unwrap();
+    database.create_publication_for_all(&publication_name, Some(&table_name.schema)).await.unwrap();
 
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
@@ -1060,7 +995,8 @@ async fn partition_detach_with_schema_publication_does_replicate_detached_insert
 
     // Detach partition p1.
     let partition_p1_name = format!("{}_{}", table_name.name, "p1");
-    let partition_p1_qualified = format!("{}.{}", table_name.schema, partition_p1_name);
+    let partition_p1_qualified =
+        quoted_qualified_table_name(&table_name.schema, &partition_p1_name);
     database
         .run_sql(&format!(
             "alter table {} detach partition {}",
@@ -1073,7 +1009,8 @@ async fn partition_detach_with_schema_publication_does_replicate_detached_insert
     // Insert into detached partition (while pipeline is still running).
     database
         .run_sql(&format!(
-            "insert into {partition_p1_qualified} (data, partition_key) values ('detached_event', 25)"
+            "insert into {partition_p1_qualified} (data, partition_key) values ('detached_event', \
+             25)"
         ))
         .await
         .unwrap();
@@ -1081,10 +1018,10 @@ async fn partition_detach_with_schema_publication_does_replicate_detached_insert
     // Shutdown the pipeline.
     let _ = pipeline.shutdown_and_wait().await;
 
-    // Restart the pipeline. It should now discover the detached partition as a new table.
-    let detached_ready_notify = state_store
-        .notify_on_table_state_type(p1_table_id, TableReplicationPhaseType::Ready)
-        .await;
+    // Restart the pipeline. It should now discover the detached partition as a new
+    // table.
+    let detached_ready_notify =
+        state_store.notify_on_table_state_type(p1_table_id, TableReplicationPhaseType::Ready).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -1107,22 +1044,17 @@ async fn partition_detach_with_schema_publication_does_replicate_detached_insert
 
     // Verify the data from the detached partition was copied.
     let table_rows = destination.get_table_rows().await;
-    let parent_rows: usize = table_rows
-        .get(&parent_table_id)
-        .map(|rows| rows.len())
-        .unwrap_or(0);
+    let parent_rows: usize = table_rows.get(&parent_table_id).map_or(0, Vec::len);
     assert_eq!(parent_rows, 2);
-    let detached_rows: usize = table_rows
-        .get(&p1_table_id)
-        .map(|rows| rows.len())
-        .unwrap_or(0);
+    let detached_rows: usize = table_rows.get(&p1_table_id).map_or(0, Vec::len);
     assert_eq!(detached_rows, 2);
 }
 
 /// Tests that nested partitions (sub-partitioned tables) work correctly.
-/// Creates a two-level partition hierarchy where one partition is itself partitioned,
-/// and verifies that both initial COPY and CDC streaming work correctly.
-/// Only the top-level parent table should be tracked in the pipeline state.
+/// Creates a two-level partition hierarchy where one partition is itself
+/// partitioned, and verifies that both initial COPY and CDC streaming work
+/// correctly. Only the top-level parent table should be tracked in the pipeline
+/// state.
 #[tokio::test(flavor = "multi_thread")]
 async fn nested_partitioned_table_copy_and_cdc() {
     init_test_tracing();
@@ -1162,7 +1094,7 @@ async fn nested_partitioned_table_copy_and_cdc() {
 
     // Create first partition (simple leaf partition) (Level 2a).
     let p1_name = format!("{}_{}", table_name.name, "p1");
-    let p1_qualified = format!("{}.{}", table_name.schema, p1_name);
+    let p1_qualified = quoted_qualified_table_name(&table_name.schema, &p1_name);
     database
         .run_sql(&format!(
             "create table {} partition of {} for values from (1) to (100)",
@@ -1174,10 +1106,11 @@ async fn nested_partitioned_table_copy_and_cdc() {
 
     // Create second partition that is itself partitioned (Level 2b).
     let p2_name = format!("{}_{}", table_name.name, "p2");
-    let p2_qualified = format!("{}.{}", table_name.schema, p2_name);
+    let p2_qualified = quoted_qualified_table_name(&table_name.schema, &p2_name);
     database
         .run_sql(&format!(
-            "create table {} partition of {} for values from (100) to (200) partition by range (sub_partition_key)",
+            "create table {} partition of {} for values from (100) to (200) partition by range \
+             (sub_partition_key)",
             p2_qualified,
             table_name.as_quoted_identifier()
         ))
@@ -1186,29 +1119,32 @@ async fn nested_partitioned_table_copy_and_cdc() {
 
     // Create sub-partitions of p2 (Level 3).
     let p2_sub1_name = format!("{}_{}", p2_name, "sub1");
-    let p2_sub1_qualified = format!("{}.{}", table_name.schema, p2_sub1_name);
+    let p2_sub1_qualified = quoted_qualified_table_name(&table_name.schema, &p2_sub1_name);
     database
         .run_sql(&format!(
-            "create table {p2_sub1_qualified} partition of {p2_qualified} for values from (1) to (50)"
+            "create table {p2_sub1_qualified} partition of {p2_qualified} for values from (1) to \
+             (50)"
         ))
         .await
         .unwrap();
 
     let p2_sub2_name = format!("{}_{}", p2_name, "sub2");
-    let p2_sub2_qualified = format!("{}.{}", table_name.schema, p2_sub2_name);
+    let p2_sub2_qualified = quoted_qualified_table_name(&table_name.schema, &p2_sub2_name);
     database
         .run_sql(&format!(
-            "create table {p2_sub2_qualified} partition of {p2_qualified} for values from (50) to (100)"
+            "create table {p2_sub2_qualified} partition of {p2_qualified} for values from (50) to \
+             (100)"
         ))
         .await
         .unwrap();
 
     // Create third partition that is itself partitioned (Level 2c).
     let p3_name = format!("{}_{}", table_name.name, "p3");
-    let p3_qualified = format!("{}.{}", table_name.schema, p3_name);
+    let p3_qualified = quoted_qualified_table_name(&table_name.schema, &p3_name);
     database
         .run_sql(&format!(
-            "create table {} partition of {} for values from (200) to (300) partition by range (sub_partition_key)",
+            "create table {} partition of {} for values from (200) to (300) partition by range \
+             (sub_partition_key)",
             p3_qualified,
             table_name.as_quoted_identifier()
         ))
@@ -1217,26 +1153,28 @@ async fn nested_partitioned_table_copy_and_cdc() {
 
     // Create sub-partitions of p3 (Level 3).
     let p3_sub1_name = format!("{}_{}", p3_name, "sub1");
-    let p3_sub1_qualified = format!("{}.{}", table_name.schema, p3_sub1_name);
+    let p3_sub1_qualified = quoted_qualified_table_name(&table_name.schema, &p3_sub1_name);
     database
         .run_sql(&format!(
-            "create table {p3_sub1_qualified} partition of {p3_qualified} for values from (1) to (50)"
+            "create table {p3_sub1_qualified} partition of {p3_qualified} for values from (1) to \
+             (50)"
         ))
         .await
         .unwrap();
 
     let p3_sub2_name = format!("{}_{}", p3_name, "sub2");
-    let p3_sub2_qualified = format!("{}.{}", table_name.schema, p3_sub2_name);
+    let p3_sub2_qualified = quoted_qualified_table_name(&table_name.schema, &p3_sub2_name);
     database
         .run_sql(&format!(
-            "create table {p3_sub2_qualified} partition of {p3_qualified} for values from (50) to (100)"
+            "create table {p3_sub2_qualified} partition of {p3_qualified} for values from (50) to \
+             (100)"
         ))
         .await
         .unwrap();
 
     // Create fourth partition (simple leaf partition) (Level 2d).
     let p4_name = format!("{}_{}", table_name.name, "p4");
-    let p4_qualified = format!("{}.{}", table_name.schema, p4_name);
+    let p4_qualified = quoted_qualified_table_name(&table_name.schema, &p4_name);
     database
         .run_sql(&format!(
             "create table {} partition of {} for values from (300) to (400)",
@@ -1295,7 +1233,7 @@ async fn nested_partitioned_table_copy_and_cdc() {
     parent_ready_notify.notified().await;
 
     // Verify table schema was discovered correctly for nested partitioned table.
-    let table_schemas = state_store.get_table_schemas().await;
+    let table_schemas = state_store.get_latest_table_schemas().await;
     assert!(table_schemas.contains_key(&parent_table_id));
 
     let parent_schema = &table_schemas[&parent_table_id];
@@ -1310,35 +1248,36 @@ async fn nested_partitioned_table_copy_and_cdc() {
     assert_eq!(id_column.name, "id");
     assert_eq!(id_column.typ, Type::INT8);
     assert!(!id_column.nullable);
-    assert!(id_column.primary);
+    assert!(id_column.primary_key());
 
     // Check data column.
     let data_column = &parent_schema.column_schemas[1];
     assert_eq!(data_column.name, "data");
     assert_eq!(data_column.typ, Type::TEXT);
     assert!(!data_column.nullable);
-    assert!(!data_column.primary);
+    assert!(!data_column.primary_key());
 
     // Check partition_key column (part of primary key).
     let partition_key_column = &parent_schema.column_schemas[2];
     assert_eq!(partition_key_column.name, "partition_key");
     assert_eq!(partition_key_column.typ, Type::INT4);
     assert!(!partition_key_column.nullable);
-    assert!(partition_key_column.primary);
+    assert!(partition_key_column.primary_key());
 
     // Check sub_partition_key column (part of primary key for nested partitioning).
     let sub_partition_key_column = &parent_schema.column_schemas[3];
     assert_eq!(sub_partition_key_column.name, "sub_partition_key");
     assert_eq!(sub_partition_key_column.typ, Type::INT4);
     assert!(!sub_partition_key_column.nullable);
-    assert!(sub_partition_key_column.primary);
+    assert!(sub_partition_key_column.primary_key());
 
     // Verify initial COPY replicated all 6 rows (one per leaf partition).
     let table_rows = destination.get_table_rows().await;
-    let total_rows: usize = table_rows.values().map(|rows| rows.len()).sum();
+    let total_rows: usize = table_rows.values().map(Vec::len).sum();
     assert_eq!(total_rows, 6);
 
-    // Verify only the parent table is tracked (not intermediate or leaf partitions).
+    // Verify only the parent table is tracked (not intermediate or leaf
+    // partitions).
     let table_states = state_store.get_table_replication_states().await;
     assert!(table_states.contains_key(&parent_table_id));
     assert_eq!(table_states.len(), 1);
@@ -1352,9 +1291,7 @@ async fn nested_partitioned_table_copy_and_cdc() {
     assert_eq!(parent_table_rows, 6);
 
     // Insert new rows into all 6 leaf partitions via CDC.
-    let inserts_notify = destination
-        .wait_for_events_count(vec![(EventType::Insert, 6)])
-        .await;
+    let inserts_notify = destination.wait_for_events_count(vec![(EventType::Insert, 6)]).await;
 
     database
         .run_sql(&format!(
@@ -1377,23 +1314,24 @@ async fn nested_partitioned_table_copy_and_cdc() {
     // Verify that CDC events were captured for all 6 leaf partitions.
     let events = destination.get_events().await;
     let grouped = group_events_by_type_and_table_id(&events);
-    let parent_inserts = grouped
-        .get(&(EventType::Insert, parent_table_id))
-        .cloned()
-        .unwrap_or_default();
+    let parent_inserts =
+        grouped.get(&(EventType::Insert, parent_table_id)).cloned().unwrap_or_default();
     assert_eq!(parent_inserts.len(), 6);
 }
 
-/// Tests that the pipeline throws an error during startup when `publish_via_partition_root`
-/// is set to `false` and the publication contains partitioned tables.
+/// Tests that the pipeline throws an error during startup when
+/// `publish_via_partition_root` is set to `false` and the publication contains
+/// partitioned tables.
 ///
-/// When `publish_via_partition_root = false`, logical replication messages contain child
-/// partition OIDs instead of parent table OIDs. Since the pipeline's schema cache only
-/// tracks parent table IDs, this configuration would cause pipeline failures when relation
-/// messages arrive with unknown child OIDs.
+/// When `publish_via_partition_root = false`, logical replication messages
+/// contain child partition OIDs instead of parent table OIDs. Since the
+/// pipeline's schema cache only tracks parent table IDs, this configuration
+/// would cause pipeline failures when relation messages arrive with unknown
+/// child OIDs.
 ///
-/// The pipeline validates this configuration at startup and rejects it with a clear error
-/// message instructing the user to enable `publish_via_partition_root`.
+/// The pipeline validates this configuration at startup and rejects it with a
+/// clear error message instructing the user to enable
+/// `publish_via_partition_root`.
 #[tokio::test(flavor = "multi_thread")]
 async fn partitioned_table_with_publish_via_partition_root_false_and_partitioned_tables() {
     init_test_tracing();
@@ -1403,9 +1341,7 @@ async fn partitioned_table_with_publish_via_partition_root_false_and_partitioned
     let partition_specs = [("p1", "from (1) to (100)"), ("p2", "from (100) to (200)")];
 
     let (_parent_table_id, _partition_table_ids) =
-        create_partitioned_table(&database, table_name.clone(), &partition_specs)
-            .await
-            .unwrap();
+        create_partitioned_table(&database, table_name.clone(), &partition_specs).await.unwrap();
 
     database
         .run_sql(&format!(
@@ -1438,8 +1374,9 @@ async fn partitioned_table_with_publish_via_partition_root_false_and_partitioned
     assert_eq!(err.kind(), ErrorKind::ConfigError);
 }
 
-/// Tests that the pipeline doesn't throw an error when `publish_via_partition_root=false` and there
-/// are no partitioned tables in the tables of the publication.
+/// Tests that the pipeline doesn't throw an error when
+/// `publish_via_partition_root=false` and there are no partitioned tables in
+/// the tables of the publication.
 #[tokio::test(flavor = "multi_thread")]
 async fn partitioned_table_with_publish_via_partition_root_false_and_no_partitioned_tables() {
     init_test_tracing();
@@ -1447,11 +1384,7 @@ async fn partitioned_table_with_publish_via_partition_root_false_and_no_partitio
 
     let table_name = test_table_name("non_partitioned_events");
     database
-        .create_table(
-            table_name.clone(),
-            true,
-            &[("description", "text not null")],
-        )
+        .create_table(table_name.clone(), true, &[("description", "text not null")])
         .await
         .unwrap();
 

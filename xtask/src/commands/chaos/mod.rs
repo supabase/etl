@@ -1,15 +1,15 @@
-pub(crate) mod install;
-pub(crate) mod scenario;
+mod install;
+mod scenario;
 
-use std::collections::BTreeMap;
-use std::time::Duration;
+use std::{collections::BTreeMap, time::Duration};
 
 use anyhow::Result;
 use clap::Args;
 use k8s_openapi::api::core::v1::Service;
-use kube::CustomResource;
-use kube::api::{DeleteParams, PostParams};
-use kube::{Api, Client, Discovery};
+use kube::{
+    Api, Client, CustomResource, Discovery,
+    api::{DeleteParams, PostParams},
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -18,8 +18,8 @@ pub(crate) struct ChaosArgs {
     #[command(subcommand)]
     scenario: scenario::Scenario,
 
-    /// Label selector for the pod to inject chaos on; repeat for multiple labels.
-    /// Example: --selector app.kubernetes.io/name=local-replicator
+    /// Label selector for the pod to inject chaos on; repeat for multiple
+    /// labels. Example: --selector app.kubernetes.io/name=local-replicator
     #[arg(long = "selector", default_value = "app=replicator", global = true)]
     selector: Vec<String>,
 
@@ -50,11 +50,7 @@ impl ChaosArgs {
 
         let labels = parse_selector(&self.selector)?;
         let client = ChaosClient::new(&self.namespace).await?;
-        let client = if self.print {
-            client.with_dry_run()
-        } else {
-            client
-        };
+        let client = if self.print { client.with_dry_run() } else { client };
         if self.delete {
             self.scenario.delete(&client, &labels).await?;
             println!("Chaos deleted.");
@@ -68,7 +64,8 @@ impl ChaosArgs {
     }
 }
 
-// ─── CRD types ────────────────────────────────────────────────────────────────
+// ─── CRD types
+// ────────────────────────────────────────────────────────────────
 
 #[derive(CustomResource, Serialize, Deserialize, Clone, Debug, JsonSchema)]
 #[kube(
@@ -140,7 +137,8 @@ pub(crate) struct BandwidthSpec {
     pub(crate) buffer: u32,
 }
 
-// ─── Chaos client ─────────────────────────────────────────────────────────────
+// ─── Chaos client
+// ─────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
 pub(crate) struct ChaosClient {
@@ -157,8 +155,9 @@ impl ChaosClient {
         let discovery = Discovery::new(client.clone()).run().await?;
         if !discovery.has_group("chaos-mesh.org") {
             anyhow::bail!(
-                "Chaos Mesh is not installed in this cluster (chaos-mesh.org API group not found).\n\
-                 Install it with: helm install chaos-mesh chaos-mesh/chaos-mesh -n chaos-mesh --create-namespace"
+                "Chaos Mesh is not installed in this cluster (chaos-mesh.org API group not \
+                 found).\nInstall it with: helm install chaos-mesh chaos-mesh/chaos-mesh -n \
+                 chaos-mesh --create-namespace"
             );
         }
 
@@ -180,22 +179,17 @@ impl ChaosClient {
     /// Resolve a Kubernetes service name to its ClusterIP.
     ///
     /// This is the correct target for pod-to-service traffic: kube-proxy's DNAT
-    /// runs at the node level (outside the pod's network namespace), so Chaos Mesh
-    /// must match the ClusterIP — not the pod IP — to intercept the traffic.
+    /// runs at the node level (outside the pod's network namespace), so Chaos
+    /// Mesh must match the ClusterIP — not the pod IP — to intercept the
+    /// traffic.
     pub(crate) async fn resolve_svc_clusterip(&self, svc_name: &str) -> Result<String> {
         let svc_api: Api<Service> = Api::namespaced(self.client.clone(), &self.namespace);
         let svc = svc_api.get(svc_name).await.map_err(|e| {
-            anyhow::anyhow!(
-                "service '{svc_name}' not found in namespace '{}': {e}",
-                self.namespace
-            )
+            anyhow::anyhow!("service '{svc_name}' not found in namespace '{}': {e}", self.namespace)
         })?;
-        svc.spec
-            .and_then(|s| s.cluster_ip)
-            .filter(|ip| ip != "None" && !ip.is_empty())
-            .ok_or_else(|| {
-                anyhow::anyhow!("service '{svc_name}' has no ClusterIP (headless service?)")
-            })
+        svc.spec.and_then(|s| s.cluster_ip).filter(|ip| ip != "None" && !ip.is_empty()).ok_or_else(
+            || anyhow::anyhow!("service '{svc_name}' has no ClusterIP (headless service?)"),
+        )
     }
 
     pub(crate) async fn delete(&self, name: &str) -> Result<()> {
@@ -223,7 +217,8 @@ impl ChaosClient {
                         Err(kube::Error::Api(ref e)) if e.code == 404 => break,
                         _ if std::time::Instant::now() >= deadline => {
                             eprintln!(
-                                "warning: timed out waiting for {name} to be deleted, proceeding anyway"
+                                "warning: timed out waiting for {name} to be deleted, proceeding \
+                                 anyway"
                             );
                             break;
                         }
@@ -274,10 +269,7 @@ impl ChaosClient {
             Target::Port(port) => (
                 Some(direction.to_string()),
                 None,
-                Some(vec![
-                    format!("0.0.0.0/1:{port}"),
-                    format!("128.0.0.0/1:{port}"),
-                ]),
+                Some(vec![format!("0.0.0.0/1:{port}"), format!("128.0.0.0/1:{port}")]),
             ),
         };
         NetworkChaos::new(
@@ -286,10 +278,7 @@ impl ChaosClient {
                 action: "loss".into(),
                 mode: "all".into(),
                 selector: sel(&self.namespace, source),
-                loss: Some(LossSpec {
-                    loss: loss_pct.to_string(),
-                    correlation: "25".into(),
-                }),
+                loss: Some(LossSpec { loss: loss_pct.to_string(), correlation: "25".into() }),
                 direction: direction_val,
                 target: pod_target,
                 external_targets,
@@ -327,10 +316,7 @@ impl ChaosClient {
             Target::Port(port) => (
                 Some(direction.to_string()),
                 None,
-                Some(vec![
-                    format!("0.0.0.0/1:{port}"),
-                    format!("128.0.0.0/1:{port}"),
-                ]),
+                Some(vec![format!("0.0.0.0/1:{port}"), format!("128.0.0.0/1:{port}")]),
             ),
         };
         NetworkChaos::new(
@@ -380,10 +366,7 @@ impl ChaosClient {
             Target::Port(port) => (
                 Some(direction.to_string()),
                 None,
-                Some(vec![
-                    format!("0.0.0.0/1:{port}"),
-                    format!("128.0.0.0/1:{port}"),
-                ]),
+                Some(vec![format!("0.0.0.0/1:{port}"), format!("128.0.0.0/1:{port}")]),
             ),
         };
         NetworkChaos::new(
@@ -392,11 +375,7 @@ impl ChaosClient {
                 action: "bandwidth".into(),
                 mode: "all".into(),
                 selector: sel(&self.namespace, selector),
-                bandwidth: Some(BandwidthSpec {
-                    rate: rate.into(),
-                    limit: 10000,
-                    buffer: 10000,
-                }),
+                bandwidth: Some(BandwidthSpec { rate: rate.into(), limit: 10000, buffer: 10000 }),
                 loss: None,
                 delay: None,
                 corrupt: None,
@@ -437,20 +416,23 @@ impl ChaosClient {
     }
 }
 
-// ─── Target ───────────────────────────────────────────────────────────────────
+// ─── Target
+// ───────────────────────────────────────────────────────────────────
 
 /// Specifies the destination for a [`ChaosClient::drop_to`] call.
 pub(crate) enum Target {
     /// All traffic in the given direction — no specific destination filter.
     All,
 
-    /// In-cluster pods matching these labels (resolved within the client's namespace).
+    /// In-cluster pods matching these labels (resolved within the client's
+    /// namespace).
     Pods(Vec<(String, String)>),
 
     /// External hostname, IP address, CIDR block, or `"host:port"` string.
     ///
     /// Passed directly as a Chaos Mesh `externalTargets` entry.
-    /// Examples: `"postgres"`, `"10.0.0.1"`, `"10.0.0.0/8"`, `"clickhouse:8123"`
+    /// Examples: `"postgres"`, `"10.0.0.1"`, `"10.0.0.0/8"`,
+    /// `"clickhouse:8123"`
     Url(String),
 
     /// All traffic to a specific destination port, regardless of host.
@@ -460,7 +442,8 @@ pub(crate) enum Target {
     Port(u16),
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+// ─── Helpers
+// ──────────────────────────────────────────────────────────────────
 
 pub(crate) type Labels = Vec<(String, String)>;
 
@@ -476,10 +459,11 @@ pub(crate) fn parse_selector(selectors: &[String]) -> anyhow::Result<Labels> {
         .collect()
 }
 
-/// Derive a short name suitable for a Kubernetes resource name from a label set.
-/// Uses the value of the first label, e.g. `app.kubernetes.io/name=etl` → `"etl"`.
+/// Derive a short name suitable for a Kubernetes resource name from a label
+/// set. Uses the value of the first label, e.g. `app.kubernetes.io/name=etl` →
+/// `"etl"`.
 pub(crate) fn app_name_from_labels(labels: &Labels) -> &str {
-    labels.first().map(|(_, v)| v.as_str()).unwrap_or("app")
+    labels.first().map_or("app", |(_, v)| v.as_str())
 }
 
 fn sel(namespace: &str, labels: Labels) -> Selector {

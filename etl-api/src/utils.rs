@@ -11,7 +11,8 @@ where
     Ok(s.trim().to_string())
 }
 
-/// Deserializes an optional string and trims leading and trailing whitespace if present.
+/// Deserializes an optional string and trims leading and trailing whitespace if
+/// present.
 pub fn trim_option_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
 where
     D: Deserializer<'de>,
@@ -20,7 +21,8 @@ where
     Ok(opt.map(|s| s.trim().to_string()))
 }
 
-/// Deserializes an optional secret string and trims leading and trailing whitespace if present.
+/// Deserializes an optional secret string and trims leading and trailing
+/// whitespace if present.
 pub fn trim_option_secret_string<'de, D>(
     deserializer: D,
 ) -> Result<Option<SerializableSecretString>, D::Error>
@@ -38,12 +40,11 @@ pub fn generate_random_alpha_str(len: usize) -> String {
         's', 't', 'u', 'v', 'w', 'x', 'y', 'z',
     ];
     let mut rng = rand::rng();
-    (0..len)
-        .map(|_| chars[rng.random_range(0..chars.len())])
-        .collect()
+    (0..len).map(|_| chars[rng.random_range(0..chars.len())]).collect()
 }
 
-/// Parses a Docker image reference to extract the tag to be used as a version name.
+/// Parses a Docker image reference to extract the tag to be used as a version
+/// name.
 ///
 /// Expected formats: `HOST[:PORT]/NAMESPACE/REPOSITORY[:TAG][@DIGEST]`.
 /// - If a tag is present, returns it (ignoring any trailing digest part).
@@ -51,13 +52,14 @@ pub fn generate_random_alpha_str(len: usize) -> String {
 /// - If parsing fails or only a digest is present, returns `unavailable`.
 pub fn parse_docker_image_tag(image: &str) -> String {
     // Work on the last path segment only
-    let last_slash = image.rfind('/').map(|i| i + 1).unwrap_or(0);
+    let last_slash = image.rfind('/').map_or(0, |i| i + 1);
     let segment = &image[last_slash..];
 
     // Identify optional digest marker within the segment
     let at_pos = segment.find('@');
 
-    // Search for ':' in the segment, but if a digest '@' exists, ignore ':' that occur after it
+    // Search for ':' in the segment, but if a digest '@' exists, ignore ':' that
+    // occur after it
     let colon_pos_in_segment = match at_pos {
         Some(at_idx) => segment[..at_idx].find(':'),
         None => segment.find(':'),
@@ -78,7 +80,8 @@ pub fn parse_docker_image_tag(image: &str) -> String {
         return tag.to_string();
     }
 
-    // No tag in the segment. If there's a digest in the segment, we can't infer a tag.
+    // No tag in the segment. If there's a digest in the segment, we can't infer a
+    // tag.
     if at_pos.is_some() {
         return "unavailable".to_string();
     }
@@ -95,14 +98,8 @@ mod tests {
     #[test]
     fn parse_with_tag() {
         assert_eq!(parse_docker_image_tag("supabase/replicator:1.2.3"), "1.2.3");
-        assert_eq!(
-            parse_docker_image_tag("example.com:5000/team/my-app:2.0"),
-            "2.0"
-        );
-        assert_eq!(
-            parse_docker_image_tag("ghcr.io/dockersamples/example-app:pr-311"),
-            "pr-311"
-        );
+        assert_eq!(parse_docker_image_tag("example.com:5000/team/my-app:2.0"), "2.0");
+        assert_eq!(parse_docker_image_tag("ghcr.io/dockersamples/example-app:pr-311"), "pr-311");
     }
 
     #[test]
@@ -122,14 +119,11 @@ mod tests {
 
     #[test]
     fn parse_with_only_digest_unavailable() {
-        assert_eq!(
-            parse_docker_image_tag("repo/name@sha256:abcdef0123456789"),
-            "unavailable"
-        );
+        assert_eq!(parse_docker_image_tag("repo/name@sha256:abcdef0123456789"), "unavailable");
     }
 
     #[test]
-    fn test_trim_string_with_leading_and_trailing_whitespace() {
+    fn trim_string_with_leading_and_trailing_whitespace() {
         #[derive(Deserialize)]
         struct TestStruct {
             #[serde(deserialize_with = "trim_string")]
@@ -142,7 +136,7 @@ mod tests {
     }
 
     #[test]
-    fn test_trim_string_without_whitespace() {
+    fn trim_string_without_whitespace() {
         #[derive(Deserialize)]
         struct TestStruct {
             #[serde(deserialize_with = "trim_string")]
@@ -155,7 +149,7 @@ mod tests {
     }
 
     #[test]
-    fn test_trim_string_with_tabs_and_newlines() {
+    fn trim_string_with_tabs_and_newlines() {
         #[derive(Deserialize)]
         struct TestStruct {
             #[serde(deserialize_with = "trim_string")]
@@ -168,7 +162,7 @@ mod tests {
     }
 
     #[test]
-    fn test_trim_string_empty_string() {
+    fn trim_string_empty_string() {
         #[derive(Deserialize)]
         struct TestStruct {
             #[serde(deserialize_with = "trim_string")]
@@ -181,7 +175,7 @@ mod tests {
     }
 
     #[test]
-    fn test_trim_string_only_whitespace_becomes_empty() {
+    fn trim_string_only_whitespace_becomes_empty() {
         #[derive(Deserialize)]
         struct TestStruct {
             #[serde(deserialize_with = "trim_string")]
@@ -194,7 +188,7 @@ mod tests {
     }
 
     #[test]
-    fn test_trim_string_preserves_internal_whitespace() {
+    fn trim_string_preserves_internal_whitespace() {
         #[derive(Deserialize)]
         struct TestStruct {
             #[serde(deserialize_with = "trim_string")]
@@ -207,7 +201,7 @@ mod tests {
     }
 
     #[test]
-    fn test_trim_string_leading_only() {
+    fn trim_string_leading_only() {
         #[derive(Deserialize)]
         struct TestStruct {
             #[serde(deserialize_with = "trim_string")]
@@ -220,7 +214,7 @@ mod tests {
     }
 
     #[test]
-    fn test_trim_string_trailing_only() {
+    fn trim_string_trailing_only() {
         #[derive(Deserialize)]
         struct TestStruct {
             #[serde(deserialize_with = "trim_string")]
@@ -233,7 +227,7 @@ mod tests {
     }
 
     #[test]
-    fn test_trim_option_string_with_whitespace() {
+    fn trim_option_string_with_whitespace() {
         #[derive(Deserialize)]
         struct TestStruct {
             #[serde(default, deserialize_with = "trim_option_string")]
@@ -246,7 +240,7 @@ mod tests {
     }
 
     #[test]
-    fn test_trim_option_string_with_null() {
+    fn trim_option_string_with_null() {
         #[derive(Deserialize)]
         struct TestStruct {
             #[serde(default, deserialize_with = "trim_option_string")]
@@ -259,7 +253,7 @@ mod tests {
     }
 
     #[test]
-    fn test_trim_option_string_with_missing_field() {
+    fn trim_option_string_with_missing_field() {
         #[derive(Deserialize)]
         struct TestStruct {
             #[serde(default, deserialize_with = "trim_option_string")]
@@ -272,7 +266,7 @@ mod tests {
     }
 
     #[test]
-    fn test_trim_option_string_with_empty_string() {
+    fn trim_option_string_with_empty_string() {
         #[derive(Deserialize)]
         struct TestStruct {
             #[serde(default, deserialize_with = "trim_option_string")]
@@ -285,7 +279,7 @@ mod tests {
     }
 
     #[test]
-    fn test_trim_option_string_whitespace_only_becomes_empty() {
+    fn trim_option_string_whitespace_only_becomes_empty() {
         #[derive(Deserialize)]
         struct TestStruct {
             #[serde(default, deserialize_with = "trim_option_string")]

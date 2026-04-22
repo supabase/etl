@@ -5,8 +5,10 @@ use actix_web_httpauth::middleware::HttpAuthentication;
 use actix_web_metrics::ActixWebMetricsBuilder;
 use aws_lc_rs::aead::{AES_256_GCM, RandomizedNonceKey};
 use base64::{Engine, prelude::BASE64_STANDARD};
-use etl_config::Environment;
-use etl_config::shared::{IntoConnectOptions, PgConnectionConfig};
+use etl_config::{
+    Environment,
+    shared::{IntoConnectOptions, PgConnectionConfig},
+};
 use etl_telemetry::metrics::init_metrics_handle;
 use kube::config::KubeConfigOptions;
 use sqlx::{PgPool, postgres::PgPoolOptions};
@@ -15,14 +17,13 @@ use tracing_actix_web::TracingLogger;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
-use crate::feature_flags::init_feature_flags;
-use crate::k8s::http::HttpK8sClient;
-use crate::k8s::{K8sClient, K8sError, TrustedRootCertsCache};
 use crate::{
     authentication::auth_validator,
     config::ApiConfig,
     configs::encryption,
     db::publications::Publication,
+    feature_flags::{FeatureFlagsClient, init_feature_flags},
+    k8s::{K8sClient, K8sError, TrustedRootCertsCache, http::HttpK8sClient},
     routes::{
         destinations::{
             CreateDestinationRequest, CreateDestinationResponse, ReadDestinationResponse,
@@ -79,7 +80,8 @@ use crate::{
 
 /// ETL API application server wrapper.
 ///
-/// Manages the HTTP server lifecycle including startup, migration, and shutdown.
+/// Manages the HTTP server lifecycle including startup, migration, and
+/// shutdown.
 pub struct Application {
     port: u16,
     server: Server,
@@ -88,8 +90,8 @@ pub struct Application {
 impl Application {
     /// Builds and configures the API application server.
     ///
-    /// Sets up database connections, encryption, Kubernetes client, and HTTP server
-    /// with all routes and middleware configured.
+    /// Sets up database connections, encryption, Kubernetes client, and HTTP
+    /// server with all routes and middleware configured.
     pub async fn build(config: ApiConfig) -> anyhow::Result<Self> {
         let connection_pool = get_connection_pool(&config.database);
 
@@ -99,16 +101,11 @@ impl Application {
 
         let key_bytes = BASE64_STANDARD.decode(&config.encryption_key.key)?;
         let key = RandomizedNonceKey::new(&AES_256_GCM, &key_bytes)?;
-        let encryption_key = encryption::EncryptionKey {
-            id: config.encryption_key.id,
-            key,
-        };
+        let encryption_key = encryption::EncryptionKey { id: config.encryption_key.id, key };
 
         // Try to create Kubernetes client, but continue without it if unavailable
         let kube_client_result = match Environment::load() {
-            Ok(Environment::Staging) | Ok(Environment::Prod) => {
-                kube::Client::try_default().await.ok()
-            }
+            Ok(Environment::Staging | Environment::Prod) => kube::Client::try_default().await.ok(),
             Ok(Environment::Dev) => {
                 async {
                     let options = KubeConfigOptions {
@@ -126,8 +123,10 @@ impl Application {
             Err(_) => None,
         };
 
+        let feature_flags_client = init_feature_flags(config.configcat_sdk_key.as_deref())?;
+
         let k8s_client = match kube_client_result {
-            Some(client) => match HttpK8sClient::new(client) {
+            Some(client) => match HttpK8sClient::new(client, config.k8s.clone()) {
                 Ok(client) => Some(Arc::new(client) as Arc<dyn K8sClient>),
                 Err(e) => {
                     warn!(
@@ -142,8 +141,6 @@ impl Application {
                 None
             }
         };
-
-        let feature_flags_client = init_feature_flags(config.configcat_sdk_key.as_deref())?;
 
         let trusted_root_certs_cache = k8s_client.clone().map(TrustedRootCertsCache::new);
 
@@ -193,7 +190,8 @@ async fn test_orbstack_connection(client: &kube::Client) -> Result<(), K8sError>
         }
         Err(e) => {
             error!(
-                "failed to connect to orbstack, ensure orbstack is installed and kubernetes is enabled"
+                "failed to connect to orbstack, ensure orbstack is installed and kubernetes is \
+                 enabled"
             );
             return Err(e.into());
         }
@@ -204,7 +202,8 @@ async fn test_orbstack_connection(client: &kube::Client) -> Result<(), K8sError>
 
 /// Creates a Postgres connection pool from the provided configuration.
 ///
-/// Connects to the API's own metadata database using server defaults (no custom options).
+/// Connects to the API's own metadata database using server defaults (no custom
+/// options).
 pub fn get_connection_pool(config: &PgConnectionConfig) -> PgPool {
     PgPoolOptions::new().connect_lazy_with(config.with_db(None))
 }
@@ -212,7 +211,8 @@ pub fn get_connection_pool(config: &PgConnectionConfig) -> PgPool {
 /// Creates and configures the HTTP server with all routes and middleware.
 ///
 /// Sets up authentication, tracing, Swagger UI, and all API endpoints.
-/// The Kubernetes client and trusted root certs cache are optional to support testing scenarios.
+/// The Kubernetes client and trusted root certs cache are optional to support
+/// testing scenarios.
 pub fn run(
     config: ApiConfig,
     listener: TcpListener,
@@ -220,7 +220,7 @@ pub fn run(
     encryption_key: encryption::EncryptionKey,
     k8s_client: Option<Arc<dyn K8sClient>>,
     trusted_root_certs_cache: Option<TrustedRootCertsCache>,
-    feature_flags_client: Option<configcat::Client>,
+    feature_flags_client: Option<FeatureFlagsClient>,
 ) -> Result<Server, anyhow::Error> {
     let prometheus_handle = web::ThinData(init_metrics_handle()?);
     let config = web::Data::new(config);
@@ -346,7 +346,7 @@ pub fn run(
         let tracing_logger = TracingLogger::<ApiRootSpanBuilder>::new();
         let authentication = HttpAuthentication::bearer(auth_validator);
         let app = App::new()
-            .wrap(actix_metrics.clone())
+            .wrap(actix_metrics)
             .wrap(tracing_logger)
             .wrap(
                 sentry::integrations::actix::Sentry::builder()
@@ -424,11 +424,8 @@ pub fn run(
             .app_data(connection_pool.clone())
             .app_data(encryption_key.clone());
 
-        let app = if let Some(k8s_client) = k8s_client.clone() {
-            app.app_data(k8s_client)
-        } else {
-            app
-        };
+        let app =
+            if let Some(k8s_client) = k8s_client.clone() { app.app_data(k8s_client) } else { app };
 
         let app = if let Some(trusted_root_certs_cache) = trusted_root_certs_cache.clone() {
             app.app_data(trusted_root_certs_cache)

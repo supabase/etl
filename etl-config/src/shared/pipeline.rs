@@ -9,28 +9,33 @@ use crate::shared::{PgConnectionConfig, PgConnectionConfigWithoutSecrets, Valida
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub struct BatchConfig {
-    /// Maximum time, in milliseconds, to wait before flushing a partially filled batch.
+    /// Maximum time, in milliseconds, to wait before flushing a partially
+    /// filled batch.
     ///
-    /// This is the latency bound for stream batching: once the first item enters a batch,
-    /// the batch is flushed when this timer elapses, even if byte/row targets were not met.
+    /// This is the latency bound for stream batching: once the first item
+    /// enters a batch, the batch is flushed when this timer elapses, even
+    /// if byte/row targets were not met.
     ///
-    /// In practice, flush happens on the first trigger between this timeout and the
-    /// memory-based byte budget driven by [`Self::memory_budget_ratio`].
+    /// In practice, flush happens on the first trigger between this timeout and
+    /// the memory-based byte budget driven by
+    /// [`Self::memory_budget_ratio`].
     #[serde(default = "default_batch_max_fill_ms")]
     #[cfg_attr(feature = "utoipa", schema(example = 0))]
     pub max_fill_ms: u64,
     /// Ratio of process memory reserved for incoming stream batch bytes.
     ///
     /// This value is expressed as a ratio in the `(0.0, 1.0]` interval.
-    /// The configured memory is divided by the number of active streams at runtime, so each
-    /// stream gets only a per-stream share of the global memory budget.
+    /// The configured memory is divided by the number of active streams at
+    /// runtime, so each stream gets only a per-stream share of the global
+    /// memory budget.
     ///
-    /// Together with [`Self::max_fill_ms`], this controls stream flushes: batches flush either
-    /// when their accumulated size estimate reaches the per-stream byte budget or when the
-    /// fill timeout elapses, whichever happens first.
+    /// Together with [`Self::max_fill_ms`], this controls stream flushes:
+    /// batches flush either when their accumulated size estimate reaches
+    /// the per-stream byte budget or when the fill timeout elapses,
+    /// whichever happens first.
     ///
-    /// The goal is to preserve headroom for allocations beyond incoming rows, such as
-    /// destination batch building and serialization buffers.
+    /// The goal is to preserve headroom for allocations beyond incoming rows,
+    /// such as destination batch building and serialization buffers.
     #[serde(default = "default_memory_budget_ratio")]
     #[cfg_attr(feature = "utoipa", schema(example = 0.2))]
     pub memory_budget_ratio: f32,
@@ -42,8 +47,9 @@ impl BatchConfig {
 
     /// Default percentage of total memory used for batch bytes budgeting.
     ///
-    /// This was empirically found to be a good value to avoid OOMs, but it's highly dependent on
-    /// how we measure the stream batches impacts on memory.
+    /// This was empirically found to be a good value to avoid OOMs, but it's
+    /// highly dependent on how we measure the stream batches impacts on
+    /// memory.
     pub const DEFAULT_MEMORY_BUDGET_RATIO: f32 = 0.2;
 
     /// Validates batch configuration settings.
@@ -80,18 +86,19 @@ const fn default_memory_budget_ratio() -> f32 {
 
 /// Behavior when the main replication slot is found to be invalidated.
 ///
-/// A replication slot can become invalidated when it falls too far behind the current
-/// WAL position (e.g., when `max_slot_wal_keep_size` is exceeded) or when PostgreSQL
-/// explicitly invalidates it. This enum controls how the pipeline responds to such situations.
+/// A replication slot can become invalidated when it falls too far behind the
+/// current WAL position (e.g., when `max_slot_wal_keep_size` is exceeded) or
+/// when PostgreSQL explicitly invalidates it. This enum controls how the
+/// pipeline responds to such situations.
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq, Default)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum InvalidatedSlotBehavior {
     /// Prevents pipeline startup when the slot is invalidated.
     ///
-    /// The pipeline will fail with an error indicating that the slot needs to be
-    /// manually addressed before replication can continue. This is the safest option
-    /// as it requires explicit operator intervention.
+    /// The pipeline will fail with an error indicating that the slot needs to
+    /// be manually addressed before replication can continue. This is the
+    /// safest option as it requires explicit operator intervention.
     #[default]
     Error,
     /// Automatically recreates the slot and restarts replication from scratch.
@@ -100,9 +107,11 @@ pub enum InvalidatedSlotBehavior {
     /// 1. Reset all table replication states to `Init`
     /// 2. Delete all existing replication slots for the pipeline
     /// 3. Create a new replication slot
-    /// 4. Run table sync for all tables, respecting [`TableSyncCopyConfig`] rules
+    /// 4. Run table sync for all tables, respecting [`TableSyncCopyConfig`]
+    ///    rules
     ///
-    /// This option allows the pipeline to restart replication and automatically recover.
+    /// This option allows the pipeline to restart replication and automatically
+    /// recover.
     Recreate,
 }
 
@@ -131,7 +140,8 @@ pub enum TableSyncCopyConfig {
 }
 
 impl TableSyncCopyConfig {
-    /// Returns `true` if the table should be copied during initial sync, `false` otherwise.
+    /// Returns `true` if the table should be copied during initial sync,
+    /// `false` otherwise.
     pub fn should_copy_table(&self, table_id: u32) -> bool {
         match self {
             TableSyncCopyConfig::IncludeAllTables => true,
@@ -210,23 +220,25 @@ impl Default for MemoryBackpressureConfig {
 pub struct PipelineConfig {
     /// The unique identifier for this pipeline.
     ///
-    /// A pipeline id determines isolation between pipelines, in terms of replication slots and state
-    /// store.
+    /// A pipeline id determines isolation between pipelines, in terms of
+    /// replication slots and state store.
     pub id: u64,
     /// Name of the Postgres publication to use for logical replication.
     pub publication_name: String,
-    /// The connection configuration for the Postgres instance to which the pipeline connects for
-    /// replication.
+    /// The connection configuration for the Postgres instance to which the
+    /// pipeline connects for replication.
     pub pg_connection: PgConnectionConfig,
     /// Batch processing configuration.
     #[serde(default)]
     pub batch: BatchConfig,
-    /// Number of milliseconds between one retry and another for timed worker retries.
+    /// Number of milliseconds between one retry and another for timed worker
+    /// retries.
     ///
     /// This setting is shared by table sync and apply workers.
     #[serde(default = "default_table_error_retry_delay_ms")]
     pub table_error_retry_delay_ms: u64,
-    /// Maximum number of automatic timed retry attempts before failing the worker.
+    /// Maximum number of automatic timed retry attempts before failing the
+    /// worker.
     ///
     /// This setting is shared by table sync and apply workers.
     #[serde(default = "default_table_error_retry_max_attempts")]
@@ -236,7 +248,8 @@ pub struct PipelineConfig {
     pub max_table_sync_workers: u16,
     /// Maximum parallel connections per table during initial copy.
     /// When 1, the existing serial copy path is used.
-    /// When >1 (default), ctid-based partitioning splits the table across N connections.
+    /// When >1 (default), ctid-based partitioning splits the table across N
+    /// connections.
     #[serde(default = "default_max_copy_connections_per_table")]
     pub max_copy_connections_per_table: u16,
     /// Number of milliseconds between one memory usage refresh and another.
@@ -273,7 +286,8 @@ impl PipelineConfig {
 
     /// Validates pipeline configuration settings.
     ///
-    /// Checks batch configuration and ensures worker counts and retry attempts are non-zero.
+    /// Checks batch configuration and ensures worker counts and retry attempts
+    /// are non-zero.
     pub fn validate(&self) -> Result<(), ValidationError> {
         self.batch.validate()?;
 
@@ -344,23 +358,25 @@ fn default_memory_backpressure() -> Option<MemoryBackpressureConfig> {
 pub struct PipelineConfigWithoutSecrets {
     /// The unique identifier for this pipeline.
     ///
-    /// A pipeline id determines isolation between pipelines, in terms of replication slots and state
-    /// store.
+    /// A pipeline id determines isolation between pipelines, in terms of
+    /// replication slots and state store.
     pub id: u64,
     /// Name of the Postgres publication to use for logical replication.
     pub publication_name: String,
-    /// The connection configuration for the Postgres instance to which the pipeline connects for
-    /// replication.
+    /// The connection configuration for the Postgres instance to which the
+    /// pipeline connects for replication.
     pub pg_connection: PgConnectionConfigWithoutSecrets,
     /// Batch processing configuration.
     #[serde(default)]
     pub batch: BatchConfig,
-    /// Number of milliseconds between one retry and another for timed worker retries.
+    /// Number of milliseconds between one retry and another for timed worker
+    /// retries.
     ///
     /// This setting is shared by table sync and apply workers.
     #[serde(default = "default_table_error_retry_delay_ms")]
     pub table_error_retry_delay_ms: u64,
-    /// Maximum number of automatic timed retry attempts before failing the worker.
+    /// Maximum number of automatic timed retry attempts before failing the
+    /// worker.
     ///
     /// This setting is shared by table sync and apply workers.
     #[serde(default = "default_table_error_retry_max_attempts")]
@@ -370,7 +386,8 @@ pub struct PipelineConfigWithoutSecrets {
     pub max_table_sync_workers: u16,
     /// Maximum parallel connections per table during initial copy.
     /// When 1, the existing serial copy path is used.
-    /// When >1 (default), ctid-based partitioning splits the table across N connections.
+    /// When >1 (default), ctid-based partitioning splits the table across N
+    /// connections.
     #[serde(default = "default_max_copy_connections_per_table")]
     pub max_copy_connections_per_table: u16,
     /// Number of milliseconds between one memory usage refresh and another.
@@ -414,7 +431,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_table_sync_copy_serialization_skip_all() {
+    fn table_sync_copy_serialization_skip_all() {
         let selection = TableSyncCopyConfig::SkipAllTables;
         let json = serde_json::to_string(&selection).unwrap();
         let decoded: TableSyncCopyConfig = serde_json::from_str(&json).unwrap();
@@ -423,10 +440,8 @@ mod tests {
     }
 
     #[test]
-    fn test_table_sync_copy_serialization_include_tables() {
-        let selection = TableSyncCopyConfig::IncludeTables {
-            table_ids: vec![1, 2, 3],
-        };
+    fn table_sync_copy_serialization_include_tables() {
+        let selection = TableSyncCopyConfig::IncludeTables { table_ids: vec![1, 2, 3] };
         let json = serde_json::to_string(&selection).unwrap();
         let decoded: TableSyncCopyConfig = serde_json::from_str(&json).unwrap();
 
@@ -434,10 +449,8 @@ mod tests {
     }
 
     #[test]
-    fn test_table_sync_copy_serialization_exclude_tables() {
-        let selection = TableSyncCopyConfig::SkipTables {
-            table_ids: vec![4, 5],
-        };
+    fn table_sync_copy_serialization_exclude_tables() {
+        let selection = TableSyncCopyConfig::SkipTables { table_ids: vec![4, 5] };
         let json = serde_json::to_string(&selection).unwrap();
         let decoded: TableSyncCopyConfig = serde_json::from_str(&json).unwrap();
 

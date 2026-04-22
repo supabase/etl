@@ -19,23 +19,21 @@
 - Build everything:
   - `cargo build --workspace --all-targets --all-features`
 - Format:
-  - `cargo fmt --all`
+  - `./scripts/fmt`
+- Check formatting:
+  - `./scripts/fmt-check`
 - Lint:
   - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
-- Run all tests:
-  - `cargo test --workspace --all-features`
-- Run doctests:
-  - `cargo test --workspace --all-features --doc`
-- List tests before running filtered or crate-specific test commands:
-  - `cargo test --workspace --all-features -- --list`
-- List doctests before running filtered doctest commands:
-  - `cargo test --workspace --all-features --doc -- --list`
-- Run one crate:
-  - `cargo test -p etl-replicator --all-features`
-- Show tracing during integration tests:
-  - `ENABLE_TRACING=1 cargo test --workspace --all-features`
-- Override log level when needed:
-  - `RUST_LOG=debug cargo test -p etl-replicator --all-features`
+- Run unit tests (no Postgres required):
+  - `cargo nextest run --workspace --all-features --lib`
+- Run unit tests for one crate:
+  - `cargo nextest run -p etl-config --all-features`
+- Run doctests (nextest does not support doctests):
+  - `cargo test --doc --workspace --all-features`
+- List tests:
+  - `cargo nextest list --workspace --all-features`
+- Run full test suite (requires Postgres clusters via `cargo xtask postgres start`):
+  - `cargo xtask nextest run`
 
 ## Agent Workflow
 - Keep changes focused on the issue being solved.
@@ -43,6 +41,8 @@
 - Before adding new patterns, inspect nearby code and follow the local style first.
 - Do not add dependencies unless they are justified by the task.
 - If you change workflow assumptions, build or test the smallest relevant target and report what actually ran.
+- Never create commits, push branches, open pull requests, or perform other git write actions unless the user explicitly instructs you to do so.
+- Keep the workspace on the stable toolchain from `rust-toolchain.toml` for build, lint, and test commands; use the pinned nightly formatter only through `./scripts/fmt` and `./scripts/fmt-check`.
 
 ## Rust Style
 - Follow default Rust formatting and idioms.
@@ -56,6 +56,16 @@
 - Keep top-level binaries focused on orchestration; move implementation detail into helpers or modules.
 - Prefer clear, boring code over clever abstractions.
 - Prefer existing workspace patterns over introducing new local conventions.
+- Default to private visibility and only widen when a real caller requires it.
+- Prefer the narrowest working visibility in this order: private, `pub(super)`, `pub(crate)`, then `pub`.
+- Use `pub` only for intentional crate APIs consumed by other crates, integration tests, examples, or documented user-facing entrypoints.
+- Keep struct fields private by default; prefer constructors, accessors, and focused helper methods over exposing mutable fields.
+- When a module is internal, tighten the module itself before leaving deep items `pub`.
+- In `mod.rs` and other module roots, prefer private child modules plus selective `pub use` lists over `pub mod` or `pub use child::*` when building a facade API.
+- Treat `pub use` as part of the public API contract: re-export only items you intentionally want callers to depend on, and avoid wildcard re-exports from internal modules.
+- When a crate re-exports dependency types through its own facade, prefer referring to them via the crate facade (for example `crate::types::SchemaError`) inside that crate unless you are working at an explicit integration boundary or the item is not re-exported.
+- After visibility changes, verify with `cargo rustc -p <crate> --all-features -- -W unreachable_pub` for the relevant target and then rerun the smallest relevant checks/tests.
+- Use `Arc::clone(&value)` instead of `value.clone()` when cloning `Arc` pointers — it makes the cheap reference-count increment explicit and avoids confusion with deep clones.
 - All logs should be strictly lowercase.
 
 ## Error Handling And Panics
@@ -85,11 +95,15 @@
 - Prefer low-cardinality labels unless higher-cardinality labels are operationally necessary.
 
 ## Testing
+- Tests run via `cargo-nextest` (process-per-test). Use `cargo xtask nextest run` for the full sharded suite, or `cargo nextest run` for single-crate runs.
+- Integration tests are consolidated into `tests/main.rs` per crate. Address individual modules with `-- module_name::`.
+- Doctests use `cargo test --doc` (nextest does not support them).
 - If test output shows `0 passed; 0 failed; 0 ignored; n filtered out`, treat that as a failure to run tests.
 - Verify that expected tests actually ran, not just that Cargo exited successfully.
-- Prefer running `cargo test -- --list` before using filters or crate-specific commands if there is any doubt.
+- Prefer running `cargo nextest list` before using filters or crate-specific commands if there is any doubt.
 - When fixing a specific crate, run the narrowest relevant tests first, then broaden if needed.
 - Add or update tests when behavior changes, regressions are possible, or new logic is introduced.
+- Do not prefix `#[test]` functions with `test_`. Name them after what they verify — e.g. `fn parses_empty_input()` not `fn test_parses_empty_input()`.
 
 ## Review Checklist
 - Code compiles for the changed target or workspace as appropriate.

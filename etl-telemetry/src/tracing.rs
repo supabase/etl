@@ -1,31 +1,32 @@
-use etl_config::Environment;
-use serde::ser::{SerializeMap, Serializer as _};
-use std::io;
-use std::io::Error;
-use std::sync::OnceLock;
 use std::{
     backtrace::{Backtrace, BacktraceStatus},
     fmt as stdfmt,
+    io::{self, Error},
     panic::PanicHookInfo,
-    sync::Once,
+    sync::{Once, OnceLock},
 };
+
+use etl_config::Environment;
+use serde::ser::{SerializeMap, Serializer as _};
 use thiserror::Error;
-use tracing::Event;
-use tracing::subscriber::{SetGlobalDefaultError, set_global_default};
+use tracing::{
+    Event,
+    subscriber::{SetGlobalDefaultError, set_global_default},
+};
 use tracing_appender::{
     non_blocking::WorkerGuard,
     rolling::{self, InitError},
 };
-use tracing_log::NormalizeEvent;
-use tracing_log::{LogTracer, log_tracer::SetLoggerError};
-use tracing_subscriber::EnvFilter;
-use tracing_subscriber::fmt as tracing_fmt;
-use tracing_subscriber::fmt::{
-    FmtContext, FormattedFields, MakeWriter, fmt,
-    format::{self, FormatEvent, FormatFields, Writer},
-    time::FormatTime,
+use tracing_log::{LogTracer, NormalizeEvent, log_tracer::SetLoggerError};
+use tracing_subscriber::{
+    EnvFilter,
+    fmt::{
+        self as tracing_fmt, FmtContext, FormattedFields, MakeWriter, fmt,
+        format::{self, FormatEvent, FormatFields, Writer},
+        time::FormatTime,
+    },
+    registry::{LookupSpan, SpanRef},
 };
-use tracing_subscriber::registry::{LookupSpan, SpanRef};
 
 /// JSON field name for project identification in logs.
 const PROJECT_KEY_IN_LOG: &str = "project";
@@ -69,15 +70,17 @@ pub enum LogFlusher {
 
 /// Initializes tracing for test environments.
 ///
-/// Call once at the beginning of tests. Set `ENABLE_TRACING=1` to view tracing output:
+/// Call once at the beginning of tests. Set `ENABLE_TRACING=1` to view tracing
+/// output:
 /// ```bash
 /// ENABLE_TRACING=1 cargo test test_name
 /// ```
 pub fn init_test_tracing() {
     INIT_TEST_TRACING.call_once(|| {
         if std::env::var("ENABLE_TRACING").is_ok() {
-            // Needed because if no env is set, it defaults to prod, which logs to files instead of terminal,
-            // and we need to log to terminal when `ENABLE_TRACING` env var is set.
+            // Needed because if no env is set, it defaults to prod, which logs to files
+            // instead of terminal, and we need to log to terminal when
+            // `ENABLE_TRACING` env var is set.
             Environment::Dev.set();
             let _log_flusher =
                 init_tracing("test").expect("Failed to initialize tracing for tests");
@@ -97,7 +100,7 @@ pub fn set_global_project_ref(project_ref: &str) {
 ///
 /// Returns `None` if no project reference has been set.
 pub fn get_global_project_ref() -> Option<&'static str> {
-    PROJECT_REF.get().map(|s| s.as_str())
+    PROJECT_REF.get().map(String::as_str)
 }
 
 /// Sets the global pipeline id for all tracing events.
@@ -146,42 +149,32 @@ where
         let meta = normalized_meta.as_ref().unwrap_or_else(|| event.metadata());
 
         let spans = ctx.event_scope().map(|scope| {
-            scope
-                .from_root()
-                .map(|span| span_to_json_value::<S, N>(&span))
-                .collect::<Vec<_>>()
+            scope.from_root().map(|span| span_to_json_value::<S, N>(&span)).collect::<Vec<_>>()
         });
 
         let mut output = Vec::new();
         let mut serializer = serde_json::Serializer::new(&mut output);
         let mut map = serializer.serialize_map(None).map_err(|_| stdfmt::Error)?;
 
-        map.serialize_entry("timestamp", &timestamp)
-            .map_err(|_| stdfmt::Error)?;
-        map.serialize_entry("level", &meta.level().as_str())
-            .map_err(|_| stdfmt::Error)?;
+        map.serialize_entry("timestamp", &timestamp).map_err(|_| stdfmt::Error)?;
+        map.serialize_entry("level", &meta.level().as_str()).map_err(|_| stdfmt::Error)?;
 
         if let Some(project_ref) = get_global_project_ref() {
-            map.serialize_entry(PROJECT_KEY_IN_LOG, project_ref)
-                .map_err(|_| stdfmt::Error)?;
+            map.serialize_entry(PROJECT_KEY_IN_LOG, project_ref).map_err(|_| stdfmt::Error)?;
         }
 
         if let Some(pipeline_id) = get_global_pipeline_id() {
-            map.serialize_entry(PIPELINE_KEY_IN_LOG, &pipeline_id)
-                .map_err(|_| stdfmt::Error)?;
+            map.serialize_entry(PIPELINE_KEY_IN_LOG, &pipeline_id).map_err(|_| stdfmt::Error)?;
         }
 
-        map.serialize_entry("fields", &SerializableEvent(event))
-            .map_err(|_| stdfmt::Error)?;
+        map.serialize_entry("fields", &SerializableEvent(event)).map_err(|_| stdfmt::Error)?;
 
         if let Some(span) = spans.as_ref().and_then(|spans| spans.last()) {
-            map.serialize_entry("span", span)
-                .map_err(|_| stdfmt::Error)?;
+            map.serialize_entry("span", span).map_err(|_| stdfmt::Error)?;
         }
 
         if let Some(spans) = spans.as_ref() {
-            map.serialize_entry("spans", spans)
-                .map_err(|_| stdfmt::Error)?;
+            map.serialize_entry("spans", spans).map_err(|_| stdfmt::Error)?;
         }
 
         map.end().map_err(|_| stdfmt::Error)?;
@@ -214,18 +207,13 @@ where
     let mut map = serde_json::Map::new();
 
     let ext = span.extensions();
-    let data = ext
-        .get::<FormattedFields<N>>()
-        .expect("formatted span fields must exist");
+    let data = ext.get::<FormattedFields<N>>().expect("formatted span fields must exist");
 
     if let Ok(serde_json::Value::Object(fields)) = serde_json::from_str::<serde_json::Value>(data) {
         map.extend(fields);
     }
 
-    map.insert(
-        "name".to_string(),
-        serde_json::Value::String(span.metadata().name().to_string()),
-    );
+    map.insert("name".to_string(), serde_json::Value::String(span.metadata().name().to_string()));
 
     serde_json::Value::Object(map)
 }
@@ -238,30 +226,23 @@ struct JsonFieldVisitor {
 
 impl tracing::field::Visit for JsonFieldVisitor {
     fn record_f64(&mut self, field: &tracing::field::Field, value: f64) {
-        self.values
-            .insert(field.name().to_string(), serde_json::Value::from(value));
+        self.values.insert(field.name().to_string(), serde_json::Value::from(value));
     }
 
     fn record_i64(&mut self, field: &tracing::field::Field, value: i64) {
-        self.values
-            .insert(field.name().to_string(), serde_json::Value::from(value));
+        self.values.insert(field.name().to_string(), serde_json::Value::from(value));
     }
 
     fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
-        self.values
-            .insert(field.name().to_string(), serde_json::Value::from(value));
+        self.values.insert(field.name().to_string(), serde_json::Value::from(value));
     }
 
     fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
-        self.values
-            .insert(field.name().to_string(), serde_json::Value::from(value));
+        self.values.insert(field.name().to_string(), serde_json::Value::from(value));
     }
 
     fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-        self.values.insert(
-            normalize_field_name(field.name()),
-            serde_json::Value::from(value),
-        );
+        self.values.insert(normalize_field_name(field.name()), serde_json::Value::from(value));
     }
 
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn stdfmt::Debug) {
@@ -280,10 +261,7 @@ impl tracing::field::Visit for JsonFieldVisitor {
 
 /// Normalizes raw tracing field names to their emitted representation.
 fn normalize_field_name(field_name: &str) -> String {
-    field_name
-        .strip_prefix("r#")
-        .unwrap_or(field_name)
-        .to_string()
+    field_name.strip_prefix("r#").unwrap_or(field_name).to_string()
 }
 
 /// Initializes tracing for the application.
@@ -296,8 +274,8 @@ pub fn init_tracing(app_name: &str) -> Result<LogFlusher, TracingError> {
 
 /// Initializes tracing with optional top-level fields.
 ///
-/// Like [`init_tracing`] but allows specifying multiple top-level fields that will be added to each
-/// log entry.
+/// Like [`init_tracing`] but allows specifying multiple top-level fields that
+/// will be added to each log entry.
 pub fn init_tracing_with_top_level_fields(
     app_name: &str,
     project_ref: Option<&str>,
@@ -320,7 +298,8 @@ pub fn init_tracing_with_top_level_fields(
 
     let is_prod = Environment::load()?.is_prod();
 
-    // Set the default log level to `info` if not specified in the `RUST_LOG` environment variable.
+    // Set the default log level to `info` if not specified in the `RUST_LOG`
+    // environment variable.
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
 
     let log_flusher = if is_prod {
@@ -331,14 +310,15 @@ pub fn init_tracing_with_top_level_fields(
 
     set_tracing_panic_hook();
 
-    // Return the log flusher to ensure logs are flushed before the application exits
-    // without this the logs in memory may not be flushed to the file.
+    // Return the log flusher to ensure logs are flushed before the application
+    // exits without this the logs in memory may not be flushed to the file.
     Ok(log_flusher)
 }
 
 /// Configures tracing for production environments.
 ///
-/// Sets up structured JSON logging to rotating daily files with project injection.
+/// Sets up structured JSON logging to rotating daily files with project
+/// injection.
 fn configure_prod_tracing(filter: EnvFilter, app_name: &str) -> Result<LogFlusher, TracingError> {
     let filename_suffix = "log";
     let log_dir = "logs";
@@ -378,11 +358,8 @@ fn configure_dev_tracing(filter: EnvFilter) -> Result<LogFlusher, TracingError> 
         .with_file(false)
         .with_target(true);
 
-    let subscriber = fmt()
-        .with_env_filter(filter)
-        .event_format(format)
-        .with_writer(io::stdout)
-        .finish();
+    let subscriber =
+        fmt().with_env_filter(filter).event_format(format).with_writer(io::stdout).finish();
 
     set_global_default(subscriber)?;
 
@@ -409,10 +386,9 @@ fn panic_hook(panic_info: &PanicHookInfo) {
     let backtrace = Backtrace::capture();
     let (backtrace, note) = match backtrace.status() {
         BacktraceStatus::Captured => (Some(backtrace), None),
-        BacktraceStatus::Disabled => (
-            None,
-            Some("run with RUST_BACKTRACE=1 to display backtraces"),
-        ),
+        BacktraceStatus::Disabled => {
+            (None, Some("run with RUST_BACKTRACE=1 to display backtraces"))
+        }
         BacktraceStatus::Unsupported => {
             (None, Some("backtraces are not supported on this platform"))
         }
@@ -427,7 +403,7 @@ fn panic_hook(panic_info: &PanicHookInfo) {
         "unknown panic payload"
     };
 
-    let location = panic_info.location().map(|location| location.to_string());
+    let location = panic_info.location().map(ToString::to_string);
 
     tracing::error!(
         panic.payload = payload,

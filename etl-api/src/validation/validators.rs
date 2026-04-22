@@ -5,18 +5,19 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 use etl::store::both::memory::MemoryStore;
 use etl_config::parse_ducklake_url;
-use etl_destinations::bigquery::BigQueryClient;
-use etl_destinations::ducklake::{DuckLakeDestination, S3Config as DucklakeS3Config};
-use etl_destinations::iceberg::{
-    IcebergClient, S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_SECRET_ACCESS_KEY,
+use etl_destinations::{
+    bigquery::BigQueryClient,
+    ducklake::{DuckLakeDestination, S3Config as DucklakeS3Config},
+    iceberg::{IcebergClient, S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_SECRET_ACCESS_KEY},
 };
 use secrecy::ExposeSecret;
 use sqlx::FromRow;
 
-use crate::configs::destination::{FullApiDestinationConfig, FullApiIcebergConfig};
-use crate::configs::pipeline::FullApiPipelineConfig;
-
 use super::{ValidationContext, ValidationError, ValidationFailure, Validator};
+use crate::configs::{
+    destination::{FullApiDestinationConfig, FullApiIcebergConfig},
+    pipeline::FullApiPipelineConfig,
+};
 
 const ETL_SCHEMA_NAME: &str = "etl";
 
@@ -50,14 +51,11 @@ impl Validator for SourceValidator {
             return Ok(vec![]);
         };
 
-        let source_pool = ctx
-            .source_pool
-            .as_ref()
-            .expect("source pool required for source validation");
+        let source_pool =
+            ctx.source_pool.as_ref().expect("source pool required for source validation");
 
-        let current_user: String = sqlx::query_scalar("select current_user")
-            .fetch_one(source_pool)
-            .await?;
+        let current_user: String =
+            sqlx::query_scalar("select current_user").fetch_one(source_pool).await?;
 
         if current_user != *expected_username {
             return Ok(vec![ValidationFailure::critical(
@@ -165,7 +163,8 @@ impl Validator for SourceValidator {
         if !has_required_role_attributes {
             failures.push(ValidationFailure::critical(
                 "Invalid source role attributes",
-                "The source database does not grant the trusted username role all permissions ETL needs to work properly.",
+                "The source database does not grant the trusted username role all permissions ETL \
+                 needs to work properly.",
             ));
         }
 
@@ -181,7 +180,8 @@ impl Validator for SourceValidator {
             failures.push(ValidationFailure::critical(
                 "Invalid source etl schema permissions",
                 format!(
-                    "The source database does not grant the trusted username role all permissions ETL needs to manage schema {ETL_SCHEMA_NAME} properly."
+                    "The source database does not grant the trusted username role all permissions \
+                     ETL needs to manage schema {ETL_SCHEMA_NAME} properly."
                 ),
             ));
         }
@@ -208,10 +208,8 @@ impl Validator for PublicationExistsValidator {
         &self,
         ctx: &ValidationContext,
     ) -> Result<Vec<ValidationFailure>, ValidationError> {
-        let source_pool = ctx
-            .source_pool
-            .as_ref()
-            .expect("source pool required for publication validation");
+        let source_pool =
+            ctx.source_pool.as_ref().expect("source pool required for publication validation");
 
         let exists: bool =
             sqlx::query_scalar("select exists(select 1 from pg_publication where pubname = $1)")
@@ -225,8 +223,8 @@ impl Validator for PublicationExistsValidator {
             Ok(vec![ValidationFailure::critical(
                 "Publication Not Found",
                 format!(
-                    "Publication '{}' does not exist in the source database. \
-                    Create it with: CREATE PUBLICATION {} FOR TABLE <table_name>, ...",
+                    "Publication '{}' does not exist in the source database. Create it with: \
+                     CREATE PUBLICATION {} FOR TABLE <table_name>, ...",
                     self.publication_name, self.publication_name
                 ),
             )])
@@ -242,9 +240,7 @@ pub struct ReplicationSlotsValidator {
 
 impl ReplicationSlotsValidator {
     pub fn new(max_table_sync_workers: u16) -> Self {
-        Self {
-            max_table_sync_workers,
-        }
+        Self { max_table_sync_workers }
     }
 }
 
@@ -270,8 +266,8 @@ impl Validator for ReplicationSlotsValidator {
             .await?;
 
         let free_slots = max_slots as i64 - used_slots;
-        // We need 1 slot for the apply worker plus at most `max_table_sync_workers` other slots
-        // for table sync workers.
+        // We need 1 slot for the apply worker plus at most `max_table_sync_workers`
+        // other slots for table sync workers.
         let required_slots = self.max_table_sync_workers as i64 + 1;
 
         if required_slots <= free_slots {
@@ -280,13 +276,12 @@ impl Validator for ReplicationSlotsValidator {
             Ok(vec![ValidationFailure::critical(
                 "Insufficient Replication Slots",
                 format!(
-                    "Not enough replication slots available.\n\
-                    Found {free_slots} free slots, but {required_slots} are required at most during initial table copy ({used_slots}/{max_slots} currently in use).\n\
-                    Once all tables are copied, only 1 slot will be used.\n\n\
-                    Please verify:\n\
-                    (1) max_replication_slots in postgresql.conf is sufficient\n\
-                    (2) Unused replication slots can be removed\n\
-                    (3) max_table_sync_workers can be reduced if needed",
+                    "Not enough replication slots available.\nFound {free_slots} free slots, but \
+                     {required_slots} are required at most during initial table copy \
+                     ({used_slots}/{max_slots} currently in use).\nOnce all tables are copied, \
+                     only 1 slot will be used.\n\nPlease verify:\n(1) max_replication_slots in \
+                     postgresql.conf is sufficient\n(2) Unused replication slots can be \
+                     removed\n(3) max_table_sync_workers can be reduced if needed",
                 ),
             )])
         }
@@ -303,10 +298,8 @@ impl Validator for WalLevelValidator {
         &self,
         ctx: &ValidationContext,
     ) -> Result<Vec<ValidationFailure>, ValidationError> {
-        let source_pool = ctx
-            .source_pool
-            .as_ref()
-            .expect("source pool required for WAL level validation");
+        let source_pool =
+            ctx.source_pool.as_ref().expect("source pool required for WAL level validation");
 
         let wal_level: String = sqlx::query_scalar("select current_setting('wal_level')")
             .fetch_one(source_pool)
@@ -319,7 +312,7 @@ impl Validator for WalLevelValidator {
                 "Invalid WAL Level",
                 format!(
                     "WAL level is set to '{wal_level}', but must be 'logical' for replication. \
-                    Update postgresql.conf with: wal_level = 'logical' and restart PostgreSQL"
+                     Update postgresql.conf with: wal_level = 'logical' and restart PostgreSQL"
                 ),
             )])
         }
@@ -396,7 +389,8 @@ impl Validator for PublicationHasTablesValidator {
         .fetch_optional(source_pool)
         .await?;
 
-        // If publication doesn't exist, skip this check (PublicationExistsValidator handles it)
+        // If publication doesn't exist, skip this check (PublicationExistsValidator
+        // handles it)
         let Some((puballtables, table_count)) = result else {
             return Ok(vec![]);
         };
@@ -407,8 +401,8 @@ impl Validator for PublicationHasTablesValidator {
             Ok(vec![ValidationFailure::critical(
                 "Publication Empty",
                 format!(
-                    "Publication '{}' exists but contains no tables.\n\n\
-                    Add tables with: ALTER PUBLICATION {} ADD TABLE <table_name>",
+                    "Publication '{}' exists but contains no tables.\n\nAdd tables with: ALTER \
+                     PUBLICATION {} ADD TABLE <table_name>",
                     self.publication_name, self.publication_name
                 ),
             )])
@@ -434,12 +428,11 @@ impl Validator for PrimaryKeysValidator {
         &self,
         ctx: &ValidationContext,
     ) -> Result<Vec<ValidationFailure>, ValidationError> {
-        let source_pool = ctx
-            .source_pool
-            .as_ref()
-            .expect("source pool required for primary keys validation");
+        let source_pool =
+            ctx.source_pool.as_ref().expect("source pool required for primary keys validation");
 
-        // Find tables without primary keys using pg_publication_rel for direct OID access
+        // Find tables without primary keys using pg_publication_rel for direct OID
+        // access
         let tables_without_pk: Vec<String> = sqlx::query_scalar(
             r#"
             select n.nspname || '.' || c.relname
@@ -468,8 +461,8 @@ impl Validator for PrimaryKeysValidator {
             Ok(vec![ValidationFailure::warning(
                 "Tables Missing Primary Keys",
                 format!(
-                    "Tables without primary keys: {}\n\n\
-                    Primary keys are required for UPDATE and DELETE replication.",
+                    "Tables without primary keys: {}\n\nPrimary keys are required for UPDATE and \
+                     DELETE replication.",
                     tables_without_pk.join(", ")
                 ),
             )])
@@ -500,7 +493,8 @@ impl Validator for GeneratedColumnsValidator {
             .as_ref()
             .expect("source pool required for generated columns validation");
 
-        // Find tables with generated columns using pg_publication_rel for direct OID access
+        // Find tables with generated columns using pg_publication_rel for direct OID
+        // access
         let tables_with_generated: Vec<String> = sqlx::query_scalar(
             r#"
             select distinct n.nspname || '.' || c.relname
@@ -531,8 +525,8 @@ impl Validator for GeneratedColumnsValidator {
             Ok(vec![ValidationFailure::warning(
                 "Tables With Generated Columns",
                 format!(
-                    "Tables with generated columns: {}\n\n\
-                    Generated columns cannot be replicated and will be excluded from the destination.",
+                    "Tables with generated columns: {}\n\nGenerated columns cannot be replicated \
+                     and will be excluded from the destination.",
                     tables_with_generated.join(", ")
                 ),
             )])
@@ -593,11 +587,7 @@ struct BigQueryValidator {
 
 impl BigQueryValidator {
     fn new(project_id: String, dataset_id: String, service_account_key: String) -> Self {
-        Self {
-            project_id,
-            dataset_id,
-            service_account_key,
-        }
+        Self { project_id, dataset_id, service_account_key }
     }
 }
 
@@ -607,24 +597,16 @@ impl Validator for BigQueryValidator {
         &self,
         _ctx: &ValidationContext,
     ) -> Result<Vec<ValidationFailure>, ValidationError> {
-        let client = match BigQueryClient::new_with_key(
-            self.project_id.clone(),
-            &self.service_account_key,
-            1,
-        )
-        .await
-        {
-            Ok(client) => client,
-            Err(_) => {
-                return Ok(vec![ValidationFailure::critical(
-                    "BigQuery Authentication Failed",
-                    "Unable to authenticate with BigQuery.\n\n\
-                    Please verify:\n\
-                    (1) The service account key is valid JSON\n\
-                    (2) The key has not expired or been revoked\n\
-                    (3) The project ID is correct",
-                )]);
-            }
+        let Ok(client) =
+            BigQueryClient::new_with_key(self.project_id.clone(), &self.service_account_key, 1)
+                .await
+        else {
+            return Ok(vec![ValidationFailure::critical(
+                "BigQuery Authentication Failed",
+                "Unable to authenticate with BigQuery.\n\nPlease verify:\n(1) The service account \
+                 key is valid JSON\n(2) The key has not expired or been revoked\n(3) The project \
+                 ID is correct",
+            )]);
         };
 
         match client.dataset_exists(&self.dataset_id).await {
@@ -632,21 +614,17 @@ impl Validator for BigQueryValidator {
             Ok(false) => Ok(vec![ValidationFailure::critical(
                 "BigQuery Dataset Not Found",
                 format!(
-                    "Dataset '{}' does not exist in project '{}'.\n\n\
-                    Please verify:\n\
-                    (1) The dataset name is correct\n\
-                    (2) The dataset exists in the specified project\n\
-                    (3) The service account has permission to access it",
+                    "Dataset '{}' does not exist in project '{}'.\n\nPlease verify:\n(1) The \
+                     dataset name is correct\n(2) The dataset exists in the specified \
+                     project\n(3) The service account has permission to access it",
                     self.dataset_id, self.project_id
                 ),
             )]),
             Err(_) => Ok(vec![ValidationFailure::critical(
                 "BigQuery Connection Failed",
-                "Unable to connect to BigQuery.\n\n\
-                Please verify:\n\
-                (1) Network connectivity to Google Cloud\n\
-                (2) The service account has the required permissions (BigQuery Data Editor, BigQuery Job User)\n\
-                (3) BigQuery API is enabled for your project",
+                "Unable to connect to BigQuery.\n\nPlease verify:\n(1) Network connectivity to \
+                 Google Cloud\n(2) The service account has the required permissions (BigQuery \
+                 Data Editor, BigQuery Job User)\n(3) BigQuery API is enabled for your project",
             )]),
         }
     }
@@ -712,7 +690,8 @@ impl Validator for DucklakeValidator {
             (Some(_), None) | (None, Some(_)) => {
                 return Ok(vec![ValidationFailure::critical(
                     "Ducklake S3 Configuration Invalid",
-                    "DuckLake S3 credentials must include both access key ID and secret access key.",
+                    "DuckLake S3 credentials must include both access key ID and secret access \
+                     key.",
                 )]);
             }
             _ => {}
@@ -738,26 +717,17 @@ impl Validator for DucklakeValidator {
             }
         };
 
-        let s3_config = self
-            .s3_access_key_id
-            .clone()
-            .map(|access_key_id| DucklakeS3Config {
-                access_key_id,
-                secret_access_key: self
-                    .s3_secret_access_key
-                    .clone()
-                    .expect("ducklake s3 secret access key should be present"),
-                region: self
-                    .s3_region
-                    .clone()
-                    .unwrap_or_else(|| "us-east-1".to_string()),
-                endpoint: self.s3_endpoint.clone(),
-                url_style: self
-                    .s3_url_style
-                    .clone()
-                    .unwrap_or_else(|| "path".to_string()),
-                use_ssl: self.s3_use_ssl.unwrap_or(false),
-            });
+        let s3_config = self.s3_access_key_id.clone().map(|access_key_id| DucklakeS3Config {
+            access_key_id,
+            secret_access_key: self
+                .s3_secret_access_key
+                .clone()
+                .expect("ducklake s3 secret access key should be present"),
+            region: self.s3_region.clone().unwrap_or_else(|| "us-east-1".to_string()),
+            endpoint: self.s3_endpoint.clone(),
+            url_style: self.s3_url_style.clone().unwrap_or_else(|| "path".to_string()),
+            use_ssl: self.s3_use_ssl.unwrap_or(false),
+        });
 
         match DuckLakeDestination::new(
             catalog_url,
@@ -772,11 +742,10 @@ impl Validator for DucklakeValidator {
             Ok(_) => Ok(vec![]),
             Err(_) => Ok(vec![ValidationFailure::critical(
                 "Ducklake Connection Failed",
-                "Unable to connect to DuckLake.\n\n\
-                Please verify:\n\
-                (1) The catalog URL and data path are valid and reachable\n\
-                (2) DuckLake catalog credentials are embedded correctly in the catalog URL\n\
-                (3) The S3-compatible credentials and endpoint are correct when using object storage",
+                "Unable to connect to DuckLake.\n\nPlease verify:\n(1) The catalog URL and data \
+                 path are valid and reachable\n(2) DuckLake catalog credentials are embedded \
+                 correctly in the catalog URL\n(3) The S3-compatible credentials and endpoint are \
+                 correct when using object storage",
             )]),
         }
     }
@@ -842,31 +811,23 @@ impl Validator for IcebergValidator {
                 .await
             }
         };
-
-        let client = match client {
-            Ok(client) => client,
-            Err(_) => {
-                return Ok(vec![ValidationFailure::critical(
-                    "Iceberg Authentication Failed",
-                    "Unable to authenticate with Iceberg.\n\n\
-                    Please verify:\n\
-                    (1) The catalog token is valid and has not expired\n\
-                    (2) The S3 access key and secret key are correct\n\
-                    (3) The catalog URI is properly formatted",
-                )]);
-            }
+        let Ok(client) = client else {
+            return Ok(vec![ValidationFailure::critical(
+                "Iceberg Authentication Failed",
+                "Unable to authenticate with Iceberg.\n\nPlease verify:\n(1) The catalog token is \
+                 valid and has not expired\n(2) The S3 access key and secret key are correct\n(3) \
+                 The catalog URI is properly formatted",
+            )]);
         };
 
         match client.validate_connectivity().await {
             Ok(()) => Ok(vec![]),
             Err(_) => Ok(vec![ValidationFailure::critical(
                 "Iceberg Connection Failed",
-                "Unable to connect to Iceberg catalog.\n\n\
-                Please verify:\n\
-                (1) Network connectivity to the catalog and S3\n\
-                (2) The warehouse name exists in the catalog\n\
-                (3) You have the required permissions to access the warehouse\n\
-                (4) The S3 endpoint is reachable",
+                "Unable to connect to Iceberg catalog.\n\nPlease verify:\n(1) Network \
+                 connectivity to the catalog and S3\n(2) The warehouse name exists in the \
+                 catalog\n(3) You have the required permissions to access the warehouse\n(4) The \
+                 S3 endpoint is reachable",
             )]),
         }
     }
@@ -926,12 +887,8 @@ impl Validator for DestinationValidator {
                     pool_size.unwrap_or(
                         etl_config::shared::DestinationConfig::DEFAULT_DUCKLAKE_POOL_SIZE,
                     ),
-                    s3_access_key_id
-                        .as_ref()
-                        .map(|value| value.expose_secret().to_string()),
-                    s3_secret_access_key
-                        .as_ref()
-                        .map(|value| value.expose_secret().to_string()),
+                    s3_access_key_id.as_ref().map(|value| value.expose_secret().to_string()),
+                    s3_secret_access_key.as_ref().map(|value| value.expose_secret().to_string()),
                     s3_region.clone(),
                     s3_endpoint.clone(),
                     s3_url_style.clone(),

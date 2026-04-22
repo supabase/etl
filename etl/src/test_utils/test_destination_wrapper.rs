@@ -1,34 +1,45 @@
-use etl_postgres::types::TableId;
-use std::collections::HashMap;
-use std::fmt;
-use std::sync::Arc;
-use tokio::runtime::Handle;
-use tokio::sync::{Notify, RwLock};
-
-use std::time::Instant;
-
-use crate::destination::Destination;
-use crate::destination::async_result::{
-    ApplyLoopAsyncResultMetadata, DispatchMetrics, TruncateTableResult, WriteEventsResult,
-    WriteTableRowsResult,
+use std::{
+    collections::{HashMap, HashSet},
+    fmt,
+    sync::Arc,
+    time::Instant,
 };
-use crate::error::EtlResult;
-use crate::test_utils::event::{check_all_events_count, check_events_count, deduplicate_events};
-use crate::test_utils::notify::TimedNotify;
-use crate::types::{Event, EventType, TableRow};
 
-type EventCondition = Box<dyn Fn(&[Event]) -> bool + Send + Sync>;
-type TableRowCondition = Box<dyn Fn(&HashMap<TableId, Vec<TableRow>>) -> bool + Send + Sync>;
-type CombinedCondition =
+use etl_postgres::types::{ReplicatedTableSchema, TableId};
+use tokio::{
+    runtime::Handle,
+    sync::{Notify, RwLock},
+};
+
+use crate::{
+    destination::{
+        Destination,
+        async_result::{
+            ApplyLoopAsyncResultMetadata, DispatchMetrics, TruncateTableResult, WriteEventsResult,
+            WriteTableRowsResult,
+        },
+    },
+    error::EtlResult,
+    test_utils::{
+        event::{EventCondition, check_all_events_count, check_events_count, deduplicate_events},
+        notify::TimedNotify,
+    },
+    types::{Event, EventType, TableRow},
+};
+
+type EventCheckFn = Box<dyn Fn(&[Event]) -> bool + Send + Sync>;
+type TableRowCheckFn = Box<dyn Fn(&HashMap<TableId, Vec<TableRow>>) -> bool + Send + Sync>;
+type CombinedCheckFn =
     Box<dyn Fn(&[Event], &HashMap<TableId, Vec<TableRow>>) -> bool + Send + Sync>;
 
 struct Inner<D> {
     wrapped_destination: D,
     events: Vec<Event>,
     table_rows: HashMap<TableId, Vec<TableRow>>,
-    event_conditions: Vec<(EventCondition, Arc<Notify>)>,
-    table_row_conditions: Vec<(TableRowCondition, Arc<Notify>)>,
-    combined_conditions: Vec<(CombinedCondition, Arc<Notify>)>,
+    truncated_tables: HashSet<TableId>,
+    event_conditions: Vec<(EventCheckFn, Arc<Notify>)>,
+    table_row_conditions: Vec<(TableRowCheckFn, Arc<Notify>)>,
+    combined_conditions: Vec<(CombinedCheckFn, Arc<Notify>)>,
     write_table_rows_called: u64,
     shutdown_called: bool,
 }
@@ -70,12 +81,13 @@ impl<D> Inner<D> {
 
 /// Test wrapper for [`Destination`] implementations that tracks all operations.
 ///
-/// [`TestDestinationWrapper`] wraps any destination implementation and records all
-/// method calls and data flowing through it. This enables test assertions on the
-/// behavior of ETL pipelines without requiring complex destination setup.
+/// [`TestDestinationWrapper`] wraps any destination implementation and records
+/// all method calls and data flowing through it. This enables test assertions
+/// on the behavior of ETL pipelines without requiring complex destination
+/// setup.
 ///
-/// The wrapper supports waiting for specific conditions to be met, making it ideal
-/// for testing asynchronous ETL operations with deterministic assertions.
+/// The wrapper supports waiting for specific conditions to be met, making it
+/// ideal for testing asynchronous ETL operations with deterministic assertions.
 #[derive(Clone)]
 pub struct TestDestinationWrapper<D> {
     inner: Arc<RwLock<Inner<D>>>,
@@ -104,6 +116,7 @@ impl<D> TestDestinationWrapper<D> {
             wrapped_destination: destination,
             events: Vec::new(),
             table_rows: HashMap::new(),
+            truncated_tables: HashSet::new(),
             event_conditions: Vec::new(),
             table_row_conditions: Vec::new(),
             combined_conditions: Vec::new(),
@@ -111,9 +124,7 @@ impl<D> TestDestinationWrapper<D> {
             shutdown_called: false,
         };
 
-        Self {
-            inner: Arc::new(RwLock::new(inner)),
-        }
+        Self { inner: Arc::new(RwLock::new(inner)) }
     }
 
     /// Get all table rows that have been written
@@ -126,45 +137,46 @@ impl<D> TestDestinationWrapper<D> {
         self.inner.read().await.events.clone()
     }
 
-    /// Get all events that have been written, de-duplicated by full event equality.
+    /// Get all events that have been written, de-duplicated by full event
+    /// equality.
     pub async fn get_events_deduped(&self) -> Vec<Event> {
         let events = self.inner.read().await.events.clone();
         deduplicate_events(&events)
     }
 
-    /// Registers a notification that fires when events match a specific condition.
+    /// Registers a notification that fires when events match a specific
+    /// condition after this method is called.
     ///
-    /// Returns a [`TimedNotify`] that will automatically timeout after 30 seconds if the
-    /// condition is not met. This prevents tests from hanging indefinitely.
+    /// Returns a [`TimedNotify`] that will automatically timeout after the
+    /// specified timeout if the condition is not met. This prevents tests
+    /// from hanging indefinitely.
     pub async fn notify_on_events<F>(&self, condition: F) -> TimedNotify
     where
         F: Fn(&[Event]) -> bool + Send + Sync + 'static,
     {
         let notify = Arc::new(Notify::new());
         let mut inner = self.inner.write().await;
-        inner
-            .event_conditions
-            .push((Box::new(condition), notify.clone()));
-
-        // Check conditions immediately in case they're already satisfied
-        inner.check_conditions();
+        inner.event_conditions.push((Box::new(condition), notify.clone()));
 
         TimedNotify::new(notify)
     }
 
-    /// Registers a notification that fires when a specific number of events of given types are received.
+    /// Registers a notification that fires when a specific number of events of
+    /// given types are received.
     ///
-    /// Returns a [`TimedNotify`] that will automatically timeout after 30 seconds if the
-    /// expected event count is not reached. This prevents tests from hanging indefinitely.
+    /// Returns a [`TimedNotify`] that will automatically timeout after the
+    /// specified timeout if the expected event count is not reached. This
+    /// prevents tests from hanging indefinitely.
     pub async fn wait_for_events_count(&self, conditions: Vec<(EventType, u64)>) -> TimedNotify {
-        self.notify_on_events(move |events| check_events_count(events, conditions.clone()))
-            .await
+        self.notify_on_events(move |events| check_events_count(events, conditions.clone())).await
     }
 
-    /// Registers a notification that fires when a specific number of events of given types are received after de-duplicating.
+    /// Registers a notification that fires when a specific number of events of
+    /// given types are received after de-duplicating.
     ///
-    /// Returns a [`TimedNotify`] that will automatically timeout after 30 seconds if the
-    /// expected event count is not reached. This prevents tests from hanging indefinitely.
+    /// Returns a [`TimedNotify`] that will automatically timeout after the
+    /// specified timeout if the expected event count is not reached. This
+    /// prevents tests from hanging indefinitely.
     pub async fn wait_for_events_count_deduped(
         &self,
         conditions: Vec<(EventType, u64)>,
@@ -176,28 +188,27 @@ impl<D> TestDestinationWrapper<D> {
         .await
     }
 
-    /// Registers a notification that fires when a specific number of events are received,
-    /// counting both insert events from streaming and table rows from the initial copy phase.
+    /// Registers a notification that fires when event conditions are met after
+    /// this method is called.
     ///
-    /// This is useful for tests that need to verify all data was captured regardless of
-    /// whether it arrived during table copy or streaming replication.
+    /// Supports two condition types:
+    /// - [`EventCondition::Any`]: counts events across all tables
+    /// - [`EventCondition::Table`]: counts events for a specific table only
     ///
-    /// Counts are aggregated across all tables for the specified event types.
+    /// For insert events, both streaming events and table copy rows are
+    /// counted.
     ///
-    /// Returns a [`TimedNotify`] that will automatically timeout after 30 seconds if the
-    /// expected count is not reached. This prevents tests from hanging indefinitely.
-    pub async fn wait_for_all_events(&self, conditions: Vec<(EventType, u64)>) -> TimedNotify {
+    /// Returns a [`TimedNotify`] that will automatically timeout after the
+    /// specified timeout if the expected count is not reached.
+    pub async fn wait_for_all_events(&self, conditions: Vec<EventCondition>) -> TimedNotify {
         let notify = Arc::new(Notify::new());
         let mut inner = self.inner.write().await;
 
-        let condition: CombinedCondition = Box::new(move |events, table_rows| {
+        let condition: CombinedCheckFn = Box::new(move |events, table_rows| {
             check_all_events_count(events, table_rows, conditions.clone())
         });
 
         inner.combined_conditions.push((condition, notify.clone()));
-
-        // Check conditions immediately in case they're already satisfied.
-        inner.check_conditions();
 
         TimedNotify::new(notify)
     }
@@ -210,6 +221,10 @@ impl<D> TestDestinationWrapper<D> {
     pub async fn clear_events(&self) {
         let mut inner = self.inner.write().await;
         inner.events.clear();
+    }
+
+    pub async fn was_table_truncated(&self, table_id: TableId) -> bool {
+        self.inner.read().await.truncated_tables.contains(&table_id)
     }
 
     pub async fn write_table_rows_called(&self) -> u64 {
@@ -232,7 +247,7 @@ where
 
     async fn truncate_table(
         &self,
-        table_id: TableId,
+        replicated_table_schema: &ReplicatedTableSchema,
         async_result: TruncateTableResult<()>,
     ) -> EtlResult<()> {
         let destination = {
@@ -241,26 +256,22 @@ where
         };
 
         let (wrapped_truncate_result, pending_result) = TruncateTableResult::new(());
-        destination
-            .truncate_table(table_id, wrapped_truncate_result)
-            .await?;
+        destination.truncate_table(replicated_table_schema, wrapped_truncate_result).await?;
 
         let result = pending_result.await.into_result();
 
         let mut inner = self.inner.write().await;
 
+        let table_id = replicated_table_schema.id();
+        inner.truncated_tables.insert(table_id);
         inner.table_rows.remove(&table_id);
         inner.events.retain_mut(|event| {
             let has_table_id = event.has_table_id(&table_id);
-            if let Event::Truncate(event) = event
+            if let Event::Truncate(truncate_event) = event
                 && has_table_id
             {
-                let Some(index) = event.rel_ids.iter().position(|&id| table_id.0 == id) else {
-                    return true;
-                };
-
-                event.rel_ids.remove(index);
-                if event.rel_ids.is_empty() {
+                truncate_event.truncated_tables.retain(|s| s.id() != table_id);
+                if truncate_event.truncated_tables.is_empty() {
                     return false;
                 }
 
@@ -277,7 +288,7 @@ where
 
     async fn write_table_rows(
         &self,
-        table_id: TableId,
+        replicated_table_schema: &ReplicatedTableSchema,
         table_rows: Vec<TableRow>,
         async_result: WriteTableRowsResult<()>,
     ) -> EtlResult<()> {
@@ -289,19 +300,16 @@ where
 
         let (wrapped_flush_result, pending_result) = WriteTableRowsResult::new(());
         destination
-            .write_table_rows(table_id, table_rows.clone(), wrapped_flush_result)
+            .write_table_rows(replicated_table_schema, table_rows.clone(), wrapped_flush_result)
             .await?;
 
         let result = pending_result.await.into_result();
 
         {
+            let table_id = replicated_table_schema.id();
             let mut inner = self.inner.write().await;
             if result.is_ok() {
-                inner
-                    .table_rows
-                    .entry(table_id)
-                    .or_default()
-                    .extend(table_rows);
+                inner.table_rows.entry(table_id).or_default().extend(table_rows);
             }
 
             inner.check_conditions();
@@ -330,18 +338,17 @@ where
                     dispatched_at: Instant::now(),
                 },
             });
-        destination
-            .write_events(events.clone(), wrapped_flush_result)
-            .await?;
+        destination.write_events(events.clone(), wrapped_flush_result).await?;
 
-        // We spawn a task to handle the result, this way the wrapper behaves like a transparent
-        // layer that doesn't block on the result of the inner destination, effectively exhibiting
-        // the fully asynchronous behavior that a destination could have.
+        // We spawn a task to handle the result, this way the wrapper behaves like a
+        // transparent layer that doesn't block on the result of the inner
+        // destination, effectively exhibiting the fully asynchronous behavior
+        // that a destination could have.
         //
-        // For the other destination methods with async result this is not needed since the methods
-        // on the outside block on the result right after calling the method, so it's not needed to
-        // simulate asynchronous work to make the code continue and do something else in the
-        // meanwhile.
+        // For the other destination methods with async result this is not needed since
+        // the methods on the outside block on the result right after calling
+        // the method, so it's not needed to simulate asynchronous work to make
+        // the code continue and do something else in the meanwhile.
         let inner = self.inner.clone();
         tokio::spawn(async move {
             let result = pending_result.await.into_result();

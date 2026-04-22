@@ -19,10 +19,11 @@ const MIN_POOL_CONNECTIONS: u32 = 1;
 /// Maximum number of connections for the source Postgres connection pool.
 const MAX_POOL_CONNECTIONS: u32 = 1;
 
-/// Connects to the source database with the specified configuration and default connection pool size.
+/// Connects to the source database with the specified configuration and default
+/// connection pool size.
 ///
-/// Uses state management options with moderate timeouts suitable for administrative queries
-/// like listing tables and reading publications.
+/// Uses state management options with moderate timeouts suitable for
+/// administrative queries like listing tables and reading publications.
 pub async fn connect_to_source_database_from_api(
     config: &PgConnectionConfig,
 ) -> Result<PgPool, sqlx::Error> {

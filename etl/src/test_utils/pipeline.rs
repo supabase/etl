@@ -2,19 +2,32 @@ use etl_config::shared::{
     BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PgConnectionConfig,
     PipelineConfig, TableSyncCopyConfig,
 };
+use etl_postgres::{
+    tokio::test_utils::PgDatabase,
+    types::{TableId, TableName},
+};
+use rand::random;
+use tokio_postgres::Client;
 use uuid::Uuid;
 
-use crate::destination::Destination;
-use crate::pipeline::Pipeline;
-use crate::store::cleanup::CleanupStore;
-use crate::store::schema::SchemaStore;
-use crate::store::state::StateStore;
-use crate::types::PipelineId;
+use crate::{
+    destination::Destination,
+    pipeline::Pipeline,
+    state::table::TableReplicationPhaseType,
+    store::{cleanup::CleanupStore, schema::SchemaStore, state::StateStore},
+    test_utils::{
+        database::{spawn_source_database, test_table_name},
+        memory_destination::MemoryDestination,
+        notifying_store::NotifyingStore,
+        test_destination_wrapper::TestDestinationWrapper,
+    },
+    types::PipelineId,
+};
 
 /// Generates a test-specific replication slot name with a random component.
 ///
-/// This function prefixes the provided slot name with "test_" to avoid conflicts
-/// with other replication slots and other tests running in parallel.
+/// This function prefixes the provided slot name with "test_" to avoid
+/// conflicts with other replication slots and other tests running in parallel.
 pub fn test_slot_name(slot_name: &str) -> String {
     let uuid = Uuid::new_v4().simple().to_string();
     format!("test_{slot_name}_{uuid}")
@@ -22,9 +35,10 @@ pub fn test_slot_name(slot_name: &str) -> String {
 
 /// Builder for creating test pipelines with configurable options.
 ///
-/// This builder provides a fluent interface for constructing `Pipeline` instances
-/// with custom configurations. All configuration options have sensible defaults,
-/// allowing you to only specify the options you need to customize.
+/// This builder provides a fluent interface for constructing `Pipeline`
+/// instances with custom configurations. All configuration options have
+/// sensible defaults, allowing you to only specify the options you need to
+/// customize.
 ///
 /// # Examples
 ///
@@ -47,7 +61,8 @@ pub struct PipelineBuilder<S, D> {
     destination: D,
     /// Batch configuration.
     batch: BatchConfig,
-    /// Delay in milliseconds before retrying a failed table operation. Default: 1000ms.
+    /// Delay in milliseconds before retrying a failed table operation. Default:
+    /// 1000ms.
     table_error_retry_delay_ms: u64,
     /// Maximum number of retry attempts for table operations. Default: 2.
     table_error_retry_max_attempts: u32,
@@ -70,14 +85,17 @@ where
     S: StateStore + SchemaStore + CleanupStore + Clone + Send + Sync + 'static,
     D: Destination + Clone + Send + Sync + 'static,
 {
-    /// Creates a new pipeline builder with required parameters and default settings.
+    /// Creates a new pipeline builder with required parameters and default
+    /// settings.
     ///
     /// # Arguments
     ///
     /// * `pg_connection_config` - PostgreSQL connection configuration
     /// * `pipeline_id` - Unique identifier for the pipeline
-    /// * `publication_name` - Name of the PostgreSQL publication to replicate from
-    /// * `store` - Store implementation for state, schema, and cleanup operations
+    /// * `publication_name` - Name of the PostgreSQL publication to replicate
+    ///   from
+    /// * `store` - Store implementation for state, schema, and cleanup
+    ///   operations
     /// * `destination` - Destination for replicated data
     ///
     /// # Default Settings
@@ -100,10 +118,7 @@ where
             publication_name,
             store,
             destination,
-            batch: BatchConfig {
-                max_fill_ms: 1000,
-                memory_budget_ratio: 0.2,
-            },
+            batch: BatchConfig { max_fill_ms: 1000, memory_budget_ratio: 0.2 },
             table_error_retry_delay_ms: 1000,
             table_error_retry_max_attempts: 2,
             max_table_sync_workers: 1,
@@ -143,13 +158,15 @@ where
         self
     }
 
-    /// Sets the behavior when the main replication slot is found to be invalidated.
+    /// Sets the behavior when the main replication slot is found to be
+    /// invalidated.
     pub fn with_invalidated_slot_behavior(mut self, behavior: InvalidatedSlotBehavior) -> Self {
         self.invalidated_slot_behavior = behavior;
         self
     }
 
-    /// Sets the maximum number of parallel connections per table during initial copy.
+    /// Sets the maximum number of parallel connections per table during initial
+    /// copy.
     pub fn with_max_copy_connections_per_table(mut self, connections: u16) -> Self {
         self.max_copy_connections_per_table = connections;
         self
@@ -158,8 +175,8 @@ where
     /// Builds and returns the configured pipeline.
     ///
     /// This method consumes the builder and creates a `Pipeline` instance with
-    /// all the configured settings. Any options not explicitly set will use their
-    /// default values.
+    /// all the configured settings. Any options not explicitly set will use
+    /// their default values.
     pub fn build(self) -> Pipeline<S, D> {
         let config = PipelineConfig {
             id: self.pipeline_id,
@@ -182,9 +199,9 @@ where
 
 /// Creates a pipeline with default test configuration.
 ///
-/// This is a convenience wrapper around `PipelineBuilder` that creates a pipeline
-/// with standard test defaults: small batch size (1), short timeouts (1000ms),
-/// and minimal retry attempts (2).
+/// This is a convenience wrapper around `PipelineBuilder` that creates a
+/// pipeline with standard test defaults: small batch size (1), short timeouts
+/// (1000ms), and minimal retry attempts (2).
 pub fn create_pipeline<S, D>(
     pg_connection_config: &PgConnectionConfig,
     pipeline_id: PipelineId,
@@ -260,4 +277,58 @@ where
     )
     .with_table_sync_copy_config(table_sync_copy)
     .build()
+}
+
+pub async fn create_database_and_ready_pipeline_with_table(
+    table_suffix: &str,
+    columns: &[(&str, &str)],
+) -> (
+    PgDatabase<Client>,
+    TableName,
+    TableId,
+    NotifyingStore,
+    TestDestinationWrapper<MemoryDestination<NotifyingStore>>,
+    Pipeline<NotifyingStore, TestDestinationWrapper<MemoryDestination<NotifyingStore>>>,
+    PipelineId,
+    String,
+) {
+    let database = spawn_source_database().await;
+
+    let table_name = test_table_name(table_suffix);
+    let table_id = database.create_table(table_name.clone(), true, columns).await.unwrap();
+
+    let publication_name = format!("pub_{}", random::<u32>());
+    database
+        .create_publication(&publication_name, std::slice::from_ref(&table_name))
+        .await
+        .unwrap();
+
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name.clone(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    // We wait for ready so that we have the apply worker dealing with events, this
+    // is the common testing condition which ensures that the table is ready to
+    // be streamed from the main apply worker.
+    //
+    // The rationale for wanting to test ETL mainly on the apply worker is that it's
+    // really hard to test ETL in a state before `Ready` since the system will
+    // advance on its own. To properly test all the table sync worker states, we
+    // would need a way to programmatically drive execution, but we deemed
+    // it too much work compared to the benefit it brings.
+    let ready = store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
+
+    pipeline.start().await.unwrap();
+
+    ready.notified().await;
+
+    (database, table_name, table_id, store, destination, pipeline, pipeline_id, publication_name)
 }
