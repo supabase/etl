@@ -19,7 +19,7 @@ pub use event::{
 };
 pub use pipeline::PipelineId;
 pub use sized::SizeHint;
-pub use table_row::TableRow;
+pub use table_row::{OldTableRow, PartialTableRow, TableRow, UpdatedTableRow};
 pub use tokio_postgres::types::*;
 
 pub use crate::conversions::{InvalidSign, ParseNumericError, PgNumeric, Sign};

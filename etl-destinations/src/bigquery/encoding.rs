@@ -2,7 +2,7 @@ use etl::{
     error::EtlError,
     etl_error,
     types::{
-        ArrayCellNonOptional, CellNonOptional, DATE_FORMAT, TIME_FORMAT, TIMESTAMP_FORMAT,
+        ArrayCellNonOptional, Cell, CellNonOptional, DATE_FORMAT, TIME_FORMAT, TIMESTAMP_FORMAT,
         TIMESTAMPTZ_FORMAT_HH_MM, TableRow,
     },
 };
@@ -17,7 +17,7 @@ use crate::bigquery::validation::validate_cell_for_bigquery;
 /// [`prost::Message`] trait to enable Protocol Buffer serialization for
 /// BigQuery streaming inserts.
 #[derive(Debug)]
-pub(super) struct BigQueryTableRow(Vec<CellNonOptional>);
+pub(super) struct BigQueryTableRow(Vec<(u32, CellNonOptional)>);
 
 impl TryFrom<TableRow> for BigQueryTableRow {
     type Error = EtlError;
@@ -37,16 +37,29 @@ impl TryFrom<TableRow> for BigQueryTableRow {
     /// clamping, ensuring users are aware when their data doesn't fit
     /// BigQuery's constraints.
     fn try_from(value: TableRow) -> Result<Self, Self::Error> {
-        let mut validated_cells = Vec::with_capacity(value.values().len());
+        BigQueryTableRow::try_from_tagged_cells(
+            value.into_values().into_iter().enumerate().map(|(index, cell)| (index + 1, cell)),
+        )
+    }
+}
 
-        for (index, cell) in value.into_values().into_iter().enumerate() {
+impl BigQueryTableRow {
+    /// Converts tagged cells into a BigQuery row while preserving sparse field
+    /// positions.
+    pub(super) fn try_from_tagged_cells(
+        tagged_cells: impl IntoIterator<Item = (usize, Cell)>,
+    ) -> Result<Self, EtlError> {
+        let mut validated_cells = Vec::new();
+
+        for (index, cell) in tagged_cells {
             let cell_non_optional = CellNonOptional::try_from(cell).map_err(|err| {
                 etl_error!(
                     err.kind(),
                     "Cell conversion failed during BigQuery validation",
                     format!(
                         "Failed to convert cell at index {} to non-optional format: {}",
-                        index, err
+                        index - 1,
+                        err
                     )
                 )
             })?;
@@ -57,13 +70,13 @@ impl TryFrom<TableRow> for BigQueryTableRow {
                     "Cell validation failed for BigQuery compatibility",
                     format!(
                         "Cell at index {} failed validation: {}",
-                        index,
+                        index - 1,
                         err.detail().unwrap_or("validation error")
                     )
                 )
             })?;
 
-            validated_cells.push(cell_non_optional);
+            validated_cells.push((index as u32, cell_non_optional));
         }
 
         Ok(BigQueryTableRow(validated_cells))
@@ -74,16 +87,14 @@ impl prost::Message for BigQueryTableRow {
     /// Encodes the table row into the provided buffer using Protocol Buffer
     /// format.
     ///
-    /// Each cell is encoded with a sequential tag starting from 1, using the
+    /// Each cell is encoded with the field tag stored alongside it, using the
     /// appropriate prost encoding method for the cell's data type.
     fn encode_raw(&self, buf: &mut impl bytes::BufMut)
     where
         Self: Sized,
     {
-        let mut tag = 1;
-        for cell in &self.0 {
-            cell_encode_prost(cell, tag, buf);
-            tag += 1;
+        for (tag, cell) in &self.0 {
+            cell_encode_prost(cell, *tag, buf);
         }
     }
 
@@ -110,10 +121,8 @@ impl prost::Message for BigQueryTableRow {
     /// determine the total serialized size.
     fn encoded_len(&self) -> usize {
         let mut len = 0;
-        let mut tag = 1;
-        for cell in &self.0 {
-            len += cell_encode_len_prost(cell, tag);
-            tag += 1;
+        for (tag, cell) in &self.0 {
+            len += cell_encode_len_prost(cell, *tag);
         }
 
         len
@@ -121,7 +130,7 @@ impl prost::Message for BigQueryTableRow {
 
     /// Clears all cell values in the table row by calling clear on each cell.
     fn clear(&mut self) {
-        for cell in &mut self.0 {
+        for (_, cell) in &mut self.0 {
             cell.clear();
         }
     }

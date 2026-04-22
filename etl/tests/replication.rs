@@ -1384,8 +1384,14 @@ async fn schema_change_messages_allow_alter_table_from_table_owner_role() {
     let table_name = test_table_name("ddl_table_owner_role");
     database.create_table(table_name.clone(), true, &[("name", "text not null")]).await.unwrap();
 
-    let role_name = "ddl_table_owner_role_user";
-    let quoted_role_name = quote_identifier(role_name);
+    let role_name = format!(
+        "ddl_table_owner_role_user_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos()
+    );
+    let quoted_role_name = quote_identifier(&role_name);
     database.run_sql(&format!("create role {quoted_role_name}")).await.unwrap();
     database
         .run_sql(&format!(

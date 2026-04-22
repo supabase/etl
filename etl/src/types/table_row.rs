@@ -12,7 +12,7 @@ use crate::types::{
 /// [`TableRow`] contains a vector of [`Cell`] values corresponding to the
 /// columns of a database table. The values are ordered to match the table's
 /// column order and include proper type information for each cell.
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 #[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 pub struct TableRow {
     /// Approximate row size in bytes.
@@ -49,9 +49,191 @@ impl TableRow {
     }
 }
 
+impl PartialEq for TableRow {
+    fn eq(&self, other: &Self) -> bool {
+        self.values == other.values
+    }
+}
+
 impl SizeHint for TableRow {
     fn size_hint(&self) -> usize {
         self.size_hint_bytes
+    }
+}
+
+/// Represents a partial row image from a replication event.
+///
+/// Partial rows preserve the present values in replicated-schema order and
+/// separately record which replicated-column positions are missing.
+#[derive(Debug)]
+#[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
+pub struct PartialTableRow {
+    /// Approximate row size in bytes.
+    size_hint_bytes: usize,
+    /// Total number of replicated columns for the table schema.
+    total_columns: usize,
+    /// Present values in replicated-schema order, excluding missing columns.
+    table_row: TableRow,
+    /// Zero-based replicated-column indexes that are missing from the row.
+    missing_column_indexes: Vec<usize>,
+}
+
+impl PartialTableRow {
+    /// Creates a new partial row.
+    pub fn new(
+        total_columns: usize,
+        table_row: TableRow,
+        missing_column_indexes: Vec<usize>,
+    ) -> Self {
+        let size_hint_bytes = estimate_partial_table_row_allocated_bytes(
+            &table_row,
+            &missing_column_indexes,
+            missing_column_indexes.capacity(),
+            total_columns,
+        );
+
+        Self { size_hint_bytes, total_columns, table_row, missing_column_indexes }
+    }
+
+    /// Returns the total number of replicated columns for this table.
+    pub fn total_columns(&self) -> usize {
+        self.total_columns
+    }
+
+    /// Returns the present row values.
+    pub fn table_row(&self) -> &TableRow {
+        &self.table_row
+    }
+
+    /// Returns the present row values in replicated table-column order,
+    /// excluding missing columns.
+    pub fn values(&self) -> &[Cell] {
+        self.table_row.values()
+    }
+
+    /// Returns the missing replicated-column indexes.
+    pub fn missing_column_indexes(&self) -> &[usize] {
+        &self.missing_column_indexes
+    }
+
+    /// Consumes the row and returns the present values and missing indexes.
+    pub fn into_parts(self) -> (TableRow, Vec<usize>) {
+        (self.table_row, self.missing_column_indexes)
+    }
+
+    /// Consumes the row and returns the present values.
+    pub fn into_values(self) -> Vec<Cell> {
+        self.table_row.into_values()
+    }
+}
+
+impl PartialEq for PartialTableRow {
+    fn eq(&self, other: &Self) -> bool {
+        self.total_columns == other.total_columns
+            && self.table_row == other.table_row
+            && self.missing_column_indexes == other.missing_column_indexes
+    }
+}
+
+impl SizeHint for PartialTableRow {
+    fn size_hint(&self) -> usize {
+        self.size_hint_bytes
+    }
+}
+
+/// Represents a row image that may be full or partial.
+#[derive(Debug, PartialEq)]
+#[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
+pub enum UpdatedTableRow {
+    /// A complete row image with all replicated columns present.
+    Full(TableRow),
+    /// A partial row image containing only the source values we could
+    /// reconstruct, plus indexes for the missing replicated columns.
+    Partial(PartialTableRow),
+}
+
+impl UpdatedTableRow {
+    /// Returns whether this row image is partial.
+    pub fn is_partial(&self) -> bool {
+        matches!(self, Self::Partial(_))
+    }
+
+    /// Returns the full row when available.
+    pub fn as_full(&self) -> Option<&TableRow> {
+        match self {
+            Self::Full(row) => Some(row),
+            Self::Partial(_) => None,
+        }
+    }
+}
+
+impl SizeHint for UpdatedTableRow {
+    fn size_hint(&self) -> usize {
+        match self {
+            Self::Full(row) => row.size_hint(),
+            Self::Partial(row) => row.size_hint(),
+        }
+    }
+}
+
+/// Old-row image carried by logical replication for updates and deletes.
+///
+/// PostgreSQL either sends a full old tuple (`REPLICA IDENTITY FULL`) or only
+/// the replica-identity columns. Key rows are stored densely in replicated
+/// table-column order after filtering to just the identity columns.
+#[derive(Debug, PartialEq)]
+#[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
+pub enum OldTableRow {
+    /// Complete old row in replicated table-column order.
+    Full(TableRow),
+    /// Replica-identity columns only, in replicated table-column order.
+    Key(TableRow),
+}
+
+impl OldTableRow {
+    /// Returns whether this image contains only replica-identity columns.
+    pub fn is_key(&self) -> bool {
+        matches!(self, Self::Key(_))
+    }
+
+    /// Returns the full row payload when available.
+    pub fn as_full(&self) -> Option<&TableRow> {
+        match self {
+            Self::Full(row) => Some(row),
+            Self::Key(_) => None,
+        }
+    }
+
+    /// Consumes the image and returns the full row payload when available.
+    pub fn into_full(self) -> Option<TableRow> {
+        match self {
+            Self::Full(row) => Some(row),
+            Self::Key(_) => None,
+        }
+    }
+
+    /// Returns the key row payload when available.
+    pub fn as_key(&self) -> Option<&TableRow> {
+        match self {
+            Self::Full(_) => None,
+            Self::Key(row) => Some(row),
+        }
+    }
+
+    /// Consumes the image and returns the key row payload when available.
+    pub fn into_key(self) -> Option<TableRow> {
+        match self {
+            Self::Full(_) => None,
+            Self::Key(row) => Some(row),
+        }
+    }
+}
+
+impl SizeHint for OldTableRow {
+    fn size_hint(&self) -> usize {
+        match self {
+            Self::Full(row) | Self::Key(row) => row.size_hint(),
+        }
     }
 }
 
@@ -75,6 +257,28 @@ fn estimate_table_row_allocated_bytes(values: &[Cell], values_capacity: usize) -
             "table_row.add_cell_heap_bytes",
         );
     }
+
+    total
+}
+
+/// Returns an estimate of allocated bytes for a partial row payload.
+fn estimate_partial_table_row_allocated_bytes(
+    table_row: &TableRow,
+    missing_column_indexes: &[usize],
+    missing_column_indexes_capacity: usize,
+    _total_columns: usize,
+) -> usize {
+    let mut total = size_of::<PartialTableRow>() + table_row.size_hint();
+    total = checked_add_or_saturating(
+        total,
+        checked_mul_or_saturating(
+            missing_column_indexes_capacity,
+            size_of::<usize>(),
+            "partial_table_row.missing_indexes_capacity_mul_usize_size",
+        ),
+        "partial_table_row.base_add_missing_indexes_capacity",
+    );
+    let _ = missing_column_indexes;
 
     total
 }

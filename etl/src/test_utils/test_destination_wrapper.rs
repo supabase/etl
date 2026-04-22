@@ -258,7 +258,10 @@ where
         let (wrapped_truncate_result, pending_result) = TruncateTableResult::new(());
         destination.truncate_table(replicated_table_schema, wrapped_truncate_result).await?;
 
+        // We send the result back before doing the internal checks for this utility, to
+        // avoid checking before the apply loop received the result.
         let result = pending_result.await.into_result();
+        async_result.send(result);
 
         let mut inner = self.inner.write().await;
 
@@ -281,8 +284,6 @@ where
             !has_table_id
         });
 
-        async_result.send(result);
-
         Ok(())
     }
 
@@ -303,19 +304,21 @@ where
             .write_table_rows(replicated_table_schema, table_rows.clone(), wrapped_flush_result)
             .await?;
 
+        // We send the result back before doing the internal checks for this utility, to
+        // avoid checking before the apply loop received the result.
         let result = pending_result.await.into_result();
+        let should_record_table_rows = result.is_ok();
+        async_result.send(result);
 
         {
             let table_id = replicated_table_schema.id();
             let mut inner = self.inner.write().await;
-            if result.is_ok() {
+            if should_record_table_rows {
                 inner.table_rows.entry(table_id).or_default().extend(table_rows);
             }
 
             inner.check_conditions();
         }
-
-        async_result.send(result);
 
         Ok(())
     }
@@ -351,18 +354,20 @@ where
         // the code continue and do something else in the meanwhile.
         let inner = self.inner.clone();
         tokio::spawn(async move {
+            // We send the result back before doing the internal checks for this utility, to
+            // avoid checking before the apply loop received the result.
             let result = pending_result.await.into_result();
+            let should_record_events = result.is_ok();
+            async_result.send(result);
 
             {
                 let mut inner = inner.write().await;
-                if result.is_ok() {
+                if should_record_events {
                     inner.events.extend(events);
                 }
 
                 inner.check_conditions();
             }
-
-            async_result.send(result);
         });
 
         Ok(())
