@@ -19,7 +19,9 @@ use std::{
 use etl_config::shared::PipelineConfig;
 use etl_postgres::{
     replication::slots::EtlReplicationSlot,
-    types::{ReplicatedTableSchema, ReplicationMask, SnapshotId, TableId, TableSchema},
+    types::{
+        IdentityMask, ReplicatedTableSchema, ReplicationMask, SnapshotId, TableId, TableSchema,
+    },
 };
 use futures::StreamExt;
 use metrics::{counter, histogram};
@@ -47,7 +49,8 @@ use crate::{
         DDL_MESSAGE_PREFIX, SchemaChangeMessage, parse_event_from_begin_message,
         parse_event_from_commit_message, parse_event_from_delete_message,
         parse_event_from_insert_message, parse_event_from_truncate_message,
-        parse_event_from_update_message, parse_replicated_column_names,
+        parse_event_from_update_message, parse_replica_identity_column_names,
+        parse_replicated_column_names,
     },
     destination::{
         Destination,
@@ -67,7 +70,6 @@ use crate::{
     replication::{
         EventsStream, SharedTableCache, StatusUpdateType,
         client::{PgReplicationClient, PostgresConnectionUpdate},
-        table_cache::SharedTableState,
     },
     state::table::{TableReplicationError, TableReplicationPhase, TableReplicationPhaseType},
     store::{schema::SchemaStore, state::StateStore},
@@ -186,11 +188,17 @@ impl ExitIntent {
 /// duplication on restart.
 #[derive(Debug, Clone)]
 pub(crate) enum ShutdownState {
-    /// No shutdown requested, normal operation.
+    /// Normal operation.
     NoShutdown,
-    /// Shutdown in progress, waiting for PostgreSQL to acknowledge our flush
-    /// position. The loop will only process keepalive messages until one
-    /// arrives with `wal_end >= acked_flush_lsn`.
+    /// Shutdown requested.
+    ///
+    /// No new WAL is accepted, but buffered or in-flight destination work is
+    /// still allowed to drain.
+    DrainingForShutdown,
+    /// Shutdown drain completed.
+    ///
+    /// The loop now waits only for PostgreSQL to acknowledge the shutdown
+    /// flush position.
     WaitingForPrimaryKeepAlive {
         /// The LSN we sent in the status update that PostgreSQL should
         /// acknowledge.
@@ -764,6 +772,13 @@ where
                     )
                     .await?
                 }
+                ShutdownState::DrainingForShutdown => {
+                    self.run_draining_shutdown_iteration(
+                        events_stream.as_mut(),
+                        &mut connection_updates_rx,
+                    )
+                    .await?
+                }
                 ShutdownState::WaitingForPrimaryKeepAlive { acked_flush_lsn } => {
                     self.run_shutdown_wait_iteration(
                         events_stream.as_mut(),
@@ -883,21 +898,85 @@ where
         Ok(self.try_finish_active_iteration())
     }
 
-    /// Runs one loop iteration while shutdown is waiting for PostgreSQL to
-    /// acknowledge the requested flush LSN.
+    /// Runs one iteration of the shutdown drain phase.
     ///
-    /// In this phase the loop no longer accepts new replication messages and it
-    /// no longer waits for pending destination flushes. Instead it only
-    /// waits for:
+    /// This mirrors the active phase but omits shutdown handling and new WAL
+    /// intake.
+    ///
+    /// Priority order:
     /// 1. PostgreSQL connection lifecycle updates.
-    /// 2. PostgreSQL keepalives that may acknowledge the shutdown status update
-    ///    with `wal_end >= acked_flush_lsn`.
-    /// 3. Periodic heartbeats once the computed keep alive deadline expires.
+    /// 2. Pending destination flush results.
+    /// 3. Batch flush deadline expiry.
+    /// 4. Periodic keep alive status updates.
     ///
-    /// Once the keepalive acknowledgement arrives, unresolved batch or flush
-    /// work causes the loop to conservatively return
-    /// [`ApplyLoopResult::Paused`]. Only quiescent state may reuse the
-    /// stored exit intent.
+    /// After the selected branch runs, the loop advances idle syncing state.
+    /// Once buffered or in-flight destination work is resolved, it sends the
+    /// final shutdown status update and transitions to
+    /// [`ShutdownState::WaitingForPrimaryKeepAlive`].
+    async fn run_draining_shutdown_iteration(
+        &mut self,
+        mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
+        connection_updates_rx: &mut watch::Receiver<PostgresConnectionUpdate>,
+    ) -> EtlResult<Option<ApplyLoopResult>> {
+        tokio::select! {
+            biased;
+
+            // PRIORITY 1: Handle PostgreSQL connection lifecycle updates.
+            changed = connection_updates_rx.changed() => {
+                Self::handle_connection_update(changed, connection_updates_rx)?;
+            }
+
+            // PRIORITY 2: Handle the pending destination write result.
+            apply_result = Self::wait_for_flush_result(self.state.pending_flush_result.as_mut()), if self.state.pending_flush_result.is_some() => {
+                self.handle_flush_result(apply_result)
+                    .await?;
+            }
+
+            // PRIORITY 3: Handle batch flush timer expiry.
+            _ = Self::wait_for_batch_deadline(self.state.flush_deadline), if self.state.can_wait_for_deadline() => {
+                self.flush_batch("flush deadline reached during shutdown drain").await?;
+            }
+
+            // PRIORITY 4: Emit a periodic status update while shutdown is draining.
+            _ = Self::wait_for_keep_alive_deadline(self.state.keep_alive_deadline) => {
+                self.send_status_update(
+                    events_stream.as_mut(),
+                    self.state.effective_flush_lsn(),
+                    true,
+                    StatusUpdateType::PeriodicKeepAlive,
+                )
+                .await?;
+
+                self.state
+                    .reset_keep_alive_deadline(self.keep_alive_deadline_duration);
+            }
+        }
+
+        // Try to keep advancing syncing tables whenever the system becomes idle.
+        self.maybe_process_syncing_tables_when_idle().await?;
+
+        // Once the drain is complete, start waiting for PostgreSQL to
+        // acknowledge the final flush position.
+        if !self.state.has_unresolved_batch_work() {
+            self.initiate_graceful_shutdown(events_stream.as_mut()).await?;
+        }
+
+        Ok(None)
+    }
+
+    /// Runs one iteration of the final shutdown acknowledgement phase.
+    ///
+    /// In this phase the loop no longer accepts new replication messages and
+    /// no longer waits for destination flush results.
+    ///
+    /// Priority order:
+    /// 1. PostgreSQL connection lifecycle updates.
+    /// 2. PostgreSQL keepalives that may acknowledge `acked_flush_lsn`.
+    /// 3. Periodic keep alive status updates.
+    ///
+    /// Once the acknowledgement arrives, unresolved work causes
+    /// [`ApplyLoopResult::Paused`]; otherwise the recorded exit result may be
+    /// reused.
     async fn run_shutdown_wait_iteration(
         &mut self,
         mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
@@ -950,16 +1029,12 @@ where
     /// Returns the final loop result after PostgreSQL has acknowledged the
     /// shutdown status update.
     ///
-    /// If batch construction or destination flush work is still unresolved,
-    /// shutdown conservatively pauses the loop so the next start can replay
-    /// from the last confirmed durable position.
-    ///
-    /// If there is no exit result, which should not happen in case of shutdown,
-    /// but it's not enforced statically, we also default to pausing.
+    /// By the time shutdown reaches this point, the drain phase should have
+    /// resolved any buffered or in-flight destination work. The loop therefore
+    /// reuses the recorded exit result and falls back to pausing only if no
+    /// exit intent was recorded unexpectedly.
     fn finish_shutdown(&self) -> ApplyLoopResult {
-        if self.state.has_unresolved_batch_work() {
-            return ApplyLoopResult::Paused;
-        }
+        debug_assert!(!self.state.has_unresolved_batch_work());
 
         self.state.exit_result().unwrap_or(ApplyLoopResult::Paused)
     }
@@ -1112,21 +1187,14 @@ where
     }
 
     /// Handles a shutdown signal by transitioning to
+    /// [`ShutdownState::DrainingForShutdown`] or
     /// [`ShutdownState::WaitingForPrimaryKeepAlive`].
     ///
-    /// The shutdown procedure is intentionally quick and best-effort. We do not
-    /// generally defer shutdown to transaction or catch-up boundaries
-    /// because the system is still at-least-once and extra draining logic
-    /// would add disproportionate complexity.
-    ///
-    /// Instead, the goal here is to report the best durable position already
-    /// known by the loop.
-    ///
-    /// If a batch is still being built or a destination flush is still in
-    /// flight, shutdown does not try to resolve that work explicitly. After
-    /// PostgreSQL acknowledges the status update, the loop
-    /// returns [`ApplyLoopResult::Paused`] so the next start can replay from
-    /// the last confirmed durable position.
+    /// Shutdown stops new message intake immediately. If there is already
+    /// buffered or in-flight destination work, the loop first drains that work
+    /// so the best durable position can advance before sending the final
+    /// shutdown status update. Otherwise it transitions directly into waiting
+    /// for PostgreSQL to acknowledge the current flush position.
     ///
     /// Note: the shutdown system is best-effort. Graceful shutdown may not
     /// complete if we are blocked on non-interruptible code or if keepalive
@@ -1155,9 +1223,24 @@ where
         // complete.
         self.state.record_exit_intent(Some(ExitIntent::Pause));
 
+        // If there is unresolved work, we want to drain it before shutting down.
+        if self.state.has_unresolved_batch_work() {
+            info!(
+                %worker_type,
+                pending_flush_result = self.state.has_pending_flush_result(),
+                pending_batch = self.state.has_pending_batch(),
+                processing_paused = self.state.processing_paused,
+                "shutdown signal received, stopping new intake and entering shutdown drain",
+            );
+
+            self.state.shutdown_state = ShutdownState::DrainingForShutdown;
+
+            return Ok(());
+        }
+
         info!(
             %worker_type,
-            "shutdown signal received, sending status update and waiting for acknowledgement",
+            "shutdown signal received, no unresolved work left, entering final acknowledgement wait",
         );
 
         self.initiate_graceful_shutdown(events_stream.as_mut()).await
@@ -1167,15 +1250,23 @@ where
     /// to [`ShutdownState::WaitingForPrimaryKeepAlive`].
     ///
     /// The status update uses the best durable position currently known by the
-    /// loop; it does not try to advance shutdown to a transaction-specific
-    /// target by doing additional draining work.
+    /// loop.
     async fn initiate_graceful_shutdown(
         &mut self,
         mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
     ) -> EtlResult<()> {
+        let worker_type = self.worker_context.worker_type();
+
         // Use effective flush LSN to report last received LSN when idle, since
         // last flush LSN only advances during actual flushes.
         let flush_lsn = self.state.effective_flush_lsn();
+
+        info!(
+            %worker_type,
+            %flush_lsn,
+            "sending shutdown status update and waiting for primary keep alive acknowledgement",
+        );
+
         self.send_status_update(
             events_stream.as_mut(),
             flush_lsn,
@@ -1755,19 +1846,15 @@ where
         )
         .await?;
         let replication_mask = ReplicationMask::try_build(&table_schema, &replicated_columns)?;
-        self.shared_table_cache
-            .note_ready(
-                table_id,
-                ReplicatedTableSchema::from_mask(
-                    Arc::clone(&table_schema),
-                    replication_mask.clone(),
-                ),
-            )
-            .await;
+        let identity_columns = parse_replica_identity_column_names(message)?;
+        let identity_mask = IdentityMask::try_build(&table_schema, &identity_columns)?;
 
-        // Build the ReplicatedTableSchema and emit a Relation event.
         let replicated_table_schema =
-            ReplicatedTableSchema::from_mask(table_schema, replication_mask);
+            ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask);
+
+        self.shared_table_cache.note_ready(table_id, replicated_table_schema.clone()).await;
+
+        // Build the event schema and emit a Relation event.
 
         let relation_event = RelationEvent {
             start_lsn,
@@ -1804,8 +1891,7 @@ where
         }
 
         let replicated_table_schema =
-            get_replicated_table_schema(&table_id, &self.schema_store, &self.shared_table_cache)
-                .await?;
+            get_replicated_table_schema(&table_id, &self.shared_table_cache).await?;
 
         let event = parse_event_from_insert_message(
             replicated_table_schema,
@@ -1843,8 +1929,7 @@ where
         }
 
         let replicated_table_schema =
-            get_replicated_table_schema(&table_id, &self.schema_store, &self.shared_table_cache)
-                .await?;
+            get_replicated_table_schema(&table_id, &self.shared_table_cache).await?;
 
         let event = parse_event_from_update_message(
             replicated_table_schema,
@@ -1882,8 +1967,7 @@ where
         }
 
         let replicated_table_schema =
-            get_replicated_table_schema(&table_id, &self.schema_store, &self.shared_table_cache)
-                .await?;
+            get_replicated_table_schema(&table_id, &self.shared_table_cache).await?;
 
         let event = parse_event_from_delete_message(
             replicated_table_schema,
@@ -1919,12 +2003,8 @@ where
             // Exactly one worker owns protocol interpretation for a table at a time, so
             // non-owning workers skip truncation handling for that table as well.
             if self.should_apply_changes(table_id, remote_final_lsn).await? {
-                let replicated_table_schema = get_replicated_table_schema(
-                    &table_id,
-                    &self.schema_store,
-                    &self.shared_table_cache,
-                )
-                .await?;
+                let replicated_table_schema =
+                    get_replicated_table_schema(&table_id, &self.shared_table_cache).await?;
                 truncated_tables.push(replicated_table_schema);
             }
         }
@@ -2982,33 +3062,36 @@ where
 /// Retrieves a [`ReplicatedTableSchema`] for the given table from the shared
 /// table state.
 ///
-/// This function combines the table schema from the schema store with the
-/// shared per-table protocol state to create a [`ReplicatedTableSchema`].
-async fn get_replicated_table_schema<S>(
+/// Relation handling and table copy both materialize the same runtime schema
+/// shape into the shared cache, so row-event decoding can read that exact
+/// schema directly without reconstructing masks on demand.
+async fn get_replicated_table_schema(
     table_id: &TableId,
-    schema_store: &S,
     shared_table_cache: &SharedTableCache,
-) -> EtlResult<ReplicatedTableSchema>
-where
-    S: SchemaStore + Clone + Send + 'static,
-{
+) -> EtlResult<ReplicatedTableSchema> {
     let Some(shared_table_state) = shared_table_cache.get(table_id).await else {
         bail!(
             ErrorKind::InvalidState,
             "Missing shared table state",
             format!(
-                "No shared table state with a replication mask found for table {}, this event \
-                 can't be processed",
+                "No shared replicated table schema found for table {}, this event can't be \
+                 processed",
                 table_id
             )
         );
     };
 
-    match shared_table_state {
-        SharedTableState::Ready { replicated_table_schema } => Ok(replicated_table_schema),
-        SharedTableState::WaitingForRelation { snapshot_id } => {
-            let table_schema = get_table_schema(schema_store, table_id, snapshot_id, false).await?;
-            Ok(ReplicatedTableSchema::all(table_schema))
-        }
-    }
+    let Some(replicated_table_schema) = shared_table_state.replicated_table_schema().cloned()
+    else {
+        bail!(
+            ErrorKind::InvalidState,
+            "Waiting for relation state cannot decode row event",
+            format!(
+                "Table {} is waiting for a relation refresh before row events can be decoded",
+                table_id
+            )
+        );
+    };
+
+    Ok(replicated_table_schema)
 }

@@ -58,7 +58,6 @@ impl SharedTableState {
     }
 
     /// Returns the runtime replicated schema when it is ready.
-    #[cfg(test)]
     pub(crate) fn replicated_table_schema(&self) -> Option<&ReplicatedTableSchema> {
         match self {
             Self::WaitingForRelation { .. } => None,
