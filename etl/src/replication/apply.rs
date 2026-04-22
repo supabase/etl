@@ -1201,20 +1201,25 @@ where
         // complete.
         self.state.record_exit_intent(Some(ExitIntent::Pause));
 
-        info!(
-            %worker_type,
-            pending_flush_result = self.state.has_pending_flush_result(),
-            pending_batch = self.state.has_pending_batch(),
-            processing_paused = self.state.processing_paused,
-            "shutdown signal received, stopping new intake and entering graceful shutdown drain",
-        );
-
         // If there is unresolved work, we want to drain it before shutting down.
         if self.state.has_unresolved_batch_work() {
+            info!(
+                %worker_type,
+                pending_flush_result = self.state.has_pending_flush_result(),
+                pending_batch = self.state.has_pending_batch(),
+                processing_paused = self.state.processing_paused,
+                "shutdown signal received, stopping new intake and entering shutdown drain",
+            );
+
             self.state.shutdown_state = ShutdownState::DrainingForShutdown;
 
             return Ok(());
         }
+
+        info!(
+            %worker_type,
+            "shutdown signal received, no unresolved work left, entering final acknowledgement wait",
+        );
 
         self.initiate_graceful_shutdown(events_stream.as_mut()).await
     }
