@@ -158,28 +158,18 @@ impl<D> TestDestinationWrapper<D> {
     where
         F: Fn(&[Event]) -> bool + Send + Sync + 'static,
     {
-        self.notify_on_events_with_description("custom event condition", condition).await
-    }
-
-    /// Registers a notification that fires when events match a specific
-    /// condition after this method is called.
-    async fn notify_on_events_with_description<F>(
-        &self,
-        description: impl Into<String>,
-        condition: F,
-    ) -> TimedNotify
-    where
-        F: Fn(&[Event]) -> bool + Send + Sync + 'static,
-    {
         let notify = Arc::new(Notify::new());
-        let description = description.into();
         let mut inner = self.inner.write().await;
-        inner.event_conditions.push((description.clone(), Box::new(condition), notify.clone()));
+        inner.event_conditions.push((
+            "custom event condition".to_owned(),
+            Box::new(condition),
+            notify.clone(),
+        ));
 
         TimedNotify::with_description(
             notify,
             crate::test_utils::notify::DEFAULT_NOTIFY_TIMEOUT,
-            description,
+            "custom event condition",
         )
     }
 
@@ -190,11 +180,20 @@ impl<D> TestDestinationWrapper<D> {
     /// specified timeout if the expected event count is not reached. This
     /// prevents tests from hanging indefinitely.
     pub async fn wait_for_events_count(&self, conditions: Vec<(EventType, u64)>) -> TimedNotify {
+        let notify = Arc::new(Notify::new());
         let description = format!("event counts {:?}", conditions);
-        self.notify_on_events_with_description(description, move |events| {
-            check_events_count(events, conditions.clone())
-        })
-        .await
+        let mut inner = self.inner.write().await;
+        inner.event_conditions.push((
+            description.clone(),
+            Box::new(move |events| check_events_count(events, conditions.clone())),
+            notify.clone(),
+        ));
+
+        TimedNotify::with_description(
+            notify,
+            crate::test_utils::notify::DEFAULT_NOTIFY_TIMEOUT,
+            description,
+        )
     }
 
     /// Registers a notification that fires when a specific number of events of
@@ -207,12 +206,23 @@ impl<D> TestDestinationWrapper<D> {
         &self,
         conditions: Vec<(EventType, u64)>,
     ) -> TimedNotify {
+        let notify = Arc::new(Notify::new());
         let description = format!("deduped event counts {:?}", conditions);
-        self.notify_on_events_with_description(description, move |events| {
-            let deduped = deduplicate_events(events);
-            check_events_count(&deduped, conditions.clone())
-        })
-        .await
+        let mut inner = self.inner.write().await;
+        inner.event_conditions.push((
+            description.clone(),
+            Box::new(move |events| {
+                let deduped = deduplicate_events(events);
+                check_events_count(&deduped, conditions.clone())
+            }),
+            notify.clone(),
+        ));
+
+        TimedNotify::with_description(
+            notify,
+            crate::test_utils::notify::DEFAULT_NOTIFY_TIMEOUT,
+            description,
+        )
     }
 
     /// Registers a notification that fires when event conditions are met after
