@@ -416,7 +416,7 @@ async fn table_primary_key_update_rewrites_row() {
         .unwrap();
     event_notify.notified().await;
 
-    let updated_id = 10i32;
+    let updated_id = 10i64;
     let updated_name = "user_10".to_string();
     let updated_age = 10i32;
     let event_notify = destination.wait_for_events_count(vec![(EventType::Update, 1)]).await;
