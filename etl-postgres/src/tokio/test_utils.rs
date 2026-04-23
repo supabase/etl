@@ -521,6 +521,31 @@ impl<G: GenericClient> PgDatabase<G> {
             panic!("invalidate_slot: pg_reload_conf failed: {e}");
         }
 
+        let settings_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let effective_max_slot_wal_keep_size = loop {
+            let effective_max_slot_wal_keep_size: String = client
+                .query_one("SHOW max_slot_wal_keep_size", &[])
+                .await
+                .expect("invalidate_slot: failed to read max_slot_wal_keep_size")
+                .get(0);
+
+            if effective_max_slot_wal_keep_size != "-1" {
+                break effective_max_slot_wal_keep_size;
+            }
+
+            assert!(
+                tokio::time::Instant::now() < settings_deadline,
+                "invalidate_slot: effective max_slot_wal_keep_size did not change; command-line \
+                 postgres settings override ALTER SYSTEM"
+            );
+
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        };
+        info!(
+            slot_name,
+            effective_max_slot_wal_keep_size, "slot invalidation configuration applied",
+        );
+
         // Create a temp table to generate WAL.
         let _ = client
             .execute(
@@ -537,6 +562,7 @@ impl<G: GenericClient> PgDatabase<G> {
         };
 
         let mut iteration = 0;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
 
         // Loop until the slot is invalidated.
         loop {
@@ -568,6 +594,12 @@ impl<G: GenericClient> PgDatabase<G> {
                 info!(slot_name, iteration, "slot invalidated successfully");
                 break;
             }
+
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "invalidate_slot: timed out waiting for slot {slot_name} to reach wal_status \
+                 'lost'"
+            );
         }
 
         // IMPORTANT: Reset config BEFORE returning to avoid invalidating new slots

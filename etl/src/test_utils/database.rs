@@ -25,6 +25,7 @@ use etl_postgres::{
 };
 use pg_escape::quote_identifier;
 use tokio_postgres::Client;
+use tracing::info;
 use uuid::Uuid;
 
 /// The schema name used for organizing test tables.
@@ -83,6 +84,12 @@ fn local_pg_connection_config() -> PgConnectionConfig {
 pub async fn spawn_source_database() -> PgDatabase<Client> {
     // We create the database via tokio postgres.
     let config = local_pg_connection_config();
+    info!(
+        database_name = %config.name,
+        host = %config.host,
+        port = config.port,
+        "spawning source test database",
+    );
     let database = PgDatabase::new(config.clone()).await;
 
     // We create the test schema, where all tables will be added.
@@ -93,6 +100,11 @@ pub async fn spawn_source_database() -> PgDatabase<Client> {
         .execute(&format!("create schema {}", quote_identifier(TEST_DATABASE_SCHEMA)), &[])
         .await
         .expect("Failed to create test schema");
+    info!(
+        database_name = %config.name,
+        schema = TEST_DATABASE_SCHEMA,
+        "created source test schema",
+    );
 
     // We now connect via sqlx just to run the migrations, but we still use the
     // original tokio postgres connection for the db object returned.
@@ -114,6 +126,10 @@ pub async fn spawn_source_database() -> PgDatabase<Client> {
 
     // Run migrations to create the state store tables.
     sqlx::migrate!("./migrations").run(&pool).await.expect("Failed to run migrations");
+    info!(
+        database_name = %config.name,
+        "finished source test database setup",
+    );
 
     database
 }

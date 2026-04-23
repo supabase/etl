@@ -29,8 +29,6 @@ services:
       -N 1000
       -c listen_addresses=*
       -c wal_level=logical
-      -c max_slot_wal_keep_size=-1
-      -c idle_replication_slot_timeout=0
       -c max_wal_senders=1000
       -c max_replication_slots=1000
       -c wal_sender_timeout=10s

@@ -30,6 +30,10 @@ fn docker_compose_command() -> (&'static str, &'static [&'static str]) {
 const DEFAULT_PG_VERSION: &str = "18";
 const DEFAULT_PG_USER: &str = "postgres";
 const HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+const TEST_SAFE_REPLICATION_SETTINGS: &[&str] = &[
+    "ALTER SYSTEM SET max_slot_wal_keep_size = '-1'",
+    "ALTER SYSTEM SET idle_replication_slot_timeout = '0'",
+];
 
 #[derive(Args)]
 pub(crate) struct PostgresArgs {
@@ -103,6 +107,7 @@ impl StartArgs {
         for shard in 1..=self.shards {
             let port = self.base_port + shard - 1;
             self.wait_for_pg(port)?;
+            self.configure_pg_for_tests(port)?;
         }
 
         Ok(())
@@ -153,5 +158,59 @@ impl StartArgs {
 
             thread::sleep(HEALTH_CHECK_INTERVAL);
         }
+    }
+
+    fn configure_pg_for_tests(&self, port: u16) -> Result<()> {
+        for statement in TEST_SAFE_REPLICATION_SETTINGS {
+            let status = Command::new("psql")
+                .args([
+                    "-h",
+                    "localhost",
+                    "-p",
+                    &port.to_string(),
+                    "-U",
+                    &self.pg_user,
+                    "-d",
+                    "postgres",
+                    "-c",
+                    statement,
+                ])
+                .env(
+                    "PGPASSWORD",
+                    std::env::var("POSTGRES_PASSWORD").unwrap_or_else(|_| "postgres".to_owned()),
+                )
+                .status()
+                .context("failed to configure Postgres test setting")?;
+
+            if !status.success() {
+                bail!("failed to apply Postgres test setting on port {port}: {statement}");
+            }
+        }
+
+        let status = Command::new("psql")
+            .args([
+                "-h",
+                "localhost",
+                "-p",
+                &port.to_string(),
+                "-U",
+                &self.pg_user,
+                "-d",
+                "postgres",
+                "-c",
+                "SELECT pg_reload_conf()",
+            ])
+            .env(
+                "PGPASSWORD",
+                std::env::var("POSTGRES_PASSWORD").unwrap_or_else(|_| "postgres".to_owned()),
+            )
+            .status()
+            .context("failed to reload Postgres config")?;
+
+        if !status.success() {
+            bail!("failed to reload Postgres config on port {port}");
+        }
+
+        Ok(())
     }
 }
