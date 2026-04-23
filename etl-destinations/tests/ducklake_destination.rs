@@ -117,8 +117,11 @@ fn make_replicated_table_schema(schema: &TableSchema) -> ReplicatedTableSchema {
     ReplicatedTableSchema::all(Arc::new(schema.clone()))
 }
 
-/// Opens a verification connection to the same DuckLake catalog and returns it.
-fn open_lake_conn(catalog: &Url, data: &Url) -> Connection {
+/// Opens a verification connection to the same DuckLake catalog.
+///
+/// Returns `Err` when the catalog cannot be attached (e.g. DuckDB WAL
+/// checkpoint mismatch while another connection is still flushing).
+fn try_open_lake_conn(catalog: &Url, data: &Url) -> Result<Connection, duckdb::Error> {
     let conn = open_verification_connection();
     conn.execute_batch(&format!(
         "{} ATTACH {} AS {} (DATA_PATH {});",
@@ -126,9 +129,13 @@ fn open_lake_conn(catalog: &Url, data: &Url) -> Connection {
         quote_literal(&format!("ducklake:{}", catalog.as_str())),
         quote_identifier("lake"),
         quote_literal(data.as_str())
-    ))
-    .expect("failed to attach DuckLake catalog");
-    conn
+    ))?;
+    Ok(conn)
+}
+
+/// Opens a verification connection, panicking on failure.
+fn open_lake_conn(catalog: &Url, data: &Url) -> Connection {
+    try_open_lake_conn(catalog, data).expect("failed to attach DuckLake catalog")
 }
 
 fn lake_table_exists(conn: &Connection, table_name: &str) -> bool {
@@ -154,16 +161,20 @@ async fn open_lake_conn_when_tables_visible(
 ) -> Connection {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
-        let conn = open_lake_conn(catalog, data);
-        if table_names.iter().all(|table_name| lake_table_exists(&conn, table_name)) {
-            return conn;
+        // The attach can fail transiently (e.g. DuckDB WAL checkpoint mismatch
+        // while the destination connection is still flushing). Retry instead of
+        // panicking.
+        if let Ok(conn) = try_open_lake_conn(catalog, data) {
+            if table_names.iter().all(|table_name| lake_table_exists(&conn, table_name)) {
+                return conn;
+            }
+            drop(conn);
         }
 
         assert!(
             tokio::time::Instant::now() < deadline,
             "timed out waiting for DuckLake tables to become visible: {table_names:?}"
         );
-        drop(conn);
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
