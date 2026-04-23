@@ -1191,7 +1191,6 @@ fn get_restarted_at_annotation_value() -> String {
 #[cfg(test)]
 #[allow(clippy::redundant_test_prefix)]
 mod tests {
-    use crate::configs::pipeline::ReplicatorResourcesConfig;
     use etl_config::shared::{
         BatchConfig, DestinationConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig,
         PgConnectionConfig, PipelineConfig, ReplicatorConfig, ReplicatorConfigWithoutSecrets,
@@ -1200,6 +1199,7 @@ mod tests {
     use insta::assert_json_snapshot;
 
     use super::*;
+    use crate::configs::pipeline::ReplicatorResourcesConfig;
 
     const TENANT_ID: &str = "abcdefghijklmnopqrst";
 

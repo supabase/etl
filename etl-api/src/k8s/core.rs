@@ -9,7 +9,7 @@ use crate::{
     configs::{
         destination::{StoredDestinationConfig, StoredIcebergConfig},
         log::LogLevel,
-        pipeline::StoredPipelineConfig,
+        pipeline::{ReplicatorResourcesConfig, StoredPipelineConfig},
         source::StoredSourceConfig,
     },
     db::{
@@ -374,7 +374,7 @@ async fn create_or_update_replicator_stateful_set(
     prefix: &str,
     replicator_image: String,
     environment: Environment,
-    replicator_resources: Option<&crate::configs::pipeline::ReplicatorResourcesConfig>,
+    replicator_resources: Option<&ReplicatorResourcesConfig>,
     destination_type: DestinationType,
     log_level: LogLevel,
 ) -> Result<(), K8sCoreError> {
@@ -553,7 +553,7 @@ mod tests {
             _prefix: &str,
             _replicator_image: &str,
             _environment: Environment,
-            _replicator_resources: Option<&crate::configs::pipeline::ReplicatorResourcesConfig>,
+            _replicator_resources: Option<&ReplicatorResourcesConfig>,
             _destination_type: DestinationType,
             _log_level: LogLevel,
         ) -> Result<(), K8sError> {
