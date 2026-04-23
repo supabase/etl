@@ -73,15 +73,19 @@ fn pending_inline_data_bytes_query(metadata_schema: &str) -> String {
     let ducklake_table = quote_identifier("ducklake_table");
     let ducklake_inlined_data_tables = quote_identifier("ducklake_inlined_data_tables");
 
+    // DuckLake uses one inlined insert table per (table_id, schema_version),
+    // but one inlined delete table per table_id. We therefore sum every
+    // registered inlined data table for the current table and add the single
+    // deterministic delete-table relation size.
     format!(
-        r#"WITH target_table AS (
+        r"WITH target_table AS (
              SELECT table_id
              FROM {metadata_schema}.{ducklake_table}
              WHERE end_snapshot IS NULL AND table_name = $1
              LIMIT 1
          ),
          target_inline_tables AS (
-             SELECT table_name
+             SELECT DISTINCT table_name
              FROM {metadata_schema}.{ducklake_inlined_data_tables}
              WHERE table_id = (SELECT table_id FROM target_table)
          ),
@@ -114,7 +118,7 @@ fn pending_inline_data_bytes_query(metadata_schema: &str) -> String {
          )
          SELECT
              (SELECT total_bytes FROM inline_data_bytes)
-             + (SELECT total_bytes FROM inline_delete_bytes);"#
+             + (SELECT total_bytes FROM inline_delete_bytes);"
     )
 }
 

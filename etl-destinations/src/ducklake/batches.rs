@@ -170,7 +170,9 @@ impl TrackedTableMutation {
         match &self.mutation {
             TableMutation::Insert(row) | TableMutation::Replace(row) => row.size_hint() as u64,
             TableMutation::Delete(row) => row.size_hint() as u64,
-            TableMutation::Update { new_row, .. } => new_row.size_hint() as u64,
+            TableMutation::Update { delete_row, new_row } => {
+                (delete_row.size_hint() as u64).saturating_add(new_row.size_hint() as u64)
+            }
         }
     }
 }

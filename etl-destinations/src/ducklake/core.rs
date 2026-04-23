@@ -1156,7 +1156,9 @@ fn table_write_activity_for_mutations(
 
     for tracked_mutation in tracked_mutations {
         // This is only a fallback estimate for catalogs where we cannot sample
-        // actual inlined-table sizes directly.
+        // actual inlined-table sizes directly. The optional row-threshold path
+        // is disabled today, so we treat each mutation as one unit of fallback
+        // activity to keep mutation-only streams visible to maintenance.
         write_activity.approx_bytes =
             write_activity.approx_bytes.saturating_add(tracked_mutation.write_activity_size_hint());
         write_activity.inserted_rows = write_activity.inserted_rows.saturating_add(1);
@@ -1301,12 +1303,15 @@ mod tests {
     #[test]
     fn table_write_activity_for_mutations_counts_partial_updates_and_deletes() {
         let delete_row = OldTableRow::Key(TableRow::new(vec![Cell::I32(1)]));
+        let update_delete_row = OldTableRow::Key(TableRow::new(vec![Cell::I32(1)]));
         let partial_row = UpdatedTableRow::Partial(PartialTableRow::new(
             2,
             TableRow::new(vec![Cell::I32(1), Cell::String("grown".to_string())]),
             vec![],
         ));
-        let expected_bytes = delete_row.size_hint() as u64 + partial_row.size_hint() as u64;
+        let expected_bytes = delete_row.size_hint() as u64
+            + update_delete_row.size_hint() as u64
+            + partial_row.size_hint() as u64;
         let write_activity = table_write_activity_for_mutations(
             "public_users".to_string(),
             &[
@@ -1320,10 +1325,7 @@ mod tests {
                     PgLsn::from(100),
                     PgLsn::from(100),
                     1,
-                    TableMutation::Update {
-                        delete_row: OldTableRow::Key(TableRow::new(vec![Cell::I32(1)])),
-                        new_row: partial_row,
-                    },
+                    TableMutation::Update { delete_row: update_delete_row, new_row: partial_row },
                 ),
             ],
         );

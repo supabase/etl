@@ -317,13 +317,13 @@ pub(crate) fn parse_replica_identity_column_names(
         protocol::ReplicaIdentity::Full => relation_body
             .columns()
             .iter()
-            .map(|column| column.name().map(std::string::ToString::to_string))
+            .map(|column| column.name().map(ToString::to_string))
             .collect::<Result<HashSet<String>, _>>()?,
         _ => relation_body
             .columns()
             .iter()
             .filter(|column| column.flags() & 1 == 1)
-            .map(|column| column.name().map(std::string::ToString::to_string))
+            .map(|column| column.name().map(ToString::to_string))
             .collect::<Result<HashSet<String>, _>>()?,
     };
 
