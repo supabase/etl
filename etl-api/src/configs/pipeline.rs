@@ -31,6 +31,35 @@ fn default_memory_backpressure() -> Option<MemoryBackpressureConfig> {
     Some(MemoryBackpressureConfig::default())
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct ReplicatorResourcesConfig {
+    #[schema(example = 500)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu_request_millicores: Option<i32>,
+    #[schema(example = 2000)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_request_mib: Option<i32>,
+}
+
+impl ReplicatorResourcesConfig {
+    /// Validates that configured resource requests are positive when present.
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(cpu_request_millicores) = self.cpu_request_millicores
+            && cpu_request_millicores <= 0
+        {
+            return Err("replicator cpu request must be greater than 0".to_string());
+        }
+
+        if let Some(memory_request_mib) = self.memory_request_mib
+            && memory_request_mib <= 0
+        {
+            return Err("replicator memory request must be greater than 0".to_string());
+        }
+
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct FullApiPipelineConfig {
     #[schema(example = "my_publication")]
@@ -59,7 +88,20 @@ pub struct FullApiPipelineConfig {
     pub table_sync_copy: Option<TableSyncCopyConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub invalidated_slot_behavior: Option<InvalidatedSlotBehavior>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replicator_resources: Option<ReplicatorResourcesConfig>,
     pub log_level: Option<LogLevel>,
+}
+
+impl FullApiPipelineConfig {
+    /// Validates optional pipeline-specific replicator resource requests.
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(replicator_resources) = &self.replicator_resources {
+            replicator_resources.validate()?;
+        }
+
+        Ok(())
+    }
 }
 
 impl From<StoredPipelineConfig> for FullApiPipelineConfig {
@@ -75,6 +117,7 @@ impl From<StoredPipelineConfig> for FullApiPipelineConfig {
             memory_backpressure: value.memory_backpressure,
             table_sync_copy: Some(value.table_sync_copy),
             invalidated_slot_behavior: Some(value.invalidated_slot_behavior),
+            replicator_resources: value.replicator_resources,
             log_level: value.log_level,
         }
     }
@@ -101,6 +144,8 @@ pub struct StoredPipelineConfig {
     pub table_sync_copy: TableSyncCopyConfig,
     #[serde(default)]
     pub invalidated_slot_behavior: InvalidatedSlotBehavior,
+    #[serde(default)]
+    pub replicator_resources: Option<ReplicatorResourcesConfig>,
     pub log_level: Option<LogLevel>,
 }
 
@@ -154,6 +199,7 @@ impl From<FullApiPipelineConfig> for StoredPipelineConfig {
             memory_backpressure: value.memory_backpressure,
             table_sync_copy: value.table_sync_copy.unwrap_or_default(),
             invalidated_slot_behavior: value.invalidated_slot_behavior.unwrap_or_default(),
+            replicator_resources: value.replicator_resources,
             log_level: value.log_level,
         }
     }
@@ -180,6 +226,10 @@ mod tests {
                 resume_threshold: 0.7,
             }),
             table_sync_copy: TableSyncCopyConfig::IncludeAllTables,
+            replicator_resources: Some(ReplicatorResourcesConfig {
+                cpu_request_millicores: Some(500),
+                memory_request_mib: Some(2000),
+            }),
             log_level: None,
             invalidated_slot_behavior: InvalidatedSlotBehavior::Error,
         };
@@ -213,6 +263,10 @@ mod tests {
             memory_backpressure: None,
             table_sync_copy: None,
             invalidated_slot_behavior: None,
+            replicator_resources: Some(ReplicatorResourcesConfig {
+                cpu_request_millicores: Some(500),
+                memory_request_mib: Some(2000),
+            }),
             log_level: Some(LogLevel::Debug),
         };
 
@@ -235,6 +289,7 @@ mod tests {
             memory_backpressure: None,
             table_sync_copy: None,
             invalidated_slot_behavior: None,
+            replicator_resources: None,
             log_level: None,
         };
 
@@ -260,5 +315,35 @@ mod tests {
         );
         assert_eq!(stored.memory_backpressure, None);
         assert_eq!(stored.invalidated_slot_behavior, InvalidatedSlotBehavior::Error);
+    }
+
+    #[test]
+    fn stored_pipeline_config_deserializes_without_replicator_resources() {
+        let config = StoredPipelineConfig {
+            publication_name: "test_publication".to_string(),
+            batch: BatchConfig { max_fill_ms: 5000, memory_budget_ratio: 0.2 },
+            table_error_retry_delay_ms: 2000,
+            table_error_retry_max_attempts: 7,
+            max_table_sync_workers: 4,
+            max_copy_connections_per_table: 8,
+            memory_refresh_interval_ms: 100,
+            memory_backpressure: Some(MemoryBackpressureConfig {
+                activate_threshold: 0.8,
+                resume_threshold: 0.7,
+            }),
+            table_sync_copy: TableSyncCopyConfig::IncludeAllTables,
+            replicator_resources: Some(ReplicatorResourcesConfig {
+                cpu_request_millicores: Some(500),
+                memory_request_mib: Some(2000),
+            }),
+            log_level: None,
+            invalidated_slot_behavior: InvalidatedSlotBehavior::Error,
+        };
+        let mut json = serde_json::to_value(config).unwrap();
+        json.as_object_mut().unwrap().remove("replicator_resources");
+
+        let deserialized: StoredPipelineConfig = serde_json::from_value(json).unwrap();
+
+        assert_eq!(deserialized.replicator_resources, None);
     }
 }

@@ -128,6 +128,9 @@ pub enum PipelineError {
 
     #[error(transparent)]
     Validation(#[from] ValidationError),
+
+    #[error("{0}")]
+    InvalidPipelineRequest(String),
 }
 
 impl From<PipelinesDbError> for PipelineError {
@@ -212,6 +215,7 @@ impl ResponseError for PipelineError {
             PipelineError::TenantId(_) | PipelineError::NotRollbackable(_) => {
                 StatusCode::BAD_REQUEST
             }
+            PipelineError::InvalidPipelineRequest(_) => StatusCode::BAD_REQUEST,
             PipelineError::PipelineLimitReached { .. } => StatusCode::UNPROCESSABLE_ENTITY,
         }
     }
@@ -502,6 +506,10 @@ pub struct ValidationFailureResponse {
     pub failure_type: FailureType,
 }
 
+fn validate_pipeline_request(config: &FullApiPipelineConfig) -> Result<(), PipelineError> {
+    config.validate().map_err(PipelineError::InvalidPipelineRequest)
+}
+
 impl From<ValidationFailure> for ValidationFailureResponse {
     fn from(failure: ValidationFailure) -> Self {
         Self { name: failure.name, reason: failure.reason, failure_type: failure.failure_type }
@@ -537,6 +545,7 @@ pub async fn create_pipeline(
 ) -> Result<impl Responder, PipelineError> {
     let tenant_id = extract_tenant_id(&req)?;
     let pipeline = pipeline.into_inner();
+    validate_pipeline_request(&pipeline.config)?;
 
     let mut txn = pool.begin().await?;
 
@@ -642,9 +651,13 @@ pub async fn read_pipeline(
 // Forcing {pipeline_id} to be all digits by appending :\\d+
 // to avoid this route clashing with /pipelines/stop
 #[post("/pipelines/{pipeline_id:\\d+}")]
+#[allow(clippy::too_many_arguments)]
 pub async fn update_pipeline(
     req: HttpRequest,
     pool: Data<PgPool>,
+    trusted_root_certs_cache: Data<TrustedRootCertsCache>,
+    api_config: Data<ApiConfig>,
+    k8s_client: Data<dyn K8sClient>,
     pipeline_id: Path<i64>,
     pipeline: Json<UpdatePipelineRequest>,
     encryption_key: Data<EncryptionKey>,
@@ -652,6 +665,8 @@ pub async fn update_pipeline(
     let tenant_id = extract_tenant_id(&req)?;
     let pipeline_id = pipeline_id.into_inner();
     let pipeline = pipeline.into_inner();
+    let k8s_client = k8s_client.into_inner();
+    validate_pipeline_request(&pipeline.config)?;
 
     let mut txn = pool.begin().await?;
 
@@ -674,6 +689,30 @@ pub async fn update_pipeline(
     )
     .await?
     .ok_or(PipelineError::PipelineNotFound(pipeline_id))?;
+
+    let (pipeline, replicator, image, source, destination) =
+        read_pipeline_components(&mut txn, tenant_id, pipeline_id, &encryption_key).await?;
+
+    if is_replicator_pod_stopped(k8s_client.as_ref(), tenant_id, replicator.id).await? {
+        txn.commit().await?;
+
+        return Ok(HttpResponse::Ok().finish());
+    }
+
+    let tls_config = trusted_root_certs_cache.get_tls_config(api_config.source.tls_enabled).await?;
+    create_or_update_pipeline_resources_in_k8s(
+        k8s_client.as_ref(),
+        tenant_id,
+        pipeline,
+        replicator,
+        image,
+        source,
+        destination,
+        api_config.supabase_api_url.as_deref(),
+        tls_config,
+    )
+    .await?;
+
     txn.commit().await?;
 
     Ok(HttpResponse::Ok().finish())
@@ -1359,6 +1398,7 @@ pub async fn validate_pipeline(
 ) -> Result<impl Responder, PipelineError> {
     let tenant_id = extract_tenant_id(&req)?;
     let request = request.into_inner();
+    validate_pipeline_request(&request.config)?;
 
     let source =
         db::sources::read_source(pool.as_ref(), tenant_id, request.source_id, &encryption_key)
