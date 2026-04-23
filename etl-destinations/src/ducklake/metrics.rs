@@ -70,6 +70,8 @@ pub(crate) const ETL_DUCKLAKE_TABLE_ACTIVE_DATA_FILES: &str =
     "etl_ducklake_table_active_data_files";
 pub(crate) const ETL_DUCKLAKE_TABLE_ACTIVE_DATA_BYTES: &str =
     "etl_ducklake_table_active_data_bytes";
+pub(crate) const ETL_DUCKLAKE_TABLE_ACTIVE_INLINED_DATA_BYTES: &str =
+    "etl_ducklake_table_active_inlined_data_bytes";
 pub(crate) const ETL_DUCKLAKE_TABLE_ACTIVE_DATA_FILE_AVG_SIZE_BYTES: &str =
     "etl_ducklake_table_active_data_file_avg_size_bytes";
 pub(crate) const ETL_DUCKLAKE_TABLE_SMALL_FILE_RATIO: &str = "etl_ducklake_table_small_file_ratio";
@@ -92,6 +94,7 @@ pub(crate) const ETL_DUCKLAKE_OLDEST_SCHEDULED_DELETION_AGE_SECONDS: &str =
     "etl_ducklake_oldest_scheduled_deletion_age_seconds";
 
 pub(crate) const BATCH_KIND_LABEL: &str = "batch_kind";
+pub(crate) const TABLE_LABEL: &str = "table";
 pub(crate) const SUB_BATCH_KIND_LABEL: &str = "sub_batch_kind";
 pub(crate) const PREPARED_ROWS_KIND_LABEL: &str = "prepared_rows_kind";
 pub(crate) const DELETE_ORIGIN_LABEL: &str = "delete_origin";
@@ -271,6 +274,12 @@ pub(crate) fn register_metrics() {
             ETL_DUCKLAKE_TABLE_ACTIVE_DATA_BYTES,
             Unit::Bytes,
             "Sampled active data bytes for one DuckLake table from the background metrics task."
+        );
+        describe_gauge!(
+            ETL_DUCKLAKE_TABLE_ACTIVE_INLINED_DATA_BYTES,
+            Unit::Bytes,
+            "Sampled active inlined data bytes for one DuckLake table from the background metrics \
+             task."
         );
         describe_histogram!(
             ETL_DUCKLAKE_TABLE_ACTIVE_DATA_FILE_AVG_SIZE_BYTES,
