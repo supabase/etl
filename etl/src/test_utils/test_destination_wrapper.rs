@@ -32,18 +32,14 @@ type TableRowCheckFn = Box<dyn Fn(&HashMap<TableId, Vec<TableRow>>) -> bool + Se
 type CombinedCheckFn =
     Box<dyn Fn(&[Event], &HashMap<TableId, Vec<TableRow>>) -> bool + Send + Sync>;
 
-type EventConditionEntry = (String, EventCheckFn, Arc<Notify>);
-type TableRowConditionEntry = (String, TableRowCheckFn, Arc<Notify>);
-type CombinedConditionEntry = (String, CombinedCheckFn, Arc<Notify>);
-
 struct Inner<D> {
     wrapped_destination: D,
     events: Vec<Event>,
     table_rows: HashMap<TableId, Vec<TableRow>>,
     truncated_tables: HashSet<TableId>,
-    event_conditions: Vec<EventConditionEntry>,
-    table_row_conditions: Vec<TableRowConditionEntry>,
-    combined_conditions: Vec<CombinedConditionEntry>,
+    event_conditions: Vec<(EventCheckFn, Arc<Notify>)>,
+    table_row_conditions: Vec<(TableRowCheckFn, Arc<Notify>)>,
+    combined_conditions: Vec<(CombinedCheckFn, Arc<Notify>)>,
     write_table_rows_called: u64,
     shutdown_called: bool,
 }
@@ -52,7 +48,7 @@ impl<D> Inner<D> {
     fn check_conditions(&mut self) {
         // Check event conditions
         let events = self.events.clone();
-        self.event_conditions.retain(|(_, condition, notify)| {
+        self.event_conditions.retain(|(condition, notify)| {
             let should_retain = !condition(&events);
             if !should_retain {
                 notify.notify_one();
@@ -62,7 +58,7 @@ impl<D> Inner<D> {
 
         // Check table row conditions
         let table_rows = self.table_rows.clone();
-        self.table_row_conditions.retain(|(_, condition, notify)| {
+        self.table_row_conditions.retain(|(condition, notify)| {
             let should_retain = !condition(&table_rows);
             if !should_retain {
                 notify.notify_one();
@@ -73,7 +69,7 @@ impl<D> Inner<D> {
         // Check combined conditions
         let events = self.events.clone();
         let table_rows = self.table_rows.clone();
-        self.combined_conditions.retain(|(_, condition, notify)| {
+        self.combined_conditions.retain(|(condition, notify)| {
             let should_retain = !condition(&events, &table_rows);
             if !should_retain {
                 notify.notify_one();
@@ -160,17 +156,9 @@ impl<D> TestDestinationWrapper<D> {
     {
         let notify = Arc::new(Notify::new());
         let mut inner = self.inner.write().await;
-        inner.event_conditions.push((
-            "custom event condition".to_owned(),
-            Box::new(condition),
-            notify.clone(),
-        ));
+        inner.event_conditions.push((Box::new(condition), notify.clone()));
 
-        TimedNotify::with_description(
-            notify,
-            crate::test_utils::notify::DEFAULT_NOTIFY_TIMEOUT,
-            "custom event condition",
-        )
+        TimedNotify::new(notify)
     }
 
     /// Registers a notification that fires when a specific number of events of
@@ -180,20 +168,7 @@ impl<D> TestDestinationWrapper<D> {
     /// specified timeout if the expected event count is not reached. This
     /// prevents tests from hanging indefinitely.
     pub async fn wait_for_events_count(&self, conditions: Vec<(EventType, u64)>) -> TimedNotify {
-        let notify = Arc::new(Notify::new());
-        let description = format!("event counts {:?}", conditions);
-        let mut inner = self.inner.write().await;
-        inner.event_conditions.push((
-            description.clone(),
-            Box::new(move |events| check_events_count(events, conditions.clone())),
-            notify.clone(),
-        ));
-
-        TimedNotify::with_description(
-            notify,
-            crate::test_utils::notify::DEFAULT_NOTIFY_TIMEOUT,
-            description,
-        )
+        self.notify_on_events(move |events| check_events_count(events, conditions.clone())).await
     }
 
     /// Registers a notification that fires when a specific number of events of
@@ -206,23 +181,11 @@ impl<D> TestDestinationWrapper<D> {
         &self,
         conditions: Vec<(EventType, u64)>,
     ) -> TimedNotify {
-        let notify = Arc::new(Notify::new());
-        let description = format!("deduped event counts {:?}", conditions);
-        let mut inner = self.inner.write().await;
-        inner.event_conditions.push((
-            description.clone(),
-            Box::new(move |events| {
-                let deduped = deduplicate_events(events);
-                check_events_count(&deduped, conditions.clone())
-            }),
-            notify.clone(),
-        ));
-
-        TimedNotify::with_description(
-            notify,
-            crate::test_utils::notify::DEFAULT_NOTIFY_TIMEOUT,
-            description,
-        )
+        self.notify_on_events(move |events| {
+            let deduped = deduplicate_events(events);
+            check_events_count(&deduped, conditions.clone())
+        })
+        .await
     }
 
     /// Registers a notification that fires when event conditions are met after
@@ -239,20 +202,15 @@ impl<D> TestDestinationWrapper<D> {
     /// specified timeout if the expected count is not reached.
     pub async fn wait_for_all_events(&self, conditions: Vec<EventCondition>) -> TimedNotify {
         let notify = Arc::new(Notify::new());
-        let description = format!("all event conditions {:?}", conditions);
         let mut inner = self.inner.write().await;
 
         let condition: CombinedCheckFn = Box::new(move |events, table_rows| {
             check_all_events_count(events, table_rows, conditions.clone())
         });
 
-        inner.combined_conditions.push((description.clone(), condition, notify.clone()));
+        inner.combined_conditions.push((condition, notify.clone()));
 
-        TimedNotify::with_description(
-            notify,
-            crate::test_utils::notify::DEFAULT_NOTIFY_TIMEOUT,
-            description,
-        )
+        TimedNotify::new(notify)
     }
 
     pub async fn clear_table_rows(&self) {
@@ -358,6 +316,7 @@ where
             if should_record_table_rows {
                 inner.table_rows.entry(table_id).or_default().extend(table_rows);
             }
+
             inner.check_conditions();
         }
 
@@ -406,6 +365,7 @@ where
                 if should_record_events {
                     inner.events.extend(events);
                 }
+
                 inner.check_conditions();
             }
         });

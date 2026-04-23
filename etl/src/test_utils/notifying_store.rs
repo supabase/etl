@@ -31,10 +31,10 @@ pub enum StateStoreMethod {
     RollbackTableReplicationState,
 }
 
-type TableStateTypeCondition = (TableId, TableReplicationPhaseType, String, Arc<Notify>);
+type TableStateTypeCondition = (TableId, TableReplicationPhaseType, Arc<Notify>);
 type TableStateCondition =
-    (TableId, String, Arc<Notify>, Box<dyn Fn(&TableReplicationPhase) -> bool + Send + Sync>);
-type TableSchemaCountCondition = (TableId, usize, String, Arc<Notify>);
+    (TableId, Arc<Notify>, Box<dyn Fn(&TableReplicationPhase) -> bool + Send + Sync>);
+type TableSchemaCountCondition = (TableId, usize, Arc<Notify>);
 
 struct Inner {
     table_replication_states: TableReplicationStates,
@@ -50,7 +50,7 @@ struct Inner {
 impl Inner {
     fn check_conditions(&mut self) {
         let table_states = Arc::clone(&self.table_replication_states);
-        self.table_state_type_conditions.retain(|(tid, expected_state, _, notify)| {
+        self.table_state_type_conditions.retain(|(tid, expected_state, notify)| {
             if let Some(state) = table_states.get(tid) {
                 let should_retain = *expected_state != state.as_type();
                 if !should_retain {
@@ -62,7 +62,7 @@ impl Inner {
             }
         });
 
-        self.table_state_conditions.retain(|(tid, _, notify, condition)| {
+        self.table_state_conditions.retain(|(tid, notify, condition)| {
             if let Some(state) = table_states.get(tid) {
                 let should_retain = !condition(state);
                 if !should_retain {
@@ -74,7 +74,7 @@ impl Inner {
             }
         });
 
-        self.table_schema_count_conditions.retain(|(tid, expected_count, _, notify)| {
+        self.table_schema_count_conditions.retain(|(tid, expected_count, notify)| {
             let schemas_count = self.table_schemas.get(tid).map_or(0, Vec::len);
             let should_retain = schemas_count < *expected_count;
             if !should_retain {
@@ -163,20 +163,10 @@ impl NotifyingStore {
         expected_state: TableReplicationPhaseType,
     ) -> TimedNotify {
         let notify = Arc::new(Notify::new());
-        let description = format!("table {table_id} state type {:?}", expected_state);
         let mut inner = self.inner.write().await;
-        inner.table_state_type_conditions.push((
-            table_id,
-            expected_state,
-            description.clone(),
-            notify.clone(),
-        ));
+        inner.table_state_type_conditions.push((table_id, expected_state, notify.clone()));
 
-        TimedNotify::with_description(
-            notify,
-            crate::test_utils::notify::DEFAULT_NOTIFY_TIMEOUT,
-            description,
-        )
+        TimedNotify::new(notify)
     }
 
     /// Registers a notification that fires when a table state matches a custom
@@ -190,20 +180,10 @@ impl NotifyingStore {
         F: Fn(&TableReplicationPhase) -> bool + Send + Sync + 'static,
     {
         let notify = Arc::new(Notify::new());
-        let description = format!("table {table_id} custom state condition");
         let mut inner = self.inner.write().await;
-        inner.table_state_conditions.push((
-            table_id,
-            description.clone(),
-            notify.clone(),
-            Box::new(condition),
-        ));
+        inner.table_state_conditions.push((table_id, notify.clone(), Box::new(condition)));
 
-        TimedNotify::with_description(
-            notify,
-            crate::test_utils::notify::DEFAULT_NOTIFY_TIMEOUT,
-            description,
-        )
+        TimedNotify::new(notify)
     }
 
     /// Registers a notification that fires when a table has stored at least the
@@ -218,20 +198,10 @@ impl NotifyingStore {
         expected_count: usize,
     ) -> TimedNotify {
         let notify = Arc::new(Notify::new());
-        let description = format!("table {table_id} schema count >= {expected_count}");
         let mut inner = self.inner.write().await;
-        inner.table_schema_count_conditions.push((
-            table_id,
-            expected_count,
-            description.clone(),
-            notify.clone(),
-        ));
+        inner.table_schema_count_conditions.push((table_id, expected_count, notify.clone()));
 
-        TimedNotify::with_description(
-            notify,
-            crate::test_utils::notify::DEFAULT_NOTIFY_TIMEOUT,
-            description,
-        )
+        TimedNotify::new(notify)
     }
 
     pub async fn reset_table_state(&self, table_id: TableId) -> EtlResult<()> {

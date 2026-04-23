@@ -18,28 +18,17 @@ pub const DEFAULT_NOTIFY_TIMEOUT: Duration = Duration::from_secs(240);
 pub struct TimedNotify {
     notify: Arc<Notify>,
     timeout_duration: Duration,
-    description: Arc<str>,
 }
 
 impl TimedNotify {
     /// Creates a new [`TimedNotify`] with the default timeout.
     pub fn new(notify: Arc<Notify>) -> Self {
-        Self::with_description(notify, DEFAULT_NOTIFY_TIMEOUT, "test notification")
+        Self::with_timeout(notify, DEFAULT_NOTIFY_TIMEOUT)
     }
 
     /// Creates a new [`TimedNotify`] with a custom timeout duration.
     pub fn with_timeout(notify: Arc<Notify>, timeout_duration: Duration) -> Self {
-        Self::with_description(notify, timeout_duration, "test notification")
-    }
-
-    /// Creates a new [`TimedNotify`] with a custom timeout duration and
-    /// description.
-    pub fn with_description(
-        notify: Arc<Notify>,
-        timeout_duration: Duration,
-        description: impl Into<Arc<str>>,
-    ) -> Self {
-        Self { notify, timeout_duration, description: description.into() }
+        Self { notify, timeout_duration }
     }
 
     /// Waits for a notification with timeout.
@@ -58,11 +47,10 @@ impl TimedNotify {
                 Ok(()) => {}
                 Err(_) => {
                     panic!(
-                        "Test notification timed out after {:?} while waiting for {} at {}:{}:{}. \
-                         This likely indicates the expected state was never reached. Check if the \
-                         condition is reachable.",
+                        "Test notification timed out after {:?} at {}:{}:{}. This likely \
+                         indicates the expected state was never reached. Check if the condition \
+                         is reachable.",
                         self.timeout_duration,
-                        self.description,
                         caller.file(),
                         caller.line(),
                         caller.column(),
@@ -80,9 +68,6 @@ impl TimedNotify {
 
 impl fmt::Debug for TimedNotify {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("TimedNotify")
-            .field("timeout_duration", &self.timeout_duration)
-            .field("description", &self.description)
-            .finish()
+        f.debug_struct("TimedNotify").field("timeout_duration", &self.timeout_duration).finish()
     }
 }
