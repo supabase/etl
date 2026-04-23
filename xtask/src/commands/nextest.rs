@@ -15,6 +15,8 @@ const SHARED_PG_FILTER: &str = "\
     test(exclusive_) | binary_id(etl::main) | (binary_id(etl-destinations::main) & \
                                 test(/^(bigquery_pipeline|ducklake_pipeline|iceberg_destination)::/\
                                 ))";
+const TRACING_SUCCESS_OUTPUT: &str = "immediate";
+const TRACING_FAILURE_OUTPUT: &str = "immediate-final";
 
 use super::shared::{DEFAULT_BASE_PORT, DEFAULT_PG_SHARD_COUNT};
 
@@ -186,6 +188,15 @@ fn nextest_command(mode: Mode) -> Command {
 
     if matches!(mode, Mode::LlvmCov) {
         cmd.arg("--no-report");
+    }
+
+    if std::env::var_os("ENABLE_TRACING").is_some() {
+        cmd.args([
+            "--success-output",
+            TRACING_SUCCESS_OUTPUT,
+            "--failure-output",
+            TRACING_FAILURE_OUTPUT,
+        ]);
     }
 
     cmd
