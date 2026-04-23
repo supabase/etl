@@ -54,8 +54,8 @@ use crate::{
             format_query_error_detail, run_duckdb_blocking,
         },
         config::{
-            MAINTENANCE_TARGET_FILE_SIZE, build_maintenance_setup_plan, build_setup_plan,
-            current_duckdb_extension_strategy,
+            MAINTENANCE_TARGET_FILE_SIZE, build_setup_plan, current_duckdb_extension_strategy,
+            maintenance_target_file_size_sql,
         },
         inline_size::DuckLakePendingInlineSizeSampler,
         maintenance::{
@@ -413,10 +413,6 @@ where
             metadata_schema.as_deref(),
             duckdb_memory_cache_limit.as_deref(),
         )?);
-        let maintenance_setup_plan = Arc::new(build_maintenance_setup_plan(
-            setup_plan.as_ref(),
-            Some(maintenance_target_file_size.as_ref()),
-        ));
 
         let manager = Arc::new(DuckLakeConnectionManager {
             setup_plan: Arc::clone(&setup_plan),
@@ -428,6 +424,32 @@ where
         let pool =
             Arc::new(build_warm_ducklake_pool(manager.as_ref().clone(), pool_size, "write").await?);
         let blocking_slots = Arc::new(Semaphore::new(pool_size as usize));
+
+        // `target_file_size` is a catalog-wide DuckLake option consumed during
+        // compaction. Apply it once on the write pool before the maintenance
+        // pool starts warming, so the maintenance worker does not need to
+        // mutate the catalog from a separate RW DuckDB instance during its
+        // background warm-up. Two RW instances ATTACHing the same catalog file
+        // and racing a catalog write against concurrent user writes caused
+        // lost commits.
+        let target_file_size_sql =
+            maintenance_target_file_size_sql(Some(maintenance_target_file_size.as_ref()));
+        run_duckdb_blocking(
+            Arc::clone(&pool),
+            Arc::clone(&blocking_slots),
+            DuckDbBlockingOperationKind::Foreground,
+            move |conn| -> EtlResult<()> {
+                conn.execute_batch(&target_file_size_sql).map_err(|error| {
+                    etl_error!(
+                        ErrorKind::DestinationQueryFailed,
+                        "DuckLake target_file_size configuration failed",
+                        source: error
+                    )
+                })?;
+                Ok(())
+            },
+        )
+        .await?;
         let pending_inline_size_sampler =
             if matches!(catalog_url.scheme(), "postgres" | "postgresql") {
                 match run_duckdb_blocking(
@@ -480,7 +502,7 @@ where
         destination.maintenance_worker = Arc::new(
             spawn_ducklake_maintenance_worker(
                 DuckLakeConnectionManager {
-                    setup_plan: Arc::clone(&maintenance_setup_plan),
+                    setup_plan: Arc::clone(&setup_plan),
                     disable_extension_autoload,
                     #[cfg(feature = "test-utils")]
                     open_count: Arc::new(AtomicUsize::new(0)),

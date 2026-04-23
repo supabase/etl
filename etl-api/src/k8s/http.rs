@@ -15,7 +15,7 @@ use tracing::debug;
 
 use crate::{
     config::K8sConfig,
-    configs::log::LogLevel,
+    configs::{log::LogLevel, pipeline::ReplicatorResourcesConfig},
     k8s::{DestinationType, K8sClient, K8sError, PodPhase, PodStatus, ReplicatorConfigMapFile},
 };
 
@@ -121,7 +121,7 @@ impl ReplicatorResourceConfig {
     /// environment.
     #[cfg(test)]
     fn load(environment: &Environment) -> Result<Self, K8sError> {
-        Self::load_with_overrides(environment, &K8sConfig::default())
+        Self::load_with_overrides(environment, &K8sConfig::default(), None)
     }
 
     /// Builds runtime limits from environment defaults with optional config
@@ -129,6 +129,7 @@ impl ReplicatorResourceConfig {
     fn load_with_overrides(
         environment: &Environment,
         k8s_config: &K8sConfig,
+        replicator_resources: Option<&ReplicatorResourcesConfig>,
     ) -> Result<Self, K8sError> {
         let (default_replicator_memory_request, default_replicator_cpu_request) = match environment
         {
@@ -146,13 +147,13 @@ impl ReplicatorResourceConfig {
             }
             _ => (VECTOR_MEMORY_REQUEST_NON_PROD_DEFAULT, VECTOR_CPU_REQUEST_NON_PROD_DEFAULT),
         };
-        let replicator_memory_request = k8s_config
-            .replicator_resources
-            .replicator_memory_request_mib
+        let replicator_memory_request = replicator_resources
+            .and_then(|config| config.memory_request_mib)
+            .or(k8s_config.replicator_resources.replicator_memory_request_mib)
             .unwrap_or(default_replicator_memory_request);
-        let replicator_cpu_request = k8s_config
-            .replicator_resources
-            .replicator_cpu_request_millicores
+        let replicator_cpu_request = replicator_resources
+            .and_then(|config| config.cpu_request_millicores)
+            .or(k8s_config.replicator_resources.replicator_cpu_request_millicores)
             .unwrap_or(default_replicator_cpu_request);
         let vector_memory_request = k8s_config
             .replicator_resources
@@ -498,12 +499,17 @@ impl K8sClient for HttpK8sClient {
         prefix: &str,
         replicator_image: &str,
         environment: Environment,
+        replicator_resources: Option<&ReplicatorResourcesConfig>,
         destination_type: DestinationType,
         log_level: LogLevel,
     ) -> Result<(), K8sError> {
         debug!("patching stateful set");
 
-        let config = ReplicatorResourceConfig::load_with_overrides(&environment, &self.k8s_config)?;
+        let config = ReplicatorResourceConfig::load_with_overrides(
+            &environment,
+            &self.k8s_config,
+            replicator_resources,
+        )?;
 
         let stateful_set_name = create_stateful_set_name(prefix);
 
@@ -1193,11 +1199,69 @@ mod tests {
     use insta::assert_json_snapshot;
 
     use super::*;
+    use crate::configs::pipeline::ReplicatorResourcesConfig;
 
     const TENANT_ID: &str = "abcdefghijklmnopqrst";
 
     fn create_k8s_object_prefix(tenant_id: &str, replicator_id: i64) -> String {
         format!("{tenant_id}-{replicator_id}")
+    }
+
+    #[test]
+    fn test_replicator_resource_config_uses_environment_defaults() {
+        let prod = ReplicatorResourceConfig::load(&Environment::Prod).unwrap();
+        let staging = ReplicatorResourceConfig::load(&Environment::Staging).unwrap();
+
+        assert_eq!(prod.replicator_cpu_request, "500m");
+        assert_eq!(prod.replicator_memory_request, "500Mi");
+        assert_eq!(staging.replicator_cpu_request, "125m");
+        assert_eq!(staging.replicator_memory_request, "250Mi");
+    }
+
+    #[test]
+    fn test_replicator_resource_config_uses_pipeline_overrides() {
+        let overrides = ReplicatorResourcesConfig {
+            cpu_request_millicores: Some(750),
+            memory_request_mib: Some(1536),
+        };
+
+        let config = ReplicatorResourceConfig::load_with_overrides(
+            &Environment::Prod,
+            &K8sConfig::default(),
+            Some(&overrides),
+        )
+        .unwrap();
+
+        assert_eq!(config.replicator_cpu_request, "750m");
+        assert_eq!(config.replicator_memory_request, "1536Mi");
+        assert_eq!(config.replicator_cpu_limit, "1500m");
+        assert_eq!(config.replicator_memory_limit, "1843Mi");
+    }
+
+    #[test]
+    fn test_replicator_resource_config_prefers_pipeline_over_api_config() {
+        let overrides = ReplicatorResourcesConfig {
+            cpu_request_millicores: Some(900),
+            memory_request_mib: Some(1800),
+        };
+        let k8s_config = K8sConfig {
+            replicator_resources: crate::config::ReplicatorResourcesConfig {
+                replicator_cpu_request_millicores: Some(300),
+                replicator_memory_request_mib: Some(400),
+                vector_cpu_request_millicores: None,
+                vector_memory_request_mib: None,
+            },
+        };
+
+        let config = ReplicatorResourceConfig::load_with_overrides(
+            &Environment::Staging,
+            &k8s_config,
+            Some(&overrides),
+        )
+        .unwrap();
+
+        assert_eq!(config.replicator_cpu_request, "900m");
+        assert_eq!(config.replicator_memory_request, "1800Mi");
     }
 
     #[test]
