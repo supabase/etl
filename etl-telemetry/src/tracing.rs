@@ -207,9 +207,10 @@ where
     let mut map = serde_json::Map::new();
 
     let ext = span.extensions();
-    let data = ext.get::<FormattedFields<N>>().expect("formatted span fields must exist");
-
-    if let Ok(serde_json::Value::Object(fields)) = serde_json::from_str::<serde_json::Value>(data) {
+    if let Some(data) = ext.get::<FormattedFields<N>>()
+        && let Ok(serde_json::Value::Object(fields)) =
+            serde_json::from_str::<serde_json::Value>(data)
+    {
         map.extend(fields);
     }
 

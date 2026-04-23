@@ -127,10 +127,18 @@ async fn build_destination(
     data_url: &Url,
     store: NotifyingStore,
 ) -> TestDestinationWrapper<DuckLakeDestination<NotifyingStore>> {
-    let raw_destination =
-        DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
-            .await
-            .expect("failed to create DuckLake destination");
+    let raw_destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .expect("failed to create DuckLake destination");
 
     TestDestinationWrapper::wrap(raw_destination)
 }

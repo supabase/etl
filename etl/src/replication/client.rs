@@ -164,7 +164,13 @@ impl GetOrCreateSlotResult {
     pub(crate) fn get_start_lsn(&self) -> PgLsn {
         match self {
             GetOrCreateSlotResult::CreateSlot(result) => result.consistent_point,
-            GetOrCreateSlotResult::GetSlot(result) => result.confirmed_flush_lsn,
+            GetOrCreateSlotResult::GetSlot(result) => {
+                // `START_REPLICATION` resumes from the requested position, so
+                // when a slot already reports a durable flush point we must
+                // advance past that byte to avoid replaying the last flushed
+                // transaction after reconnect.
+                PgLsn::from(u64::from(result.confirmed_flush_lsn).saturating_add(1))
+            }
         }
     }
 }
@@ -212,6 +218,14 @@ impl PgReplicationTransaction {
     /// Retrieves the schema information for the supplied table.
     pub async fn get_table_schema(&self, table_id: TableId) -> EtlResult<TableSchema> {
         self.client.get_table_schema(table_id).await
+    }
+
+    /// Retrieves the schema and identity information for the supplied table.
+    pub(crate) async fn get_table_schema_with_identity(
+        &self,
+        table_id: TableId,
+    ) -> EtlResult<(TableSchema, IdentityMessage)> {
+        self.client.get_table_schema_with_identity(table_id).await
     }
 
     /// Retrieves the names of columns being replicated for a table in a
@@ -1191,6 +1205,23 @@ impl PgReplicationClient {
             identity.primary_key_attnums,
             SnapshotId::initial(),
         ))
+    }
+
+    /// Retrieves the full schema and identity information for a single table.
+    async fn get_table_schema_with_identity(
+        &self,
+        table_id: TableId,
+    ) -> EtlResult<(TableSchema, IdentityMessage)> {
+        let (table_name, columns, identity) = self.get_table_schema_snapshot(table_id).await?;
+        let table_schema = build_table_schema(
+            table_id,
+            table_name,
+            columns,
+            identity.primary_key_attnums.clone(),
+            SnapshotId::initial(),
+        );
+
+        Ok((table_schema, identity))
     }
 
     /// Loads the table name and schema information for a given table OID.

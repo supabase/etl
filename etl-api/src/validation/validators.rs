@@ -696,6 +696,8 @@ struct DucklakeValidator {
     s3_url_style: Option<String>,
     s3_use_ssl: Option<bool>,
     metadata_schema: Option<String>,
+    duckdb_memory_cache_limit: Option<String>,
+    maintenance_target_file_size: Option<String>,
 }
 
 impl DucklakeValidator {
@@ -711,6 +713,8 @@ impl DucklakeValidator {
         s3_url_style: Option<String>,
         s3_use_ssl: Option<bool>,
         metadata_schema: Option<String>,
+        duckdb_memory_cache_limit: Option<String>,
+        maintenance_target_file_size: Option<String>,
     ) -> Self {
         Self {
             catalog_url,
@@ -723,6 +727,8 @@ impl DucklakeValidator {
             s3_url_style,
             s3_use_ssl,
             metadata_schema,
+            duckdb_memory_cache_limit,
+            maintenance_target_file_size,
         }
     }
 }
@@ -782,6 +788,8 @@ impl Validator for DucklakeValidator {
             self.pool_size,
             s3_config,
             self.metadata_schema.clone(),
+            self.duckdb_memory_cache_limit.clone(),
+            self.maintenance_target_file_size.clone(),
             MemoryStore::new(),
         )
         .await
@@ -936,6 +944,8 @@ impl Validator for DestinationValidator {
                 s3_url_style,
                 s3_use_ssl,
                 metadata_schema,
+                duckdb_memory_cache_limit,
+                maintenance_target_file_size,
             } => {
                 let validator = DucklakeValidator::new(
                     catalog_url.clone(),
@@ -950,6 +960,8 @@ impl Validator for DestinationValidator {
                     s3_url_style.clone(),
                     *s3_use_ssl,
                     metadata_schema.clone(),
+                    duckdb_memory_cache_limit.clone(),
+                    maintenance_target_file_size.clone(),
                 );
                 validator.validate(ctx).await
             }

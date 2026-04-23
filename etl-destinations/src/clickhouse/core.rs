@@ -11,7 +11,8 @@ use etl::{
     state::destination_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus},
     store::{schema::SchemaStore, state::StateStore},
     types::{
-        Cell, Event, PgLsn, ReplicatedTableSchema, SchemaDiff, TableId, TableRow, is_array_type,
+        Cell, Event, OldTableRow, PgLsn, ReplicatedTableSchema, SchemaDiff, TableId, TableRow,
+        UpdatedTableRow, is_array_type,
     },
 };
 use parking_lot::RwLock;
@@ -484,6 +485,13 @@ where
                         });
                     }
                     Event::Update(update) => {
+                        let table_row = match update.updated_table_row {
+                            UpdatedTableRow::Full(row) => row,
+                            UpdatedTableRow::Partial(_) => {
+                                warn!("skipping partial update row for ClickHouse");
+                                continue;
+                            }
+                        };
                         let table_id = update.replicated_table_schema.id();
                         table_schemas
                             .entry(table_id)
@@ -491,13 +499,16 @@ where
                         table_id_to_rows.entry(table_id).or_default().push(PendingRow {
                             operation: CdcOperation::Update,
                             lsn: update.commit_lsn,
-                            cells: update.table_row.into_values(),
+                            cells: table_row.into_values(),
                         });
                     }
                     Event::Delete(delete) => {
-                        let Some((_, old_row)) = delete.old_table_row else {
+                        let Some(old_table_row) = delete.old_table_row else {
                             info!("delete event has no row data, skipping");
                             continue;
+                        };
+                        let old_row = match old_table_row {
+                            OldTableRow::Full(row) | OldTableRow::Key(row) => row,
                         };
                         let table_id = delete.replicated_table_schema.id();
                         table_schemas
