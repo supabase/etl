@@ -8,13 +8,13 @@ use pg_escape::{quote_identifier, quote_literal};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use url::Url;
 
-/// Pending inline insert-data bytes sampled from the Postgres DuckLake catalog.
+/// Pending inlined bytes sampled from the Postgres DuckLake catalog.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) struct DuckLakePendingInlineDataSizes {
-    pub(super) inlined_data_bytes: u64,
+    pub(super) inlined_bytes: u64,
 }
 
-/// Postgres-backed sampler for DuckLake inline insert-data table sizes.
+/// Postgres-backed sampler for DuckLake inlined catalog table sizes.
 #[derive(Clone)]
 pub(super) struct DuckLakePendingInlineSizeSampler {
     metadata_schema: String,
@@ -45,13 +45,13 @@ impl DuckLakePendingInlineSizeSampler {
         Ok(Some(Self { metadata_schema, pool }))
     }
 
-    /// Samples pending inline insert-data bytes for one DuckLake table.
+    /// Samples pending inlined bytes for one DuckLake table.
     pub(super) async fn sample_table(
         &self,
         table_name: &str,
     ) -> EtlResult<DuckLakePendingInlineDataSizes> {
         let sql = pending_inline_data_bytes_query(&self.metadata_schema);
-        let inlined_data_bytes: i64 =
+        let inlined_bytes: i64 =
             sqlx::query_scalar(&sql).bind(table_name).fetch_one(&self.pool).await.map_err(
                 |source| {
                     etl_error!(
@@ -62,12 +62,11 @@ impl DuckLakePendingInlineSizeSampler {
                 },
             )?;
 
-        Ok(DuckLakePendingInlineDataSizes { inlined_data_bytes: inlined_data_bytes.max(0) as u64 })
+        Ok(DuckLakePendingInlineDataSizes { inlined_bytes: inlined_bytes.max(0) as u64 })
     }
 }
 
-/// Returns the PostgreSQL query that measures one table's inline insert-data
-/// size.
+/// Returns the PostgreSQL query that measures one table's pending inlined size.
 fn pending_inline_data_bytes_query(metadata_schema: &str) -> String {
     let metadata_schema_literal = quote_literal(metadata_schema);
     let metadata_schema = quote_identifier(metadata_schema);
@@ -81,20 +80,41 @@ fn pending_inline_data_bytes_query(metadata_schema: &str) -> String {
              WHERE end_snapshot IS NULL AND table_name = $1
              LIMIT 1
          ),
-         target_inline_table AS (
+         target_inline_tables AS (
              SELECT table_name
              FROM {metadata_schema}.{ducklake_inlined_data_tables}
              WHERE table_id = (SELECT table_id FROM target_table)
-             LIMIT 1
+         ),
+         inline_data_bytes AS (
+             SELECT COALESCE(
+                 SUM(
+                     pg_total_relation_size(
+                         to_regclass(
+                             format('%I.%I', {metadata_schema_literal}, table_name)
+                         )
+                     )
+                 ),
+                 0
+             ) AS total_bytes
+             FROM target_inline_tables
+         ),
+         inline_delete_bytes AS (
+             SELECT COALESCE(
+                 pg_total_relation_size(
+                     to_regclass(
+                         format(
+                             '%I.%I',
+                             {metadata_schema_literal},
+                             format('ducklake_inlined_delete_%s', (SELECT table_id FROM target_table))
+                         )
+                     )
+                 ),
+                 0
+             ) AS total_bytes
          )
-         SELECT COALESCE(
-             pg_total_relation_size(
-                 to_regclass(
-                     format('%I.%I', {metadata_schema_literal}, (SELECT table_name FROM target_inline_table))
-                 )
-             ),
-             0
-         );"#
+         SELECT
+             (SELECT total_bytes FROM inline_data_bytes)
+             + (SELECT total_bytes FROM inline_delete_bytes);"#
     )
 }
 
@@ -108,7 +128,9 @@ mod tests {
 
         assert!(sql.contains("ducklake_table"));
         assert!(sql.contains("ducklake_inlined_data_tables"));
+        assert!(sql.contains("ducklake_inlined_delete_%s"));
         assert!(sql.contains("duck'lake"));
         assert!(sql.contains(r#"format('%I.%I', 'duck''lake'"#));
+        assert!(sql.contains("SUM("));
     }
 }

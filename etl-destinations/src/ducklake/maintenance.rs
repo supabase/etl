@@ -42,8 +42,7 @@ use crate::ducklake::{
 const MAINTENANCE_POOL_SIZE: u32 = 1;
 /// Poll interval for checking per-table inline flush thresholds.
 const MAINTENANCE_FLUSH_POLL_INTERVAL: Duration = Duration::from_secs(30);
-/// Pending inline insert-data bytes threshold that triggers a background inline
-/// flush.
+/// Pending inlined bytes threshold that triggers a background inline flush.
 const MAINTENANCE_PENDING_INLINED_DATA_BYTES_THRESHOLD: u64 = 10_000_000;
 /// Estimated ratio from raw row payload to compressed parquet bytes.
 const PARQUET_COMPRESSION_RATIO_ESTIMATE: u64 = 4;
@@ -263,7 +262,7 @@ impl TableMaintenanceState {
         self.last_write_at = Some(now);
     }
 
-    /// Records one sampled inline insert-data snapshot for this table.
+    /// Records one sampled inlined-data snapshot for this table.
     fn record_pending_inline_data_sizes(
         &mut self,
         sampled_at: Instant,
@@ -292,7 +291,7 @@ impl TableMaintenanceState {
             && self.current_pending_inline_data_sizes().is_none()
     }
 
-    /// Returns the latest inline insert-data sample covering the current dirty
+    /// Returns the latest inlined-data sample covering the current dirty
     /// period.
     fn current_pending_inline_data_sizes(&self) -> Option<DuckLakePendingInlineDataSizes> {
         let sizes = self.latest_pending_inline_data_sizes?;
@@ -319,7 +318,7 @@ impl TableMaintenanceState {
         pending_rows_threshold: Option<u64>,
     ) -> Option<MaintenanceReason> {
         if let Some(sizes) = self.current_pending_inline_data_sizes() {
-            return (sizes.inlined_data_bytes
+            return (sizes.inlined_bytes
                 >= (MAINTENANCE_PENDING_INLINED_DATA_BYTES_THRESHOLD
                     * PARQUET_COMPRESSION_RATIO_ESTIMATE))
                 .then_some(MaintenanceReason::PendingInlinedDataBytesThreshold);
@@ -1514,7 +1513,7 @@ mod tests {
         state.record_pending_inline_data_sizes(
             now + Duration::from_secs(1),
             DuckLakePendingInlineDataSizes {
-                inlined_data_bytes: MAINTENANCE_PENDING_INLINED_DATA_BYTES_THRESHOLD
+                inlined_bytes: MAINTENANCE_PENDING_INLINED_DATA_BYTES_THRESHOLD
                     * PARQUET_COMPRESSION_RATIO_ESTIMATE,
             },
         );
@@ -1533,7 +1532,7 @@ mod tests {
         state.record_pending_inline_data_sizes(
             now + Duration::from_secs(1),
             DuckLakePendingInlineDataSizes {
-                inlined_data_bytes: MAINTENANCE_PENDING_INLINED_DATA_BYTES_THRESHOLD - 1,
+                inlined_bytes: MAINTENANCE_PENDING_INLINED_DATA_BYTES_THRESHOLD - 1,
             },
         );
 

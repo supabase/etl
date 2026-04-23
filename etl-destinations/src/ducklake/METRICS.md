@@ -104,12 +104,13 @@ How to read it:
 
 - `task="flush"` with
   `reason="pending_inlined_data_bytes_threshold"` means the flush was
-  scheduled from sampled inline insert-data table size in a PostgreSQL-backed
-  DuckLake catalog.
+  scheduled from sampled inlined catalog-table size in a PostgreSQL-backed
+  DuckLake catalog. This includes both inlined inserts and inlined deletions.
 - `task="flush"` with `reason="pending_bytes_threshold"` means the flush was
-  scheduled because the fallback estimated pre-compression inline bytes
+  scheduled because the fallback estimated pre-compression inlined bytes
   crossed the configured threshold. The current heuristic assumes a 4:1
-  raw-to-parquet compression ratio.
+  raw-to-parquet compression ratio when direct catalog-size sampling is not
+  available.
 - `task="flush"` with `reason="pending_inserted_rows_threshold"` means the
   optional row-count threshold was enabled in code and fired before shutdown.
 - `task="scheduled_maintenance"` with `reason="merge_interval"` means the

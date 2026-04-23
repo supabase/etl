@@ -23,8 +23,8 @@ use etl::{
     error::{ErrorKind, EtlResult},
     etl_error,
     types::{
-        Cell, EventSequenceKey, OldTableRow, PartialTableRow, ReplicatedTableSchema, TableRow,
-        UpdatedTableRow,
+        Cell, EventSequenceKey, OldTableRow, PartialTableRow, ReplicatedTableSchema, SizeHint,
+        TableRow, UpdatedTableRow,
     },
 };
 use metrics::{counter, histogram};
@@ -164,15 +164,13 @@ impl TrackedTableMutation {
         EventSequenceKey::new(self.commit_lsn, self.tx_ordinal)
     }
 
-    /// Returns the row that will be upserted for this mutation, if any.
-    pub(super) fn upsert_row(&self) -> Option<&TableRow> {
+    /// Returns the approximate payload bytes that this mutation contributes to
+    /// inline-maintenance accounting.
+    pub(super) fn write_activity_size_hint(&self) -> u64 {
         match &self.mutation {
-            TableMutation::Insert(row) | TableMutation::Replace(row) => Some(row),
-            TableMutation::Update { new_row, .. } => match new_row {
-                UpdatedTableRow::Full(row) => Some(row),
-                UpdatedTableRow::Partial(_) => None,
-            },
-            TableMutation::Delete(_) => None,
+            TableMutation::Insert(row) | TableMutation::Replace(row) => row.size_hint() as u64,
+            TableMutation::Delete(row) => row.size_hint() as u64,
+            TableMutation::Update { new_row, .. } => new_row.size_hint() as u64,
         }
     }
 }
@@ -1108,16 +1106,14 @@ fn delete_predicate_from_row<'a>(
 ) -> EtlResult<String> {
     let row = row.into();
     let replicated_column_schemas: Vec<_> = replicated_table_schema.column_schemas().collect();
-
-    if !replicated_column_schemas
-        .iter()
-        .any(|column_schema| column_schema.primary_key_ordinal_position.is_some())
-    {
+    let identity_column_schemas: Vec<_> =
+        replicated_table_schema.identity_column_schemas().collect();
+    if identity_column_schemas.is_empty() {
         return Err(etl_error!(
             ErrorKind::InvalidState,
-            "DuckLake delete requires a primary key",
+            "DuckLake delete requires a replica identity",
             format!(
-                "Table '{}' has no replicated primary key columns",
+                "Table '{}' has no replicated replica-identity columns",
                 replicated_table_schema.name()
             )
         ));
@@ -1138,9 +1134,8 @@ fn delete_predicate_from_row<'a>(
                 ));
             }
 
-            let mut identity_columns = replicated_table_schema.identity_column_schemas().peekable();
-            let mut key_values =
-                Vec::with_capacity(replicated_table_schema.identity_column_schemas().len());
+            let mut identity_columns = identity_column_schemas.iter().copied().peekable();
+            let mut key_values = Vec::with_capacity(identity_column_schemas.len());
 
             for (column_schema, value) in replicated_column_schemas.iter().zip(row.values()) {
                 if identity_columns.peek().is_some_and(|identity_column| {
@@ -1154,22 +1149,20 @@ fn delete_predicate_from_row<'a>(
             key_values
         }
         DeletePredicateRowRef::Key(row) => {
-            let key_column_schemas: Vec<_> =
-                replicated_table_schema.identity_column_schemas().collect();
-            if row.values().len() != key_column_schemas.len() {
+            if row.values().len() != identity_column_schemas.len() {
                 return Err(etl_error!(
                     ErrorKind::InvalidState,
                     "DuckLake key image does not match replica identity",
                     format!(
                         "Expected {} key values for table '{}', got {}",
-                        key_column_schemas.len(),
+                        identity_column_schemas.len(),
                         replicated_table_schema.name(),
                         row.values().len()
                     )
                 ));
             }
 
-            key_column_schemas.into_iter().zip(row.values()).collect()
+            identity_column_schemas.iter().copied().zip(row.values()).collect()
         }
     };
 
@@ -2073,8 +2066,8 @@ fn maybe_fail_after_copy_batch_commit_for_tests(table_name: &str) -> EtlResult<(
 #[cfg(test)]
 mod tests {
     use etl::types::{
-        ColumnSchema, OldTableRow, PartialTableRow, ReplicatedTableSchema, TableId, TableName,
-        TableSchema, Type as PgType, UpdatedTableRow,
+        ColumnSchema, IdentityMask, OldTableRow, PartialTableRow, ReplicatedTableSchema,
+        ReplicationMask, TableId, TableName, TableSchema, Type as PgType, UpdatedTableRow,
     };
 
     use super::*;
@@ -2095,7 +2088,7 @@ mod tests {
     }
 
     #[test]
-    fn delete_predicate_from_row_uses_only_primary_key_columns() {
+    fn delete_predicate_from_row_uses_only_replica_identity_columns() {
         let replicated_table_schema = ReplicatedTableSchema::all(Arc::new(TableSchema::new(
             TableId::new(1),
             TableName::new("public".to_string(), "users".to_string()),
@@ -2112,6 +2105,78 @@ mod tests {
             delete_predicate_from_row(&replicated_table_schema, &row).unwrap(),
             "tenant_id = 7 AND id = 42"
         );
+    }
+
+    #[test]
+    fn delete_predicate_from_row_supports_alternative_identity_without_primary_key() {
+        let table_schema = Arc::new(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_string(), "users".to_string()),
+            vec![
+                ColumnSchema::new("id".to_string(), PgType::INT4, -1, 1, None, false),
+                ColumnSchema::new("email".to_string(), PgType::TEXT, -1, 2, None, false),
+                ColumnSchema::new("name".to_string(), PgType::TEXT, -1, 3, None, true),
+            ],
+        ));
+        let replicated_table_schema = ReplicatedTableSchema::from_masks(
+            Arc::clone(&table_schema),
+            ReplicationMask::all(&table_schema),
+            IdentityMask::from_bytes(vec![0, 1, 0]),
+        );
+        let row = TableRow::new(vec![
+            Cell::I32(7),
+            Cell::String("alice@example.com".to_string()),
+            Cell::String("alice".to_string()),
+        ]);
+
+        assert_eq!(
+            delete_predicate_from_row(&replicated_table_schema, &row).unwrap(),
+            "email = 'alice@example.com'"
+        );
+    }
+
+    #[test]
+    fn delete_predicate_from_row_uses_full_replica_identity_columns() {
+        let table_schema = Arc::new(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_string(), "users".to_string()),
+            vec![
+                ColumnSchema::new("id".to_string(), PgType::INT4, -1, 1, Some(1), false),
+                ColumnSchema::new("email".to_string(), PgType::TEXT, -1, 2, None, false),
+                ColumnSchema::new("name".to_string(), PgType::TEXT, -1, 3, None, true),
+            ],
+        ));
+        let replicated_table_schema = ReplicatedTableSchema::from_masks(
+            Arc::clone(&table_schema),
+            ReplicationMask::all(&table_schema),
+            IdentityMask::from_bytes(vec![1, 1, 1]),
+        );
+        let row = TableRow::new(vec![
+            Cell::I32(7),
+            Cell::String("alice@example.com".to_string()),
+            Cell::String("alice".to_string()),
+        ]);
+
+        assert_eq!(
+            delete_predicate_from_row(&replicated_table_schema, &row).unwrap(),
+            "id = 7 AND email = 'alice@example.com' AND name = 'alice'"
+        );
+    }
+
+    #[test]
+    fn delete_predicate_from_row_rejects_missing_replica_identity() {
+        let table_schema = Arc::new(make_schema());
+        let replicated_table_schema = ReplicatedTableSchema::from_masks(
+            Arc::clone(&table_schema),
+            ReplicationMask::all(&table_schema),
+            IdentityMask::from_bytes(vec![0, 0]),
+        );
+        let row = TableRow::new(vec![Cell::I32(1), Cell::String("alice".to_string())]);
+
+        let error = delete_predicate_from_row(&replicated_table_schema, &row).unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::InvalidState);
+        assert_eq!(error.description(), Some("DuckLake delete requires a replica identity"));
     }
 
     #[test]
@@ -2167,6 +2232,125 @@ mod tests {
             PreparedTableMutation::Update { assignments, predicate } => {
                 assert_eq!(assignments, &vec!["id = 1".to_string(), "name = 'after'".to_string()]);
                 assert_eq!(predicate, "id = 1");
+            }
+            PreparedTableMutation::Upsert(_) | PreparedTableMutation::Delete { .. } => {
+                panic!("expected update")
+            }
+        }
+    }
+
+    #[test]
+    fn prepare_table_mutations_update_uses_alternative_identity_key_for_changed_key_update() {
+        let table_schema = Arc::new(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_string(), "users".to_string()),
+            vec![
+                ColumnSchema::new("id".to_string(), PgType::INT4, -1, 1, Some(1), false),
+                ColumnSchema::new("email".to_string(), PgType::TEXT, -1, 2, None, false),
+                ColumnSchema::new("name".to_string(), PgType::TEXT, -1, 3, None, true),
+                ColumnSchema::new("payload".to_string(), PgType::TEXT, -1, 4, None, true),
+            ],
+        ));
+        let replicated_table_schema = ReplicatedTableSchema::from_masks(
+            Arc::clone(&table_schema),
+            ReplicationMask::all(&table_schema),
+            IdentityMask::from_bytes(vec![0, 1, 0, 0]),
+        );
+
+        let prepared = prepare_table_mutations(
+            &replicated_table_schema,
+            vec![TableMutation::Update {
+                delete_row: OldTableRow::Key(TableRow::new(vec![Cell::String(
+                    "alice@example.com".to_string(),
+                )])),
+                new_row: UpdatedTableRow::Partial(PartialTableRow::new(
+                    4,
+                    TableRow::new(vec![
+                        Cell::I32(1),
+                        Cell::String("alice@new.example.com".to_string()),
+                        Cell::String("ripe".to_string()),
+                    ]),
+                    vec![3],
+                )),
+            }],
+        )
+        .unwrap();
+
+        assert_eq!(prepared.len(), 1);
+        match &prepared[0] {
+            PreparedTableMutation::Update { assignments, predicate } => {
+                assert_eq!(
+                    assignments,
+                    &vec![
+                        "id = 1".to_string(),
+                        "email = 'alice@new.example.com'".to_string(),
+                        "name = 'ripe'".to_string(),
+                    ]
+                );
+                assert_eq!(predicate, "email = 'alice@example.com'");
+            }
+            PreparedTableMutation::Upsert(_) | PreparedTableMutation::Delete { .. } => {
+                panic!("expected update")
+            }
+        }
+    }
+
+    #[test]
+    fn prepare_table_mutations_update_uses_full_replica_identity_predicate() {
+        let table_schema = Arc::new(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_string(), "users".to_string()),
+            vec![
+                ColumnSchema::new("id".to_string(), PgType::INT4, -1, 1, Some(1), false),
+                ColumnSchema::new("email".to_string(), PgType::TEXT, -1, 2, None, false),
+                ColumnSchema::new("name".to_string(), PgType::TEXT, -1, 3, None, true),
+                ColumnSchema::new("payload".to_string(), PgType::TEXT, -1, 4, None, true),
+            ],
+        ));
+        let replicated_table_schema = ReplicatedTableSchema::from_masks(
+            Arc::clone(&table_schema),
+            ReplicationMask::all(&table_schema),
+            IdentityMask::from_bytes(vec![1, 1, 1, 1]),
+        );
+
+        let prepared = prepare_table_mutations(
+            &replicated_table_schema,
+            vec![TableMutation::Update {
+                delete_row: OldTableRow::Full(TableRow::new(vec![
+                    Cell::I32(1),
+                    Cell::String("alice@example.com".to_string()),
+                    Cell::String("seed".to_string()),
+                    Cell::String("toast".to_string()),
+                ])),
+                new_row: UpdatedTableRow::Partial(PartialTableRow::new(
+                    4,
+                    TableRow::new(vec![
+                        Cell::I32(1),
+                        Cell::String("alice@example.com".to_string()),
+                        Cell::String("grown".to_string()),
+                    ]),
+                    vec![3],
+                )),
+            }],
+        )
+        .unwrap();
+
+        assert_eq!(prepared.len(), 1);
+        match &prepared[0] {
+            PreparedTableMutation::Update { assignments, predicate } => {
+                assert_eq!(
+                    assignments,
+                    &vec![
+                        "id = 1".to_string(),
+                        "email = 'alice@example.com'".to_string(),
+                        "name = 'grown'".to_string(),
+                    ]
+                );
+                assert_eq!(
+                    predicate,
+                    "id = 1 AND email = 'alice@example.com' AND name = 'seed' AND payload = \
+                     'toast'"
+                );
             }
             PreparedTableMutation::Upsert(_) | PreparedTableMutation::Delete { .. } => {
                 panic!("expected update")
