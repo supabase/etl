@@ -30,10 +30,9 @@ fn docker_compose_command() -> (&'static str, &'static [&'static str]) {
 const DEFAULT_PG_VERSION: &str = "18";
 const DEFAULT_PG_USER: &str = "postgres";
 const HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(1);
-const TEST_SAFE_REPLICATION_SETTINGS: &[&str] = &[
-    "ALTER SYSTEM SET max_slot_wal_keep_size = '-1'",
-    "ALTER SYSTEM SET idle_replication_slot_timeout = '0'",
-];
+const TEST_SAFE_SLOT_WAL_KEEP_SIZE: &str = "ALTER SYSTEM SET max_slot_wal_keep_size = '-1'";
+const TEST_SAFE_IDLE_REPLICATION_SLOT_TIMEOUT: &str =
+    "ALTER SYSTEM SET idle_replication_slot_timeout = '0'";
 
 #[derive(Args)]
 pub(crate) struct PostgresArgs {
@@ -107,7 +106,7 @@ impl StartArgs {
         for shard in 1..=self.shards {
             let port = self.base_port + shard - 1;
             self.wait_for_pg(port)?;
-            self.configure_pg_for_tests(port)?;
+            self.configure_pg_for_tests(port, &self.pg_version)?;
         }
 
         Ok(())
@@ -160,8 +159,13 @@ impl StartArgs {
         }
     }
 
-    fn configure_pg_for_tests(&self, port: u16) -> Result<()> {
-        for statement in TEST_SAFE_REPLICATION_SETTINGS {
+    fn configure_pg_for_tests(&self, port: u16, pg_version: &str) -> Result<()> {
+        let mut statements = vec![TEST_SAFE_SLOT_WAL_KEEP_SIZE];
+        if supports_idle_replication_slot_timeout(pg_version) {
+            statements.push(TEST_SAFE_IDLE_REPLICATION_SLOT_TIMEOUT);
+        }
+
+        for statement in statements {
             let status = Command::new("psql")
                 .args([
                     "-h",
@@ -213,4 +217,8 @@ impl StartArgs {
 
         Ok(())
     }
+}
+
+fn supports_idle_replication_slot_timeout(pg_version: &str) -> bool {
+    pg_version.parse::<u16>().is_ok_and(|major| major >= 18)
 }
