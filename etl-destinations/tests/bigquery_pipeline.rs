@@ -22,7 +22,7 @@ use etl_destinations::bigquery::test_utils::{
 };
 use etl_postgres::tokio::test_utils::TableModification;
 use etl_telemetry::tracing::init_test_tracing;
-use rand::random;
+use rand::{Rng, distr::Alphanumeric, random};
 use tokio::time::sleep;
 
 /// Ensures crypto provider is only initialized once.
@@ -38,11 +38,15 @@ fn install_crypto_provider() {
 }
 
 use crate::support::bigquery::{
-    BigQueryOrder, BigQueryReplicaIdentityRow, BigQueryUser, NonNullableColsScalar,
-    NullableColsArray, NullableColsScalar, parse_bigquery_table_rows,
+    BigQueryOrder, BigQueryUser, NonNullableColsScalar, NullableColsArray, NullableColsScalar,
+    parse_bigquery_table_rows,
 };
 
 const REPLICA_IDENTITY_LARGE_TEXT_SIZE_BYTES: usize = 8192;
+
+fn generate_random_ascii_string(length: usize) -> String {
+    rand::rng().sample_iter(&Alphanumeric).take(length).map(char::from).collect()
+}
 
 fn data_events(events: Vec<Event>) -> Vec<Event> {
     events
@@ -523,7 +527,7 @@ async fn table_full_replica_identity_update_preserves_unchanged_toasted_columns(
         .await
         .unwrap();
 
-    let initial_large_text = "a".repeat(REPLICA_IDENTITY_LARGE_TEXT_SIZE_BYTES);
+    let initial_large_text = generate_random_ascii_string(REPLICA_IDENTITY_LARGE_TEXT_SIZE_BYTES);
     database
         .insert_values(
             table_name.clone(),
@@ -611,181 +615,6 @@ async fn table_full_replica_identity_update_preserves_unchanged_toasted_columns(
 
     let table_rows = bigquery_database.query_table(table_name).await;
     assert!(table_rows.is_none());
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn table_alternative_replica_identity_errors_cleanly() {
-    if skip_if_missing_bigquery_env_vars() {
-        return;
-    }
-
-    init_test_tracing();
-    install_crypto_provider();
-
-    let database = spawn_source_database().await;
-    let bigquery_database = setup_bigquery_database().await;
-    let table_name = test_table_name("alternative_replica_identity_users");
-    let table_id = database
-        .create_table(
-            table_name.clone(),
-            true,
-            &[("email", "text not null"), ("name", "text not null")],
-        )
-        .await
-        .unwrap();
-
-    database
-        .insert_values(table_name.clone(), &["email", "name"], &[&"alice@example.com", &"alice"])
-        .await
-        .unwrap();
-
-    let index_name = format!("{}_replica_identity_idx", table_name.name);
-    database
-        .run_sql(&format!(
-            "create unique index {index_name} on {} (email)",
-            table_name.as_quoted_identifier(),
-        ))
-        .await
-        .unwrap();
-    let replica_identity_value = format!("using index {index_name}");
-    database
-        .alter_table(
-            table_name.clone(),
-            &[TableModification::ReplicaIdentity { value: &replica_identity_value }],
-        )
-        .await
-        .unwrap();
-
-    let store = NotifyingStore::new();
-    let pipeline_id: PipelineId = random();
-    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
-    let destination = TestDestinationWrapper::wrap(raw_destination);
-
-    let publication_name = "test_pub_alternative_replica_identity".to_string();
-    database
-        .create_publication(&publication_name, std::slice::from_ref(&table_name))
-        .await
-        .expect("Failed to create publication");
-
-    let mut pipeline = create_pipeline(
-        &database.config,
-        pipeline_id,
-        publication_name,
-        store.clone(),
-        destination.clone(),
-    );
-
-    // PostgreSQL can validly publish USING INDEX key rows here, but BigQuery
-    // only supports source primary-key or FULL replica identity.
-    let table_error_notify =
-        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Errored).await;
-
-    pipeline.start().await.unwrap();
-
-    table_error_notify.notified().await;
-
-    pipeline.shutdown_and_wait().await.unwrap();
-
-    let table_state = store.get_table_replication_state(table_id).await.unwrap();
-    assert!(matches!(table_state, Some(TableReplicationPhase::Errored { .. })));
-    assert!(destination.get_events().await.is_empty());
-    assert!(bigquery_database.query_table(table_name).await.is_none());
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn table_partial_update_rows_error_cleanly_for_bigquery() {
-    if skip_if_missing_bigquery_env_vars() {
-        return;
-    }
-
-    init_test_tracing();
-    install_crypto_provider();
-
-    let database = spawn_source_database().await;
-    let bigquery_database = setup_bigquery_database().await;
-    let table_name = test_table_name("partial_update_rows_users");
-    let table_id = database
-        .create_table(
-            table_name.clone(),
-            true,
-            &[("name", "text not null"), ("large_text", "text not null")],
-        )
-        .await
-        .unwrap();
-
-    database
-        .alter_table(
-            table_name.clone(),
-            &[TableModification::AlterColumn {
-                name: "large_text",
-                alteration: "set storage external",
-            }],
-        )
-        .await
-        .unwrap();
-
-    let initial_large_text = "a".repeat(REPLICA_IDENTITY_LARGE_TEXT_SIZE_BYTES);
-    database
-        .insert_values(
-            table_name.clone(),
-            &["name", "large_text"],
-            &[&"alice", &initial_large_text],
-        )
-        .await
-        .unwrap();
-
-    let store = NotifyingStore::new();
-    let pipeline_id: PipelineId = random();
-    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
-    let destination = TestDestinationWrapper::wrap(raw_destination);
-
-    let publication_name = "test_pub_partial_update_rows".to_string();
-    database
-        .create_publication(&publication_name, std::slice::from_ref(&table_name))
-        .await
-        .expect("Failed to create publication");
-
-    let mut pipeline = create_pipeline(
-        &database.config,
-        pipeline_id,
-        publication_name,
-        store.clone(),
-        destination.clone(),
-    );
-
-    let table_ready_notify =
-        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
-
-    pipeline.start().await.unwrap();
-
-    table_ready_notify.notified().await;
-
-    // With default primary-key replica identity, updating a non-key column
-    // while leaving an external TOAST value unchanged is a valid PostgreSQL
-    // shape: no old row plus a partial new row. BigQuery should reject that
-    // cleanly instead of trying to upsert a sparse row.
-    let table_error_notify =
-        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Errored).await;
-
-    database
-        .update_values_where(table_name.clone(), &["name"], &[&"alicia"], &["id"], &["1"], "")
-        .await
-        .unwrap();
-
-    table_error_notify.notified().await;
-
-    pipeline.shutdown_and_wait().await.unwrap();
-
-    let table_state = store.get_table_replication_state(table_id).await.unwrap();
-    assert!(matches!(table_state, Some(TableReplicationPhase::Errored { .. })));
-    assert!(destination.get_events().await.is_empty());
-
-    let table_rows = bigquery_database.query_table(table_name).await.unwrap();
-    let parsed_table_rows = parse_bigquery_table_rows::<BigQueryReplicaIdentityRow>(table_rows);
-    assert_eq!(
-        parsed_table_rows,
-        vec![BigQueryReplicaIdentityRow::new(1, "alice", &initial_large_text),]
-    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

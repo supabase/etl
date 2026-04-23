@@ -219,13 +219,16 @@ impl BigQueryDatabase {
         let mut attempts_remaining = BIGQUERY_QUERY_MAX_ATTEMPTS;
 
         loop {
-            let rows = self
+            let rows = match self
                 .client
                 .job()
                 .query(&self.project_id, QueryRequest::new(query.clone()))
                 .await
-                .unwrap()
-                .rows;
+            {
+                Ok(response) => response.rows,
+                Err(BQError::ResponseError { error }) if error.error.code == 404 => return None,
+                Err(err) => panic!("Failed to query BigQuery table: {err:?}"),
+            };
 
             if rows.is_some() || attempts_remaining == 1 {
                 return rows;
