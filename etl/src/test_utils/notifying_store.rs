@@ -6,7 +6,6 @@ use std::{
 
 use etl_postgres::types::{SnapshotId, TableId, TableSchema};
 use tokio::sync::{Notify, RwLock};
-use tracing::info;
 
 use crate::{
     error::{ErrorKind, EtlResult},
@@ -51,17 +50,10 @@ struct Inner {
 impl Inner {
     fn check_conditions(&mut self) {
         let table_states = Arc::clone(&self.table_replication_states);
-        self.table_state_type_conditions.retain(|(tid, expected_state, description, notify)| {
+        self.table_state_type_conditions.retain(|(tid, expected_state, _, notify)| {
             if let Some(state) = table_states.get(tid) {
                 let should_retain = *expected_state != state.as_type();
                 if !should_retain {
-                    info!(
-                        table_id = %tid,
-                        expected_state = ?expected_state,
-                        current_state = ?state.as_type(),
-                        description,
-                        "table state type wait satisfied",
-                    );
                     notify.notify_one();
                 }
                 should_retain
@@ -70,16 +62,10 @@ impl Inner {
             }
         });
 
-        self.table_state_conditions.retain(|(tid, description, notify, condition)| {
+        self.table_state_conditions.retain(|(tid, _, notify, condition)| {
             if let Some(state) = table_states.get(tid) {
                 let should_retain = !condition(state);
                 if !should_retain {
-                    info!(
-                        table_id = %tid,
-                        current_state = ?state.as_type(),
-                        description,
-                        "table state wait satisfied",
-                    );
                     notify.notify_one();
                 }
                 should_retain
@@ -88,17 +74,10 @@ impl Inner {
             }
         });
 
-        self.table_schema_count_conditions.retain(|(tid, expected_count, description, notify)| {
+        self.table_schema_count_conditions.retain(|(tid, expected_count, _, notify)| {
             let schemas_count = self.table_schemas.get(tid).map_or(0, Vec::len);
             let should_retain = schemas_count < *expected_count;
             if !should_retain {
-                info!(
-                    table_id = %tid,
-                    expected_count,
-                    schemas_count,
-                    description,
-                    "table schema count wait satisfied",
-                );
                 notify.notify_one();
             }
             should_retain
@@ -186,12 +165,6 @@ impl NotifyingStore {
         let notify = Arc::new(Notify::new());
         let description = format!("table {table_id} state type {:?}", expected_state);
         let mut inner = self.inner.write().await;
-        info!(
-            table_id = %table_id,
-            expected_state = ?expected_state,
-            current_state = inner.table_replication_states.get(&table_id).map(TableReplicationPhase::as_type).map(|state| format!("{state:?}")),
-            "registered table state type wait",
-        );
         inner.table_state_type_conditions.push((
             table_id,
             expected_state,
@@ -219,11 +192,6 @@ impl NotifyingStore {
         let notify = Arc::new(Notify::new());
         let description = format!("table {table_id} custom state condition");
         let mut inner = self.inner.write().await;
-        info!(
-            table_id = %table_id,
-            current_state = inner.table_replication_states.get(&table_id).map(TableReplicationPhase::as_type).map(|state| format!("{state:?}")),
-            "registered table state wait",
-        );
         inner.table_state_conditions.push((
             table_id,
             description.clone(),
@@ -252,13 +220,6 @@ impl NotifyingStore {
         let notify = Arc::new(Notify::new());
         let description = format!("table {table_id} schema count >= {expected_count}");
         let mut inner = self.inner.write().await;
-        let current_count = inner.table_schemas.get(&table_id).map_or(0, Vec::len);
-        info!(
-            table_id = %table_id,
-            expected_count,
-            current_count,
-            "registered table schema count wait",
-        );
         inner.table_schema_count_conditions.push((
             table_id,
             expected_count,
@@ -280,11 +241,6 @@ impl NotifyingStore {
         let states = Arc::make_mut(&mut inner.table_replication_states);
         states.remove(&table_id);
         states.insert(table_id, TableReplicationPhase::Init);
-
-        info!(
-            table_id = %table_id,
-            "reset table replication state to init",
-        );
 
         Ok(())
     }
@@ -333,11 +289,6 @@ impl StateStore for NotifyingStore {
     ) -> EtlResult<()> {
         let mut guard = self.inner.write().await;
         let inner = &mut *guard;
-        let updates_summary = updates
-            .iter()
-            .map(|(table_id, state)| format!("{table_id}:{:?}", state.as_type()))
-            .collect::<Vec<_>>()
-            .join(",");
 
         let states = Arc::make_mut(&mut inner.table_replication_states);
         for (table_id, state) in updates {
@@ -353,11 +304,6 @@ impl StateStore for NotifyingStore {
             states.insert(table_id, state);
         }
 
-        info!(
-            updates_summary,
-            tracked_tables = states.len(),
-            "stored table replication state updates",
-        );
         guard.check_conditions();
         guard.dispatch_method_notification(StateStoreMethod::StoreTableReplicationState);
 
@@ -382,11 +328,6 @@ impl StateStore for NotifyingStore {
         // Update the current state to the previous state
         Arc::make_mut(&mut inner.table_replication_states).insert(table_id, previous_state.clone());
         inner.check_conditions();
-        info!(
-            table_id = %table_id,
-            rolled_back_state = ?previous_state.as_type(),
-            "rolled back table replication state",
-        );
 
         inner.dispatch_method_notification(StateStoreMethod::RollbackTableReplicationState);
 
@@ -479,12 +420,6 @@ impl SchemaStore for NotifyingStore {
             schemas.push(Arc::clone(&table_schema));
         }
 
-        info!(
-            table_id = %table_id,
-            snapshot_id = %snapshot_id,
-            schema_versions = schemas.len(),
-            "stored table schema",
-        );
         inner.check_conditions();
 
         Ok(table_schema)
@@ -499,11 +434,6 @@ impl CleanupStore for NotifyingStore {
         inner.table_state_history.remove(&table_id);
         inner.table_schemas.remove(&table_id);
         Arc::make_mut(&mut inner.destination_tables_metadata).remove(&table_id);
-
-        info!(
-            table_id = %table_id,
-            "cleaned up table state",
-        );
 
         Ok(())
     }

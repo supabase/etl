@@ -178,7 +178,6 @@ jobs:
       TESTS_DATABASE_USERNAME: postgres
       TESTS_DATABASE_PASSWORD: postgres
       ETL_DUCKDB_EXTENSION_ROOT: ${{ github.workspace }}/vendor/duckdb/extensions
-      ENABLE_TRACING: 1
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2

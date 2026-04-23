@@ -10,7 +10,6 @@ use tokio::{
     runtime::Handle,
     sync::{Notify, RwLock},
 };
-use tracing::info;
 
 use crate::{
     destination::{
@@ -53,16 +52,9 @@ impl<D> Inner<D> {
     fn check_conditions(&mut self) {
         // Check event conditions
         let events = self.events.clone();
-        let total_table_row_count = total_table_rows(&self.table_rows);
-        self.event_conditions.retain(|(description, condition, notify)| {
+        self.event_conditions.retain(|(_, condition, notify)| {
             let should_retain = !condition(&events);
             if !should_retain {
-                info!(
-                    description,
-                    events_len = events.len(),
-                    total_table_rows = total_table_row_count,
-                    "destination event wait satisfied",
-                );
                 notify.notify_one();
             }
             should_retain
@@ -70,14 +62,9 @@ impl<D> Inner<D> {
 
         // Check table row conditions
         let table_rows = self.table_rows.clone();
-        self.table_row_conditions.retain(|(description, condition, notify)| {
+        self.table_row_conditions.retain(|(_, condition, notify)| {
             let should_retain = !condition(&table_rows);
             if !should_retain {
-                info!(
-                    description,
-                    total_table_rows = total_table_rows(&table_rows),
-                    "destination table row wait satisfied",
-                );
                 notify.notify_one();
             }
             should_retain
@@ -86,15 +73,9 @@ impl<D> Inner<D> {
         // Check combined conditions
         let events = self.events.clone();
         let table_rows = self.table_rows.clone();
-        self.combined_conditions.retain(|(description, condition, notify)| {
+        self.combined_conditions.retain(|(_, condition, notify)| {
             let should_retain = !condition(&events, &table_rows);
             if !should_retain {
-                info!(
-                    description,
-                    events_len = events.len(),
-                    total_table_rows = total_table_rows(&table_rows),
-                    "destination combined wait satisfied",
-                );
                 notify.notify_one();
             }
             should_retain
@@ -193,12 +174,6 @@ impl<D> TestDestinationWrapper<D> {
         let notify = Arc::new(Notify::new());
         let description = description.into();
         let mut inner = self.inner.write().await;
-        info!(
-            description,
-            current_events_len = inner.events.len(),
-            current_total_table_rows = total_table_rows(&inner.table_rows),
-            "registered destination event wait",
-        );
         inner.event_conditions.push((description.clone(), Box::new(condition), notify.clone()));
 
         TimedNotify::with_description(
@@ -256,12 +231,6 @@ impl<D> TestDestinationWrapper<D> {
         let notify = Arc::new(Notify::new());
         let description = format!("all event conditions {:?}", conditions);
         let mut inner = self.inner.write().await;
-        info!(
-            description,
-            current_events_len = inner.events.len(),
-            current_total_table_rows = total_table_rows(&inner.table_rows),
-            "registered destination combined wait",
-        );
 
         let condition: CombinedCheckFn = Box::new(move |events, table_rows| {
             check_all_events_count(events, table_rows, conditions.clone())
@@ -347,13 +316,6 @@ where
             !has_table_id
         });
 
-        info!(
-            table_id = %table_id,
-            remaining_events_len = inner.events.len(),
-            remaining_total_table_rows = total_table_rows(&inner.table_rows),
-            "destination truncate recorded",
-        );
-
         Ok(())
     }
 
@@ -382,20 +344,10 @@ where
 
         {
             let table_id = replicated_table_schema.id();
-            let row_count = table_rows.len();
             let mut inner = self.inner.write().await;
             if should_record_table_rows {
                 inner.table_rows.entry(table_id).or_default().extend(table_rows);
             }
-
-            info!(
-                table_id = %table_id,
-                row_count,
-                recorded = should_record_table_rows,
-                write_table_rows_called = inner.write_table_rows_called,
-                total_table_rows = total_table_rows(&inner.table_rows),
-                "destination table rows completed",
-            );
             inner.check_conditions();
         }
 
@@ -432,8 +384,6 @@ where
         // the method, so it's not needed to simulate asynchronous work to make
         // the code continue and do something else in the meanwhile.
         let inner = self.inner.clone();
-        let event_batch_summary = summarize_events(&events);
-        let event_count = events.len();
         tokio::spawn(async move {
             // We send the result back before doing the internal checks for this utility, to
             // avoid checking before the apply loop received the result.
@@ -446,15 +396,6 @@ where
                 if should_record_events {
                     inner.events.extend(events);
                 }
-
-                info!(
-                    event_count,
-                    event_batch_summary,
-                    recorded = should_record_events,
-                    total_events_len = inner.events.len(),
-                    total_table_rows = total_table_rows(&inner.table_rows),
-                    "destination events completed",
-                );
                 inner.check_conditions();
             }
         });
@@ -473,39 +414,8 @@ where
         {
             let mut inner = self.inner.write().await;
             inner.shutdown_called = true;
-            info!(
-                total_events_len = inner.events.len(),
-                total_table_rows = total_table_rows(&inner.table_rows),
-                "destination shutdown recorded",
-            );
         }
 
         result
     }
-}
-
-fn total_table_rows(table_rows: &HashMap<TableId, Vec<TableRow>>) -> usize {
-    table_rows.values().map(Vec::len).sum()
-}
-
-fn summarize_events(events: &[Event]) -> String {
-    let mut counts = HashMap::new();
-    for event in events {
-        let key = match event {
-            Event::Begin(_) => "begin",
-            Event::Commit(_) => "commit",
-            Event::Relation(_) => "relation",
-            Event::Insert(_) => "insert",
-            Event::Update(_) => "update",
-            Event::Delete(_) => "delete",
-            Event::Truncate(_) => "truncate",
-            Event::Unsupported => "unsupported",
-        };
-        *counts.entry(key).or_insert(0usize) += 1;
-    }
-
-    let mut counts = counts.into_iter().collect::<Vec<_>>();
-    counts.sort_unstable_by_key(|(name, _)| *name);
-
-    counts.into_iter().map(|(name, count)| format!("{name}={count}")).collect::<Vec<_>>().join(",")
 }

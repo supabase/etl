@@ -1,7 +1,6 @@
 use std::{fmt, panic::Location, sync::Arc, time::Duration};
 
 use tokio::{sync::Notify, time::timeout};
-use tracing::{error, info};
 
 /// Default timeout duration for notifications.
 ///
@@ -53,38 +52,11 @@ impl TimedNotify {
     #[track_caller]
     pub fn notified(&self) -> impl Future<Output = ()> + '_ {
         let caller = Location::caller();
-        let description = Arc::clone(&self.description);
 
         async move {
-            info!(
-                description = %description,
-                timeout_ms = self.timeout_duration.as_millis(),
-                file = caller.file(),
-                line = caller.line(),
-                column = caller.column(),
-                "waiting on timed test notification",
-            );
-
             match timeout(self.timeout_duration, self.notify.notified()).await {
-                Ok(()) => {
-                    info!(
-                        description = %description,
-                        file = caller.file(),
-                        line = caller.line(),
-                        column = caller.column(),
-                        "timed test notification received",
-                    );
-                }
+                Ok(()) => {}
                 Err(_) => {
-                    error!(
-                        description = %description,
-                        timeout_ms = self.timeout_duration.as_millis(),
-                        file = caller.file(),
-                        line = caller.line(),
-                        column = caller.column(),
-                        "timed test notification timed out",
-                    );
-
                     panic!(
                         "Test notification timed out after {:?} while waiting for {} at {}:{}:{}. \
                          This likely indicates the expected state was never reached. Check if the \

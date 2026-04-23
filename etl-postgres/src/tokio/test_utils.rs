@@ -522,7 +522,7 @@ impl<G: GenericClient> PgDatabase<G> {
         }
 
         let settings_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        let effective_max_slot_wal_keep_size = loop {
+        loop {
             let effective_max_slot_wal_keep_size: String = client
                 .query_one("SHOW max_slot_wal_keep_size", &[])
                 .await
@@ -530,7 +530,7 @@ impl<G: GenericClient> PgDatabase<G> {
                 .get(0);
 
             if effective_max_slot_wal_keep_size != "-1" {
-                break effective_max_slot_wal_keep_size;
+                break;
             }
 
             assert!(
@@ -540,11 +540,7 @@ impl<G: GenericClient> PgDatabase<G> {
             );
 
             tokio::time::sleep(Duration::from_millis(50)).await;
-        };
-        info!(
-            slot_name,
-            effective_max_slot_wal_keep_size, "slot invalidation configuration applied",
-        );
+        }
 
         // Create a temp table to generate WAL.
         let _ = client
