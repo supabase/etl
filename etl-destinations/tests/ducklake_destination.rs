@@ -48,6 +48,7 @@ use etl_destinations::ducklake::{
     arm_fail_after_copy_batch_commit_once_for_tests, ducklake_staging_table_creations_for_tests,
     reset_ducklake_test_hooks,
 };
+use etl_telemetry::tracing::init_test_tracing;
 use pg_escape::{quote_identifier, quote_literal};
 #[cfg(feature = "test-utils")]
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -596,6 +597,7 @@ async fn write_table_rows_retry_after_post_commit_failure_is_idempotent() {
 /// exact.
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_same_table_copy_batches_complete() {
+    init_test_tracing();
     let dir = make_test_dir("concurrent_same_table_copy_batches_complete");
     let catalog = dir.join("catalog.ducklake");
     let data = dir.join("data");
@@ -669,8 +671,58 @@ async fn concurrent_same_table_copy_batches_complete() {
     checkpoint_lake(&catalog_url, &data_url);
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
-    assert_eq!(count_rows(&conn, &table_name), 100);
-    assert_eq!(count_applied_batches(&conn, &table_name, "copy"), 2);
+
+    // Diagnostic block: capture both counts plus direct-parquet and marker
+    // detail so the failure message distinguishes between a silent rollback
+    // (one missing marker) and a catalog snapshot clobber (markers present but
+    // catalog reports fewer rows than the parquet files on disk).
+    let rows = count_rows(&conn, &table_name);
+    let markers = count_applied_batches(&conn, &table_name, "copy");
+
+    let data_path = data_url.to_file_path().expect("data_url should be a file:// URL");
+    let parquet_glob = format!("{}/**/*.parquet", data_path.display());
+    let parquet_rows: i64 = conn
+        .query_row(
+            &format!("SELECT COUNT(*) FROM read_parquet({})", quote_literal(&parquet_glob)),
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(-1);
+
+    let marker_detail: Vec<(String, Option<u64>, Option<u64>)> = {
+        let sql = format!(
+            "SELECT batch_id, first_start_lsn, last_commit_lsn FROM {}.{} WHERE table_name = {} \
+             AND batch_kind = {}",
+            quote_identifier("lake"),
+            quote_identifier("__etl_applied_table_batches"),
+            quote_literal(&table_name),
+            quote_literal("copy"),
+        );
+        let mut stmt = conn.prepare(&sql).expect("marker detail prepare failed");
+        stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<u64>>(1)?,
+                row.get::<_, Option<u64>>(2)?,
+            ))
+        })
+        .expect("marker detail query failed")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("marker detail collect failed")
+    };
+
+    eprintln!(
+        "[concurrent_same_table_copy_batches_complete] diagnostics:\n  catalog rows      : \
+         {rows}\n  applied markers   : {markers}\n  parquet rows      : {parquet_rows}\n  marker \
+         detail     : {marker_detail:?}"
+    );
+
+    assert_eq!(
+        (rows, markers),
+        (100, 2),
+        "expected (rows, markers) = (100, 2), got ({rows}, {markers}); parquet rows = \
+         {parquet_rows}, marker detail = {marker_detail:?}"
+    );
 }
 
 /// `write_table_rows` with an empty slice still creates the table schema.
