@@ -27,10 +27,11 @@ A new row was added to a table.
 
 ```rust
 pub struct InsertEvent {
-    pub start_lsn: PgLsn,      // Position where event was recorded
-    pub commit_lsn: PgLsn,     // Position where transaction commits
-    pub table_id: TableId,     // Which table
-    pub table_row: TableRow,   // The new row data
+    pub start_lsn: PgLsn,
+    pub commit_lsn: PgLsn,
+    pub tx_ordinal: u64,
+    pub replicated_table_schema: ReplicatedTableSchema,
+    pub table_row: TableRow,
 }
 ```
 
@@ -42,19 +43,45 @@ An existing row was modified.
 pub struct UpdateEvent {
     pub start_lsn: PgLsn,
     pub commit_lsn: PgLsn,
-    pub table_id: TableId,
-    pub table_row: TableRow,                     // New row data
-    pub old_table_row: Option<(bool, TableRow)>, // Previous row (see below)
+    pub tx_ordinal: u64,
+    pub replicated_table_schema: ReplicatedTableSchema,
+    pub updated_table_row: UpdatedTableRow,
+    pub old_table_row: Option<OldTableRow>,
 }
 ```
 
-The `old_table_row` field depends on Postgres `REPLICA IDENTITY` setting:
+`updated_table_row` is:
+
+- `UpdatedTableRow::Full` when ETL knows every replicated column value after decoding the update.
+- `UpdatedTableRow::Partial` when PostgreSQL emitted `UnchangedToast` fields that ETL could not reconstruct safely.
+
+As a destination author, treat `updated_table_row` as the authoritative
+post-update payload. The `old_table_row` field is auxiliary old-side context
+that may be needed for row matching, key changes, or reconstruction logic.
+
+The `old_table_row` field depends on PostgreSQL replica-identity semantics:
 
 | REPLICA IDENTITY | `old_table_row` contains |
 |------------------|--------------------------|
-| `DEFAULT` | Primary key columns only (`true`, row) |
-| `FULL` | All columns (`false`, row) |
-| `NOTHING` | `None` |
+| `FULL` | `Some(OldTableRow::Full(row))` |
+| `DEFAULT` / `USING INDEX` | `Some(OldTableRow::Key(row))` when PostgreSQL emits a key image, otherwise `None` |
+| `NOTHING` | Published `UPDATE` is rejected by PostgreSQL |
+
+`OldTableRow::Key(row)` stores only the replica-identity columns, normalized into replicated table-column order.
+
+For `UPDATE`, PostgreSQL only sends an old key image when it needs one, for example:
+
+- the replica-identity value changed, or
+- PostgreSQL still needs the old identity values, such as externally stored identity columns.
+
+That means non-identity updates under `DEFAULT` or `USING INDEX` often arrive with `old_table_row = None`.
+
+Important implications:
+
+- `old_table_row = None` on an update is usually a valid `pgoutput` shape. It does not mean the table has no replica identity.
+- `OldTableRow::Key(row)` contains only replica-identity columns, in replicated table-column order. It is not necessarily the source primary key.
+- If your destination matches source rows by replica identity, use the identity columns from `old_table_row`.
+- If your destination matches source rows by some other key, such as the source primary key, project the old or new row down to that key yourself.
 
 ### Delete
 
@@ -64,12 +91,28 @@ A row was removed from a table.
 pub struct DeleteEvent {
     pub start_lsn: PgLsn,
     pub commit_lsn: PgLsn,
-    pub table_id: TableId,                       // Which table
-    pub old_table_row: Option<(bool, TableRow)>, // Deleted row data
+    pub tx_ordinal: u64,
+    pub replicated_table_schema: ReplicatedTableSchema,
+    pub old_table_row: Option<OldTableRow>,
 }
 ```
 
-Same `REPLICA IDENTITY` rules apply as for Update.
+For `DELETE`, valid PostgreSQL publications send an old-side image:
+
+| REPLICA IDENTITY | `old_table_row` contains |
+|------------------|--------------------------|
+| `FULL` | `Some(OldTableRow::Full(row))` |
+| `DEFAULT` / `USING INDEX` | `Some(OldTableRow::Key(row))` |
+| `NOTHING` | Published `DELETE` is rejected by PostgreSQL |
+
+If `old_table_row` is `None` on a delete, ETL is preserving an upstream invalid state defensively, and destinations should treat it as unsafe for row-matching deletes.
+
+Important implications:
+
+- Deletes do not carry a new row image. `old_table_row` is the delete payload.
+- `OldTableRow::Key(row)` again means replica-identity columns only, not necessarily the table's primary key.
+- A destination that cannot apply deletes from a key-only image must reject non-`FULL` replica identity up front.
+- A destination that sees `old_table_row = None` on a delete should treat it as invalid rather than silently guessing how to match the row.
 
 ### Truncate
 
@@ -79,8 +122,9 @@ One or more tables were truncated (all rows deleted).
 pub struct TruncateEvent {
     pub start_lsn: PgLsn,
     pub commit_lsn: PgLsn,
-    pub options: i8,       // Postgres truncate options
-    pub rel_ids: Vec<u32>, // List of truncated table IDs
+    pub tx_ordinal: u64,
+    pub options: i8,
+    pub truncated_tables: Vec<ReplicatedTableSchema>,
 }
 ```
 
@@ -96,10 +140,11 @@ Marks the start of a transaction.
 
 ```rust
 pub struct BeginEvent {
-    pub start_lsn: PgLsn,   // Position where transaction started
-    pub commit_lsn: PgLsn,  // Position where transaction will commit
-    pub timestamp: i64,     // Transaction start time
-    pub xid: u32,           // Transaction ID
+    pub start_lsn: PgLsn,
+    pub commit_lsn: PgLsn,
+    pub tx_ordinal: u64,
+    pub timestamp: i64,
+    pub xid: u32,
 }
 ```
 
@@ -111,9 +156,10 @@ Marks successful transaction completion.
 pub struct CommitEvent {
     pub start_lsn: PgLsn,
     pub commit_lsn: PgLsn,
-    pub flags: i8,        // Postgres commit flags
-    pub end_lsn: u64,     // Final LSN after commit
-    pub timestamp: i64,   // Commit time
+    pub tx_ordinal: u64,
+    pub flags: i8,
+    pub end_lsn: PgLsn,
+    pub timestamp: i64,
 }
 ```
 
@@ -127,7 +173,8 @@ Provides table schema information. Sent before data events for a table.
 pub struct RelationEvent {
     pub start_lsn: PgLsn,
     pub commit_lsn: PgLsn,
-    pub table_schema: TableSchema, // Column definitions, types, etc.
+    pub tx_ordinal: u64,
+    pub replicated_table_schema: ReplicatedTableSchema,
 }
 ```
 

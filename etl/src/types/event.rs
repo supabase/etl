@@ -89,10 +89,29 @@ impl InsertEvent {
 ///
 /// [`UpdateEvent`] represents an existing row being modified.
 ///
+/// Destination authors should read this event as:
+///
+/// - [`UpdateEvent::updated_table_row`] is the new row state that PostgreSQL
+///   exposed after the update.
+/// - [`UpdateEvent::old_table_row`] is auxiliary old-side data that PostgreSQL
+///   may or may not include, depending on replica-identity semantics.
+///
 /// The new row may be full or partial depending on whether all column values
 /// are known after decoding `UnchangedToast` fields. The optional old row is
-/// either a full old image or a key-only image, depending on PostgreSQL
-/// replica-identity semantics.
+/// either a full old image, a key-only image, or absent, depending on
+/// PostgreSQL replica-identity semantics:
+///
+/// - `REPLICA IDENTITY FULL` yields a full old row.
+/// - `REPLICA IDENTITY DEFAULT` and `USING INDEX` may yield a key-only row.
+/// - updates that do not require an old-side image carry no old row.
+///
+/// Two details matter when implementing destinations:
+///
+/// - [`OldTableRow::Key`] contains replica-identity columns only. That is not
+///   necessarily the source primary key.
+/// - `old_table_row == None` on an update does not mean "missing identity" or
+///   "invalid event". For valid `pgoutput` streams it usually means PostgreSQL
+///   determined that no old-side tuple needed to be logged.
 #[derive(Debug)]
 #[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 pub struct UpdateEvent {
@@ -105,8 +124,17 @@ pub struct UpdateEvent {
     /// The replicated table schema for this event.
     pub replicated_table_schema: ReplicatedTableSchema,
     /// New row data after the update.
+    ///
+    /// [`UpdatedTableRow::Full`] means ETL knows every replicated column value.
+    /// [`UpdatedTableRow::Partial`] means some replicated columns were emitted
+    /// by PostgreSQL as `UnchangedToast` and could not be reconstructed
+    /// safely.
     pub updated_table_row: UpdatedTableRow,
     /// Previous row data before the update, when PostgreSQL emitted one.
+    ///
+    /// For `REPLICA IDENTITY FULL`, this should be a full row image. For
+    /// `DEFAULT` or `USING INDEX`, this may be a key image or may be absent
+    /// entirely when PostgreSQL did not need to log an old-side tuple.
     pub old_table_row: Option<OldTableRow>,
 }
 
@@ -121,8 +149,19 @@ impl UpdateEvent {
 ///
 /// [`DeleteEvent`] represents a row being removed from a table.
 ///
-/// The old row image is either a full old row or a key-only row depending on
-/// PostgreSQL replica-identity semantics.
+/// Unlike updates, deletes carry only old-side data. Destinations should treat
+/// [`DeleteEvent::old_table_row`] as the payload used to identify the removed
+/// source row.
+///
+/// The optional old row follows PostgreSQL replica-identity semantics:
+///
+/// - `REPLICA IDENTITY FULL` yields a full old row.
+/// - `REPLICA IDENTITY DEFAULT` and `USING INDEX` yield a key-only row.
+/// - valid publications do not emit deletes without an old row; `None` is
+///   preserved defensively for invalid upstream states.
+///
+/// [`OldTableRow::Key`] again means replica-identity columns only, not
+/// necessarily the table's primary key.
 #[derive(Debug)]
 #[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 pub struct DeleteEvent {
@@ -135,6 +174,11 @@ pub struct DeleteEvent {
     /// The replicated table schema for this event.
     pub replicated_table_schema: ReplicatedTableSchema,
     /// Data from the deleted row.
+    ///
+    /// For supported PostgreSQL publications, deletes should carry either a
+    /// full old row or a key-only old row. `None` is preserved only
+    /// defensively and should be treated as an unsafe, unmatchable delete by
+    /// destinations.
     pub old_table_row: Option<OldTableRow>,
 }
 

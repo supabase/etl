@@ -182,49 +182,53 @@ where
     }
 }
 
+/// Validates that a replicated table schema can be applied to one DuckLake
+/// row-matching mutation.
+///
+/// DuckLake can stream inserts without replica identity, but update and delete
+/// paths need replicated replica-identity columns so the destination can match
+/// existing rows safely.
+fn validate_ducklake_replica_identity(
+    replicated_table_schema: &ReplicatedTableSchema,
+    operation: &'static str,
+) -> EtlResult<()> {
+    if replicated_table_schema.identity_column_schemas().len() == 0 {
+        let description = match operation {
+            "update" => "DuckLake update requires a replica identity",
+            "delete" => "DuckLake delete requires a replica identity",
+            _ => "DuckLake mutation requires a replica identity",
+        };
+        return Err(etl_error!(
+            ErrorKind::InvalidState,
+            description,
+            format!(
+                "Table '{}' has no replicated replica-identity columns",
+                replicated_table_schema.name()
+            )
+        ));
+    }
+
+    Ok(())
+}
+
 impl<S> DuckLakeDestination<S>
 where
     S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
 {
-    /// Validates that the table exposes replicated replica-identity columns
-    /// for one row-matching mutation operation.
-    fn require_replica_identity(
-        replicated_table_schema: &ReplicatedTableSchema,
-        operation: &'static str,
-    ) -> EtlResult<()> {
-        if replicated_table_schema.identity_column_schemas().len() == 0 {
-            let description = match operation {
-                "update" => "DuckLake update requires a replica identity",
-                "delete" => "DuckLake delete requires a replica identity",
-                _ => "DuckLake mutation requires a replica identity",
-            };
-            return Err(etl_error!(
-                ErrorKind::InvalidState,
-                description,
-                format!(
-                    "Table '{}' has no replicated replica-identity columns",
-                    replicated_table_schema.name()
-                )
-            ));
-        }
-
-        Ok(())
-    }
-
     /// Builds a key-only row from a partial update row when PostgreSQL omits
     /// the old key image because the replica identity did not change.
     fn key_row_from_updated_partial_row(
         replicated_table_schema: &ReplicatedTableSchema,
         partial_row: &PartialTableRow,
     ) -> EtlResult<TableRow> {
-        let column_schemas: Vec<_> = replicated_table_schema.column_schemas().collect();
-        if partial_row.total_columns() != column_schemas.len() {
+        let column_count = replicated_table_schema.column_schemas().len();
+        if partial_row.total_columns() != column_count {
             return Err(etl_error!(
                 ErrorKind::InvalidState,
                 "DuckLake partial update row does not match schema",
                 format!(
                     "Expected {} replicated columns for table '{}', got {}",
-                    column_schemas.len(),
+                    column_count,
                     replicated_table_schema.name(),
                     partial_row.total_columns()
                 )
@@ -248,17 +252,15 @@ where
             ));
         }
 
-        Self::require_replica_identity(replicated_table_schema, "update")?;
+        validate_ducklake_replica_identity(replicated_table_schema, "update")?;
 
         let mut missing_indexes = partial_row.missing_column_indexes().iter().copied().peekable();
         let mut present_values = partial_row.values().iter();
-        let identity_column_schemas: Vec<_> =
-            replicated_table_schema.identity_column_schemas().collect();
+        let identity_column_count = replicated_table_schema.identity_column_schemas().len();
+        let mut identity_columns = replicated_table_schema.identity_column_schemas().peekable();
+        let mut key_values = Vec::with_capacity(identity_column_count);
 
-        let mut identity_columns = identity_column_schemas.iter().copied().peekable();
-        let mut key_values = Vec::with_capacity(identity_column_schemas.len());
-
-        for (column_index, column_schema) in column_schemas.iter().enumerate() {
+        for (column_index, column_schema) in replicated_table_schema.column_schemas().enumerate() {
             let is_identity = identity_columns.peek().is_some_and(|identity_column| {
                 identity_column.ordinal_position == column_schema.ordinal_position
             });
@@ -684,6 +686,10 @@ where
                         ));
                     }
                     Event::Update(update) => {
+                        validate_ducklake_replica_identity(
+                            &update.replicated_table_schema,
+                            "update",
+                        )?;
                         let table_id = update.replicated_table_schema.id();
                         let entry = table_id_to_mutations.entry(table_id).or_insert_with(|| {
                             (update.replicated_table_schema.clone(), Vec::new())
@@ -702,7 +708,6 @@ where
                         } else {
                             match table_row {
                                 UpdatedTableRow::Full(table_row) => {
-                                    Self::require_replica_identity(&entry.0, "update")?;
                                     debug!(
                                         "update event has no old row, deleting by replica \
                                          identity from new row"
@@ -737,11 +742,11 @@ where
                         }
                     }
                     Event::Delete(delete) => {
+                        validate_ducklake_replica_identity(
+                            &delete.replicated_table_schema,
+                            "delete",
+                        )?;
                         let Some(old_row) = delete.old_table_row else {
-                            Self::require_replica_identity(
-                                &delete.replicated_table_schema,
-                                "delete",
-                            )?;
                             return Err(etl_error!(
                                 ErrorKind::InvalidState,
                                 "DuckLake delete requires an old row image",

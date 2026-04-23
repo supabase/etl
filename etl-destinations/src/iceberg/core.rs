@@ -302,6 +302,7 @@ where
                         entry.1.push(insert.table_row);
                     }
                     Event::Update(update) => {
+                        validate_iceberg_replica_identity(&update.replicated_table_schema)?;
                         let sequence_key = update.event_sequence_key().to_string();
                         let mut table_row = match update.updated_table_row {
                             etl::types::UpdatedTableRow::Full(row) => row,
@@ -328,10 +329,18 @@ where
                         entry.1.push(table_row);
                     }
                     Event::Delete(delete) => {
+                        validate_iceberg_replica_identity(&delete.replicated_table_schema)?;
                         let sequence_key = delete.event_sequence_key().to_string();
                         let Some(old_table_row) = delete.old_table_row else {
-                            debug!("delete event has no row, skipping");
-                            continue;
+                            return Err(etl_error!(
+                                ErrorKind::InvalidState,
+                                "Iceberg delete requires an old row image",
+                                format!(
+                                    "Table '{}' emitted a delete without an old row image even \
+                                     though Iceberg requires FULL replica identity.",
+                                    delete.replicated_table_schema.name()
+                                )
+                            ));
                         };
                         if old_table_row.is_key() {
                             return Err(etl_error!(

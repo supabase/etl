@@ -20,7 +20,7 @@ use etl_postgres::{
 };
 use etl_telemetry::tracing::init_test_tracing;
 use futures::StreamExt;
-use pg_escape::quote_identifier;
+use pg_escape::{quote_identifier, quote_literal};
 use postgres_replication::{
     LogicalReplicationStream,
     protocol::{LogicalReplicationMessage, ReplicationMessage},
@@ -257,6 +257,273 @@ async fn collect_stream_markers(
     }
 
     markers
+}
+
+const REPLICA_IDENTITY_LARGE_TEXT_SIZE_BYTES: usize = 8192;
+const REPLICA_IDENTITY_INITIAL_ID: i64 = 1;
+const REPLICA_IDENTITY_INITIAL_NAME: &str = "alice";
+const REPLICA_IDENTITY_INITIAL_SURNAME: &str = "smith";
+const REPLICA_IDENTITY_INITIAL_CITY: &str = "rome";
+const REPLICA_IDENTITY_UPDATED_CITY: &str = "vienna";
+const REPLICA_IDENTITY_UPDATED_NAME: &str = "alicia";
+const REPLICA_IDENTITY_UPDATED_SURNAME: &str = "smithers";
+
+#[derive(Clone, Copy)]
+enum ReplicaIdentityMode {
+    Default,
+    Full,
+    UsingIndex,
+}
+
+impl ReplicaIdentityMode {
+    fn identity_update_sql(self, table_name: &str, final_large_text: &str) -> String {
+        match self {
+            Self::UsingIndex => format!(
+                "update {table_name} set name = {}, large_text = {} where id = {} and surname = {}",
+                quote_literal(REPLICA_IDENTITY_UPDATED_NAME),
+                quote_literal(final_large_text),
+                REPLICA_IDENTITY_INITIAL_ID,
+                quote_literal(REPLICA_IDENTITY_INITIAL_SURNAME),
+            ),
+            Self::Default | Self::Full => format!(
+                "update {table_name} set surname = {}, large_text = {} where id = {} and surname \
+                 = {}",
+                quote_literal(REPLICA_IDENTITY_UPDATED_SURNAME),
+                quote_literal(final_large_text),
+                REPLICA_IDENTITY_INITIAL_ID,
+                quote_literal(REPLICA_IDENTITY_INITIAL_SURNAME),
+            ),
+        }
+    }
+
+    fn delete_sql(self, table_name: &str) -> String {
+        match self {
+            Self::UsingIndex => format!(
+                "delete from {table_name} where id = {} and name = {} and surname = {}",
+                REPLICA_IDENTITY_INITIAL_ID,
+                quote_literal(REPLICA_IDENTITY_UPDATED_NAME),
+                quote_literal(REPLICA_IDENTITY_INITIAL_SURNAME),
+            ),
+            Self::Default | Self::Full => format!(
+                "delete from {table_name} where id = {} and surname = {}",
+                REPLICA_IDENTITY_INITIAL_ID,
+                quote_literal(REPLICA_IDENTITY_UPDATED_SURNAME),
+            ),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ObservedTupleCell {
+    Null,
+    UnchangedToast,
+    Text(String),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ObservedChangeMessage {
+    Update {
+        key_tuple: Option<Vec<ObservedTupleCell>>,
+        old_tuple: Option<Vec<ObservedTupleCell>>,
+        new_tuple: Vec<ObservedTupleCell>,
+    },
+    Delete {
+        key_tuple: Option<Vec<ObservedTupleCell>>,
+        old_tuple: Option<Vec<ObservedTupleCell>>,
+    },
+}
+
+fn observed_tuple_cells(tuple: &postgres_replication::protocol::Tuple) -> Vec<ObservedTupleCell> {
+    tuple
+        .tuple_data()
+        .iter()
+        .map(|cell| match cell {
+            postgres_replication::protocol::TupleData::Null => ObservedTupleCell::Null,
+            postgres_replication::protocol::TupleData::UnchangedToast => {
+                ObservedTupleCell::UnchangedToast
+            }
+            postgres_replication::protocol::TupleData::Text(bytes) => {
+                ObservedTupleCell::Text(std::str::from_utf8(bytes).unwrap().to_string())
+            }
+            postgres_replication::protocol::TupleData::Binary(_) => {
+                panic!("unexpected binary tuple data in test")
+            }
+        })
+        .collect()
+}
+
+async fn collect_update_delete_messages(
+    stream: LogicalReplicationStream,
+    expected_count: usize,
+) -> Vec<ObservedChangeMessage> {
+    let mut messages = Vec::with_capacity(expected_count);
+
+    pin!(stream);
+    while messages.len() < expected_count {
+        let event = timeout(Duration::from_secs(10), stream.next())
+            .await
+            .expect("timed out while waiting for logical replication data")
+            .expect("logical replication stream ended unexpectedly")
+            .expect("failed to decode logical replication data");
+
+        let ReplicationMessage::XLogData(event) = event else {
+            continue;
+        };
+
+        match event.data() {
+            LogicalReplicationMessage::Update(update) => {
+                messages.push(ObservedChangeMessage::Update {
+                    key_tuple: update.key_tuple().map(observed_tuple_cells),
+                    old_tuple: update.old_tuple().map(observed_tuple_cells),
+                    new_tuple: observed_tuple_cells(update.new_tuple()),
+                });
+            }
+            LogicalReplicationMessage::Delete(delete) => {
+                messages.push(ObservedChangeMessage::Delete {
+                    key_tuple: delete.key_tuple().map(observed_tuple_cells),
+                    old_tuple: delete.old_tuple().map(observed_tuple_cells),
+                });
+            }
+            _ => {}
+        }
+    }
+
+    messages
+}
+
+struct RawReplicaIdentityScenarioResult {
+    changes: Vec<ObservedChangeMessage>,
+}
+
+async fn run_raw_replica_identity_scenario(
+    replica_identity: ReplicaIdentityMode,
+) -> RawReplicaIdentityScenarioResult {
+    init_test_tracing();
+
+    let database = spawn_source_database().await;
+    let table_name = test_table_name("raw_replica_identity");
+    let quoted_table_name = table_name.as_quoted_identifier();
+    database
+        .create_table(
+            table_name.clone(),
+            false,
+            &[
+                ("id", "bigint not null"),
+                ("name", "text not null"),
+                ("surname", "text not null"),
+                ("city", "text not null"),
+                ("large_text", "text not null"),
+            ],
+        )
+        .await
+        .unwrap();
+
+    database
+        .run_sql(&format!("alter table {quoted_table_name} add primary key (surname, id)"))
+        .await
+        .unwrap();
+
+    database
+        .alter_table(
+            table_name.clone(),
+            &[TableModification::AlterColumn {
+                name: "large_text",
+                alteration: "set storage external",
+            }],
+        )
+        .await
+        .unwrap();
+
+    match replica_identity {
+        ReplicaIdentityMode::Default => {}
+        ReplicaIdentityMode::Full => {
+            database
+                .alter_table(
+                    table_name.clone(),
+                    &[TableModification::ReplicaIdentity { value: "full" }],
+                )
+                .await
+                .unwrap();
+        }
+        ReplicaIdentityMode::UsingIndex => {
+            let index_name = format!("{}_replica_identity_idx", table_name.name);
+            database
+                .run_sql(&format!(
+                    "create unique index {} on {} (surname, name)",
+                    quote_identifier(&index_name),
+                    quoted_table_name,
+                ))
+                .await
+                .unwrap();
+            database
+                .run_sql(&format!(
+                    "alter table {} replica identity using index {}",
+                    quoted_table_name,
+                    quote_identifier(&index_name),
+                ))
+                .await
+                .unwrap();
+        }
+    }
+
+    let publication_name = "raw_replica_identity_pub";
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
+
+    let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let slot_name = test_slot_name("raw_replica_identity_slot");
+    let slot = client.create_slot(&slot_name).await.unwrap();
+    let stream = client
+        .start_logical_replication(publication_name, &slot_name, slot.consistent_point)
+        .await
+        .unwrap();
+
+    let initial_large_text = "a".repeat(REPLICA_IDENTITY_LARGE_TEXT_SIZE_BYTES);
+    let updated_large_text = "b".repeat(REPLICA_IDENTITY_LARGE_TEXT_SIZE_BYTES);
+    let final_large_text = "c".repeat(REPLICA_IDENTITY_LARGE_TEXT_SIZE_BYTES);
+
+    database
+        .run_sql(&format!(
+            "insert into {quoted_table_name} (id, name, surname, city, large_text) values ({}, \
+             {}, {}, {}, {})",
+            REPLICA_IDENTITY_INITIAL_ID,
+            quote_literal(REPLICA_IDENTITY_INITIAL_NAME),
+            quote_literal(REPLICA_IDENTITY_INITIAL_SURNAME),
+            quote_literal(REPLICA_IDENTITY_INITIAL_CITY),
+            quote_literal(&initial_large_text),
+        ))
+        .await
+        .unwrap();
+
+    database
+        .run_sql(&format!(
+            "update {quoted_table_name} set city = {} where id = {} and surname = {}",
+            quote_literal(REPLICA_IDENTITY_UPDATED_CITY),
+            REPLICA_IDENTITY_INITIAL_ID,
+            quote_literal(REPLICA_IDENTITY_INITIAL_SURNAME),
+        ))
+        .await
+        .unwrap();
+
+    database
+        .run_sql(&format!(
+            "update {quoted_table_name} set large_text = {} where id = {} and surname = {}",
+            quote_literal(&updated_large_text),
+            REPLICA_IDENTITY_INITIAL_ID,
+            quote_literal(REPLICA_IDENTITY_INITIAL_SURNAME),
+        ))
+        .await
+        .unwrap();
+
+    database
+        .run_sql(&replica_identity.identity_update_sql(&quoted_table_name, &final_large_text))
+        .await
+        .unwrap();
+
+    database.run_sql(&replica_identity.delete_sql(&quoted_table_name)).await.unwrap();
+
+    let changes = collect_update_delete_messages(stream, 4).await;
+
+    RawReplicaIdentityScenarioResult { changes }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1809,5 +2076,197 @@ async fn table_copy_stream_with_ctid_partition() {
     assert_eq!(
         total_rows, expected_rows as u64,
         "total rows across all partitions should match inserted rows"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pgoutput_default_replica_identity_uses_replica_identity_not_primary_key() {
+    let result = run_raw_replica_identity_scenario(ReplicaIdentityMode::Default).await;
+
+    assert_eq!(
+        result.changes,
+        vec![
+            ObservedChangeMessage::Update {
+                key_tuple: None,
+                old_tuple: None,
+                new_tuple: vec![
+                    ObservedTupleCell::Text("1".to_string()),
+                    ObservedTupleCell::Text("alice".to_string()),
+                    ObservedTupleCell::Text("smith".to_string()),
+                    ObservedTupleCell::Text("vienna".to_string()),
+                    ObservedTupleCell::UnchangedToast,
+                ],
+            },
+            ObservedChangeMessage::Update {
+                key_tuple: None,
+                old_tuple: None,
+                new_tuple: vec![
+                    ObservedTupleCell::Text("1".to_string()),
+                    ObservedTupleCell::Text("alice".to_string()),
+                    ObservedTupleCell::Text("smith".to_string()),
+                    ObservedTupleCell::Text("vienna".to_string()),
+                    ObservedTupleCell::Text("b".repeat(REPLICA_IDENTITY_LARGE_TEXT_SIZE_BYTES),),
+                ],
+            },
+            ObservedChangeMessage::Update {
+                key_tuple: Some(vec![
+                    ObservedTupleCell::Text("1".to_string()),
+                    ObservedTupleCell::Null,
+                    ObservedTupleCell::Text("smith".to_string()),
+                    ObservedTupleCell::Null,
+                    ObservedTupleCell::Null,
+                ]),
+                old_tuple: None,
+                new_tuple: vec![
+                    ObservedTupleCell::Text("1".to_string()),
+                    ObservedTupleCell::Text("alice".to_string()),
+                    ObservedTupleCell::Text("smithers".to_string()),
+                    ObservedTupleCell::Text("vienna".to_string()),
+                    ObservedTupleCell::Text("c".repeat(REPLICA_IDENTITY_LARGE_TEXT_SIZE_BYTES),),
+                ],
+            },
+            ObservedChangeMessage::Delete {
+                key_tuple: Some(vec![
+                    ObservedTupleCell::Text("1".to_string()),
+                    ObservedTupleCell::Null,
+                    ObservedTupleCell::Text("smithers".to_string()),
+                    ObservedTupleCell::Null,
+                    ObservedTupleCell::Null,
+                ]),
+                old_tuple: None,
+            },
+        ]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pgoutput_using_index_replica_identity_tracks_alternative_identity_columns() {
+    let result = run_raw_replica_identity_scenario(ReplicaIdentityMode::UsingIndex).await;
+
+    assert_eq!(
+        result.changes,
+        vec![
+            ObservedChangeMessage::Update {
+                key_tuple: None,
+                old_tuple: None,
+                new_tuple: vec![
+                    ObservedTupleCell::Text("1".to_string()),
+                    ObservedTupleCell::Text("alice".to_string()),
+                    ObservedTupleCell::Text("smith".to_string()),
+                    ObservedTupleCell::Text("vienna".to_string()),
+                    ObservedTupleCell::UnchangedToast,
+                ],
+            },
+            ObservedChangeMessage::Update {
+                key_tuple: None,
+                old_tuple: None,
+                new_tuple: vec![
+                    ObservedTupleCell::Text("1".to_string()),
+                    ObservedTupleCell::Text("alice".to_string()),
+                    ObservedTupleCell::Text("smith".to_string()),
+                    ObservedTupleCell::Text("vienna".to_string()),
+                    ObservedTupleCell::Text("b".repeat(REPLICA_IDENTITY_LARGE_TEXT_SIZE_BYTES),),
+                ],
+            },
+            ObservedChangeMessage::Update {
+                key_tuple: Some(vec![
+                    ObservedTupleCell::Null,
+                    ObservedTupleCell::Text("alice".to_string()),
+                    ObservedTupleCell::Text("smith".to_string()),
+                    ObservedTupleCell::Null,
+                    ObservedTupleCell::Null,
+                ]),
+                old_tuple: None,
+                new_tuple: vec![
+                    ObservedTupleCell::Text("1".to_string()),
+                    ObservedTupleCell::Text("alicia".to_string()),
+                    ObservedTupleCell::Text("smith".to_string()),
+                    ObservedTupleCell::Text("vienna".to_string()),
+                    ObservedTupleCell::Text("c".repeat(REPLICA_IDENTITY_LARGE_TEXT_SIZE_BYTES),),
+                ],
+            },
+            ObservedChangeMessage::Delete {
+                key_tuple: Some(vec![
+                    ObservedTupleCell::Null,
+                    ObservedTupleCell::Text("alicia".to_string()),
+                    ObservedTupleCell::Text("smith".to_string()),
+                    ObservedTupleCell::Null,
+                    ObservedTupleCell::Null,
+                ]),
+                old_tuple: None,
+            },
+        ]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pgoutput_full_replica_identity_always_sends_full_old_rows() {
+    let result = run_raw_replica_identity_scenario(ReplicaIdentityMode::Full).await;
+
+    assert_eq!(
+        result.changes,
+        vec![
+            ObservedChangeMessage::Update {
+                key_tuple: None,
+                old_tuple: Some(vec![
+                    ObservedTupleCell::Text("1".to_string()),
+                    ObservedTupleCell::Text("alice".to_string()),
+                    ObservedTupleCell::Text("smith".to_string()),
+                    ObservedTupleCell::Text("rome".to_string()),
+                    ObservedTupleCell::Text("a".repeat(REPLICA_IDENTITY_LARGE_TEXT_SIZE_BYTES),),
+                ]),
+                new_tuple: vec![
+                    ObservedTupleCell::Text("1".to_string()),
+                    ObservedTupleCell::Text("alice".to_string()),
+                    ObservedTupleCell::Text("smith".to_string()),
+                    ObservedTupleCell::Text("vienna".to_string()),
+                    ObservedTupleCell::UnchangedToast,
+                ],
+            },
+            ObservedChangeMessage::Update {
+                key_tuple: None,
+                old_tuple: Some(vec![
+                    ObservedTupleCell::Text("1".to_string()),
+                    ObservedTupleCell::Text("alice".to_string()),
+                    ObservedTupleCell::Text("smith".to_string()),
+                    ObservedTupleCell::Text("vienna".to_string()),
+                    ObservedTupleCell::Text("a".repeat(REPLICA_IDENTITY_LARGE_TEXT_SIZE_BYTES),),
+                ]),
+                new_tuple: vec![
+                    ObservedTupleCell::Text("1".to_string()),
+                    ObservedTupleCell::Text("alice".to_string()),
+                    ObservedTupleCell::Text("smith".to_string()),
+                    ObservedTupleCell::Text("vienna".to_string()),
+                    ObservedTupleCell::Text("b".repeat(REPLICA_IDENTITY_LARGE_TEXT_SIZE_BYTES),),
+                ],
+            },
+            ObservedChangeMessage::Update {
+                key_tuple: None,
+                old_tuple: Some(vec![
+                    ObservedTupleCell::Text("1".to_string()),
+                    ObservedTupleCell::Text("alice".to_string()),
+                    ObservedTupleCell::Text("smith".to_string()),
+                    ObservedTupleCell::Text("vienna".to_string()),
+                    ObservedTupleCell::Text("b".repeat(REPLICA_IDENTITY_LARGE_TEXT_SIZE_BYTES),),
+                ]),
+                new_tuple: vec![
+                    ObservedTupleCell::Text("1".to_string()),
+                    ObservedTupleCell::Text("alice".to_string()),
+                    ObservedTupleCell::Text("smithers".to_string()),
+                    ObservedTupleCell::Text("vienna".to_string()),
+                    ObservedTupleCell::Text("c".repeat(REPLICA_IDENTITY_LARGE_TEXT_SIZE_BYTES),),
+                ],
+            },
+            ObservedChangeMessage::Delete {
+                key_tuple: None,
+                old_tuple: Some(vec![
+                    ObservedTupleCell::Text("1".to_string()),
+                    ObservedTupleCell::Text("alice".to_string()),
+                    ObservedTupleCell::Text("smithers".to_string()),
+                    ObservedTupleCell::Text("vienna".to_string()),
+                    ObservedTupleCell::Text("c".repeat(REPLICA_IDENTITY_LARGE_TEXT_SIZE_BYTES),),
+                ]),
+            },
+        ]
     );
 }

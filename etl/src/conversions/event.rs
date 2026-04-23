@@ -360,8 +360,18 @@ pub(crate) fn parse_event_from_insert_message(
 ///
 /// The old row image may be either [`OldTableRow::Full`] or
 /// [`OldTableRow::Key`], depending on the table's `REPLICA IDENTITY` setting
-/// and on whether PostgreSQL needed to send an old-side image at all. The new
-/// row image is always decoded from the update's new tuple and becomes
+/// and on whether PostgreSQL needed to send an old-side image at all:
+///
+/// - `REPLICA IDENTITY FULL` emits `old_tuple`, which we decode as
+///   [`OldTableRow::Full`].
+/// - `REPLICA IDENTITY DEFAULT` and `USING INDEX` may emit `key_tuple`, which
+///   we decode as [`OldTableRow::Key`]. PostgreSQL does this when the replica
+///   identity changed, or when it still needs the old identity values (for
+///   example because a replica-identity column is externally stored).
+/// - Otherwise PostgreSQL emits no old-side tuple at all and `old_table_row`
+///   stays `None`.
+///
+/// The new row image is always decoded from the update's new tuple and becomes
 /// [`UpdatedTableRow::Full`] when every column value is known, or
 /// [`UpdatedTableRow::Partial`] when PostgreSQL emits `UnchangedToast` fields
 /// that cannot be reconstructed from the available old-row image.
@@ -378,9 +388,11 @@ pub(crate) fn parse_event_from_update_message(
     update_body: &protocol::UpdateBody,
 ) -> EtlResult<UpdateEvent> {
     // PostgreSQL can attach either a full old tuple (`old_tuple`) or only the
-    // replica-identity columns (`key_tuple`) to an update. We preserve that
-    // shape in `OldTableRow`. The new tuple is decoded separately below, where
-    // the old row acts only as a source for resolving `UnchangedToast`.
+    // replica-identity columns (`key_tuple`) to an update. If neither is
+    // present, the publisher determined that no old-side image was required
+    // for this update. We preserve that shape in `OldTableRow`. The new tuple
+    // is decoded separately below, where the old row acts only as a source for
+    // resolving `UnchangedToast`.
     let is_key = update_body.old_tuple().is_none();
     let old_tuple = update_body.old_tuple().or(update_body.key_tuple());
 
@@ -431,10 +443,20 @@ pub(crate) fn parse_event_from_update_message(
 /// Delete events carry only an old row image.
 ///
 /// That old image may be either [`OldTableRow::Full`] or [`OldTableRow::Key`],
-/// depending on the table's `REPLICA IDENTITY` setting. Unlike updates, delete
-/// handling does not need any additional reconstruction step for a new row, so
-/// this function simply preserves PostgreSQL's old-row semantics after
-/// normalizing any key tuple into a dense key row in replicated table order.
+/// depending on the table's `REPLICA IDENTITY` setting:
+///
+/// - `REPLICA IDENTITY FULL` emits `old_tuple`, which we decode as
+///   [`OldTableRow::Full`].
+/// - `REPLICA IDENTITY DEFAULT` and `USING INDEX` emit `key_tuple`, which we
+///   decode as [`OldTableRow::Key`].
+/// - valid publications cannot emit deletes for `REPLICA IDENTITY NOTHING`, and
+///   published deletes should always carry an old-side tuple. A missing old row
+///   is therefore preserved defensively as an invalid upstream absence.
+///
+/// Unlike updates, delete handling does not need any additional reconstruction
+/// step for a new row, so this function simply preserves PostgreSQL's old-row
+/// semantics after normalizing any key tuple into a dense key row in
+/// replicated table order.
 pub(crate) fn parse_event_from_delete_message(
     replicated_table_schema: ReplicatedTableSchema,
     start_lsn: PgLsn,
@@ -442,8 +464,9 @@ pub(crate) fn parse_event_from_delete_message(
     tx_ordinal: u64,
     delete_body: &protocol::DeleteBody,
 ) -> EtlResult<DeleteEvent> {
-    // Delete messages carry only an old-side image. PostgreSQL may send either
-    // the full old row or only the replica-identity columns.
+    // Published delete messages should always carry an old-side image.
+    // PostgreSQL sends either the full old row or only the replica-identity
+    // columns, and we preserve that shape here.
     let is_key = delete_body.old_tuple().is_none();
     let old_tuple = delete_body.old_tuple().or(delete_body.key_tuple());
 
@@ -924,21 +947,30 @@ fn convert_tuple_data_to_cell(
 mod tests {
     use std::sync::Arc;
 
+    use bytes::Bytes;
     use etl_postgres::types::{ColumnSchema, IdentityType, ReplicationMask};
-    use postgres_replication::protocol::TupleData;
+    use postgres_replication::protocol::{LogicalReplicationMessage, TupleData};
     use tokio_postgres::types::Type;
 
     use super::{
         IdentityMessage, convert_tuple_to_row, convert_update_tuple_to_updated_table_row,
-        normalize_key_tuple_to_row,
+        normalize_key_tuple_to_row, parse_event_from_delete_message,
+        parse_event_from_update_message,
     };
     use crate::{
         error::ErrorKind,
         types::{
-            Cell, OldTableRow, PartialTableRow, ReplicatedTableSchema, TableId, TableName,
-            TableRow, TableSchema, UpdatedTableRow,
+            Cell, DeleteEvent, OldTableRow, PartialTableRow, PgLsn, ReplicatedTableSchema, TableId,
+            TableName, TableRow, TableSchema, UpdateEvent, UpdatedTableRow,
         },
     };
+
+    #[derive(Clone, Copy)]
+    enum TestTupleData<'a> {
+        Null,
+        UnchangedToast,
+        Text(&'a str),
+    }
 
     fn event_schema(columns: Vec<ColumnSchema>) -> ReplicatedTableSchema {
         let table_schema = Arc::new(TableSchema::new(
@@ -948,6 +980,162 @@ mod tests {
         ));
 
         ReplicatedTableSchema::all(Arc::clone(&table_schema))
+    }
+
+    fn composite_primary_key_schema() -> ReplicatedTableSchema {
+        event_schema(vec![
+            ColumnSchema::new("id".to_string(), Type::INT8, -1, 1, Some(2), false),
+            ColumnSchema::new("name".to_string(), Type::TEXT, -1, 2, None, false),
+            ColumnSchema::new("surname".to_string(), Type::TEXT, -1, 3, Some(1), false),
+            ColumnSchema::new("city".to_string(), Type::TEXT, -1, 4, None, false),
+            ColumnSchema::new("large_text".to_string(), Type::TEXT, -1, 5, None, false),
+        ])
+    }
+
+    fn alternative_identity_schema() -> ReplicatedTableSchema {
+        let table_schema = Arc::new(TableSchema::new(
+            TableId::new(43),
+            TableName::new("public".to_string(), "users".to_string()),
+            vec![
+                ColumnSchema::new("id".to_string(), Type::INT8, -1, 1, Some(2), false),
+                ColumnSchema::new("name".to_string(), Type::TEXT, -1, 2, None, false),
+                ColumnSchema::new("surname".to_string(), Type::TEXT, -1, 3, Some(1), false),
+                ColumnSchema::new("city".to_string(), Type::TEXT, -1, 4, None, false),
+            ],
+        ));
+
+        ReplicatedTableSchema::from_masks(
+            Arc::clone(&table_schema),
+            ReplicationMask::all(&table_schema),
+            etl_postgres::types::IdentityMask::from_bytes(vec![0, 1, 1, 0]),
+        )
+    }
+
+    fn full_identity_schema() -> ReplicatedTableSchema {
+        let table_schema = Arc::new(TableSchema::new(
+            TableId::new(44),
+            TableName::new("public".to_string(), "users".to_string()),
+            vec![
+                ColumnSchema::new("id".to_string(), Type::INT8, -1, 1, Some(2), false),
+                ColumnSchema::new("name".to_string(), Type::TEXT, -1, 2, None, false),
+                ColumnSchema::new("surname".to_string(), Type::TEXT, -1, 3, Some(1), false),
+                ColumnSchema::new("city".to_string(), Type::TEXT, -1, 4, None, false),
+            ],
+        ));
+
+        ReplicatedTableSchema::from_masks(
+            Arc::clone(&table_schema),
+            ReplicationMask::all(&table_schema),
+            etl_postgres::types::IdentityMask::from_bytes(vec![1, 1, 1, 1]),
+        )
+    }
+
+    fn encode_tuple(buf: &mut Vec<u8>, tuple_data: &[TestTupleData<'_>]) {
+        buf.extend_from_slice(&(i16::try_from(tuple_data.len()).unwrap()).to_be_bytes());
+
+        for cell in tuple_data {
+            match cell {
+                TestTupleData::Null => buf.push(b'n'),
+                TestTupleData::UnchangedToast => buf.push(b'u'),
+                TestTupleData::Text(value) => {
+                    buf.push(b't');
+                    buf.extend_from_slice(&(i32::try_from(value.len()).unwrap()).to_be_bytes());
+                    buf.extend_from_slice(value.as_bytes());
+                }
+            }
+        }
+    }
+
+    fn parse_update_body_from_parts(
+        rel_id: u32,
+        old_tuple: Option<&[TestTupleData<'_>]>,
+        key_tuple: Option<&[TestTupleData<'_>]>,
+        new_tuple: &[TestTupleData<'_>],
+    ) -> postgres_replication::protocol::UpdateBody {
+        let mut bytes = Vec::new();
+        bytes.push(b'U');
+        bytes.extend_from_slice(&rel_id.to_be_bytes());
+
+        match (old_tuple, key_tuple) {
+            (Some(old_tuple), None) => {
+                bytes.push(b'O');
+                encode_tuple(&mut bytes, old_tuple);
+            }
+            (None, Some(key_tuple)) => {
+                bytes.push(b'K');
+                encode_tuple(&mut bytes, key_tuple);
+            }
+            (None, None) => {}
+            (Some(_), Some(_)) => panic!("update body cannot contain both old and key tuples"),
+        }
+
+        bytes.push(b'N');
+        encode_tuple(&mut bytes, new_tuple);
+
+        let message = LogicalReplicationMessage::parse(&Bytes::from(bytes)).unwrap();
+        let LogicalReplicationMessage::Update(body) = message else {
+            panic!("expected update body");
+        };
+
+        body
+    }
+
+    fn parse_delete_body_from_parts(
+        rel_id: u32,
+        old_tuple: Option<&[TestTupleData<'_>]>,
+        key_tuple: Option<&[TestTupleData<'_>]>,
+    ) -> postgres_replication::protocol::DeleteBody {
+        let mut bytes = Vec::new();
+        bytes.push(b'D');
+        bytes.extend_from_slice(&rel_id.to_be_bytes());
+
+        match (old_tuple, key_tuple) {
+            (Some(old_tuple), None) => {
+                bytes.push(b'O');
+                encode_tuple(&mut bytes, old_tuple);
+            }
+            (None, Some(key_tuple)) => {
+                bytes.push(b'K');
+                encode_tuple(&mut bytes, key_tuple);
+            }
+            (None, None) => panic!("delete body requires either old or key tuple"),
+            (Some(_), Some(_)) => panic!("delete body cannot contain both old and key tuples"),
+        }
+
+        let message = LogicalReplicationMessage::parse(&Bytes::from(bytes)).unwrap();
+        let LogicalReplicationMessage::Delete(body) = message else {
+            panic!("expected delete body");
+        };
+
+        body
+    }
+
+    fn parse_update_event(
+        replicated_table_schema: ReplicatedTableSchema,
+        update_body: &postgres_replication::protocol::UpdateBody,
+    ) -> UpdateEvent {
+        parse_event_from_update_message(
+            replicated_table_schema,
+            PgLsn::from(10),
+            PgLsn::from(20),
+            0,
+            update_body,
+        )
+        .unwrap()
+    }
+
+    fn parse_delete_event(
+        replicated_table_schema: ReplicatedTableSchema,
+        delete_body: &postgres_replication::protocol::DeleteBody,
+    ) -> DeleteEvent {
+        parse_event_from_delete_message(
+            replicated_table_schema,
+            PgLsn::from(10),
+            PgLsn::from(20),
+            0,
+            delete_body,
+        )
+        .unwrap()
     }
 
     #[test]
@@ -1147,5 +1335,201 @@ mod tests {
         let row = normalize_key_tuple_to_row(&replicated_table_schema, &tuple_data).unwrap();
 
         assert_eq!(row, TableRow::new(vec![Cell::I64(1), Cell::String("smith".to_string())]));
+    }
+
+    #[test]
+    fn parse_event_from_update_message_preserves_absent_old_row_for_non_identity_change() {
+        let replicated_table_schema = composite_primary_key_schema();
+        let update_body = parse_update_body_from_parts(
+            42,
+            None,
+            None,
+            &[
+                TestTupleData::Text("1"),
+                TestTupleData::Text("alice"),
+                TestTupleData::Text("smith"),
+                TestTupleData::Text("vienna"),
+                TestTupleData::Text("toast"),
+            ],
+        );
+
+        let event = parse_update_event(replicated_table_schema, &update_body);
+
+        assert_eq!(event.old_table_row, None);
+        assert_eq!(
+            event.updated_table_row,
+            UpdatedTableRow::Full(TableRow::new(vec![
+                Cell::I64(1),
+                Cell::String("alice".to_string()),
+                Cell::String("smith".to_string()),
+                Cell::String("vienna".to_string()),
+                Cell::String("toast".to_string()),
+            ]))
+        );
+    }
+
+    #[test]
+    fn parse_event_from_update_message_marks_unrecoverable_toast_as_partial_without_old_row() {
+        let replicated_table_schema = composite_primary_key_schema();
+        let update_body = parse_update_body_from_parts(
+            42,
+            None,
+            None,
+            &[
+                TestTupleData::Text("1"),
+                TestTupleData::Text("alice"),
+                TestTupleData::Text("smith"),
+                TestTupleData::Text("vienna"),
+                TestTupleData::UnchangedToast,
+            ],
+        );
+
+        let event = parse_update_event(replicated_table_schema, &update_body);
+
+        assert_eq!(event.old_table_row, None);
+        assert_eq!(
+            event.updated_table_row,
+            UpdatedTableRow::Partial(PartialTableRow::new(
+                5,
+                TableRow::new(vec![
+                    Cell::I64(1),
+                    Cell::String("alice".to_string()),
+                    Cell::String("smith".to_string()),
+                    Cell::String("vienna".to_string()),
+                ]),
+                vec![4],
+            ))
+        );
+    }
+
+    #[test]
+    fn parse_event_from_update_message_preserves_key_tuple_for_identity_change() {
+        let replicated_table_schema = composite_primary_key_schema();
+        let update_body = parse_update_body_from_parts(
+            42,
+            None,
+            Some(&[
+                TestTupleData::Text("1"),
+                TestTupleData::Null,
+                TestTupleData::Text("smith"),
+                TestTupleData::Null,
+                TestTupleData::Null,
+            ]),
+            &[
+                TestTupleData::Text("1"),
+                TestTupleData::Text("alice"),
+                TestTupleData::Text("smithers"),
+                TestTupleData::Text("rome"),
+                TestTupleData::Text("toast"),
+            ],
+        );
+
+        let event = parse_update_event(replicated_table_schema, &update_body);
+
+        assert_eq!(
+            event.old_table_row,
+            Some(OldTableRow::Key(TableRow::new(vec![
+                Cell::I64(1),
+                Cell::String("smith".to_string()),
+            ])))
+        );
+    }
+
+    #[test]
+    fn parse_event_from_update_message_preserves_key_tuple_when_old_identity_is_still_sent() {
+        let replicated_table_schema = alternative_identity_schema();
+        let update_body = parse_update_body_from_parts(
+            43,
+            None,
+            Some(&[
+                TestTupleData::Null,
+                TestTupleData::Text("alice"),
+                TestTupleData::Text("smith"),
+                TestTupleData::Null,
+            ]),
+            &[
+                TestTupleData::Text("1"),
+                TestTupleData::Text("alice"),
+                TestTupleData::Text("smith"),
+                TestTupleData::Text("vienna"),
+            ],
+        );
+
+        let event = parse_update_event(replicated_table_schema, &update_body);
+
+        assert_eq!(
+            event.old_table_row,
+            Some(OldTableRow::Key(TableRow::new(vec![
+                Cell::String("alice".to_string()),
+                Cell::String("smith".to_string()),
+            ])))
+        );
+        assert_eq!(
+            event.updated_table_row,
+            UpdatedTableRow::Full(TableRow::new(vec![
+                Cell::I64(1),
+                Cell::String("alice".to_string()),
+                Cell::String("smith".to_string()),
+                Cell::String("vienna".to_string()),
+            ]))
+        );
+    }
+
+    #[test]
+    fn parse_event_from_update_message_preserves_full_old_tuple_for_full_identity() {
+        let replicated_table_schema = full_identity_schema();
+        let update_body = parse_update_body_from_parts(
+            44,
+            Some(&[
+                TestTupleData::Text("1"),
+                TestTupleData::Text("alice"),
+                TestTupleData::Text("smith"),
+                TestTupleData::Text("rome"),
+            ]),
+            None,
+            &[
+                TestTupleData::Text("1"),
+                TestTupleData::Text("alice"),
+                TestTupleData::Text("smith"),
+                TestTupleData::Text("vienna"),
+            ],
+        );
+
+        let event = parse_update_event(replicated_table_schema, &update_body);
+
+        assert_eq!(
+            event.old_table_row,
+            Some(OldTableRow::Full(TableRow::new(vec![
+                Cell::I64(1),
+                Cell::String("alice".to_string()),
+                Cell::String("smith".to_string()),
+                Cell::String("rome".to_string()),
+            ])))
+        );
+    }
+
+    #[test]
+    fn parse_event_from_delete_message_preserves_key_tuple_for_delete() {
+        let replicated_table_schema = alternative_identity_schema();
+        let delete_body = parse_delete_body_from_parts(
+            43,
+            None,
+            Some(&[
+                TestTupleData::Null,
+                TestTupleData::Text("alice"),
+                TestTupleData::Text("smith"),
+                TestTupleData::Null,
+            ]),
+        );
+
+        let event = parse_delete_event(replicated_table_schema, &delete_body);
+
+        assert_eq!(
+            event.old_table_row,
+            Some(OldTableRow::Key(TableRow::new(vec![
+                Cell::String("alice".to_string()),
+                Cell::String("smith".to_string()),
+            ])))
+        );
     }
 }

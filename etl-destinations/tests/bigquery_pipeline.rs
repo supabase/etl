@@ -368,6 +368,80 @@ async fn table_subsequent_updates() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn table_primary_key_update_rewrites_row() {
+    if skip_if_missing_bigquery_env_vars() {
+        return;
+    }
+
+    init_test_tracing();
+    install_crypto_provider();
+
+    let database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+
+    let bigquery_database = setup_bigquery_database().await;
+
+    let store = NotifyingStore::new();
+    let pipeline_id: PipelineId = random();
+    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
+    let destination = TestDestinationWrapper::wrap(raw_destination);
+
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    let users_state_notify = store
+        .notify_on_table_state_type(
+            database_schema.users_schema().id,
+            TableReplicationPhaseType::Ready,
+        )
+        .await;
+
+    pipeline.start().await.unwrap();
+
+    users_state_notify.notified().await;
+
+    let event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
+    database
+        .insert_values(
+            database_schema.users_schema().name.clone(),
+            &["name", "age"],
+            &[&"user_1", &1],
+        )
+        .await
+        .unwrap();
+    event_notify.notified().await;
+
+    let updated_id = 10i32;
+    let updated_name = "user_10".to_string();
+    let updated_age = 10i32;
+    let event_notify = destination.wait_for_events_count(vec![(EventType::Update, 1)]).await;
+    database
+        .update_values_where(
+            database_schema.users_schema().name.clone(),
+            &["id", "name", "age"],
+            &[&updated_id, &updated_name, &updated_age],
+            &["id"],
+            &["1"],
+            "",
+        )
+        .await
+        .unwrap();
+    event_notify.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let users_rows =
+        bigquery_database.query_table(database_schema.users_schema().name).await.unwrap();
+    let parsed_users_rows = parse_bigquery_table_rows::<BigQueryUser>(users_rows);
+    assert_eq!(parsed_users_rows, vec![BigQueryUser::new(10, "user_10", 10),]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn table_truncate_with_batching() {
     if skip_if_missing_bigquery_env_vars() {
         return;

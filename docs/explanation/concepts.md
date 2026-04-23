@@ -165,7 +165,10 @@ Understanding the two phases helps you:
 
 ### The Problem
 
-When a row is updated or deleted, what identifies which row changed? By default, Postgres only sends the primary key - enough to identify the row, but not to see the old values.
+When a row is updated or deleted, downstream systems need enough old-row information to identify which source row changed.
+
+The important nuance is that PostgreSQL does **not** always send an old-side tuple for `UPDATE`.
+Under key-based replica identity, it only sends a key image when it is needed.
 
 ### Settings
 
@@ -179,18 +182,37 @@ ALTER TABLE your_table REPLICA IDENTITY FULL;
 
 | Setting | What's sent with UPDATE/DELETE | Use case |
 |---------|-------------------------------|----------|
-| `DEFAULT` | Primary key columns only | Most cases |
-| `FULL` | All columns (old values) | Audit logs, CDC requiring old values |
-| `NOTHING` | Nothing | Not recommended |
-| `USING INDEX` | Columns from specified index | Tables without primary key |
+| `DEFAULT` | For `UPDATE`, old primary-key columns only when PostgreSQL needs them; for `DELETE`, old primary-key columns | Most tables with a primary key |
+| `FULL` | Full old row | Destinations or audits that need full old-row images |
+| `NOTHING` | Published `UPDATE` and `DELETE` are rejected by PostgreSQL | Rare special cases, generally unsuitable for CDC |
+| `USING INDEX` | For `UPDATE`, old replica-identity index columns only when PostgreSQL needs them; for `DELETE`, old replica-identity index columns | Tables whose replication identity differs from the primary key |
 
 ### Impact on ETL
 
-In your destination's `write_events()`, Update and Delete events have an `old_table_row` field of type `Option<(bool, TableRow)>`:
+In ETL, update and delete events expose:
 
-- With `DEFAULT`: Contains `Some((true, row))` where `row` has only primary key columns
-- With `FULL`: Contains `Some((false, row))` where `row` has all columns with previous values
-- With `NOTHING`: Contains `None`
+```rust
+pub old_table_row: Option<OldTableRow>
+```
+
+where:
+
+- `Some(OldTableRow::Key(row))` means PostgreSQL sent only the replica-identity columns, normalized into replicated table-column order.
+- `Some(OldTableRow::Full(row))` means PostgreSQL sent the full old row.
+- `None` means PostgreSQL did not send an old-side tuple for that update.
+
+For `UPDATE`, `old_table_row = None` is normal when:
+
+- the table uses `DEFAULT` or `USING INDEX`, and
+- PostgreSQL determined no old-side image was required.
+
+For example, a non-identity-column update often arrives without an old row.
+If an identity column changed, or PostgreSQL still needs old identity values
+(such as externally stored identity columns), PostgreSQL sends a key image instead.
+
+For `DELETE`, valid publications include an old row image. If a delete arrives with
+`old_table_row = None`, ETL is preserving an upstream invalid state defensively, and most destinations should treat it
+as unsafe for row-matching deletes.
 
 If you need old values for auditing or comparison, set `REPLICA IDENTITY FULL` on those tables.
 
