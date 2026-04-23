@@ -466,7 +466,6 @@ async fn table_copy_with_row_filter_and_parallel_connections() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "flaky under load"]
 async fn table_schema_copy_survives_pipeline_restarts() {
     init_test_tracing();
     let mut database = spawn_source_database().await;
@@ -564,7 +563,6 @@ async fn table_schema_copy_survives_pipeline_restarts() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "flaky under load"]
 async fn publication_changes_are_correctly_handled() {
     init_test_tracing();
 
