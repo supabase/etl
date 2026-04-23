@@ -570,18 +570,18 @@ fn table_storage_metrics_query(metadata_schema: &str) -> String {
          ),
          data_stats AS (
              SELECT
-                 COUNT(*) AS active_data_files,
-                 COALESCE(SUM(file_size_bytes), 0) AS active_data_bytes,
-                 COALESCE(SUM(CASE WHEN file_size_bytes < {SMALL_FILE_SIZE_BYTES} THEN 1 ELSE 0 END), 0) AS small_data_files,
-                 COALESCE(SUM(record_count), 0) AS active_data_rows
+                 COUNT(*)::BIGINT AS active_data_files,
+                 COALESCE(SUM(file_size_bytes), 0)::BIGINT AS active_data_bytes,
+                 COALESCE(SUM(CASE WHEN file_size_bytes < {SMALL_FILE_SIZE_BYTES} THEN 1 ELSE 0 END), 0)::BIGINT AS small_data_files,
+                 COALESCE(SUM(record_count), 0)::BIGINT AS active_data_rows
              FROM {metadata_schema}.{ducklake_data_file}
              WHERE end_snapshot IS NULL AND table_id = (SELECT table_id FROM target_table)
          ),
          delete_stats AS (
              SELECT
-                 COUNT(*) AS active_delete_files,
-                 COALESCE(SUM(file_size_bytes), 0) AS active_delete_bytes,
-                 COALESCE(SUM(delete_count), 0) AS deleted_rows
+                 COUNT(*)::BIGINT AS active_delete_files,
+                 COALESCE(SUM(file_size_bytes), 0)::BIGINT AS active_delete_bytes,
+                 COALESCE(SUM(delete_count), 0)::BIGINT AS deleted_rows
              FROM {metadata_schema}.{ducklake_delete_file}
              WHERE end_snapshot IS NULL AND table_id = (SELECT table_id FROM target_table)
          )
@@ -607,21 +607,21 @@ fn catalog_maintenance_metrics_query(metadata_schema: &str) -> String {
 
     format!(
         r#"WITH active_data_file_stats AS (
-             SELECT COUNT(*) AS active_data_files_total
+             SELECT COUNT(*)::BIGINT AS active_data_files_total
              FROM {metadata_schema}.{ducklake_data_file}
              WHERE end_snapshot IS NULL
          ),
          snapshot_stats AS (
              SELECT
-                 COUNT(*) AS snapshots_total,
-                 MIN(epoch_ms(snapshot_time)) AS oldest_snapshot_epoch_ms
+                 COUNT(*)::BIGINT AS snapshots_total,
+                 MIN((EXTRACT(EPOCH FROM snapshot_time) * 1000)::BIGINT) AS oldest_snapshot_epoch_ms
              FROM {metadata_schema}.{ducklake_snapshot}
          ),
          scheduled_deletion_stats AS (
              SELECT
-                 COUNT(*) AS files_scheduled_for_deletion_total,
-                 COALESCE(SUM(data_files.file_size_bytes), 0) AS files_scheduled_for_deletion_bytes,
-                 MIN(epoch_ms(scheduled.schedule_start)) AS oldest_scheduled_deletion_epoch_ms
+                 COUNT(*)::BIGINT AS files_scheduled_for_deletion_total,
+                 COALESCE(SUM(data_files.file_size_bytes), 0)::BIGINT AS files_scheduled_for_deletion_bytes,
+                 MIN((EXTRACT(EPOCH FROM scheduled.schedule_start) * 1000)::BIGINT) AS oldest_scheduled_deletion_epoch_ms
              FROM {metadata_schema}.{ducklake_files_scheduled_for_deletion} AS scheduled
              LEFT JOIN {metadata_schema}.{ducklake_data_file} AS data_files USING (data_file_id)
          )

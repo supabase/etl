@@ -19,8 +19,7 @@ use uuid::Uuid;
 
 const DUCKDB_EXTENSION_VERSION: &str = "1.5.2";
 const DUCKLAKE_EXTENSION_FILE: &str = "ducklake.duckdb_extension";
-const JSON_EXTENSION_FILE: &str = "json.duckdb_extension";
-const PARQUET_EXTENSION_FILE: &str = "parquet.duckdb_extension";
+const POSTGRES_SCANNER_EXTENSION_FILE: &str = "postgres_scanner.duckdb_extension";
 
 pub struct DuckLakeTestEnv {
     _catalog_database: PgDatabase<Client>,
@@ -49,10 +48,9 @@ fn current_vendored_extension_dir() -> Option<PathBuf> {
     for root in candidate_roots {
         let extension_dir = root.join(DUCKDB_EXTENSION_VERSION).join(platform_dir);
         let ducklake_extension = extension_dir.join(DUCKLAKE_EXTENSION_FILE);
-        let json_extension = extension_dir.join(JSON_EXTENSION_FILE);
-        let parquet_extension = extension_dir.join(PARQUET_EXTENSION_FILE);
+        let postgres_scanner_extension = extension_dir.join(POSTGRES_SCANNER_EXTENSION_FILE);
 
-        if ducklake_extension.is_file() && json_extension.is_file() && parquet_extension.is_file() {
+        if ducklake_extension.is_file() && postgres_scanner_extension.is_file() {
             return Some(extension_dir);
         }
     }
@@ -84,18 +82,17 @@ pub fn open_verification_connection() -> Connection {
 pub fn ducklake_load_sql() -> String {
     if let Some(extension_dir) = current_vendored_extension_dir() {
         let ducklake_extension = extension_dir.join(DUCKLAKE_EXTENSION_FILE);
-        let json_extension = extension_dir.join(JSON_EXTENSION_FILE);
-        let parquet_extension = extension_dir.join(PARQUET_EXTENSION_FILE);
+        let postgres_scanner_extension = extension_dir.join(POSTGRES_SCANNER_EXTENSION_FILE);
 
         return format!(
-            "LOAD {}; LOAD {}; LOAD {};",
+            "LOAD {}; LOAD {}; LOAD json; LOAD parquet;",
             quote_literal(&ducklake_extension.display().to_string()),
-            quote_literal(&json_extension.display().to_string()),
-            quote_literal(&parquet_extension.display().to_string()),
+            quote_literal(&postgres_scanner_extension.display().to_string()),
         );
     }
 
-    "INSTALL ducklake; LOAD ducklake; INSTALL json; LOAD json; INSTALL parquet; LOAD parquet;"
+    "INSTALL ducklake; LOAD ducklake; INSTALL json; LOAD json; INSTALL parquet; LOAD parquet; \
+     INSTALL postgres_scanner; LOAD postgres_scanner;"
         .to_string()
 }
 

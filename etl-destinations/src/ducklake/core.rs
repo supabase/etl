@@ -1264,6 +1264,8 @@ mod tests {
         metrics::{query_catalog_maintenance_metrics, query_table_storage_metrics},
     };
 
+    const POSTGRES_SCANNER_EXTENSION_FILE: &str = "postgres_scanner.duckdb_extension";
+
     fn make_schema(table_id: u32, schema: &str, table: &str) -> TableSchema {
         TableSchema::new(
             TableId::new(table_id),
@@ -1337,8 +1339,9 @@ mod tests {
         for root in candidate_roots {
             let extension_dir = root.join("1.5.2").join(platform_dir);
             let ducklake_extension = extension_dir.join("ducklake.duckdb_extension");
+            let postgres_scanner_extension = extension_dir.join(POSTGRES_SCANNER_EXTENSION_FILE);
 
-            if ducklake_extension.is_file() {
+            if ducklake_extension.is_file() && postgres_scanner_extension.is_file() {
                 return Some(extension_dir);
             }
         }
@@ -1370,11 +1373,17 @@ mod tests {
     fn ducklake_load_sql() -> String {
         if let Some(extension_dir) = current_vendored_extension_dir() {
             let ducklake_extension = extension_dir.join("ducklake.duckdb_extension");
+            let postgres_scanner_extension = extension_dir.join(POSTGRES_SCANNER_EXTENSION_FILE);
 
-            return format!("LOAD {};", quote_literal(&ducklake_extension.display().to_string()),);
+            return format!(
+                "LOAD {}; LOAD {};",
+                quote_literal(&ducklake_extension.display().to_string()),
+                quote_literal(&postgres_scanner_extension.display().to_string()),
+            );
         }
 
-        "INSTALL ducklake; LOAD ducklake;".to_string()
+        "INSTALL ducklake; LOAD ducklake; INSTALL postgres_scanner; LOAD postgres_scanner;"
+            .to_string()
     }
 
     fn open_lake_conn(catalog: &Url, data: &Url) -> Connection {
@@ -1466,7 +1475,7 @@ mod tests {
         assert!(!is_create_table_conflict(&error, "public_orders"));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn query_table_storage_metrics_reads_ducklake_metadata() {
         let dir = TempDir::new().expect("failed to create temp dir");
         let data = path_to_file_url(&dir.path().join("data"));
@@ -1531,7 +1540,7 @@ mod tests {
         assert_eq!(metrics.deleted_rows, 0);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn query_catalog_maintenance_metrics_reports_active_data_files_total() {
         let dir = TempDir::new().expect("failed to create temp dir");
         let data = path_to_file_url(&dir.path().join("data"));
@@ -1592,7 +1601,7 @@ mod tests {
         assert!(metrics.active_data_files_total >= 1);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn query_catalog_maintenance_metrics_reads_ducklake_metadata() {
         let dir = TempDir::new().expect("failed to create temp dir");
         let data = path_to_file_url(&dir.path().join("data"));

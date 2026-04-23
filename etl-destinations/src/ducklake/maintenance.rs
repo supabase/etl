@@ -1196,7 +1196,9 @@ mod tests {
     use etl_telemetry::metrics::init_metrics_handle;
 
     use super::*;
-    use crate::ducklake::{client::build_warm_ducklake_pool, metrics::register_metrics};
+    #[cfg(feature = "test-utils")]
+    use crate::ducklake::client::build_warm_ducklake_pool;
+    use crate::ducklake::metrics::register_metrics;
 
     fn maintenance_duration_count(
         rendered: &str,
