@@ -189,12 +189,12 @@ async fn run_replica_identity_scenario(
             ))
             .await
             .unwrap();
+        let replica_identity_value = format!("using index {}", quote_identifier(&index_name));
         database
-            .run_sql(&format!(
-                "alter table {} replica identity using index {}",
-                table_name.as_quoted_identifier(),
-                quote_identifier(&index_name),
-            ))
+            .alter_table(
+                table_name.clone(),
+                &[TableModification::ReplicaIdentity { value: &replica_identity_value }],
+            )
             .await
             .unwrap();
     } else {
