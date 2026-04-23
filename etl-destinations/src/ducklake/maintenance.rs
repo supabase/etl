@@ -1193,18 +1193,10 @@ fn rewrite_table_data_files(conn: &duckdb::Connection, table_name: &str) -> EtlR
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use etl_telemetry::metrics::init_metrics_handle;
 
     use super::*;
-    use crate::ducklake::{
-        client::{
-            DuckDbBlockingOperationKind, DuckLakeConnectionManager, build_warm_ducklake_pool,
-            run_duckdb_blocking,
-        },
-        metrics::register_metrics,
-    };
+    use crate::ducklake::metrics::register_metrics;
 
     fn maintenance_duration_count(
         rendered: &str,

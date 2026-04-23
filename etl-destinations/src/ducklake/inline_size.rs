@@ -1,12 +1,9 @@
-use std::time::Duration;
-
 use etl::{
     error::{ErrorKind, EtlResult},
     etl_error,
 };
 use pg_escape::{quote_identifier, quote_literal};
-use sqlx::{PgPool, postgres::PgPoolOptions};
-use url::Url;
+use sqlx::PgPool;
 
 /// Pending inline insert-data bytes sampled from the Postgres DuckLake catalog.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -22,27 +19,9 @@ pub(super) struct DuckLakePendingInlineSizeSampler {
 }
 
 impl DuckLakePendingInlineSizeSampler {
-    /// Builds a sampler for PostgreSQL-backed DuckLake catalogs.
-    pub(super) fn new(catalog_url: &Url, metadata_schema: String) -> EtlResult<Option<Self>> {
-        if !matches!(catalog_url.scheme(), "postgres" | "postgresql") {
-            return Ok(None);
-        }
-
-        let pool = PgPoolOptions::new()
-            .max_connections(1)
-            .min_connections(0)
-            .acquire_timeout(Duration::from_secs(5))
-            .idle_timeout(Some(Duration::from_secs(30)))
-            .connect_lazy(catalog_url.as_str())
-            .map_err(|source| {
-                etl_error!(
-                    ErrorKind::ConfigError,
-                    "DuckLake inline-size sampler configuration failed",
-                    source: source
-                )
-            })?;
-
-        Ok(Some(Self { metadata_schema, pool }))
+    /// Builds a sampler backed by the shared DuckLake metadata pool.
+    pub(super) fn new(metadata_schema: String, pool: PgPool) -> Self {
+        Self { metadata_schema, pool }
     }
 
     /// Samples pending inline insert-data bytes for one DuckLake table.
