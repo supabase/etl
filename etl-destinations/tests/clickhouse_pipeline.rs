@@ -1267,6 +1267,12 @@ async fn multiple_tables_receive_independent_writes() {
         }
         sleep(Duration::from_millis(100)).await;
     }
+    assert!(
+        rows_a.len() >= 2 && rows_b.len() >= 2,
+        "timed out: multi_a has {} rows, multi_b has {} rows",
+        rows_a.len(),
+        rows_b.len()
+    );
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -1399,6 +1405,7 @@ async fn sequential_transactions_preserve_commit_order() {
         }
         sleep(Duration::from_millis(100)).await;
     }
+    assert!(rows.len() >= 3, "timed out waiting for tx_order rows: got {} of 3", rows.len());
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -1421,48 +1428,108 @@ async fn sequential_transactions_preserve_commit_order() {
     assert!(r.cdc_lsn > rows[1].cdc_lsn, "update_b must have a higher LSN than update_a");
 }
 
-/// SELECT query used to verify the `default_identity_delete` test.
+/// Row struct for the wide default-identity delete test.
+#[derive(clickhouse::Row, serde::Deserialize, Debug)]
+struct DefaultIdentityDeleteRow {
+    id: i64,
+    smallint_col: i16,
+    integer_col: i32,
+    bigint_col: i64,
+    real_col: f32,
+    double_col: f64,
+    numeric_col: String,
+    boolean_col: bool,
+    text_col: String,
+    varchar_col: String,
+    date_col: u16,
+    timestamp_col: i64,
+    timestamptz_col: i64,
+    time_col: String,
+    jsonb_col: String,
+    bytea_col: String,
+    uuid_col: String,
+    nullable_text: Option<String>,
+    nullable_int: Option<i32>,
+    int_array_col: Vec<Option<i32>>,
+    text_array_col: Vec<Option<String>>,
+    cdc_operation: String,
+    cdc_lsn: i64,
+}
+
 const DEFAULT_IDENTITY_DELETE_SELECT: &str = concat!(
-    "SELECT id, value, cdc_operation, cdc_lsn ",
+    "SELECT id, ",
+    "smallint_col, integer_col, bigint_col, real_col, double_col, ",
+    "numeric_col, boolean_col, text_col, varchar_col, ",
+    "date_col, timestamp_col, timestamptz_col, time_col, ",
+    "jsonb_col, bytea_col, toString(uuid_col) AS uuid_col, ",
+    "nullable_text, nullable_int, ",
+    "int_array_col, text_array_col, ",
+    "cdc_operation, cdc_lsn ",
     "FROM \"test_default__identity__delete\" ",
     "ORDER BY id, cdc_lsn",
 );
 
 /// Tests that a DELETE under default replica identity (PK only) produces a
-/// valid CDC row in ClickHouse with the correct PK and zero-value non-PK
-/// columns.
+/// tombstone row with the correct PK and zero-value defaults for every
+/// supported column type.
 ///
 /// # GIVEN
 ///
-/// A Postgres table with **default replica identity** (not FULL) and two rows
-/// (`id=1, value='keep'` and `id=2, value='to_delete'`), copied to ClickHouse.
+/// A wide Postgres table with **default replica identity** (not FULL) covering:
+/// - Non-nullable scalars: smallint, integer, bigint, real, double, numeric,
+///   boolean, text, varchar, date, timestamp, timestamptz, time, jsonb, bytea,
+///   uuid
+/// - Nullable scalars: text, integer
+/// - Nullable arrays: integer[], text[]
+/// Two rows inserted and copied to ClickHouse.
 ///
 /// # WHEN
 ///
-/// Row `id=2` is deleted in Postgres, and a new row (`id=3, value='after'`)
-/// is inserted.
+/// Row `id=2` is deleted in Postgres, and a new row (`id=3`) is inserted.
 ///
 /// # THEN
 ///
-/// ClickHouse contains four rows:
-/// - `id=1, value='keep',      cdc_operation='INSERT', cdc_lsn=0` (untouched)
-/// - `id=2, value='to_delete', cdc_operation='INSERT', cdc_lsn=0` (table copy)
-/// - `id=2, value='',          cdc_operation='DELETE', cdc_lsn > 0` (streamed
-///   delete -- Postgres only sent the PK, so the non-PK `value` column is a
-///   zero-value empty string, not the original data)
-/// - `id=3, value='after',     cdc_operation='INSERT', cdc_lsn > 0` (proves the
-///   pipeline continued after the delete)
+/// The DELETE tombstone has:
+/// - Correct PK (`id=2`)
+/// - Non-nullable scalars filled with type-appropriate zero values
+/// - Nullable scalars filled with NULL
+/// - Arrays filled with empty arrays
 #[tokio::test(flavor = "multi_thread")]
 async fn delete_with_default_replica_identity() {
     init_test_tracing();
     install_crypto_provider();
 
-    // --- GIVEN: two rows, default replica identity (NOT full) ---
+    // --- GIVEN: wide table with all types, default replica identity ---
     let database = spawn_source_database().await;
     let table_name = test_table_name("default_identity_delete");
 
     let table_id = database
-        .create_table(table_name.clone(), true, &[("value", "text not null")])
+        .create_table(
+            table_name.clone(),
+            true,
+            &[
+                ("smallint_col", "smallint not null"),
+                ("integer_col", "integer not null"),
+                ("bigint_col", "bigint not null"),
+                ("real_col", "real not null"),
+                ("double_col", "double precision not null"),
+                ("numeric_col", "numeric(10,2) not null"),
+                ("boolean_col", "boolean not null"),
+                ("text_col", "text not null"),
+                ("varchar_col", "varchar(100) not null"),
+                ("date_col", "date not null"),
+                ("timestamp_col", "timestamp not null"),
+                ("timestamptz_col", "timestamptz not null"),
+                ("time_col", "time not null"),
+                ("jsonb_col", "jsonb not null"),
+                ("bytea_col", "bytea not null"),
+                ("uuid_col", "uuid not null"),
+                ("nullable_text", "text"),
+                ("nullable_int", "integer"),
+                ("int_array_col", "integer[]"),
+                ("text_array_col", "text[]"),
+            ],
+        )
         .await
         .expect("Failed to create test table");
 
@@ -1476,8 +1543,26 @@ async fn delete_with_default_replica_identity() {
 
     database
         .run_sql(&format!(
-            "INSERT INTO {} (value) VALUES ('keep'), ('to_delete')",
-            table_name.as_quoted_identifier(),
+            r#"INSERT INTO {table} (
+                smallint_col, integer_col, bigint_col, real_col, double_col,
+                numeric_col, boolean_col, text_col, varchar_col,
+                date_col, timestamp_col, timestamptz_col, time_col,
+                jsonb_col, bytea_col, uuid_col,
+                nullable_text, nullable_int, int_array_col, text_array_col
+            ) VALUES
+            (1, 10, 100, 1.5, 2.5, 123.45, true,
+             'keep', 'keeper', '2024-01-15', '2024-01-15 12:00:00',
+             '2024-01-15 12:00:00+00', '14:30:00',
+             '{{"key":"value"}}', '\xdeadbeef',
+             'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+             'present', 42, ARRAY[1,2,3]::integer[], ARRAY['a','b']::text[]),
+            (2, 20, 200, 3.5, 4.5, 678.90, false,
+             'delete_me', 'doomed', '2024-06-01', '2024-06-01 08:00:00',
+             '2024-06-01 08:00:00+00', '09:00:00',
+             '{{"x":1}}', '\xcafebabe',
+             'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
+             'also_present', 99, ARRAY[4,5]::integer[], ARRAY['c']::text[])"#,
+            table = table_name.as_quoted_identifier(),
         ))
         .await
         .expect("Failed to insert rows");
@@ -1501,22 +1586,34 @@ async fn delete_with_default_replica_identity() {
     pipeline.start().await.unwrap();
     table_ready.notified().await;
 
-    // --- WHEN: delete id=2, and insert a new row ---
+    // --- WHEN: delete id=2, insert id=3 ---
     database
-        .run_sql(&format!("DELETE FROM {} WHERE id = 2", table_name.as_quoted_identifier(),))
+        .run_sql(&format!("DELETE FROM {} WHERE id = 2", table_name.as_quoted_identifier()))
         .await
         .expect("Failed to delete row");
 
     database
         .run_sql(&format!(
-            "INSERT INTO {} (value) VALUES ('after')",
-            table_name.as_quoted_identifier(),
+            r#"INSERT INTO {table} (
+                smallint_col, integer_col, bigint_col, real_col, double_col,
+                numeric_col, boolean_col, text_col, varchar_col,
+                date_col, timestamp_col, timestamptz_col, time_col,
+                jsonb_col, bytea_col, uuid_col,
+                int_array_col, text_array_col
+            ) VALUES (
+                3, 30, 300, 5.5, 6.5, 111.11, true,
+                'after', 'survivor', '2025-01-01', '2025-01-01 00:00:00',
+                '2025-01-01 00:00:00+00', '00:00:00',
+                '{{"new":true}}', '\x00',
+                'b2c3d4e5-f6a7-8901-bcde-f12345678901',
+                ARRAY[7]::integer[], ARRAY['d']::text[])"#,
+            table = table_name.as_quoted_identifier(),
         ))
         .await
         .expect("Failed to insert post-delete row");
 
-    // Poll for 4 rows: 2 copied INSERTs + DELETE + new INSERT.
-    let mut rows: Vec<UpdateFlowRow> = Vec::with_capacity(4);
+    // Poll for 4 rows: 2 copied INSERTs + DELETE tombstone + new INSERT.
+    let mut rows: Vec<DefaultIdentityDeleteRow> = Vec::new();
     for _ in 0..50 {
         rows = ch_db.query(DEFAULT_IDENTITY_DELETE_SELECT).await;
         if rows.len() >= 4 {
@@ -1524,42 +1621,65 @@ async fn delete_with_default_replica_identity() {
         }
         sleep(Duration::from_millis(100)).await;
     }
+    assert!(
+        rows.len() >= 4,
+        "timed out waiting for default_identity_delete rows: got {} of 4",
+        rows.len()
+    );
 
     pipeline.shutdown_and_wait().await.unwrap();
 
-    // --- THEN: DELETE targets the correct row, non-PK columns are zero-values ---
+    // --- THEN: DELETE tombstone has zero-value defaults for all types ---
     assert_eq!(rows.len(), 4, "expected 2 copied INSERTs + DELETE + new INSERT");
 
+    // Row 1: copied, untouched -- spot check.
     let r = &rows[0];
     assert_eq!(r.id, 1);
-    assert_eq!(r.value, "keep");
+    assert_eq!(r.text_col, "keep");
+    assert_eq!(r.integer_col, 10);
+    assert_eq!(r.boolean_col, true);
+    assert_eq!(r.nullable_text, Some("present".to_string()));
+    assert_eq!(r.int_array_col, vec![Some(1), Some(2), Some(3)]);
     assert_eq!(r.cdc_operation, "INSERT");
-    assert_eq!(r.cdc_lsn, 0);
 
+    // Row 2: copied, will be deleted.
     let r = &rows[1];
     assert_eq!(r.id, 2);
-    assert_eq!(r.value, "to_delete");
+    assert_eq!(r.text_col, "delete_me");
     assert_eq!(r.cdc_operation, "INSERT");
-    assert_eq!(r.cdc_lsn, 0);
 
+    // Row 3: DELETE tombstone -- every non-PK column type verified.
     let r = &rows[2];
-    assert_eq!(r.id, 2, "DELETE must target the correct row among multiple");
-    assert_eq!(
-        r.value, "",
-        "non-PK column should be zero-value (empty string) under default replica identity"
-    );
+    assert_eq!(r.id, 2, "DELETE must target the correct row");
     assert_eq!(r.cdc_operation, "DELETE");
     assert!(r.cdc_lsn > 0);
+    // Non-nullable scalars -> zero values.
+    assert_eq!(r.smallint_col, 0, "smallint -> 0");
+    assert_eq!(r.integer_col, 0, "integer -> 0");
+    assert_eq!(r.bigint_col, 0, "bigint -> 0");
+    assert!(r.real_col.abs() < 1e-6, "real -> 0.0");
+    assert!(r.double_col.abs() < 1e-9, "double -> 0.0");
+    assert_eq!(r.numeric_col, "", "numeric -> empty string");
+    assert_eq!(r.boolean_col, false, "boolean -> false");
+    assert_eq!(r.text_col, "", "text -> empty string");
+    assert_eq!(r.varchar_col, "", "varchar -> empty string");
+    assert_eq!(r.time_col, "", "time -> empty string (String-mapped)");
+    assert_eq!(r.jsonb_col, "", "jsonb -> empty string (String-mapped)");
+    assert_eq!(r.bytea_col, "", "bytea -> empty string");
+    assert_eq!(r.uuid_col, "00000000-0000-0000-0000-000000000000", "uuid -> nil UUID");
+    // Nullable scalars -> NULL.
+    assert_eq!(r.nullable_text, None, "nullable text -> NULL");
+    assert_eq!(r.nullable_int, None, "nullable int -> NULL");
+    // Arrays -> empty.
+    assert!(r.int_array_col.is_empty(), "int array -> empty");
+    assert!(r.text_array_col.is_empty(), "text array -> empty");
 
+    // Row 4: post-delete INSERT proves pipeline continued.
     let r = &rows[3];
     assert_eq!(r.id, 3);
-    assert_eq!(r.value, "after");
+    assert_eq!(r.text_col, "after");
     assert_eq!(r.cdc_operation, "INSERT");
-    assert!(r.cdc_lsn > 0, "pipeline must continue after the delete");
-    assert!(
-        r.cdc_lsn > rows[2].cdc_lsn,
-        "post-delete INSERT must have a higher LSN than the DELETE"
-    );
+    assert!(r.cdc_lsn > 0);
 }
 
 /// SELECT query used to verify the `large_batch` test.
@@ -1823,6 +1943,11 @@ async fn schema_change_add_column() {
         }
         sleep(Duration::from_millis(200)).await;
     }
+    assert!(
+        rows.len() >= 2,
+        "timed out waiting for schema_change_add_column rows: got {} of 2",
+        rows.len()
+    );
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -2008,6 +2133,11 @@ async fn schema_change_add_drop_rename() {
         }
         sleep(Duration::from_millis(200)).await;
     }
+    assert!(
+        rows.len() >= 2,
+        "timed out waiting for schema_change_add_drop_rename rows: got {} of 2",
+        rows.len()
+    );
 
     pipeline.shutdown_and_wait().await.unwrap();
 

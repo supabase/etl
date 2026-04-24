@@ -12,7 +12,7 @@ use etl::{
     store::{schema::SchemaStore, state::StateStore},
     types::{
         Cell, Event, OldTableRow, PgLsn, ReplicatedTableSchema, SchemaDiff, TableId, TableRow,
-        UpdatedTableRow, is_array_type,
+        Type, UpdatedTableRow, is_array_type,
     },
 };
 use parking_lot::RwLock;
@@ -508,7 +508,10 @@ where
                             continue;
                         };
                         let old_row = match old_table_row {
-                            OldTableRow::Full(row) | OldTableRow::Key(row) => row,
+                            OldTableRow::Full(row) => row,
+                            OldTableRow::Key(key_row) => {
+                                expand_key_row(key_row, &delete.replicated_table_schema)
+                            }
                         };
                         let table_id = delete.replicated_table_schema.id();
                         table_schemas
@@ -615,6 +618,77 @@ where
         }
 
         Ok(())
+    }
+}
+
+/// Expands a key-only delete row to full column width for RowBinary encoding.
+///
+/// PK columns keep their real values. Non-PK columns get `Cell::Null` if
+/// nullable, or a type-appropriate zero value if non-nullable (since RowBinary
+/// rejects NULL for non-nullable columns).
+fn expand_key_row(key_row: TableRow, schema: &ReplicatedTableSchema) -> TableRow {
+    let key_cells = key_row.into_values();
+    let mut key_iter = key_cells.into_iter();
+    let cells: Vec<Cell> = schema
+        .column_schemas()
+        .map(|col| {
+            if col.primary_key_ordinal_position.is_some() {
+                key_iter.next().unwrap_or(Cell::Null)
+            } else if col.nullable && !is_array_type(&col.typ) {
+                // Nullable scalars -> NULL. Array columns are never nullable
+                // in ClickHouse (Array(Nullable(T)) without outer Nullable),
+                // so they must use an empty array default instead.
+                Cell::Null
+            } else {
+                default_cell(&col.typ)
+            }
+        })
+        .collect();
+    TableRow::new(cells)
+}
+
+/// Returns a zero-value Cell for a Postgres type, used to fill non-PK columns
+/// in key-only DELETE tombstones. Array types produce empty arrays. All other
+/// non-primitive types fall through to an empty String, which is a valid zero
+/// value for every ClickHouse String-mapped type (numeric, time, json, bytea).
+/// Date, Timestamp, and UUID use typed zero values because their ClickHouse
+/// wire format is not String.
+fn default_cell(typ: &Type) -> Cell {
+    use etl::types::ArrayCell;
+
+    match *typ {
+        Type::BOOL => Cell::Bool(false),
+        Type::INT2 => Cell::I16(0),
+        Type::INT4 => Cell::I32(0),
+        Type::INT8 => Cell::I64(0),
+        Type::OID => Cell::U32(0),
+        Type::FLOAT4 => Cell::F32(0.0),
+        Type::FLOAT8 => Cell::F64(0.0),
+        Type::DATE => Cell::Date(chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap()),
+        Type::TIMESTAMP => Cell::Timestamp(chrono::NaiveDateTime::UNIX_EPOCH),
+        Type::TIMESTAMPTZ => Cell::TimestampTz(chrono::DateTime::UNIX_EPOCH),
+        Type::UUID => Cell::Uuid(uuid::Uuid::nil()),
+        Type::BOOL_ARRAY => Cell::Array(ArrayCell::Bool(Vec::new())),
+        Type::INT2_ARRAY => Cell::Array(ArrayCell::I16(Vec::new())),
+        Type::INT4_ARRAY => Cell::Array(ArrayCell::I32(Vec::new())),
+        Type::INT8_ARRAY => Cell::Array(ArrayCell::I64(Vec::new())),
+        Type::OID_ARRAY => Cell::Array(ArrayCell::U32(Vec::new())),
+        Type::FLOAT4_ARRAY => Cell::Array(ArrayCell::F32(Vec::new())),
+        Type::FLOAT8_ARRAY => Cell::Array(ArrayCell::F64(Vec::new())),
+        Type::TEXT_ARRAY
+        | Type::VARCHAR_ARRAY
+        | Type::CHAR_ARRAY
+        | Type::BPCHAR_ARRAY
+        | Type::NAME_ARRAY => Cell::Array(ArrayCell::String(Vec::new())),
+        Type::NUMERIC_ARRAY => Cell::Array(ArrayCell::Numeric(Vec::new())),
+        Type::DATE_ARRAY => Cell::Array(ArrayCell::Date(Vec::new())),
+        Type::TIME_ARRAY => Cell::Array(ArrayCell::Time(Vec::new())),
+        Type::TIMESTAMP_ARRAY => Cell::Array(ArrayCell::Timestamp(Vec::new())),
+        Type::TIMESTAMPTZ_ARRAY => Cell::Array(ArrayCell::TimestampTz(Vec::new())),
+        Type::UUID_ARRAY => Cell::Array(ArrayCell::Uuid(Vec::new())),
+        Type::JSON_ARRAY | Type::JSONB_ARRAY => Cell::Array(ArrayCell::Json(Vec::new())),
+        Type::BYTEA_ARRAY => Cell::Array(ArrayCell::Bytes(Vec::new())),
+        _ => Cell::String(String::new()),
     }
 }
 
