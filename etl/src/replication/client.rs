@@ -484,7 +484,7 @@ impl PgReplicationClient {
 
         let client = PgReplicationClient {
             client: Arc::new(client),
-            pg_connection_config: self.pg_connection_config.clone(),
+            pg_connection_config: Arc::clone(&self.pg_connection_config),
             server_version: self.server_version,
             connection_updates_rx,
         };
@@ -513,7 +513,7 @@ impl PgReplicationClient {
 
         let client = PgReplicationClient {
             client: Arc::new(client),
-            pg_connection_config: self.pg_connection_config.clone(),
+            pg_connection_config: Arc::clone(&self.pg_connection_config),
             server_version: self.server_version,
             connection_updates_rx,
         };

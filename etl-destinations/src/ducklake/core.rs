@@ -954,7 +954,7 @@ where
         }
 
         let _table_creation_permit =
-            self.table_creation_slots.clone().acquire_owned().await.map_err(|_| {
+            Arc::clone(&self.table_creation_slots).acquire_owned().await.map_err(|_| {
                 etl_error!(ErrorKind::InvalidState, "DuckLake table creation semaphore closed")
             })?;
 

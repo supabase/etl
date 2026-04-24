@@ -48,7 +48,7 @@ impl BatchBudgetController {
         let units = units.max(1);
         self.active_streams.fetch_add(units, Ordering::Relaxed);
 
-        ActiveStreamsGuard { active_streams: self.active_streams.clone(), units }
+        ActiveStreamsGuard { active_streams: Arc::clone(&self.active_streams), units }
     }
 
     /// Returns a cached budget reader that refreshes from the controller every

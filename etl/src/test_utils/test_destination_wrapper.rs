@@ -156,7 +156,7 @@ impl<D> TestDestinationWrapper<D> {
     {
         let notify = Arc::new(Notify::new());
         let mut inner = self.inner.write().await;
-        inner.event_conditions.push((Box::new(condition), notify.clone()));
+        inner.event_conditions.push((Box::new(condition), Arc::clone(&notify)));
 
         TimedNotify::new(notify)
     }
@@ -208,7 +208,7 @@ impl<D> TestDestinationWrapper<D> {
             check_all_events_count(events, table_rows, conditions.clone())
         });
 
-        inner.combined_conditions.push((condition, notify.clone()));
+        inner.combined_conditions.push((condition, Arc::clone(&notify)));
 
         TimedNotify::new(notify)
     }
@@ -352,7 +352,7 @@ where
         // the methods on the outside block on the result right after calling
         // the method, so it's not needed to simulate asynchronous work to make
         // the code continue and do something else in the meanwhile.
-        let inner = self.inner.clone();
+        let inner = Arc::clone(&self.inner);
         tokio::spawn(async move {
             // We send the result back before doing the internal checks for this utility, to
             // avoid checking before the apply loop received the result.
