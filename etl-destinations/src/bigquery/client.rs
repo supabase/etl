@@ -506,6 +506,7 @@ fn is_retryable_schema_propagation_error(error: &BQError) -> bool {
 
     let message = status.message().to_ascii_lowercase();
     message.contains("missing in the proto message")
+        || message.contains("extra proto fields")
         || message.contains("schema_mismatch_extra_field")
         || message.contains("schema_mismatch_extra_fields")
 }
@@ -1670,6 +1671,20 @@ mod tests {
         let result = process_single_batch_append_result(BatchAppendResult {
             batch_index: 0,
             responses: vec![Err(tonic::Status::invalid_argument("schema_mismatch_extra_fields"))],
+            bytes_sent: 128,
+        });
+
+        assert!(matches!(result, BatchProcessResult::RetryableSchemaPropagation { .. }));
+    }
+
+    #[test]
+    fn process_single_batch_append_result_retries_extra_proto_fields_schema_lag() {
+        let result = process_single_batch_append_result(BatchAppendResult {
+            batch_index: 0,
+            responses: vec![Err(tonic::Status::invalid_argument(
+                "Found incompatible fields: 'id' and/or mismatch fields, extra proto fields: \
+                 'ddl_col_1_0' extra bq fields: ''",
+            ))],
             bytes_sent: 128,
         });
 
