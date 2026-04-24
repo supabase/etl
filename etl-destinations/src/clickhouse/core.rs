@@ -665,7 +665,7 @@ fn default_cell(typ: &Type) -> Cell {
         Type::FLOAT4 => Cell::F32(0.0),
         Type::FLOAT8 => Cell::F64(0.0),
         Type::DATE => Cell::Date(chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap()),
-        Type::TIMESTAMP => Cell::Timestamp(chrono::NaiveDateTime::UNIX_EPOCH),
+        Type::TIMESTAMP => Cell::Timestamp(chrono::DateTime::UNIX_EPOCH.naive_utc()),
         Type::TIMESTAMPTZ => Cell::TimestampTz(chrono::DateTime::UNIX_EPOCH),
         Type::UUID => Cell::Uuid(uuid::Uuid::nil()),
         Type::BOOL_ARRAY => Cell::Array(ArrayCell::Bool(Vec::new())),
