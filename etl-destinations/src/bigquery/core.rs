@@ -802,7 +802,9 @@ where
                     break;
                 }
 
-                let event = events_iter.next().unwrap();
+                let Some(event) = events_iter.next() else {
+                    break;
+                };
                 match event {
                     Event::Insert(mut insert) => {
                         let sequence_key = insert.event_sequence_key().to_string();
@@ -1201,25 +1203,11 @@ fn bigquery_update_rows(
     old_table_row: Option<OldTableRow>,
     sequence_key: String,
 ) -> EtlResult<Vec<BigQueryTableRow>> {
-    if old_table_row.is_none()
-        && matches!(replicated_table_schema.identity_type(), IdentityType::Full)
-    {
-        bail!(
-            ErrorKind::InvalidState,
-            "BigQuery full replica identity update requires an old row image",
-            format!(
-                "Table '{}' emitted an update without an old row image even though it uses FULL \
-                 replica identity",
-                replicated_table_schema.name()
-            )
-        );
-    }
-
     let primary_key_changed = match old_table_row.as_ref() {
         // PostgreSQL omits the old-side image only when the publisher
         // determined it was unnecessary. For primary-key identity, that means
-        // the destination key did not change. `FULL` is handled above and must
-        // always carry an old row.
+        // the destination key did not change. `FULL` updates are expected to
+        // carry an old row from pgoutput.
         Some(old_table_row) => {
             bigquery_primary_key_changed(replicated_table_schema, old_table_row, &new_table_row)?
         }
@@ -1228,9 +1216,20 @@ fn bigquery_update_rows(
 
     let mut rows = Vec::with_capacity(1 + usize::from(primary_key_changed));
     if primary_key_changed {
+        let Some(old_table_row) = old_table_row else {
+            bail!(
+                ErrorKind::InvalidState,
+                "BigQuery primary key change is missing old row",
+                format!(
+                    "Table '{}' primary key change was detected without an old row image",
+                    replicated_table_schema.name()
+                )
+            );
+        };
+
         rows.push(bigquery_delete_row(
             replicated_table_schema,
-            old_table_row.expect("checked above"),
+            old_table_row,
             sequence_key.clone(),
         )?);
     }
@@ -1319,8 +1318,17 @@ fn bigquery_primary_key_changed(
                 .map(|(_, value)| value);
 
             for old_value in old_key_values {
-                let new_value =
-                    new_primary_key_values.next().expect("validated primary-key column count");
+                let Some(new_value) = new_primary_key_values.next() else {
+                    bail!(
+                        ErrorKind::InvalidState,
+                        "BigQuery primary key schema mismatch",
+                        format!(
+                            "Table '{}' did not expose enough primary key columns",
+                            replicated_table_schema.name()
+                        )
+                    );
+                };
+
                 if old_value != new_value {
                     return Ok(true);
                 }
@@ -1405,7 +1413,18 @@ fn bigquery_primary_key_tagged_cells_from_old_row(
                     primary_key_column.ordinal_position == column_schema.ordinal_position
                 }) {
                     primary_key_columns.next();
-                    let value = key_values.next().expect("validated key image length");
+
+                    let Some(value) = key_values.next() else {
+                        bail!(
+                            ErrorKind::InvalidState,
+                            "BigQuery delete key image shape is inconsistent",
+                            format!(
+                                "Table '{}' key image ended before all primary key values",
+                                replicated_table_schema.name()
+                            )
+                        );
+                    };
+
                     tagged_cells.push((column_index + 1, value));
                 }
             }
@@ -2129,25 +2148,6 @@ mod tests {
                 (3, CellNonOptional::String("UPSERT".to_string())),
                 (4, CellNonOptional::String("lsn:1".to_string())),
             ]
-        );
-    }
-
-    #[test]
-    fn bigquery_update_rows_rejects_full_identity_update_without_old_row() {
-        let replicated_table_schema = replicated_schema(IdentityType::Full);
-
-        let error = bigquery_update_rows(
-            &replicated_table_schema,
-            TableRow::new(vec![Cell::I32(1), Cell::String("updated".to_string())]),
-            None,
-            "lsn:1".to_string(),
-        )
-        .unwrap_err();
-
-        assert_eq!(error.kind(), ErrorKind::InvalidState);
-        assert_eq!(
-            error.description(),
-            Some("BigQuery full replica identity update requires an old row image")
         );
     }
 }

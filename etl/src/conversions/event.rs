@@ -291,6 +291,19 @@ pub(crate) fn parse_event_from_commit_message(
 }
 
 /// Returns the set of column names to replicate from a relation message.
+///
+/// PostgreSQL pgoutput emits relation columns by iterating the relation
+/// `TupleDesc` in physical `pg_attribute.attnum` order and skipping columns
+/// that are not published.
+///
+/// This function intentionally returns a [`HashSet`]: mask membership is built
+/// by column name, and PostgreSQL requires live column names to be unique
+/// within one table schema version. Relation-message order is therefore not
+/// needed to decide which columns are included. The order matters later, when
+/// tuple data is decoded, because tuple fields are sent in the same order as
+/// the relation message. Applying the name-based masks to ETL's stored,
+/// `attnum`-ordered [`TableSchema`] creates the [`ReplicatedTableSchema`] view
+/// used for positional tuple decoding.
 pub(crate) fn parse_replicated_column_names(
     relation_body: &protocol::RelationBody,
 ) -> EtlResult<HashSet<String>> {
@@ -309,7 +322,11 @@ pub(crate) fn parse_replicated_column_names(
 /// key-column membership on each [`RelationBody`] column. For
 /// `REPLICA IDENTITY FULL`, every replicated column belongs to the old-row
 /// identity. Otherwise the low bit of the column flags marks identity
-/// membership.
+/// membership. The column order is the same `attnum` order described in
+/// [`parse_replicated_column_names`]. This returns names because identity-mask
+/// membership is also name-based; tuple interpretation relies on the resulting
+/// replicated schema preserving relation-message order after the masks are
+/// applied.
 pub(crate) fn parse_replica_identity_column_names(
     relation_body: &protocol::RelationBody,
 ) -> EtlResult<HashSet<String>> {
@@ -356,30 +373,25 @@ pub(crate) fn parse_event_from_insert_message(
 
 /// Converts a Postgres update message into an [`UpdateEvent`].
 ///
-/// Update events have two distinct row images with different semantics.
-///
-/// The old row image may be either [`OldTableRow::Full`] or
-/// [`OldTableRow::Key`], depending on the table's `REPLICA IDENTITY` setting
-/// and on whether PostgreSQL needed to send an old-side image at all:
+/// This function preserves pgoutput's update tuple markers:
 ///
 /// - `REPLICA IDENTITY FULL` emits `old_tuple`, which we decode as
-///   [`OldTableRow::Full`].
-/// - `REPLICA IDENTITY DEFAULT` and `USING INDEX` may emit `key_tuple`, which
-///   we decode as [`OldTableRow::Key`]. PostgreSQL does this when the replica
-///   identity changed, or when it still needs the old identity values (for
-///   example because a replica-identity column is externally stored).
-/// - Otherwise PostgreSQL emits no old-side tuple at all and `old_table_row`
-///   stays `None`.
+///   [`OldTableRow::Full`] for every published update.
+/// - `REPLICA IDENTITY DEFAULT` with a primary key and `USING INDEX` may emit
+///   `key_tuple`, which we decode as [`OldTableRow::Key`]. PostgreSQL does this
+///   when any replica-identity column changed, or when a replica-identity
+///   column has external data that must be available from the old tuple.
+/// - `REPLICA IDENTITY DEFAULT` with a primary key and `USING INDEX` otherwise
+///   emit no old-side tuple and `old_table_row` stays `None`.
+/// - `REPLICA IDENTITY NOTHING`, and `DEFAULT` without a primary key, do not
+///   produce published update messages when the table publishes updates. The
+///   source `UPDATE` is rejected before pgoutput emits an event.
+/// - `REPLICA IDENTITY FULL` updates with no old row are not emitted by
+///   PostgreSQL pgoutput.
 ///
-/// The new row image is always decoded from the update's new tuple and becomes
-/// [`UpdatedTableRow::Full`] when every column value is known, or
-/// [`UpdatedTableRow::Partial`] when PostgreSQL emits `UnchangedToast` fields
-/// that cannot be reconstructed from the available old-row image.
-///
-/// The shared key-row decoder only normalizes PostgreSQL's key-image tuple into
-/// a dense row containing replica-identity columns in replicated table order.
-/// The update-specific semantics live here: the old row is auxiliary data that
-/// is consulted only to resolve missing new-row values.
+/// The new tuple is decoded separately. `UnchangedToast` values are recovered
+/// from the old-side row image when possible; otherwise the result is
+/// [`UpdatedTableRow::Partial`].
 pub(crate) fn parse_event_from_update_message(
     replicated_table_schema: ReplicatedTableSchema,
     start_lsn: PgLsn,
@@ -390,9 +402,9 @@ pub(crate) fn parse_event_from_update_message(
     // PostgreSQL can attach either a full old tuple (`old_tuple`) or only the
     // replica-identity columns (`key_tuple`) to an update. If neither is
     // present, the publisher determined that no old-side image was required
-    // for this update. We preserve that shape in `OldTableRow`. The new tuple
-    // is decoded separately below, where the old row acts only as a source for
-    // resolving `UnchangedToast`.
+    // for this key-based replica-identity update. We preserve that shape in
+    // `OldTableRow`. The new tuple is decoded separately below, where the old
+    // row acts only as a source for resolving `UnchangedToast`.
     let is_key = update_body.old_tuple().is_none();
     let old_tuple = update_body.old_tuple().or(update_body.key_tuple());
 
@@ -440,23 +452,19 @@ pub(crate) fn parse_event_from_update_message(
 
 /// Converts a Postgres delete message into a [`DeleteEvent`].
 ///
-/// Delete events carry only an old row image.
-///
-/// That old image may be either [`OldTableRow::Full`] or [`OldTableRow::Key`],
-/// depending on the table's `REPLICA IDENTITY` setting:
+/// Delete messages carry only an old-side row image:
 ///
 /// - `REPLICA IDENTITY FULL` emits `old_tuple`, which we decode as
 ///   [`OldTableRow::Full`].
-/// - `REPLICA IDENTITY DEFAULT` and `USING INDEX` emit `key_tuple`, which we
-///   decode as [`OldTableRow::Key`].
-/// - valid publications cannot emit deletes for `REPLICA IDENTITY NOTHING`, and
-///   published deletes should always carry an old-side tuple. A missing old row
-///   is therefore preserved defensively as an invalid upstream absence.
+/// - `REPLICA IDENTITY DEFAULT` with a primary key and `USING INDEX` emit
+///   `key_tuple`, which we decode as [`OldTableRow::Key`].
+/// - `REPLICA IDENTITY NOTHING`, and `DEFAULT` without a primary key, do not
+///   produce published delete messages when the table publishes deletes. The
+///   source `DELETE` is rejected before pgoutput emits an event.
 ///
-/// Unlike updates, delete handling does not need any additional reconstruction
-/// step for a new row, so this function simply preserves PostgreSQL's old-row
-/// semantics after normalizing any key tuple into a dense key row in
-/// replicated table order.
+/// PostgreSQL pgoutput sends an old-side tuple for every published delete. This
+/// decoder preserves that tuple shape, normalizing key tuples into dense
+/// replica-identity rows in replicated table order.
 pub(crate) fn parse_event_from_delete_message(
     replicated_table_schema: ReplicatedTableSchema,
     start_lsn: PgLsn,
@@ -464,9 +472,9 @@ pub(crate) fn parse_event_from_delete_message(
     tx_ordinal: u64,
     delete_body: &protocol::DeleteBody,
 ) -> EtlResult<DeleteEvent> {
-    // Published delete messages should always carry an old-side image.
-    // PostgreSQL sends either the full old row or only the replica-identity
-    // columns, and we preserve that shape here.
+    // Published delete messages carry an old-side image. PostgreSQL sends
+    // either the full old row or only the replica-identity columns, and we
+    // preserve that shape here.
     let is_key = delete_body.old_tuple().is_none();
     let old_tuple = delete_body.old_tuple().or(delete_body.key_tuple());
 
@@ -602,7 +610,7 @@ fn convert_update_tuple_to_updated_table_row(
         });
         let old_value = old_row_resolver.value_for_column(is_identity)?;
         if is_identity {
-            let _ = identity_columns.next().expect("peeked identity column");
+            let _ = identity_columns.next();
         }
         match convert_tuple_data_to_cell(index, column_schema, tuple_data, old_value)? {
             ConvertedTupleCell::Present(value) if partial_row => {
@@ -620,9 +628,9 @@ fn convert_update_tuple_to_updated_table_row(
                     present_values.append(&mut full_values);
                     partial_row = true;
                 }
-                // Missing indexes stay in replicated-column order so
-                // destinations can align the sparse row against the attached
-                // replicated schema without guessing positions.
+                // Missing indexes stay in replicated-column order so consumers
+                // can align the sparse row against the attached replicated
+                // schema without guessing positions.
                 missing_column_indexes.push(index);
             }
         }
@@ -805,7 +813,13 @@ fn convert_full_width_key_tuple_to_row(
             continue;
         }
 
-        let identity_column = identity_columns.next().expect("peeked identity column");
+        let Some(identity_column) = identity_columns.next() else {
+            bail!(
+                ErrorKind::ConversionError,
+                "Replica-identity tuple shape does not match schema",
+                "Replica-identity column iterator ended unexpectedly"
+            );
+        };
         let ConvertedTupleCell::Present(value) =
             convert_tuple_data_to_cell(i, identity_column, tuple_data, None)?
         else {

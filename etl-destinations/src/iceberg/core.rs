@@ -15,8 +15,8 @@ use etl::{
     state::destination_metadata::DestinationTableMetadata,
     store::state::StateStore,
     types::{
-        Cell, ColumnSchema, Event, IdentityType, ReplicatedTableSchema, TableId, TableName,
-        TableRow, Type, generate_sequence_number,
+        Cell, ColumnSchema, Event, IdentityType, OldTableRow, ReplicatedTableSchema, TableId,
+        TableName, TableRow, Type, generate_sequence_number,
     },
 };
 use tokio::{sync::Mutex, task::JoinSet};
@@ -288,7 +288,9 @@ where
                     break;
                 }
 
-                let event = events_iter.next().unwrap();
+                let Some(event) = events_iter.next() else {
+                    break;
+                };
                 match event {
                     Event::Insert(mut insert) => {
                         let sequence_key = insert.event_sequence_key().to_string();
@@ -342,7 +344,7 @@ where
                                 )
                             ));
                         };
-                        if old_table_row.is_key() {
+                        let OldTableRow::Full(mut old_table_row) = old_table_row else {
                             return Err(etl_error!(
                                 ErrorKind::InvalidState,
                                 "Iceberg delete requires a full old row image",
@@ -352,8 +354,7 @@ where
                                     delete.replicated_table_schema.name()
                                 )
                             ));
-                        }
-                        let mut old_table_row = old_table_row.into_full().expect("checked above");
+                        };
                         old_table_row.values_mut().push(IcebergOperationType::Delete.into());
                         old_table_row.values_mut().push(Cell::String(sequence_key));
 

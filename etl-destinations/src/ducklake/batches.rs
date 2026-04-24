@@ -1143,7 +1143,17 @@ fn delete_predicate_from_row<'a>(
                 if identity_columns.peek().is_some_and(|identity_column| {
                     identity_column.ordinal_position == column_schema.ordinal_position
                 }) {
-                    let identity_column = identity_columns.next().expect("peeked identity column");
+                    let Some(identity_column) = identity_columns.next() else {
+                        return Err(etl_error!(
+                            ErrorKind::InvalidState,
+                            "DuckLake replica identity schema is inconsistent",
+                            format!(
+                                "Table '{}' identity columns ended unexpectedly",
+                                replicated_table_schema.name()
+                            )
+                        ));
+                    };
+
                     key_values.push((identity_column, value));
                 }
             }
@@ -1292,7 +1302,7 @@ fn build_mutation_batch_identity(
                 delete_predicate_from_row(replicated_table_schema, delete_row)?.hash(&mut hasher);
                 match new_row {
                     UpdatedTableRow::Full(row) => hash_table_row_ref(&mut hasher, row),
-                    UpdatedTableRow::Partial(row) => hash_partial_table_row_ref(&mut hasher, row),
+                    UpdatedTableRow::Partial(row) => hash_partial_table_row_ref(&mut hasher, row)?,
                 }
             }
             TableMutation::Replace(row) => {
@@ -1416,7 +1426,7 @@ fn hash_table_row_ref(hasher: &mut BatchIdHasher, row: &TableRow) {
 }
 
 /// Hashes a partial row using column indexes and SQL literal forms.
-fn hash_partial_table_row_ref(hasher: &mut BatchIdHasher, row: &PartialTableRow) {
+fn hash_partial_table_row_ref(hasher: &mut BatchIdHasher, row: &PartialTableRow) -> EtlResult<()> {
     row.total_columns().hash(hasher);
     let mut missing_indexes = row.missing_column_indexes().iter().copied().peekable();
     let mut present_values = row.values().iter();
@@ -1427,12 +1437,27 @@ fn hash_partial_table_row_ref(hasher: &mut BatchIdHasher, row: &PartialTableRow)
             continue;
         }
 
-        let value = present_values
-            .next()
-            .expect("partial row present value count should match missing indexes");
+        let Some(value) = present_values.next() else {
+            return Err(etl_error!(
+                ErrorKind::InvalidState,
+                "DuckLake partial row shape is inconsistent",
+                format!("Partial row ended before replicated column index {}", column_index)
+            ));
+        };
+
         column_index.hash(hasher);
         cell_to_sql_literal_ref(value).hash(hasher);
     }
+
+    if present_values.next().is_some() {
+        return Err(etl_error!(
+            ErrorKind::InvalidState,
+            "DuckLake partial row shape is inconsistent",
+            "Partial row contained more present values than its missing indexes allow"
+        ));
+    }
+
+    Ok(())
 }
 
 /// Returns whether the atomic batch marker already exists.

@@ -692,7 +692,9 @@ where
                     break;
                 }
 
-                let event = event_iter.next().unwrap();
+                let Some(event) = event_iter.next() else {
+                    break;
+                };
                 match event {
                     Event::Insert(insert) => {
                         let table_id = insert.replicated_table_schema.id();

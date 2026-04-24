@@ -62,7 +62,7 @@ impl CommitEvent {
 /// Row insertion event from Postgres logical replication.
 ///
 /// [`InsertEvent`] represents a new row being added to a table. It contains
-/// the complete row data for insertion into the destination system.
+/// the complete row data for the inserted source row.
 #[derive(Debug)]
 #[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 pub struct InsertEvent {
@@ -89,29 +89,19 @@ impl InsertEvent {
 ///
 /// [`UpdateEvent`] represents an existing row being modified.
 ///
-/// Destination authors should read this event as:
+/// The updated row is the authoritative post-update payload. The old row, when
+/// present, is auxiliary context from PostgreSQL's replica identity and may be
+/// a full old image or only replica-identity columns.
 ///
-/// - [`UpdateEvent::updated_table_row`] is the new row state that PostgreSQL
-///   exposed after the update.
-/// - [`UpdateEvent::old_table_row`] is auxiliary old-side data that PostgreSQL
-///   may or may not include, depending on replica-identity semantics.
+/// A few details matter for consumers:
 ///
-/// The new row may be full or partial depending on whether all column values
-/// are known after decoding `UnchangedToast` fields. The optional old row is
-/// either a full old image, a key-only image, or absent, depending on
-/// PostgreSQL replica-identity semantics:
-///
-/// - `REPLICA IDENTITY FULL` yields a full old row.
-/// - `REPLICA IDENTITY DEFAULT` and `USING INDEX` may yield a key-only row.
-/// - updates that do not require an old-side image carry no old row.
-///
-/// Two details matter when implementing destinations:
-///
+/// - `old_table_row == None` is valid for updates under key-based replica
+///   identities when PostgreSQL determines no old-side tuple is needed.
 /// - [`OldTableRow::Key`] contains replica-identity columns only. That is not
 ///   necessarily the source primary key.
-/// - `old_table_row == None` on an update does not mean "missing identity" or
-///   "invalid event". For valid `pgoutput` streams it usually means PostgreSQL
-///   determined that no old-side tuple needed to be logged.
+/// - [`UpdatedTableRow::Partial`] can occur when PostgreSQL emits
+///   `UnchangedToast` for columns ETL cannot reconstruct from the available
+///   old-side row image.
 #[derive(Debug)]
 #[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 pub struct UpdateEvent {
@@ -128,13 +118,13 @@ pub struct UpdateEvent {
     /// [`UpdatedTableRow::Full`] means ETL knows every replicated column value.
     /// [`UpdatedTableRow::Partial`] means some replicated columns were emitted
     /// by PostgreSQL as `UnchangedToast` and could not be reconstructed
-    /// safely.
+    /// safely from the old-side row image.
     pub updated_table_row: UpdatedTableRow,
     /// Previous row data before the update, when PostgreSQL emitted one.
     ///
-    /// For `REPLICA IDENTITY FULL`, this should be a full row image. For
-    /// `DEFAULT` or `USING INDEX`, this may be a key image or may be absent
-    /// entirely when PostgreSQL did not need to log an old-side tuple.
+    /// For `REPLICA IDENTITY FULL`, this is a full row image. For `DEFAULT`
+    /// with a primary key or `USING INDEX`, this may be a key image or may be
+    /// absent entirely when PostgreSQL did not need to log an old-side tuple.
     pub old_table_row: Option<OldTableRow>,
 }
 
@@ -149,19 +139,14 @@ impl UpdateEvent {
 ///
 /// [`DeleteEvent`] represents a row being removed from a table.
 ///
-/// Unlike updates, deletes carry only old-side data. Destinations should treat
-/// [`DeleteEvent::old_table_row`] as the payload used to identify the removed
+/// Unlike updates, deletes carry only old-side data.
+/// [`DeleteEvent::old_table_row`] is the payload used to identify the removed
 /// source row.
 ///
-/// The optional old row follows PostgreSQL replica-identity semantics:
-///
-/// - `REPLICA IDENTITY FULL` yields a full old row.
-/// - `REPLICA IDENTITY DEFAULT` and `USING INDEX` yield a key-only row.
-/// - valid publications do not emit deletes without an old row; `None` is
-///   preserved defensively for invalid upstream states.
-///
-/// [`OldTableRow::Key`] again means replica-identity columns only, not
-/// necessarily the table's primary key.
+/// PostgreSQL pgoutput sends an old-side tuple for every published delete:
+/// [`OldTableRow::Full`] for `REPLICA IDENTITY FULL`, otherwise
+/// [`OldTableRow::Key`] for key-based replica identity. The field remains
+/// optional at the Rust API boundary for malformed or non-pgoutput inputs.
 #[derive(Debug)]
 #[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 pub struct DeleteEvent {
@@ -173,12 +158,7 @@ pub struct DeleteEvent {
     pub tx_ordinal: u64,
     /// The replicated table schema for this event.
     pub replicated_table_schema: ReplicatedTableSchema,
-    /// Data from the deleted row.
-    ///
-    /// For supported PostgreSQL publications, deletes should carry either a
-    /// full old row or a key-only old row. `None` is preserved only
-    /// defensively and should be treated as an unsafe, unmatchable delete by
-    /// destinations.
+    /// Old-side payload from the deleted row.
     pub old_table_row: Option<OldTableRow>,
 }
 
@@ -222,6 +202,14 @@ impl TruncateEvent {
 /// stream. It is emitted when a RELATION message is received, containing the
 /// current replication mask for the table. This event notifies downstream
 /// consumers about which columns are being replicated for a table.
+///
+/// PostgreSQL emits relation-message columns in `pg_attribute.attnum` order,
+/// skipping unpublished columns, and sends tuple data in that same order. The
+/// masks are built by unique column name, so ordering is not needed for mask
+/// membership. Applying those masks to ETL's `attnum`-ordered stored table
+/// schema creates a [`ReplicatedTableSchema`] whose column order matches the
+/// tuple payloads. Event conversion can then decode row values by
+/// replicated-column position.
 #[derive(Debug)]
 #[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 pub struct RelationEvent {

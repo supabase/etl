@@ -15,7 +15,7 @@ Postgres supports two types of replication:
 
 Physical replication creates identical Postgres instances. Logical replication decodes changes into a format that any system can consume - not just another Postgres server.
 
-ETL uses logical replication to stream changes to destinations like BigQuery, Iceberg, or your custom systems.
+ETL uses logical replication to stream changes to downstream systems.
 
 ## The Write-Ahead Log (WAL)
 
@@ -33,7 +33,7 @@ flowchart LR
     A[WAL bytes] --> B["Decoder (pgoutput)"] --> C[INSERT/UPDATE/DELETE events]
 ```
 
-ETL receives these decoded events and forwards them to your destination.
+ETL receives these decoded events and forwards them to downstream consumers.
 
 ### WAL Level
 
@@ -96,7 +96,7 @@ The Apply Worker uses one persistent slot. Table Sync Workers create temporary s
 
 ### Slot Risks
 
-Slots prevent WAL cleanup. If ETL stops consuming (due to crashes, network issues, or a slow destination), WAL files accumulate on disk. This can fill your disk.
+Slots prevent WAL cleanup. If ETL stops consuming (due to crashes, network issues, or a slow consumer), WAL files accumulate on disk. This can fill your disk.
 
 To mitigate this risk:
 
@@ -122,7 +122,7 @@ The decoder transforms binary WAL records into structured messages:
 | `TRUNCATE` | Table cleared |
 | `COMMIT` | Transaction completed |
 
-ETL receives these messages and converts them to events for your destination.
+ETL receives these messages and converts them to events.
 
 ## Why Two Phases?
 
@@ -135,7 +135,7 @@ Logical replication only captures **changes**. It doesn't know about data that e
 So ETL first copies all existing rows using Postgres's `COPY` command:
 
 1. Create replication slot (captures consistent snapshot point)
-2. COPY all rows from table to destination
+2. COPY all rows from the table
 3. Start streaming changes from the snapshot point
 
 The slot ensures no changes are lost between the snapshot and when streaming begins.
@@ -149,7 +149,7 @@ flowchart LR
     A[Postgres WAL] --> B[Decoder] --> C[ETL] --> D[Destination]
 ```
 
-Each change is delivered as an event (Insert, Update, Delete) to your destination's `write_events()` method.
+Each change is delivered as an event (Insert, Update, Delete) through `write_events()`.
 
 ### Why This Matters
 
@@ -169,6 +169,12 @@ When a row is updated or deleted, downstream systems need enough old-row informa
 
 The important nuance is that PostgreSQL does **not** always send an old-side tuple for `UPDATE`.
 Under key-based replica identity, it only sends a key image when it is needed.
+For `DELETE`, PostgreSQL sends an old-side tuple whenever the delete is publishable.
+
+This means replica identity is both a PostgreSQL logging rule and a contract for
+downstream consumers. It determines whether an event contains enough old-row
+data to match an existing row, detect key changes, or compare before-and-after
+values.
 
 ### Settings
 
@@ -180,41 +186,47 @@ SELECT relname, relreplident FROM pg_class WHERE relname = 'your_table';
 ALTER TABLE your_table REPLICA IDENTITY FULL;
 ```
 
-| Setting | What's sent with UPDATE/DELETE | Use case |
-|---------|-------------------------------|----------|
-| `DEFAULT` | For `UPDATE`, old primary-key columns only when PostgreSQL needs them; for `DELETE`, old primary-key columns | Most tables with a primary key |
-| `FULL` | Full old row | Destinations or audits that need full old-row images |
-| `NOTHING` | Published `UPDATE` and `DELETE` are rejected by PostgreSQL | Rare special cases, generally unsuitable for CDC |
-| `USING INDEX` | For `UPDATE`, old replica-identity index columns only when PostgreSQL needs them; for `DELETE`, old replica-identity index columns | Tables whose replication identity differs from the primary key |
+| Setting | Published `UPDATE` payload | Published `DELETE` payload | Notes |
+|---------|----------------------------|----------------------------|-------|
+| `DEFAULT` with a primary key | Old primary-key columns only when PostgreSQL determines the old key must be logged; otherwise no old tuple | Old primary-key columns | Most tables with a primary key |
+| `DEFAULT` without a primary key | Source `UPDATE` is rejected when the table publishes updates | Source `DELETE` is rejected when the table publishes deletes | Equivalent to having no usable replica identity for update/delete |
+| `FULL` | Full old row | Full old row | Use when consumers need full old-row images |
+| `NOTHING` | Source `UPDATE` is rejected when the table publishes updates | Source `DELETE` is rejected when the table publishes deletes | Suitable only when updates/deletes are not published |
+| `USING INDEX` | Old replica-identity index columns only when PostgreSQL determines the old key must be logged; otherwise no old tuple | Old replica-identity index columns | Tables whose replication identity differs from the primary key |
 
 ### Impact on ETL
 
-In ETL, update and delete events expose:
+ETL preserves PostgreSQL's old-row semantics in update and delete events:
 
 ```rust
 pub old_table_row: Option<OldTableRow>
 ```
 
-where:
-
 - `Some(OldTableRow::Key(row))` means PostgreSQL sent only the replica-identity columns, normalized into replicated table-column order.
 - `Some(OldTableRow::Full(row))` means PostgreSQL sent the full old row.
-- `None` means PostgreSQL did not send an old-side tuple for that update.
+- `None` means PostgreSQL did not send an old-side tuple for that update. This
+  is normal under `DEFAULT` or `USING INDEX` when PostgreSQL determines no
+  old-side image is required.
 
-For `UPDATE`, `old_table_row = None` is normal when:
+For `FULL`, PostgreSQL sends a full old row for every published update and delete.
+For `DELETE`, valid pgoutput messages always include either a full old row or a
+key image. `REPLICA IDENTITY NOTHING`, and `DEFAULT` on a table without a primary
+key, do not produce update/delete events when those actions are published; the
+source statement is rejected instead.
+The Rust event API keeps the old-row fields optional at the boundary, but those
+`None` cases are broader than the PostgreSQL pgoutput shapes described here.
 
-- the table uses `DEFAULT` or `USING INDEX`, and
-- PostgreSQL determined no old-side image was required.
+TOAST adds one more wrinkle. PostgreSQL can mark unchanged toasted update values
+as `UnchangedToast` instead of resending the value. ETL can reconstruct those
+values only if the old-side row image contains them, so tables with toasted
+columns can produce partial update rows unless they use `REPLICA IDENTITY FULL`
+or the missing values are present in a logged key image.
 
-For example, a non-identity-column update often arrives without an old row.
-If an identity column changed, or PostgreSQL still needs old identity values
-(such as externally stored identity columns), PostgreSQL sends a key image instead.
-
-For `DELETE`, valid publications include an old row image. If a delete arrives with
-`old_table_row = None`, ETL is preserving an upstream invalid state defensively, and most destinations should treat it
-as unsafe for row-matching deletes.
-
-If you need old values for auditing or comparison, set `REPLICA IDENTITY FULL` on those tables.
+If you need old values for auditing, comparison, complete replacement rows, or
+reliable reconstruction of unchanged toasted columns, set `REPLICA IDENTITY FULL`
+on those tables. If a consumer only needs stable key values, `DEFAULT` with a
+primary key or `USING INDEX` is usually enough, but update events will not always
+include `old_table_row`.
 
 ## LSN (Log Sequence Number)
 
@@ -255,7 +267,7 @@ ETL stores:
 |-------|---------|
 | Replication phase | Know whether to copy or stream for each table |
 | Table schemas | Validate incoming data against expected schema |
-| Table mappings | Route events to correct destination tables |
+| Table mappings | Route events to correct downstream tables |
 
 On restart, ETL loads this state and resumes from where it left off.
 
@@ -271,13 +283,13 @@ Here's the complete flow:
 4. ETL copies existing data (Phase 1: Initial Copy)
 5. ETL streams ongoing changes (Phase 2: Streaming)
 6. Postgres decodes WAL using pgoutput
-7. ETL receives events and sends them to your destination
+7. ETL receives events and forwards them downstream
 8. ETL reports progress back to Postgres (so WAL can be cleaned up)
 9. State is persisted for crash recovery
 
 ## Next Steps
 
 - [Architecture](architecture.md): How ETL's components work together
-- [Event Types](events.md): All events your destination receives
+- [Event Types](events.md): All events emitted by ETL
 - [Configure Postgres](../guides/configure-postgres.md): Production setup
 - [First Pipeline](../guides/first-pipeline.md): Build something
