@@ -1,9 +1,7 @@
 //! End-to-end integration tests for DuckLake using a real ETL [`Pipeline`].
 //!
-//! These tests use a local DuckDB-backed DuckLake catalog and verify the final
+//! These tests use a PostgreSQL-backed DuckLake catalog and verify the final
 //! table contents by querying DuckLake directly through DuckDB.
-
-use std::path::{Path, PathBuf};
 
 use duckdb::Connection;
 use etl::{
@@ -23,42 +21,17 @@ use pg_escape::{quote_identifier, quote_literal};
 use rand::random;
 use url::Url;
 
-use crate::support::ducklake::{ducklake_load_sql, open_verification_connection};
-
-/// Creates a persistent temp directory named after the test and prints its
-/// path. Returns the directory path kept on disk after the test completes.
-fn make_test_dir(test_name: &str) -> PathBuf {
-    let dir = tempfile::Builder::new()
-        .prefix(&format!("etl_ducklake_{test_name}_"))
-        .tempdir()
-        .expect("failed to create temp dir")
-        .keep();
-
-    println!("[{test_name}] catalog : {}", dir.join("catalog.ducklake").display());
-    println!("[{test_name}] data    : {}", dir.join("data").display());
-
-    dir
-}
-
-fn path_to_file_url(path: &Path) -> Url {
-    Url::from_file_path(path).expect("failed to convert path to file url")
-}
-
-fn make_lake_urls(test_name: &str) -> (Url, Url) {
-    let dir = make_test_dir(test_name);
-    let catalog = dir.join("catalog.ducklake");
-    let data = dir.join("data");
-    std::fs::create_dir_all(&data).expect("failed to create DuckLake data dir");
-
-    (path_to_file_url(&catalog), path_to_file_url(&data))
-}
+use crate::support::ducklake::{
+    catalog_attach_target, create_test_lake, ducklake_load_sql, open_verification_connection,
+};
 
 fn open_lake_conn(catalog: &Url, data: &Url) -> Connection {
     let conn = open_verification_connection();
+    let catalog_attach_target = catalog_attach_target(catalog);
     conn.execute_batch(&format!(
         "{} ATTACH {} AS {} (DATA_PATH {});",
         ducklake_load_sql(),
-        quote_literal(&format!("ducklake:{}", catalog.as_str())),
+        quote_literal(&format!("ducklake:{catalog_attach_target}")),
         quote_identifier("lake"),
         quote_literal(data.as_str())
     ))
@@ -149,7 +122,9 @@ async fn table_copy_and_streaming_with_restart() {
 
     let mut database = spawn_source_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
-    let (catalog_url, data_url) = make_lake_urls("table_copy_and_streaming_with_restart");
+    let lake = create_test_lake("table_copy_and_streaming_with_restart").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
 
     let users_table_name = table_name_to_ducklake_table_name(&database_schema.users_schema().name)
         .expect("failed to build DuckLake users table name");
@@ -266,7 +241,9 @@ async fn table_insert_update_delete() {
 
     let database = spawn_source_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
-    let (catalog_url, data_url) = make_lake_urls("table_insert_update_delete");
+    let lake = create_test_lake("table_insert_update_delete").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
 
     let users_table_name = table_name_to_ducklake_table_name(&database_schema.users_schema().name)
         .expect("failed to build DuckLake users table name");
@@ -376,7 +353,9 @@ async fn cdc_streaming_with_truncate() {
 
     let mut database = spawn_source_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
-    let (catalog_url, data_url) = make_lake_urls("cdc_streaming_with_truncate");
+    let lake = create_test_lake("cdc_streaming_with_truncate").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
 
     let users_table_name = table_name_to_ducklake_table_name(&database_schema.users_schema().name)
         .expect("failed to build DuckLake users table name");

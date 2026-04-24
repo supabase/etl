@@ -1,8 +1,7 @@
 //! Integration tests for the DuckLake destination.
 //!
-//! These tests use a local DuckDB-backed DuckLake catalog (a `.ducklake`
-//! metadata file + a local Parquet data directory). No PostgreSQL or cloud
-//! storage account is required.
+//! These tests use a PostgreSQL-backed DuckLake catalog with a local Parquet
+//! data directory.
 //!
 //! Run with `-- --nocapture` to see the paths printed for each test:
 //!
@@ -15,7 +14,7 @@
 //! ```
 //! duckdb :memory: -c "
 //!   LOAD '/absolute/path/to/ducklake.duckdb_extension';
-//!   ATTACH 'ducklake:file:///path/printed/catalog.ducklake' AS lake
+//!   ATTACH 'ducklake:postgres:host=... dbname=... user=...' AS lake
 //!     (DATA_PATH 'file:///path/printed/data');
 //!   SELECT * FROM lake.public_users;
 //! "
@@ -23,12 +22,7 @@
 
 #[cfg(feature = "test-utils")]
 use std::sync::LazyLock;
-use std::{
-    f64::consts::PI,
-    path::{Path, PathBuf},
-    sync::Arc,
-    time::Duration,
-};
+use std::{f64::consts::PI, path::Path, sync::Arc, time::Duration};
 
 use chrono::NaiveDate;
 use duckdb::Connection;
@@ -55,28 +49,13 @@ use pg_escape::{quote_identifier, quote_literal};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use url::Url;
 
-use crate::support::ducklake::{ducklake_load_sql, open_verification_connection};
+use crate::support::ducklake::{
+    catalog_attach_target, create_test_lake, ducklake_load_sql, open_verification_connection,
+    path_to_file_url,
+};
 
 // ── helpers
 // ───────────────────────────────────────────────────────────────────
-
-/// Creates a persistent temp directory named after the test and prints its
-/// path. Returns the directory path (kept on disk after the test completes).
-fn make_test_dir(test_name: &str) -> PathBuf {
-    let dir = tempfile::Builder::new()
-        .prefix(&format!("etl_ducklake_{test_name}_"))
-        .tempdir()
-        .expect("failed to create temp dir")
-        .keep(); // `into_path` prevents auto-cleanup on drop
-
-    println!("[{test_name}] catalog : {}", dir.join("catalog.ducklake").display());
-    println!("[{test_name}] data    : {}", dir.join("data").display());
-    dir
-}
-
-fn path_to_file_url(path: &Path) -> Url {
-    Url::from_file_path(path).expect("failed to convert path to file url")
-}
 
 #[cfg(feature = "test-utils")]
 static DUCKLAKE_TEST_HOOKS_GUARD: LazyLock<Arc<Semaphore>> =
@@ -125,10 +104,11 @@ fn make_replicated_table_schema(schema: &TableSchema) -> ReplicatedTableSchema {
 /// checkpoint mismatch while another connection is still flushing).
 fn try_open_lake_conn(catalog: &Url, data: &Url) -> Result<Connection, duckdb::Error> {
     let conn = open_verification_connection();
+    let catalog_attach_target = catalog_attach_target(catalog);
     conn.execute_batch(&format!(
         "{} ATTACH {} AS {} (DATA_PATH {});",
         ducklake_load_sql(),
-        quote_literal(&format!("ducklake:{}", catalog.as_str())),
+        quote_literal(&format!("ducklake:{catalog_attach_target}")),
         quote_identifier("lake"),
         quote_literal(data.as_str())
     ))?;
@@ -282,13 +262,9 @@ fn checkpoint_lake(catalog: &Url, data: &Url) {
 /// DuckLake catalog using a separate DuckDB connection.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_table_rows_basic() {
-    let dir = make_test_dir("write_table_rows_basic");
-    let catalog = dir.join("catalog.ducklake");
-    let data = dir.join("data");
-    std::fs::create_dir_all(&data).unwrap();
-
-    let catalog_url = path_to_file_url(&catalog);
-    let data_url = path_to_file_url(&data);
+    let lake = create_test_lake("write_table_rows_basic").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
 
     let _table_id = TableId::new(1);
     let schema = make_schema(1, "public", "users");
@@ -343,13 +319,10 @@ async fn write_table_rows_basic() {
 /// Small copy batches should remain inlined after the caller returns.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_table_rows_small_batch_stays_inlined_after_return() {
-    let dir = make_test_dir("write_table_rows_small_batch_stays_inlined_after_return");
-    let catalog = dir.join("catalog.ducklake");
-    let data = dir.join("data");
-    std::fs::create_dir_all(&data).unwrap();
-
-    let catalog_url = path_to_file_url(&catalog);
-    let data_url = path_to_file_url(&data);
+    let lake = create_test_lake("write_table_rows_small_batch_stays_inlined_after_return").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
+    let data = lake.data_dir.clone();
 
     let _table_id = TableId::new(16);
     let schema = make_schema(16, "public", "copy_flush");
@@ -393,14 +366,18 @@ async fn write_table_rows_small_batch_stays_inlined_after_return() {
 /// `pool_size = 0` should fail fast with a configuration error.
 #[tokio::test(flavor = "multi_thread")]
 async fn ducklake_rejects_zero_pool_size() {
-    let dir = make_test_dir("ducklake_rejects_zero_pool_size");
-    let catalog = dir.join("catalog.ducklake");
-    let data = dir.join("data");
-    std::fs::create_dir_all(&data).unwrap();
+    let data_dir = tempfile::Builder::new()
+        .prefix("etl_ducklake_zero_pool_size_")
+        .tempdir()
+        .expect("failed to create temp dir")
+        .keep()
+        .join("data");
+    std::fs::create_dir_all(&data_dir).expect("failed to create data dir");
 
     let err = DuckLakeDestination::new(
-        path_to_file_url(&catalog),
-        path_to_file_url(&data),
+        Url::parse("postgres://ducklake@localhost/test_catalog")
+            .expect("failed to parse catalog url"),
+        path_to_file_url(&data_dir),
         0,
         None,
         None,
@@ -415,20 +392,49 @@ async fn ducklake_rejects_zero_pool_size() {
     assert_eq!(err.kind(), ErrorKind::ConfigError);
 }
 
+/// Non-Postgres DuckLake catalogs should be rejected up front.
+#[tokio::test(flavor = "multi_thread")]
+async fn ducklake_rejects_non_postgres_catalog_url() {
+    let file_catalog = tempfile::Builder::new()
+        .prefix("etl_ducklake_file_catalog_")
+        .tempdir()
+        .expect("failed to create file catalog dir")
+        .keep()
+        .join("catalog.ducklake");
+    let data_dir = tempfile::Builder::new()
+        .prefix("etl_ducklake_non_postgres_catalog_")
+        .tempdir()
+        .expect("failed to create temp data dir")
+        .keep()
+        .join("data");
+    std::fs::create_dir_all(&data_dir).expect("failed to create data dir");
+
+    let err = DuckLakeDestination::new(
+        path_to_file_url(&file_catalog),
+        path_to_file_url(&data_dir),
+        1,
+        None,
+        None,
+        None,
+        None,
+        MemoryStore::new(),
+    )
+    .await
+    .err()
+    .expect("file-backed catalogs should be rejected");
+
+    assert_eq!(err.kind(), ErrorKind::ConfigError);
+}
+
 /// Repeated writes should reuse the warm pooled DuckDB connection.
 #[cfg(feature = "test-utils")]
 #[tokio::test(flavor = "multi_thread")]
 async fn write_table_rows_reuses_warm_pooled_connection() {
     let _test_hook_guard = acquire_ducklake_test_hook_guard().await;
     reset_ducklake_test_hooks();
-
-    let dir = make_test_dir("write_table_rows_reuses_warm_pooled_connection");
-    let catalog = dir.join("catalog.ducklake");
-    let data = dir.join("data");
-    std::fs::create_dir_all(&data).unwrap();
-
-    let catalog_url = path_to_file_url(&catalog);
-    let data_url = path_to_file_url(&data);
+    let lake = create_test_lake("write_table_rows_reuses_warm_pooled_connection").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
 
     let _table_id = TableId::new(21);
     let schema = make_schema(21, "public", "pooled_copy");
@@ -482,14 +488,10 @@ async fn write_table_rows_reuses_warm_pooled_connection() {
 async fn write_table_rows_replaces_broken_pooled_connection_after_retry() {
     let _test_hook_guard = acquire_ducklake_test_hook_guard().await;
     reset_ducklake_test_hooks();
-
-    let dir = make_test_dir("write_table_rows_replaces_broken_pooled_connection_after_retry");
-    let catalog = dir.join("catalog.ducklake");
-    let data = dir.join("data");
-    std::fs::create_dir_all(&data).unwrap();
-
-    let catalog_url = path_to_file_url(&catalog);
-    let data_url = path_to_file_url(&data);
+    let lake =
+        create_test_lake("write_table_rows_replaces_broken_pooled_connection_after_retry").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
 
     let _table_id = TableId::new(22);
     let schema = make_schema(22, "public", "pooled_retry");
@@ -545,14 +547,10 @@ async fn write_table_rows_replaces_broken_pooled_connection_after_retry() {
 async fn write_table_rows_retry_after_post_commit_failure_is_idempotent() {
     let _test_hook_guard = acquire_ducklake_test_hook_guard().await;
     reset_ducklake_test_hooks();
-
-    let dir = make_test_dir("write_table_rows_retry_after_post_commit_failure_is_idempotent");
-    let catalog = dir.join("catalog.ducklake");
-    let data = dir.join("data");
-    std::fs::create_dir_all(&data).unwrap();
-
-    let catalog_url = path_to_file_url(&catalog);
-    let data_url = path_to_file_url(&data);
+    let lake =
+        create_test_lake("write_table_rows_retry_after_post_commit_failure_is_idempotent").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
 
     let _table_id = TableId::new(13);
     let schema = make_schema(13, "public", "copy_retry");
@@ -599,13 +597,9 @@ async fn write_table_rows_retry_after_post_commit_failure_is_idempotent() {
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_same_table_copy_batches_complete() {
     init_test_tracing();
-    let dir = make_test_dir("concurrent_same_table_copy_batches_complete");
-    let catalog = dir.join("catalog.ducklake");
-    let data = dir.join("data");
-    std::fs::create_dir_all(&data).unwrap();
-
-    let catalog_url = path_to_file_url(&catalog);
-    let data_url = path_to_file_url(&data);
+    let lake = create_test_lake("concurrent_same_table_copy_batches_complete").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
 
     let _table_id = TableId::new(14);
     let schema = make_schema(14, "public", "parallel_copy");
@@ -729,13 +723,9 @@ async fn concurrent_same_table_copy_batches_complete() {
 /// `write_table_rows` with an empty slice still creates the table schema.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_table_rows_empty_creates_table() {
-    let dir = make_test_dir("write_table_rows_empty");
-    let catalog = dir.join("catalog.ducklake");
-    let data = dir.join("data");
-    std::fs::create_dir_all(&data).unwrap();
-
-    let catalog_url = path_to_file_url(&catalog);
-    let data_url = path_to_file_url(&data);
+    let lake = create_test_lake("write_table_rows_empty").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
 
     let _table_id = TableId::new(2);
     let schema = make_schema(2, "public", "events");
@@ -769,13 +759,9 @@ async fn write_table_rows_empty_creates_table() {
 /// `truncate_table` deletes all rows while leaving the table schema intact.
 #[tokio::test(flavor = "multi_thread")]
 async fn truncate_clears_rows() {
-    let dir = make_test_dir("truncate_clears_rows");
-    let catalog = dir.join("catalog.ducklake");
-    let data = dir.join("data");
-    std::fs::create_dir_all(&data).unwrap();
-
-    let catalog_url = path_to_file_url(&catalog);
-    let data_url = path_to_file_url(&data);
+    let lake = create_test_lake("truncate_clears_rows").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
 
     let _table_id = TableId::new(3);
     let schema = make_schema(3, "public", "logs");
@@ -833,13 +819,9 @@ async fn truncate_clears_rows() {
 /// Truncation should clear copy markers so the same rows can be copied again.
 #[tokio::test(flavor = "multi_thread")]
 async fn truncate_clears_copy_markers_for_recopy() {
-    let dir = make_test_dir("truncate_clears_copy_markers_for_recopy");
-    let catalog = dir.join("catalog.ducklake");
-    let data = dir.join("data");
-    std::fs::create_dir_all(&data).unwrap();
-
-    let catalog_url = path_to_file_url(&catalog);
-    let data_url = path_to_file_url(&data);
+    let lake = create_test_lake("truncate_clears_copy_markers_for_recopy").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
 
     let _table_id = TableId::new(15);
     let schema = make_schema(15, "public", "recopy_logs");
@@ -881,14 +863,9 @@ async fn truncate_clears_copy_markers_for_recopy() {
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events() {
     use etl::types::{DeleteEvent, InsertEvent, PgLsn, UpdateEvent};
-
-    let dir = make_test_dir("write_events");
-    let catalog = dir.join("catalog.ducklake");
-    let data = dir.join("data");
-    std::fs::create_dir_all(&data).unwrap();
-
-    let catalog_url = path_to_file_url(&catalog);
-    let data_url = path_to_file_url(&data);
+    let lake = create_test_lake("write_events").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
 
     let _table_id = TableId::new(4);
     let schema = make_schema(4, "public", "products");
@@ -975,14 +952,10 @@ async fn write_events() {
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_small_batch_stays_inlined_after_return() {
     use etl::types::{InsertEvent, PgLsn};
-
-    let dir = make_test_dir("write_events_small_batch_stays_inlined_after_return");
-    let catalog = dir.join("catalog.ducklake");
-    let data = dir.join("data");
-    std::fs::create_dir_all(&data).unwrap();
-
-    let catalog_url = path_to_file_url(&catalog);
-    let data_url = path_to_file_url(&data);
+    let lake = create_test_lake("write_events_small_batch_stays_inlined_after_return").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
+    let data = lake.data_dir.clone();
 
     let _table_id = TableId::new(17);
     let schema = make_schema(17, "public", "cdc_flush");
@@ -1032,14 +1005,9 @@ async fn write_events_small_batch_stays_inlined_after_return() {
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_with_old_row_update() {
     use etl::types::{InsertEvent, PgLsn, UpdateEvent};
-
-    let dir = make_test_dir("write_events_with_old_row_update");
-    let catalog = dir.join("catalog.ducklake");
-    let data = dir.join("data");
-    std::fs::create_dir_all(&data).unwrap();
-
-    let catalog_url = path_to_file_url(&catalog);
-    let data_url = path_to_file_url(&data);
+    let lake = create_test_lake("write_events_with_old_row_update").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
 
     let _table_id = TableId::new(8);
     let schema = make_schema(8, "public", "inventory");
@@ -1114,13 +1082,9 @@ async fn write_events_with_old_row_update() {
 async fn write_events_with_partial_updates() {
     use etl::types::UpdateEvent;
 
-    let dir = make_test_dir("write_events_with_partial_updates");
-    let catalog = dir.join("catalog.ducklake");
-    let data = dir.join("data");
-    std::fs::create_dir_all(&data).unwrap();
-
-    let catalog_url = path_to_file_url(&catalog);
-    let data_url = path_to_file_url(&data);
+    let lake = create_test_lake("write_events_with_partial_updates").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
 
     let schema = make_schema(37, "public", "partial_inventory");
     let replicated_schema = make_replicated_table_schema(&schema);
@@ -1206,13 +1170,9 @@ async fn write_events_with_partial_updates() {
 async fn write_events_without_replica_identity_rejects_mutations() {
     use etl::types::UpdateEvent;
 
-    let dir = make_test_dir("write_events_without_replica_identity_rejects_mutations");
-    let catalog = dir.join("catalog.ducklake");
-    let data = dir.join("data");
-    std::fs::create_dir_all(&data).unwrap();
-
-    let catalog_url = path_to_file_url(&catalog);
-    let data_url = path_to_file_url(&data);
+    let lake = create_test_lake("write_events_without_replica_identity_rejects_mutations").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
 
     let table_schema = Arc::new(make_schema(40, "public", "missing_identity_inventory"));
     let replicated_schema = ReplicatedTableSchema::from_masks(
@@ -1300,13 +1260,9 @@ async fn write_events_without_replica_identity_rejects_mutations() {
 async fn write_events_replay_is_idempotent() {
     use etl::types::{InsertEvent, PgLsn, UpdateEvent};
 
-    let dir = make_test_dir("write_events_replay_is_idempotent");
-    let catalog = dir.join("catalog.ducklake");
-    let data = dir.join("data");
-    std::fs::create_dir_all(&data).unwrap();
-
-    let catalog_url = path_to_file_url(&catalog);
-    let data_url = path_to_file_url(&data);
+    let lake = create_test_lake("write_events_replay_is_idempotent").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
 
     let _table_id = TableId::new(9);
     let schema = make_schema(9, "public", "orders");
@@ -1398,14 +1354,10 @@ async fn write_events_replay_is_idempotent() {
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_same_commit_lsn_higher_tx_ordinal_still_applies() {
     use etl::types::{InsertEvent, UpdateEvent};
-
-    let dir = make_test_dir("write_events_same_commit_lsn_higher_tx_ordinal_still_applies");
-    let catalog = dir.join("catalog.ducklake");
-    let data = dir.join("data");
-    std::fs::create_dir_all(&data).unwrap();
-
-    let catalog_url = path_to_file_url(&catalog);
-    let data_url = path_to_file_url(&data);
+    let lake =
+        create_test_lake("write_events_same_commit_lsn_higher_tx_ordinal_still_applies").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
 
     let _table_id = TableId::new(18);
     let schema = make_schema(18, "public", "tx_ordinal_progress");
@@ -1480,14 +1432,9 @@ async fn write_events_same_commit_lsn_higher_tx_ordinal_still_applies() {
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_restart_overlap_rebatches_only_pending_suffix() {
     use etl::types::InsertEvent;
-
-    let dir = make_test_dir("write_events_restart_overlap_rebatches_only_pending_suffix");
-    let catalog = dir.join("catalog.ducklake");
-    let data = dir.join("data");
-    std::fs::create_dir_all(&data).unwrap();
-
-    let catalog_url = path_to_file_url(&catalog);
-    let data_url = path_to_file_url(&data);
+    let lake = create_test_lake("write_events_restart_overlap_rebatches_only_pending_suffix").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
 
     let _table_id = TableId::new(19);
     let schema = make_schema(19, "public", "restart_overlap_progress");
@@ -1602,14 +1549,9 @@ async fn write_events_reuses_one_staging_table_per_atomic_batch() {
 
     let _test_hook_guard = acquire_ducklake_test_hook_guard().await;
     reset_ducklake_test_hooks();
-
-    let dir = make_test_dir("write_events_reuses_one_staging_table_per_atomic_batch");
-    let catalog = dir.join("catalog.ducklake");
-    let data = dir.join("data");
-    std::fs::create_dir_all(&data).unwrap();
-
-    let catalog_url = path_to_file_url(&catalog);
-    let data_url = path_to_file_url(&data);
+    let lake = create_test_lake("write_events_reuses_one_staging_table_per_atomic_batch").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
 
     let _table_id = TableId::new(19);
     let schema = make_schema(19, "public", "staging_reuse");
@@ -1692,13 +1634,10 @@ async fn write_events_reuses_one_staging_table_per_atomic_batch() {
 /// Parquet files.
 #[tokio::test(flavor = "multi_thread")]
 async fn applied_batches_table_uses_data_inlining() {
-    let dir = make_test_dir("applied_batches_table_uses_data_inlining");
-    let catalog = dir.join("catalog.ducklake");
-    let data = dir.join("data");
-    std::fs::create_dir_all(&data).unwrap();
-
-    let catalog_url = path_to_file_url(&catalog);
-    let data_url = path_to_file_url(&data);
+    let lake = create_test_lake("applied_batches_table_uses_data_inlining").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
+    let data = lake.data_dir.clone();
 
     let _table_id = TableId::new(13);
     let schema = make_schema(13, "public", "audit");
@@ -1740,14 +1679,9 @@ async fn applied_batches_table_uses_data_inlining() {
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_mixed_multi_table_batches() {
     use etl::types::{DeleteEvent, InsertEvent, PgLsn, UpdateEvent};
-
-    let dir = make_test_dir("write_events_mixed_multi_table_batches");
-    let catalog = dir.join("catalog.ducklake");
-    let data = dir.join("data");
-    std::fs::create_dir_all(&data).unwrap();
-
-    let catalog_url = path_to_file_url(&catalog);
-    let data_url = path_to_file_url(&data);
+    let lake = create_test_lake("write_events_mixed_multi_table_batches").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
 
     let _table_id_a = TableId::new(10);
     let _table_id_b = TableId::new(11);
@@ -1880,14 +1814,11 @@ async fn write_events_truncate_retry_after_post_commit_failure_is_idempotent() {
 
     let _test_hook_guard = acquire_ducklake_test_hook_guard().await;
     reset_ducklake_test_hooks();
-
-    let dir = make_test_dir("write_events_truncate_retry_after_post_commit_failure_is_idempotent");
-    let catalog = dir.join("catalog.ducklake");
-    let data = dir.join("data");
-    std::fs::create_dir_all(&data).unwrap();
-
-    let catalog_url = path_to_file_url(&catalog);
-    let data_url = path_to_file_url(&data);
+    let lake =
+        create_test_lake("write_events_truncate_retry_after_post_commit_failure_is_idempotent")
+            .await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
 
     let _table_id = TableId::new(16);
     let schema = make_schema(16, "public", "truncate_retries");
@@ -1979,14 +1910,9 @@ async fn write_events_retry_after_post_commit_failure_is_idempotent() {
 
     let _test_hook_guard = acquire_ducklake_test_hook_guard().await;
     reset_ducklake_test_hooks();
-
-    let dir = make_test_dir("write_events_retry_after_post_commit_failure_is_idempotent");
-    let catalog = dir.join("catalog.ducklake");
-    let data = dir.join("data");
-    std::fs::create_dir_all(&data).unwrap();
-
-    let catalog_url = path_to_file_url(&catalog);
-    let data_url = path_to_file_url(&data);
+    let lake = create_test_lake("write_events_retry_after_post_commit_failure_is_idempotent").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
 
     let _table_id = TableId::new(12);
     let schema = make_schema(12, "public", "payments");
@@ -2081,13 +2007,9 @@ async fn write_events_retry_after_post_commit_failure_is_idempotent() {
 /// Concurrent async callers should serialize cleanly behind one DuckDB slot.
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_writes_with_single_slot_complete() {
-    let dir = make_test_dir("concurrent_writes_single_slot");
-    let catalog = dir.join("catalog.ducklake");
-    let data = dir.join("data");
-    std::fs::create_dir_all(&data).unwrap();
-
-    let catalog_url = path_to_file_url(&catalog);
-    let data_url = path_to_file_url(&data);
+    let lake = create_test_lake("concurrent_writes_single_slot").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
 
     let _table_id_a = TableId::new(6);
     let _table_id_b = TableId::new(7);
@@ -2155,13 +2077,9 @@ async fn concurrent_writes_with_single_slot_complete() {
 /// Verifies that common Postgres types survive the write → read cycle.
 #[tokio::test(flavor = "multi_thread")]
 async fn type_mapping_round_trip() {
-    let dir = make_test_dir("type_mapping");
-    let catalog = dir.join("catalog.ducklake");
-    let data = dir.join("data");
-    std::fs::create_dir_all(&data).unwrap();
-
-    let catalog_url = path_to_file_url(&catalog);
-    let data_url = path_to_file_url(&data);
+    let lake = create_test_lake("type_mapping").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
 
     let _table_id = TableId::new(5);
     let schema = make_rich_schema(5);

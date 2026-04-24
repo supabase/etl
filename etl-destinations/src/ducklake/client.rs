@@ -36,15 +36,12 @@ static NEXT_CONNECTION_INIT_ID: AtomicU64 = AtomicU64::new(1);
 pub(super) const FOREGROUND_QUERY_TIMEOUT: Duration = Duration::from_secs(2 * 60);
 /// Timeout applied to each maintenance DuckLake blocking operation.
 pub(super) const MAINTENANCE_QUERY_TIMEOUT: Duration = Duration::from_secs(5 * 60);
-/// Timeout applied to each background DuckLake metrics query.
-pub(super) const METRICS_QUERY_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Timeout class applied to one DuckDB blocking operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum DuckDbBlockingOperationKind {
     Foreground,
     Maintenance,
-    Metrics,
 }
 
 impl DuckDbBlockingOperationKind {
@@ -52,7 +49,6 @@ impl DuckDbBlockingOperationKind {
         match self {
             Self::Foreground => "foreground",
             Self::Maintenance => "maintenance",
-            Self::Metrics => "metrics",
         }
     }
 
@@ -60,7 +56,6 @@ impl DuckDbBlockingOperationKind {
         match self {
             Self::Foreground => FOREGROUND_QUERY_TIMEOUT,
             Self::Maintenance => MAINTENANCE_QUERY_TIMEOUT,
-            Self::Metrics => METRICS_QUERY_TIMEOUT,
         }
     }
 }
@@ -563,7 +558,6 @@ mod tests {
     fn duckdb_blocking_operation_kind_timeouts() {
         assert_eq!(DuckDbBlockingOperationKind::Foreground.timeout(), FOREGROUND_QUERY_TIMEOUT);
         assert_eq!(DuckDbBlockingOperationKind::Maintenance.timeout(), MAINTENANCE_QUERY_TIMEOUT);
-        assert_eq!(DuckDbBlockingOperationKind::Metrics.timeout(), METRICS_QUERY_TIMEOUT);
     }
 
     #[tokio::test]
