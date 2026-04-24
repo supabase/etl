@@ -609,8 +609,10 @@ async fn publication_changes_are_correctly_handled() {
 
     // Insert one row in each table and wait for two insert events.
     let inserts_notify = destination.wait_for_events_count(vec![(EventType::Insert, 2)]).await;
+
     database.insert_values(table_1.clone(), &["value"], &[&1]).await.unwrap();
     database.insert_values(table_2.clone(), &["value"], &[&1]).await.unwrap();
+
     inserts_notify.notified().await;
 
     // Drop table_2 so it's no longer part of the publication.
@@ -626,6 +628,17 @@ async fn publication_changes_are_correctly_handled() {
     // dropping of a table doesn't cause issues with the pipeline since the
     // change is picked up on pipeline restart.
     pipeline.shutdown_and_wait().await.unwrap();
+
+    // The destination should have the insert event for each original table
+    // before the restart.
+    let events = destination.get_events().await;
+    let grouped = group_events_by_type_and_table_id(&events);
+    let table_1_inserts = grouped.get(&(EventType::Insert, table_1_id)).cloned().unwrap();
+    assert_eq!(table_1_inserts.len(), 1);
+    let table_2_inserts = grouped.get(&(EventType::Insert, table_2_id)).cloned().unwrap();
+    assert_eq!(table_2_inserts.len(), 1);
+
+    destination.clear_events().await;
 
     // Create table_3 which is going to be added to the publication.
     let table_3 = test_table_name("table_3");
@@ -649,10 +662,8 @@ async fn publication_changes_are_correctly_handled() {
 
     table_3_ready_notify.notified().await;
 
-    // Insert one row in table_1 and wait for it. (We wait for 4 inserts since it
-    // keeps the previous ones).
-    let inserts_notify =
-        destination.wait_for_events_count_deduped(vec![(EventType::Insert, 4)]).await;
+    // Insert one row in table_1 and table_3 and wait for the new events.
+    let inserts_notify = destination.wait_for_events_count(vec![(EventType::Insert, 2)]).await;
 
     database.insert_values(table_1.clone(), &["value"], &[&2]).await.unwrap();
     database.insert_values(table_3.clone(), &["value"], &[&1]).await.unwrap();
@@ -673,16 +684,11 @@ async fn publication_changes_are_correctly_handled() {
     let slot_state = database.get_replication_slot_state(&table_2_slot_name).await.unwrap();
     assert_eq!(slot_state, None, "Table sync slot for removed table should be deleted");
 
-    // The destination should have the 2 events of the first table, the 1 event of
-    // the removed table and the 1 event of the new table.
-    // Use de-duplicated events for assertions to be robust to potential duplicates
-    // on restart where confirmed_flush_lsn may not have been stored.
-    let events = destination.get_events_deduped().await;
+    // The destination should have the new event for table_1 and table_3.
+    let events = destination.get_events().await;
     let grouped = group_events_by_type_and_table_id(&events);
     let table_1_inserts = grouped.get(&(EventType::Insert, table_1_id)).cloned().unwrap();
-    assert_eq!(table_1_inserts.len(), 2);
-    let table_2_inserts = grouped.get(&(EventType::Insert, table_2_id)).cloned().unwrap();
-    assert_eq!(table_2_inserts.len(), 1);
+    assert_eq!(table_1_inserts.len(), 1);
     let table_3_inserts = grouped.get(&(EventType::Insert, table_3_id)).cloned().unwrap();
     assert_eq!(table_3_inserts.len(), 1);
 }
