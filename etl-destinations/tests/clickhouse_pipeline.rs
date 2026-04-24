@@ -1637,7 +1637,7 @@ async fn delete_with_default_replica_identity() {
     assert_eq!(r.id, 1);
     assert_eq!(r.text_col, "keep");
     assert_eq!(r.integer_col, 10);
-    assert_eq!(r.boolean_col, true);
+    assert!(r.boolean_col);
     assert_eq!(r.nullable_text, Some("present".to_string()));
     assert_eq!(r.int_array_col, vec![Some(1), Some(2), Some(3)]);
     assert_eq!(r.cdc_operation, "INSERT");
@@ -1660,9 +1660,12 @@ async fn delete_with_default_replica_identity() {
     assert!(r.real_col.abs() < 1e-6, "real -> 0.0");
     assert!(r.double_col.abs() < 1e-9, "double -> 0.0");
     assert_eq!(r.numeric_col, "", "numeric -> empty string");
-    assert_eq!(r.boolean_col, false, "boolean -> false");
+    assert!(!r.boolean_col, "boolean -> false");
     assert_eq!(r.text_col, "", "text -> empty string");
     assert_eq!(r.varchar_col, "", "varchar -> empty string");
+    assert_eq!(r.date_col, 0, "date -> 1970-01-01 (day 0)");
+    assert_eq!(r.timestamp_col, 0, "timestamp -> unix epoch");
+    assert_eq!(r.timestamptz_col, 0, "timestamptz -> unix epoch");
     assert_eq!(r.time_col, "", "time -> empty string (String-mapped)");
     assert_eq!(r.jsonb_col, "", "jsonb -> empty string (String-mapped)");
     assert_eq!(r.bytea_col, "", "bytea -> empty string");
