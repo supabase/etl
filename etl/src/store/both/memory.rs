@@ -208,7 +208,7 @@ impl SchemaStore for MemoryStore {
             .iter()
             .filter(|((tid, sid), _)| *tid == *table_id && *sid <= snapshot_id)
             .max_by_key(|((_, sid), _)| *sid)
-            .map(|(_, schema)| schema.clone());
+            .map(|(_, schema)| Arc::clone(schema));
 
         Ok(best_match)
     }
@@ -216,7 +216,7 @@ impl SchemaStore for MemoryStore {
     async fn get_table_schemas(&self) -> EtlResult<Vec<Arc<TableSchema>>> {
         let inner = self.inner.lock().await;
 
-        Ok(inner.table_schemas.values().cloned().collect())
+        Ok(inner.table_schemas.values().map(Arc::clone).collect())
     }
 
     async fn load_table_schemas(&self) -> EtlResult<usize> {
@@ -230,7 +230,7 @@ impl SchemaStore for MemoryStore {
 
         let key = (table_schema.id, table_schema.snapshot_id);
         let table_schema = Arc::new(table_schema);
-        inner.table_schemas.insert(key, table_schema.clone());
+        inner.table_schemas.insert(key, Arc::clone(&table_schema));
         Ok(table_schema)
     }
 }

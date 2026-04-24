@@ -223,7 +223,7 @@ impl TableSyncWorkerState {
             // condition which occurs when we release the lock, the value
             // changes, and then we wait for a value change, in that case, we
             // will miss the notification and the system will stall.
-            let phase_change = inner.phase_change.clone();
+            let phase_change = Arc::clone(&inner.phase_change);
             let phase_change_notified = phase_change.notified();
 
             // We must drop the lock here so that state changes can actually happen.
@@ -565,26 +565,26 @@ where
         state: TableSyncWorkerState,
     ) -> EtlResult<TableSyncWorkerResult> {
         let table_id = self.table_id;
-        let pool = self.pool.clone();
+        let pool = Arc::clone(&self.pool);
         let store = self.store.clone();
-        let config = self.config.clone();
+        let config = Arc::clone(&self.config);
         let pipeline_id = self.pipeline_id;
         let destination = self.destination.clone();
         let shared_table_cache = self.shared_table_cache.clone();
         let mut shutdown_rx = self.shutdown_rx.clone();
-        let run_permit = self.run_permit.clone();
+        let run_permit = Arc::clone(&self.run_permit);
 
         loop {
             let worker = TableSyncWorker {
                 pipeline_id,
-                config: config.clone(),
-                pool: pool.clone(),
+                config: Arc::clone(&config),
+                pool: Arc::clone(&pool),
                 table_id,
                 store: store.clone(),
                 destination: destination.clone(),
                 shared_table_cache: shared_table_cache.clone(),
                 shutdown_rx: shutdown_rx.clone(),
-                run_permit: run_permit.clone(),
+                run_permit: Arc::clone(&run_permit),
                 memory_monitor: self.memory_monitor.clone(),
                 batch_budget: self.batch_budget.clone(),
             };
@@ -647,7 +647,7 @@ where
 
             // We use `acquired_owned` for better semantics over `acquire` since we want to own the
             // permit in this future.
-            permit = self.run_permit.clone().acquire_owned() => {
+            permit = Arc::clone(&self.run_permit).acquire_owned() => {
                 permit
             }
         }
@@ -675,7 +675,7 @@ where
 
         let table_sync_result = start_table_sync(
             self.pipeline_id,
-            self.config.clone(),
+            Arc::clone(&self.config),
             replication_client.clone(),
             self.table_id,
             state.clone(),

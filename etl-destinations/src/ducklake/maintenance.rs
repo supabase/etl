@@ -910,7 +910,8 @@ pub(super) fn table_write_slot(
     table_name: &str,
 ) -> Arc<Semaphore> {
     let mut slots = table_write_slots.lock();
-    slots.entry(table_name.to_string()).or_insert_with(|| Arc::new(Semaphore::new(1))).clone()
+    let slot = slots.entry(table_name.to_string()).or_insert_with(|| Arc::new(Semaphore::new(1)));
+    Arc::clone(slot)
 }
 
 /// Tries to acquire the table-local semaphore without blocking the maintenance
