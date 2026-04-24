@@ -1,10 +1,14 @@
 use etl_api::{
+    configs::pipeline::ReplicatorResourcesConfig,
     k8s::PodStatus,
-    routes::pipelines::{
-        CreatePipelineRequest, CreatePipelineResponse, GetPipelineReplicationStatusResponse,
-        GetPipelineVersionResponse, ReadPipelineResponse, ReadPipelinesResponse,
-        RollbackTablesRequest, RollbackTablesResponse, RollbackTablesTarget, RollbackType,
-        SimpleTableReplicationState, UpdatePipelineRequest, UpdatePipelineVersionRequest,
+    routes::{
+        ErrorMessage,
+        pipelines::{
+            CreatePipelineRequest, CreatePipelineResponse, GetPipelineReplicationStatusResponse,
+            GetPipelineVersionResponse, ReadPipelineResponse, ReadPipelinesResponse,
+            RollbackTablesRequest, RollbackTablesResponse, RollbackTablesTarget, RollbackType,
+            SimpleTableReplicationState, UpdatePipelineRequest, UpdatePipelineVersionRequest,
+        },
     },
 };
 use etl_config::shared::PgConnectionConfig;
@@ -205,6 +209,50 @@ async fn pipeline_can_be_created() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn pipeline_replicator_resources_are_persisted_and_used_on_start() {
+    init_test_tracing();
+    let k8s_state = MockK8sState::default();
+    let app = spawn_test_app_with_k8s_state(None, k8s_state.clone()).await;
+    create_default_image(&app).await;
+    let tenant_id = &create_tenant(&app).await;
+    let source_id = create_source(&app, tenant_id).await;
+    let destination_id = create_destination(&app, tenant_id).await;
+
+    let mut config = new_pipeline_config();
+    config.replicator_resources = Some(ReplicatorResourcesConfig {
+        cpu_request_millicores: Some(750),
+        memory_request_mib: Some(1536),
+    });
+
+    let pipeline = CreatePipelineRequest { source_id, destination_id, config };
+    let response = app.create_pipeline(tenant_id, &pipeline).await;
+    let response: CreatePipelineResponse =
+        response.json().await.expect("failed to deserialize response");
+    let pipeline_id = response.id;
+
+    let response = app.read_pipeline(tenant_id, pipeline_id).await;
+    let response: ReadPipelineResponse =
+        response.json().await.expect("failed to deserialize response");
+    assert_eq!(
+        response.config.replicator_resources,
+        Some(ReplicatorResourcesConfig {
+            cpu_request_millicores: Some(750),
+            memory_request_mib: Some(1536),
+        })
+    );
+
+    let response = app.start_pipeline(tenant_id, pipeline_id).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        k8s_state.last_replicator_resources().await,
+        Some(ReplicatorResourcesConfig {
+            cpu_request_millicores: Some(750),
+            memory_request_mib: Some(1536),
+        })
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn tenant_cannot_create_more_than_max_pipelines() {
     use etl_api::db::pipelines::MAX_PIPELINES_PER_TENANT;
 
@@ -380,6 +428,110 @@ async fn an_existing_pipeline_can_be_updated() {
     assert_eq!(response.source_id, source_id);
     assert_eq!(response.destination_id, destination_id);
     insta::assert_debug_snapshot!(response.config);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn updating_a_running_pipeline_reapplies_replicator_resources() {
+    init_test_tracing();
+    let k8s_state = MockK8sState::default();
+    let app = spawn_test_app_with_k8s_state(None, k8s_state.clone()).await;
+    create_default_image(&app).await;
+    let tenant_id = &create_tenant(&app).await;
+    let source_id = create_source(&app, tenant_id).await;
+    let destination_id = create_destination(&app, tenant_id).await;
+    let pipeline =
+        CreatePipelineRequest { source_id, destination_id, config: new_pipeline_config() };
+    let response = app.create_pipeline(tenant_id, &pipeline).await;
+    let response: CreatePipelineResponse =
+        response.json().await.expect("failed to deserialize response");
+    let pipeline_id = response.id;
+
+    let create_calls_before = k8s_state.create_calls();
+    let mut updated_pipeline_config = updated_pipeline_config();
+    updated_pipeline_config.replicator_resources = Some(ReplicatorResourcesConfig {
+        cpu_request_millicores: Some(900),
+        memory_request_mib: Some(2048),
+    });
+    let update_request =
+        UpdatePipelineRequest { source_id, destination_id, config: updated_pipeline_config };
+
+    let response = app.update_pipeline(tenant_id, pipeline_id, &update_request).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(k8s_state.create_calls() > create_calls_before);
+    assert_eq!(
+        k8s_state.last_replicator_resources().await,
+        Some(ReplicatorResourcesConfig {
+            cpu_request_millicores: Some(900),
+            memory_request_mib: Some(2048),
+        })
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn updating_a_stopped_pipeline_only_persists_replicator_resources() {
+    init_test_tracing();
+    let k8s_state = MockK8sState::default();
+    k8s_state.set_pod_status(PodStatus::Stopped).await;
+    let app = spawn_test_app_with_k8s_state(None, k8s_state.clone()).await;
+    create_default_image(&app).await;
+    let tenant_id = &create_tenant(&app).await;
+    let source_id = create_source(&app, tenant_id).await;
+    let destination_id = create_destination(&app, tenant_id).await;
+    let pipeline =
+        CreatePipelineRequest { source_id, destination_id, config: new_pipeline_config() };
+    let response = app.create_pipeline(tenant_id, &pipeline).await;
+    let response: CreatePipelineResponse =
+        response.json().await.expect("failed to deserialize response");
+    let pipeline_id = response.id;
+
+    let mut updated_pipeline_config = updated_pipeline_config();
+    updated_pipeline_config.replicator_resources = Some(ReplicatorResourcesConfig {
+        cpu_request_millicores: Some(333),
+        memory_request_mib: Some(444),
+    });
+    let update_request =
+        UpdatePipelineRequest { source_id, destination_id, config: updated_pipeline_config };
+
+    let response = app.update_pipeline(tenant_id, pipeline_id, &update_request).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(k8s_state.create_calls(), 0);
+    assert_eq!(k8s_state.last_replicator_resources().await, None);
+
+    let response = app.read_pipeline(tenant_id, pipeline_id).await;
+    let response: ReadPipelineResponse =
+        response.json().await.expect("failed to deserialize response");
+    assert_eq!(
+        response.config.replicator_resources,
+        Some(ReplicatorResourcesConfig {
+            cpu_request_millicores: Some(333),
+            memory_request_mib: Some(444),
+        })
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn invalid_replicator_resources_are_rejected() {
+    init_test_tracing();
+    let app = spawn_test_app().await;
+    create_default_image(&app).await;
+    let tenant_id = &create_tenant(&app).await;
+    let source_id = create_source(&app, tenant_id).await;
+    let destination_id = create_destination(&app, tenant_id).await;
+
+    let mut config = new_pipeline_config();
+    config.replicator_resources = Some(ReplicatorResourcesConfig {
+        cpu_request_millicores: Some(0),
+        memory_request_mib: Some(100),
+    });
+    let pipeline = CreatePipelineRequest { source_id, destination_id, config };
+
+    let response = app.create_pipeline(tenant_id, &pipeline).await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: ErrorMessage = response.json().await.expect("failed to deserialize response");
+    assert_eq!(body.error, "replicator cpu request must be greater than 0");
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -58,6 +58,31 @@ impl From<TableRow> for BigQueryOrder {
     }
 }
 
+#[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub struct BigQueryReplicaIdentityRow {
+    id: i32,
+    name: String,
+    large_text: String,
+}
+
+impl BigQueryReplicaIdentityRow {
+    pub fn new(id: i32, name: &str, large_text: &str) -> Self {
+        Self { id, name: name.to_owned(), large_text: large_text.to_owned() }
+    }
+}
+
+impl From<TableRow> for BigQueryReplicaIdentityRow {
+    fn from(value: TableRow) -> Self {
+        let columns = value.columns.unwrap();
+
+        BigQueryReplicaIdentityRow {
+            id: parse_table_cell(columns[0].clone()).unwrap(),
+            name: parse_table_cell(columns[1].clone()).unwrap(),
+            large_text: parse_table_cell(columns[2].clone()).unwrap(),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct NullableColsScalar {
     id: i32,

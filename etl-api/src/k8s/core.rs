@@ -9,7 +9,7 @@ use crate::{
     configs::{
         destination::{StoredDestinationConfig, StoredIcebergConfig},
         log::LogLevel,
-        pipeline::StoredPipelineConfig,
+        pipeline::{ReplicatorResourcesConfig, StoredPipelineConfig},
         source::StoredSourceConfig,
     },
     db::{
@@ -111,6 +111,7 @@ pub async fn create_or_update_pipeline_resources_in_k8s(
     };
 
     let log_level = pipeline.config.log_level.clone().unwrap_or_default();
+    let replicator_resources = pipeline.config.replicator_resources.clone();
     let replicator_config = build_replicator_config_without_secrets(
         // We are safe to perform this conversion, since the i64 -> u64 conversion performs wrap
         // around, and we won't have two different values map to the same u64, since the domain
@@ -130,6 +131,7 @@ pub async fn create_or_update_pipeline_resources_in_k8s(
         &prefix,
         image.name,
         environment,
+        replicator_resources.as_ref(),
         destination_type,
         log_level,
     )
@@ -387,6 +389,7 @@ async fn create_or_update_replicator_stateful_set(
     prefix: &str,
     replicator_image: String,
     environment: Environment,
+    replicator_resources: Option<&ReplicatorResourcesConfig>,
     destination_type: DestinationType,
     log_level: LogLevel,
 ) -> Result<(), K8sCoreError> {
@@ -395,6 +398,7 @@ async fn create_or_update_replicator_stateful_set(
             prefix,
             &replicator_image,
             environment,
+            replicator_resources,
             destination_type,
             log_level,
         )
@@ -574,6 +578,7 @@ mod tests {
             _prefix: &str,
             _replicator_image: &str,
             _environment: Environment,
+            _replicator_resources: Option<&ReplicatorResourcesConfig>,
             _destination_type: DestinationType,
             _log_level: LogLevel,
         ) -> Result<(), K8sError> {

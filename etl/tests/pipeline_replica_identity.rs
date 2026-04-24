@@ -189,12 +189,12 @@ async fn run_replica_identity_scenario(
             ))
             .await
             .unwrap();
+        let replica_identity_value = format!("using index {}", quote_identifier(&index_name));
         database
-            .run_sql(&format!(
-                "alter table {} replica identity using index {}",
-                table_name.as_quoted_identifier(),
-                quote_identifier(&index_name),
-            ))
+            .alter_table(
+                table_name.clone(),
+                &[TableModification::ReplicaIdentity { value: &replica_identity_value }],
+            )
             .await
             .unwrap();
     } else {
@@ -428,6 +428,15 @@ async fn full_replica_identity_with_composite_primary_key_preserves_full_old_row
 
     let toast_update = find_update_event(&events, 1);
     assert_eq!(
+        toast_update.updated_table_row,
+        UpdatedTableRow::Full(full_row(
+            INITIAL_NAME,
+            INITIAL_SURNAME,
+            UPDATED_CITY,
+            &result.updated_large_text,
+        ))
+    );
+    assert_eq!(
         toast_update.old_table_row,
         Some(OldTableRow::Full(full_row(
             INITIAL_NAME,
@@ -438,6 +447,15 @@ async fn full_replica_identity_with_composite_primary_key_preserves_full_old_row
     );
 
     let identity_update = find_update_event(&events, 2);
+    assert_eq!(
+        identity_update.updated_table_row,
+        UpdatedTableRow::Full(full_row(
+            INITIAL_NAME,
+            UPDATED_SURNAME_IDENTITY,
+            UPDATED_CITY,
+            &result.final_large_text,
+        ))
+    );
     assert_eq!(
         identity_update.old_table_row,
         Some(OldTableRow::Full(full_row(

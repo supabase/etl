@@ -37,6 +37,7 @@ FullApiPipelineConfig {
     invalidated_slot_behavior: Some(
         Error,
     ),
+    replicator_resources: None,
     log_level: Some(
         Info,
     ),

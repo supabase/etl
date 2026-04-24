@@ -565,6 +565,14 @@ impl IdentityMask {
 /// - [`IdentityType::Full`] means the whole replicated row is the old-row key.
 /// - [`IdentityType::Missing`] means updates and deletes do not have a usable
 ///   row identity.
+///
+/// Equivalence is established structurally from the current replicated schema
+/// columns, not from the raw PostgreSQL mode byte or from an index OID. In
+/// practice that means a `USING INDEX` identity is treated as
+/// [`IdentityType::PrimaryKey`] whenever it resolves to the same current
+/// columns as the primary key. This is the semantic question destinations care
+/// about, and it remains stable across supported DDL evolution because ETL
+/// keeps rebuilding the runtime schema from schema-change messages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdentityType {
     /// The full replicated row is the row identity.
@@ -776,7 +784,13 @@ impl ReplicatedTableSchema {
     ///
     /// This is the semantic question destinations usually care about. A table
     /// configured with `REPLICA IDENTITY USING INDEX` can still return `true`
-    /// here if the chosen index is the primary-key index.
+    /// here if the chosen index resolves to the same current columns as the
+    /// primary key.
+    ///
+    /// This comparison is structural over the runtime schema masks, not a
+    /// direct comparison of PostgreSQL identity modes or index OIDs. Because
+    /// ETL tracks DDL/schema changes, that gives the intended notion of
+    /// primary-key equivalence across schema evolution.
     pub fn identity_matches_primary_key(&self) -> bool {
         self.identity_mask.as_slice().iter().eq(Self::primary_key_identity_mask(
             &self.table_schema,
@@ -921,6 +935,11 @@ impl ReplicatedTableSchema {
     ///
     /// In the case when a primary key is made up of all the table columns, the
     /// identity will be marked as [`IdentityType::PrimaryKey`].
+    ///
+    /// The inference is structural: if the identity mask selects the same
+    /// current replicated columns as the primary key mask, the result is
+    /// [`IdentityType::PrimaryKey`] even if the original source mode might
+    /// have been `USING INDEX`.
     fn infer_identity_type(
         table_schema: &TableSchema,
         replication_mask: &ReplicationMask,

@@ -3,7 +3,9 @@ use etl_config::Environment;
 use k8s_openapi::api::core::v1::ConfigMap;
 use thiserror::Error;
 
-use crate::configs::{destination::StoredDestinationConfig, log::LogLevel};
+use crate::configs::{
+    destination::StoredDestinationConfig, log::LogLevel, pipeline::ReplicatorResourcesConfig,
+};
 
 /// Errors from Kubernetes operations.
 ///
@@ -225,6 +227,7 @@ pub trait K8sClient: Send + Sync {
         prefix: &str,
         replicator_image: &str,
         environment: Environment,
+        replicator_resources: Option<&ReplicatorResourcesConfig>,
         destination_type: DestinationType,
         log_level: LogLevel,
     ) -> Result<(), K8sError>;
