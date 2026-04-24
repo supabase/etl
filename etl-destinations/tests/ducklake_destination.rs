@@ -22,12 +22,7 @@
 
 #[cfg(feature = "test-utils")]
 use std::sync::LazyLock;
-use std::{
-    f64::consts::PI,
-    path::{Path, PathBuf},
-    sync::Arc,
-    time::Duration,
-};
+use std::{f64::consts::PI, path::Path, sync::Arc, time::Duration};
 
 use chrono::NaiveDate;
 use duckdb::Connection;
@@ -61,20 +56,6 @@ use crate::support::ducklake::{
 
 // ── helpers
 // ───────────────────────────────────────────────────────────────────
-
-/// Creates a persistent temp directory named after the test and prints its
-/// path. Returns the directory path (kept on disk after the test completes).
-fn make_test_dir(test_name: &str) -> PathBuf {
-    let dir = tempfile::Builder::new()
-        .prefix(&format!("etl_ducklake_{test_name}_"))
-        .tempdir()
-        .expect("failed to create temp dir")
-        .keep(); // `into_path` prevents auto-cleanup on drop
-
-    println!("[{test_name}] catalog : {}", dir.join("catalog.ducklake").display());
-    println!("[{test_name}] data    : {}", dir.join("data").display());
-    dir
-}
 
 #[cfg(feature = "test-utils")]
 static DUCKLAKE_TEST_HOOKS_GUARD: LazyLock<Arc<Semaphore>> =
@@ -1101,13 +1082,9 @@ async fn write_events_with_old_row_update() {
 async fn write_events_with_partial_updates() {
     use etl::types::UpdateEvent;
 
-    let dir = make_test_dir("write_events_with_partial_updates");
-    let catalog = dir.join("catalog.ducklake");
-    let data = dir.join("data");
-    std::fs::create_dir_all(&data).unwrap();
-
-    let catalog_url = path_to_file_url(&catalog);
-    let data_url = path_to_file_url(&data);
+    let lake = create_test_lake("write_events_with_partial_updates").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
 
     let schema = make_schema(37, "public", "partial_inventory");
     let replicated_schema = make_replicated_table_schema(&schema);
@@ -1193,13 +1170,9 @@ async fn write_events_with_partial_updates() {
 async fn write_events_without_replica_identity_rejects_mutations() {
     use etl::types::UpdateEvent;
 
-    let dir = make_test_dir("write_events_without_replica_identity_rejects_mutations");
-    let catalog = dir.join("catalog.ducklake");
-    let data = dir.join("data");
-    std::fs::create_dir_all(&data).unwrap();
-
-    let catalog_url = path_to_file_url(&catalog);
-    let data_url = path_to_file_url(&data);
+    let lake = create_test_lake("write_events_without_replica_identity_rejects_mutations").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
 
     let table_schema = Arc::new(make_schema(40, "public", "missing_identity_inventory"));
     let replicated_schema = ReplicatedTableSchema::from_masks(
@@ -1287,13 +1260,9 @@ async fn write_events_without_replica_identity_rejects_mutations() {
 async fn write_events_replay_is_idempotent() {
     use etl::types::{InsertEvent, PgLsn, UpdateEvent};
 
-    let dir = make_test_dir("write_events_replay_is_idempotent");
-    let catalog = dir.join("catalog.ducklake");
-    let data = dir.join("data");
-    std::fs::create_dir_all(&data).unwrap();
-
-    let catalog_url = path_to_file_url(&catalog);
-    let data_url = path_to_file_url(&data);
+    let lake = create_test_lake("write_events_replay_is_idempotent").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
 
     let _table_id = TableId::new(9);
     let schema = make_schema(9, "public", "orders");
