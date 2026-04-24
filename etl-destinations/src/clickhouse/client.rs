@@ -5,7 +5,6 @@ use etl::{
     error::{ErrorKind, EtlResult},
     etl_error,
 };
-use tracing::info;
 use url::Url;
 
 use crate::clickhouse::{
@@ -103,32 +102,20 @@ impl ClickHouseClient {
         self.execute_ddl(&sql).await
     }
 
-    /// Renames a column in an existing ClickHouse table.
+    /// Renames a column in an existing ClickHouse table (idempotent).
     ///
-    /// Idempotent: checks system.columns before renaming. If the old column
-    /// doesn't exist, the rename is assumed already applied and skipped.
+    /// `RENAME COLUMN IF EXISTS` makes the ALTER a server-side noop when the
+    /// old column is already absent, so the check and the rename happen in
+    /// one statement without a racy read-then-write.
     pub(crate) async fn rename_column(
         &self,
         table_name: &str,
         old_name: &str,
         new_name: &str,
     ) -> EtlResult<()> {
-        let exists: u64 = self
-            .inner
-            .query(&format!(
-                "SELECT count() FROM system.columns WHERE table = '{table_name}' AND name = \
-                 '{old_name}'"
-            ))
-            .fetch_one()
-            .await
-            .map_err(|e| etl_error!(ErrorKind::Unknown, "ClickHouse column check failed", e))?;
-        if exists == 0 {
-            info!("rename {old_name} -> {new_name} already applied, skipping");
-            return Ok(());
-        }
-
-        let sql =
-            format!("ALTER TABLE \"{table_name}\" RENAME COLUMN \"{old_name}\" TO \"{new_name}\"");
+        let sql = format!(
+            "ALTER TABLE \"{table_name}\" RENAME COLUMN IF EXISTS \"{old_name}\" TO \"{new_name}\""
+        );
         self.execute_ddl(&sql).await
     }
 
