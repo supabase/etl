@@ -1,8 +1,9 @@
 # Event Types
 
-**Understanding the events ETL delivers to your destination**
+**Understanding the events ETL emits from Postgres logical replication**
 
-ETL streams events from Postgres logical replication to your destination via `write_events()`. This page documents all event types and how to handle them.
+ETL streams events from Postgres logical replication via `write_events()`.
+This page documents the event types and the PostgreSQL semantics they preserve.
 
 ## Event Overview
 
@@ -13,13 +14,42 @@ ETL streams events from Postgres logical replication to your destination via `wr
 | `Insert` | New row added | Yes |
 | `Update` | Row modified | Yes |
 | `Delete` | Row removed | Yes |
-| `Relation` | Table schema | Yes |
 | `Truncate` | Table cleared | Yes |
+| `Relation` | Table schema | Yes |
 | `Unsupported` | Unknown event | No |
 
 ## Data Modification Events
 
 These events carry row data and are associated with specific tables.
+
+### Row Images
+
+Data modification events use row-image helper types:
+
+```rust
+pub enum UpdatedTableRow {
+    Full(TableRow),
+    Partial(PartialTableRow),
+}
+
+pub enum OldTableRow {
+    Full(TableRow),
+    Key(TableRow),
+}
+```
+
+`TableRow` is a complete dense row. Its values are ordered to match the
+replicated table-column order.
+
+`PartialTableRow` is used when an update row is not complete. It exposes:
+
+- `total_columns()`: the number of replicated columns in the table schema;
+- `values()`: present values in replicated table-column order, excluding missing columns;
+- `missing_column_indexes()`: zero-based replicated-column indexes for values ETL could not reconstruct.
+
+`OldTableRow::Full(row)` contains a complete old row. `OldTableRow::Key(row)`
+contains only replica-identity columns, densely packed in replicated
+table-column order.
 
 ### Insert
 
@@ -27,10 +57,11 @@ A new row was added to a table.
 
 ```rust
 pub struct InsertEvent {
-    pub start_lsn: PgLsn,      // Position where event was recorded
-    pub commit_lsn: PgLsn,     // Position where transaction commits
-    pub table_id: TableId,     // Which table
-    pub table_row: TableRow,   // The new row data
+    pub start_lsn: PgLsn,
+    pub commit_lsn: PgLsn,
+    pub tx_ordinal: u64,
+    pub replicated_table_schema: ReplicatedTableSchema,
+    pub table_row: TableRow,
 }
 ```
 
@@ -42,19 +73,93 @@ An existing row was modified.
 pub struct UpdateEvent {
     pub start_lsn: PgLsn,
     pub commit_lsn: PgLsn,
-    pub table_id: TableId,
-    pub table_row: TableRow,                     // New row data
-    pub old_table_row: Option<(bool, TableRow)>, // Previous row (see below)
+    pub tx_ordinal: u64,
+    pub replicated_table_schema: ReplicatedTableSchema,
+    pub updated_table_row: UpdatedTableRow,
+    pub old_table_row: Option<OldTableRow>,
 }
 ```
 
-The `old_table_row` field depends on Postgres `REPLICA IDENTITY` setting:
+`updated_table_row` is the authoritative post-update payload:
 
-| REPLICA IDENTITY | `old_table_row` contains |
-|------------------|--------------------------|
-| `DEFAULT` | Primary key columns only (`true`, row) |
-| `FULL` | All columns (`false`, row) |
-| `NOTHING` | `None` |
+- `UpdatedTableRow::Full` when ETL knows every replicated column value after decoding the update.
+- `UpdatedTableRow::Partial` when PostgreSQL emitted `UnchangedToast` fields that ETL could not reconstruct safely.
+
+The `old_table_row` field is auxiliary old-side context that may be needed for
+row matching, key changes, or reconstruction logic.
+
+#### Unchanged Toast
+
+PostgreSQL may encode an unchanged toasted value as `UnchangedToast` in the
+update's new tuple instead of resending the full column value. ETL can turn the
+update into `UpdatedTableRow::Full` only when that value can be recovered from
+the old-side row image:
+
+- a `FULL` old row can recover unchanged toasted values for any replicated column;
+- a key-only old row can recover unchanged toasted values only for
+  replica-identity columns included in that key image;
+- no old row means unchanged toasted values cannot be recovered from the event.
+
+When any `UnchangedToast` field cannot be recovered, ETL emits
+`UpdatedTableRow::Partial` with known values and missing column indexes instead
+of pretending the unknown value is `NULL` or a replacement value.
+
+Destinations that need complete replacement rows, full before/after comparison,
+or complete audit records should require `REPLICA IDENTITY FULL` for tables with
+toasted columns, or keep enough prior state to fill missing values themselves.
+
+#### Old Row Mapping
+
+ETL maps PostgreSQL pgoutput update tuple markers directly:
+
+| pgoutput marker | ETL field |
+|-----------------|-----------|
+| `O` old tuple | `Some(OldTableRow::Full(row))` |
+| `K` old key | `Some(OldTableRow::Key(row))` |
+| no old tuple/key marker | `None` |
+| `N` new tuple | `updated_table_row` |
+
+PostgreSQL chooses which old-side marker to emit from the table's replica
+identity:
+
+| REPLICA IDENTITY | `old_table_row` contains for published updates |
+|------------------|----------------------------------------------|
+| `FULL` | `Some(OldTableRow::Full(row))` |
+| `DEFAULT` with a primary key | `Some(OldTableRow::Key(row))` when PostgreSQL determines the old key must be logged, otherwise `None` |
+| `DEFAULT` without a primary key | Source `UPDATE` is rejected when the table publishes updates |
+| `USING INDEX` | `Some(OldTableRow::Key(row))` when PostgreSQL determines the old key must be logged, otherwise `None` |
+| `NOTHING` | Source `UPDATE` is rejected when the table publishes updates |
+
+`OldTableRow::Key(row)` stores only the replica-identity columns, normalized into replicated table-column order.
+
+For `UPDATE`, PostgreSQL only sends an old key image under `DEFAULT` or
+`USING INDEX` when it determines the old key must be logged. In practice, that
+happens when:
+
+- any replica-identity column changed, or
+- any replica-identity column contains external data, such as a toasted value
+  that must be available from the old tuple.
+
+That means non-identity updates under `DEFAULT` or `USING INDEX` often arrive with `old_table_row = None`.
+Under `FULL`, PostgreSQL sends a full old row for every published update.
+A `FULL` update with `old_table_row = None` is not a shape emitted by
+PostgreSQL pgoutput.
+
+Key points for update handling:
+
+- `old_table_row = None` on an update is a valid `pgoutput` shape for `DEFAULT` or `USING INDEX`. It does not mean the table has no replica identity.
+- `OldTableRow::Key(row)` contains only replica-identity columns, in replicated table-column order. It is not necessarily the source primary key.
+- Consumers that match source rows by replica identity should use identity columns from `old_table_row` when present.
+- Consumers that match source rows by another key, such as the source primary key, can project the old or new row down to that key.
+- Consumers that need before-and-after values for arbitrary columns need `REPLICA IDENTITY FULL`; key-based identity only gives old identity columns, and only when PostgreSQL logs them.
+
+For destination implementations, a practical update flow is:
+
+1. Treat `updated_table_row` as the post-update payload.
+2. Handle `UpdatedTableRow::Partial` before constructing a complete replacement row.
+3. Use `OldTableRow::Key` only as old replica-identity values.
+4. Use `OldTableRow::Full` when full before-image values are required.
+5. If `old_table_row` is `None`, match or upsert from the new row according to the destination's own keying model.
 
 ### Delete
 
@@ -64,12 +169,32 @@ A row was removed from a table.
 pub struct DeleteEvent {
     pub start_lsn: PgLsn,
     pub commit_lsn: PgLsn,
-    pub table_id: TableId,                       // Which table
-    pub old_table_row: Option<(bool, TableRow)>, // Deleted row data
+    pub tx_ordinal: u64,
+    pub replicated_table_schema: ReplicatedTableSchema,
+    pub old_table_row: Option<OldTableRow>,
 }
 ```
 
-Same `REPLICA IDENTITY` rules apply as for Update.
+For `DELETE`, valid PostgreSQL publications send an old-side image:
+
+| REPLICA IDENTITY | `old_table_row` contains for published deletes |
+|------------------|---------------------------------------------|
+| `FULL` | `Some(OldTableRow::Full(row))` |
+| `DEFAULT` with a primary key | `Some(OldTableRow::Key(row))` |
+| `DEFAULT` without a primary key | Source `DELETE` is rejected when the table publishes deletes |
+| `USING INDEX` | `Some(OldTableRow::Key(row))` |
+| `NOTHING` | Source `DELETE` is rejected when the table publishes deletes |
+
+Important implications:
+
+- Deletes do not carry a new row image. `old_table_row` is the delete payload.
+- `OldTableRow::Key(row)` again means replica-identity columns only, not necessarily the table's primary key.
+- Consumers that require full old rows for deletes need `REPLICA IDENTITY FULL`.
+- The Rust field is optional at the event API boundary, but PostgreSQL pgoutput
+  populates it for every published delete. Tables without usable replica
+  identity fail at the source when they publish deletes.
+- Destination implementations should decide up front whether key-only deletes
+  are enough. If they are not, require `REPLICA IDENTITY FULL` for those tables.
 
 ### Truncate
 
@@ -79,8 +204,9 @@ One or more tables were truncated (all rows deleted).
 pub struct TruncateEvent {
     pub start_lsn: PgLsn,
     pub commit_lsn: PgLsn,
-    pub options: i8,       // Postgres truncate options
-    pub rel_ids: Vec<u32>, // List of truncated table IDs
+    pub tx_ordinal: u64,
+    pub options: i8,
+    pub truncated_tables: Vec<ReplicatedTableSchema>,
 }
 ```
 
@@ -96,10 +222,11 @@ Marks the start of a transaction.
 
 ```rust
 pub struct BeginEvent {
-    pub start_lsn: PgLsn,   // Position where transaction started
-    pub commit_lsn: PgLsn,  // Position where transaction will commit
-    pub timestamp: i64,     // Transaction start time
-    pub xid: u32,           // Transaction ID
+    pub start_lsn: PgLsn,
+    pub commit_lsn: PgLsn,
+    pub tx_ordinal: u64,
+    pub timestamp: i64,
+    pub xid: u32,
 }
 ```
 
@@ -111,9 +238,10 @@ Marks successful transaction completion.
 pub struct CommitEvent {
     pub start_lsn: PgLsn,
     pub commit_lsn: PgLsn,
-    pub flags: i8,        // Postgres commit flags
-    pub end_lsn: u64,     // Final LSN after commit
-    pub timestamp: i64,   // Commit time
+    pub tx_ordinal: u64,
+    pub flags: i8,
+    pub end_lsn: PgLsn,
+    pub timestamp: i64,
 }
 ```
 
@@ -127,9 +255,22 @@ Provides table schema information. Sent before data events for a table.
 pub struct RelationEvent {
     pub start_lsn: PgLsn,
     pub commit_lsn: PgLsn,
-    pub table_schema: TableSchema, // Column definitions, types, etc.
+    pub tx_ordinal: u64,
+    pub replicated_table_schema: ReplicatedTableSchema,
 }
 ```
+
+PostgreSQL pgoutput builds relation messages by walking the table descriptor in
+`pg_attribute.attnum` order and skipping columns that are not published. It
+sends tuple data in the same order as the relation message.
+
+ETL builds replication and identity masks from relation-message column names, so
+the order is not needed to decide which columns are included. That name-based
+matching is sound because PostgreSQL live column names are unique within a table
+schema version. The order matters only after the masks are applied: stored table
+schemas are also ordered by `attnum`, so
+`ReplicatedTableSchema::column_schemas()` becomes a positional view that matches
+the tuple payloads exactly, even when a publication filters columns.
 
 ## Begin/Commit Behavior
 
@@ -137,7 +278,7 @@ During initial copy, `Begin` and `Commit` events may be delivered **multiple tim
 
 Handle this by either:
 - Tracking LSNs to detect duplicate Begin/Commit events
-- Ignoring Begin/Commit if your destination does not require transactions
+- Ignoring Begin/Commit if transaction markers are not required
 
 ```rust
 async fn write_events(&self, events: Vec<Event>, async_result: WriteEventsResult<()>) -> EtlResult<()> {
@@ -149,7 +290,7 @@ async fn write_events(&self, events: Vec<Event>, async_result: WriteEventsResult
                 Event::Delete(e) => self.handle_delete(e).await?,
                 Event::Truncate(e) => self.handle_truncate(e).await?,
                 Event::Relation(e) => self.handle_schema(e).await?,
-                // Transaction markers - safe to ignore for most destinations
+                // Transaction markers - safe to ignore for most consumers.
                 Event::Begin(_) | Event::Commit(_) => {}
                 Event::Unsupported => {}
             }

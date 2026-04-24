@@ -3,7 +3,7 @@
 //! Provides a database wrapper for managing BigQuery datasets and constants for
 //! connecting to Google Cloud BigQuery in test environments.
 
-use std::{fmt, str::FromStr, time::Duration};
+use std::{fmt, path::Path, str::FromStr, time::Duration};
 
 use etl::{
     store::{schema::SchemaStore, state::StateStore},
@@ -57,16 +57,26 @@ pub const BIGQUERY_SA_KEY_PATH_ENV: &str = "TESTS_BIGQUERY_SA_KEY_PATH";
 ///
 /// Prints a warning and returns `true` when credentials are unavailable.
 pub fn skip_if_missing_bigquery_env_vars() -> bool {
-    let has_sa_key_path = std::env::var_os(BIGQUERY_SA_KEY_PATH_ENV).is_some();
+    let sa_key_path = std::env::var_os(BIGQUERY_SA_KEY_PATH_ENV);
     let has_project_id = std::env::var_os(BIGQUERY_PROJECT_ID_ENV).is_some();
-    if has_sa_key_path && has_project_id {
+    let has_sa_key_path = sa_key_path.is_some();
+    let has_sa_key_file = sa_key_path.as_ref().is_some_and(|path| Path::new(path).is_file());
+    if has_sa_key_file && has_project_id {
         return false;
     }
 
     let mut missing_env_vars = Vec::new();
     if !has_sa_key_path {
         missing_env_vars.push(BIGQUERY_SA_KEY_PATH_ENV);
+    } else if !has_sa_key_file {
+        eprintln!(
+            "skipping bigquery integration test: {BIGQUERY_SA_KEY_PATH_ENV} does not point to an \
+             existing file"
+        );
+
+        return true;
     }
+
     if !has_project_id {
         missing_env_vars.push(BIGQUERY_PROJECT_ID_ENV);
     }
@@ -209,13 +219,16 @@ impl BigQueryDatabase {
         let mut attempts_remaining = BIGQUERY_QUERY_MAX_ATTEMPTS;
 
         loop {
-            let rows = self
+            let rows = match self
                 .client
                 .job()
                 .query(&self.project_id, QueryRequest::new(query.clone()))
                 .await
-                .unwrap()
-                .rows;
+            {
+                Ok(response) => response.rows,
+                Err(BQError::ResponseError { error }) if error.error.code == 404 => return None,
+                Err(err) => panic!("Failed to query BigQuery table: {err:?}"),
+            };
 
             if rows.is_some() || attempts_remaining == 1 {
                 return rows;
