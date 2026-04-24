@@ -93,13 +93,18 @@ impl Inner {
     }
 }
 
-/// A state store that notifies listeners about changes to table states.
+/// In-memory store that notifies tests about state and schema changes.
+///
+/// Notification helpers only observe changes that happen after registration.
+/// Register the returned [`TimedNotify`] before starting the producer that is
+/// expected to satisfy it.
 #[derive(Clone)]
 pub struct NotifyingStore {
     inner: Arc<RwLock<Inner>>,
 }
 
 impl NotifyingStore {
+    /// Creates an empty notifying store.
     pub fn new() -> Self {
         let inner = Inner {
             table_replication_states: Arc::new(BTreeMap::new()),
@@ -115,12 +120,13 @@ impl NotifyingStore {
         Self { inner: Arc::new(RwLock::new(inner)) }
     }
 
-    /// Returns all table replication states.
+    /// Returns the current table replication states.
     pub async fn get_table_replication_states(&self) -> TableReplicationStates {
         let inner = self.inner.read().await;
         Arc::clone(&inner.table_replication_states)
     }
 
+    /// Returns the latest schema snapshot stored for each table.
     pub async fn get_latest_table_schemas(&self) -> HashMap<TableId, TableSchema> {
         let inner = self.inner.read().await;
 
@@ -134,6 +140,7 @@ impl NotifyingStore {
             .collect()
     }
 
+    /// Returns all stored schema snapshots grouped by table.
     pub async fn get_table_schemas(&self) -> HashMap<TableId, Vec<(SnapshotId, TableSchema)>> {
         let inner = self.inner.read().await;
 
@@ -151,8 +158,8 @@ impl NotifyingStore {
             .collect()
     }
 
-    /// Registers a notification that fires when a table reaches a specific
-    /// state type after this method is called.
+    /// Registers a notification that fires when a future state update reaches
+    /// the expected table state type.
     ///
     /// Returns a [`TimedNotify`] that will automatically timeout after the
     /// specified timeout if the expected state is not reached. This
@@ -169,8 +176,8 @@ impl NotifyingStore {
         TimedNotify::new(notify)
     }
 
-    /// Registers a notification that fires when a table state matches a custom
-    /// condition after this method is called.
+    /// Registers a notification that fires when a future state update matches a
+    /// custom condition.
     ///
     /// Returns a [`TimedNotify`] that will automatically timeout after the
     /// specified timeout if the condition is not met. This prevents tests
@@ -186,8 +193,8 @@ impl NotifyingStore {
         TimedNotify::new(notify)
     }
 
-    /// Registers a notification that fires when a table has stored at least the
-    /// expected number of schema snapshots after this method is called.
+    /// Registers a notification that fires when a future schema write brings a
+    /// table to at least the expected number of stored snapshots.
     ///
     /// Returns a [`TimedNotify`] that will automatically timeout after the
     /// specified timeout if the expected schema count is not reached. This
@@ -204,6 +211,8 @@ impl NotifyingStore {
         TimedNotify::new(notify)
     }
 
+    /// Resets one table to [`TableReplicationPhase::Init`] and clears its state
+    /// history.
     pub async fn reset_table_state(&self, table_id: TableId) -> EtlResult<()> {
         let mut inner = self.inner.write().await;
         inner.table_state_history.remove(&table_id);
@@ -262,7 +271,7 @@ impl StateStore for NotifyingStore {
 
         let states = Arc::make_mut(&mut inner.table_replication_states);
         for (table_id, state) in updates {
-            // Store the current state in history before updating
+            // Store the current state in history before updating.
             if let Some(current_state) = states.get(&table_id).cloned() {
                 inner
                     .table_state_history
@@ -286,7 +295,7 @@ impl StateStore for NotifyingStore {
     ) -> EtlResult<TableReplicationPhase> {
         let mut inner = self.inner.write().await;
 
-        // Get the previous state from history
+        // Get the previous state from history.
         let previous_state =
             inner.table_state_history.get_mut(&table_id).and_then(Vec::pop).ok_or_else(|| {
                 etl_error!(
@@ -295,7 +304,7 @@ impl StateStore for NotifyingStore {
                 )
             })?;
 
-        // Update the current state to the previous state
+        // Update the current state to the previous state.
         Arc::make_mut(&mut inner.table_replication_states).insert(table_id, previous_state.clone());
         inner.check_conditions();
 

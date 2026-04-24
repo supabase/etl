@@ -21,7 +21,7 @@ use crate::{
     },
     error::EtlResult,
     test_utils::{
-        event::{EventCondition, check_all_events_count, check_events_count, deduplicate_events},
+        event::{EventCondition, check_all_events_count, group_events_by_type},
         notify::TimedNotify,
     },
     types::{Event, EventType, TableRow},
@@ -46,7 +46,7 @@ struct Inner<D> {
 
 impl<D> Inner<D> {
     fn check_conditions(&mut self) {
-        // Check event conditions
+        // Check event conditions.
         let events = self.events.clone();
         self.event_conditions.retain(|(condition, notify)| {
             let should_retain = !condition(&events);
@@ -56,7 +56,7 @@ impl<D> Inner<D> {
             should_retain
         });
 
-        // Check table row conditions
+        // Check table row conditions.
         let table_rows = self.table_rows.clone();
         self.table_row_conditions.retain(|(condition, notify)| {
             let should_retain = !condition(&table_rows);
@@ -66,7 +66,7 @@ impl<D> Inner<D> {
             should_retain
         });
 
-        // Check combined conditions
+        // Check combined conditions.
         let events = self.events.clone();
         let table_rows = self.table_rows.clone();
         self.combined_conditions.retain(|(condition, notify)| {
@@ -82,12 +82,13 @@ impl<D> Inner<D> {
 /// Test wrapper for [`Destination`] implementations that tracks all operations.
 ///
 /// [`TestDestinationWrapper`] wraps any destination implementation and records
-/// all method calls and data flowing through it. This enables test assertions
-/// on the behavior of ETL pipelines without requiring complex destination
-/// setup.
+/// all rows, events, truncations, and shutdown calls flowing through it. This
+/// enables test assertions on pipeline behavior without requiring complex
+/// destination setup.
 ///
-/// The wrapper supports waiting for specific conditions to be met, making it
-/// ideal for testing asynchronous ETL operations with deterministic assertions.
+/// Notification helpers only observe writes that happen after registration.
+/// Register the returned [`TimedNotify`] before starting the producer that is
+/// expected to satisfy it.
 #[derive(Clone)]
 pub struct TestDestinationWrapper<D> {
     inner: Arc<RwLock<Inner<D>>>,
@@ -109,8 +110,8 @@ impl<D: fmt::Debug> fmt::Debug for TestDestinationWrapper<D> {
 impl<D> TestDestinationWrapper<D> {
     /// Creates a new test wrapper around any destination implementation.
     ///
-    /// The wrapper will track all method calls and data operations performed
-    /// on the destination, enabling comprehensive testing and verification.
+    /// The wrapper forwards every operation to the wrapped destination and
+    /// keeps an in-memory history for assertions.
     pub fn wrap(destination: D) -> Self {
         let inner = Inner {
             wrapped_destination: destination,
@@ -127,25 +128,18 @@ impl<D> TestDestinationWrapper<D> {
         Self { inner: Arc::new(RwLock::new(inner)) }
     }
 
-    /// Get all table rows that have been written
+    /// Returns all table rows written through the wrapper.
     pub async fn get_table_rows(&self) -> HashMap<TableId, Vec<TableRow>> {
         self.inner.read().await.table_rows.clone()
     }
 
-    /// Get all events that have been written
+    /// Returns all events written through the wrapper.
     pub async fn get_events(&self) -> Vec<Event> {
         self.inner.read().await.events.clone()
     }
 
-    /// Get all events that have been written, de-duplicated by full event
-    /// equality.
-    pub async fn get_events_deduped(&self) -> Vec<Event> {
-        let events = self.inner.read().await.events.clone();
-        deduplicate_events(&events)
-    }
-
-    /// Registers a notification that fires when events match a specific
-    /// condition after this method is called.
+    /// Registers a notification that fires when future events match a
+    /// condition.
     ///
     /// Returns a [`TimedNotify`] that will automatically timeout after the
     /// specified timeout if the condition is not met. This prevents tests
@@ -161,35 +155,25 @@ impl<D> TestDestinationWrapper<D> {
         TimedNotify::new(notify)
     }
 
-    /// Registers a notification that fires when a specific number of events of
-    /// given types are received.
+    /// Registers a notification that fires when future events exactly match the
+    /// requested per-type counts.
     ///
     /// Returns a [`TimedNotify`] that will automatically timeout after the
     /// specified timeout if the expected event count is not reached. This
     /// prevents tests from hanging indefinitely.
     pub async fn wait_for_events_count(&self, conditions: Vec<(EventType, u64)>) -> TimedNotify {
-        self.notify_on_events(move |events| check_events_count(events, conditions.clone())).await
-    }
-
-    /// Registers a notification that fires when a specific number of events of
-    /// given types are received after de-duplicating.
-    ///
-    /// Returns a [`TimedNotify`] that will automatically timeout after the
-    /// specified timeout if the expected event count is not reached. This
-    /// prevents tests from hanging indefinitely.
-    pub async fn wait_for_events_count_deduped(
-        &self,
-        conditions: Vec<(EventType, u64)>,
-    ) -> TimedNotify {
         self.notify_on_events(move |events| {
-            let deduped = deduplicate_events(events);
-            check_events_count(&deduped, conditions.clone())
+            let grouped_events = group_events_by_type(events);
+
+            conditions.iter().all(|(event_type, count)| {
+                grouped_events.get(event_type).is_some_and(|inner| inner.len() == *count as usize)
+            })
         })
         .await
     }
 
-    /// Registers a notification that fires when event conditions are met after
-    /// this method is called.
+    /// Registers a notification that fires when future events and table rows
+    /// satisfy all requested conditions.
     ///
     /// Supports two condition types:
     /// - [`EventCondition::Any`]: counts events across all tables
@@ -213,20 +197,24 @@ impl<D> TestDestinationWrapper<D> {
         TimedNotify::new(notify)
     }
 
+    /// Clears the recorded table rows without touching the wrapped destination.
     pub async fn clear_table_rows(&self) {
         let mut inner = self.inner.write().await;
         inner.table_rows.clear();
     }
 
+    /// Clears the recorded events without touching the wrapped destination.
     pub async fn clear_events(&self) {
         let mut inner = self.inner.write().await;
         inner.events.clear();
     }
 
+    /// Returns whether the table was truncated through the wrapper.
     pub async fn was_table_truncated(&self, table_id: TableId) -> bool {
         self.inner.read().await.truncated_tables.contains(&table_id)
     }
 
+    /// Returns how many times [`Destination::write_table_rows`] was called.
     pub async fn write_table_rows_called(&self) -> u64 {
         self.inner.read().await.write_table_rows_called
     }

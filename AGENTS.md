@@ -112,7 +112,6 @@
 - Prefer one-way integration tests: perform the source-side writes first, wait for the expected notifications, then call `shutdown_and_wait()` immediately before assertions.
 - Avoid asserting destination state while the pipeline is still running unless the test is specifically about in-flight behavior or recovery during active replication.
 - For `TestDestinationWrapper`, prefer asserting against the cumulative event history from `get_events()`. Use `clear_events()` only when restarting the pipeline or when a test intentionally needs to discard earlier history and assert on a new phase in isolation.
-- Use `get_events_deduped()` only for replay/idempotence scenarios where duplicate wrapper observations are expected and the test is asserting logical equivalence rather than delivery history.
 - When asserting CDC event shapes, only expect combinations that PostgreSQL can actually emit for the table's replica identity mode. In particular, distinguish between `FULL`, primary-key identity, and `USING INDEX`, and remember that partial update rows only occur for update new-tuples.
 
 ## Review Checklist
