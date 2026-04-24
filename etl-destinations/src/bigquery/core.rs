@@ -18,8 +18,8 @@ use etl::{
     state::destination_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus},
     store::{schema::SchemaStore, state::StateStore},
     types::{
-        Cell, Event, IdentityType, OldTableRow, PipelineId, ReplicatedTableSchema, SchemaDiff,
-        TableId, TableName, TableRow, UpdatedTableRow,
+        Cell, Event, EventSequenceKey, IdentityType, OldTableRow, PipelineId,
+        ReplicatedTableSchema, SchemaDiff, TableId, TableName, TableRow, UpdatedTableRow,
     },
 };
 use gcp_bigquery_client::storage::{MAX_BATCH_SIZE_BYTES, TableDescriptor};
@@ -39,6 +39,11 @@ use crate::{
     },
     table_name::try_stringify_table_name,
 };
+
+/// Internal CDC sequence ordinal for single-row changes and generated deletes.
+const BIGQUERY_SEQUENCE_ORDINAL_FIRST: u64 = 0;
+/// Internal CDC sequence ordinal for generated upserts after generated deletes.
+const BIGQUERY_SEQUENCE_ORDINAL_SECOND: u64 = 1;
 
 /// Returns the [`BigQueryTableId`] for a supplied [`TableName`].
 ///
@@ -807,7 +812,10 @@ where
                 };
                 match event {
                     Event::Insert(mut insert) => {
-                        let sequence_key = insert.event_sequence_key().to_string();
+                        let sequence_key = bigquery_sequence_key(
+                            insert.event_sequence_key(),
+                            BIGQUERY_SEQUENCE_ORDINAL_FIRST,
+                        );
                         insert
                             .table_row
                             .values_mut()
@@ -822,7 +830,7 @@ where
                     }
                     Event::Update(update) => {
                         validate_bigquery_replica_identity(&update.replicated_table_schema)?;
-                        let sequence_key = update.event_sequence_key().to_string();
+                        let sequence_key = update.event_sequence_key();
                         let table_id = update.replicated_table_schema.id();
                         let table_row = match update.updated_table_row {
                             UpdatedTableRow::Full(row) => row,
@@ -851,7 +859,10 @@ where
                     }
                     Event::Delete(delete) => {
                         validate_bigquery_replica_identity(&delete.replicated_table_schema)?;
-                        let sequence_key = delete.event_sequence_key().to_string();
+                        let sequence_key = bigquery_sequence_key(
+                            delete.event_sequence_key(),
+                            BIGQUERY_SEQUENCE_ORDINAL_FIRST,
+                        );
                         let old_table_row = delete.old_table_row.ok_or_else(|| {
                             etl_error!(
                                 ErrorKind::InvalidState,
@@ -1181,6 +1192,24 @@ where
     }
 }
 
+/// Builds a BigQuery CDC ordering key with destination-internal ordering.
+///
+/// BigQuery applies CDC records for the same primary key by comparing
+/// `_CHANGE_SEQUENCE_NUMBER` sections from left to right as unsigned
+/// hexadecimal numbers. [`EventSequenceKey`] supplies the source ordering as
+/// `commit_lsn/tx_ordinal`; the extra section gives this destination a stable
+/// place to order multiple BigQuery rows generated from one source event.
+///
+/// This matters for primary-key-changing updates, which are represented as a
+/// generated `DELETE` for the old key followed by a generated `UPSERT` for the
+/// new key. Because both rows come from the same source event, they would share
+/// the same source sequence key without this extra section. The internal
+/// ordinal makes the ordering within generated rows explicit instead of relying
+/// on append order or BigQuery ingestion-time tie-breaking.
+fn bigquery_sequence_key(sequence_key: EventSequenceKey, internal_ordinal: u64) -> String {
+    format!("{sequence_key}/{internal_ordinal:016x}")
+}
+
 /// Builds a BigQuery CDC upsert row.
 fn bigquery_upsert_row(
     mut table_row: TableRow,
@@ -1201,7 +1230,7 @@ fn bigquery_update_rows(
     replicated_table_schema: &ReplicatedTableSchema,
     new_table_row: TableRow,
     old_table_row: Option<OldTableRow>,
-    sequence_key: String,
+    sequence_key: EventSequenceKey,
 ) -> EtlResult<Vec<BigQueryTableRow>> {
     let primary_key_changed = match old_table_row.as_ref() {
         // PostgreSQL omits the old-side image only when the publisher
@@ -1230,10 +1259,18 @@ fn bigquery_update_rows(
         rows.push(bigquery_delete_row(
             replicated_table_schema,
             old_table_row,
-            sequence_key.clone(),
+            bigquery_sequence_key(sequence_key, BIGQUERY_SEQUENCE_ORDINAL_FIRST),
         )?);
     }
-    rows.push(bigquery_upsert_row(new_table_row, sequence_key)?);
+    let upsert_ordinal = if primary_key_changed {
+        BIGQUERY_SEQUENCE_ORDINAL_SECOND
+    } else {
+        BIGQUERY_SEQUENCE_ORDINAL_FIRST
+    };
+    rows.push(bigquery_upsert_row(
+        new_table_row,
+        bigquery_sequence_key(sequence_key, upsert_ordinal),
+    )?);
 
     Ok(rows)
 }
@@ -1538,7 +1575,9 @@ fn split_table_rows(
 mod tests {
     use std::sync::Arc;
 
-    use etl::types::{CellNonOptional, ColumnSchema, IdentityMask, TableId, TableSchema, Type};
+    use etl::types::{
+        CellNonOptional, ColumnSchema, IdentityMask, PgLsn, TableId, TableSchema, Type,
+    };
     use prost::Message;
 
     use super::*;
@@ -2063,12 +2102,13 @@ mod tests {
     #[test]
     fn bigquery_update_rows_emits_delete_before_upsert_when_primary_key_changes() {
         let replicated_table_schema = replicated_schema(IdentityType::PrimaryKey);
+        let sequence_key = EventSequenceKey::new(PgLsn::from(1), 0);
 
         let rows = bigquery_update_rows(
             &replicated_table_schema,
             TableRow::new(vec![Cell::I32(2), Cell::String("updated".to_string())]),
             Some(OldTableRow::Key(TableRow::new(vec![Cell::I32(1)]))),
-            "lsn:1".to_string(),
+            sequence_key,
         )
         .unwrap();
 
@@ -2078,7 +2118,12 @@ mod tests {
             vec![
                 (1, CellNonOptional::I32(1)),
                 (3, CellNonOptional::String("DELETE".to_string())),
-                (4, CellNonOptional::String("lsn:1".to_string())),
+                (
+                    4,
+                    CellNonOptional::String(
+                        "0000000000000001/0000000000000000/0000000000000000".to_string(),
+                    ),
+                ),
             ]
         );
         assert_eq!(
@@ -2087,7 +2132,12 @@ mod tests {
                 (1, CellNonOptional::I32(2)),
                 (2, CellNonOptional::String("updated".to_string())),
                 (3, CellNonOptional::String("UPSERT".to_string())),
-                (4, CellNonOptional::String("lsn:1".to_string())),
+                (
+                    4,
+                    CellNonOptional::String(
+                        "0000000000000001/0000000000000000/0000000000000001".to_string(),
+                    ),
+                ),
             ]
         );
     }
@@ -2095,12 +2145,13 @@ mod tests {
     #[test]
     fn bigquery_update_rows_skips_delete_when_primary_key_is_unchanged() {
         let replicated_table_schema = replicated_schema(IdentityType::PrimaryKey);
+        let sequence_key = EventSequenceKey::new(PgLsn::from(1), 0);
 
         let rows = bigquery_update_rows(
             &replicated_table_schema,
             TableRow::new(vec![Cell::I32(1), Cell::String("updated".to_string())]),
             Some(OldTableRow::Key(TableRow::new(vec![Cell::I32(1)]))),
-            "lsn:1".to_string(),
+            sequence_key,
         )
         .unwrap();
 
@@ -2111,7 +2162,12 @@ mod tests {
                 (1, CellNonOptional::I32(1)),
                 (2, CellNonOptional::String("updated".to_string())),
                 (3, CellNonOptional::String("UPSERT".to_string())),
-                (4, CellNonOptional::String("lsn:1".to_string())),
+                (
+                    4,
+                    CellNonOptional::String(
+                        "0000000000000001/0000000000000000/0000000000000000".to_string(),
+                    ),
+                ),
             ]
         );
     }
@@ -2119,6 +2175,7 @@ mod tests {
     #[test]
     fn bigquery_update_rows_emits_delete_before_upsert_for_full_identity_primary_key_change() {
         let replicated_table_schema = replicated_schema(IdentityType::Full);
+        let sequence_key = EventSequenceKey::new(PgLsn::from(1), 0);
 
         let rows = bigquery_update_rows(
             &replicated_table_schema,
@@ -2127,7 +2184,7 @@ mod tests {
                 Cell::I32(1),
                 Cell::String("before".to_string()),
             ]))),
-            "lsn:1".to_string(),
+            sequence_key,
         )
         .unwrap();
 
@@ -2137,7 +2194,12 @@ mod tests {
             vec![
                 (1, CellNonOptional::I32(1)),
                 (3, CellNonOptional::String("DELETE".to_string())),
-                (4, CellNonOptional::String("lsn:1".to_string())),
+                (
+                    4,
+                    CellNonOptional::String(
+                        "0000000000000001/0000000000000000/0000000000000000".to_string(),
+                    ),
+                ),
             ]
         );
         assert_eq!(
@@ -2146,7 +2208,12 @@ mod tests {
                 (1, CellNonOptional::I32(2)),
                 (2, CellNonOptional::String("updated".to_string())),
                 (3, CellNonOptional::String("UPSERT".to_string())),
-                (4, CellNonOptional::String("lsn:1".to_string())),
+                (
+                    4,
+                    CellNonOptional::String(
+                        "0000000000000001/0000000000000000/0000000000000001".to_string(),
+                    ),
+                ),
             ]
         );
     }
