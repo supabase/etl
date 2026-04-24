@@ -569,19 +569,6 @@ pub(super) fn build_setup_plan(
     )
 }
 
-/// Appends the maintenance-specific setup phase for DuckLake compaction sizing.
-pub(super) fn build_maintenance_setup_plan(
-    base_plan: &DuckLakeSetupPlan,
-    maintenance_target_file_size: Option<&str>,
-) -> DuckLakeSetupPlan {
-    let mut steps = base_plan.steps.clone();
-    steps.push(DuckLakeSetupStep {
-        label: "configure_maintenance",
-        sql: maintenance_target_file_size_sql(maintenance_target_file_size),
-    });
-    DuckLakeSetupPlan { steps }
-}
-
 #[cfg(test)]
 fn build_setup_sql_with_strategy(
     catalog_url: &Url,
@@ -1151,52 +1138,6 @@ mod tests {
         .unwrap();
 
         assert_eq!(plan.steps()[0].sql, format!("SET memory_limit = {};", quote_literal("256MB")));
-    }
-
-    #[test]
-    fn build_maintenance_setup_plan_appends_target_file_size_step() {
-        let catalog_url = Url::parse("file:///tmp/catalog.ducklake").unwrap();
-        let data_url = Url::parse("file:///tmp/data").unwrap();
-        let plan = build_setup_plan_with_strategy(
-            &catalog_url,
-            &data_url,
-            None,
-            None,
-            None,
-            DuckDbExtensionStrategy::InstallFromRepository,
-            None,
-        )
-        .unwrap();
-
-        let maintenance_plan = build_maintenance_setup_plan(&plan, None);
-
-        assert_eq!(maintenance_plan.steps().len(), plan.steps().len() + 1);
-        let last_step =
-            maintenance_plan.steps().last().expect("maintenance setup should append one step");
-        assert_eq!(last_step.label, "configure_maintenance");
-        assert_eq!(last_step.sql, maintenance_target_file_size_sql(None));
-    }
-
-    #[test]
-    fn build_maintenance_setup_plan_uses_configured_target_file_size() {
-        let catalog_url = Url::parse("file:///tmp/catalog.ducklake").unwrap();
-        let data_url = Url::parse("file:///tmp/data").unwrap();
-        let plan = build_setup_plan_with_strategy(
-            &catalog_url,
-            &data_url,
-            None,
-            None,
-            None,
-            DuckDbExtensionStrategy::InstallFromRepository,
-            None,
-        )
-        .unwrap();
-
-        let maintenance_plan = build_maintenance_setup_plan(&plan, Some("32MB"));
-        let last_step =
-            maintenance_plan.steps().last().expect("maintenance setup should append one step");
-
-        assert_eq!(last_step.sql, maintenance_target_file_size_sql(Some("32MB")));
     }
 
     #[test]
