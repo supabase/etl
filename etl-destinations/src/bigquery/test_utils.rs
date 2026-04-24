@@ -14,7 +14,8 @@ use gcp_bigquery_client::{
     client_builder::ClientBuilder,
     error::BQError,
     model::{
-        dataset::Dataset, query_request::QueryRequest, table_cell::TableCell, table_row::TableRow,
+        dataset::Dataset, query_request::QueryRequest, query_response::QueryResponse,
+        table_cell::TableCell, table_row::TableRow,
     },
 };
 use tokio::{runtime::Handle, time::sleep};
@@ -36,6 +37,15 @@ const SETUP_RETRY_POLICY: RetryPolicy = RetryPolicy {
     max_retries: 4,
     initial_delay: Duration::from_secs(1),
     max_delay: Duration::from_secs(4),
+};
+
+/// Retry policy for one-shot BigQuery queries issued by tests. Absorbs
+/// transient 5xx responses (e.g. the "Visibility check was unavailable" 503
+/// BigQuery sometimes returns) without making tests flaky.
+const QUERY_RETRY_POLICY: RetryPolicy = RetryPolicy {
+    max_retries: 5,
+    initial_delay: Duration::from_secs(1),
+    max_delay: Duration::from_secs(8),
 };
 
 /// Returns whether a `BQError` is transient and worth retrying.
@@ -196,6 +206,37 @@ impl BigQueryDatabase {
         &self.client
     }
 
+    /// Runs a BigQuery query with retry on transient 5xx errors.
+    ///
+    /// Panics (via the caller's intended semantics) after the retry budget is
+    /// exhausted or on a non-retriable error.
+    async fn run_query(&self, query: &str) -> QueryResponse {
+        retry_with_backoff(
+            QUERY_RETRY_POLICY,
+            is_transient_bq_error,
+            |delay| delay,
+            |attempt| {
+                eprintln!(
+                    "bigquery test query failed (attempt {}/{}): {}",
+                    attempt.retry_index, attempt.max_retries, attempt.error,
+                );
+            },
+            || async {
+                self.client
+                    .job()
+                    .query(&self.project_id, QueryRequest::new(query.to_string()))
+                    .await
+            },
+        )
+        .await
+        .unwrap_or_else(|failure| {
+            panic!(
+                "BigQuery query failed after {} attempts: {}",
+                failure.total_attempts, failure.last_error,
+            )
+        })
+    }
+
     /// Executes a SELECT * query against the specified table.
     ///
     /// Returns all rows from the table in the test dataset, polling until
@@ -209,13 +250,7 @@ impl BigQueryDatabase {
         let mut attempts_remaining = BIGQUERY_QUERY_MAX_ATTEMPTS;
 
         loop {
-            let rows = self
-                .client
-                .job()
-                .query(&self.project_id, QueryRequest::new(query.clone()))
-                .await
-                .unwrap()
-                .rows;
+            let rows = self.run_query(&query).await.rows;
 
             if rows.is_some() || attempts_remaining == 1 {
                 return rows;
@@ -248,13 +283,7 @@ impl BigQueryDatabase {
         let mut attempts_remaining = BIGQUERY_QUERY_MAX_ATTEMPTS;
 
         loop {
-            let rows = self
-                .client
-                .job()
-                .query(project_id, QueryRequest::new(query.clone()))
-                .await
-                .unwrap()
-                .rows;
+            let rows = self.run_query(&query).await.rows;
 
             if rows.is_some() || attempts_remaining == 1 {
                 return rows.map(|r| BigQueryTableSchema::new(parse_bigquery_table_rows(r)));
@@ -282,7 +311,7 @@ impl BigQueryDatabase {
             column_definitions.join(", ")
         );
 
-        self.client.job().query(&self.project_id, QueryRequest::new(ddl)).await.unwrap();
+        self.run_query(&ddl).await;
     }
 
     /// Creates a [`BigQueryDestination`] configured for this database instance.
