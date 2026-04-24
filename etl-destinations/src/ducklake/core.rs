@@ -10,8 +10,6 @@ use std::{
     },
 };
 
-#[cfg(test)]
-use etl::types::Cell;
 use etl::{
     destination::{
         Destination,
@@ -208,6 +206,35 @@ where
     }
 }
 
+/// Validates that a replicated table schema can be applied to one DuckLake
+/// row-matching mutation.
+///
+/// DuckLake can stream inserts without replica identity, but update and delete
+/// paths need replicated replica-identity columns so the destination can match
+/// existing rows safely.
+fn validate_ducklake_replica_identity(
+    replicated_table_schema: &ReplicatedTableSchema,
+    operation: &'static str,
+) -> EtlResult<()> {
+    if replicated_table_schema.identity_column_schemas().len() == 0 {
+        let description = match operation {
+            "update" => "DuckLake update requires a replica identity",
+            "delete" => "DuckLake delete requires a replica identity",
+            _ => "DuckLake mutation requires a replica identity",
+        };
+        return Err(etl_error!(
+            ErrorKind::InvalidState,
+            description,
+            format!(
+                "Table '{}' has no replicated replica-identity columns",
+                replicated_table_schema.name()
+            )
+        ));
+    }
+
+    Ok(())
+}
+
 impl<S> DuckLakeDestination<S>
 where
     S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
@@ -218,14 +245,14 @@ where
         replicated_table_schema: &ReplicatedTableSchema,
         partial_row: &PartialTableRow,
     ) -> EtlResult<TableRow> {
-        let column_schemas: Vec<_> = replicated_table_schema.column_schemas().collect();
-        if partial_row.total_columns() != column_schemas.len() {
+        let column_count = replicated_table_schema.column_schemas().len();
+        if partial_row.total_columns() != column_count {
             return Err(etl_error!(
                 ErrorKind::InvalidState,
                 "DuckLake partial update row does not match schema",
                 format!(
                     "Expected {} replicated columns for table '{}', got {}",
-                    column_schemas.len(),
+                    column_count,
                     replicated_table_schema.name(),
                     partial_row.total_columns()
                 )
@@ -249,13 +276,15 @@ where
             ));
         }
 
+        validate_ducklake_replica_identity(replicated_table_schema, "update")?;
+
         let mut missing_indexes = partial_row.missing_column_indexes().iter().copied().peekable();
         let mut present_values = partial_row.values().iter();
+        let identity_column_count = replicated_table_schema.identity_column_schemas().len();
         let mut identity_columns = replicated_table_schema.identity_column_schemas().peekable();
-        let mut key_values =
-            Vec::with_capacity(replicated_table_schema.identity_column_schemas().len());
+        let mut key_values = Vec::with_capacity(identity_column_count);
 
-        for (column_index, column_schema) in column_schemas.iter().enumerate() {
+        for (column_index, column_schema) in replicated_table_schema.column_schemas().enumerate() {
             let is_identity = identity_columns.peek().is_some_and(|identity_column| {
                 identity_column.ordinal_position == column_schema.ordinal_position
             });
@@ -684,7 +713,9 @@ where
                     break;
                 }
 
-                let event = event_iter.next().unwrap();
+                let Some(event) = event_iter.next() else {
+                    break;
+                };
                 match event {
                     Event::Insert(insert) => {
                         let table_id = insert.replicated_table_schema.id();
@@ -700,6 +731,10 @@ where
                         ));
                     }
                     Event::Update(update) => {
+                        validate_ducklake_replica_identity(
+                            &update.replicated_table_schema,
+                            "update",
+                        )?;
                         let table_id = update.replicated_table_schema.id();
                         let entry = table_id_to_mutations.entry(table_id).or_insert_with(|| {
                             (update.replicated_table_schema.clone(), Vec::new())
@@ -719,8 +754,8 @@ where
                             match table_row {
                                 UpdatedTableRow::Full(table_row) => {
                                     debug!(
-                                        "update event has no old row, deleting by primary key \
-                                         from new row"
+                                        "update event has no old row, deleting by replica \
+                                         identity from new row"
                                     );
                                     mutations.push(TrackedTableMutation::new(
                                         update.start_lsn,
@@ -752,9 +787,20 @@ where
                         }
                     }
                     Event::Delete(delete) => {
+                        validate_ducklake_replica_identity(
+                            &delete.replicated_table_schema,
+                            "delete",
+                        )?;
                         let Some(old_row) = delete.old_table_row else {
-                            debug!("delete event has no old row, skipping");
-                            continue;
+                            return Err(etl_error!(
+                                ErrorKind::InvalidState,
+                                "DuckLake delete requires an old row image",
+                                format!(
+                                    "Table '{}' emitted a delete without an old row despite \
+                                     exposing replica-identity columns",
+                                    delete.replicated_table_schema.name()
+                                )
+                            ));
                         };
                         let table_id = delete.replicated_table_schema.id();
                         let entry = table_id_to_mutations.entry(table_id).or_insert_with(|| {
@@ -929,7 +975,7 @@ where
         }
 
         let _table_creation_permit =
-            self.table_creation_slots.clone().acquire_owned().await.map_err(|_| {
+            Arc::clone(&self.table_creation_slots).acquire_owned().await.map_err(|_| {
                 etl_error!(ErrorKind::InvalidState, "DuckLake table creation semaphore closed")
             })?;
 
@@ -1159,11 +1205,13 @@ fn table_write_activity_for_mutations(
     let mut write_activity = TableWriteActivity { table_name, approx_bytes: 0, inserted_rows: 0 };
 
     for tracked_mutation in tracked_mutations {
-        if let Some(row) = tracked_mutation.upsert_row() {
-            write_activity.approx_bytes =
-                write_activity.approx_bytes.saturating_add(row.size_hint() as u64);
-            write_activity.inserted_rows = write_activity.inserted_rows.saturating_add(1);
-        }
+        // This is only a fallback estimate for catalogs where we cannot sample
+        // actual inlined-table sizes directly. The optional row-threshold path
+        // is disabled today, so we treat each mutation as one unit of fallback
+        // activity to keep mutation-only streams visible to maintenance.
+        write_activity.approx_bytes =
+            write_activity.approx_bytes.saturating_add(tracked_mutation.write_activity_size_hint());
+        write_activity.inserted_rows = write_activity.inserted_rows.saturating_add(1);
     }
 
     write_activity
@@ -1248,7 +1296,10 @@ mod tests {
     use etl::{
         config::{PgConnectionConfig, TcpKeepaliveConfig, TlsConfig},
         store::{both::memory::MemoryStore, schema::SchemaStore},
-        types::{ColumnSchema, TableSchema, Type as PgType},
+        types::{
+            Cell, ColumnSchema, IdentityMask, OldTableRow, PartialTableRow, PgLsn, ReplicationMask,
+            SizeHint, TableRow, TableSchema, Type as PgType, UpdatedTableRow,
+        },
     };
     use etl_postgres::tokio::test_utils::PgDatabase;
     use pg_escape::{quote_identifier, quote_literal};
@@ -1275,6 +1326,105 @@ mod tests {
                 ColumnSchema::new("name".to_string(), PgType::TEXT, -1, 2, None, true),
             ],
         )
+    }
+
+    fn make_alternative_identity_schema() -> ReplicatedTableSchema {
+        let table_schema = Arc::new(TableSchema::new(
+            TableId::new(2),
+            TableName::new("public".to_string(), "users".to_string()),
+            vec![
+                ColumnSchema::new("id".to_string(), PgType::INT4, -1, 1, Some(1), false),
+                ColumnSchema::new("email".to_string(), PgType::TEXT, -1, 2, None, false),
+                ColumnSchema::new("payload".to_string(), PgType::TEXT, -1, 3, None, true),
+            ],
+        ));
+
+        ReplicatedTableSchema::from_masks(
+            Arc::clone(&table_schema),
+            ReplicationMask::all(&table_schema),
+            IdentityMask::from_bytes(vec![0, 1, 0]),
+        )
+    }
+
+    fn make_missing_identity_schema() -> ReplicatedTableSchema {
+        let table_schema = Arc::new(make_schema(3, "public", "users"));
+
+        ReplicatedTableSchema::from_masks(
+            Arc::clone(&table_schema),
+            ReplicationMask::all(&table_schema),
+            IdentityMask::from_bytes(vec![0, 0]),
+        )
+    }
+
+    #[test]
+    fn table_write_activity_for_mutations_counts_partial_updates_and_deletes() {
+        let delete_row = OldTableRow::Key(TableRow::new(vec![Cell::I32(1)]));
+        let update_delete_row = OldTableRow::Key(TableRow::new(vec![Cell::I32(1)]));
+        let partial_row = UpdatedTableRow::Partial(PartialTableRow::new(
+            2,
+            TableRow::new(vec![Cell::I32(1), Cell::String("grown".to_string())]),
+            vec![],
+        ));
+        let expected_bytes = delete_row.size_hint() as u64
+            + update_delete_row.size_hint() as u64
+            + partial_row.size_hint() as u64;
+        let write_activity = table_write_activity_for_mutations(
+            "public_users".to_string(),
+            &[
+                TrackedTableMutation::new(
+                    PgLsn::from(100),
+                    PgLsn::from(100),
+                    0,
+                    TableMutation::Delete(delete_row),
+                ),
+                TrackedTableMutation::new(
+                    PgLsn::from(100),
+                    PgLsn::from(100),
+                    1,
+                    TableMutation::Update { delete_row: update_delete_row, new_row: partial_row },
+                ),
+            ],
+        );
+
+        assert_eq!(write_activity.approx_bytes, expected_bytes);
+        assert_eq!(write_activity.inserted_rows, 2);
+    }
+
+    #[test]
+    fn key_row_from_updated_partial_row_uses_alternative_identity_columns() {
+        let replicated_table_schema = make_alternative_identity_schema();
+        let partial_row = PartialTableRow::new(
+            3,
+            TableRow::new(vec![Cell::I32(1), Cell::String("alice@example.com".to_string())]),
+            vec![2],
+        );
+
+        let key_row = DuckLakeDestination::<MemoryStore>::key_row_from_updated_partial_row(
+            &replicated_table_schema,
+            &partial_row,
+        )
+        .unwrap();
+
+        assert_eq!(key_row, TableRow::new(vec![Cell::String("alice@example.com".to_string())]));
+    }
+
+    #[test]
+    fn key_row_from_updated_partial_row_rejects_missing_replica_identity() {
+        let replicated_table_schema = make_missing_identity_schema();
+        let partial_row = PartialTableRow::new(
+            2,
+            TableRow::new(vec![Cell::I32(1), Cell::String("alice".to_string())]),
+            vec![],
+        );
+
+        let error = DuckLakeDestination::<MemoryStore>::key_row_from_updated_partial_row(
+            &replicated_table_schema,
+            &partial_row,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::InvalidState);
+        assert_eq!(error.description(), Some("DuckLake update requires a replica identity"));
     }
 
     fn path_to_file_url(path: &Path) -> Url {

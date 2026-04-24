@@ -230,25 +230,25 @@ where
     /// coherent across worker types.
     async fn guarded_run_apply_worker(self) -> EtlResult<()> {
         let pipeline_id = self.pipeline_id;
-        let config = self.config.clone();
-        let pool = self.pool.clone();
+        let config = Arc::clone(&self.config);
+        let pool = Arc::clone(&self.pool);
         let store = self.store.clone();
         let destination = self.destination.clone();
         let shared_table_cache = self.shared_table_cache.clone();
-        let table_sync_worker_permits = self.table_sync_worker_permits.clone();
+        let table_sync_worker_permits = Arc::clone(&self.table_sync_worker_permits);
         let mut shutdown_rx = self.shutdown_rx.clone();
         let mut retry_attempts: u32 = 0;
 
         loop {
             let worker = ApplyWorker {
                 pipeline_id,
-                config: config.clone(),
-                pool: pool.clone(),
+                config: Arc::clone(&config),
+                pool: Arc::clone(&pool),
                 store: store.clone(),
                 destination: destination.clone(),
                 shared_table_cache: shared_table_cache.clone(),
                 shutdown_rx: shutdown_rx.clone(),
-                table_sync_worker_permits: table_sync_worker_permits.clone(),
+                table_sync_worker_permits: Arc::clone(&table_sync_worker_permits),
                 memory_monitor: self.memory_monitor.clone(),
                 batch_budget: self.batch_budget.clone(),
             };
@@ -289,7 +289,7 @@ where
 
         let worker_context = WorkerContext::Apply(ApplyWorkerContext {
             pipeline_id: self.pipeline_id,
-            config: self.config.clone(),
+            config: Arc::clone(&self.config),
             pool: self.pool,
             store: self.store.clone(),
             destination: self.destination.clone(),

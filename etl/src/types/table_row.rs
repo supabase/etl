@@ -178,9 +178,18 @@ impl SizeHint for UpdatedTableRow {
 
 /// Old-row image carried by logical replication for updates and deletes.
 ///
-/// PostgreSQL either sends a full old tuple (`REPLICA IDENTITY FULL`) or only
-/// the replica-identity columns. Key rows are stored densely in replicated
-/// table-column order after filtering to just the identity columns.
+/// This enum preserves the old-side tuple shape that PostgreSQL exposed to the
+/// replication stream:
+///
+/// - [`OldTableRow::Full`] means PostgreSQL emitted a full old tuple. In
+///   practice this is the `REPLICA IDENTITY FULL` case.
+/// - [`OldTableRow::Key`] means PostgreSQL emitted only the replica-identity
+///   columns.
+///
+/// Key rows are stored densely in replicated table-column order after
+/// filtering to just the identity columns. They are therefore not necessarily
+/// the table's primary key; they represent whatever the source table exposed as
+/// replica identity.
 #[derive(Debug, PartialEq)]
 #[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 pub enum OldTableRow {

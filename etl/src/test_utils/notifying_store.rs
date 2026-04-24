@@ -164,7 +164,7 @@ impl NotifyingStore {
     ) -> TimedNotify {
         let notify = Arc::new(Notify::new());
         let mut inner = self.inner.write().await;
-        inner.table_state_type_conditions.push((table_id, expected_state, notify.clone()));
+        inner.table_state_type_conditions.push((table_id, expected_state, Arc::clone(&notify)));
 
         TimedNotify::new(notify)
     }
@@ -181,7 +181,7 @@ impl NotifyingStore {
     {
         let notify = Arc::new(Notify::new());
         let mut inner = self.inner.write().await;
-        inner.table_state_conditions.push((table_id, notify.clone(), Box::new(condition)));
+        inner.table_state_conditions.push((table_id, Arc::clone(&notify), Box::new(condition)));
 
         TimedNotify::new(notify)
     }
@@ -199,7 +199,7 @@ impl NotifyingStore {
     ) -> TimedNotify {
         let notify = Arc::new(Notify::new());
         let mut inner = self.inner.write().await;
-        inner.table_schema_count_conditions.push((table_id, expected_count, notify.clone()));
+        inner.table_schema_count_conditions.push((table_id, expected_count, Arc::clone(&notify)));
 
         TimedNotify::new(notify)
     }
@@ -356,7 +356,7 @@ impl SchemaStore for NotifyingStore {
                 .iter()
                 .filter(|schema| schema.snapshot_id <= snapshot_id)
                 .max_by_key(|schema| schema.snapshot_id)
-                .cloned()
+                .map(Arc::clone)
         });
 
         Ok(best_match)
@@ -365,7 +365,11 @@ impl SchemaStore for NotifyingStore {
     async fn get_table_schemas(&self) -> EtlResult<Vec<Arc<TableSchema>>> {
         let inner = self.inner.read().await;
 
-        Ok(inner.table_schemas.values().flat_map(|schemas| schemas.iter().cloned()).collect())
+        Ok(inner
+            .table_schemas
+            .values()
+            .flat_map(|schemas| schemas.iter().map(Arc::clone))
+            .collect())
     }
 
     async fn load_table_schemas(&self) -> EtlResult<usize> {

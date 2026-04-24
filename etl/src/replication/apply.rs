@@ -712,7 +712,7 @@ where
 
         let mut apply_loop = Self {
             pipeline_id,
-            config: config.clone(),
+            config: Arc::clone(&config),
             schema_store,
             destination,
             shared_table_cache,
@@ -1824,11 +1824,22 @@ where
             return Ok(HandleMessageResult::no_event());
         }
 
+        // We extract the columns from the message that are needed to build the masks.
+        // The masks themselves are built by name, so relation-message order is
+        // not needed to decide membership: PostgreSQL live column names are
+        // unique within a table schema version. The order matters after the
+        // masks are applied: PostgreSQL writes RELATION columns and tuple data
+        // in the same physical `pg_attribute.attnum` order, skipping
+        // unpublished columns. Because stored TableSchema values use that same
+        // order, ReplicatedTableSchema becomes the positional view used to
+        // decode later tuple payloads.
         let replicated_columns = parse_replicated_column_names(message)?;
+        let identity_columns = parse_replica_identity_column_names(message)?;
 
         info!(
             table_id = %table_id,
             replicated_columns = ?replicated_columns,
+            identity_columns = ?identity_columns,
             "received relation message, building replication mask"
         );
 
@@ -1846,15 +1857,12 @@ where
         )
         .await?;
         let replication_mask = ReplicationMask::try_build(&table_schema, &replicated_columns)?;
-        let identity_columns = parse_replica_identity_column_names(message)?;
         let identity_mask = IdentityMask::try_build(&table_schema, &identity_columns)?;
 
         let replicated_table_schema =
             ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask);
 
         self.shared_table_cache.note_ready(table_id, replicated_table_schema.clone()).await;
-
-        // Build the event schema and emit a Relation event.
 
         let relation_event = RelationEvent {
             start_lsn,
@@ -2407,7 +2415,7 @@ mod apply_worker {
                     // Start a new worker for this table.
                     let table_sync_worker = build_table_sync_worker(ctx, table_id);
                     if let Err(err) =
-                        start_table_sync_worker(ctx.pool.clone(), table_sync_worker).await
+                        start_table_sync_worker(Arc::clone(&ctx.pool), table_sync_worker).await
                     {
                         error!(
                             worker_type = %WorkerType::Apply,
@@ -2538,7 +2546,7 @@ mod apply_worker {
                     // Start a new worker for this table.
                     let table_sync_worker = build_table_sync_worker(ctx, table_id);
                     if let Err(err) =
-                        start_table_sync_worker(ctx.pool.clone(), table_sync_worker).await
+                        start_table_sync_worker(Arc::clone(&ctx.pool), table_sync_worker).await
                     {
                         error!(
                             worker_type = %WorkerType::Apply,
@@ -2754,7 +2762,7 @@ mod apply_worker {
                     // Start a new worker for this table.
                     let table_sync_worker = build_table_sync_worker(ctx, table_id);
                     if let Err(err) =
-                        start_table_sync_worker(ctx.pool.clone(), table_sync_worker).await
+                        start_table_sync_worker(Arc::clone(&ctx.pool), table_sync_worker).await
                     {
                         error!(
                             worker_type = %WorkerType::Apply,
@@ -2806,14 +2814,14 @@ mod apply_worker {
 
         TableSyncWorker::new(
             ctx.pipeline_id,
-            ctx.config.clone(),
-            ctx.pool.clone(),
+            Arc::clone(&ctx.config),
+            Arc::clone(&ctx.pool),
             table_id,
             ctx.store.clone(),
             ctx.destination.clone(),
             ctx.shared_table_cache.clone(),
             ctx.shutdown_rx.clone(),
-            ctx.table_sync_worker_permits.clone(),
+            Arc::clone(&ctx.table_sync_worker_permits),
             ctx.memory_monitor.clone(),
             ctx.batch_budget.clone(),
         )

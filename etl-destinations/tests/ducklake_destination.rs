@@ -22,7 +22,12 @@
 
 #[cfg(feature = "test-utils")]
 use std::sync::LazyLock;
-use std::{f64::consts::PI, path::Path, sync::Arc, time::Duration};
+use std::{
+    f64::consts::PI,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 
 use chrono::NaiveDate;
 use duckdb::Connection;
@@ -31,8 +36,9 @@ use etl::{
     error::ErrorKind,
     store::{both::memory::MemoryStore, schema::SchemaStore},
     types::{
-        Cell, ColumnSchema, Event, OldTableRow, PgLsn, ReplicatedTableSchema, TableId, TableName,
-        TableRow, TableSchema, Type as PgType, UpdatedTableRow,
+        Cell, ColumnSchema, DeleteEvent, Event, IdentityMask, OldTableRow, PartialTableRow, PgLsn,
+        ReplicatedTableSchema, ReplicationMask, TableId, TableName, TableRow, TableSchema,
+        Type as PgType, UpdatedTableRow,
     },
 };
 use etl_destinations::ducklake::{DuckLakeDestination, table_name_to_ducklake_table_name};
@@ -55,6 +61,20 @@ use crate::support::ducklake::{
 
 // ── helpers
 // ───────────────────────────────────────────────────────────────────
+
+/// Creates a persistent temp directory named after the test and prints its
+/// path. Returns the directory path (kept on disk after the test completes).
+fn make_test_dir(test_name: &str) -> PathBuf {
+    let dir = tempfile::Builder::new()
+        .prefix(&format!("etl_ducklake_{test_name}_"))
+        .tempdir()
+        .expect("failed to create temp dir")
+        .keep(); // `into_path` prevents auto-cleanup on drop
+
+    println!("[{test_name}] catalog : {}", dir.join("catalog.ducklake").display());
+    println!("[{test_name}] data    : {}", dir.join("data").display());
+    dir
+}
 
 #[cfg(feature = "test-utils")]
 static DUCKLAKE_TEST_HOOKS_GUARD: LazyLock<Arc<Semaphore>> =
@@ -1075,14 +1095,205 @@ async fn write_events_with_old_row_update() {
     assert_eq!(name, "Gadget");
 }
 
+/// Partial update rows should execute through DuckLake and preserve the latest
+/// value when the same row is updated multiple times in order.
+#[tokio::test(flavor = "multi_thread")]
+async fn write_events_with_partial_updates() {
+    use etl::types::UpdateEvent;
+
+    let dir = make_test_dir("write_events_with_partial_updates");
+    let catalog = dir.join("catalog.ducklake");
+    let data = dir.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+
+    let catalog_url = path_to_file_url(&catalog);
+    let data_url = path_to_file_url(&data);
+
+    let schema = make_schema(37, "public", "partial_inventory");
+    let replicated_schema = make_replicated_table_schema(&schema);
+    let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
+
+    let store = MemoryStore::new();
+    store.store_table_schema(schema).await.unwrap();
+
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .unwrap();
+
+    destination
+        .write_table_rows(
+            &replicated_schema,
+            vec![TableRow::new(vec![Cell::I32(1), Cell::String("seed".to_string())])],
+        )
+        .await
+        .unwrap();
+
+    let lsn = PgLsn::from(425u64);
+    destination
+        .write_events(vec![
+            Event::Update(UpdateEvent {
+                start_lsn: lsn,
+                commit_lsn: lsn,
+                tx_ordinal: 0,
+                replicated_table_schema: replicated_schema.clone(),
+                updated_table_row: UpdatedTableRow::Partial(PartialTableRow::new(
+                    2,
+                    TableRow::new(vec![Cell::I32(1), Cell::String("grown".to_string())]),
+                    vec![],
+                )),
+                old_table_row: Some(OldTableRow::Key(TableRow::new(vec![Cell::I32(1)]))),
+            }),
+            Event::Update(UpdateEvent {
+                start_lsn: lsn,
+                commit_lsn: lsn,
+                tx_ordinal: 1,
+                replicated_table_schema: replicated_schema.clone(),
+                updated_table_row: UpdatedTableRow::Partial(PartialTableRow::new(
+                    2,
+                    TableRow::new(vec![Cell::I32(1), Cell::String("ripe".to_string())]),
+                    vec![],
+                )),
+                old_table_row: Some(OldTableRow::Key(TableRow::new(vec![Cell::I32(1)]))),
+            }),
+        ])
+        .await
+        .unwrap();
+
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
+    assert_eq!(count_rows(&conn, &table_name), 1);
+    assert_eq!(count_streaming_progress_rows(&conn, &table_name), 1);
+    assert_eq!(read_streaming_progress(&conn, &table_name), Some((425, 1)));
+
+    let name: String = conn
+        .query_row(
+            &format!(
+                "SELECT name FROM {}.{} WHERE id = 1",
+                quote_identifier("lake"),
+                quote_identifier(&table_name)
+            ),
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(name, "ripe");
+}
+
+/// Missing replica identity should fail mutations clearly instead of silently
+/// skipping them.
+#[tokio::test(flavor = "multi_thread")]
+async fn write_events_without_replica_identity_rejects_mutations() {
+    use etl::types::UpdateEvent;
+
+    let dir = make_test_dir("write_events_without_replica_identity_rejects_mutations");
+    let catalog = dir.join("catalog.ducklake");
+    let data = dir.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+
+    let catalog_url = path_to_file_url(&catalog);
+    let data_url = path_to_file_url(&data);
+
+    let table_schema = Arc::new(make_schema(40, "public", "missing_identity_inventory"));
+    let replicated_schema = ReplicatedTableSchema::from_masks(
+        Arc::clone(&table_schema),
+        ReplicationMask::all(&table_schema),
+        IdentityMask::from_bytes(vec![0, 0]),
+    );
+    let table_name = table_name_to_ducklake_table_name(&table_schema.name).unwrap();
+
+    let store = MemoryStore::new();
+    store.store_table_schema(table_schema.as_ref().clone()).await.unwrap();
+
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .unwrap();
+
+    destination
+        .write_table_rows(
+            &replicated_schema,
+            vec![TableRow::new(vec![Cell::I32(1), Cell::String("seed".to_string())])],
+        )
+        .await
+        .unwrap();
+
+    let update_lsn = PgLsn::from(450u64);
+    let update_error = destination
+        .write_events(vec![Event::Update(UpdateEvent {
+            start_lsn: update_lsn,
+            commit_lsn: update_lsn,
+            tx_ordinal: 0,
+            replicated_table_schema: replicated_schema.clone(),
+            updated_table_row: UpdatedTableRow::Full(TableRow::new(vec![
+                Cell::I32(1),
+                Cell::String("grown".to_string()),
+            ])),
+            old_table_row: None,
+        })])
+        .await
+        .unwrap_err();
+    assert_eq!(update_error.kind(), ErrorKind::InvalidState);
+    assert_eq!(update_error.description(), Some("DuckLake update requires a replica identity"));
+
+    let delete_lsn = PgLsn::from(451u64);
+    let delete_error = destination
+        .write_events(vec![Event::Delete(DeleteEvent {
+            start_lsn: delete_lsn,
+            commit_lsn: delete_lsn,
+            tx_ordinal: 0,
+            replicated_table_schema: replicated_schema.clone(),
+            old_table_row: None,
+        })])
+        .await
+        .unwrap_err();
+    assert_eq!(delete_error.kind(), ErrorKind::InvalidState);
+    assert_eq!(delete_error.description(), Some("DuckLake delete requires a replica identity"));
+
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
+    assert_eq!(count_rows(&conn, &table_name), 1);
+    let name: String = conn
+        .query_row(
+            &format!(
+                "SELECT name FROM {}.{} WHERE id = 1",
+                quote_identifier("lake"),
+                quote_identifier(&table_name)
+            ),
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(name, "seed");
+}
+
 /// Replaying the same CDC batch should be a no-op after the progress row is
 /// committed.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_replay_is_idempotent() {
-    use etl::types::{DeleteEvent, InsertEvent, PgLsn, UpdateEvent};
-    let lake = create_test_lake("write_events_replay_is_idempotent").await;
-    let catalog_url = lake.catalog_url.clone();
-    let data_url = lake.data_url.clone();
+    use etl::types::{InsertEvent, PgLsn, UpdateEvent};
+
+    let dir = make_test_dir("write_events_replay_is_idempotent");
+    let catalog = dir.join("catalog.ducklake");
+    let data = dir.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+
+    let catalog_url = path_to_file_url(&catalog);
+    let data_url = path_to_file_url(&data);
 
     let _table_id = TableId::new(9);
     let schema = make_schema(9, "public", "orders");

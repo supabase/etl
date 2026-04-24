@@ -18,8 +18,8 @@ use etl::{
     state::destination_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus},
     store::{schema::SchemaStore, state::StateStore},
     types::{
-        Cell, Event, IdentityType, OldTableRow, PipelineId, ReplicatedTableSchema, SchemaDiff,
-        TableId, TableName, TableRow, UpdatedTableRow,
+        Cell, Event, EventSequenceKey, IdentityType, OldTableRow, PipelineId,
+        ReplicatedTableSchema, SchemaDiff, TableId, TableName, TableRow, UpdatedTableRow,
     },
 };
 use gcp_bigquery_client::storage::{MAX_BATCH_SIZE_BYTES, TableDescriptor};
@@ -39,6 +39,11 @@ use crate::{
     },
     table_name::try_stringify_table_name,
 };
+
+/// Internal CDC sequence ordinal for single-row changes and generated deletes.
+const BIGQUERY_SEQUENCE_ORDINAL_FIRST: u64 = 0;
+/// Internal CDC sequence ordinal for generated upserts after generated deletes.
+const BIGQUERY_SEQUENCE_ORDINAL_SECOND: u64 = 1;
 
 /// Returns the [`BigQueryTableId`] for a supplied [`TableName`].
 ///
@@ -802,10 +807,15 @@ where
                     break;
                 }
 
-                let event = events_iter.next().unwrap();
+                let Some(event) = events_iter.next() else {
+                    break;
+                };
                 match event {
                     Event::Insert(mut insert) => {
-                        let sequence_key = insert.event_sequence_key().to_string();
+                        let sequence_key = bigquery_sequence_key(
+                            insert.event_sequence_key(),
+                            BIGQUERY_SEQUENCE_ORDINAL_FIRST,
+                        );
                         insert
                             .table_row
                             .values_mut()
@@ -819,9 +829,10 @@ where
                         entry.1.push(BigQueryTableRow::try_from(insert.table_row)?);
                     }
                     Event::Update(update) => {
-                        let sequence_key = update.event_sequence_key().to_string();
+                        validate_bigquery_replica_identity(&update.replicated_table_schema)?;
+                        let sequence_key = update.event_sequence_key();
                         let table_id = update.replicated_table_schema.id();
-                        let mut table_row = match update.updated_table_row {
+                        let table_row = match update.updated_table_row {
                             UpdatedTableRow::Full(row) => row,
                             UpdatedTableRow::Partial(_) => {
                                 return Err(etl_error!(
@@ -835,20 +846,35 @@ where
                                 ));
                             }
                         };
-                        table_row.values_mut().push(BigQueryOperationType::Upsert.into_cell());
-                        table_row.values_mut().push(Cell::String(sequence_key));
 
                         let entry = table_id_to_data.entry(table_id).or_insert_with(|| {
                             (update.replicated_table_schema.clone(), Vec::new())
                         });
-                        entry.1.push(BigQueryTableRow::try_from(table_row)?);
+                        entry.1.extend(bigquery_update_rows(
+                            &update.replicated_table_schema,
+                            table_row,
+                            update.old_table_row,
+                            sequence_key,
+                        )?);
                     }
                     Event::Delete(delete) => {
-                        let sequence_key = delete.event_sequence_key().to_string();
-                        let Some(old_table_row) = delete.old_table_row else {
-                            info!("delete event has no row, skipping");
-                            continue;
-                        };
+                        validate_bigquery_replica_identity(&delete.replicated_table_schema)?;
+                        let sequence_key = bigquery_sequence_key(
+                            delete.event_sequence_key(),
+                            BIGQUERY_SEQUENCE_ORDINAL_FIRST,
+                        );
+                        let old_table_row = delete.old_table_row.ok_or_else(|| {
+                            etl_error!(
+                                ErrorKind::InvalidState,
+                                "BigQuery delete requires an old row image",
+                                format!(
+                                    "Table '{}' emitted a delete without an old row image. \
+                                     BigQuery deletes are keyed by the source primary key and \
+                                     cannot be applied safely without it.",
+                                    delete.replicated_table_schema.name()
+                                )
+                            )
+                        })?;
 
                         let table_id = delete.replicated_table_schema.id();
                         let entry = table_id_to_data.entry(table_id).or_insert_with(|| {
@@ -1069,12 +1095,16 @@ where
 
 /// Validates that a replicated table schema can be applied in BigQuery.
 ///
-/// BigQuery matches deletes and upserts by the destination table primary key,
-/// so the source table must always expose a compatible row identity.
-/// PostgreSQL replica identity may use that primary key directly or request
-/// full old-row images, but alternative replica-identity indexes would
-/// identify rows differently from the destination key and would therefore
-/// apply updates and deletes incorrectly.
+/// BigQuery matches CDC rows by the destination table primary key, so the
+/// source table must always expose that key.
+/// PostgreSQL replica identity may either:
+/// - match the source primary key directly, or
+/// - request full old-row images (`FULL`), which still let us recover the
+///   source primary key for deletes and primary-key-changing updates.
+///
+/// Alternative replica-identity indexes are not compatible with BigQuery's
+/// destination key because BigQuery would deduplicate against a different row
+/// identity than the source publisher.
 fn validate_bigquery_replica_identity(
     replicated_table_schema: &ReplicatedTableSchema,
 ) -> EtlResult<()> {
@@ -1162,47 +1192,276 @@ where
     }
 }
 
-/// Builds a CDC delete row for BigQuery from either a full old row image or a
-/// replica-identity key image.
-fn bigquery_delete_row(
-    replicated_table_schema: &ReplicatedTableSchema,
-    old_table_row: OldTableRow,
+/// Builds a BigQuery CDC ordering key with destination-internal ordering.
+///
+/// BigQuery applies CDC records for the same primary key by comparing
+/// `_CHANGE_SEQUENCE_NUMBER` sections from left to right as unsigned
+/// hexadecimal numbers. [`EventSequenceKey`] supplies the source ordering as
+/// `commit_lsn/tx_ordinal`; the extra section gives this destination a stable
+/// place to order multiple BigQuery rows generated from one source event.
+///
+/// This matters for primary-key-changing updates, which are represented as a
+/// generated `DELETE` for the old key followed by a generated `UPSERT` for the
+/// new key. Because both rows come from the same source event, they would share
+/// the same source sequence key without this extra section. The internal
+/// ordinal makes the ordering within generated rows explicit instead of relying
+/// on append order or BigQuery ingestion-time tie-breaking.
+fn bigquery_sequence_key(sequence_key: EventSequenceKey, internal_ordinal: u64) -> String {
+    format!("{sequence_key}/{internal_ordinal:016x}")
+}
+
+/// Builds a BigQuery CDC upsert row.
+fn bigquery_upsert_row(
+    mut table_row: TableRow,
     sequence_key: String,
 ) -> EtlResult<BigQueryTableRow> {
-    match old_table_row {
-        OldTableRow::Full(mut row) => {
-            row.values_mut().push(BigQueryOperationType::Delete.into_cell());
-            row.values_mut().push(Cell::String(sequence_key));
+    table_row.values_mut().push(BigQueryOperationType::Upsert.into_cell());
+    table_row.values_mut().push(Cell::String(sequence_key));
 
-            BigQueryTableRow::try_from(row)
+    BigQueryTableRow::try_from(table_row)
+}
+
+/// Builds one or two BigQuery CDC rows for an update.
+///
+/// BigQuery applies CDC rows by the destination primary key, so if the source
+/// update changes that key we must first delete the old key before upserting
+/// the new row.
+fn bigquery_update_rows(
+    replicated_table_schema: &ReplicatedTableSchema,
+    new_table_row: TableRow,
+    old_table_row: Option<OldTableRow>,
+    sequence_key: EventSequenceKey,
+) -> EtlResult<Vec<BigQueryTableRow>> {
+    let primary_key_changed = match old_table_row.as_ref() {
+        // PostgreSQL omits the old-side image only when the publisher
+        // determined it was unnecessary. For primary-key identity, that means
+        // the destination key did not change. `FULL` updates are expected to
+        // carry an old row from pgoutput.
+        Some(old_table_row) => {
+            bigquery_primary_key_changed(replicated_table_schema, old_table_row, &new_table_row)?
         }
-        OldTableRow::Key(row) => {
-            let source_column_count = replicated_table_schema.column_schemas().count();
-            let identity_column_count = replicated_table_schema.identity_column_schemas().len();
-            if row.values().len() != identity_column_count {
+        None => false,
+    };
+
+    let mut rows = Vec::with_capacity(1 + usize::from(primary_key_changed));
+    if primary_key_changed {
+        let Some(old_table_row) = old_table_row else {
+            bail!(
+                ErrorKind::InvalidState,
+                "BigQuery primary key change is missing old row",
+                format!(
+                    "Table '{}' primary key change was detected without an old row image",
+                    replicated_table_schema.name()
+                )
+            );
+        };
+
+        rows.push(bigquery_delete_row(
+            replicated_table_schema,
+            old_table_row,
+            bigquery_sequence_key(sequence_key, BIGQUERY_SEQUENCE_ORDINAL_FIRST),
+        )?);
+    }
+    let upsert_ordinal = if primary_key_changed {
+        BIGQUERY_SEQUENCE_ORDINAL_SECOND
+    } else {
+        BIGQUERY_SEQUENCE_ORDINAL_FIRST
+    };
+    rows.push(bigquery_upsert_row(
+        new_table_row,
+        bigquery_sequence_key(sequence_key, upsert_ordinal),
+    )?);
+
+    Ok(rows)
+}
+
+/// Returns whether an update changed the destination primary key.
+fn bigquery_primary_key_changed(
+    replicated_table_schema: &ReplicatedTableSchema,
+    old_table_row: &OldTableRow,
+    new_table_row: &TableRow,
+) -> EtlResult<bool> {
+    let column_count = replicated_table_schema.column_schemas().len();
+    if new_table_row.values().len() != column_count {
+        bail!(
+            ErrorKind::InvalidState,
+            "BigQuery full row image does not match the replicated schema",
+            format!(
+                "Expected {} values for table '{}', got {}",
+                column_count,
+                replicated_table_schema.name(),
+                new_table_row.values().len()
+            )
+        );
+    }
+
+    match old_table_row {
+        OldTableRow::Full(row) => {
+            if row.values().len() != column_count {
                 bail!(
                     ErrorKind::InvalidState,
-                    "BigQuery delete key image does not match replica identity",
+                    "BigQuery full row image does not match the replicated schema",
                     format!(
-                        "Expected {} key values for table '{}', got {}",
-                        identity_column_count,
+                        "Expected {} values for table '{}', got {}",
+                        column_count,
                         replicated_table_schema.name(),
                         row.values().len()
                     )
                 );
             }
 
-            let mut tagged_cells = Vec::new();
-            let mut identity_columns = replicated_table_schema.identity_column_schemas().peekable();
+            Ok(replicated_table_schema
+                .column_schemas()
+                .zip(row.values())
+                .zip(new_table_row.values())
+                .any(|((column_schema, old_value), new_value)| {
+                    column_schema.primary_key() && old_value != new_value
+                }))
+        }
+        OldTableRow::Key(row) => {
+            if !replicated_table_schema.identity_matches_primary_key() {
+                bail!(
+                    ErrorKind::InvalidState,
+                    "BigQuery key image does not match the source primary key",
+                    format!(
+                        "Table '{}' emitted a key image for replica identity {:?}, but BigQuery \
+                         rows are keyed by the source primary key",
+                        replicated_table_schema.name(),
+                        replicated_table_schema.identity_type()
+                    )
+                );
+            }
+
+            let primary_key_column_count =
+                replicated_table_schema.primary_key_column_schemas().len();
+            let old_key_values = row.values();
+            if old_key_values.len() != primary_key_column_count {
+                bail!(
+                    ErrorKind::InvalidState,
+                    "BigQuery key image does not match the source primary key",
+                    format!(
+                        "Expected {} key values for table '{}', got {}",
+                        primary_key_column_count,
+                        replicated_table_schema.name(),
+                        old_key_values.len()
+                    )
+                );
+            }
+
+            let mut new_primary_key_values = replicated_table_schema
+                .column_schemas()
+                .zip(new_table_row.values())
+                .filter(|(column_schema, _)| column_schema.primary_key())
+                .map(|(_, value)| value);
+
+            for old_value in old_key_values {
+                let Some(new_value) = new_primary_key_values.next() else {
+                    bail!(
+                        ErrorKind::InvalidState,
+                        "BigQuery primary key schema mismatch",
+                        format!(
+                            "Table '{}' did not expose enough primary key columns",
+                            replicated_table_schema.name()
+                        )
+                    );
+                };
+
+                if old_value != new_value {
+                    return Ok(true);
+                }
+            }
+
+            Ok(false)
+        }
+    }
+}
+
+/// Extracts tagged primary-key cells from an old row image.
+fn bigquery_primary_key_tagged_cells_from_old_row(
+    replicated_table_schema: &ReplicatedTableSchema,
+    old_table_row: OldTableRow,
+) -> EtlResult<Vec<(usize, Cell)>> {
+    match old_table_row {
+        OldTableRow::Full(row) => {
+            let column_count = replicated_table_schema.column_schemas().len();
+            let primary_key_column_count =
+                replicated_table_schema.primary_key_column_schemas().len();
+            if row.values().len() != column_count {
+                bail!(
+                    ErrorKind::InvalidState,
+                    "BigQuery full row image does not match the replicated schema",
+                    format!(
+                        "Expected {} values for table '{}', got {}",
+                        column_count,
+                        replicated_table_schema.name(),
+                        row.values().len()
+                    )
+                );
+            }
+
+            let mut tagged_cells = Vec::with_capacity(primary_key_column_count);
+            for (column_index, (column_schema, value)) in
+                replicated_table_schema.column_schemas().zip(row.into_values()).enumerate()
+            {
+                if column_schema.primary_key() {
+                    tagged_cells.push((column_index + 1, value));
+                }
+            }
+
+            Ok(tagged_cells)
+        }
+        OldTableRow::Key(row) => {
+            if !replicated_table_schema.identity_matches_primary_key() {
+                bail!(
+                    ErrorKind::InvalidState,
+                    "BigQuery key image does not match the source primary key",
+                    format!(
+                        "Table '{}' emitted a key image for replica identity {:?}, but BigQuery \
+                         rows are keyed by the source primary key",
+                        replicated_table_schema.name(),
+                        replicated_table_schema.identity_type()
+                    )
+                );
+            }
+
+            let primary_key_column_count =
+                replicated_table_schema.primary_key_column_schemas().len();
+            if row.values().len() != primary_key_column_count {
+                bail!(
+                    ErrorKind::InvalidState,
+                    "BigQuery delete key image does not match the source primary key",
+                    format!(
+                        "Expected {} key values for table '{}', got {}",
+                        primary_key_column_count,
+                        replicated_table_schema.name(),
+                        row.values().len()
+                    )
+                );
+            }
+
+            let mut tagged_cells = Vec::with_capacity(primary_key_column_count);
+            let mut primary_key_columns =
+                replicated_table_schema.primary_key_column_schemas().peekable();
             let mut key_values = row.into_values().into_iter();
             for (column_index, column_schema) in
                 replicated_table_schema.column_schemas().enumerate()
             {
-                if identity_columns.peek().is_some_and(|identity_column| {
-                    identity_column.ordinal_position == column_schema.ordinal_position
+                if primary_key_columns.peek().is_some_and(|primary_key_column| {
+                    primary_key_column.ordinal_position == column_schema.ordinal_position
                 }) {
-                    identity_columns.next();
-                    let value = key_values.next().expect("validated key image length");
+                    primary_key_columns.next();
+
+                    let Some(value) = key_values.next() else {
+                        bail!(
+                            ErrorKind::InvalidState,
+                            "BigQuery delete key image shape is inconsistent",
+                            format!(
+                                "Table '{}' key image ended before all primary key values",
+                                replicated_table_schema.name()
+                            )
+                        );
+                    };
+
                     tagged_cells.push((column_index + 1, value));
                 }
             }
@@ -1212,18 +1471,30 @@ fn bigquery_delete_row(
                     ErrorKind::InvalidState,
                     "BigQuery delete key image has leftover values",
                     format!(
-                        "Table '{}' key image contained more values than its replica identity",
+                        "Table '{}' key image contained more values than its primary key",
                         replicated_table_schema.name()
                     )
                 );
             }
 
-            tagged_cells.push((source_column_count + 1, BigQueryOperationType::Delete.into_cell()));
-            tagged_cells.push((source_column_count + 2, Cell::String(sequence_key)));
-
-            BigQueryTableRow::try_from_tagged_cells(tagged_cells)
+            Ok(tagged_cells)
         }
     }
+}
+
+/// Builds a CDC delete row for BigQuery from an old row image.
+fn bigquery_delete_row(
+    replicated_table_schema: &ReplicatedTableSchema,
+    old_table_row: OldTableRow,
+    sequence_key: String,
+) -> EtlResult<BigQueryTableRow> {
+    let source_column_count = replicated_table_schema.column_schemas().len();
+    let mut tagged_cells =
+        bigquery_primary_key_tagged_cells_from_old_row(replicated_table_schema, old_table_row)?;
+    tagged_cells.push((source_column_count + 1, BigQueryOperationType::Delete.into_cell()));
+    tagged_cells.push((source_column_count + 2, Cell::String(sequence_key)));
+
+    BigQueryTableRow::try_from_tagged_cells(tagged_cells)
 }
 
 /// Calculates the optimal number of batches for table copy operations.
@@ -1304,7 +1575,9 @@ fn split_table_rows(
 mod tests {
     use std::sync::Arc;
 
-    use etl::types::{ColumnSchema, IdentityMask, TableId, TableSchema, Type};
+    use etl::types::{
+        CellNonOptional, ColumnSchema, IdentityMask, PgLsn, TableId, TableSchema, Type,
+    };
     use prost::Message;
 
     use super::*;
@@ -1786,5 +2059,162 @@ mod tests {
         // delete rows.
         assert!(!encoded.contains(&0x12));
         assert!(!encoded.contains(&0x18));
+    }
+
+    #[test]
+    fn bigquery_delete_full_row_omits_non_primary_key_source_columns() {
+        let table_schema = Arc::new(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_string(), "users".to_string()),
+            vec![
+                ColumnSchema::new("id".to_string(), Type::INT4, -1, 1, Some(1), false),
+                ColumnSchema::new("name".to_string(), Type::TEXT, -1, 2, None, false),
+                ColumnSchema::new("age".to_string(), Type::INT4, -1, 3, None, false),
+            ],
+        ));
+        let replicated_table_schema = ReplicatedTableSchema::from_masks(
+            table_schema,
+            etl::types::ReplicationMask::from_bytes(vec![1, 1, 1]),
+            IdentityMask::from_bytes(vec![1, 1, 1]),
+        );
+
+        let row = bigquery_delete_row(
+            &replicated_table_schema,
+            OldTableRow::Full(TableRow::new(vec![
+                Cell::I32(42),
+                Cell::String("alice".to_string()),
+                Cell::I32(7),
+            ])),
+            "lsn:1".to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            row.debug_cells(),
+            vec![
+                (1, CellNonOptional::I32(42)),
+                (4, CellNonOptional::String("DELETE".to_string())),
+                (5, CellNonOptional::String("lsn:1".to_string())),
+            ]
+        );
+    }
+
+    #[test]
+    fn bigquery_update_rows_emits_delete_before_upsert_when_primary_key_changes() {
+        let replicated_table_schema = replicated_schema(IdentityType::PrimaryKey);
+        let sequence_key = EventSequenceKey::new(PgLsn::from(1), 0);
+
+        let rows = bigquery_update_rows(
+            &replicated_table_schema,
+            TableRow::new(vec![Cell::I32(2), Cell::String("updated".to_string())]),
+            Some(OldTableRow::Key(TableRow::new(vec![Cell::I32(1)]))),
+            sequence_key,
+        )
+        .unwrap();
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[0].debug_cells(),
+            vec![
+                (1, CellNonOptional::I32(1)),
+                (3, CellNonOptional::String("DELETE".to_string())),
+                (
+                    4,
+                    CellNonOptional::String(
+                        "0000000000000001/0000000000000000/0000000000000000".to_string(),
+                    ),
+                ),
+            ]
+        );
+        assert_eq!(
+            rows[1].debug_cells(),
+            vec![
+                (1, CellNonOptional::I32(2)),
+                (2, CellNonOptional::String("updated".to_string())),
+                (3, CellNonOptional::String("UPSERT".to_string())),
+                (
+                    4,
+                    CellNonOptional::String(
+                        "0000000000000001/0000000000000000/0000000000000001".to_string(),
+                    ),
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn bigquery_update_rows_skips_delete_when_primary_key_is_unchanged() {
+        let replicated_table_schema = replicated_schema(IdentityType::PrimaryKey);
+        let sequence_key = EventSequenceKey::new(PgLsn::from(1), 0);
+
+        let rows = bigquery_update_rows(
+            &replicated_table_schema,
+            TableRow::new(vec![Cell::I32(1), Cell::String("updated".to_string())]),
+            Some(OldTableRow::Key(TableRow::new(vec![Cell::I32(1)]))),
+            sequence_key,
+        )
+        .unwrap();
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].debug_cells(),
+            vec![
+                (1, CellNonOptional::I32(1)),
+                (2, CellNonOptional::String("updated".to_string())),
+                (3, CellNonOptional::String("UPSERT".to_string())),
+                (
+                    4,
+                    CellNonOptional::String(
+                        "0000000000000001/0000000000000000/0000000000000000".to_string(),
+                    ),
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn bigquery_update_rows_emits_delete_before_upsert_for_full_identity_primary_key_change() {
+        let replicated_table_schema = replicated_schema(IdentityType::Full);
+        let sequence_key = EventSequenceKey::new(PgLsn::from(1), 0);
+
+        let rows = bigquery_update_rows(
+            &replicated_table_schema,
+            TableRow::new(vec![Cell::I32(2), Cell::String("updated".to_string())]),
+            Some(OldTableRow::Full(TableRow::new(vec![
+                Cell::I32(1),
+                Cell::String("before".to_string()),
+            ]))),
+            sequence_key,
+        )
+        .unwrap();
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[0].debug_cells(),
+            vec![
+                (1, CellNonOptional::I32(1)),
+                (3, CellNonOptional::String("DELETE".to_string())),
+                (
+                    4,
+                    CellNonOptional::String(
+                        "0000000000000001/0000000000000000/0000000000000000".to_string(),
+                    ),
+                ),
+            ]
+        );
+        assert_eq!(
+            rows[1].debug_cells(),
+            vec![
+                (1, CellNonOptional::I32(2)),
+                (2, CellNonOptional::String("updated".to_string())),
+                (3, CellNonOptional::String("UPSERT".to_string())),
+                (
+                    4,
+                    CellNonOptional::String(
+                        "0000000000000001/0000000000000000/0000000000000001".to_string(),
+                    ),
+                ),
+            ]
+        );
     }
 }

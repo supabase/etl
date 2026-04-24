@@ -522,7 +522,7 @@ pub async fn spawn_test_app_with_k8s_state(
     k8s_state: MockK8sState,
 ) -> TestApp {
     let k8s_client: Arc<dyn K8sClient> = Arc::new(MockK8sClient::new(k8s_state.clone()));
-    let trusted_root_certs_cache = TrustedRootCertsCache::new(k8s_client.clone());
+    let trusted_root_certs_cache = TrustedRootCertsCache::new(Arc::clone(&k8s_client));
 
     spawn_test_app_with_services(
         trusted_source_username,

@@ -165,8 +165,8 @@ where
         // We create and start the apply worker.
         let apply_worker = ApplyWorker::new(
             self.config.id,
-            self.config.clone(),
-            pool.clone(),
+            Arc::clone(&self.config),
+            Arc::clone(&pool),
             self.store.clone(),
             self.destination.clone(),
             shared_table_cache,

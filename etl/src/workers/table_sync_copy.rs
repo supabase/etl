@@ -382,7 +382,7 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
     for partition in copy_partitions {
         // Acquire a concurrency slot to make sure we are always using at most
         // `max_copy_connections`.
-        let permit = semaphore.clone().acquire_owned().await.map_err(|err| {
+        let permit = Arc::clone(&semaphore).acquire_owned().await.map_err(|err| {
             etl_error!(
                 ErrorKind::InvalidState,
                 "Could not acquire semaphore while copying a table in parallel",

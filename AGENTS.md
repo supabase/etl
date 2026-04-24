@@ -11,6 +11,7 @@
   - `etl-telemetry/`: tracing and Prometheus setup.
   - `etl-examples/`: examples.
   - `etl-benchmarks/`: benchmarks.
+  - `xtask/`: workspace automation commands.
 - Docs live in `docs/`.
 - Local development and ops tooling live in `scripts/` and `DEVELOPMENT.md`.
 - Tests live next to code in `src/` or `tests/`.
@@ -26,7 +27,7 @@
   - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
 - Run unit tests (no Postgres required):
   - `cargo nextest run --workspace --all-features --lib`
-- Run unit tests for one crate:
+- Run tests for one crate:
   - `cargo nextest run -p etl-config --all-features`
 - Run doctests (nextest does not support doctests):
   - `cargo test --doc --workspace --all-features`
@@ -43,14 +44,10 @@
 - If you change workflow assumptions, build or test the smallest relevant target and report what actually ran.
 - Never create commits, push branches, open pull requests, or perform other git write actions unless the user explicitly instructs you to do so.
 - Keep the workspace on the stable toolchain from `rust-toolchain.toml` for build, lint, and test commands; use the pinned nightly formatter only through `./scripts/fmt` and `./scripts/fmt-check`.
+- Treat `Cargo.toml` workspace lints, `rustfmt.toml`, and compiler diagnostics as the source of truth for enforceable style and correctness rules. Prefer adding or tightening static checks over adding prose rules here.
 
 ## Rust Style
-- Follow default Rust formatting and idioms.
-- Naming:
-  - crates: `kebab-case`.
-  - modules/files/functions/variables: `snake_case`.
-  - types/traits/enums: `CamelCase`.
-  - constants/statics: `SCREAMING_SNAKE_CASE`.
+- This section is only for project-specific judgment that is not already covered by rustfmt, rustc, or Clippy.
 - Prefer absolute crate imports for shared module items, for example `use crate::metrics::{PIPELINE_ID_LABEL, APP_TYPE_LABEL};`, instead of `use super::{...};`.
 - When multiple files share constants, helpers, or a single entrypoint, prefer a module directory with `mod.rs`.
 - Keep top-level binaries focused on orchestration; move implementation detail into helpers or modules.
@@ -65,8 +62,7 @@
 - Treat `pub use` as part of the public API contract: re-export only items you intentionally want callers to depend on, and avoid wildcard re-exports from internal modules.
 - When a crate re-exports dependency types through its own facade, prefer referring to them via the crate facade (for example `crate::types::SchemaError`) inside that crate unless you are working at an explicit integration boundary or the item is not re-exported.
 - After visibility changes, verify with `cargo rustc -p <crate> --all-features -- -W unreachable_pub` for the relevant target and then rerun the smallest relevant checks/tests.
-- Use `Arc::clone(&value)` instead of `value.clone()` when cloning `Arc` pointers — it makes the cheap reference-count increment explicit and avoids confusion with deep clones.
-- All logs should be strictly lowercase.
+- Keep log message prose lowercase; SQL fragments, identifiers, and external product names may keep their required casing.
 
 ## Error Handling And Panics
 - Use typed errors and `Result` for recoverable failures.
@@ -104,7 +100,6 @@
 - Prefer running `cargo nextest list` before using filters or crate-specific commands if there is any doubt.
 - When fixing a specific crate, run the narrowest relevant tests first, then broaden if needed.
 - Add or update tests when behavior changes, regressions are possible, or new logic is introduced.
-- Do not prefix `#[test]` functions with `test_`. Name them after what they verify — e.g. `fn parses_empty_input()` not `fn test_parses_empty_input()`.
 - Register `NotifyingStore::notify_on_*` and `TestDestinationWrapper::wait_for_*` handles before the producer can fire. These helpers only arm on updates that arrive *after* registration, so register the notifier first, then start the producer.
 
   ```rust
@@ -113,10 +108,17 @@
   ready.notified().await;
   ```
 
+### Integration Test Style
+- Prefer one-way integration tests: perform the source-side writes first, wait for the expected notifications, then call `shutdown_and_wait()` immediately before assertions.
+- Avoid asserting destination state while the pipeline is still running unless the test is specifically about in-flight behavior or recovery during active replication.
+- For `TestDestinationWrapper`, prefer asserting against the cumulative event history from `get_events()`. Use `clear_events()` only when restarting the pipeline or when a test intentionally needs to discard earlier history and assert on a new phase in isolation.
+- Use `get_events_deduped()` only for replay/idempotence scenarios where duplicate wrapper observations are expected and the test is asserting logical equivalence rather than delivery history.
+- When asserting CDC event shapes, only expect combinations that PostgreSQL can actually emit for the table's replica identity mode. In particular, distinguish between `FULL`, primary-key identity, and `USING INDEX`, and remember that partial update rows only occur for update new-tuples.
+
 ## Review Checklist
 - Code compiles for the changed target or workspace as appropriate.
 - Code is formatted.
-- Clippy passes for the changed target or workspace as appropriate.
+- Clippy passes for the changed target or workspace as appropriate, using the workspace lint configuration as the source of truth for enforceable style and correctness rules.
 - Tests pass for the changed target or workspace as appropriate.
 - Doctests pass for the changed target or workspace as appropriate.
 - Docs and comments match the final behavior.
