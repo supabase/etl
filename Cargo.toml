@@ -29,6 +29,7 @@ broken_intra_doc_links = "deny"
 [workspace.lints.clippy]
 # Correctness & safety
 await_holding_lock = "deny"
+clone_on_ref_ptr = "deny"
 unused_async = "deny"
 large_futures = "deny"
 
