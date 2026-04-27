@@ -18,6 +18,8 @@ pub const ETL_EVENTS_PROCESSED_TOTAL: &str = "etl_events_processed_total";
 pub const ETL_REPLICATION_MESSAGES_TOTAL: &str = "etl_replication_messages_total";
 pub const ETL_STATUS_UPDATES_TOTAL: &str = "etl_status_updates_total";
 pub const ETL_STATUS_UPDATES_SKIPPED_TOTAL: &str = "etl_status_updates_skipped_total";
+pub const ETL_DDL_SCHEMA_CHANGES_TOTAL: &str = "etl_ddl_schema_changes_total";
+pub const ETL_DDL_SCHEMA_CHANGE_COLUMNS: &str = "etl_ddl_schema_change_columns";
 pub const ETL_ROW_SIZE_BYTES: &str = "etl_row_size_bytes";
 pub const ETL_SLOT_INVALIDATIONS_TOTAL: &str = "etl_slot_invalidations_total";
 pub const ETL_WORKER_ERRORS_TOTAL: &str = "etl_worker_errors_total";
@@ -46,6 +48,10 @@ pub const EVENT_TYPE_LABEL: &str = "event_type";
 pub const FORCED_LABEL: &str = "forced";
 /// Label key for the status update type.
 pub const STATUS_UPDATE_TYPE_LABEL: &str = "status_update_type";
+/// Label key for the DDL command tag emitted by Postgres.
+pub const COMMAND_TAG_LABEL: &str = "command_tag";
+/// Label key for the outcome of an operation.
+pub const OUTCOME_LABEL: &str = "outcome";
 /// Label key for worker error classification ("timed", "manual", "no_retry").
 pub const ERROR_TYPE_LABEL: &str = "error_type";
 /// Label key for transition direction ("activate" or "resume").
@@ -139,6 +145,20 @@ pub(crate) fn register_metrics() {
             Unit::Count,
             "Total number of status updates skipped due to throttling, labeled by \
              status_update_type."
+        );
+
+        describe_counter!(
+            ETL_DDL_SCHEMA_CHANGES_TOTAL,
+            Unit::Count,
+            "Total number of DDL schema change messages handled, labeled by worker_type, \
+             command_tag, and outcome."
+        );
+
+        describe_histogram!(
+            ETL_DDL_SCHEMA_CHANGE_COLUMNS,
+            Unit::Count,
+            "Number of columns in applied DDL schema change snapshots, labeled by worker_type and \
+             command_tag."
         );
 
         describe_histogram!(
