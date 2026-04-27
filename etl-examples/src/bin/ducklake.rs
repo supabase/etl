@@ -94,9 +94,7 @@ struct DbArgs {
 
 #[derive(Debug, Args)]
 struct DuckLakeArgs {
-    /// DuckLake catalog URL (e.g., postgres://user:pass@host/db or file:///tmp/catalog.ducklake)
-    ///
-    /// Plain local paths are accepted and converted to absolute `file://` URLs.
+    /// DuckLake catalog URL (e.g., postgres://user:pass@host/db)
     #[arg(long, value_parser = parse_ducklake_url)]
     catalog_url: Url,
     /// Local directory or S3 / S3-compatible URI for Parquet files (e.g., file:///tmp/lake_data or s3://bucket/)

@@ -95,7 +95,7 @@ uuid = { workspace = true, optional = true, features = ["v4"] }
 [dev-dependencies]
 duckdb = { workspace = true, features = ["bundled", "json", "parquet"] }
 etl = { workspace = true, features = ["test-utils"] }
-etl-postgres = { workspace = true, features = ["test-utils"] }
+etl-postgres = { workspace = true, features = ["test-utils", "tokio"] }
 etl-telemetry = { workspace = true }
 tempfile = { workspace = true }
 

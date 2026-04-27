@@ -28,13 +28,14 @@ use etl::{
 use metrics::gauge;
 use parking_lot::Mutex;
 use pg_escape::quote_identifier;
+use sqlx::{PgPool, postgres::PgPoolOptions};
 #[cfg(feature = "test-utils")]
 use tokio::sync::oneshot;
 use tokio::{
     sync::{OwnedRwLockReadGuard, OwnedSemaphorePermit, RwLock, Semaphore},
     task::JoinSet,
 };
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 use url::Url;
 
 use crate::{
@@ -71,6 +72,29 @@ use crate::{
     },
     table_name::try_stringify_table_name,
 };
+
+/// Shared Postgres metadata pool size for DuckLake background samplers.
+///
+/// One connection is enough because inline-size sampling and metrics sampling
+/// are both best-effort background reads and can safely serialize.
+const DUCKLAKE_METADATA_PG_POOL_SIZE: u32 = 1;
+
+/// Builds the shared Postgres metadata pool used by background samplers.
+fn build_ducklake_metadata_pg_pool(catalog_url: &Url) -> EtlResult<PgPool> {
+    PgPoolOptions::new()
+        .max_connections(DUCKLAKE_METADATA_PG_POOL_SIZE)
+        .min_connections(0)
+        .acquire_timeout(std::time::Duration::from_secs(5))
+        .idle_timeout(Some(std::time::Duration::from_secs(30)))
+        .connect_lazy(catalog_url.as_str())
+        .map_err(|source| {
+            etl_error!(
+                ErrorKind::ConfigError,
+                "DuckLake metadata pool configuration failed",
+                source: source
+            )
+        })
+}
 
 /// Returns whether a DuckLake DDL error indicates another transaction already
 /// created the requested table.
@@ -348,8 +372,8 @@ where
 
     /// Creates a new DuckLake destination.
     ///
-    /// - `catalog_url`: DuckLake catalog location. Use a PostgreSQL URL (`postgres://user:pass@localhost:5432/mydb`)
-    ///   or a local file URL (`file:///tmp/catalog.ducklake`).
+    /// - `catalog_url`: DuckLake catalog location. Use a PostgreSQL URL
+    ///   (`postgres://user:pass@localhost:5432/mydb`).
     /// - `data_path`: Where Parquet files are stored. Use a local file URL (`file:///tmp/lake_data`)
     ///   or a cloud URL (`s3://bucket/prefix/`, `gs://bucket/prefix/`).
     /// - `pool_size`: Number of warm DuckDB connections maintained in the pool.
@@ -386,6 +410,14 @@ where
         store: S,
     ) -> EtlResult<Self> {
         register_metrics();
+
+        if !matches!(catalog_url.scheme(), "postgres" | "postgresql") {
+            return Err(etl_error!(
+                ErrorKind::ConfigError,
+                "DuckLake destination requires a PostgreSQL catalog URL",
+                format!("unsupported catalog URL scheme `{}`", catalog_url.scheme())
+            ));
+        }
 
         if pool_size == 0 {
             return Err(etl_error!(
@@ -450,30 +482,23 @@ where
             },
         )
         .await?;
-        let pending_inline_size_sampler =
-            if matches!(catalog_url.scheme(), "postgres" | "postgresql") {
-                match run_duckdb_blocking(
+        let metadata_schema = match metadata_schema {
+            Some(metadata_schema) => metadata_schema,
+            None => {
+                run_duckdb_blocking(
                     Arc::clone(&pool),
                     Arc::clone(&blocking_slots),
                     DuckDbBlockingOperationKind::Foreground,
                     resolve_ducklake_metadata_schema_blocking,
                 )
-                .await
-                {
-                    Ok(metadata_schema) => {
-                        DuckLakePendingInlineSizeSampler::new(&catalog_url, metadata_schema)?
-                    }
-                    Err(error) => {
-                        warn!(
-                            error = ?error,
-                            "ducklake inline-size sampler initialization skipped"
-                        );
-                        None
-                    }
-                }
-            } else {
-                None
-            };
+                .await?
+            }
+        };
+        let metadata_pg_pool = build_ducklake_metadata_pg_pool(&catalog_url)?;
+        let pending_inline_size_sampler = Some(DuckLakePendingInlineSizeSampler::new(
+            metadata_schema.clone(),
+            metadata_pg_pool.clone(),
+        ));
         let created_tables = Arc::default();
         let checkpoint_gate = Arc::new(RwLock::new(()));
         let inline_flush_requested = Arc::new(AtomicBool::new(false));
@@ -517,12 +542,8 @@ where
         );
         destination.metrics_sampler = Arc::new(
             spawn_ducklake_metrics_sampler(
-                DuckLakeConnectionManager {
-                    setup_plan: Arc::clone(&setup_plan),
-                    disable_extension_autoload,
-                    #[cfg(feature = "test-utils")]
-                    open_count: Arc::new(AtomicUsize::new(0)),
-                },
+                metadata_schema,
+                metadata_pg_pool,
                 Arc::clone(&created_tables),
                 destination
                     .maintenance_worker
@@ -954,7 +975,7 @@ where
         }
 
         let _table_creation_permit =
-            self.table_creation_slots.clone().acquire_owned().await.map_err(|_| {
+            Arc::clone(&self.table_creation_slots).acquire_owned().await.map_err(|_| {
                 etl_error!(ErrorKind::InvalidState, "DuckLake table creation semaphore closed")
             })?;
 
@@ -1266,29 +1287,35 @@ pub fn table_name_to_ducklake_table_name(table_name: &TableName) -> EtlResult<Du
 #[cfg(test)]
 mod tests {
     use std::{
+        env,
         path::{Path, PathBuf},
         time::Instant,
     };
 
     use duckdb::{Config, Connection};
     use etl::{
+        config::{PgConnectionConfig, TcpKeepaliveConfig, TlsConfig},
         store::{both::memory::MemoryStore, schema::SchemaStore},
         types::{
             Cell, ColumnSchema, IdentityMask, OldTableRow, PartialTableRow, PgLsn, ReplicationMask,
             SizeHint, TableRow, TableSchema, Type as PgType, UpdatedTableRow,
         },
     };
+    use etl_postgres::tokio::test_utils::PgDatabase;
     use pg_escape::{quote_identifier, quote_literal};
     use tempfile::TempDir;
+    use tokio_postgres::Client;
     use url::Url;
+    use uuid::Uuid;
 
     use super::*;
     use crate::ducklake::{
+        config::catalog_conninfo_from_url,
         maintenance::flush_table_inlined_data,
-        metrics::{
-            query_catalog_maintenance_metrics_blocking, query_table_storage_metrics_blocking,
-        },
+        metrics::{query_catalog_maintenance_metrics, query_table_storage_metrics},
     };
+
+    const POSTGRES_SCANNER_EXTENSION_FILE: &str = "postgres_scanner.duckdb_extension";
 
     fn make_schema(table_id: u32, schema: &str, table: &str) -> TableSchema {
         TableSchema::new(
@@ -1404,6 +1431,44 @@ mod tests {
         Url::from_file_path(path).expect("failed to convert path to file url")
     }
 
+    fn local_pg_connection_config(database_name: String) -> PgConnectionConfig {
+        PgConnectionConfig {
+            host: env::var("TESTS_DATABASE_HOST").expect("TESTS_DATABASE_HOST must be set"),
+            port: env::var("TESTS_DATABASE_PORT")
+                .expect("TESTS_DATABASE_PORT must be set")
+                .parse()
+                .expect("TESTS_DATABASE_PORT must be a valid port number"),
+            name: database_name,
+            username: env::var("TESTS_DATABASE_USERNAME")
+                .expect("TESTS_DATABASE_USERNAME must be set"),
+            password: env::var("TESTS_DATABASE_PASSWORD").ok().map(Into::into),
+            tls: TlsConfig { trusted_root_certs: String::new(), enabled: false },
+            keepalive: TcpKeepaliveConfig::default(),
+        }
+    }
+
+    async fn create_catalog_database() -> (PgDatabase<Client>, Url) {
+        let database_name = Uuid::new_v4().to_string();
+        let host = env::var("TESTS_DATABASE_HOST").expect("TESTS_DATABASE_HOST must be set");
+        let port = env::var("TESTS_DATABASE_PORT")
+            .expect("TESTS_DATABASE_PORT must be set")
+            .parse()
+            .expect("TESTS_DATABASE_PORT must be a valid port number");
+        let username =
+            env::var("TESTS_DATABASE_USERNAME").expect("TESTS_DATABASE_USERNAME must be set");
+        let password = env::var("TESTS_DATABASE_PASSWORD").ok();
+        let database = PgDatabase::new(local_pg_connection_config(database_name.clone())).await;
+
+        let mut catalog_url = Url::parse("postgres://localhost").expect("failed to parse base url");
+        catalog_url.set_host(Some(&host)).expect("failed to set catalog host");
+        catalog_url.set_port(Some(port)).expect("failed to set catalog port");
+        catalog_url.set_username(&username).expect("failed to set catalog username");
+        catalog_url.set_password(password.as_deref()).expect("failed to set catalog password");
+        catalog_url.set_path(&database_name);
+
+        (database, catalog_url)
+    }
+
     fn current_vendored_extension_dir() -> Option<PathBuf> {
         let platform_dir = match (std::env::consts::OS, std::env::consts::ARCH) {
             ("linux", "x86_64" | "amd64") => "linux_amd64",
@@ -1424,8 +1489,9 @@ mod tests {
         for root in candidate_roots {
             let extension_dir = root.join("1.5.2").join(platform_dir);
             let ducklake_extension = extension_dir.join("ducklake.duckdb_extension");
+            let postgres_scanner_extension = extension_dir.join(POSTGRES_SCANNER_EXTENSION_FILE);
 
-            if ducklake_extension.is_file() {
+            if ducklake_extension.is_file() && postgres_scanner_extension.is_file() {
                 return Some(extension_dir);
             }
         }
@@ -1457,19 +1523,27 @@ mod tests {
     fn ducklake_load_sql() -> String {
         if let Some(extension_dir) = current_vendored_extension_dir() {
             let ducklake_extension = extension_dir.join("ducklake.duckdb_extension");
+            let postgres_scanner_extension = extension_dir.join(POSTGRES_SCANNER_EXTENSION_FILE);
 
-            return format!("LOAD {};", quote_literal(&ducklake_extension.display().to_string()),);
+            return format!(
+                "LOAD {}; LOAD {};",
+                quote_literal(&ducklake_extension.display().to_string()),
+                quote_literal(&postgres_scanner_extension.display().to_string()),
+            );
         }
 
-        "INSTALL ducklake; LOAD ducklake;".to_string()
+        "INSTALL ducklake; LOAD ducklake; INSTALL postgres_scanner; LOAD postgres_scanner;"
+            .to_string()
     }
 
     fn open_lake_conn(catalog: &Url, data: &Url) -> Connection {
         let conn = open_verification_connection();
+        let catalog_attach_target =
+            catalog_conninfo_from_url(catalog).expect("invalid catalog url");
         conn.execute_batch(&format!(
             "{} ATTACH {} AS {} (DATA_PATH {});",
             ducklake_load_sql(),
-            quote_literal(&format!("ducklake:{}", catalog.as_str())),
+            quote_literal(&format!("ducklake:{catalog_attach_target}")),
             quote_identifier(LAKE_CATALOG),
             quote_literal(data.as_str()),
         ))
@@ -1551,11 +1625,11 @@ mod tests {
         assert!(!is_create_table_conflict(&error, "public_orders"));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn query_table_storage_metrics_reads_ducklake_metadata() {
         let dir = TempDir::new().expect("failed to create temp dir");
-        let catalog = path_to_file_url(&dir.path().join("catalog.ducklake"));
         let data = path_to_file_url(&dir.path().join("data"));
+        let (_catalog_database, catalog) = create_catalog_database().await;
         let store = MemoryStore::new();
         let schema = make_schema(1, "public", "users");
         let replicated_table_schema = ReplicatedTableSchema::all(Arc::new(schema.clone()));
@@ -1588,12 +1662,18 @@ mod tests {
             .expect("failed to write rows");
 
         let conn = open_lake_conn_when_table_visible(&catalog, &data, &table_name).await;
+        let metadata_schema = resolve_ducklake_metadata_schema_blocking(&conn)
+            .expect("failed to resolve metadata schema");
+        let metadata_pg_pool =
+            build_ducklake_metadata_pg_pool(&catalog).expect("failed to create metadata pool");
         let _rows_flushed = flush_table_inlined_data(&conn, &table_name)
             .expect("failed to materialize inlined rows for storage metrics test");
         let deadline = Instant::now() + Duration::from_secs(10);
         let metrics = loop {
-            let metrics = query_table_storage_metrics_blocking(&conn, &table_name)
-                .expect("failed to query storage metrics");
+            let metrics =
+                query_table_storage_metrics(&metadata_pg_pool, &metadata_schema, &table_name)
+                    .await
+                    .expect("failed to query storage metrics");
             if metrics.active_data_files >= 1 {
                 break metrics;
             }
@@ -1610,11 +1690,11 @@ mod tests {
         assert_eq!(metrics.deleted_rows, 0);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn query_catalog_maintenance_metrics_reports_active_data_files_total() {
         let dir = TempDir::new().expect("failed to create temp dir");
-        let catalog = path_to_file_url(&dir.path().join("catalog.ducklake"));
         let data = path_to_file_url(&dir.path().join("data"));
+        let (_catalog_database, catalog) = create_catalog_database().await;
         let store = MemoryStore::new();
         let schema = make_schema(1, "public", "users");
         let replicated_table_schema = ReplicatedTableSchema::all(Arc::new(schema.clone()));
@@ -1647,11 +1727,16 @@ mod tests {
             .expect("failed to write rows");
 
         let conn = open_lake_conn_when_table_visible(&catalog, &data, &table_name).await;
+        let metadata_schema = resolve_ducklake_metadata_schema_blocking(&conn)
+            .expect("failed to resolve metadata schema");
+        let metadata_pg_pool =
+            build_ducklake_metadata_pg_pool(&catalog).expect("failed to create metadata pool");
         let _rows_flushed = flush_table_inlined_data(&conn, &table_name)
             .expect("failed to materialize inlined rows for catalog metrics test");
         let deadline = Instant::now() + Duration::from_secs(10);
         let metrics = loop {
-            let metrics = query_catalog_maintenance_metrics_blocking(&conn)
+            let metrics = query_catalog_maintenance_metrics(&metadata_pg_pool, &metadata_schema)
+                .await
                 .expect("failed to query catalog maintenance metrics");
             if metrics.active_data_files_total >= 1 {
                 break metrics;
@@ -1666,11 +1751,11 @@ mod tests {
         assert!(metrics.active_data_files_total >= 1);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn query_catalog_maintenance_metrics_reads_ducklake_metadata() {
         let dir = TempDir::new().expect("failed to create temp dir");
-        let catalog = path_to_file_url(&dir.path().join("catalog.ducklake"));
         let data = path_to_file_url(&dir.path().join("data"));
+        let (_catalog_database, catalog) = create_catalog_database().await;
         let store = MemoryStore::new();
         let schema = make_schema(1, "public", "users");
         let replicated_table_schema = ReplicatedTableSchema::all(Arc::new(schema.clone()));
@@ -1707,7 +1792,12 @@ mod tests {
         drop(destination);
 
         let conn = open_lake_conn_when_table_visible(&catalog, &data, &table_name).await;
-        let metrics = query_catalog_maintenance_metrics_blocking(&conn)
+        let metadata_schema = resolve_ducklake_metadata_schema_blocking(&conn)
+            .expect("failed to resolve metadata schema");
+        let metadata_pg_pool =
+            build_ducklake_metadata_pg_pool(&catalog).expect("failed to create metadata pool");
+        let metrics = query_catalog_maintenance_metrics(&metadata_pg_pool, &metadata_schema)
+            .await
             .expect("failed to query catalog maintenance metrics");
 
         assert!(metrics.active_data_files_total >= 0);

@@ -712,7 +712,7 @@ where
 
         let mut apply_loop = Self {
             pipeline_id,
-            config: config.clone(),
+            config: Arc::clone(&config),
             schema_store,
             destination,
             shared_table_cache,
@@ -2415,7 +2415,7 @@ mod apply_worker {
                     // Start a new worker for this table.
                     let table_sync_worker = build_table_sync_worker(ctx, table_id);
                     if let Err(err) =
-                        start_table_sync_worker(ctx.pool.clone(), table_sync_worker).await
+                        start_table_sync_worker(Arc::clone(&ctx.pool), table_sync_worker).await
                     {
                         error!(
                             worker_type = %WorkerType::Apply,
@@ -2546,7 +2546,7 @@ mod apply_worker {
                     // Start a new worker for this table.
                     let table_sync_worker = build_table_sync_worker(ctx, table_id);
                     if let Err(err) =
-                        start_table_sync_worker(ctx.pool.clone(), table_sync_worker).await
+                        start_table_sync_worker(Arc::clone(&ctx.pool), table_sync_worker).await
                     {
                         error!(
                             worker_type = %WorkerType::Apply,
@@ -2762,7 +2762,7 @@ mod apply_worker {
                     // Start a new worker for this table.
                     let table_sync_worker = build_table_sync_worker(ctx, table_id);
                     if let Err(err) =
-                        start_table_sync_worker(ctx.pool.clone(), table_sync_worker).await
+                        start_table_sync_worker(Arc::clone(&ctx.pool), table_sync_worker).await
                     {
                         error!(
                             worker_type = %WorkerType::Apply,
@@ -2814,14 +2814,14 @@ mod apply_worker {
 
         TableSyncWorker::new(
             ctx.pipeline_id,
-            ctx.config.clone(),
-            ctx.pool.clone(),
+            Arc::clone(&ctx.config),
+            Arc::clone(&ctx.pool),
             table_id,
             ctx.store.clone(),
             ctx.destination.clone(),
             ctx.shared_table_cache.clone(),
             ctx.shutdown_rx.clone(),
-            ctx.table_sync_worker_permits.clone(),
+            Arc::clone(&ctx.table_sync_worker_permits),
             ctx.memory_monitor.clone(),
             ctx.batch_budget.clone(),
         )

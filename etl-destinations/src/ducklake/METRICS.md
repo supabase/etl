@@ -11,8 +11,8 @@ The metrics fall into four groups:
   emitted by the background maintenance worker with the primary reason and
   outcome for each maintenance attempt.
 - table-health samples: histograms recorded by a background sampler every
-  30 seconds on a dedicated DuckDB pool of size 1. They describe the current
-  shape of tables known to the current destination instance.
+  30 seconds from the PostgreSQL DuckLake metadata catalog. They describe the
+  current shape of tables known to the current destination instance.
 - catalog-backlog gauges: current global snapshot and deletion backlog in the
   attached DuckLake catalog.
 

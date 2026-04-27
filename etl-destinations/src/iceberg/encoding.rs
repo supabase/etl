@@ -78,7 +78,7 @@ fn build_array_for_field(rows: &[TableRow], field_idx: usize, data_type: &DataTy
             build_primitive_array::<TimestampMicrosecondType, _>(rows, field_idx, cell_to_timestamp)
         }
         DataType::FixedSizeBinary(UUID_BYTE_WIDTH) => build_uuid_array(rows, field_idx),
-        DataType::List(field) => build_list_array(rows, field_idx, field.clone()),
+        DataType::List(field) => build_list_array(rows, field_idx, Arc::clone(field)),
         _ => build_string_array(rows, field_idx),
     }
 }
@@ -408,7 +408,7 @@ fn build_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef) -> Arr
 
 /// Builds a list array for boolean elements.
 fn build_boolean_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef) -> ArrayRef {
-    let mut list_builder = ListBuilder::new(BooleanBuilder::new()).with_field(field.clone());
+    let mut list_builder = ListBuilder::new(BooleanBuilder::new()).with_field(Arc::clone(&field));
 
     for row in rows {
         if let Some(array_cell) = cell_to_array_cell(&row.values()[field_idx]) {
@@ -435,7 +435,7 @@ fn build_boolean_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef
 /// Builds a list array for 32-bit integer elements.
 fn build_int32_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef) -> ArrayRef {
     let mut list_builder =
-        ListBuilder::new(PrimitiveBuilder::<Int32Type>::new()).with_field(field.clone());
+        ListBuilder::new(PrimitiveBuilder::<Int32Type>::new()).with_field(Arc::clone(&field));
 
     for row in rows {
         if let Some(array_cell) = cell_to_array_cell(&row.values()[field_idx]) {
@@ -467,7 +467,7 @@ fn build_int32_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef) 
 /// Builds a list array for 64-bit integer elements.
 fn build_int64_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef) -> ArrayRef {
     let mut list_builder =
-        ListBuilder::new(PrimitiveBuilder::<Int64Type>::new()).with_field(field.clone());
+        ListBuilder::new(PrimitiveBuilder::<Int64Type>::new()).with_field(Arc::clone(&field));
 
     for row in rows {
         if let Some(array_cell) = cell_to_array_cell(&row.values()[field_idx]) {
@@ -499,7 +499,7 @@ fn build_int64_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef) 
 /// Builds a list array for 32-bit float elements.
 fn build_float32_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef) -> ArrayRef {
     let mut list_builder =
-        ListBuilder::new(PrimitiveBuilder::<Float32Type>::new()).with_field(field.clone());
+        ListBuilder::new(PrimitiveBuilder::<Float32Type>::new()).with_field(Arc::clone(&field));
 
     for row in rows {
         if let Some(array_cell) = cell_to_array_cell(&row.values()[field_idx]) {
@@ -525,7 +525,7 @@ fn build_float32_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef
 /// Builds a list array for 64-bit float elements.
 fn build_float64_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef) -> ArrayRef {
     let mut list_builder =
-        ListBuilder::new(PrimitiveBuilder::<Float64Type>::new()).with_field(field.clone());
+        ListBuilder::new(PrimitiveBuilder::<Float64Type>::new()).with_field(Arc::clone(&field));
 
     for row in rows {
         if let Some(array_cell) = cell_to_array_cell(&row.values()[field_idx]) {
@@ -550,7 +550,7 @@ fn build_float64_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef
 
 /// Builds a list array for string elements.
 fn build_string_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef) -> ArrayRef {
-    let mut list_builder = ListBuilder::new(StringBuilder::new()).with_field(field.clone());
+    let mut list_builder = ListBuilder::new(StringBuilder::new()).with_field(Arc::clone(&field));
 
     for row in rows {
         if let Some(array_cell) = cell_to_array_cell(&row.values()[field_idx]) {
@@ -596,7 +596,8 @@ fn build_string_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef)
 
 /// Builds a list array for binary elements.
 fn build_binary_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef) -> ArrayRef {
-    let mut list_builder = ListBuilder::new(LargeBinaryBuilder::new()).with_field(field.clone());
+    let mut list_builder =
+        ListBuilder::new(LargeBinaryBuilder::new()).with_field(Arc::clone(&field));
 
     for row in rows {
         if let Some(array_cell) = cell_to_array_cell(&row.values()[field_idx]) {
@@ -625,7 +626,7 @@ fn build_binary_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef)
 /// Builds a list array for Date32 elements.
 fn build_date32_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef) -> ArrayRef {
     let mut list_builder =
-        ListBuilder::new(PrimitiveBuilder::<Date32Type>::new()).with_field(field.clone());
+        ListBuilder::new(PrimitiveBuilder::<Date32Type>::new()).with_field(Arc::clone(&field));
 
     for row in rows {
         if let Some(array_cell) = cell_to_array_cell(&row.values()[field_idx]) {
@@ -653,7 +654,7 @@ fn build_date32_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef)
 /// Builds a list array for Time64 elements.
 fn build_time64_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef) -> ArrayRef {
     let mut list_builder = ListBuilder::new(PrimitiveBuilder::<Time64MicrosecondType>::new())
-        .with_field(field.clone());
+        .with_field(Arc::clone(&field));
 
     for row in rows {
         if let Some(array_cell) = cell_to_array_cell(&row.values()[field_idx]) {
@@ -682,7 +683,7 @@ fn build_time64_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef)
 /// Builds a list array for Timestamp elements.
 fn build_timestamp_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef) -> ArrayRef {
     let mut list_builder = ListBuilder::new(PrimitiveBuilder::<TimestampMicrosecondType>::new())
-        .with_field(field.clone());
+        .with_field(Arc::clone(&field));
 
     for row in rows {
         if let Some(array_cell) = cell_to_array_cell(&row.values()[field_idx]) {
@@ -710,13 +711,13 @@ fn build_timestamp_list_array(rows: &[TableRow], field_idx: usize, field: FieldR
 fn build_timestamptz_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef) -> ArrayRef {
     // Extract timezone from the field's data type
     let tz = if let DataType::Timestamp(TimeUnit::Microsecond, Some(tz_str)) = field.data_type() {
-        tz_str.clone()
+        Arc::clone(tz_str)
     } else {
         Arc::from("+00:00".to_string()) // Default to UTC
     };
 
     let mut list_builder = ListBuilder::new(TimestampMicrosecondBuilder::new().with_timezone(tz))
-        .with_field(field.clone());
+        .with_field(Arc::clone(&field));
 
     for row in rows {
         if let Some(array_cell) = cell_to_array_cell(&row.values()[field_idx]) {
@@ -742,8 +743,8 @@ fn build_timestamptz_list_array(rows: &[TableRow], field_idx: usize, field: Fiel
 
 /// Builds a list array for UUID elements.
 fn build_uuid_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef) -> ArrayRef {
-    let mut list_builder =
-        ListBuilder::new(FixedSizeBinaryBuilder::new(UUID_BYTE_WIDTH)).with_field(field.clone());
+    let mut list_builder = ListBuilder::new(FixedSizeBinaryBuilder::new(UUID_BYTE_WIDTH))
+        .with_field(Arc::clone(&field));
 
     for row in rows {
         if let Some(array_cell) = cell_to_array_cell(&row.values()[field_idx]) {

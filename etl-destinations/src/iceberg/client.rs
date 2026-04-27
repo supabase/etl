@@ -339,7 +339,7 @@ impl IcebergClient {
 
         // Create Parquet writer builder (now only takes props and schema)
         let parquet_writer_builder =
-            ParquetWriterBuilder::new(writer_props, table.metadata().current_schema().clone());
+            ParquetWriterBuilder::new(writer_props, Arc::clone(table.metadata().current_schema()));
 
         // Create rolling file writer builder (handles file I/O and location generation)
         let rolling_writer_builder = RollingFileWriterBuilder::new_with_default_file_size(
