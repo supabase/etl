@@ -26,6 +26,7 @@ const HTTPFS_EXTENSION_FILE: &str = "httpfs.duckdb_extension";
 const POSTGRES_SCANNER_EXTENSION_FILE: &str = "postgres_scanner.duckdb_extension";
 pub(super) const TARGET_FILE_SIZE_OPTION_NAME: &str = "target_file_size";
 pub(super) const MAINTENANCE_TARGET_FILE_SIZE: &str = "10MB";
+pub(super) const EXPIRE_SNAPSHOTS_OLDER_THAN: &str = "7 days";
 pub(super) const DUCKDB_MEMORY_CACHE_LIMIT: &str = "150MB";
 
 /// Resolves the configured DuckDB memory limit or falls back to the default.
@@ -56,6 +57,24 @@ pub(super) fn maintenance_target_file_size_sql(
         quote_literal(LAKE_CATALOG),
         quote_literal(TARGET_FILE_SIZE_OPTION_NAME),
         quote_literal(resolve_maintenance_target_file_size(maintenance_target_file_size,)),
+    )
+}
+
+/// Resolves the configured snapshot-retention window or falls back to the
+/// default.
+pub(super) fn resolve_expire_snapshots_older_than(
+    expire_snapshots_older_than: Option<&str>,
+) -> &str {
+    expire_snapshots_older_than.unwrap_or(EXPIRE_SNAPSHOTS_OLDER_THAN)
+}
+
+/// Builds the SQL used to validate the configured snapshot-retention window.
+pub(super) fn validate_expire_snapshots_older_than_sql(
+    expire_snapshots_older_than: &str,
+) -> String {
+    format!(
+        "SELECT CAST(now() AS TIMESTAMP) - CAST({} AS INTERVAL);",
+        quote_literal(expire_snapshots_older_than)
     )
 }
 
@@ -1138,6 +1157,22 @@ mod tests {
         .unwrap();
 
         assert_eq!(plan.steps()[0].sql, format!("SET memory_limit = {};", quote_literal("256MB")));
+    }
+
+    #[test]
+    fn resolve_expire_snapshots_older_than_uses_default() {
+        assert_eq!(resolve_expire_snapshots_older_than(None), EXPIRE_SNAPSHOTS_OLDER_THAN);
+        assert_eq!(resolve_expire_snapshots_older_than(Some("2 days")), "2 days");
+    }
+
+    #[test]
+    fn validate_expire_snapshots_older_than_sql_casts_interval() {
+        let sql = validate_expire_snapshots_older_than_sql("2 days");
+        let quoted_interval = quote_literal("2 days");
+
+        assert!(sql.contains("SELECT CAST(now() AS TIMESTAMP) - CAST("));
+        assert!(sql.contains(&quoted_interval));
+        assert!(sql.contains(" AS INTERVAL);"));
     }
 
     #[test]
