@@ -12,8 +12,11 @@ CLICKHOUSE_HTTP_PORT="${CLICKHOUSE_HTTP_PORT:-8123}"
 CLICKHOUSE_USER="${CLICKHOUSE_USER:-etl}"
 CLICKHOUSE_PASSWORD="${CLICKHOUSE_PASSWORD:-etl}"
 CARGO_TOOLCHAIN="${CARGO_TOOLCHAIN:-}"
-TEST_TARGET="${TEST_TARGET:-clickhouse_pipeline}"
-TEST_NAME_FILTER="${TEST_NAME_FILTER:-}"
+# Cargo integration test target name. ClickHouse tests live in tests/main.rs under
+# the clickhouse_pipeline module; use TEST_NAME_FILTER to select that module or a
+# specific test. Set TEST_NAME_FILTER='' to run all tests in the target.
+TEST_TARGET="${TEST_TARGET:-main}"
+TEST_NAME_FILTER="${TEST_NAME_FILTER-clickhouse_pipeline}"
 CARGO_PACKAGE="${CARGO_PACKAGE:-etl-destinations}"
 FEATURES="${FEATURES:-clickhouse,test-utils}"
 
