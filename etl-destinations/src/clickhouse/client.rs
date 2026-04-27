@@ -10,7 +10,7 @@ use url::Url;
 use crate::clickhouse::{
     encoding::{ClickHouseValue, rb_encode_row},
     metrics::ETL_CH_INSERT_DURATION_SECONDS,
-    schema::clickhouse_column_type,
+    schema::{clickhouse_column_type, quote_identifier},
 };
 
 /// Capacity of the internal write buffer used per INSERT statement.
@@ -19,6 +19,50 @@ use crate::clickhouse::{
 /// network (but the INSERT statement itself is not closed — that only happens
 /// when `end()` is called or the `max_bytes_per_insert` limit is reached).
 const BUFFERED_CAPACITY: usize = 256 * 1024;
+
+/// Builds the SQL used to add a column to a ClickHouse table.
+fn build_add_column_sql(
+    table_name: &str,
+    column: &etl::types::ColumnSchema,
+    after_column: &str,
+) -> String {
+    let col_type = clickhouse_column_type(column, true);
+    let table_name = quote_identifier(table_name);
+    let column_name = quote_identifier(&column.name);
+    let after_column = quote_identifier(after_column);
+
+    format!(
+        "ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS {column_name} {col_type} AFTER \
+         {after_column}"
+    )
+}
+
+/// Builds the SQL used to drop a column from a ClickHouse table.
+fn build_drop_column_sql(table_name: &str, column_name: &str) -> String {
+    let table_name = quote_identifier(table_name);
+    let column_name = quote_identifier(column_name);
+    format!("ALTER TABLE {table_name} DROP COLUMN IF EXISTS {column_name}")
+}
+
+/// Builds the SQL used to rename a column in a ClickHouse table.
+fn build_rename_column_sql(table_name: &str, old_name: &str, new_name: &str) -> String {
+    let table_name = quote_identifier(table_name);
+    let old_name = quote_identifier(old_name);
+    let new_name = quote_identifier(new_name);
+    format!("ALTER TABLE {table_name} RENAME COLUMN IF EXISTS {old_name} TO {new_name}")
+}
+
+/// Builds the SQL used to truncate a ClickHouse table.
+fn build_truncate_table_sql(table_name: &str) -> String {
+    let table_name = quote_identifier(table_name);
+    format!("TRUNCATE TABLE IF EXISTS {table_name}")
+}
+
+/// Builds the SQL used to insert RowBinary rows into a ClickHouse table.
+fn build_insert_rows_sql(table_name: &str) -> String {
+    let table_name = quote_identifier(table_name);
+    format!("INSERT INTO {table_name} FORMAT RowBinary")
+}
 
 /// High-level ClickHouse client used by [`super::core::ClickHouseDestination`].
 ///
@@ -87,18 +131,13 @@ impl ClickHouseClient {
         column: &etl::types::ColumnSchema,
         after_column: &str,
     ) -> EtlResult<()> {
-        let col_type = clickhouse_column_type(column, true);
-        let sql = format!(
-            "ALTER TABLE \"{table_name}\" ADD COLUMN IF NOT EXISTS \"{}\" {col_type} AFTER \
-             \"{after_column}\"",
-            column.name
-        );
+        let sql = build_add_column_sql(table_name, column, after_column);
         self.execute_ddl(&sql).await
     }
 
     /// Drops a column from an existing ClickHouse table (idempotent).
     pub(crate) async fn drop_column(&self, table_name: &str, column_name: &str) -> EtlResult<()> {
-        let sql = format!("ALTER TABLE \"{table_name}\" DROP COLUMN IF EXISTS \"{column_name}\"");
+        let sql = build_drop_column_sql(table_name, column_name);
         self.execute_ddl(&sql).await
     }
 
@@ -113,25 +152,19 @@ impl ClickHouseClient {
         old_name: &str,
         new_name: &str,
     ) -> EtlResult<()> {
-        let sql = format!(
-            "ALTER TABLE \"{table_name}\" RENAME COLUMN IF EXISTS \"{old_name}\" TO \"{new_name}\""
-        );
+        let sql = build_rename_column_sql(table_name, old_name, new_name);
         self.execute_ddl(&sql).await
     }
 
-    /// Executes `TRUNCATE TABLE IF EXISTS "<table_name>"`.
+    /// Executes `TRUNCATE TABLE IF EXISTS` for the supplied table.
     pub(crate) async fn truncate_table(&self, table_name: &str) -> EtlResult<()> {
-        self.inner
-            .query(&format!("TRUNCATE TABLE IF EXISTS \"{table_name}\""))
-            .execute()
-            .await
-            .map_err(|e| {
-                etl_error!(
-                    ErrorKind::Unknown,
-                    "ClickHouse truncate failed",
-                    format!("Failed to truncate table '{table_name}': {e}")
-                )
-            })
+        self.inner.query(&build_truncate_table_sql(table_name)).execute().await.map_err(|e| {
+            etl_error!(
+                ErrorKind::Unknown,
+                "ClickHouse truncate failed",
+                format!("Failed to truncate table '{table_name}': {e}")
+            )
+        })
     }
 
     /// Inserts `rows` into `table_name` using the RowBinary format.
@@ -156,7 +189,7 @@ impl ClickHouseClient {
         max_bytes_per_insert: u64,
         source: &'static str,
     ) -> EtlResult<()> {
-        let sql = format!("INSERT INTO \"{table_name}\" FORMAT RowBinary");
+        let sql = build_insert_rows_sql(table_name);
 
         let mut insert =
             self.inner.insert_formatted_with(sql.clone()).buffered_with_capacity(BUFFERED_CAPACITY);
@@ -210,5 +243,67 @@ impl ClickHouseClient {
         .record(insert_start.elapsed().as_secs_f64());
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use etl::types::{ColumnSchema, Type};
+
+    use super::*;
+
+    fn column_schema(name: &str) -> ColumnSchema {
+        ColumnSchema {
+            name: name.to_string(),
+            typ: Type::INT4,
+            modifier: -1,
+            ordinal_position: 1,
+            primary_key_ordinal_position: Some(1),
+            nullable: false,
+        }
+    }
+
+    #[test]
+    fn add_column_sql_quotes_identifiers() {
+        let column = column_schema("new\"column");
+        let sql = build_add_column_sql("table\"name", &column, "old\"column");
+
+        assert_eq!(
+            sql,
+            "ALTER TABLE \"table\"\"name\" ADD COLUMN IF NOT EXISTS \"new\"\"column\" \
+             Nullable(Int32) AFTER \"old\"\"column\""
+        );
+    }
+
+    #[test]
+    fn drop_column_sql_quotes_identifiers() {
+        let sql = build_drop_column_sql("table\"name", "old\"column");
+
+        assert_eq!(sql, "ALTER TABLE \"table\"\"name\" DROP COLUMN IF EXISTS \"old\"\"column\"");
+    }
+
+    #[test]
+    fn rename_column_sql_quotes_identifiers() {
+        let sql = build_rename_column_sql("table\"name", "old\"column", "new\"column");
+
+        assert_eq!(
+            sql,
+            "ALTER TABLE \"table\"\"name\" RENAME COLUMN IF EXISTS \"old\"\"column\" TO \
+             \"new\"\"column\""
+        );
+    }
+
+    #[test]
+    fn truncate_table_sql_quotes_identifiers() {
+        let sql = build_truncate_table_sql("table\"name");
+
+        assert_eq!(sql, "TRUNCATE TABLE IF EXISTS \"table\"\"name\"");
+    }
+
+    #[test]
+    fn insert_rows_sql_quotes_identifiers() {
+        let sql = build_insert_rows_sql("table\"name");
+
+        assert_eq!(sql, "INSERT INTO \"table\"\"name\" FORMAT RowBinary");
     }
 }

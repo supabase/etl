@@ -54,6 +54,11 @@ fn postgres_array_element_clickhouse_sql(typ: &Type) -> &'static str {
     }
 }
 
+/// Quotes a ClickHouse identifier, escaping embedded double quotes.
+pub(crate) fn quote_identifier(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
+}
+
 /// Converts a Postgres `public.my_table` style table name into a ClickHouse
 /// table name using the same double-underscore escaping convention used by
 /// DuckLake/Iceberg.
@@ -94,23 +99,30 @@ pub fn build_create_table_sql(table_name: &str, column_schemas: &[ColumnSchema])
 
     for col in column_schemas {
         let col_type = clickhouse_column_type(col, false);
-        cols.push(format!("  \"{}\" {}", col.name, col_type));
+        cols.push(format!("  {} {}", quote_identifier(&col.name), col_type));
     }
 
     // CDC columns — always non-nullable
-    cols.push("  \"cdc_operation\" String".to_string());
-    cols.push("  \"cdc_lsn\" Int64".to_string());
+    cols.push(format!("  {} String", quote_identifier("cdc_operation")));
+    cols.push(format!("  {} Int64", quote_identifier("cdc_lsn")));
 
     let col_defs = cols.join(",\n");
+    let quoted_table_name = quote_identifier(table_name);
     format!(
-        "CREATE TABLE IF NOT EXISTS \"{table_name}\" (\n{col_defs}\n) ENGINE = MergeTree()\nORDER \
-         BY tuple()"
+        "CREATE TABLE IF NOT EXISTS {quoted_table_name} (\n{col_defs}\n) ENGINE = \
+         MergeTree()\nORDER BY tuple()"
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quote_identifier_escapes_embedded_quotes() {
+        assert_eq!(quote_identifier("plain"), "\"plain\"");
+        assert_eq!(quote_identifier("has\"quote"), "\"has\"\"quote\"");
+    }
 
     #[test]
     fn table_name_escaping() {
@@ -122,6 +134,29 @@ mod tests {
         assert_eq!(
             table_name_to_clickhouse_table_name("public", "my__table"),
             "public_my____table"
+        );
+    }
+
+    #[test]
+    fn build_create_table_sql_quotes_identifiers() {
+        let schemas = vec![ColumnSchema {
+            name: "id\"value".to_string(),
+            typ: Type::INT4,
+            modifier: -1,
+            ordinal_position: 1,
+            primary_key_ordinal_position: Some(1),
+            nullable: false,
+        }];
+        let table_name = table_name_to_clickhouse_table_name("sche\"ma", "ta\"ble");
+        let sql = build_create_table_sql(&table_name, &schemas);
+
+        assert!(
+            sql.contains("CREATE TABLE IF NOT EXISTS \"sche\"\"ma_ta\"\"ble\""),
+            "schema-derived table name should be quoted and escaped: {sql}"
+        );
+        assert!(
+            sql.contains("\"id\"\"value\" Int32"),
+            "column name should be quoted and escaped: {sql}"
         );
     }
 
