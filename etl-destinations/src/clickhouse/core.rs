@@ -21,10 +21,13 @@ use tracing::{debug, info, warn};
 use url::Url;
 
 use crate::clickhouse::{
-    client::ClickHouseClient,
+    client::{ClickHouseClient, ClickHouseTableColumn},
     encoding::{ClickHouseValue, cell_to_clickhouse_value},
     metrics::{ETL_CH_DDL_DURATION_SECONDS, register_metrics},
-    schema::{build_create_table_sql, table_name_to_clickhouse_table_name},
+    schema::{
+        CDC_LSN_COLUMN_NAME, CDC_OPERATION_COLUMN_NAME, build_create_table_sql,
+        table_name_to_clickhouse_table_name,
+    },
 };
 
 // -- CDC operation type --
@@ -56,6 +59,63 @@ struct PendingRow {
 /// Converts a Postgres LSN into the ClickHouse CDC LSN value.
 fn cdc_lsn_to_clickhouse_value(lsn: PgLsn) -> ClickHouseValue {
     ClickHouseValue::UInt64(u64::from(lsn))
+}
+
+/// Returns true if the ClickHouse type has an outer Nullable wrapper.
+fn clickhouse_type_expects_nullable_marker(type_name: &str) -> bool {
+    type_name.starts_with("Nullable(")
+}
+
+/// Returns expected ClickHouse column names for a replicated schema.
+fn expected_clickhouse_column_names(schema: &ReplicatedTableSchema) -> Vec<String> {
+    let mut names: Vec<String> =
+        schema.column_schemas().map(|column| column.name.clone()).collect();
+    names.push(CDC_OPERATION_COLUMN_NAME.to_string());
+    names.push(CDC_LSN_COLUMN_NAME.to_string());
+    names
+}
+
+/// Derives RowBinary nullable flags from the actual ClickHouse table schema.
+fn nullable_flags_from_clickhouse_columns(
+    ch_table_name: &str,
+    expected_column_names: &[String],
+    actual_columns: &[ClickHouseTableColumn],
+) -> EtlResult<Arc<[bool]>> {
+    if actual_columns.len() != expected_column_names.len() {
+        return Err(etl_error!(
+            ErrorKind::CorruptedTableSchema,
+            "ClickHouse table schema does not match replicated schema",
+            format!(
+                "table '{}' has {} columns, but {} were expected",
+                ch_table_name,
+                actual_columns.len(),
+                expected_column_names.len()
+            )
+        ));
+    }
+
+    let mut nullable_flags = Vec::with_capacity(actual_columns.len());
+    for (index, (actual_column, expected_name)) in
+        actual_columns.iter().zip(expected_column_names).enumerate()
+    {
+        if actual_column.name != *expected_name {
+            return Err(etl_error!(
+                ErrorKind::CorruptedTableSchema,
+                "ClickHouse table schema does not match replicated schema",
+                format!(
+                    "table '{}' column {} is named '{}', but '{}' was expected",
+                    ch_table_name,
+                    index + 1,
+                    actual_column.name,
+                    expected_name
+                )
+            ));
+        }
+
+        nullable_flags.push(clickhouse_type_expects_nullable_marker(&actual_column.type_name));
+    }
+
+    Ok(nullable_flags.into())
 }
 
 // -- Inserter configuration --
@@ -242,18 +302,17 @@ where
             }
         }
 
-        // Compute nullable flags (user columns + 2 CDC columns always non-nullable).
-        //
-        // Array columns are NEVER marked nullable here, even if the Postgres column
-        // is nullable. The DDL always emits `Array(Nullable(T))` (no outer `Nullable`
-        // wrapper), so ClickHouse does not expect a null-indicator byte before the
-        // array.
-        let column_schemas: Vec<_> = schema.column_schemas().cloned().collect();
-        let mut nullable_flags_vec: Vec<bool> =
-            column_schemas.iter().map(|c| c.nullable && !is_array_type(&c.typ)).collect();
-        nullable_flags_vec.push(false); // cdc_operation
-        nullable_flags_vec.push(false); // cdc_lsn
-        let nullable_flags: Arc<[bool]> = nullable_flags_vec.into();
+        // Compute nullable flags from the actual ClickHouse schema. This matters after
+        // `ALTER TABLE ADD COLUMN`: ClickHouse scalar columns are forced to
+        // `Nullable(T)` even when the Postgres column is `NOT NULL`, so RowBinary must
+        // include the nullable marker byte ClickHouse expects.
+        let actual_columns = self.client.table_columns(&ch_table_name).await?;
+        let expected_column_names = expected_clickhouse_column_names(schema);
+        let nullable_flags = nullable_flags_from_clickhouse_columns(
+            &ch_table_name,
+            &expected_column_names,
+            &actual_columns,
+        )?;
 
         // Write-lock: insert, using or_insert to handle concurrent first-writer race.
         let stored_flags = {
@@ -731,6 +790,10 @@ where
 mod tests {
     use super::*;
 
+    fn clickhouse_column(name: &str, type_name: &str) -> ClickHouseTableColumn {
+        ClickHouseTableColumn { name: name.to_string(), type_name: type_name.to_string() }
+    }
+
     #[test]
     fn cdc_lsn_value_preserves_full_u64_range() {
         let value = cdc_lsn_to_clickhouse_value(PgLsn::from(u64::MAX));
@@ -739,6 +802,60 @@ mod tests {
             ClickHouseValue::UInt64(lsn) => assert_eq!(lsn, u64::MAX),
             _ => panic!("expected UInt64 CDC LSN value"),
         }
+    }
+
+    #[test]
+    fn nullable_flags_use_clickhouse_destination_nullability() {
+        let expected_names = vec![
+            "id".to_string(),
+            "score".to_string(),
+            "tags".to_string(),
+            CDC_OPERATION_COLUMN_NAME.to_string(),
+            CDC_LSN_COLUMN_NAME.to_string(),
+        ];
+        let actual_columns = vec![
+            clickhouse_column("id", "Int64"),
+            clickhouse_column("score", "Nullable(Int32)"),
+            clickhouse_column("tags", "Array(Nullable(String))"),
+            clickhouse_column(CDC_OPERATION_COLUMN_NAME, "String"),
+            clickhouse_column(CDC_LSN_COLUMN_NAME, "UInt64"),
+        ];
+
+        let flags =
+            nullable_flags_from_clickhouse_columns("test_table", &expected_names, &actual_columns)
+                .unwrap();
+
+        assert_eq!(flags.as_ref(), [false, true, false, false, false]);
+    }
+
+    #[test]
+    fn nullable_flags_reject_clickhouse_column_count_mismatch() {
+        let expected_names = vec!["id".to_string(), CDC_OPERATION_COLUMN_NAME.to_string()];
+        let actual_columns = vec![clickhouse_column("id", "Int64")];
+
+        let err =
+            nullable_flags_from_clickhouse_columns("test_table", &expected_names, &actual_columns)
+                .unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::CorruptedTableSchema);
+        assert_eq!(err.detail(), Some("table 'test_table' has 1 columns, but 2 were expected"));
+    }
+
+    #[test]
+    fn nullable_flags_reject_clickhouse_column_order_mismatch() {
+        let expected_names = vec!["id".to_string(), "name".to_string()];
+        let actual_columns =
+            vec![clickhouse_column("name", "String"), clickhouse_column("id", "Int64")];
+
+        let err =
+            nullable_flags_from_clickhouse_columns("test_table", &expected_names, &actual_columns)
+                .unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::CorruptedTableSchema);
+        assert_eq!(
+            err.detail(),
+            Some("table 'test_table' column 1 is named 'name', but 'id' was expected")
+        );
     }
 
     #[test]

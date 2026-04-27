@@ -20,6 +20,15 @@ use crate::clickhouse::{
 /// when `end()` is called or the `max_bytes_per_insert` limit is reached).
 const BUFFERED_CAPACITY: usize = 256 * 1024;
 
+/// A ClickHouse table column returned from `system.columns`.
+#[derive(Debug, Clone, PartialEq, Eq, clickhouse::Row, serde::Deserialize)]
+pub(crate) struct ClickHouseTableColumn {
+    /// Column name.
+    pub(crate) name: String,
+    /// ClickHouse type string, for example `Int32` or `Nullable(String)`.
+    pub(crate) type_name: String,
+}
+
 /// Builds the SQL used to add a column to a ClickHouse table.
 fn build_add_column_sql(
     table_name: &str,
@@ -114,6 +123,28 @@ impl ClickHouseClient {
                 format!("DDL execution failed: {e}")
             )
         })
+    }
+
+    /// Returns ClickHouse columns for a table in position order.
+    pub(crate) async fn table_columns(
+        &self,
+        table_name: &str,
+    ) -> EtlResult<Vec<ClickHouseTableColumn>> {
+        self.inner
+            .query(
+                "SELECT name, type AS type_name FROM system.columns WHERE database = \
+                 currentDatabase() AND table = ? ORDER BY position",
+            )
+            .bind(table_name)
+            .fetch_all::<ClickHouseTableColumn>()
+            .await
+            .map_err(|e| {
+                etl_error!(
+                    ErrorKind::Unknown,
+                    "ClickHouse schema query failed",
+                    format!("Failed to query columns for table '{table_name}': {e}")
+                )
+            })
     }
 
     /// Adds a column to an existing ClickHouse table.

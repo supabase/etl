@@ -1818,13 +1818,14 @@ async fn ping_fails_against_unreachable_clickhouse() {
 }
 
 /// Row struct for the ADD COLUMN test after schema change.
-/// Columns: id, name, age, email (email is Nullable after ALTER TABLE ADD).
+/// Columns: id, name, age, email, score.
 #[derive(clickhouse::Row, serde::Deserialize, Debug)]
 struct AddColumnRow {
     id: i64,
     name: String,
     age: i32,
     email: Option<String>,
+    score: Option<i32>,
     cdc_operation: String,
 }
 
@@ -1838,14 +1839,16 @@ struct AddColumnRow {
 ///
 /// # WHEN
 ///
-/// A new column `email text` is added in Postgres, and a row ('Bob', 30,
-/// 'bob@example.com') is inserted with the new schema.
+/// A nullable `email text` column and a `score integer NOT NULL DEFAULT 0`
+/// column are added in Postgres, and a row ('Bob', 30, 'bob@example.com', 7)
+/// is inserted with the new schema.
 ///
 /// # THEN
 ///
-/// The ClickHouse table has an `email` column. Alice's row has NULL for email.
-/// Bob's row has 'bob@example.com'. The destination metadata snapshot_id has
-/// increased.
+/// The ClickHouse table has `email` and `score` columns. Alice's row has NULL
+/// for both added columns because ClickHouse does not backfill historical CDC
+/// rows. Bob's row has 'bob@example.com' and 7. The destination metadata
+/// snapshot_id has increased.
 #[tokio::test(flavor = "multi_thread")]
 async fn schema_change_add_column() {
     init_test_tracing();
@@ -1914,14 +1917,20 @@ async fn schema_change_add_column() {
     database
         .alter_table(
             table_name.clone(),
-            &[TableModification::AddColumn { name: "email", data_type: "text" }],
+            &[
+                TableModification::AddColumn { name: "email", data_type: "text" },
+                TableModification::AddColumn {
+                    name: "score",
+                    data_type: "integer not null default 0",
+                },
+            ],
         )
         .await
         .unwrap();
 
     database
         .run_sql(&format!(
-            "INSERT INTO {} (name, age, email) VALUES ('Bob', 30, 'bob@example.com')",
+            "INSERT INTO {} (name, age, email, score) VALUES ('Bob', 30, 'bob@example.com', 7)",
             table_name.as_quoted_identifier(),
         ))
         .await
@@ -1930,7 +1939,7 @@ async fn schema_change_add_column() {
     // Poll until Bob's row arrives (2 rows total = Alice from copy + Bob from
     // streaming).
     let select = concat!(
-        "SELECT id, name, age, email, cdc_operation ",
+        "SELECT id, name, age, email, score, cdc_operation ",
         "FROM \"test_schema__add__col\" ",
         "ORDER BY id",
     );
@@ -1954,24 +1963,38 @@ async fn schema_change_add_column() {
 
     pipeline.shutdown_and_wait().await.unwrap();
 
-    // --- THEN: ClickHouse has the new column, both rows present ---
+    // --- THEN: ClickHouse has the new columns, both rows present ---
     let final_columns = ch_db.column_names(ch_table_name).await;
-    assert_eq!(final_columns, vec!["id", "name", "age", "email"]);
+    assert_eq!(final_columns, vec!["id", "name", "age", "email", "score"]);
+
+    let final_column_types = ch_db.column_types(ch_table_name).await;
+    assert_eq!(
+        final_column_types,
+        vec![
+            ("id".to_string(), "Int64".to_string()),
+            ("name".to_string(), "String".to_string()),
+            ("age".to_string(), "Int32".to_string()),
+            ("email".to_string(), "Nullable(String)".to_string()),
+            ("score".to_string(), "Nullable(Int32)".to_string()),
+        ]
+    );
 
     assert_eq!(rows.len(), 2, "expected Alice + Bob");
 
-    // Alice: pre-change row, email should be NULL.
+    // Alice: pre-change row, added columns should be NULL.
     assert_eq!(rows[0].id, 1);
     assert_eq!(rows[0].name, "Alice");
     assert_eq!(rows[0].age, 25);
     assert_eq!(rows[0].email, None, "Alice's email should be NULL (column added after her row)");
+    assert_eq!(rows[0].score, None, "Alice's score should be NULL (column added after her row)");
     assert_eq!(rows[0].cdc_operation, "INSERT");
 
-    // Bob: post-change row, email present.
+    // Bob: post-change row, added columns present.
     assert_eq!(rows[1].id, 2);
     assert_eq!(rows[1].name, "Bob");
     assert_eq!(rows[1].age, 30);
     assert_eq!(rows[1].email, Some("bob@example.com".to_string()));
+    assert_eq!(rows[1].score, Some(7));
     assert_eq!(rows[1].cdc_operation, "INSERT");
 
     // Metadata snapshot_id should have advanced.

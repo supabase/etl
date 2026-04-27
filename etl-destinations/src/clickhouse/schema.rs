@@ -1,5 +1,10 @@
 use etl::types::{ColumnSchema, Type, is_array_type};
 
+/// Name of the CDC operation metadata column appended to ClickHouse tables.
+pub(crate) const CDC_OPERATION_COLUMN_NAME: &str = "cdc_operation";
+/// Name of the CDC LSN metadata column appended to ClickHouse tables.
+pub(crate) const CDC_LSN_COLUMN_NAME: &str = "cdc_lsn";
+
 /// Returns the base ClickHouse type string for a Postgres scalar type.
 ///
 /// The returned string does not include `Nullable(...)` wrapping — callers are
@@ -103,8 +108,8 @@ pub fn build_create_table_sql(table_name: &str, column_schemas: &[ColumnSchema])
     }
 
     // CDC columns — always non-nullable
-    cols.push(format!("  {} String", quote_identifier("cdc_operation")));
-    cols.push(format!("  {} UInt64", quote_identifier("cdc_lsn")));
+    cols.push(format!("  {} String", quote_identifier(CDC_OPERATION_COLUMN_NAME)));
+    cols.push(format!("  {} UInt64", quote_identifier(CDC_LSN_COLUMN_NAME)));
 
     let col_defs = cols.join(",\n");
     let quoted_table_name = quote_identifier(table_name);

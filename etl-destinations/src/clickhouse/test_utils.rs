@@ -165,22 +165,29 @@ impl ClickHouseTestDatabase {
     /// Returns the column names of a ClickHouse table in position order,
     /// excluding the CDC columns (`cdc_operation`, `cdc_lsn`).
     pub async fn column_names(&self, table_name: &str) -> Vec<String> {
+        self.column_types(table_name).await.into_iter().map(|(name, _)| name).collect()
+    }
+
+    /// Returns the column names and ClickHouse type strings in position order,
+    /// excluding the CDC columns (`cdc_operation`, `cdc_lsn`).
+    pub async fn column_types(&self, table_name: &str) -> Vec<(String, String)> {
         #[derive(clickhouse::Row, serde::Deserialize)]
         struct Col {
             name: String,
+            type_name: String,
         }
-        let sql = format!(
-            "SELECT name FROM system.columns WHERE database = '{}' AND table = '{}' AND name NOT \
-             IN ('cdc_operation', 'cdc_lsn') ORDER BY position",
-            self.database, table_name
-        );
         self.db_client
-            .query(&sql)
+            .query(
+                "SELECT name, type AS type_name FROM system.columns WHERE database = ? AND table \
+                 = ? AND name NOT IN ('cdc_operation', 'cdc_lsn') ORDER BY position",
+            )
+            .bind(&self.database)
+            .bind(table_name)
             .fetch_all::<Col>()
             .await
             .expect("failed to query system.columns")
             .into_iter()
-            .map(|c| c.name)
+            .map(|c| (c.name, c.type_name))
             .collect()
     }
 }
