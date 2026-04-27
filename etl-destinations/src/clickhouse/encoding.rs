@@ -40,6 +40,8 @@ pub(crate) enum ClickHouseValue {
     Int32(i32),
     Int64(i64),
     UInt32(u32),
+    /// Unsigned 64-bit integer, used for CDC LSN metadata.
+    UInt64(u64),
     Float32(f32),
     Float64(f64),
     /// TEXT, NUMERIC (string), TIME (string), JSON, BYTEA (hex-encoded)
@@ -228,6 +230,7 @@ pub(crate) fn rb_encode_value(val: ClickHouseValue, buf: &mut Vec<u8>) -> EtlRes
         ClickHouseValue::Int32(v) => buf.extend_from_slice(&v.to_le_bytes()),
         ClickHouseValue::Int64(v) => buf.extend_from_slice(&v.to_le_bytes()),
         ClickHouseValue::UInt32(v) => buf.extend_from_slice(&v.to_le_bytes()),
+        ClickHouseValue::UInt64(v) => buf.extend_from_slice(&v.to_le_bytes()),
         ClickHouseValue::Float32(v) => buf.extend_from_slice(&v.to_le_bytes()),
         ClickHouseValue::Float64(v) => buf.extend_from_slice(&v.to_le_bytes()),
         ClickHouseValue::String(s) => {
@@ -380,6 +383,10 @@ mod tests {
         buf.clear();
         rb_encode_value(ClickHouseValue::Int32(-1), &mut buf).unwrap();
         assert_eq!(buf, (-1i32).to_le_bytes());
+
+        buf.clear();
+        rb_encode_value(ClickHouseValue::UInt64(u64::MAX), &mut buf).unwrap();
+        assert_eq!(buf, u64::MAX.to_le_bytes());
 
         buf.clear();
         rb_encode_value(ClickHouseValue::String("hi".to_string()), &mut buf).unwrap();

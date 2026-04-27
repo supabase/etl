@@ -66,7 +66,7 @@ struct UpdateFlowRow {
     id: i64,
     value: String,
     cdc_operation: String,
-    cdc_lsn: i64,
+    cdc_lsn: u64,
 }
 
 /// SELECT query used to verify the `update_flow` streaming test.
@@ -1453,7 +1453,7 @@ struct DefaultIdentityDeleteRow {
     int_array_col: Vec<Option<i32>>,
     text_array_col: Vec<Option<String>>,
     cdc_operation: String,
-    cdc_lsn: i64,
+    cdc_lsn: u64,
 }
 
 const DEFAULT_IDENTITY_DELETE_SELECT: &str = concat!(

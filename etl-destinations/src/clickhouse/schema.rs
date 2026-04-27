@@ -92,7 +92,7 @@ pub fn clickhouse_column_type(col: &ColumnSchema, force_nullable: bool) -> Strin
 
 /// Generates a `CREATE TABLE IF NOT EXISTS` DDL for the given columns.
 ///
-/// Appends `cdc_operation String` and `cdc_lsn Int64` as trailing non-nullable
+/// Appends `cdc_operation String` and `cdc_lsn UInt64` as trailing non-nullable
 /// columns. Uses `MergeTree()` with `ORDER BY tuple()`.
 pub fn build_create_table_sql(table_name: &str, column_schemas: &[ColumnSchema]) -> String {
     let mut cols = Vec::with_capacity(column_schemas.len() + 2);
@@ -104,7 +104,7 @@ pub fn build_create_table_sql(table_name: &str, column_schemas: &[ColumnSchema])
 
     // CDC columns — always non-nullable
     cols.push(format!("  {} String", quote_identifier("cdc_operation")));
-    cols.push(format!("  {} Int64", quote_identifier("cdc_lsn")));
+    cols.push(format!("  {} UInt64", quote_identifier("cdc_lsn")));
 
     let col_defs = cols.join(",\n");
     let quoted_table_name = quote_identifier(table_name);
@@ -236,7 +236,7 @@ mod tests {
         }];
         let sql = build_create_table_sql("public_t", &schemas);
         assert!(sql.contains("\"cdc_operation\" String"), "cdc_operation should be non-nullable");
-        assert!(sql.contains("\"cdc_lsn\" Int64"), "cdc_lsn should be non-nullable Int64");
+        assert!(sql.contains("\"cdc_lsn\" UInt64"), "cdc_lsn should be non-nullable UInt64");
         assert!(sql.contains("ENGINE = MergeTree()"));
         assert!(sql.contains("ORDER BY tuple()"));
     }

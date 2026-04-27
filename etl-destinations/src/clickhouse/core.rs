@@ -53,6 +53,11 @@ struct PendingRow {
     cells: Vec<Cell>,
 }
 
+/// Converts a Postgres LSN into the ClickHouse CDC LSN value.
+fn cdc_lsn_to_clickhouse_value(lsn: PgLsn) -> ClickHouseValue {
+    ClickHouseValue::UInt64(u64::from(lsn))
+}
+
 // -- Inserter configuration --
 
 /// Controls intermediate flushing inside a single `write_table_rows` /
@@ -279,7 +284,7 @@ where
                 let mut values: Vec<ClickHouseValue> =
                     table_row.into_values().into_iter().map(cell_to_clickhouse_value).collect();
                 values.push(ClickHouseValue::String(String::from("INSERT")));
-                values.push(ClickHouseValue::Int64(0));
+                values.push(ClickHouseValue::UInt64(0));
                 values
             })
             .collect();
@@ -560,17 +565,7 @@ where
                                 let mut values: Vec<ClickHouseValue> =
                                     cells.into_iter().map(cell_to_clickhouse_value).collect();
                                 values.push(ClickHouseValue::String(operation.to_string()));
-                                values.push(ClickHouseValue::Int64(
-                                    i64::try_from(u64::from(lsn))
-                                        .inspect_err(|error| {
-                                            tracing::error!(
-                                                ?error,
-                                                "cannot convert u64 LSN to i64, falling back to \
-                                                 i64::MAX"
-                                            );
-                                        })
-                                        .unwrap_or(i64::MAX),
-                                ));
+                                values.push(cdc_lsn_to_clickhouse_value(lsn));
                                 values
                             })
                             .collect();
@@ -734,6 +729,18 @@ where
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn cdc_lsn_value_preserves_full_u64_range() {
+        let value = cdc_lsn_to_clickhouse_value(PgLsn::from(u64::MAX));
+
+        match value {
+            ClickHouseValue::UInt64(lsn) => assert_eq!(lsn, u64::MAX),
+            _ => panic!("expected UInt64 CDC LSN value"),
+        }
+    }
+
     #[test]
     fn nullable_flags_includes_cdc() {
         let mut all_flags: Vec<bool> = vec![true, false];
