@@ -438,7 +438,7 @@ impl ApplyLoopState {
             exit_intent: None,
             processing_paused: false,
             bootstrap_snapshot_id,
-            last_schema_cleanup_at: Some(Instant::now()),
+            last_schema_cleanup_at: None,
             schema_cleanup_tasks: JoinSet::new(),
         }
     }
