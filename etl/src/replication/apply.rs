@@ -62,10 +62,10 @@ use crate::{
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
     metrics::{
-        ACTION_LABEL, DESTINATION_LABEL, ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
-        ETL_EVENTS_PROCESSED_TOTAL, ETL_REPLICATION_MESSAGES_TOTAL,
-        ETL_TRANSACTION_DURATION_SECONDS, ETL_TRANSACTION_SIZE, ETL_TRANSACTIONS_TOTAL,
-        WORKER_TYPE_LABEL,
+        ACTION_LABEL, COMMAND_TAG_LABEL, DESTINATION_LABEL, ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
+        ETL_DDL_SCHEMA_CHANGE_COLUMNS, ETL_DDL_SCHEMA_CHANGES_TOTAL, ETL_EVENTS_PROCESSED_TOTAL,
+        ETL_REPLICATION_MESSAGES_TOTAL, ETL_TRANSACTION_DURATION_SECONDS, ETL_TRANSACTION_SIZE,
+        ETL_TRANSACTIONS_TOTAL, OUTCOME_LABEL, WORKER_TYPE_LABEL,
     },
     replication::{
         EventsStream, SharedTableCache, StatusUpdateType,
@@ -1671,15 +1671,38 @@ where
         };
 
         let content = message.content()?;
-        let schema_change_message = SchemaChangeMessage::from_str(content)?;
+        let schema_change_message = match SchemaChangeMessage::from_str(content) {
+            Ok(schema_change_message) => schema_change_message,
+            Err(err) => {
+                counter!(
+                    ETL_DDL_SCHEMA_CHANGES_TOTAL,
+                    WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
+                    COMMAND_TAG_LABEL => "unknown",
+                    OUTCOME_LABEL => "failed_parse",
+                )
+                .increment(1);
+
+                return Err(err);
+            }
+        };
 
         let table_id = schema_change_message.table_id();
+        let command_tag = schema_change_message.command_tag.clone();
+        let columns_count = schema_change_message.columns.len();
 
         // Exactly one worker owns protocol interpretation for a table at a time. If
         // this worker is not the owner, it must skip the DDL so the owning
         // worker is solely responsible for advancing the shared per-table
         // protocol state.
         if !self.should_apply_changes(table_id, remote_final_lsn).await? {
+            counter!(
+                ETL_DDL_SCHEMA_CHANGES_TOTAL,
+                WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
+                COMMAND_TAG_LABEL => command_tag,
+                OUTCOME_LABEL => "skipped",
+            )
+            .increment(1);
+
             return Ok(HandleMessageResult::no_event());
         }
 
@@ -1697,7 +1720,17 @@ where
         let table_schema = schema_change_message.into_table_schema(snapshot_id);
 
         // Store the new schema version in the store.
-        self.schema_store.store_table_schema(table_schema).await?;
+        if let Err(err) = self.schema_store.store_table_schema(table_schema).await {
+            counter!(
+                ETL_DDL_SCHEMA_CHANGES_TOTAL,
+                WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
+                COMMAND_TAG_LABEL => command_tag.clone(),
+                OUTCOME_LABEL => "failed_store",
+            )
+            .increment(1);
+
+            return Err(err);
+        }
 
         // The next post-DDL DML will cause pgoutput to synthesize a fresh `RELATION`
         // message for this table. Record the new snapshot and clear any cached
@@ -1706,6 +1739,21 @@ where
         self.shared_table_cache.note_waiting_for_relation(table_id, snapshot_id).await;
 
         let table_id_u32: u32 = table_id.into();
+        counter!(
+            ETL_DDL_SCHEMA_CHANGES_TOTAL,
+            WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
+            COMMAND_TAG_LABEL => command_tag.clone(),
+            OUTCOME_LABEL => "applied",
+        )
+        .increment(1);
+
+        histogram!(
+            ETL_DDL_SCHEMA_CHANGE_COLUMNS,
+            WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
+            COMMAND_TAG_LABEL => command_tag.clone(),
+        )
+        .record(columns_count as f64);
+
         info!(
             table_id = table_id_u32,
             %snapshot_id,
