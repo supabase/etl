@@ -17,6 +17,7 @@ ducklake = [
     "dep:pg_escape",
     "dep:r2d2",
     "dep:rand",
+    "dep:regex",
     "dep:sqlx",
     "dep:tokio-postgres",
     "dep:tracing",
@@ -69,6 +70,7 @@ pg_escape = { workspace = true, optional = true }
 prost = { workspace = true, optional = true }
 r2d2 = { workspace = true, optional = true }
 rand = { workspace = true, optional = true, features = ["thread_rng"] }
+regex = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true, features = ["json"] }
 serde = { workspace = true, optional = true, features = ["derive"] }
 serde_json = { workspace = true, optional = true }

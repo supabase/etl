@@ -1,8 +1,10 @@
 #[cfg(feature = "test-utils")]
 use std::sync::atomic::AtomicUsize;
 use std::{
+    borrow::Cow,
+    error, fmt,
     sync::{
-        Arc,
+        Arc, LazyLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
@@ -14,6 +16,7 @@ use etl::{
     etl_error,
 };
 use metrics::histogram;
+use regex::Regex;
 use tokio::{
     sync::{Semaphore, oneshot},
     task::JoinHandle,
@@ -22,7 +25,7 @@ use tokio::{
 use tracing::{info, trace, warn};
 
 use crate::ducklake::{
-    config::DuckLakeSetupPlan,
+    config::{DuckLakeSetupPlan, DuckLakeSetupStep},
     metrics::{
         ETL_DUCKLAKE_BLOCKING_OPERATION_DURATION_SECONDS, ETL_DUCKLAKE_BLOCKING_SLOT_WAIT_SECONDS,
         ETL_DUCKLAKE_POOL_CHECKOUT_WAIT_SECONDS,
@@ -31,6 +34,11 @@ use crate::ducklake::{
 
 /// Monotonic identifier assigned to each DuckLake connection setup attempt.
 static NEXT_CONNECTION_INIT_ID: AtomicU64 = AtomicU64::new(1);
+/// Matches one libpq password field inside a conninfo string.
+static POSTGRES_PASSWORD_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"password=(?:'([^'\\]|\\.)*'|[^\s,);]+)")
+        .expect("postgres password redaction regex should compile")
+});
 
 /// Timeout applied to each foreground DuckLake blocking operation.
 pub(super) const FOREGROUND_QUERY_TIMEOUT: Duration = Duration::from_secs(2 * 60);
@@ -172,6 +180,45 @@ pub(super) struct ManagedDuckLakeConnection {
     broken: bool,
 }
 
+/// Error returned while opening or validating one DuckLake pooled connection.
+#[derive(Debug)]
+pub(super) struct DuckLakeConnectionError {
+    message: String,
+}
+
+impl DuckLakeConnectionError {
+    /// Creates one setup-phase error and redacts a PostgreSQL catalog password
+    /// when present.
+    fn setup_phase(step: &DuckLakeSetupStep, error: duckdb::Error) -> Self {
+        let error_message = error.to_string();
+        let error_message = if attach_step_uses_postgres_catalog(step) {
+            redact_ducklake_connection_error_message(&error_message)
+        } else {
+            Cow::Owned(error_message)
+        };
+
+        Self {
+            message: format!(
+                "ducklake duckdb connection setup phase `{}` failed: {error_message}",
+                step.label
+            ),
+        }
+    }
+
+    /// Creates one connection validation error.
+    fn validation(error: duckdb::Error) -> Self {
+        Self { message: format!("ducklake duckdb connection validation failed: {error}") }
+    }
+}
+
+impl fmt::Display for DuckLakeConnectionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
+        f.write_str(&self.message)
+    }
+}
+
+impl error::Error for DuckLakeConnectionError {}
+
 /// Manages one dedicated DuckLake pool for a background task.
 pub(super) struct LazyDuckLakePool {
     manager: DuckLakeConnectionManager,
@@ -271,14 +318,19 @@ impl Drop for LazyDuckLakePool {
 impl DuckLakeConnectionManager {
     /// Opens one fully initialized DuckDB connection and attaches the lake
     /// catalog.
-    pub(super) fn open_duckdb_connection(&self) -> Result<duckdb::Connection, duckdb::Error> {
+    pub(super) fn open_duckdb_connection(
+        &self,
+    ) -> Result<duckdb::Connection, DuckLakeConnectionError> {
         let connection_init_id = NEXT_CONNECTION_INIT_ID.fetch_add(1, Ordering::Relaxed);
         let conn = if self.disable_extension_autoload {
             duckdb::Connection::open_in_memory_with_flags(
-                Config::default().enable_autoload_extension(false)?,
-            )?
+                Config::default()
+                    .enable_autoload_extension(false)
+                    .map_err(DuckLakeConnectionError::validation)?,
+            )
+            .map_err(DuckLakeConnectionError::validation)?
         } else {
-            duckdb::Connection::open_in_memory()?
+            duckdb::Connection::open_in_memory().map_err(DuckLakeConnectionError::validation)?
         };
         for step in self.setup_plan.steps() {
             let phase_started = Instant::now();
@@ -288,14 +340,7 @@ impl DuckLakeConnectionManager {
                 "starting ducklake duckdb connection setup phase"
             );
             if let Err(error) = conn.execute_batch(&step.sql) {
-                warn!(
-                    connection_init_id,
-                    phase = step.label,
-                    elapsed_ms = phase_started.elapsed().as_millis() as u64,
-                    error = ?error,
-                    "ducklake duckdb connection setup phase failed"
-                );
-                return Err(error);
+                return Err(DuckLakeConnectionError::setup_phase(step, error));
             }
             info!(
                 connection_init_id,
@@ -318,14 +363,17 @@ impl DuckLakeConnectionManager {
 
 impl r2d2::ManageConnection for DuckLakeConnectionManager {
     type Connection = ManagedDuckLakeConnection;
-    type Error = duckdb::Error;
+    type Error = DuckLakeConnectionError;
 
-    fn connect(&self) -> Result<ManagedDuckLakeConnection, duckdb::Error> {
+    fn connect(&self) -> Result<ManagedDuckLakeConnection, DuckLakeConnectionError> {
         Ok(ManagedDuckLakeConnection { conn: self.open_duckdb_connection()?, broken: false })
     }
 
-    fn is_valid(&self, conn: &mut ManagedDuckLakeConnection) -> Result<(), duckdb::Error> {
-        conn.conn.execute_batch("SELECT 1")?;
+    fn is_valid(
+        &self,
+        conn: &mut ManagedDuckLakeConnection,
+    ) -> Result<(), DuckLakeConnectionError> {
+        conn.conn.execute_batch("SELECT 1").map_err(DuckLakeConnectionError::validation)?;
         Ok(())
     }
 
@@ -341,6 +389,16 @@ pub(super) fn format_query_error_detail(sql: &str, error: &duckdb::Error) -> Str
     format!("sql: {compact_sql}; source: {error}")
 }
 
+/// Returns whether one setup step attaches a PostgreSQL-backed catalog.
+fn attach_step_uses_postgres_catalog(step: &DuckLakeSetupStep) -> bool {
+    step.label == "attach_catalog" && step.sql.contains("ducklake:postgres:")
+}
+
+/// Redacts PostgreSQL passwords from one DuckDB or r2d2 error message.
+fn redact_ducklake_connection_error_message(message: &str) -> Cow<'_, str> {
+    POSTGRES_PASSWORD_REGEX.replace_all(message, "password='[redacted]'")
+}
+
 /// Builds and warms an r2d2 pool of initialized DuckDB connections.
 pub(super) async fn build_warm_ducklake_pool(
     manager: DuckLakeConnectionManager,
@@ -353,6 +411,9 @@ pub(super) async fn build_warm_ducklake_pool(
             .max_size(pool_size)
             .min_idle(Some(pool_size))
             .test_on_check_out(true)
+            // Callers log the returned pool initialization failure once, so
+            // suppress r2d2's internal per-attempt logging here.
+            .error_handler(Box::new(r2d2::NopErrorHandler))
             .build(manager)
             .map_err(|e| {
                 etl_error!(
@@ -638,6 +699,48 @@ mod tests {
         assert_eq!(
             format_query_error_detail(sql, &error),
             "sql: CREATE TABLE lake.\"orders\" (\"id\" INTEGER NOT NULL); source: parser error"
+        );
+    }
+
+    #[test]
+    fn redact_ducklake_connection_error_message_masks_quoted_password() {
+        let message = "timed out waiting for connection: attach failed: postgres:host='localhost' \
+                       user='ducklake' password='pa\\'ss\\\\word' dbname='catalog'";
+
+        assert_eq!(
+            redact_ducklake_connection_error_message(message),
+            "timed out waiting for connection: attach failed: postgres:host='localhost' \
+             user='ducklake' password='[redacted]' dbname='catalog'"
+        );
+    }
+
+    #[test]
+    fn redact_ducklake_connection_error_message_keeps_non_sensitive_messages() {
+        let message = "timed out waiting for connection: parser error";
+
+        assert_eq!(redact_ducklake_connection_error_message(message), message);
+    }
+
+    #[test]
+    fn ducklake_connection_error_redacts_postgres_catalog_password() {
+        let step = DuckLakeSetupStep {
+            label: "attach_catalog",
+            sql: "ATTACH 'ducklake:postgres:host=''localhost'' user=''ducklake'' \
+                  password=''secret''' AS lake;"
+                .to_owned(),
+        };
+        let error = duckdb::Error::DuckDBFailure(
+            duckdb::ffi::Error::new(1),
+            Some(
+                "attach failed: postgres:host='localhost' user='ducklake' password='secret'"
+                    .to_owned(),
+            ),
+        );
+
+        assert_eq!(
+            DuckLakeConnectionError::setup_phase(&step, error).to_string(),
+            "ducklake duckdb connection setup phase `attach_catalog` failed: attach failed: \
+             postgres:host='localhost' user='ducklake' password='[redacted]'"
         );
     }
 
