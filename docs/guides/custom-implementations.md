@@ -49,9 +49,9 @@ tracing-subscriber = "0.3"
 
 Create `src/custom_store.rs`. A store must implement three traits (see [Extension Points](../explanation/traits.md) for full details):
 
-- `SchemaStore` - Table schema storage and retrieval
-- `StateStore` - Replication progress and destination metadata tracking
-- `CleanupStore` - Metadata cleanup when tables leave the publication
+- `SchemaStore` - Versioned table schema storage, retrieval, and pruning
+- `StateStore` - Replication progress and destination table metadata tracking
+- `CleanupStore` - Store cleanup when tables leave the publication
 
 ```rust
 use std::collections::{BTreeMap, HashMap};
@@ -127,6 +127,25 @@ impl SchemaStore for CustomStore {
             .schemas
             .insert(snapshot_id, Arc::clone(&schema));
         Ok(schema)
+    }
+
+    async fn prune_table_schemas(
+        &self,
+        current_snapshot_ids: HashMap<TableId, SnapshotId>,
+    ) -> EtlResult<u64> {
+        let mut tables = self.tables.lock().await;
+        let mut removed_count = 0u64;
+
+        for (table_id, entry) in tables.iter_mut() {
+            if let Some(current_snapshot_id) = current_snapshot_ids.get(table_id) {
+                let before_count = entry.schemas.len();
+                entry.schemas.retain(|snapshot_id, _| snapshot_id >= current_snapshot_id);
+                removed_count = removed_count
+                    .saturating_add(before_count.saturating_sub(entry.schemas.len()) as u64);
+            }
+        }
+
+        Ok(removed_count)
     }
 }
 

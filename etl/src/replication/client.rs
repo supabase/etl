@@ -720,7 +720,7 @@ impl PgReplicationClient {
 
     /// Deletes a replication slot with the specified name if it exists.
     ///
-    /// This method returns [`Ok(())`] when the slot is missing and propagates
+    /// This method returns `Ok(())` when the slot is missing and propagates
     /// any other error from [`PgReplicationClient::delete_slot`].
     pub async fn delete_slot_if_exists(&self, slot_name: &str) -> EtlResult<()> {
         self.delete_slot_internal(slot_name, false).await

@@ -18,6 +18,8 @@ pub const ETL_EVENTS_PROCESSED_TOTAL: &str = "etl_events_processed_total";
 pub const ETL_REPLICATION_MESSAGES_TOTAL: &str = "etl_replication_messages_total";
 pub const ETL_STATUS_UPDATES_TOTAL: &str = "etl_status_updates_total";
 pub const ETL_STATUS_UPDATES_SKIPPED_TOTAL: &str = "etl_status_updates_skipped_total";
+pub const ETL_SCHEMA_CLEANUPS_TOTAL: &str = "etl_schema_cleanups_total";
+pub const ETL_SCHEMA_CLEANUP_ERRORS_TOTAL: &str = "etl_schema_cleanup_errors_total";
 pub const ETL_DDL_SCHEMA_CHANGES_TOTAL: &str = "etl_ddl_schema_changes_total";
 pub const ETL_DDL_SCHEMA_CHANGE_COLUMNS: &str = "etl_ddl_schema_change_columns";
 pub const ETL_ROW_SIZE_BYTES: &str = "etl_row_size_bytes";
@@ -145,6 +147,18 @@ pub(crate) fn register_metrics() {
             Unit::Count,
             "Total number of status updates skipped due to throttling, labeled by \
              status_update_type."
+        );
+
+        describe_counter!(
+            ETL_SCHEMA_CLEANUPS_TOTAL,
+            Unit::Count,
+            "Total number of asynchronous schema cleanup tasks completed, labeled by worker_type."
+        );
+
+        describe_counter!(
+            ETL_SCHEMA_CLEANUP_ERRORS_TOTAL,
+            Unit::Count,
+            "Total number of asynchronous schema cleanup errors, labeled by worker_type."
         );
 
         describe_counter!(

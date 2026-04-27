@@ -204,6 +204,22 @@ impl Inner {
             }
         }
     }
+
+    /// Prunes cached schema versions older than the current snapshot for each
+    /// table.
+    fn prune_table_schemas(
+        &mut self,
+        current_snapshot_ids: &HashMap<TableId, SnapshotId>,
+    ) -> usize {
+        let before_count = self.table_schemas.len();
+        self.table_schemas.retain(|(table_id, snapshot_id), _| {
+            current_snapshot_ids
+                .get(table_id)
+                .is_none_or(|current_snapshot_id| snapshot_id >= current_snapshot_id)
+        });
+
+        before_count.saturating_sub(self.table_schemas.len())
+    }
 }
 
 /// Postgres-backed storage for ETL pipeline state and schema information.
@@ -247,7 +263,7 @@ impl PostgresStore {
     ///
     /// Runs the required ETL migrations and then creates a lazily-connected
     /// pool with automatic idle timeout. Connections are established on
-    /// first use and automatically closed after [`IDLE_TIMEOUT`] of
+    /// first use and automatically closed after `IDLE_TIMEOUT` of
     /// inactivity.
     pub async fn new(
         pipeline_id: PipelineId,
@@ -405,8 +421,8 @@ impl StateStore for PostgresStore {
 
     /// Retrieves destination table metadata for a specific table from cache.
     ///
-    /// This method provides fast access to destination metadata by reading
-    /// from the in-memory cache.
+    /// This method provides fast access to destination table metadata by
+    /// reading from the in-memory cache.
     async fn get_destination_table_metadata(
         &self,
         table_id: TableId,
@@ -651,6 +667,39 @@ impl SchemaStore for PostgresStore {
         inner.insert_schema_with_eviction(Arc::clone(&table_schema));
 
         Ok(table_schema)
+    }
+
+    async fn prune_table_schemas(
+        &self,
+        current_snapshot_ids: HashMap<TableId, SnapshotId>,
+    ) -> EtlResult<u64> {
+        let deleted_count = schema::delete_obsolete_table_schema_versions(
+            &self.pool,
+            self.pipeline_id as i64,
+            &current_snapshot_ids,
+        )
+        .await
+        .map_err(|err| {
+            etl_error!(
+                ErrorKind::SourceQueryFailed,
+                "Obsolete table schema deletion failed",
+                format!("Failed to delete obsolete table schemas from PostgreSQL: {}", err)
+            )
+        })?;
+
+        let mut inner = self.inner.lock().await;
+        let cached_count = inner.prune_table_schemas(&current_snapshot_ids);
+
+        if deleted_count > 0 || cached_count > 0 {
+            info!(
+                deleted_count,
+                cached_count,
+                table_count = current_snapshot_ids.len(),
+                "pruned obsolete table schema versions"
+            );
+        }
+
+        Ok(deleted_count)
     }
 }
 

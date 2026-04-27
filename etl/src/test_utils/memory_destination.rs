@@ -83,7 +83,8 @@ where
         inner.table_rows.clear();
     }
 
-    /// Stores destination metadata for a table if it has not been seen before.
+    /// Stores destination table metadata for a table if it has not been seen
+    /// before.
     async fn ensure_destination_table_metadata(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
@@ -98,7 +99,7 @@ where
         Ok(())
     }
 
-    /// Builds applied destination metadata for a memory-backed table.
+    /// Builds applied destination table metadata for a memory-backed table.
     fn build_destination_table_metadata(
         replicated_table_schema: &ReplicatedTableSchema,
     ) -> DestinationTableMetadata {
@@ -161,8 +162,8 @@ where
     ) -> EtlResult<()> {
         let table_id = replicated_table_schema.id();
 
-        // Store destination metadata on first write, like real destinations (BigQuery,
-        // Iceberg) do.
+        // Store destination table metadata on first write, like real destinations
+        // (BigQuery, Iceberg) do.
         self.ensure_destination_table_metadata(replicated_table_schema).await?;
 
         let mut inner = self.inner.lock().await;

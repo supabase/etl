@@ -243,8 +243,8 @@ pub async fn delete_pipeline_source_state(
     source_connection: &mut PgConnection,
     pipeline_id: i64,
 ) -> Result<(), PipelinesDbError> {
-    // Delete state, schema, and destination metadata from the source database, only
-    // if ETL tables exist.
+    // Delete state, schema, and destination table metadata from the source
+    // database, only if ETL tables exist.
     if health::etl_tables_present(&mut *source_connection).await? {
         state::delete_replication_state_for_all_tables(&mut *source_connection, pipeline_id)
             .await?;

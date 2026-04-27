@@ -233,6 +233,22 @@ impl SchemaStore for MemoryStore {
         inner.table_schemas.insert(key, Arc::clone(&table_schema));
         Ok(table_schema)
     }
+
+    async fn prune_table_schemas(
+        &self,
+        current_snapshot_ids: HashMap<TableId, SnapshotId>,
+    ) -> EtlResult<u64> {
+        let mut inner = self.inner.lock().await;
+
+        let before_count = inner.table_schemas.len();
+        inner.table_schemas.retain(|(table_id, snapshot_id), _| {
+            current_snapshot_ids
+                .get(table_id)
+                .is_none_or(|current_snapshot_id| snapshot_id >= current_snapshot_id)
+        });
+
+        Ok(before_count.saturating_sub(inner.table_schemas.len()) as u64)
+    }
 }
 
 impl CleanupStore for MemoryStore {

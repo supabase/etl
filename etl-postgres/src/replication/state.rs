@@ -165,7 +165,7 @@ pub async fn rollback_replication_state(
 ///
 /// Removes all existing state entries for the table (including history) and
 /// creates a new Init entry, effectively restarting replication from scratch.
-/// Table mappings and schemas are preserved for use on restart.
+/// Destination table metadata and schemas are preserved for use on restart.
 pub async fn reset_replication_state(
     conn: &mut sqlx::PgConnection,
     pipeline_id: i64,

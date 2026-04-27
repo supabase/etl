@@ -1117,7 +1117,7 @@ async fn rollback_tables_with_full_reset_succeeds() {
     .await
     .unwrap();
 
-    // Insert destination metadata for this table
+    // Insert destination table metadata for this table.
     sqlx::query(
         "insert into etl.destination_tables_metadata (pipeline_id, table_id, \
          destination_table_id, snapshot_id, schema_status, replication_mask) values ($1, $2, \
@@ -1184,7 +1184,7 @@ async fn rollback_tables_with_full_reset_succeeds() {
     .unwrap();
     assert_eq!(schema_count_after, 1);
 
-    // Verify destination metadata was not deleted.
+    // Verify destination table metadata was not deleted.
     let metadata_count_after: i64 = sqlx::query_scalar(
         "select count(*) from etl.destination_tables_metadata where pipeline_id = $1 and table_id \
          = $2",
@@ -1220,7 +1220,7 @@ async fn rollback_to_init_keeps_schemas_and_metadata() {
     )
     .await;
 
-    // Insert table schema and mapping
+    // Insert table schema and destination table metadata.
     let table_schema_id: i64 = sqlx::query_scalar(
         "insert into etl.table_schemas (pipeline_id, table_id, schema_name, table_name) values \
          ($1, $2, 'test', 'test_users') returning id",
@@ -1279,7 +1279,7 @@ async fn rollback_to_init_keeps_schemas_and_metadata() {
     .unwrap();
     assert_eq!(schema_count, 1);
 
-    // Verify destination metadata was not deleted.
+    // Verify destination table metadata was not deleted.
     let metadata_count: i64 = sqlx::query_scalar(
         "select count(*) from etl.destination_tables_metadata where pipeline_id = $1 and table_id \
          = $2",
@@ -1316,7 +1316,7 @@ async fn rollback_to_non_starting_state_keeps_schemas_and_metadata() {
     )
     .await;
 
-    // Insert table schema and mapping
+    // Insert table schema and destination table metadata.
     let table_schema_id: i64 = sqlx::query_scalar(
         "insert into etl.table_schemas (pipeline_id, table_id, schema_name, table_name) values \
          ($1, $2, 'test', 'test_users') returning id",
@@ -1375,7 +1375,7 @@ async fn rollback_to_non_starting_state_keeps_schemas_and_metadata() {
     .unwrap();
     assert_eq!(schema_count, 1);
 
-    // Verify destination metadata was NOT deleted
+    // Verify destination table metadata was NOT deleted.
     let metadata_count: i64 = sqlx::query_scalar(
         "select count(*) from etl.destination_tables_metadata where pipeline_id = $1 and table_id \
          = $2",

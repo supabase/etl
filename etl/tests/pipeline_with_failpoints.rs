@@ -2,11 +2,11 @@
 
 use etl::{
     failpoints::{
-        SEND_STATUS_UPDATE_FP, START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP,
-        START_TABLE_SYNC_DURING_DATA_SYNC_FP,
+        FORCE_SCHEMA_CLEANUP_FP, SEND_STATUS_UPDATE_FP,
+        START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP, START_TABLE_SYNC_DURING_DATA_SYNC_FP,
     },
     state::table::{RetryPolicy, TableReplicationPhase, TableReplicationPhaseType},
-    store::state::StateStore,
+    store::{schema::SchemaStore, state::StateStore},
     test_utils::{
         database::{spawn_source_database, test_table_name},
         event::group_events_by_type_and_table_id,
@@ -1029,6 +1029,140 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
 
     assert_eq!(grouped.get(&(EventType::Relation, table_id)).unwrap().len(), 2);
     assert_eq!(grouped.get(&(EventType::Insert, table_id)).unwrap().len(), 3);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cleaned_schema_snapshots_are_recreated_when_status_update_is_lost() {
+    let _scenario = FailScenario::setup();
+    fail::cfg(SEND_STATUS_UPDATE_FP, "return").unwrap();
+
+    init_test_tracing();
+
+    let database = spawn_source_database().await;
+    let table_name = test_table_name("schema_cleanup_replay");
+    let table_id = database
+        .create_table(
+            table_name.clone(),
+            true,
+            &[("name", "text not null"), ("age", "integer not null")],
+        )
+        .await
+        .unwrap();
+
+    let publication_name = format!("pub_{}", random::<u32>());
+    database
+        .run_sql(&format!(
+            "create publication {publication_name} for table {}",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name.clone(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    let ready_notify =
+        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
+
+    pipeline.start().await.unwrap();
+
+    ready_notify.notified().await;
+
+    let events_notify = destination
+        .wait_for_events_count(vec![(EventType::Relation, 2), (EventType::Insert, 2)])
+        .await;
+
+    database
+        .alter_table(
+            table_name.clone(),
+            &[TableModification::AddColumn {
+                name: "email",
+                data_type: "text not null default 'unknown@example.com'",
+            }],
+        )
+        .await
+        .unwrap();
+
+    database
+        .insert_values(
+            table_name.clone(),
+            &["name", "age", "email"],
+            &[&"Bob", &28, &"bob@example.com"],
+        )
+        .await
+        .unwrap();
+
+    database
+        .alter_table(table_name.clone(), &[TableModification::DropColumn { name: "age" }])
+        .await
+        .unwrap();
+
+    database
+        .insert_values(table_name.clone(), &["name", "email"], &[&"Matt", &"matt@example.com"])
+        .await
+        .unwrap();
+
+    events_notify.notified().await;
+
+    let initial_events = collect_table_events(&destination.get_events().await, table_id);
+    let relation_snapshots = initial_events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Relation(relation) => Some(relation.replicated_table_schema.inner().snapshot_id),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let first_snapshot = relation_snapshots[0];
+    let latest_snapshot = relation_snapshots[1];
+    assert_eq!(relation_snapshots.len(), 2);
+
+    assert!(store.get_table_schema(&table_id, first_snapshot).await.unwrap().is_some());
+    assert!(store.get_table_schema(&table_id, latest_snapshot).await.unwrap().is_some());
+
+    // We need to force the schema cleanup.
+    let prune_notify = store.notify_on_table_schema_prune().await;
+    fail::cfg(FORCE_SCHEMA_CLEANUP_FP, "return").unwrap();
+    prune_notify.notified().await;
+    fail::remove(FORCE_SCHEMA_CLEANUP_FP);
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    assert!(store.get_table_schema(&table_id, first_snapshot).await.unwrap().is_none());
+    assert!(store.get_table_schema(&table_id, latest_snapshot).await.unwrap().is_some());
+
+    destination.clear_events().await;
+
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name,
+        store.clone(),
+        destination.clone(),
+    );
+
+    let replayed_events_notify = destination
+        .wait_for_events_count(vec![(EventType::Relation, 2), (EventType::Insert, 2)])
+        .await;
+
+    pipeline.start().await.unwrap();
+
+    replayed_events_notify.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let replayed_events = collect_table_events(&destination.get_events().await, table_id);
+    assert_events_equal(&initial_events, &replayed_events);
+
+    assert!(store.get_table_schema(&table_id, first_snapshot).await.unwrap().is_some());
+    assert!(store.get_table_schema(&table_id, latest_snapshot).await.unwrap().is_some());
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -12,6 +12,6 @@ mod table_sync;
 pub(crate) use apply::{
     ApplyLoop, ApplyLoopResult, ApplyWorkerContext, TableSyncWorkerContext, WorkerContext,
 };
-pub(crate) use stream::{EventsStream, StatusUpdateType, TableCopyStream};
+pub(crate) use stream::{EventsStream, StatusUpdateResult, StatusUpdateType, TableCopyStream};
 pub(crate) use table_cache::SharedTableCache;
 pub(crate) use table_sync::{TableSyncResult, start_table_sync};

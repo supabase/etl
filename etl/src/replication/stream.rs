@@ -103,7 +103,7 @@ where
 
 /// The status update type when sending a status update message back to
 /// Postgres.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) enum StatusUpdateType {
     /// Represents an update in response to a keep alive from Postgres.
     KeepAlive,
@@ -113,6 +113,15 @@ pub(crate) enum StatusUpdateType {
     /// Represents an update before shutdown that requires acknowledgement from
     /// Postgres.
     ShutdownFlush,
+}
+
+/// Outcome of a status update attempt.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum StatusUpdateResult {
+    /// A status update was accepted by the local replication stream wrapper.
+    Sent,
+    /// No status update was sent because throttling suppressed it.
+    Skipped,
 }
 
 impl StatusUpdateType {
@@ -167,17 +176,7 @@ impl EventsStream {
         mut flush_lsn: PgLsn,
         force: bool,
         status_update_type: StatusUpdateType,
-    ) -> EtlResult<()> {
-        // If the failpoint is active, we do not send any status update. This is useful
-        // for testing the system when we want to check what happens when no
-        // status updates are sent.
-        #[cfg(feature = "failpoints")]
-        if etl_fail_point_active(SEND_STATUS_UPDATE_FP) {
-            warn!("not sending status update due to active failpoint");
-
-            return Ok(());
-        }
-
+    ) -> EtlResult<StatusUpdateResult> {
         let this = self.project();
         // If the new write lsn is less than the last one, we can safely ignore it,
         // since we only want to report monotonically increasing values.
@@ -231,8 +230,24 @@ impl EventsStream {
                     "skipping status update"
                 );
 
-                return Ok(());
+                return Ok(StatusUpdateResult::Skipped);
             }
+        }
+
+        // If the failpoint is active, we do not send any status update. This is useful
+        // for testing the system when we want to check what happens when no
+        // status updates are sent. The local stream state is still advanced so
+        // callers exercise the same post-send paths as a status update that was
+        // lost before reaching PostgreSQL.
+        #[cfg(feature = "failpoints")]
+        if etl_fail_point_active(SEND_STATUS_UPDATE_FP) {
+            warn!("not sending status update due to active failpoint");
+
+            *this.last_update = Some(Instant::now());
+            *this.last_write_lsn = Some(write_lsn);
+            *this.last_flush_lsn = Some(flush_lsn);
+
+            return Ok(StatusUpdateResult::Sent);
         }
 
         // The client's system clock at the time of transmission, as microseconds since
@@ -275,7 +290,7 @@ impl EventsStream {
         *this.last_write_lsn = Some(write_lsn);
         *this.last_flush_lsn = Some(flush_lsn);
 
-        Ok(())
+        Ok(StatusUpdateResult::Sent)
     }
 }
 

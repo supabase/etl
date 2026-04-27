@@ -409,6 +409,54 @@ where
     Ok(result.rows_affected())
 }
 
+/// Deletes obsolete table schema versions for a pipeline.
+///
+/// For each current table snapshot, deletes schema versions for that table
+/// with an older `snapshot_id`. Schema versions at or after the current
+/// snapshot are left untouched. Column rows are removed by the
+/// `table_columns.table_schema_id` `ON DELETE CASCADE` constraint, and the
+/// single `DELETE` statement is atomic in PostgreSQL.
+pub async fn delete_obsolete_table_schema_versions<'c, E>(
+    executor: E,
+    pipeline_id: i64,
+    current_snapshot_ids: &HashMap<TableId, SnapshotId>,
+) -> Result<u64, sqlx::Error>
+where
+    E: PgExecutor<'c>,
+{
+    if current_snapshot_ids.is_empty() {
+        return Ok(0);
+    }
+
+    let mut table_ids = Vec::with_capacity(current_snapshot_ids.len());
+    let mut snapshot_ids = Vec::with_capacity(current_snapshot_ids.len());
+    for (table_id, snapshot_id) in current_snapshot_ids {
+        table_ids.push(SqlxTableId(table_id.into_inner()));
+        snapshot_ids.push(snapshot_id.to_pg_lsn_string());
+    }
+
+    let result = sqlx::query(
+        r#"
+        with current_snapshots as (
+            select *
+            from unnest($2::oid[], $3::pg_lsn[]) as cs(table_id, current_snapshot_id)
+        )
+        delete from etl.table_schemas ts
+        using current_snapshots cs
+        where ts.pipeline_id = $1
+          and ts.table_id = cs.table_id
+          and ts.snapshot_id < cs.current_snapshot_id
+        "#,
+    )
+    .bind(pipeline_id)
+    .bind(table_ids)
+    .bind(snapshot_ids)
+    .execute(executor)
+    .await?;
+
+    Ok(result.rows_affected())
+}
+
 /// Builds a [`ColumnSchema`] from a database row.
 ///
 /// Assumes all required fields are present in the row after appropriate joins.

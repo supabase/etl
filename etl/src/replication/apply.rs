@@ -32,12 +32,13 @@ use postgres_replication::{
 use tokio::{
     pin,
     sync::{Semaphore, watch},
+    task::JoinSet,
 };
 use tokio_postgres::types::PgLsn;
 use tracing::{debug, error, info, warn};
 
 #[cfg(feature = "failpoints")]
-use crate::failpoints::{SEND_STATUS_UPDATE_FP, etl_fail_point_active};
+use crate::failpoints::{FORCE_SCHEMA_CLEANUP_FP, SEND_STATUS_UPDATE_FP, etl_fail_point_active};
 use crate::{
     bail,
     concurrency::{
@@ -64,11 +65,12 @@ use crate::{
     metrics::{
         ACTION_LABEL, COMMAND_TAG_LABEL, DESTINATION_LABEL, ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
         ETL_DDL_SCHEMA_CHANGE_COLUMNS, ETL_DDL_SCHEMA_CHANGES_TOTAL, ETL_EVENTS_PROCESSED_TOTAL,
-        ETL_REPLICATION_MESSAGES_TOTAL, ETL_TRANSACTION_DURATION_SECONDS, ETL_TRANSACTION_SIZE,
-        ETL_TRANSACTIONS_TOTAL, OUTCOME_LABEL, WORKER_TYPE_LABEL,
+        ETL_REPLICATION_MESSAGES_TOTAL, ETL_SCHEMA_CLEANUP_ERRORS_TOTAL, ETL_SCHEMA_CLEANUPS_TOTAL,
+        ETL_TRANSACTION_DURATION_SECONDS, ETL_TRANSACTION_SIZE, ETL_TRANSACTIONS_TOTAL,
+        OUTCOME_LABEL, WORKER_TYPE_LABEL,
     },
     replication::{
-        EventsStream, SharedTableCache, StatusUpdateType,
+        EventsStream, SharedTableCache, StatusUpdateResult, StatusUpdateType,
         client::{PgReplicationClient, PostgresConnectionUpdate},
     },
     state::table::{TableReplicationError, TableReplicationPhase, TableReplicationPhaseType},
@@ -100,6 +102,13 @@ const KEEP_ALIVE_DEADLINE_FRACTION: f64 = 0.6;
 /// deadline at that scale would make the apply loop spin sending forced keep
 /// alives, which is not operationally useful. We clamp to `100ms`.
 const MIN_KEEP_ALIVE_DEADLINE_DURATION: Duration = Duration::from_millis(100);
+/// Minimum interval between best-effort schema cleanup tasks during normal
+/// replication.
+///
+/// Cleanup is checked after status updates and depends only on when cleanup was
+/// last scheduled. The interval keeps the status-update hot path cheap while
+/// bounding how long stale schema versions normally remain in storage.
+const SCHEMA_CLEANUP_INTERVAL: Duration = Duration::from_hours(1);
 
 /// Type of worker driving the apply loop.
 #[derive(Debug, Copy, Clone)]
@@ -400,6 +409,10 @@ struct ApplyLoopState {
     /// can always resolve the latest schema version whose snapshot is less
     /// than or equal to the worker's start point.
     bootstrap_snapshot_id: SnapshotId,
+    /// Time at which a schema cleanup task was last scheduled.
+    last_schema_cleanup_at: Option<Instant>,
+    /// Background schema cleanup tasks owned by this apply loop.
+    schema_cleanup_tasks: JoinSet<()>,
 }
 
 impl ApplyLoopState {
@@ -425,6 +438,8 @@ impl ApplyLoopState {
             exit_intent: None,
             processing_paused: false,
             bootstrap_snapshot_id,
+            last_schema_cleanup_at: Some(Instant::now()),
+            schema_cleanup_tasks: JoinSet::new(),
         }
     }
 
@@ -521,6 +536,28 @@ impl ApplyLoopState {
         } else {
             self.replication_progress.last_flush_lsn
         }
+    }
+
+    /// Returns `true` when cleanup should run.
+    fn should_cleanup_schemas(&self) -> bool {
+        #[cfg(feature = "failpoints")]
+        if etl_fail_point_active(FORCE_SCHEMA_CLEANUP_FP) {
+            return true;
+        }
+
+        self.last_schema_cleanup_at.is_none_or(|last_schema_cleanup_at| {
+            last_schema_cleanup_at.elapsed() >= SCHEMA_CLEANUP_INTERVAL
+        })
+    }
+
+    /// Marks a schema cleanup task as scheduled.
+    fn mark_schema_cleanup_scheduled(&mut self) {
+        self.last_schema_cleanup_at = Some(Instant::now());
+    }
+
+    /// Returns `true` if any schema cleanup task is still running.
+    fn has_schema_cleanup_tasks(&self) -> bool {
+        !self.schema_cleanup_tasks.is_empty()
     }
 
     /// Returns true if the apply loop is in the middle of processing a
@@ -725,7 +762,19 @@ where
             state,
         };
 
-        apply_loop.run(replication_client, start_lsn).await
+        apply_loop.run_with_teardown(replication_client, start_lsn).await
+    }
+
+    /// Runs the apply loop and performs teardown work before returning.
+    async fn run_with_teardown(
+        &mut self,
+        replication_client: PgReplicationClient,
+        start_lsn: PgLsn,
+    ) -> EtlResult<ApplyLoopResult> {
+        let result = self.run(replication_client, start_lsn).await;
+        self.drain_schema_cleanup_tasks().await;
+
+        result
     }
 
     /// Runs the main event processing loop.
@@ -763,21 +812,21 @@ where
                 return Ok(self.finish_shutdown());
             }
 
-            let result = match &self.state.shutdown_state {
+            let iteration_result = match &self.state.shutdown_state {
                 ShutdownState::NoShutdown => {
                     self.run_active_iteration(
                         events_stream.as_mut(),
                         &replication_client,
                         &mut connection_updates_rx,
                     )
-                    .await?
+                    .await
                 }
                 ShutdownState::DrainingForShutdown => {
                     self.run_draining_shutdown_iteration(
                         events_stream.as_mut(),
                         &mut connection_updates_rx,
                     )
-                    .await?
+                    .await
                 }
                 ShutdownState::WaitingForPrimaryKeepAlive { acked_flush_lsn } => {
                     self.run_shutdown_wait_iteration(
@@ -785,9 +834,10 @@ where
                         &mut connection_updates_rx,
                         *acked_flush_lsn,
                     )
-                    .await?
+                    .await
                 }
             };
+            let result = iteration_result?;
 
             if let Some(result) = result {
                 return Ok(result);
@@ -802,9 +852,10 @@ where
     /// 1. Shutdown requests.
     /// 2. PostgreSQL connection lifecycle updates.
     /// 3. Pending destination flush results.
-    /// 4. Batch flush deadline expiry.
-    /// 5. Incoming replication messages.
-    /// 6. Periodic heartbeats once the computed keep alive deadline expires.
+    /// 4. Completed background schema cleanup tasks.
+    /// 5. Batch flush deadline expiry.
+    /// 6. Incoming replication messages.
+    /// 7. Periodic heartbeats once the computed keep alive deadline expires.
     ///
     /// PostgreSQL normally sends keep alives at roughly half of
     /// `wal_sender_timeout`. We wait a little longer than that before
@@ -849,13 +900,18 @@ where
                     .await?;
             }
 
-            // PRIORITY 4: Handle batch flush timer expiry.
+            // PRIORITY 4: Observe completed background schema cleanup tasks.
+            cleanup_result = self.state.schema_cleanup_tasks.join_next(), if self.state.has_schema_cleanup_tasks() => {
+                self.handle_schema_cleanup_task_result(cleanup_result);
+            }
+
+            // PRIORITY 5: Handle batch flush timer expiry.
             // This prevents buffered work from waiting forever when traffic is low.
             _ = Self::wait_for_batch_deadline(self.state.flush_deadline), if self.state.can_wait_for_deadline() => {
                 self.flush_batch("flush deadline reached").await?;
             }
 
-            // PRIORITY 5: Process incoming replication messages from PostgreSQL.
+            // PRIORITY 6: Process incoming replication messages from PostgreSQL.
             // New WAL messages are only accepted while the loop is still actively ingesting.
             maybe_message = events_stream.next(), if self.state.can_process_messages() => {
                 self.handle_stream_message(
@@ -866,7 +922,7 @@ where
                 .await?;
             }
 
-            // PRIORITY 6: Emit a periodic status update once the computed keep alive deadline
+            // PRIORITY 7: Emit a periodic status update once the computed keep alive deadline
             // expires. This intentionally resends the same effective flush LSN so PostgreSQL keeps
             // the standby connection open during long stalls, including cases where the loop is
             // paused behind an in-flight flush and therefore not making visible progress yet. This
@@ -906,8 +962,9 @@ where
     /// Priority order:
     /// 1. PostgreSQL connection lifecycle updates.
     /// 2. Pending destination flush results.
-    /// 3. Batch flush deadline expiry.
-    /// 4. Periodic keep alive status updates.
+    /// 3. Completed background schema cleanup tasks.
+    /// 4. Batch flush deadline expiry.
+    /// 5. Periodic keep alive status updates.
     ///
     /// After the selected branch runs, the loop advances idle syncing state.
     /// Once buffered or in-flight destination work is resolved, it sends the
@@ -932,12 +989,17 @@ where
                     .await?;
             }
 
-            // PRIORITY 3: Handle batch flush timer expiry.
+            // PRIORITY 3: Observe completed background schema cleanup tasks.
+            cleanup_result = self.state.schema_cleanup_tasks.join_next(), if self.state.has_schema_cleanup_tasks() => {
+                self.handle_schema_cleanup_task_result(cleanup_result);
+            }
+
+            // PRIORITY 4: Handle batch flush timer expiry.
             _ = Self::wait_for_batch_deadline(self.state.flush_deadline), if self.state.can_wait_for_deadline() => {
                 self.flush_batch("flush deadline reached during shutdown drain").await?;
             }
 
-            // PRIORITY 4: Emit a periodic status update while shutdown is draining.
+            // PRIORITY 5: Emit a periodic status update while shutdown is draining.
             _ = Self::wait_for_keep_alive_deadline(self.state.keep_alive_deadline) => {
                 self.send_status_update(
                     events_stream.as_mut(),
@@ -972,7 +1034,8 @@ where
     /// Priority order:
     /// 1. PostgreSQL connection lifecycle updates.
     /// 2. PostgreSQL keepalives that may acknowledge `acked_flush_lsn`.
-    /// 3. Periodic keep alive status updates.
+    /// 3. Completed background schema cleanup tasks.
+    /// 4. Periodic keep alive status updates.
     ///
     /// Once the acknowledgement arrives, unresolved work causes
     /// [`ApplyLoopResult::Paused`]; otherwise the recorded exit result may be
@@ -1003,7 +1066,12 @@ where
                 }
             }
 
-            // PRIORITY 3: Resend a heartbeat once the computed keep alive deadline expires while
+            // PRIORITY 3: Observe completed background schema cleanup tasks.
+            cleanup_result = self.state.schema_cleanup_tasks.join_next(), if self.state.has_schema_cleanup_tasks() => {
+                self.handle_schema_cleanup_task_result(cleanup_result);
+            }
+
+            // PRIORITY 4: Resend a heartbeat once the computed keep alive deadline expires while
             // shutdown is waiting for the primary keep alive acknowledgement barrier. This is a
             // last-resort safeguard for cases where PostgreSQL keep alives stop reaching the loop,
             // for example because the source has gone quiet, the stream is backpressured, or the
@@ -1297,7 +1365,7 @@ where
         force: bool,
         status_update_type: StatusUpdateType,
     ) -> EtlResult<()> {
-        events_stream
+        let status_update_result = events_stream
             .as_mut()
             .stream_mut()
             .send_status_update(
@@ -1306,7 +1374,95 @@ where
                 force,
                 status_update_type,
             )
-            .await
+            .await?;
+
+        if let StatusUpdateResult::Sent = status_update_result {
+            self.maybe_spawn_schema_cleanup().await;
+        }
+
+        Ok(())
+    }
+
+    /// Spawns a best-effort cleanup task for obsolete schema versions.
+    async fn maybe_spawn_schema_cleanup(&mut self) {
+        if !self.state.should_cleanup_schemas() {
+            return;
+        }
+
+        if self.state.has_schema_cleanup_tasks() {
+            return;
+        }
+
+        let current_snapshot_ids = self.shared_table_cache.snapshot_ids().await;
+        if current_snapshot_ids.is_empty() {
+            return;
+        }
+
+        self.state.mark_schema_cleanup_scheduled();
+
+        let schema_store = self.schema_store.clone();
+        let worker_type = self.worker_context.worker_type();
+
+        self.state.schema_cleanup_tasks.spawn(async move {
+            match schema_store.prune_table_schemas(current_snapshot_ids).await {
+                Ok(deleted_count) => {
+                    counter!(
+                        ETL_SCHEMA_CLEANUPS_TOTAL,
+                        WORKER_TYPE_LABEL => worker_type.as_str(),
+                    )
+                    .increment(1);
+
+                    if deleted_count > 0 {
+                        info!(
+                            %worker_type,
+                            deleted_count,
+                            "completed obsolete table schema cleanup"
+                        );
+                    }
+                }
+                Err(err) => {
+                    counter!(
+                        ETL_SCHEMA_CLEANUP_ERRORS_TOTAL,
+                        WORKER_TYPE_LABEL => worker_type.as_str(),
+                    )
+                    .increment(1);
+
+                    error!(
+                        %worker_type,
+                        error = %err,
+                        "failed to clean up obsolete table schemas"
+                    );
+                }
+            }
+        });
+    }
+
+    /// Records the result of a completed background schema cleanup task.
+    fn handle_schema_cleanup_task_result(
+        &self,
+        cleanup_result: Option<Result<(), tokio::task::JoinError>>,
+    ) {
+        if let Some(Err(err)) = cleanup_result {
+            let worker_type = self.worker_context.worker_type();
+            counter!(
+                ETL_SCHEMA_CLEANUP_ERRORS_TOTAL,
+                WORKER_TYPE_LABEL => worker_type.as_str(),
+            )
+            .increment(1);
+
+            error!(
+                %worker_type,
+                error = %err,
+                "schema cleanup task failed before completing"
+            );
+        }
+    }
+
+    /// Joins all background schema cleanup tasks before the apply loop exits.
+    async fn drain_schema_cleanup_tasks(&mut self) {
+        while let Some(cleanup_result) = self.state.schema_cleanup_tasks.join_next().await {
+            self.handle_schema_cleanup_task_result(Some(cleanup_result));
+        }
     }
 
     /// Waits for the pending flush result, if any.
@@ -1731,7 +1887,6 @@ where
 
             return Err(err);
         }
-
         // The next post-DDL DML will cause pgoutput to synthesize a fresh `RELATION`
         // message for this table. Record the new snapshot and clear any cached
         // mask now so relation handling rebuilds it from the schema version we
@@ -3150,4 +3305,57 @@ async fn get_replicated_table_schema(
     };
 
     Ok(replicated_table_schema)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn apply_loop_state() -> ApplyLoopState {
+        let start_lsn = PgLsn::from(100u64);
+        let replication_progress =
+            ReplicationProgress { last_received_lsn: start_lsn, last_flush_lsn: start_lsn };
+
+        ApplyLoopState::new(
+            replication_progress,
+            Duration::from_secs(1),
+            SnapshotId::from(start_lsn),
+        )
+    }
+
+    #[test]
+    fn schema_cleanup_waits_for_interval_before_first_trigger() {
+        let state = apply_loop_state();
+
+        assert!(!state.should_cleanup_schemas());
+    }
+
+    #[test]
+    fn schema_cleanup_uses_interval_after_first_trigger() {
+        let mut state = apply_loop_state();
+
+        state.mark_schema_cleanup_scheduled();
+
+        assert!(!state.should_cleanup_schemas());
+
+        state.last_schema_cleanup_at =
+            Some(Instant::now() - SCHEMA_CLEANUP_INTERVAL - Duration::from_secs(1));
+
+        assert!(state.should_cleanup_schemas());
+    }
+
+    #[test]
+    fn schema_cleanup_does_not_depend_on_status_update_type() {
+        let mut state = apply_loop_state();
+
+        state.mark_schema_cleanup_scheduled();
+
+        for _status_update_type in [
+            StatusUpdateType::KeepAlive,
+            StatusUpdateType::PeriodicKeepAlive,
+            StatusUpdateType::ShutdownFlush,
+        ] {
+            assert!(!state.should_cleanup_schemas());
+        }
+    }
 }

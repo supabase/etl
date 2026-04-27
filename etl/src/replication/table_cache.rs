@@ -84,6 +84,12 @@ impl SharedTableCache {
         guard.get(table_id).cloned()
     }
 
+    /// Returns the current target snapshot for every table in the cache.
+    pub(crate) async fn snapshot_ids(&self) -> HashMap<TableId, SnapshotId> {
+        let guard = self.inner.read().await;
+        guard.iter().map(|(table_id, state)| (*table_id, state.snapshot_id())).collect()
+    }
+
     /// Records that a table is waiting for a new relation-state refresh for
     /// the supplied snapshot.
     pub(crate) async fn note_waiting_for_relation(
@@ -243,5 +249,23 @@ mod tests {
         let state = cache.get(&table_id).await.expect("table state should exist");
         assert_eq!(state.snapshot_id(), snapshot_id);
         assert!(state.replicated_table_schema().is_none());
+    }
+
+    #[tokio::test]
+    async fn snapshot_ids_returns_current_snapshot_by_table() {
+        let cache = SharedTableCache::new();
+        let ready_table_id = TableId::new(123);
+        let waiting_table_id = TableId::new(456);
+        let ready_snapshot_id = SnapshotId::new(10.into());
+        let waiting_snapshot_id = SnapshotId::new(20.into());
+
+        cache.note_ready(ready_table_id, create_test_schema()).await;
+        cache.note_waiting_for_relation(waiting_table_id, waiting_snapshot_id).await;
+
+        let snapshot_ids = cache.snapshot_ids().await;
+
+        assert_eq!(snapshot_ids.len(), 2);
+        assert_eq!(snapshot_ids.get(&ready_table_id), Some(&ready_snapshot_id));
+        assert_eq!(snapshot_ids.get(&waiting_table_id), Some(&waiting_snapshot_id));
     }
 }

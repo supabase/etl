@@ -249,7 +249,7 @@ Multiple events in the same transaction share the same `commit_lsn` but have dif
 
 ## Why Persist State?
 
-ETL persists replication state (schemas, progress, mappings) for recovery.
+ETL persists replication state (schemas, progress, destination table metadata) for recovery.
 
 ### Without Persistence
 
@@ -267,7 +267,7 @@ ETL stores:
 |-------|---------|
 | Replication phase | Know whether to copy or stream for each table |
 | Table schemas | Validate incoming data against expected schema |
-| Table mappings | Route events to correct downstream tables |
+| Destination table metadata | Route events to correct downstream tables |
 
 On restart, ETL loads this state and resumes from where it left off.
 

@@ -35,6 +35,7 @@ type TableStateTypeCondition = (TableId, TableReplicationPhaseType, Arc<Notify>)
 type TableStateCondition =
     (TableId, Arc<Notify>, Box<dyn Fn(&TableReplicationPhase) -> bool + Send + Sync>);
 type TableSchemaCountCondition = (TableId, usize, Arc<Notify>);
+type TableSchemaPruneCondition = Arc<Notify>;
 
 struct Inner {
     table_replication_states: TableReplicationStates,
@@ -44,6 +45,7 @@ struct Inner {
     table_state_type_conditions: Vec<TableStateTypeCondition>,
     table_state_conditions: Vec<TableStateCondition>,
     table_schema_count_conditions: Vec<TableSchemaCountCondition>,
+    table_schema_prune_conditions: Vec<TableSchemaPruneCondition>,
     method_call_notifiers: HashMap<StateStoreMethod, Vec<Arc<Notify>>>,
 }
 
@@ -114,6 +116,7 @@ impl NotifyingStore {
             table_state_type_conditions: Vec::new(),
             table_state_conditions: Vec::new(),
             table_schema_count_conditions: Vec::new(),
+            table_schema_prune_conditions: Vec::new(),
             method_call_notifiers: HashMap::new(),
         };
 
@@ -207,6 +210,15 @@ impl NotifyingStore {
         let notify = Arc::new(Notify::new());
         let mut inner = self.inner.write().await;
         inner.table_schema_count_conditions.push((table_id, expected_count, Arc::clone(&notify)));
+
+        TimedNotify::new(notify)
+    }
+
+    /// Registers a notification that fires after a future schema prune call.
+    pub async fn notify_on_table_schema_prune(&self) -> TimedNotify {
+        let notify = Arc::new(Notify::new());
+        let mut inner = self.inner.write().await;
+        inner.table_schema_prune_conditions.push(Arc::clone(&notify));
 
         TimedNotify::new(notify)
     }
@@ -406,6 +418,29 @@ impl SchemaStore for NotifyingStore {
         inner.check_conditions();
 
         Ok(table_schema)
+    }
+
+    async fn prune_table_schemas(
+        &self,
+        current_snapshot_ids: HashMap<TableId, SnapshotId>,
+    ) -> EtlResult<u64> {
+        let mut inner = self.inner.write().await;
+        let mut removed_count = 0u64;
+
+        for (table_id, schemas) in inner.table_schemas.iter_mut() {
+            if let Some(current_snapshot_id) = current_snapshot_ids.get(table_id) {
+                let before_count = schemas.len();
+                schemas.retain(|schema| schema.snapshot_id >= *current_snapshot_id);
+                removed_count =
+                    removed_count.saturating_add(before_count.saturating_sub(schemas.len()) as u64);
+            }
+        }
+
+        for notify in std::mem::take(&mut inner.table_schema_prune_conditions) {
+            notify.notify_one();
+        }
+
+        Ok(removed_count)
     }
 }
 
