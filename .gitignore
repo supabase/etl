@@ -42,3 +42,6 @@ configuration
 
 # Nix
 result
+
+# Local rust-analyzer config
+.rust-analyzer.toml

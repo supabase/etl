@@ -78,6 +78,24 @@ pub enum DestinationConfig {
         /// Optional DuckLake maintenance target file size.
         maintenance_target_file_size: Option<String>,
     },
+    Snowflake {
+        /// Snowflake account identifier in "ORGNAME-ACCOUNTNAME" format.
+        account_id: String,
+        /// Snowflake user with RSA public key configured.
+        user: String,
+        /// Path to RSA private key file (PEM/PKCS8 format).
+        private_key_path: String,
+        /// Optional passphrase for encrypted private key.
+        private_key_passphrase: Option<SecretString>,
+        /// Target database name.
+        database: String,
+        /// Target schema name.
+        schema: String,
+        /// Virtual warehouse name.
+        warehouse: Option<String>,
+        /// Snowflake role.
+        role: Option<String>,
+    },
 }
 
 impl DestinationConfig {
@@ -257,6 +275,24 @@ pub enum DestinationConfigWithoutSecrets {
         /// Optional DuckLake maintenance target file size.
         maintenance_target_file_size: Option<String>,
     },
+    Snowflake {
+        /// Snowflake account identifier in "ORGNAME-ACCOUNTNAME" format.
+        account_id: String,
+        /// Snowflake user with RSA public key configured.
+        user: String,
+        /// Path to RSA private key file (PEM/PKCS8 format).
+        private_key_path: String,
+        /// Target database name.
+        database: String,
+        /// Target schema name.
+        schema: String,
+        /// Virtual warehouse name.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        warehouse: Option<String>,
+        /// Snowflake role.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        role: Option<String>,
+    },
 }
 
 impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
@@ -301,6 +337,24 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
                 metadata_schema,
                 duckdb_memory_cache_limit,
                 maintenance_target_file_size,
+            },
+            DestinationConfig::Snowflake {
+                account_id,
+                user,
+                private_key_path,
+                private_key_passphrase: _,
+                database,
+                schema,
+                warehouse,
+                role,
+            } => DestinationConfigWithoutSecrets::Snowflake {
+                account_id,
+                user,
+                private_key_path,
+                database,
+                schema,
+                warehouse,
+                role,
             },
         }
     }

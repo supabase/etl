@@ -4,7 +4,7 @@
 //! warehouses and analytics platforms, enabling data replication from Postgres
 //! to cloud services.
 
-#[cfg(any(feature = "bigquery", feature = "ducklake", feature = "iceberg"))]
+#[cfg(any(feature = "bigquery", feature = "ducklake", feature = "iceberg", feature = "snowflake"))]
 mod retry;
 mod table_name;
 
@@ -16,3 +16,5 @@ pub mod ducklake;
 pub mod egress;
 #[cfg(feature = "iceberg")]
 pub mod iceberg;
+#[cfg(feature = "snowflake")]
+pub mod snowflake;
