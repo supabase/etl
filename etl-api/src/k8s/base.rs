@@ -46,7 +46,11 @@ pub enum DestinationType {
     /// Apache Iceberg destination.
     Iceberg,
     /// ClickHouse destination.
-    ClickHouse,
+    ClickHouse {
+        /// Whether the StatefulSet must reference the ClickHouse password
+        /// secret.
+        password_secret_required: bool,
+    },
     /// DuckLake destination.
     Ducklake,
 }
@@ -57,7 +61,9 @@ impl From<&StoredDestinationConfig> for DestinationType {
         match value {
             StoredDestinationConfig::BigQuery { .. } => DestinationType::BigQuery,
             StoredDestinationConfig::Iceberg { .. } => DestinationType::Iceberg,
-            StoredDestinationConfig::ClickHouse { .. } => DestinationType::ClickHouse,
+            StoredDestinationConfig::ClickHouse { password, .. } => {
+                DestinationType::ClickHouse { password_secret_required: password.is_some() }
+            }
             StoredDestinationConfig::Ducklake { .. } => DestinationType::Ducklake,
         }
     }

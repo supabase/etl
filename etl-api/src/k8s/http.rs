@@ -911,16 +911,18 @@ fn create_container_environment_json(
             let bq_secret_env_var_json = create_bq_secret_env_var_json(&bq_secret_name);
             container_environment.push(bq_secret_env_var_json);
         }
-        DestinationType::ClickHouse => {
+        DestinationType::ClickHouse { password_secret_required } => {
             let postgres_secret_name = create_postgres_secret_name(prefix);
             let postgres_secret_env_var_json =
                 create_postgres_secret_env_var_json(&postgres_secret_name);
             container_environment.push(postgres_secret_env_var_json);
 
-            let clickhouse_secret_name = create_clickhouse_secret_name(prefix);
-            let clickhouse_secret_env_var_json =
-                create_clickhouse_secret_env_var_json(&clickhouse_secret_name);
-            container_environment.push(clickhouse_secret_env_var_json);
+            if password_secret_required {
+                let clickhouse_secret_name = create_clickhouse_secret_name(prefix);
+                let clickhouse_secret_env_var_json =
+                    create_clickhouse_secret_env_var_json(&clickhouse_secret_name);
+                container_environment.push(clickhouse_secret_env_var_json);
+            }
         }
         DestinationType::Iceberg => {
             let postgres_secret_name = create_postgres_secret_name(prefix);
@@ -1103,12 +1105,12 @@ fn create_bq_secret_env_var_json(bq_secret_name: &str) -> serde_json::Value {
     })
 }
 
-fn create_clickhouse_secret_env_var_json(clickouse_secret_name: &str) -> serde_json::Value {
+fn create_clickhouse_secret_env_var_json(clickhouse_secret_name: &str) -> serde_json::Value {
     json!({
       "name": "APP_DESTINATION__CLICK_HOUSE__PASSWORD",
       "valueFrom": {
         "secretKeyRef": {
-          "name": clickouse_secret_name,
+          "name": clickhouse_secret_name,
           "key": CLICKHOUSE_PASSWORD_NAME
         }
       }
@@ -1298,6 +1300,15 @@ mod tests {
 
     fn create_k8s_object_prefix(tenant_id: &str, replicator_id: i64) -> String {
         format!("{tenant_id}-{replicator_id}")
+    }
+
+    fn container_environment_has_var(
+        container_environment: &[serde_json::Value],
+        name: &str,
+    ) -> bool {
+        container_environment
+            .iter()
+            .any(|entry| entry.get("name").and_then(serde_json::Value::as_str) == Some(name))
     }
 
     #[test]
@@ -1637,6 +1648,52 @@ mod tests {
             LogLevel::Info,
         );
         assert_json_snapshot!(container_environment);
+    }
+
+    #[test]
+    fn clickhouse_with_password_references_password_secret() {
+        let prefix = create_k8s_object_prefix(TENANT_ID, 42);
+        let replicator_image = "ramsup/etl-replicator:2a41356af735f891de37d71c0e1a62864fe4630e";
+
+        let container_environment = create_container_environment_json(
+            &prefix,
+            &Environment::Dev,
+            replicator_image,
+            DestinationType::ClickHouse { password_secret_required: true },
+            LogLevel::Info,
+        );
+
+        assert!(container_environment_has_var(
+            &container_environment,
+            "APP_PIPELINE__PG_CONNECTION__PASSWORD",
+        ));
+        assert!(container_environment_has_var(
+            &container_environment,
+            "APP_DESTINATION__CLICK_HOUSE__PASSWORD",
+        ));
+    }
+
+    #[test]
+    fn passwordless_clickhouse_does_not_reference_missing_password_secret() {
+        let prefix = create_k8s_object_prefix(TENANT_ID, 42);
+        let replicator_image = "ramsup/etl-replicator:2a41356af735f891de37d71c0e1a62864fe4630e";
+
+        let container_environment = create_container_environment_json(
+            &prefix,
+            &Environment::Dev,
+            replicator_image,
+            DestinationType::ClickHouse { password_secret_required: false },
+            LogLevel::Info,
+        );
+
+        assert!(container_environment_has_var(
+            &container_environment,
+            "APP_PIPELINE__PG_CONNECTION__PASSWORD",
+        ));
+        assert!(!container_environment_has_var(
+            &container_environment,
+            "APP_DESTINATION__CLICK_HOUSE__PASSWORD",
+        ));
     }
 
     #[test]

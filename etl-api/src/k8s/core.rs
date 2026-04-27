@@ -327,7 +327,11 @@ async fn create_or_update_dynamic_replicator_secrets(
         }
         Secrets::ClickHouse { postgres_password, password } => {
             k8s_client.create_or_update_postgres_secret(prefix, &postgres_password).await?;
-            k8s_client.create_or_update_clickhouse_secret(prefix, password.as_deref()).await?;
+            if let Some(password) = password.as_deref() {
+                k8s_client.create_or_update_clickhouse_secret(prefix, Some(password)).await?;
+            } else {
+                k8s_client.delete_clickhouse_secret(prefix).await?;
+            }
         }
         Secrets::Ducklake { postgres_password, s3_access_key_id, s3_secret_access_key } => {
             k8s_client.create_or_update_postgres_secret(prefix, &postgres_password).await?;
@@ -486,6 +490,25 @@ mod tests {
         }
     }
 
+    fn source_config_with_password() -> StoredSourceConfig {
+        StoredSourceConfig {
+            host: "localhost".to_string(),
+            port: 5432,
+            name: "postgres".to_string(),
+            username: "postgres".to_string(),
+            password: Some(SerializableSecretString::from("password".to_string())),
+        }
+    }
+
+    fn clickhouse_destination_config(password: Option<&str>) -> StoredDestinationConfig {
+        StoredDestinationConfig::ClickHouse {
+            url: "http://localhost:8123".parse().unwrap(),
+            user: "default".to_string(),
+            password: password.map(ToOwned::to_owned).map(SerializableSecretString::from),
+            database: "default".to_string(),
+        }
+    }
+
     #[async_trait]
     impl K8sClient for RecordingK8sClient {
         async fn create_or_update_postgres_secret(
@@ -517,9 +540,13 @@ mod tests {
 
         async fn create_or_update_clickhouse_secret(
             &self,
-            _prefix: &str,
-            _password: Option<&str>,
+            prefix: &str,
+            password: Option<&str>,
         ) -> Result<(), K8sError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("clickhouse:{prefix}:{}", password.unwrap_or("<none>")));
             Ok(())
         }
 
@@ -548,7 +575,8 @@ mod tests {
             Ok(())
         }
 
-        async fn delete_clickhouse_secret(&self, _prefix: &str) -> Result<(), K8sError> {
+        async fn delete_clickhouse_secret(&self, prefix: &str) -> Result<(), K8sError> {
+            self.calls.lock().unwrap().push(format!("delete-clickhouse:{prefix}"));
             Ok(())
         }
 
@@ -605,6 +633,44 @@ mod tests {
             .expect("failed to inspect pipeline status");
 
         assert!(is_active);
+    }
+
+    #[tokio::test]
+    async fn clickhouse_with_password_creates_password_secret() {
+        let source_config = source_config_with_password();
+        let destination_config = clickhouse_destination_config(Some("clickhouse-password"));
+
+        let secrets = build_secrets_from_configs(&source_config, &destination_config);
+        let client = RecordingK8sClient::default();
+
+        create_or_update_dynamic_replicator_secrets(&client, "tenant-42", secrets).await.unwrap();
+
+        assert_eq!(
+            client.calls(),
+            vec![
+                "postgres:tenant-42:password".to_string(),
+                "clickhouse:tenant-42:clickhouse-password".to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn passwordless_clickhouse_deletes_any_stale_password_secret() {
+        let source_config = source_config_with_password();
+        let destination_config = clickhouse_destination_config(None);
+
+        let secrets = build_secrets_from_configs(&source_config, &destination_config);
+        let client = RecordingK8sClient::default();
+
+        create_or_update_dynamic_replicator_secrets(&client, "tenant-42", secrets).await.unwrap();
+
+        assert_eq!(
+            client.calls(),
+            vec![
+                "postgres:tenant-42:password".to_string(),
+                "delete-clickhouse:tenant-42".to_string(),
+            ]
+        );
     }
 
     #[tokio::test]
