@@ -271,6 +271,18 @@ pub(crate) fn rb_encode_row(
     nullable_flags: &[bool],
     buf: &mut Vec<u8>,
 ) -> EtlResult<()> {
+    if values.len() != nullable_flags.len() {
+        return Err(etl_error!(
+            ErrorKind::ConversionError,
+            "ClickHouse RowBinary row width mismatch",
+            format!(
+                "values length {} does not match nullable flags length {}",
+                values.len(),
+                nullable_flags.len()
+            )
+        ));
+    }
+
     for (val, &is_nullable) in values.into_iter().zip(nullable_flags.iter()) {
         if is_nullable {
             rb_encode_nullable(val, buf)?;
@@ -452,5 +464,35 @@ mod tests {
         let err = result.unwrap_err();
         assert_eq!(err.kind(), ErrorKind::ConversionError);
         assert!(buf.is_empty(), "no bytes should be written on error");
+    }
+
+    #[test]
+    fn rb_encode_row_rejects_fewer_values_than_nullable_flags() {
+        let mut buf = vec![0xaa];
+        let result = rb_encode_row(vec![ClickHouseValue::Int32(1)], &[false, false], &mut buf);
+
+        assert!(result.is_err(), "row width mismatch must error");
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::ConversionError);
+        assert_eq!(err.description(), Some("ClickHouse RowBinary row width mismatch"));
+        assert_eq!(err.detail(), Some("values length 1 does not match nullable flags length 2"));
+        assert_eq!(buf, vec![0xaa], "no bytes should be written on error");
+    }
+
+    #[test]
+    fn rb_encode_row_rejects_more_values_than_nullable_flags() {
+        let mut buf = vec![0xaa];
+        let result = rb_encode_row(
+            vec![ClickHouseValue::Int32(1), ClickHouseValue::Int32(2)],
+            &[false],
+            &mut buf,
+        );
+
+        assert!(result.is_err(), "row width mismatch must error");
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::ConversionError);
+        assert_eq!(err.description(), Some("ClickHouse RowBinary row width mismatch"));
+        assert_eq!(err.detail(), Some("values length 2 does not match nullable flags length 1"));
+        assert_eq!(buf, vec![0xaa], "no bytes should be written on error");
     }
 }
