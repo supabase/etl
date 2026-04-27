@@ -119,7 +119,10 @@ pub(crate) enum StatusUpdateType {
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum StatusUpdateResult {
     /// A status update was accepted by the local replication stream wrapper.
-    Sent,
+    Sent {
+        /// The monotonic flush LSN accepted by the stream wrapper.
+        flush_lsn: PgLsn,
+    },
     /// No status update was sent because throttling suppressed it.
     Skipped,
 }
@@ -247,7 +250,7 @@ impl EventsStream {
             *this.last_write_lsn = Some(write_lsn);
             *this.last_flush_lsn = Some(flush_lsn);
 
-            return Ok(StatusUpdateResult::Sent);
+            return Ok(StatusUpdateResult::Sent { flush_lsn });
         }
 
         // The client's system clock at the time of transmission, as microseconds since
@@ -290,7 +293,7 @@ impl EventsStream {
         *this.last_write_lsn = Some(write_lsn);
         *this.last_flush_lsn = Some(flush_lsn);
 
-        Ok(StatusUpdateResult::Sent)
+        Ok(StatusUpdateResult::Sent { flush_lsn })
     }
 }
 

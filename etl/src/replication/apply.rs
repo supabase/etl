@@ -1376,24 +1376,29 @@ where
             )
             .await?;
 
-        if let StatusUpdateResult::Sent = status_update_result {
-            self.maybe_spawn_schema_cleanup().await;
+        // If we sent a status update, we check if we can perform schema cleanup for old
+        // table schema snapshots.
+        if let StatusUpdateResult::Sent { flush_lsn } = status_update_result {
+            self.maybe_spawn_schema_cleanup(flush_lsn).await;
         }
 
         Ok(())
     }
 
     /// Spawns a best-effort cleanup task for obsolete schema versions.
-    async fn maybe_spawn_schema_cleanup(&mut self) {
+    async fn maybe_spawn_schema_cleanup(&mut self, flush_lsn: PgLsn) {
         if !self.state.should_cleanup_schemas() {
             return;
         }
 
-        if self.state.has_schema_cleanup_tasks() {
-            return;
-        }
+        // Gate cleanup by flushed progress because restart can replay WAL after
+        // the last durable flush lsn. A schema snapshot newer than that point
+        // may still be needed to decode replayed row changes, even if the live
+        // relation cache has already advanced to it.
+        let flush_lsn: SnapshotId = flush_lsn.into();
+        let mut current_snapshot_ids = self.shared_table_cache.snapshot_ids().await;
+        current_snapshot_ids.retain(|_, snapshot_id| *snapshot_id <= flush_lsn);
 
-        let current_snapshot_ids = self.shared_table_cache.snapshot_ids().await;
         if current_snapshot_ids.is_empty() {
             return;
         }

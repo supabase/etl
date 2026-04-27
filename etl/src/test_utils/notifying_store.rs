@@ -427,7 +427,7 @@ impl SchemaStore for NotifyingStore {
         let mut inner = self.inner.write().await;
         let mut removed_count = 0u64;
 
-        for (table_id, schemas) in inner.table_schemas.iter_mut() {
+        for (table_id, schemas) in &mut inner.table_schemas {
             if let Some(current_snapshot_id) = current_snapshot_ids.get(table_id) {
                 let before_count = schemas.len();
                 schemas.retain(|schema| schema.snapshot_id >= *current_snapshot_id);
