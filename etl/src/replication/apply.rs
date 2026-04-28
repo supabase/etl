@@ -17,7 +17,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use etl_config::shared::{PgConnectionConfig, PipelineConfig};
+use etl_config::shared::PipelineConfig;
 use etl_postgres::{
     replication::slots::EtlReplicationSlot,
     types::{

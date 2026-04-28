@@ -177,6 +177,9 @@ impl EventsStream {
         force: bool,
         status_update_type: StatusUpdateType,
     ) -> EtlResult<StatusUpdateResult> {
+        // If the failpoint is active, we do not send any status update. This is useful
+        // for testing the system when we want to check what happens when no
+        // status updates are sent.
         #[cfg(feature = "failpoints")]
         if etl_fail_point_active(SEND_STATUS_UPDATE_FP) {
             warn!("not sending status update due to active failpoint");
