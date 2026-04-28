@@ -1783,38 +1783,38 @@ async fn exclusive_large_batch_table_copy() {
 /// A ClickHouseClient pointed at the running test ClickHouse instance.
 ///
 /// # WHEN
-/// `ping()` is called.
+/// `validate_connectivity()` is called.
 ///
 /// # THEN
 /// It returns Ok(()).
 #[tokio::test(flavor = "multi_thread")]
-async fn ping_succeeds_against_running_clickhouse() {
+async fn validate_connectivity_succeeds_against_running_clickhouse() {
     let client = ClickHouseClient::new(
         get_clickhouse_url(),
         get_clickhouse_user(),
         get_clickhouse_password(),
         "default",
     );
-    assert!(client.ping().await.is_ok());
+    assert!(client.validate_connectivity().await.is_ok());
 }
 
 /// # GIVEN
 /// A ClickHouseClient pointed at a URL where nothing is listening.
 ///
 /// # WHEN
-/// `ping()` is called.
+/// `validate_connectivity()` is called.
 ///
 /// # THEN
 /// It returns Err.
 #[tokio::test(flavor = "multi_thread")]
-async fn ping_fails_against_unreachable_clickhouse() {
+async fn validate_connectivity_fails_against_unreachable_clickhouse() {
     let client = ClickHouseClient::new(
         Url::parse("http://localhost:1").unwrap(),
         "nobody",
         None::<String>,
         "default",
     );
-    assert!(client.ping().await.is_err());
+    assert!(client.validate_connectivity().await.is_err());
 }
 
 /// Row struct for the ADD COLUMN test after schema change.

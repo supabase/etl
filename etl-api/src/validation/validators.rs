@@ -664,7 +664,7 @@ impl Validator for ClickHouseValidator {
             self.password.as_ref().map(|password| password.expose_secret().to_owned()),
             self.database.clone(),
         );
-        match client.ping().await {
+        match client.validate_connectivity().await {
             Ok(_) => Ok(Vec::new()),
             Err(_) => Ok(vec![ValidationFailure::critical(
                 "ClickHouse Connection Failed",
