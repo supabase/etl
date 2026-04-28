@@ -51,7 +51,7 @@ pub trait SchemaStore {
     fn get_table_schemas(&self) -> impl Future<Output = EtlResult<Vec<Arc<TableSchema>>>> + Send;
     fn load_table_schemas(&self) -> impl Future<Output = EtlResult<usize>> + Send;
     fn store_table_schema(&self, table_schema: TableSchema) -> impl Future<Output = EtlResult<Arc<TableSchema>>> + Send;
-    fn prune_table_schemas(&self, current_snapshot_ids: HashMap<TableId, SnapshotId>) -> impl Future<Output = EtlResult<u64>> + Send;
+    fn prune_table_schemas(&self, table_ids: HashSet<TableId>, confirmed_flush_lsn: PgLsn) -> impl Future<Output = EtlResult<u64>> + Send;
 }
 ```
 
@@ -63,7 +63,7 @@ pub trait SchemaStore {
 | `get_table_schemas()` | Returns all cached schemas |
 | `load_table_schemas()` | Loads schemas from persistent storage into cache. Call once at startup. Returns the number of schemas loaded |
 | `store_table_schema()` | Saves a schema version to both cache and persistent storage and returns the cached `Arc` |
-| `prune_table_schemas()` | Removes schema versions older than the current snapshot for each table. Implementations with both cache and persistent storage must prune both |
+| `prune_table_schemas()` | For the supplied table IDs, preserves the newest schema version at or before the confirmed flush LSN and removes older versions. Implementations with both cache and persistent storage must prune both |
 
 ## StateStore
 

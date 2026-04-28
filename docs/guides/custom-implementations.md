@@ -54,7 +54,7 @@ Create `src/custom_store.rs`. A store must implement three traits (see [Extensio
 - `CleanupStore` - Store cleanup when tables leave the publication
 
 ```rust
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::info;
@@ -64,7 +64,7 @@ use etl::state::{
     AppliedDestinationTableMetadata, DestinationTableMetadata, TableReplicationPhase,
 };
 use etl::store::{CleanupStore, SchemaStore, StateStore, TableReplicationStates};
-use etl::types::{SnapshotId, TableId, TableSchema};
+use etl::types::{PgLsn, SnapshotId, TableId, TableSchema};
 
 #[derive(Debug, Clone, Default)]
 struct TableEntry {
@@ -131,18 +131,32 @@ impl SchemaStore for CustomStore {
 
     async fn prune_table_schemas(
         &self,
-        current_snapshot_ids: HashMap<TableId, SnapshotId>,
+        table_ids: HashSet<TableId>,
+        confirmed_flush_lsn: PgLsn,
     ) -> EtlResult<u64> {
         let mut tables = self.tables.lock().await;
+        let confirmed_flush_snapshot_id = SnapshotId::from(confirmed_flush_lsn);
         let mut removed_count = 0u64;
 
         for (table_id, entry) in tables.iter_mut() {
-            if let Some(current_snapshot_id) = current_snapshot_ids.get(table_id) {
-                let before_count = entry.schemas.len();
-                entry.schemas.retain(|snapshot_id, _| snapshot_id >= current_snapshot_id);
-                removed_count = removed_count
-                    .saturating_add(before_count.saturating_sub(entry.schemas.len()) as u64);
+            if !table_ids.contains(table_id) {
+                continue;
             }
+
+            let retained_snapshot_id = entry
+                .schemas
+                .keys()
+                .filter(|snapshot_id| **snapshot_id <= confirmed_flush_snapshot_id)
+                .max()
+                .copied();
+            let Some(retained_snapshot_id) = retained_snapshot_id else {
+                continue;
+            };
+
+            let before_count = entry.schemas.len();
+            entry.schemas.retain(|snapshot_id, _| *snapshot_id >= retained_snapshot_id);
+            removed_count =
+                removed_count.saturating_add(before_count.saturating_sub(entry.schemas.len()) as u64);
         }
 
         Ok(removed_count)
