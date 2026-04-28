@@ -39,10 +39,7 @@ use tokio_postgres::types::PgLsn;
 use tracing::{debug, error, info, warn};
 
 #[cfg(feature = "failpoints")]
-use crate::failpoints::{
-    FORCE_SCHEMA_CLEANUP_CONFIRMED_FLUSH_LSN_FP, FORCE_SCHEMA_CLEANUP_FP, SEND_STATUS_UPDATE_FP,
-    etl_fail_point_active,
-};
+use crate::failpoints::{FORCE_SCHEMA_CLEANUP_FP, SEND_STATUS_UPDATE_FP, etl_fail_point_active};
 use crate::{
     bail,
     concurrency::{
@@ -845,6 +842,7 @@ where
         start_lsn: PgLsn,
     ) -> EtlResult<ApplyLoopResult> {
         let result = self.run(replication_client, start_lsn).await;
+
         self.drain_schema_cleanup_task().await;
 
         result
@@ -1433,8 +1431,8 @@ where
 
         // If we sent a status update, we check if we can perform schema cleanup for old
         // table schema snapshots.
-        if let StatusUpdateResult::Sent { flush_lsn } = status_update_result {
-            self.maybe_spawn_schema_cleanup(flush_lsn).await?;
+        if let StatusUpdateResult::Sent = status_update_result {
+            self.maybe_spawn_schema_cleanup().await?;
         }
 
         Ok(())
@@ -1447,7 +1445,7 @@ where
     /// avoids using the optimistic status update boundary, which is acceptable
     /// for replaying data but can break decoding if schema versions are pruned
     /// before PostgreSQL stores the acknowledgement.
-    async fn maybe_spawn_schema_cleanup(&mut self, reported_flush_lsn: PgLsn) -> EtlResult<()> {
+    async fn maybe_spawn_schema_cleanup(&mut self) -> EtlResult<()> {
         self.collect_finished_schema_cleanup_task().await;
 
         if self.state.has_schema_cleanup_task() {
@@ -1466,25 +1464,19 @@ where
         let worker_context = self.worker_context.clone();
 
         let cleanup_fut = async move {
-            let confirmed_flush_lsn = match Self::get_actual_confirmed_flush_lsn(
-                pg_connection,
-                &slot_name,
-                reported_flush_lsn,
-            )
-            .await
-            {
-                Ok(confirmed_flush_lsn) => confirmed_flush_lsn,
-                Err(err) => {
-                    warn!(
-                        %worker_type,
-                        %reported_flush_lsn,
-                        error = %err,
-                        "skipping schema cleanup because slot progress could not be confirmed"
-                    );
+            let confirmed_flush_lsn =
+                match Self::get_actual_confirmed_flush_lsn(pg_connection, &slot_name).await {
+                    Ok(confirmed_flush_lsn) => confirmed_flush_lsn,
+                    Err(err) => {
+                        warn!(
+                            %worker_type,
+                            error = %err,
+                            "skipping schema cleanup because slot progress could not be confirmed"
+                        );
 
-                    return;
-                }
-            };
+                        return;
+                    }
+                };
 
             let table_ids = match Self::get_schema_cleanup_table_ids(
                 &worker_context,
@@ -1559,13 +1551,7 @@ where
     async fn get_actual_confirmed_flush_lsn(
         pg_connection: PgConnectionConfig,
         slot_name: &str,
-        reported_flush_lsn: PgLsn,
     ) -> EtlResult<PgLsn> {
-        #[cfg(feature = "failpoints")]
-        if etl_fail_point_active(FORCE_SCHEMA_CLEANUP_CONFIRMED_FLUSH_LSN_FP) {
-            return Ok(reported_flush_lsn);
-        }
-
         let replication_client = PgReplicationClient::connect(pg_connection).await?;
         let slot = replication_client.get_slot(&slot_name).await?;
 

@@ -30,7 +30,6 @@ use std::{collections::HashMap, sync::Arc};
 
 use etl_postgres::types::{ReplicatedTableSchema, SnapshotId, TableId};
 use tokio::sync::RwLock;
-use tracing::warn;
 
 /// Shared per-table protocol state used to decode logical replication messages.
 #[derive(Debug, Clone)]
@@ -110,26 +109,18 @@ impl SharedTableCache {
         self.upsert(table_id, SharedTableState::Ready { replicated_table_schema }).await;
     }
 
-    /// Inserts or updates shared table state when the incoming snapshot is not
-    /// stale.
+    /// Inserts or updates shared table state.
+    ///
+    /// This cache is deliberately oblivious to ordering and ownership. It
+    /// assumes workers call it only after the apply loop has established table
+    /// ownership, and it follows the order of those calls even when a reconnect
+    /// replays older WAL.
     async fn upsert(&self, table_id: TableId, new_state: SharedTableState) {
         let mut guard = self.inner.write().await;
-        let snapshot_id = new_state.snapshot_id();
-        match guard.get_mut(&table_id) {
-            Some(state) if state.snapshot_id() > snapshot_id => {
-                warn!(
-                    table_id = %table_id,
-                    current_snapshot_id = %state.snapshot_id(),
-                    requested_snapshot_id = %snapshot_id,
-                    "ignoring stale shared table cache snapshot update"
-                );
-            }
-            Some(state) => {
-                *state = new_state;
-            }
-            None => {
-                guard.insert(table_id, new_state);
-            }
+        if let Some(state) = guard.get_mut(&table_id) {
+            *state = new_state;
+        } else {
+            guard.insert(table_id, new_state);
         }
     }
 }
@@ -199,7 +190,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn older_snapshot_is_ignored() {
+    async fn older_snapshot_rewinds_to_waiting_relation() {
         let cache = SharedTableCache::new();
         let table_id = TableId::new(123);
         let replicated_table_schema = create_test_schema();
@@ -208,8 +199,8 @@ mod tests {
         cache.note_waiting_for_relation(table_id, SnapshotId::new(9.into())).await;
 
         let state = cache.get(&table_id).await.expect("table state should exist");
-        assert_eq!(state.snapshot_id(), SnapshotId::new(10.into()));
-        assert!(matches!(state, SharedTableState::Ready { .. }));
+        assert_eq!(state.snapshot_id(), SnapshotId::new(9.into()));
+        assert!(matches!(state, SharedTableState::WaitingForRelation { .. }));
     }
 
     #[tokio::test]

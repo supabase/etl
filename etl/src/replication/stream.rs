@@ -119,10 +119,7 @@ pub(crate) enum StatusUpdateType {
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum StatusUpdateResult {
     /// A status update was accepted by the local replication stream wrapper.
-    Sent {
-        /// The monotonic flush LSN accepted by the stream wrapper.
-        flush_lsn: PgLsn,
-    },
+    Sent,
     /// No status update was sent because throttling suppressed it.
     Skipped,
 }
@@ -180,6 +177,13 @@ impl EventsStream {
         force: bool,
         status_update_type: StatusUpdateType,
     ) -> EtlResult<StatusUpdateResult> {
+        #[cfg(feature = "failpoints")]
+        if etl_fail_point_active(SEND_STATUS_UPDATE_FP) {
+            warn!("not sending status update due to active failpoint");
+
+            return Ok(StatusUpdateResult::Skipped);
+        }
+
         let this = self.project();
         // If the new write lsn is less than the last one, we can safely ignore it,
         // since we only want to report monotonically increasing values.
@@ -237,22 +241,6 @@ impl EventsStream {
             }
         }
 
-        // If the failpoint is active, we do not send any status update. This is useful
-        // for testing the system when we want to check what happens when no
-        // status updates are sent. The local stream state is still advanced so
-        // callers exercise the same post-send paths as a status update that was
-        // lost before reaching PostgreSQL.
-        #[cfg(feature = "failpoints")]
-        if etl_fail_point_active(SEND_STATUS_UPDATE_FP) {
-            warn!("not sending status update due to active failpoint");
-
-            *this.last_update = Some(Instant::now());
-            *this.last_write_lsn = Some(write_lsn);
-            *this.last_flush_lsn = Some(flush_lsn);
-
-            return Ok(StatusUpdateResult::Sent { flush_lsn });
-        }
-
         // The client's system clock at the time of transmission, as microseconds since
         // midnight on 2000-01-01.
         let ts = POSTGRES_EPOCH
@@ -293,7 +281,7 @@ impl EventsStream {
         *this.last_write_lsn = Some(write_lsn);
         *this.last_flush_lsn = Some(flush_lsn);
 
-        Ok(StatusUpdateResult::Sent { flush_lsn })
+        Ok(StatusUpdateResult::Sent)
     }
 }
 
