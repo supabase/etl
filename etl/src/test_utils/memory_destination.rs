@@ -9,7 +9,7 @@ use crate::{
         async_result::{TruncateTableResult, WriteEventsResult, WriteTableRowsResult},
     },
     error::EtlResult,
-    state::destination_metadata::DestinationTableMetadata,
+    state::destination_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus},
     store::state::StateStore,
     types::{Event, ReplicatedTableSchema, TableId, TableRow},
 };
@@ -83,18 +83,31 @@ where
         inner.table_rows.clear();
     }
 
-    /// Stores destination table metadata for a table if it has not been seen
-    /// before.
-    async fn ensure_destination_table_metadata(
+    /// Stores or advances destination table metadata for a table.
+    async fn sync_destination_table_metadata(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<()> {
         let table_id = replicated_table_schema.id();
         let existing_metadata = self.store.get_destination_table_metadata(table_id).await?;
-        if existing_metadata.is_none() {
-            let metadata = Self::build_destination_table_metadata(replicated_table_schema);
-            self.store.store_destination_table_metadata(table_id, metadata).await?;
-        }
+        let metadata = match existing_metadata {
+            Some(metadata)
+                if metadata.snapshot_id == replicated_table_schema.inner().snapshot_id
+                    && metadata.replication_mask == *replicated_table_schema.replication_mask() =>
+            {
+                return Ok(());
+            }
+            Some(metadata) => metadata
+                .with_schema_change(
+                    replicated_table_schema.inner().snapshot_id,
+                    replicated_table_schema.replication_mask().clone(),
+                    DestinationTableSchemaStatus::Applied,
+                )
+                .to_applied(),
+            None => Self::build_destination_table_metadata(replicated_table_schema),
+        };
+
+        self.store.store_destination_table_metadata(table_id, metadata).await?;
 
         Ok(())
     }
@@ -164,7 +177,7 @@ where
 
         // Store destination table metadata on first write, like real destinations
         // (BigQuery, Iceberg) do.
-        self.ensure_destination_table_metadata(replicated_table_schema).await?;
+        self.sync_destination_table_metadata(replicated_table_schema).await?;
 
         let mut inner = self.inner.lock().await;
         info!(%table_id, row_count = table_rows.len(), "writing table rows");
@@ -218,7 +231,7 @@ where
         }
 
         for replicated_table_schema in table_schemas.into_values() {
-            self.ensure_destination_table_metadata(&replicated_table_schema).await?;
+            self.sync_destination_table_metadata(&replicated_table_schema).await?;
         }
 
         let mut inner = self.inner.lock().await;

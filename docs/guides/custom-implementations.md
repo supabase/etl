@@ -54,7 +54,7 @@ Create `src/custom_store.rs`. A store must implement three traits (see [Extensio
 - `CleanupStore` - Store cleanup when tables leave the publication
 
 ```rust
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::info;
@@ -64,7 +64,8 @@ use etl::state::{
     AppliedDestinationTableMetadata, DestinationTableMetadata, TableReplicationPhase,
 };
 use etl::store::{CleanupStore, SchemaStore, StateStore, TableReplicationStates};
-use etl::types::{PgLsn, SnapshotId, TableId, TableSchema};
+use etl::store::schema::TableSchemaRetention;
+use etl::types::{SnapshotId, TableId, TableSchema};
 
 #[derive(Debug, Clone, Default)]
 struct TableEntry {
@@ -131,22 +132,21 @@ impl SchemaStore for CustomStore {
 
     async fn prune_table_schemas(
         &self,
-        table_ids: HashSet<TableId>,
-        confirmed_flush_lsn: PgLsn,
+        table_schema_retentions: HashMap<TableId, TableSchemaRetention>,
     ) -> EtlResult<u64> {
         let mut tables = self.tables.lock().await;
-        let confirmed_flush_snapshot_id = SnapshotId::from(confirmed_flush_lsn);
         let mut removed_count = 0u64;
 
         for (table_id, entry) in tables.iter_mut() {
-            if !table_ids.contains(table_id) {
+            let Some(retention) = table_schema_retentions.get(table_id) else {
                 continue;
-            }
+            };
+            let retention_snapshot_id = SnapshotId::from(retention.to_lsn());
 
             let retained_snapshot_id = entry
                 .schemas
                 .keys()
-                .filter(|snapshot_id| **snapshot_id <= confirmed_flush_snapshot_id)
+                .filter(|snapshot_id| **snapshot_id <= retention_snapshot_id)
                 .max()
                 .copied();
             let Some(retained_snapshot_id) = retained_snapshot_id else {
