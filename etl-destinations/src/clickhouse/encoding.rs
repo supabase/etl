@@ -128,10 +128,10 @@ fn bytes_to_hex(bytes: &[u8]) -> String {
     s
 }
 
-/// Encodes a variable-length integer (LEB128) for ClickHouse string/array
-/// lengths.
+/// Encodes `v` as LEB128 for ClickHouse string/array lengths.
 pub(crate) fn rb_varint(mut v: usize, buf: &mut Vec<u8>) {
     loop {
+        // LEB128: bottom 7 bits per byte, MSB set on all but the last.
         let byte = (v & 0x7f) as u8;
         v >>= 7;
         if v == 0 {
@@ -181,21 +181,12 @@ pub(crate) fn rb_encode_value(val: ClickHouseValue, buf: &mut Vec<u8>) -> EtlRes
         ClickHouseValue::Date(days) => buf.extend_from_slice(&days.to_le_bytes()),
         ClickHouseValue::DateTime64(micros) => buf.extend_from_slice(&micros.to_le_bytes()),
         ClickHouseValue::Uuid(bytes) => {
-            // ClickHouse RowBinary UUID = two little-endian u64 (high bits then low bits).
-            // Our bytes are in standard UUID big-endian order, so we split into two u64
-            // and write each in little-endian.
-            let high = u64::from_be_bytes(bytes[0..8].try_into().map_err(
-                |e: std::array::TryFromSliceError| {
-                    etl_error!(ErrorKind::ConversionError, "UUID high-half conversion failed", e)
-                },
-            )?);
-            let low = u64::from_be_bytes(bytes[8..16].try_into().map_err(
-                |e: std::array::TryFromSliceError| {
-                    etl_error!(ErrorKind::ConversionError, "UUID low-half conversion failed", e)
-                },
-            )?);
-            buf.extend_from_slice(&high.to_le_bytes());
-            buf.extend_from_slice(&low.to_le_bytes());
+            // ClickHouse RowBinary UUID = high u64 (LE) then low u64 (LE). Our
+            // bytes are in standard UUID big-endian order; reinterpret as a
+            // u128 to split halves cleanly.
+            let n = u128::from_be_bytes(bytes);
+            buf.extend_from_slice(&((n >> 64) as u64).to_le_bytes());
+            buf.extend_from_slice(&(n as u64).to_le_bytes());
         }
         // Array elements are always Nullable in ClickHouse: Array(Nullable(T)).
         ClickHouseValue::Array(items) => {

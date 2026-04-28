@@ -30,11 +30,19 @@ use crate::clickhouse::{
     },
 };
 
-/// Postgres CDC operation kind, written to the `cdc_operation` column.
+/// Postgres CDC operation kind. Written to the `cdc_operation` column as the
+/// matching uppercase string (`"INSERT"`, `"UPDATE"`, `"DELETE"`) so downstream
+/// consumers (ReplacingMergeTree dedup, materialized views, etc.) can filter
+/// or branch on operation type.
 #[derive(Copy, Clone)]
 enum CdcOperation {
+    /// New row inserted on the source.
     Insert,
+    /// Existing row updated on the source. Carries the post-update values.
     Update,
+    /// Row deleted on the source. Carries pre-delete values for the PK
+    /// columns; non-PK columns are filled in by `expand_key_row` (NULL for
+    /// nullable columns, type-appropriate zero for non-nullable).
     Delete,
 }
 
@@ -52,8 +60,7 @@ impl std::fmt::Display for CdcOperation {
 struct PendingRow {
     /// CDC op kind, written into the `cdc_operation` column.
     operation: CdcOperation,
-    /// Commit LSN of the source transaction, written into the `cdc_lsn`
-    /// column.
+    /// Commit LSN of the source transaction, written into `cdc_lsn`.
     lsn: PgLsn,
     /// User column values in source schema order. The two CDC columns
     /// (`cdc_operation`, `cdc_lsn`) are appended at encode time and are
@@ -81,6 +88,18 @@ fn expected_clickhouse_column_names(schema: &ReplicatedTableSchema) -> Vec<Strin
 }
 
 /// Derives RowBinary nullable flags from the actual ClickHouse table schema.
+///
+/// RowBinary requires a leading null-marker byte before each `Nullable(T)`
+/// column. The actual nullability of a ClickHouse column can drift from the
+/// source Postgres column: `ALTER TABLE ADD COLUMN` forces the new column to
+/// `Nullable(T)` regardless of the upstream `NOT NULL` constraint, because
+/// ClickHouse cannot backfill a non-null default for existing rows. Deriving
+/// flags from the destination schema therefore matches what ClickHouse expects
+/// on the wire even after schema evolution.
+///
+/// The column-count and column-order checks are an integrity guard: if the
+/// destination has otherwise drifted from `ReplicatedTableSchema`, we surface
+/// a `CorruptedTableSchema` error rather than emit misaligned RowBinary bytes.
 fn nullable_flags_from_clickhouse_columns(
     ch_table_name: &str,
     expected_column_names: &[String],
@@ -355,8 +374,10 @@ where
             .map(|table_row| {
                 let mut values: Vec<ClickHouseValue> =
                     table_row.into_values().into_iter().map(cell_to_clickhouse_value).collect();
-                values.push(ClickHouseValue::String(String::from("INSERT")));
-                values.push(ClickHouseValue::UInt64(0));
+                // CDC columns: initial-copy rows are tagged as INSERT with LSN 0
+                // (sentinel meaning "this row pre-dates the streaming cursor").
+                values.push(ClickHouseValue::String(CdcOperation::Insert.to_string()));
+                values.push(cdc_lsn_to_clickhouse_value(PgLsn::from(0)));
                 values
             })
             .collect();

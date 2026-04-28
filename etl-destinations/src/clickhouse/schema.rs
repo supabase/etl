@@ -64,16 +64,16 @@ pub(crate) fn quote_identifier(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
 }
 
-/// Converts a Postgres `public.my_table` style table name into a ClickHouse
-/// table name using the same double-underscore escaping convention used by
-/// DuckLake/Iceberg.
+/// Converts a Postgres `schema.table` name into a single-segment ClickHouse
+/// table name.
 ///
-/// - Schema and table are joined with `_`
-/// - Any literal `_` in the schema or table name is escaped to `__`
+/// Schema and table are joined with `_`; any literal `_` in either component
+/// is doubled to `__` so the join character is unambiguous and the original
+/// pair can be recovered by splitting on a single underscore.
 ///
 /// Examples:
-/// - `public.orders`  → `public_orders`
-/// - `my_schema.t`    → `my__schema_t`
+/// - `public.orders`  -> `public_orders`
+/// - `my_schema.t`    -> `my__schema_t`
 pub fn table_name_to_clickhouse_table_name(schema: &str, table: &str) -> String {
     let escaped_schema = schema.replace('_', "__");
     let escaped_table = table.replace('_', "__");
