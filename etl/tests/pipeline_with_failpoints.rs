@@ -2,8 +2,9 @@
 
 use etl::{
     failpoints::{
-        FORCE_SCHEMA_CLEANUP_FP, SEND_STATUS_UPDATE_FP,
-        START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP, START_TABLE_SYNC_DURING_DATA_SYNC_FP,
+        FORCE_SCHEMA_CLEANUP_CONFIRMED_FLUSH_LSN_FP, FORCE_SCHEMA_CLEANUP_FP,
+        SEND_STATUS_UPDATE_FP, START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP,
+        START_TABLE_SYNC_DURING_DATA_SYNC_FP,
     },
     state::table::{RetryPolicy, TableReplicationPhase, TableReplicationPhaseType},
     store::{schema::SchemaStore, state::StateStore},
@@ -1127,10 +1128,17 @@ async fn cleaned_schema_snapshots_are_recreated_when_status_update_is_lost() {
     assert!(store.get_table_schema(&table_id, first_snapshot).await.unwrap().is_some());
     assert!(store.get_table_schema(&table_id, latest_snapshot).await.unwrap().is_some());
 
-    // We need to force the schema cleanup.
     let prune_notify = store.notify_on_table_schema_prune().await;
+
+    // Force cleanup during the shutdown status update. The status update itself
+    // is still lost, while the confirmed-LSN failpoint lets this test exercise
+    // replay after cleanup without relying on PostgreSQL acknowledging it.
     fail::cfg(FORCE_SCHEMA_CLEANUP_FP, "return").unwrap();
+    fail::cfg(FORCE_SCHEMA_CLEANUP_CONFIRMED_FLUSH_LSN_FP, "return").unwrap();
+
     prune_notify.notified().await;
+
+    fail::remove(FORCE_SCHEMA_CLEANUP_CONFIRMED_FLUSH_LSN_FP);
     fail::remove(FORCE_SCHEMA_CLEANUP_FP);
 
     pipeline.shutdown_and_wait().await.unwrap();

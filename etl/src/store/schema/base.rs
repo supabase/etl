@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashSet, sync::Arc};
 
 use crate::{
     error::EtlResult,
@@ -52,19 +52,21 @@ pub trait SchemaStore {
         table_schema: TableSchema,
     ) -> impl Future<Output = EtlResult<Arc<TableSchema>>> + Send;
 
-    /// Prunes obsolete table schema versions using the current schema snapshots
-    /// in use by active replication workers.
+    /// Prunes obsolete table schema versions for tables at a confirmed LSN.
     ///
-    /// For each `table_id -> snapshot_id` entry, implementations should remove
-    /// schema versions for that table whose snapshot is lower than
-    /// `snapshot_id`. Versions at or after the current snapshot must be
-    /// preserved. If an implementation uses both a cache and persistent
-    /// storage, both must be pruned consistently.
+    /// For each table id, implementations should find the newest schema
+    /// version at or before `confirmed_flush_lsn`, preserve it, and remove
+    /// older versions. The LSN must come from the replication slot's actual
+    /// `confirmed_flush_lsn`, not an optimistic status update, because cleanup
+    /// must not delete schemas PostgreSQL may still replay. Versions newer than
+    /// `confirmed_flush_lsn` must also be preserved because PostgreSQL may
+    /// replay the DDL that created them.
     ///
     /// Returns the number of schema versions removed.
     fn prune_table_schemas(
         &self,
-        _current_snapshot_ids: HashMap<TableId, SnapshotId>,
+        _table_ids: HashSet<TableId>,
+        _confirmed_flush_lsn: SnapshotId,
     ) -> impl Future<Output = EtlResult<u64>> + Send {
         async { Ok(0) }
     }

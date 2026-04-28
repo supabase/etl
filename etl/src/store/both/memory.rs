@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::Arc,
 };
 
@@ -236,15 +236,30 @@ impl SchemaStore for MemoryStore {
 
     async fn prune_table_schemas(
         &self,
-        current_snapshot_ids: HashMap<TableId, SnapshotId>,
+        table_ids: HashSet<TableId>,
+        confirmed_flush_lsn: SnapshotId,
     ) -> EtlResult<u64> {
         let mut inner = self.inner.lock().await;
 
+        let mut retained_snapshot_ids: HashMap<TableId, SnapshotId> = HashMap::new();
+        for (table_id, snapshot_id) in inner.table_schemas.keys() {
+            if !table_ids.contains(table_id) || *snapshot_id > confirmed_flush_lsn {
+                continue;
+            }
+
+            retained_snapshot_ids
+                .entry(*table_id)
+                .and_modify(|retained_snapshot_id| {
+                    *retained_snapshot_id = (*retained_snapshot_id).max(*snapshot_id);
+                })
+                .or_insert(*snapshot_id);
+        }
+
         let before_count = inner.table_schemas.len();
         inner.table_schemas.retain(|(table_id, snapshot_id), _| {
-            current_snapshot_ids
+            retained_snapshot_ids
                 .get(table_id)
-                .is_none_or(|current_snapshot_id| snapshot_id >= current_snapshot_id)
+                .is_none_or(|retained_snapshot_id| snapshot_id >= retained_snapshot_id)
         });
 
         Ok(before_count.saturating_sub(inner.table_schemas.len()) as u64)

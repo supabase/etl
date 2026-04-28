@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use sqlx::{
     PgExecutor, PgPool, Row,
@@ -411,46 +411,47 @@ where
 
 /// Deletes obsolete table schema versions for a pipeline.
 ///
-/// For each current table snapshot, deletes schema versions for that table
-/// with an older `snapshot_id`. Schema versions at or after the current
-/// snapshot are left untouched. Column rows are removed by the
-/// `table_columns.table_schema_id` `ON DELETE CASCADE` constraint, and the
+/// For each table, finds the newest schema version at or before
+/// `confirmed_flush_lsn` and deletes older schema versions. Versions at or
+/// after that retained snapshot are left untouched. Column rows are removed by
+/// the `table_columns.table_schema_id` `ON DELETE CASCADE` constraint, and the
 /// single `DELETE` statement is atomic in PostgreSQL.
 pub async fn delete_obsolete_table_schema_versions<'c, E>(
     executor: E,
     pipeline_id: i64,
-    current_snapshot_ids: &HashMap<TableId, SnapshotId>,
+    table_ids: &HashSet<TableId>,
+    confirmed_flush_lsn: SnapshotId,
 ) -> Result<u64, sqlx::Error>
 where
     E: PgExecutor<'c>,
 {
-    if current_snapshot_ids.is_empty() {
+    if table_ids.is_empty() {
         return Ok(0);
     }
 
-    let mut table_ids = Vec::with_capacity(current_snapshot_ids.len());
-    let mut snapshot_ids = Vec::with_capacity(current_snapshot_ids.len());
-    for (table_id, snapshot_id) in current_snapshot_ids {
-        table_ids.push(SqlxTableId(table_id.into_inner()));
-        snapshot_ids.push(snapshot_id.to_pg_lsn_string());
-    }
+    let table_ids =
+        table_ids.iter().map(|table_id| SqlxTableId(table_id.into_inner())).collect::<Vec<_>>();
 
     let result = sqlx::query(
         r#"
-        with current_snapshots as (
-            select *
-            from unnest($2::oid[], $3::pg_lsn[]) as cs(table_id, current_snapshot_id)
+        with retained_snapshots as (
+            select ts.table_id, max(ts.snapshot_id) as retained_snapshot_id
+            from etl.table_schemas ts
+            where ts.pipeline_id = $1
+              and ts.table_id = any($2::oid[])
+              and ts.snapshot_id <= $3::pg_lsn
+            group by ts.table_id
         )
         delete from etl.table_schemas ts
-        using current_snapshots cs
+        using retained_snapshots rs
         where ts.pipeline_id = $1
-          and ts.table_id = cs.table_id
-          and ts.snapshot_id < cs.current_snapshot_id
+          and ts.table_id = rs.table_id
+          and ts.snapshot_id < rs.retained_snapshot_id
         "#,
     )
     .bind(pipeline_id)
     .bind(table_ids)
-    .bind(snapshot_ids)
+    .bind(confirmed_flush_lsn.to_pg_lsn_string())
     .execute(executor)
     .await?;
 

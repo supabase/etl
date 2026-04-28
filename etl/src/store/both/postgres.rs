@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     ops::DerefMut,
     sync::Arc,
     time::Duration,
@@ -205,17 +205,32 @@ impl Inner {
         }
     }
 
-    /// Prunes cached schema versions older than the current snapshot for each
+    /// Prunes cached schema versions older than the retained snapshot for each
     /// table.
     fn prune_table_schemas(
         &mut self,
-        current_snapshot_ids: &HashMap<TableId, SnapshotId>,
+        table_ids: &HashSet<TableId>,
+        confirmed_flush_lsn: SnapshotId,
     ) -> usize {
+        let mut retained_snapshot_ids: HashMap<TableId, SnapshotId> = HashMap::new();
+        for (table_id, snapshot_id) in self.table_schemas.keys() {
+            if !table_ids.contains(table_id) || *snapshot_id > confirmed_flush_lsn {
+                continue;
+            }
+
+            retained_snapshot_ids
+                .entry(*table_id)
+                .and_modify(|retained_snapshot_id| {
+                    *retained_snapshot_id = (*retained_snapshot_id).max(*snapshot_id);
+                })
+                .or_insert(*snapshot_id);
+        }
+
         let before_count = self.table_schemas.len();
         self.table_schemas.retain(|(table_id, snapshot_id), _| {
-            current_snapshot_ids
+            retained_snapshot_ids
                 .get(table_id)
-                .is_none_or(|current_snapshot_id| snapshot_id >= current_snapshot_id)
+                .is_none_or(|retained_snapshot_id| snapshot_id >= retained_snapshot_id)
         });
 
         before_count.saturating_sub(self.table_schemas.len())
@@ -671,12 +686,14 @@ impl SchemaStore for PostgresStore {
 
     async fn prune_table_schemas(
         &self,
-        current_snapshot_ids: HashMap<TableId, SnapshotId>,
+        table_ids: HashSet<TableId>,
+        confirmed_flush_lsn: SnapshotId,
     ) -> EtlResult<u64> {
         let deleted_count = schema::delete_obsolete_table_schema_versions(
             &self.pool,
             self.pipeline_id as i64,
-            &current_snapshot_ids,
+            &table_ids,
+            confirmed_flush_lsn,
         )
         .await
         .map_err(|err| {
@@ -688,13 +705,13 @@ impl SchemaStore for PostgresStore {
         })?;
 
         let mut inner = self.inner.lock().await;
-        let cached_count = inner.prune_table_schemas(&current_snapshot_ids);
+        let cached_count = inner.prune_table_schemas(&table_ids, confirmed_flush_lsn);
 
         if deleted_count > 0 || cached_count > 0 {
             info!(
                 deleted_count,
                 cached_count,
-                table_count = current_snapshot_ids.len(),
+                table_count = table_ids.len(),
                 "pruned obsolete table schema versions"
             );
         }

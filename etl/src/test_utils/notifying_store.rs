@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     fmt,
     sync::Arc,
 };
@@ -422,15 +422,26 @@ impl SchemaStore for NotifyingStore {
 
     async fn prune_table_schemas(
         &self,
-        current_snapshot_ids: HashMap<TableId, SnapshotId>,
+        table_ids: HashSet<TableId>,
+        confirmed_flush_lsn: SnapshotId,
     ) -> EtlResult<u64> {
         let mut inner = self.inner.write().await;
         let mut removed_count = 0u64;
 
         for (table_id, schemas) in &mut inner.table_schemas {
-            if let Some(current_snapshot_id) = current_snapshot_ids.get(table_id) {
+            if table_ids.contains(table_id) {
+                let retained_snapshot_id = schemas
+                    .iter()
+                    .map(|schema| schema.snapshot_id)
+                    .filter(|snapshot_id| *snapshot_id <= confirmed_flush_lsn)
+                    .max();
+
+                let Some(retained_snapshot_id) = retained_snapshot_id else {
+                    continue;
+                };
+
                 let before_count = schemas.len();
-                schemas.retain(|schema| schema.snapshot_id >= *current_snapshot_id);
+                schemas.retain(|schema| schema.snapshot_id >= retained_snapshot_id);
                 removed_count =
                     removed_count.saturating_add(before_count.saturating_sub(schemas.len()) as u64);
             }

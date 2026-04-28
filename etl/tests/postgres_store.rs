@@ -1,6 +1,6 @@
 #![cfg(feature = "test-utils")]
 
-use std::collections::HashMap;
+use std::collections::HashSet;
 
 use etl::{
     error::ErrorKind,
@@ -478,7 +478,7 @@ async fn schema_store_prunes_obsolete_versions_from_database_and_cache() {
     let table_id = TableId::new(12345);
     let table_name = TableName::new("public".to_string(), "test_table".to_string());
 
-    for snapshot_id in [0u64, 100, 200] {
+    for snapshot_id in [0u64, 100, 200, 300] {
         let columns = vec![
             test_column("id", PgType::INT4, -1, 1, false, true),
             test_column(&format!("col_at_{snapshot_id}"), PgType::TEXT, -1, 2, true, false),
@@ -552,10 +552,7 @@ async fn schema_store_prunes_obsolete_versions_from_database_and_cache() {
     assert!(obsolete_column_count_before > 0);
 
     let deleted = store
-        .prune_table_schemas(HashMap::from([
-            (table_id, SnapshotId::from(200u64)),
-            (other_table_id, SnapshotId::from(150u64)),
-        ]))
+        .prune_table_schemas(HashSet::from([table_id, other_table_id]), SnapshotId::from(200u64))
         .await
         .unwrap();
     assert_eq!(deleted, 3);
@@ -563,8 +560,9 @@ async fn schema_store_prunes_obsolete_versions_from_database_and_cache() {
     let cached_schemas = store.get_table_schemas().await.unwrap();
     let table_snapshots: Vec<_> =
         cached_schemas.iter().filter(|schema| schema.id == table_id).collect();
-    assert_eq!(table_snapshots.len(), 1);
-    assert_eq!(table_snapshots[0].snapshot_id, SnapshotId::from(200u64));
+    assert_eq!(table_snapshots.len(), 2);
+    assert!(table_snapshots.iter().any(|schema| schema.snapshot_id == SnapshotId::from(200u64)));
+    assert!(table_snapshots.iter().any(|schema| schema.snapshot_id == SnapshotId::from(300u64)));
 
     let other_table_snapshots: Vec<_> =
         cached_schemas.iter().filter(|schema| schema.id == other_table_id).collect();
@@ -583,7 +581,7 @@ async fn schema_store_prunes_obsolete_versions_from_database_and_cache() {
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(schema_count, 1);
+    assert_eq!(schema_count, 2);
 
     let untouched_schema_count: i64 = sqlx::query_scalar(
         "select count(*) from etl.table_schemas where pipeline_id = $1 and table_id = $2",
@@ -607,9 +605,13 @@ async fn schema_store_prunes_obsolete_versions_from_database_and_cache() {
     let old_schema = store.get_table_schema(&table_id, SnapshotId::from(100u64)).await.unwrap();
     assert!(old_schema.is_none());
 
+    let retained_schema =
+        store.get_table_schema(&table_id, SnapshotId::from(250u64)).await.unwrap().unwrap();
+    assert_eq!(retained_schema.snapshot_id, SnapshotId::from(200u64));
+
     let latest_schema =
         store.get_table_schema(&table_id, SnapshotId::max()).await.unwrap().unwrap();
-    assert_eq!(latest_schema.snapshot_id, SnapshotId::from(200u64));
+    assert_eq!(latest_schema.snapshot_id, SnapshotId::from(300u64));
 }
 
 #[tokio::test(flavor = "multi_thread")]
