@@ -33,6 +33,11 @@ use uuid::Uuid;
 /// providing isolation from other database objects.
 pub const TEST_DATABASE_SCHEMA: &str = "test";
 
+const DEFAULT_DATABASE_HOST: &str = "localhost";
+const DEFAULT_DATABASE_PORT: &str = "5430";
+const DEFAULT_DATABASE_USERNAME: &str = "postgres";
+const DEFAULT_DATABASE_PASSWORD: &str = "postgres";
+
 /// Creates a [`TableName`] in the test schema.
 ///
 /// This helper function constructs a [`TableName`] with the schema set to the
@@ -49,23 +54,26 @@ pub fn test_table_name(name: &str) -> TableName {
 /// ease of debugging. Each invocation creates a unique database name to prevent
 /// test interference.
 ///
-/// Configuration is read from environment variables:
-/// - `TESTS_DATABASE_HOST`: Postgres server hostname (required)
-/// - `TESTS_DATABASE_PORT`: Postgres server port (required)
-/// - `TESTS_DATABASE_USERNAME`: Database user (required)
-/// - `TESTS_DATABASE_PASSWORD`: Database password (optional)
+/// Configuration is read from environment variables, falling back to defaults
+/// suitable for the local Docker Compose setup:
+/// - `TESTS_DATABASE_HOST`: Postgres server hostname (default: `localhost`)
+/// - `TESTS_DATABASE_PORT`: Postgres server port (default: `5430`)
+/// - `TESTS_DATABASE_USERNAME`: Database user (default: `postgres`)
+/// - `TESTS_DATABASE_PASSWORD`: Database password (default: `postgres`)
 fn local_pg_connection_config() -> PgConnectionConfig {
     PgConnectionConfig {
-        host: std::env::var("TESTS_DATABASE_HOST").expect("TESTS_DATABASE_HOST must be set"),
+        host: std::env::var("TESTS_DATABASE_HOST").unwrap_or(DEFAULT_DATABASE_HOST.into()),
         port: std::env::var("TESTS_DATABASE_PORT")
-            .expect("TESTS_DATABASE_PORT must be set")
+            .unwrap_or(DEFAULT_DATABASE_PORT.into())
             .parse()
             .expect("TESTS_DATABASE_PORT must be a valid port number"),
-        // Generate unique database name for test isolation
         name: Uuid::new_v4().to_string(),
         username: std::env::var("TESTS_DATABASE_USERNAME")
-            .expect("TESTS_DATABASE_USERNAME must be set"),
-        password: std::env::var("TESTS_DATABASE_PASSWORD").ok().map(Into::into),
+            .unwrap_or(DEFAULT_DATABASE_USERNAME.into()),
+        password: std::env::var("TESTS_DATABASE_PASSWORD")
+            .ok()
+            .or(Some(DEFAULT_DATABASE_PASSWORD.into()))
+            .map(Into::into),
         tls: TlsConfig { trusted_root_certs: String::new(), enabled: false },
         keepalive: TcpKeepaliveConfig::default(),
     }

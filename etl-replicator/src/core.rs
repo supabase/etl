@@ -160,6 +160,7 @@ pub(crate) async fn start_replicator_with_config(
             metadata_schema,
             duckdb_memory_cache_limit,
             maintenance_target_file_size,
+            expire_snapshots_older_than,
         } => {
             set_destination_scope::<DuckLakeDestination<PostgresStore>>();
 
@@ -189,6 +190,7 @@ pub(crate) async fn start_replicator_with_config(
                 metadata_schema.clone(),
                 duckdb_memory_cache_limit.clone(),
                 maintenance_target_file_size.clone(),
+                expire_snapshots_older_than.clone(),
                 state_store.clone(),
             )
             .await?;

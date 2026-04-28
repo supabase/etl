@@ -1,6 +1,6 @@
 ---
 source: etl-api/src/configs/destination.rs
-assertion_line: 1234
+assertion_line: 1303
 expression: full_config
 ---
 {
@@ -16,6 +16,7 @@ expression: full_config
     "s3_use_ssl": false,
     "metadata_schema": "ducklake",
     "duckdb_memory_cache_limit": "50MB",
-    "maintenance_target_file_size": "10MB"
+    "maintenance_target_file_size": "10MB",
+    "expire_snapshots_older_than": "7 days"
   }
 }

@@ -56,7 +56,8 @@ use crate::{
         },
         config::{
             MAINTENANCE_TARGET_FILE_SIZE, build_setup_plan, current_duckdb_extension_strategy,
-            maintenance_target_file_size_sql,
+            maintenance_target_file_size_sql, resolve_expire_snapshots_older_than,
+            validate_expire_snapshots_older_than_sql,
         },
         inline_size::DuckLakePendingInlineSizeSampler,
         maintenance::{
@@ -388,6 +389,8 @@ where
     ///   (e.g. `"150MB"`). Defaults to `150MB`.
     /// - `maintenance_target_file_size`: Optional DuckLake maintenance
     ///   `target_file_size` value (e.g. `"10MB"`). Defaults to `10MB`.
+    /// - `expire_snapshots_older_than`: Optional DuckLake snapshot-retention
+    ///   interval (e.g. `"7 days"`). Defaults to `7 days`.
     /// - `duckdb_log`: Optional DuckDB log storage and shutdown dump paths.
     /// - On Linux and macOS, DuckDB extensions are loaded from vendored local
     ///   files when a vendored directory is available. The root directory can
@@ -407,6 +410,7 @@ where
         metadata_schema: Option<String>,
         duckdb_memory_cache_limit: Option<String>,
         maintenance_target_file_size: Option<String>,
+        expire_snapshots_older_than: Option<String>,
         store: S,
     ) -> EtlResult<Self> {
         register_metrics();
@@ -432,6 +436,9 @@ where
         let maintenance_target_file_size = Arc::<str>::from(
             maintenance_target_file_size
                 .unwrap_or_else(|| MAINTENANCE_TARGET_FILE_SIZE.to_string()),
+        );
+        let expire_snapshots_older_than = Arc::<str>::from(
+            resolve_expire_snapshots_older_than(expire_snapshots_older_than.as_deref()).to_owned(),
         );
         if let crate::ducklake::config::DuckDbExtensionStrategy::VendoredLocal { platform_dir } =
             extension_strategy
@@ -478,6 +485,31 @@ where
                         source: error
                     )
                 })?;
+                Ok(())
+            },
+        )
+        .await?;
+        let expire_snapshots_validation_sql =
+            validate_expire_snapshots_older_than_sql(expire_snapshots_older_than.as_ref());
+        let expire_snapshots_older_than_for_error = Arc::clone(&expire_snapshots_older_than);
+        run_duckdb_blocking(
+            Arc::clone(&pool),
+            Arc::clone(&blocking_slots),
+            DuckDbBlockingOperationKind::Foreground,
+            move |conn| -> EtlResult<()> {
+                conn.query_row(&expire_snapshots_validation_sql, [], |_row| Ok(())).map_err(
+                    |source| {
+                        etl_error!(
+                            ErrorKind::ConfigError,
+                            "DuckLake expire_snapshots_older_than configuration failed",
+                            format!(
+                                "invalid expire_snapshots_older_than value `{}`",
+                                expire_snapshots_older_than_for_error
+                            ),
+                            source: source
+                        )
+                    },
+                )?;
                 Ok(())
             },
         )
@@ -537,6 +569,7 @@ where
                 Arc::clone(&inline_flush_requested),
                 Arc::clone(&inline_flush_requests),
                 pending_inline_size_sampler,
+                Arc::clone(&expire_snapshots_older_than),
             )?
             .into(),
         );
@@ -1648,6 +1681,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 store,
             )
             .await
@@ -1713,6 +1747,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 store,
             )
             .await
@@ -1771,6 +1806,7 @@ mod tests {
                 catalog.clone(),
                 data.clone(),
                 1,
+                None,
                 None,
                 None,
                 None,
