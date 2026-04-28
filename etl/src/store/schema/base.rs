@@ -1,4 +1,4 @@
-use std::{collections::HashSet, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 
 use tokio_postgres::types::PgLsn;
 
@@ -6,6 +6,29 @@ use crate::{
     error::EtlResult,
     types::{SnapshotId, TableId, TableSchema},
 };
+
+/// Per-table schema cleanup retention boundary.
+///
+/// Retention can be bounded by a stored schema snapshot that the destination
+/// still needs, or by the replication slot's confirmed flush LSN. Both are LSN
+/// values, but the variant records why that boundary was chosen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TableSchemaRetention {
+    /// Retain schemas according to a destination-useful schema snapshot.
+    SnapshotId(SnapshotId),
+    /// Retain schemas according to the replication slot's confirmed flush LSN.
+    ConfirmedFlushLsn(PgLsn),
+}
+
+impl TableSchemaRetention {
+    /// Returns the underlying LSN used as the retention boundary.
+    pub fn to_lsn(self) -> PgLsn {
+        match self {
+            Self::SnapshotId(snapshot_id) => snapshot_id.into(),
+            Self::ConfirmedFlushLsn(lsn) => lsn,
+        }
+    }
+}
 
 /// Trait for storing and retrieving database table schema information.
 ///
@@ -54,21 +77,18 @@ pub trait SchemaStore {
         table_schema: TableSchema,
     ) -> impl Future<Output = EtlResult<Arc<TableSchema>>> + Send;
 
-    /// Prunes obsolete table schema versions for tables at a confirmed LSN.
+    /// Prunes obsolete table schema versions for tables at safe cleanup points.
     ///
-    /// For each table id, implementations should find the newest schema
-    /// version at or before `confirmed_flush_lsn`, preserve it, and remove
-    /// older versions. The LSN must come from the replication slot's actual
-    /// `confirmed_flush_lsn`, not an optimistic status update, because cleanup
-    /// must not delete schemas PostgreSQL may still replay. Versions newer than
-    /// `confirmed_flush_lsn` must also be preserved because PostgreSQL may
-    /// replay the DDL that created them.
+    /// For each table id, implementations should find the newest schema version
+    /// at or before that table's retention LSN, preserve it, and remove older
+    /// versions. Versions newer than the retention LSN must also be preserved
+    /// because PostgreSQL may replay them, or the destination may need them for
+    /// schema application.
     ///
     /// Returns the number of schema versions removed.
     fn prune_table_schemas(
         &self,
-        _table_ids: HashSet<TableId>,
-        _confirmed_flush_lsn: PgLsn,
+        _table_schema_retentions: HashMap<TableId, TableSchemaRetention>,
     ) -> impl Future<Output = EtlResult<u64>> + Send {
         async { Ok(0) }
     }

@@ -1,10 +1,9 @@
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashMap},
     sync::Arc,
 };
 
 use tokio::sync::Mutex;
-use tokio_postgres::types::PgLsn;
 
 use crate::{
     error::{ErrorKind, EtlResult},
@@ -15,7 +14,7 @@ use crate::{
     },
     store::{
         cleanup::CleanupStore,
-        schema::SchemaStore,
+        schema::{SchemaStore, TableSchemaRetention},
         state::{DestinationTablesMetadata, StateStore, TableReplicationStates},
     },
     types::{SnapshotId, TableId, TableSchema},
@@ -237,15 +236,18 @@ impl SchemaStore for MemoryStore {
 
     async fn prune_table_schemas(
         &self,
-        table_ids: HashSet<TableId>,
-        confirmed_flush_lsn: PgLsn,
+        table_schema_retentions: HashMap<TableId, TableSchemaRetention>,
     ) -> EtlResult<u64> {
         let mut inner = self.inner.lock().await;
-        let confirmed_flush_snapshot_id = SnapshotId::from(confirmed_flush_lsn);
 
         let mut retained_snapshot_ids: HashMap<TableId, SnapshotId> = HashMap::new();
         for (table_id, snapshot_id) in inner.table_schemas.keys() {
-            if !table_ids.contains(table_id) || *snapshot_id > confirmed_flush_snapshot_id {
+            let Some(retention) = table_schema_retentions.get(table_id) else {
+                continue;
+            };
+
+            let retention_snapshot_id = SnapshotId::from(retention.to_lsn());
+            if *snapshot_id > retention_snapshot_id {
                 continue;
             }
 

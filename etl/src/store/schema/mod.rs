@@ -1,3 +1,3 @@
 mod base;
 
-pub use base::SchemaStore;
+pub use base::{SchemaStore, TableSchemaRetention};

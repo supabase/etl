@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use sqlx::{
     PgExecutor, PgPool, Row,
@@ -411,35 +411,44 @@ where
 
 /// Deletes obsolete table schema versions for a pipeline.
 ///
-/// For each table, finds the newest schema version at or before
-/// `confirmed_flush_lsn` and deletes older schema versions. Versions at or
+/// For each table, finds the newest schema version at or before that table's
+/// retention LSN and deletes older schema versions. Versions at or
 /// after that retained snapshot are left untouched. Column rows are removed by
 /// the `table_columns.table_schema_id` `ON DELETE CASCADE` constraint, and the
 /// single `DELETE` statement is atomic in PostgreSQL.
 pub async fn delete_obsolete_table_schema_versions<'c, E>(
     executor: E,
     pipeline_id: i64,
-    table_ids: &HashSet<TableId>,
-    confirmed_flush_lsn: PgLsn,
+    retention_lsns: &HashMap<TableId, PgLsn>,
 ) -> Result<u64, sqlx::Error>
 where
     E: PgExecutor<'c>,
 {
-    if table_ids.is_empty() {
+    if retention_lsns.is_empty() {
         return Ok(0);
     }
 
-    let table_ids =
-        table_ids.iter().map(|table_id| SqlxTableId(table_id.into_inner())).collect::<Vec<_>>();
+    let mut table_ids = Vec::with_capacity(retention_lsns.len());
+    let mut retention_lsn_values = Vec::with_capacity(retention_lsns.len());
+    for (table_id, retention_lsn) in retention_lsns {
+        table_ids.push(SqlxTableId(table_id.into_inner()));
+        retention_lsn_values.push(retention_lsn.to_string());
+    }
 
     let result = sqlx::query(
         r#"
-        with retained_snapshots as (
+        with cleanup_retentions as (
+            select table_id, retention_lsn::pg_lsn as retention_lsn
+            from unnest($2::oid[], $3::text[])
+                as cleanup(table_id, retention_lsn)
+        ),
+        retained_snapshots as (
             select ts.table_id, max(ts.snapshot_id) as retained_snapshot_id
             from etl.table_schemas ts
+            join cleanup_retentions cleanup
+              on cleanup.table_id = ts.table_id
             where ts.pipeline_id = $1
-              and ts.table_id = any($2::oid[])
-              and ts.snapshot_id <= $3::pg_lsn
+              and ts.snapshot_id <= cleanup.retention_lsn
             group by ts.table_id
         )
         delete from etl.table_schemas ts
@@ -451,7 +460,7 @@ where
     )
     .bind(pipeline_id)
     .bind(table_ids)
-    .bind(confirmed_flush_lsn.to_string())
+    .bind(retention_lsn_values)
     .execute(executor)
     .await?;
 

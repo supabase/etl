@@ -8,7 +8,7 @@
 //! cycle.
 
 use std::{
-    collections::HashSet,
+    collections::HashMap,
     fmt::{Display, Formatter},
     future::Future,
     pin::Pin,
@@ -66,16 +66,20 @@ use crate::{
     metrics::{
         ACTION_LABEL, COMMAND_TAG_LABEL, DESTINATION_LABEL, ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
         ETL_DDL_SCHEMA_CHANGE_COLUMNS, ETL_DDL_SCHEMA_CHANGES_TOTAL, ETL_EVENTS_PROCESSED_TOTAL,
-        ETL_REPLICATION_MESSAGES_TOTAL, ETL_SCHEMA_CLEANUP_ERRORS_TOTAL, ETL_SCHEMA_CLEANUPS_TOTAL,
-        ETL_TRANSACTION_DURATION_SECONDS, ETL_TRANSACTION_SIZE, ETL_TRANSACTIONS_TOTAL,
-        OUTCOME_LABEL, WORKER_TYPE_LABEL,
+        ETL_REPLICATION_MESSAGES_TOTAL, ETL_SCHEMA_CLEANUP_ERRORS_TOTAL,
+        ETL_SCHEMA_CLEANUP_PRUNED_VERSIONS_TOTAL, ETL_SCHEMA_CLEANUP_TABLES_TOTAL,
+        ETL_SCHEMA_CLEANUPS_TOTAL, ETL_TRANSACTION_DURATION_SECONDS, ETL_TRANSACTION_SIZE,
+        ETL_TRANSACTIONS_TOTAL, OUTCOME_LABEL, WORKER_TYPE_LABEL,
     },
     replication::{
         EventsStream, SharedTableCache, StatusUpdateResult, StatusUpdateType,
         client::{PgReplicationClient, PostgresConnectionUpdate},
     },
     state::table::{TableReplicationError, TableReplicationPhase, TableReplicationPhaseType},
-    store::{schema::SchemaStore, state::StateStore},
+    store::{
+        schema::{SchemaStore, TableSchemaRetention},
+        state::StateStore,
+    },
     types::{Event, PipelineId, RelationEvent, SizeHint},
     workers::{TableSyncWorker, TableSyncWorkerPool, TableSyncWorkerState},
 };
@@ -1476,47 +1480,62 @@ where
             }
         };
 
-        // We get the table ids that this apply loop instance takes care of and we try
-        // to prune their old table schemas based on the confirmed flush lsn.
-        let table_ids = match self.get_schema_cleanup_table_ids(confirmed_flush_lsn).await {
-            Ok(table_ids) => table_ids,
-            Err(err) => {
-                error!(
-                    %worker_type,
-                    error = %err,
-                    "failed to determine schema cleanup ownership"
-                );
+        // We get the table retention boundaries that this apply loop instance
+        // can safely prune up to. The map is frozen before the background task
+        // is spawned, so any concurrent progress can only make this cleanup
+        // conservative.
+        let table_schema_retentions =
+            match self.get_table_schema_retentions(confirmed_flush_lsn).await {
+                Ok(table_schema_retentions) => table_schema_retentions,
+                Err(err) => {
+                    error!(
+                        %worker_type,
+                        error = %err,
+                        "failed to determine schema cleanup ownership"
+                    );
 
-                schema_cleanup_run.finish().await;
+                    schema_cleanup_run.finish().await;
 
-                return Ok(());
-            }
-        };
+                    return Ok(());
+                }
+            };
 
         // If there are no tables to try to prune, we don't want to attempt it.
-        if table_ids.is_empty() {
+        if table_schema_retentions.is_empty() {
             schema_cleanup_run.finish().await;
 
             return Ok(());
         }
 
         let schema_store = self.schema_store.clone();
+        let table_count = table_schema_retentions.len() as u64;
 
-        // At this point we know all table ids to check for pruning, so we can offload
-        // this to a background task to not stall the worker. This is fine since
-        // we know that the frontier is frozen at confirmed flush lsn, so this
-        // task can take its time to do the job, without ever interfering
-        // with the apply loop. Also, no more than one pruning task can occur at the
-        // same time within an apply loop instance, so this makes this even
-        // safer.
+        // At this point we know the retention boundaries to check for pruning,
+        // so we can offload this to a background task to not stall the worker.
+        // This is fine since those boundaries are frozen, so this task can take
+        // its time to do the job without interfering with the apply loop. Also,
+        // no more than one pruning task can occur at the same time within an
+        // apply loop instance, so this makes this even safer.
         let cleanup_fut = async move {
-            match schema_store.prune_table_schemas(table_ids, confirmed_flush_lsn).await {
+            match schema_store.prune_table_schemas(table_schema_retentions).await {
                 Ok(deleted_count) => {
                     counter!(
                         ETL_SCHEMA_CLEANUPS_TOTAL,
                         WORKER_TYPE_LABEL => worker_type.as_str(),
                     )
                     .increment(1);
+
+                    counter!(
+                        ETL_SCHEMA_CLEANUP_TABLES_TOTAL,
+                        WORKER_TYPE_LABEL => worker_type.as_str(),
+                    )
+                    .increment(table_count);
+
+                    counter!(
+                        ETL_SCHEMA_CLEANUP_PRUNED_VERSIONS_TOTAL,
+                        WORKER_TYPE_LABEL => worker_type.as_str(),
+                    )
+                    .increment(deleted_count);
 
                     if deleted_count > 0 {
                         info!(
@@ -1566,18 +1585,19 @@ where
         Ok(slot.confirmed_flush_lsn)
     }
 
-    /// Returns table ids this worker may clean up at the confirmed LSN.
+    /// Returns schema retention boundaries for tables this worker may clean up.
     ///
     /// The shared cache is used only to find active tables, and the worker's
     /// normal ownership check decides which of those tables can be considered.
-    /// The schema store computes the retained snapshot for each table from the
-    /// confirmed flush LSN before deleting anything.
-    async fn get_schema_cleanup_table_ids(
+    /// A table's cleanup boundary is capped both by the slot's confirmed flush
+    /// LSN and by the earliest destination metadata snapshot that may still be
+    /// needed.
+    async fn get_table_schema_retentions(
         &self,
         confirmed_flush_lsn: PgLsn,
-    ) -> EtlResult<HashSet<TableId>> {
+    ) -> EtlResult<HashMap<TableId, TableSchemaRetention>> {
         let active_table_ids = self.shared_table_cache.active_table_ids().await;
-        let mut table_ids = HashSet::with_capacity(active_table_ids.len());
+        let mut table_schema_retentions = HashMap::with_capacity(active_table_ids.len());
 
         for table_id in active_table_ids {
             // Only prune snapshots for tables this worker would apply at this
@@ -1586,12 +1606,48 @@ where
             let should_apply_changes =
                 self.should_apply_changes(table_id, confirmed_flush_lsn).await?;
 
-            if should_apply_changes {
-                table_ids.insert(table_id);
+            if !should_apply_changes {
+                continue;
             }
+
+            // We try to load the destination table metadata to see if it is referencing a
+            // snapshot id that would be cleaned up if we were to just use the
+            // confirmed flush lsn as the boundary.
+            //
+            // If there is no metadata, we play it safe and skip the pruning for this table.
+            let Some(destination_table_metadata) =
+                self.schema_store.get_destination_table_metadata(table_id).await?
+            else {
+                debug!(
+                    %table_id,
+                    "skipping schema cleanup for table without destination metadata"
+                );
+
+                continue;
+            };
+
+            // We take the earliest snapshot id that is still needed by the destination
+            // table metadata.
+            let destination_retention_snapshot_id = destination_table_metadata
+                .previous_snapshot_id
+                .unwrap_or(destination_table_metadata.snapshot_id)
+                .min(destination_table_metadata.snapshot_id);
+
+            // We determine whether the confirmed flush lsn or the snapshot id is the new
+            // retention limit. We could use a normal PgLsn type for handling
+            // this, but to make the implementation
+            //
+            let retention = if confirmed_flush_lsn <= destination_retention_snapshot_id.into_inner()
+            {
+                TableSchemaRetention::ConfirmedFlushLsn(confirmed_flush_lsn)
+            } else {
+                TableSchemaRetention::SnapshotId(destination_retention_snapshot_id)
+            };
+
+            table_schema_retentions.insert(table_id, retention);
         }
 
-        Ok(table_ids)
+        Ok(table_schema_retentions)
     }
 
     /// Records the result of a completed background schema cleanup task.

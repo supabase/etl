@@ -1,4 +1,4 @@
-use std::{collections::HashSet, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 
 use etl::{
     error::{EtlError, EtlResult},
@@ -8,10 +8,10 @@ use etl::{
     },
     store::{
         cleanup::CleanupStore,
-        schema::SchemaStore,
+        schema::{SchemaStore, TableSchemaRetention},
         state::{StateStore, TableReplicationStates},
     },
-    types::{PgLsn, SnapshotId, TableId, TableSchema},
+    types::{SnapshotId, TableId, TableSchema},
 };
 use tracing::info;
 
@@ -174,10 +174,9 @@ where
 
     async fn prune_table_schemas(
         &self,
-        table_ids: HashSet<TableId>,
-        confirmed_flush_lsn: PgLsn,
+        table_schema_retentions: HashMap<TableId, TableSchemaRetention>,
     ) -> EtlResult<u64> {
-        self.inner.prune_table_schemas(table_ids, confirmed_flush_lsn).await
+        self.inner.prune_table_schemas(table_schema_retentions).await
     }
 }
 

@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashMap},
     ops::DerefMut,
     sync::Arc,
     time::Duration,
@@ -12,7 +12,6 @@ use sqlx::{
     postgres::{PgConnectOptions, PgPoolOptions},
 };
 use tokio::sync::Mutex;
-use tokio_postgres::types::PgLsn;
 use tracing::{debug, info};
 
 use crate::{
@@ -30,7 +29,7 @@ use crate::{
     },
     store::{
         cleanup::CleanupStore,
-        schema::SchemaStore,
+        schema::{SchemaStore, TableSchemaRetention},
         state::{DestinationTablesMetadata, StateStore, TableReplicationStates},
     },
     types::{PipelineId, ReplicationMask, SnapshotId, TableId, TableSchema},
@@ -210,13 +209,16 @@ impl Inner {
     /// table.
     fn prune_table_schemas(
         &mut self,
-        table_ids: &HashSet<TableId>,
-        confirmed_flush_lsn: PgLsn,
+        table_schema_retentions: &HashMap<TableId, TableSchemaRetention>,
     ) -> usize {
-        let confirmed_flush_snapshot_id = SnapshotId::from(confirmed_flush_lsn);
         let mut retained_snapshot_ids: HashMap<TableId, SnapshotId> = HashMap::new();
         for (table_id, snapshot_id) in self.table_schemas.keys() {
-            if !table_ids.contains(table_id) || *snapshot_id > confirmed_flush_snapshot_id {
+            let Some(retention) = table_schema_retentions.get(table_id) else {
+                continue;
+            };
+
+            let retention_snapshot_id = SnapshotId::from(retention.to_lsn());
+            if *snapshot_id > retention_snapshot_id {
                 continue;
             }
 
@@ -688,14 +690,16 @@ impl SchemaStore for PostgresStore {
 
     async fn prune_table_schemas(
         &self,
-        table_ids: HashSet<TableId>,
-        confirmed_flush_lsn: PgLsn,
+        table_schema_retentions: HashMap<TableId, TableSchemaRetention>,
     ) -> EtlResult<u64> {
+        let retention_lsns = table_schema_retentions
+            .iter()
+            .map(|(table_id, retention)| (*table_id, retention.to_lsn()))
+            .collect::<HashMap<_, _>>();
         let deleted_count = schema::delete_obsolete_table_schema_versions(
             &self.pool,
             self.pipeline_id as i64,
-            &table_ids,
-            confirmed_flush_lsn,
+            &retention_lsns,
         )
         .await
         .map_err(|err| {
@@ -707,13 +711,13 @@ impl SchemaStore for PostgresStore {
         })?;
 
         let mut inner = self.inner.lock().await;
-        let cached_count = inner.prune_table_schemas(&table_ids, confirmed_flush_lsn);
+        let cached_count = inner.prune_table_schemas(&table_schema_retentions);
 
         if deleted_count > 0 || cached_count > 0 {
             info!(
                 deleted_count,
                 cached_count,
-                table_count = table_ids.len(),
+                table_count = table_schema_retentions.len(),
                 "pruned obsolete table schema versions"
             );
         }
