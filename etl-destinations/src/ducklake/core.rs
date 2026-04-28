@@ -21,8 +21,8 @@ use etl::{
     state::destination_metadata::DestinationTableMetadata,
     store::{schema::SchemaStore, state::StateStore},
     types::{
-        Event, EventSequenceKey, OldTableRow, PartialTableRow, ReplicatedTableSchema, SizeHint,
-        TableId, TableName, TableRow, UpdatedTableRow,
+        Event, EventSequenceKey, OldTableRow, PartialTableRow, ReplicatedTableSchema, TableId,
+        TableName, TableRow, UpdatedTableRow,
     },
 };
 use metrics::gauge;
@@ -695,9 +695,6 @@ where
 
         self.maybe_run_requested_inline_flush().await?;
 
-        let approx_bytes = table_rows.iter().map(|row| row.size_hint() as u64).sum::<u64>();
-        let inserted_rows = table_rows.len() as u64;
-
         // Copy batches for the same table must still serialize so concurrent
         // callers do not race each other inside DuckDB.
         self.ensure_applied_batches_table_exists().await?;
@@ -713,7 +710,7 @@ where
         )
         .await?;
         self.notify_background_maintenance(TableMaintenanceNotification::WriteActivity(
-            TableWriteActivity { table_name, approx_bytes, inserted_rows },
+            TableWriteActivity { table_name },
         ))
         .await;
 
@@ -889,12 +886,9 @@ where
 
                         let maintenance_notification =
                             maintenance_worker.as_ref().as_ref().map(|_| {
-                                TableMaintenanceNotification::WriteActivity(
-                                    table_write_activity_for_mutations(
-                                        destination_table_name.clone(),
-                                        pending_mutations.as_slice(),
-                                    ),
-                                )
+                                TableMaintenanceNotification::WriteActivity(TableWriteActivity {
+                                    table_name: destination_table_name.clone(),
+                                })
                             });
                         let prepared_batches = prepare_mutation_table_batches(
                             &replicated_table_schema,
@@ -1229,27 +1223,6 @@ async fn read_table_streaming_progress_sequence_key_blocking(
     .await
 }
 
-/// Recomputes maintenance stats from the suffix of mutations that still needs
-/// applying.
-fn table_write_activity_for_mutations(
-    table_name: DuckLakeTableName,
-    tracked_mutations: &[TrackedTableMutation],
-) -> TableWriteActivity {
-    let mut write_activity = TableWriteActivity { table_name, approx_bytes: 0, inserted_rows: 0 };
-
-    for tracked_mutation in tracked_mutations {
-        // This is only a fallback estimate for catalogs where we cannot sample
-        // actual inlined-table sizes directly. The optional row-threshold path
-        // is disabled today, so we treat each mutation as one unit of fallback
-        // activity to keep mutation-only streams visible to maintenance.
-        write_activity.approx_bytes =
-            write_activity.approx_bytes.saturating_add(tracked_mutation.write_activity_size_hint());
-        write_activity.inserted_rows = write_activity.inserted_rows.saturating_add(1);
-    }
-
-    write_activity
-}
-
 #[cfg(feature = "test-utils")]
 struct PausedStreamingWriteHook {
     reached_tx: oneshot::Sender<()>,
@@ -1330,8 +1303,8 @@ mod tests {
         config::{PgConnectionConfig, TcpKeepaliveConfig, TlsConfig},
         store::{both::memory::MemoryStore, schema::SchemaStore},
         types::{
-            Cell, ColumnSchema, IdentityMask, OldTableRow, PartialTableRow, PgLsn, ReplicationMask,
-            SizeHint, TableRow, TableSchema, Type as PgType, UpdatedTableRow,
+            Cell, ColumnSchema, IdentityMask, PartialTableRow, ReplicationMask, TableRow,
+            TableSchema, Type as PgType,
         },
     };
     use etl_postgres::tokio::test_utils::PgDatabase;
@@ -1387,40 +1360,6 @@ mod tests {
             ReplicationMask::all(&table_schema),
             IdentityMask::from_bytes(vec![0, 0]),
         )
-    }
-
-    #[test]
-    fn table_write_activity_for_mutations_counts_partial_updates_and_deletes() {
-        let delete_row = OldTableRow::Key(TableRow::new(vec![Cell::I32(1)]));
-        let update_delete_row = OldTableRow::Key(TableRow::new(vec![Cell::I32(1)]));
-        let partial_row = UpdatedTableRow::Partial(PartialTableRow::new(
-            2,
-            TableRow::new(vec![Cell::I32(1), Cell::String("grown".to_string())]),
-            vec![],
-        ));
-        let expected_bytes = delete_row.size_hint() as u64
-            + update_delete_row.size_hint() as u64
-            + partial_row.size_hint() as u64;
-        let write_activity = table_write_activity_for_mutations(
-            "public_users".to_string(),
-            &[
-                TrackedTableMutation::new(
-                    PgLsn::from(100),
-                    PgLsn::from(100),
-                    0,
-                    TableMutation::Delete(delete_row),
-                ),
-                TrackedTableMutation::new(
-                    PgLsn::from(100),
-                    PgLsn::from(100),
-                    1,
-                    TableMutation::Update { delete_row: update_delete_row, new_row: partial_row },
-                ),
-            ],
-        );
-
-        assert_eq!(write_activity.approx_bytes, expected_bytes);
-        assert_eq!(write_activity.inserted_rows, 2);
     }
 
     #[test]
