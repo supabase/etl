@@ -6,6 +6,7 @@ use std::{
 
 use etl_postgres::types::{SnapshotId, TableId, TableSchema};
 use tokio::sync::{Notify, RwLock};
+use tokio_postgres::types::PgLsn;
 
 use crate::{
     error::{ErrorKind, EtlResult},
@@ -423,9 +424,10 @@ impl SchemaStore for NotifyingStore {
     async fn prune_table_schemas(
         &self,
         table_ids: HashSet<TableId>,
-        confirmed_flush_lsn: SnapshotId,
+        confirmed_flush_lsn: PgLsn,
     ) -> EtlResult<u64> {
         let mut inner = self.inner.write().await;
+        let confirmed_flush_snapshot_id = SnapshotId::from(confirmed_flush_lsn);
         let mut removed_count = 0u64;
 
         for (table_id, schemas) in &mut inner.table_schemas {
@@ -433,7 +435,7 @@ impl SchemaStore for NotifyingStore {
                 let retained_snapshot_id = schemas
                     .iter()
                     .map(|schema| schema.snapshot_id)
-                    .filter(|snapshot_id| *snapshot_id <= confirmed_flush_lsn)
+                    .filter(|snapshot_id| *snapshot_id <= confirmed_flush_snapshot_id)
                     .max();
 
                 let Some(retained_snapshot_id) = retained_snapshot_id else {
@@ -447,8 +449,10 @@ impl SchemaStore for NotifyingStore {
             }
         }
 
-        for notify in std::mem::take(&mut inner.table_schema_prune_conditions) {
-            notify.notify_one();
+        if removed_count > 0 {
+            for notify in std::mem::take(&mut inner.table_schema_prune_conditions) {
+                notify.notify_one();
+            }
         }
 
         Ok(removed_count)

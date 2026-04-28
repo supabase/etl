@@ -1,5 +1,7 @@
 use std::{collections::HashSet, sync::Arc};
 
+use tokio_postgres::types::PgLsn;
+
 use crate::{
     error::EtlResult,
     types::{SnapshotId, TableId, TableSchema},
@@ -66,7 +68,7 @@ pub trait SchemaStore {
     fn prune_table_schemas(
         &self,
         _table_ids: HashSet<TableId>,
-        _confirmed_flush_lsn: SnapshotId,
+        _confirmed_flush_lsn: PgLsn,
     ) -> impl Future<Output = EtlResult<u64>> + Send {
         async { Ok(0) }
     }

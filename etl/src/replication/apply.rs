@@ -1509,7 +1509,7 @@ where
                 return;
             }
 
-            match schema_store.prune_table_schemas(table_ids, confirmed_flush_lsn.into()).await {
+            match schema_store.prune_table_schemas(table_ids, confirmed_flush_lsn).await {
                 Ok(deleted_count) => {
                     counter!(
                         ETL_SCHEMA_CLEANUPS_TOTAL,

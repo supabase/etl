@@ -552,7 +552,10 @@ async fn schema_store_prunes_obsolete_versions_from_database_and_cache() {
     assert!(obsolete_column_count_before > 0);
 
     let deleted = store
-        .prune_table_schemas(HashSet::from([table_id, other_table_id]), SnapshotId::from(200u64))
+        .prune_table_schemas(
+            HashSet::from([table_id, other_table_id]),
+            SnapshotId::from(200u64).into(),
+        )
         .await
         .unwrap();
     assert_eq!(deleted, 3);

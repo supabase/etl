@@ -12,6 +12,7 @@ use sqlx::{
     postgres::{PgConnectOptions, PgPoolOptions},
 };
 use tokio::sync::Mutex;
+use tokio_postgres::types::PgLsn;
 use tracing::{debug, info};
 
 use crate::{
@@ -210,11 +211,12 @@ impl Inner {
     fn prune_table_schemas(
         &mut self,
         table_ids: &HashSet<TableId>,
-        confirmed_flush_lsn: SnapshotId,
+        confirmed_flush_lsn: PgLsn,
     ) -> usize {
+        let confirmed_flush_snapshot_id = SnapshotId::from(confirmed_flush_lsn);
         let mut retained_snapshot_ids: HashMap<TableId, SnapshotId> = HashMap::new();
         for (table_id, snapshot_id) in self.table_schemas.keys() {
-            if !table_ids.contains(table_id) || *snapshot_id > confirmed_flush_lsn {
+            if !table_ids.contains(table_id) || *snapshot_id > confirmed_flush_snapshot_id {
                 continue;
             }
 
@@ -687,7 +689,7 @@ impl SchemaStore for PostgresStore {
     async fn prune_table_schemas(
         &self,
         table_ids: HashSet<TableId>,
-        confirmed_flush_lsn: SnapshotId,
+        confirmed_flush_lsn: PgLsn,
     ) -> EtlResult<u64> {
         let deleted_count = schema::delete_obsolete_table_schema_versions(
             &self.pool,

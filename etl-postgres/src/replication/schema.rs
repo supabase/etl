@@ -4,7 +4,7 @@ use sqlx::{
     PgExecutor, PgPool, Row,
     postgres::{PgRow, types::Oid as SqlxTableId},
 };
-use tokio_postgres::types::Type as PgType;
+use tokio_postgres::types::{PgLsn, Type as PgType};
 
 use crate::types::{ColumnSchema, SnapshotId, TableId, TableName, TableSchema};
 
@@ -420,7 +420,7 @@ pub async fn delete_obsolete_table_schema_versions<'c, E>(
     executor: E,
     pipeline_id: i64,
     table_ids: &HashSet<TableId>,
-    confirmed_flush_lsn: SnapshotId,
+    confirmed_flush_lsn: PgLsn,
 ) -> Result<u64, sqlx::Error>
 where
     E: PgExecutor<'c>,
@@ -451,7 +451,7 @@ where
     )
     .bind(pipeline_id)
     .bind(table_ids)
-    .bind(confirmed_flush_lsn.to_pg_lsn_string())
+    .bind(confirmed_flush_lsn.to_string())
     .execute(executor)
     .await?;
 

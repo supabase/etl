@@ -1133,13 +1133,13 @@ async fn cleaned_schema_snapshots_are_recreated_when_status_update_is_lost() {
     // Force cleanup during the shutdown status update. The status update itself
     // is still lost, while the confirmed-LSN failpoint lets this test exercise
     // replay after cleanup without relying on PostgreSQL acknowledging it.
-    fail::cfg(FORCE_SCHEMA_CLEANUP_FP, "return").unwrap();
     fail::cfg(FORCE_SCHEMA_CLEANUP_CONFIRMED_FLUSH_LSN_FP, "return").unwrap();
+    fail::cfg(FORCE_SCHEMA_CLEANUP_FP, "return").unwrap();
 
     prune_notify.notified().await;
 
-    fail::remove(FORCE_SCHEMA_CLEANUP_CONFIRMED_FLUSH_LSN_FP);
     fail::remove(FORCE_SCHEMA_CLEANUP_FP);
+    fail::remove(FORCE_SCHEMA_CLEANUP_CONFIRMED_FLUSH_LSN_FP);
 
     pipeline.shutdown_and_wait().await.unwrap();
 
