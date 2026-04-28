@@ -76,9 +76,7 @@ fn build_insert_rows_sql(table_name: &str) -> String {
 /// High-level ClickHouse client used by [`super::core::ClickHouseDestination`].
 ///
 /// Wraps a [`clickhouse::Client`] and exposes typed methods for DDL,
-/// truncation, and RowBinary bulk inserts. Cheaply cloneable — the inner client
-/// holds an `Arc` internally, and the outer `Arc` here ensures a single shared
-/// instance.
+/// truncation, and RowBinary bulk inserts.
 #[derive(Clone)]
 pub struct ClickHouseClient {
     inner: Arc<Client>,

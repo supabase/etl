@@ -30,8 +30,7 @@ use crate::clickhouse::{
     },
 };
 
-// -- CDC operation type --
-
+/// Postgres CDC operation kind, written to the `cdc_operation` column.
 #[derive(Copy, Clone)]
 enum CdcOperation {
     Insert,
@@ -51,8 +50,14 @@ impl std::fmt::Display for CdcOperation {
 
 /// A row pending insertion with its CDC metadata.
 struct PendingRow {
+    /// CDC op kind, written into the `cdc_operation` column.
     operation: CdcOperation,
+    /// Commit LSN of the source transaction, written into the `cdc_lsn`
+    /// column.
     lsn: PgLsn,
+    /// User column values in source schema order. The two CDC columns
+    /// (`cdc_operation`, `cdc_lsn`) are appended at encode time and are
+    /// not present here.
     cells: Vec<Cell>,
 }
 
@@ -118,8 +123,6 @@ fn nullable_flags_from_clickhouse_columns(
     Ok(nullable_flags.into())
 }
 
-// -- Inserter configuration --
-
 /// Controls intermediate flushing inside a single `write_table_rows` /
 /// `write_events` call.
 ///
@@ -135,30 +138,28 @@ pub struct ClickHouseInserterConfig {
     pub max_bytes_per_insert: u64,
 }
 
-// -- Destination struct --
-
 /// CDC-capable ClickHouse destination that replicates Postgres tables.
 ///
 /// Uses append-only MergeTree tables with two CDC columns (`cdc_operation`,
 /// `cdc_lsn`) appended to each row. Rows are encoded as RowBinary and sent via
 /// `INSERT INTO "table" FORMAT RowBinary` -- no column-name header required.
-///
-/// The struct is cheaply cloneable: `client` wraps an `Arc` internally, and
-/// `table_cache` is wrapped in `Arc<RwLock<...>>`.
 #[derive(Clone)]
 pub struct ClickHouseDestination<S> {
+    /// HTTP client used for all DDL and RowBinary INSERT traffic.
     client: ClickHouseClient,
+    /// Per-INSERT byte budget; gates intermediate flushes within a single
+    /// `write_table_rows` / `write_events` call.
     inserter_config: Arc<ClickHouseInserterConfig>,
+    /// Schema/state store used to persist destination table metadata
+    /// (Applying / Applied) and to look up replicated schemas.
     store: Arc<S>,
-    /// Cache: ClickHouse table name -> `Arc<[bool]>` (nullable flags per
-    /// column, including the two trailing CDC columns which are always
-    /// `false`).
+    /// ClickHouse table name -> per-column nullable flags (in column order,
+    /// including the two trailing CDC columns which are always `false`).
     ///
-    /// `std::sync::RwLock` is appropriate here: both reads (hot path) and
-    /// writes (rare, only on first encounter of a new table) are brief
-    /// in-memory operations. The lock is always released before any
-    /// `.await` point (DDL is executed with no lock held), so the async
-    /// `tokio::sync::RwLock` would be unnecessary overhead.
+    /// Populated lazily on first encounter of a table and consulted on the
+    /// hot insert path. `std::sync::RwLock` is sufficient: every critical
+    /// section is a brief in-memory map op with no `.await` inside, so the
+    /// async `tokio::sync::RwLock` would be needless overhead.
     table_cache: Arc<RwLock<HashMap<String, Arc<[bool]>>>>,
 }
 
@@ -187,7 +188,21 @@ where
         })
     }
 
-    /// Creates a new ClickHouse table with Applying -> DDL -> Applied metadata.
+    /// Creates a ClickHouse table for a never-before-seen `table_id`,
+    /// bracketing the DDL with `DestinationTableMetadata` writes so the
+    /// operation is crash-recoverable.
+    ///
+    /// Sequence:
+    /// 1. Persist `Applying` metadata (so a crash between this write and step 3
+    ///    leaves a marker that lets restart logic detect the interrupted
+    ///    operation).
+    /// 2. Execute `CREATE TABLE IF NOT EXISTS` against ClickHouse.
+    /// 3. Persist `Applied` metadata.
+    ///
+    /// Recovery is handled by `ensure_table_exists`: on restart, an
+    /// `Applying` row signals that the previous run died mid-creation, so
+    /// it re-runs the idempotent DDL and transitions the metadata to
+    /// `Applied` itself.
     async fn create_table_with_metadata(
         &self,
         table_id: TableId,
@@ -359,8 +374,6 @@ where
             .await
     }
 
-    // -- Schema change handling --
-
     /// Handles a schema change event (Relation) by computing the diff and
     /// applying ALTER TABLE statements.
     async fn handle_relation_event(&self, new_schema: &ReplicatedTableSchema) -> EtlResult<()> {
@@ -512,8 +525,6 @@ where
 
         Ok(())
     }
-
-    // -- Event processing --
 
     /// Processes events in passes driven by an outer loop that runs until the
     /// iterator is exhausted. Each pass:
@@ -856,18 +867,5 @@ mod tests {
             err.detail(),
             Some("table 'test_table' column 1 is named 'name', but 'id' was expected")
         );
-    }
-
-    #[test]
-    fn nullable_flags_includes_cdc() {
-        let mut all_flags: Vec<bool> = vec![true, false];
-        all_flags.push(false); // cdc_operation
-        all_flags.push(false); // cdc_lsn
-
-        assert_eq!(all_flags.len(), 4);
-        assert!(all_flags[0]);
-        assert!(!all_flags[1]);
-        assert!(!all_flags[2]);
-        assert!(!all_flags[3]);
     }
 }

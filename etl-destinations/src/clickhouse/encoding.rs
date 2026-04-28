@@ -7,30 +7,15 @@ use etl::{
     types::{ArrayCell, Cell},
 };
 
-// ── RowBinary encoding
-// ────────────────────────────────────────────────────────
+// RowBinary bytes are written directly via `Client::insert_formatted_with`,
+// bypassing the typed `Inserter<T>` / serde path because:
+// - `Insert::new` panics on empty `COLUMN_NAMES` (via `join_column_names`) even
+//   with validation disabled.
+// - The RowBinary serde serializer wraps `BufMut` with a fresh `&mut` on every
+//   `serialize_some`, telescoping `&mut &mut ... BytesMut` on nullable array
+//   elements and overflowing the compiler recursion limit.
 //
-// We bypass the `Row` / `Inserter` API entirely and write RowBinary bytes
-// directly via `Client::insert_formatted_with("INSERT INTO \"t\" FORMAT
-// RowBinary")`.
-//
-// This avoids two fatal issues with the `Inserter<T>` path:
-//
-// 1. `Insert::new` always calls `join_column_names::<T>().expect(…)`, which
-//    panics when `COLUMN_NAMES = &[]` regardless of whether validation is
-//    enabled.
-//
-// 2. The RowBinary serde serializer wraps its `BufMut` writer in a fresh `&mut`
-//    at every `serialize_some` call, telescoping the type to `&mut &mut …
-//    BytesMut` for nullable array elements and overflowing the compiler's
-//    recursion limit.
-//
-// Direct binary encoding has neither problem: it is a simple recursive function
-// that writes bytes to a `Vec<u8>` with no generics and no type-level
-// recursion.
-
-// ── ClickHouseValue
-// ───────────────────────────────────────────────────────────
+// Direct byte-writing has no generics and no type-level recursion.
 
 /// Owned ClickHouse-compatible value, moved (not cloned) from a [`Cell`].
 pub(crate) enum ClickHouseValue {
@@ -56,8 +41,6 @@ pub(crate) enum ClickHouseValue {
     Uuid([u8; 16]),
     Array(Vec<ClickHouseValue>),
 }
-
-// ── Cell → ClickHouseValue conversion ────────────────────────────────────────
 
 /// Converts a [`Cell`] to a [`ClickHouseValue`], consuming it (no clone).
 pub(crate) fn cell_to_clickhouse_value(cell: Cell) -> ClickHouseValue {
@@ -184,9 +167,6 @@ fn bytes_to_hex(bytes: Vec<u8>) -> String {
     s
 }
 
-// ── RowBinary wire encoding
-// ───────────────────────────────────────────────────
-
 /// Encodes a variable-length integer (LEB128) for ClickHouse string/array
 /// lengths.
 pub(crate) fn rb_varint(mut v: usize, buf: &mut Vec<u8>) {
@@ -295,9 +275,6 @@ pub(crate) fn rb_encode_row(
     }
     Ok(())
 }
-
-// ── Unit tests
-// ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
