@@ -225,57 +225,39 @@ impl ClickHouseClient {
         source: &'static str,
     ) -> EtlResult<()> {
         let sql = build_insert_rows_sql(table_name);
-
-        let mut insert =
-            self.inner.insert_formatted_with(sql.clone()).buffered_with_capacity(BUFFERED_CAPACITY);
-        let mut bytes = 0u64;
+        let mut rows = rows.into_iter().peekable();
         let mut row_buf = Vec::new();
-        let mut insert_start = Instant::now();
 
-        for row in rows {
-            row_buf.clear();
-            rb_encode_row(row, nullable_flags, &mut row_buf)?;
+        while rows.peek().is_some() {
+            let mut insert = self
+                .inner
+                .insert_formatted_with(sql.clone())
+                .buffered_with_capacity(BUFFERED_CAPACITY);
+            let mut bytes = 0u64;
+            let insert_start = Instant::now();
 
-            insert.write_buffered(&row_buf);
-            bytes += row_buf.len() as u64;
-
-            if bytes >= max_bytes_per_insert {
-                insert.end().await.map_err(|e| {
-                    etl_error!(
-                        ErrorKind::Unknown,
-                        "ClickHouse insert flush failed",
-                        format!("Failed to flush INSERT for '{table_name}': {e}")
-                    )
-                })?;
-                metrics::histogram!(
-                    ETL_CH_INSERT_DURATION_SECONDS,
-                    "table" => table_name.to_string(),
-                    "source" => source
-                )
-                .record(insert_start.elapsed().as_secs_f64());
-
-                insert = self
-                    .inner
-                    .insert_formatted_with(sql.clone())
-                    .buffered_with_capacity(BUFFERED_CAPACITY);
-                insert_start = Instant::now();
-                bytes = 0;
+            while bytes < max_bytes_per_insert {
+                let Some(row) = rows.next() else { break };
+                row_buf.clear();
+                rb_encode_row(row, nullable_flags, &mut row_buf)?;
+                insert.write_buffered(&row_buf);
+                bytes += row_buf.len() as u64;
             }
-        }
 
-        insert.end().await.map_err(|e| {
-            etl_error!(
-                ErrorKind::Unknown,
-                "ClickHouse insert flush failed",
-                format!("Failed to flush INSERT for '{table_name}': {e}")
+            insert.end().await.map_err(|e| {
+                etl_error!(
+                    ErrorKind::Unknown,
+                    "ClickHouse insert flush failed",
+                    format!("Failed to flush INSERT for '{table_name}': {e}")
+                )
+            })?;
+            metrics::histogram!(
+                ETL_CH_INSERT_DURATION_SECONDS,
+                "table" => table_name.to_string(),
+                "source" => source
             )
-        })?;
-        metrics::histogram!(
-            ETL_CH_INSERT_DURATION_SECONDS,
-            "table" => table_name.to_string(),
-            "source" => source
-        )
-        .record(insert_start.elapsed().as_secs_f64());
+            .record(insert_start.elapsed().as_secs_f64());
+        }
 
         Ok(())
     }
