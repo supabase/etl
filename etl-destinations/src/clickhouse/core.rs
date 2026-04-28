@@ -244,77 +244,28 @@ where
         let ch_table_name =
             table_name_to_clickhouse_table_name(&table_name.schema, &table_name.name);
 
-        {
-            let guard = self.table_cache.read();
-            if let Some(flags) = guard.get(&ch_table_name) {
-                return Ok((ch_table_name, Arc::clone(flags)));
-            }
+        if let Some(flags) = self.table_cache.read().get(&ch_table_name).cloned() {
+            return Ok((ch_table_name, flags));
         }
 
         let table_id = schema.id();
-        let snapshot_id = schema.inner().snapshot_id;
-        let replication_mask = schema.replication_mask().clone();
-
-        let existing_metadata = self.store.get_destination_table_metadata(table_id).await?;
-        match existing_metadata {
+        match self.store.get_destination_table_metadata(table_id).await? {
             None => {
-                // First table creation: Applying -> CREATE TABLE -> Applied.
                 self.create_table_with_metadata(
                     table_id,
                     &ch_table_name,
                     schema,
-                    snapshot_id,
-                    replication_mask,
+                    schema.inner().snapshot_id,
+                    schema.replication_mask().clone(),
                 )
                 .await?;
             }
             Some(metadata) if metadata.is_applying() => {
-                // Crash recovery: the replicator was killed during a DDL
-                // operation. Re-apply idempotently and mark Applied.
-                warn!("table {} has Applying metadata, recovering interrupted operation", table_id);
-
-                match metadata.previous_snapshot_id {
-                    Some(prev_snapshot_id) => {
-                        // Interrupted schema change: re-apply the diff.
-                        let old_table_schema = self
-                            .store
-                            .get_table_schema(&table_id, prev_snapshot_id)
-                            .await?
-                            .ok_or_else(|| {
-                                etl_error!(
-                                    ErrorKind::InvalidState,
-                                    "Old schema not found for recovery",
-                                    format!(
-                                        "Cannot find schema for table {} at snapshot_id {}",
-                                        table_id, prev_snapshot_id
-                                    )
-                                )
-                            })?;
-                        let old_schema = ReplicatedTableSchema::from_mask(
-                            old_table_schema,
-                            metadata.replication_mask.clone(),
-                        );
-                        let diff = old_schema.diff(schema);
-                        self.apply_schema_diff(&ch_table_name, &diff, &old_schema).await?;
-                    }
-                    None => {
-                        // Interrupted initial table creation: re-run CREATE
-                        // TABLE IF NOT EXISTS (idempotent).
-                        let column_schemas: Vec<_> = schema.column_schemas().cloned().collect();
-                        let ddl = build_create_table_sql(&ch_table_name, &column_schemas);
-                        self.client.execute_ddl(&ddl).await?;
-                    }
-                }
-
-                self.store
-                    .store_destination_table_metadata(table_id, metadata.to_applied())
-                    .await?;
+                self.recover_applying_metadata(table_id, &ch_table_name, schema, metadata).await?;
             }
-            Some(_applied) => {
-                // Applied metadata, cache miss after handle_relation_event
-                // invalidated the cache. No DDL needed -- fall through to
-                // recompute nullable flags below.
-            }
+            // Applied metadata, cache miss after `handle_relation_event`
+            // invalidated the cache. No DDL needed.
+            Some(_applied) => {}
         }
 
         // Compute nullable flags from the actual ClickHouse schema. This matters after
@@ -329,15 +280,62 @@ where
             &actual_columns,
         )?;
 
-        // Write-lock: insert, using or_insert to handle concurrent first-writer race.
-        let stored_flags = {
+        // `or_insert_with` handles the race where a concurrent caller populated
+        // the entry between our read-miss and this write.
+        let flags = {
             let mut guard = self.table_cache.write();
             Arc::clone(
                 guard.entry(ch_table_name.clone()).or_insert_with(|| Arc::clone(&nullable_flags)),
             )
         };
 
-        Ok((ch_table_name, stored_flags))
+        Ok((ch_table_name, flags))
+    }
+
+    /// Re-runs an interrupted DDL idempotently and transitions metadata to
+    /// `Applied`. Distinguishes between an interrupted schema change (replays
+    /// the diff against the previous snapshot) and an interrupted initial
+    /// creation (re-issues `CREATE TABLE IF NOT EXISTS`).
+    async fn recover_applying_metadata(
+        &self,
+        table_id: TableId,
+        ch_table_name: &str,
+        schema: &ReplicatedTableSchema,
+        metadata: DestinationTableMetadata,
+    ) -> EtlResult<()> {
+        warn!("table {} has Applying metadata, recovering interrupted operation", table_id);
+
+        match metadata.previous_snapshot_id {
+            Some(prev_snapshot_id) => {
+                let old_table_schema =
+                    self.store.get_table_schema(&table_id, prev_snapshot_id).await?.ok_or_else(
+                        || {
+                            etl_error!(
+                                ErrorKind::InvalidState,
+                                "Old schema not found for recovery",
+                                format!(
+                                    "Cannot find schema for table {} at snapshot_id {}",
+                                    table_id, prev_snapshot_id
+                                )
+                            )
+                        },
+                    )?;
+                let old_schema = ReplicatedTableSchema::from_mask(
+                    old_table_schema,
+                    metadata.replication_mask.clone(),
+                );
+                let diff = old_schema.diff(schema);
+                self.apply_schema_diff(ch_table_name, &diff, &old_schema).await?;
+            }
+            None => {
+                let column_schemas: Vec<_> = schema.column_schemas().cloned().collect();
+                let ddl = build_create_table_sql(ch_table_name, &column_schemas);
+                self.client.execute_ddl(&ddl).await?;
+            }
+        }
+
+        self.store.store_destination_table_metadata(table_id, metadata.to_applied()).await?;
+        Ok(())
     }
 
     async fn truncate_table_inner(&self, schema: &ReplicatedTableSchema) -> EtlResult<()> {
@@ -537,8 +535,8 @@ where
         let mut event_iter = events.into_iter().peekable();
 
         while event_iter.peek().is_some() {
-            let mut table_schemas: HashMap<TableId, ReplicatedTableSchema> = HashMap::new();
-            let mut table_id_to_rows: HashMap<TableId, Vec<PendingRow>> = HashMap::new();
+            let mut pending: HashMap<TableId, (ReplicatedTableSchema, Vec<PendingRow>)> =
+                HashMap::new();
 
             // Accumulate data events until we hit a Truncate or Relation boundary.
             while let Some(event) = event_iter.peek() {
@@ -550,28 +548,25 @@ where
                 match event {
                     Event::Insert(insert) => {
                         let table_id = insert.replicated_table_schema.id();
-                        table_schemas
+                        let entry = pending
                             .entry(table_id)
-                            .or_insert_with(|| insert.replicated_table_schema.clone());
-                        table_id_to_rows.entry(table_id).or_default().push(PendingRow {
+                            .or_insert_with(|| (insert.replicated_table_schema, Vec::new()));
+                        entry.1.push(PendingRow {
                             operation: CdcOperation::Insert,
                             lsn: insert.commit_lsn,
                             cells: insert.table_row.into_values(),
                         });
                     }
                     Event::Update(update) => {
-                        let table_row = match update.updated_table_row {
-                            UpdatedTableRow::Full(row) => row,
-                            UpdatedTableRow::Partial(_) => {
-                                warn!("skipping partial update row for ClickHouse");
-                                continue;
-                            }
+                        let UpdatedTableRow::Full(table_row) = update.updated_table_row else {
+                            warn!("skipping partial update row for ClickHouse");
+                            continue;
                         };
                         let table_id = update.replicated_table_schema.id();
-                        table_schemas
+                        let entry = pending
                             .entry(table_id)
-                            .or_insert_with(|| update.replicated_table_schema.clone());
-                        table_id_to_rows.entry(table_id).or_default().push(PendingRow {
+                            .or_insert_with(|| (update.replicated_table_schema, Vec::new()));
+                        entry.1.push(PendingRow {
                             operation: CdcOperation::Update,
                             lsn: update.commit_lsn,
                             cells: table_row.into_values(),
@@ -589,10 +584,10 @@ where
                             }
                         };
                         let table_id = delete.replicated_table_schema.id();
-                        table_schemas
+                        let entry = pending
                             .entry(table_id)
-                            .or_insert_with(|| delete.replicated_table_schema.clone());
-                        table_id_to_rows.entry(table_id).or_default().push(PendingRow {
+                            .or_insert_with(|| (delete.replicated_table_schema, Vec::new()));
+                        entry.1.push(PendingRow {
                             operation: CdcOperation::Delete,
                             lsn: delete.commit_lsn,
                             cells: old_row.into_values(),
@@ -607,57 +602,7 @@ where
                 }
             }
 
-            // Flush accumulated rows concurrently, one JoinSet task per table.
-            if !table_id_to_rows.is_empty() {
-                let mut table_meta: HashMap<TableId, (String, Arc<[bool]>)> = HashMap::new();
-                for (&table_id, schema) in &table_schemas {
-                    let (name, flags) = self.ensure_table_exists(schema).await?;
-                    table_meta.insert(table_id, (name, flags));
-                }
-
-                let mut join_set: JoinSet<EtlResult<()>> = JoinSet::new();
-                for (table_id, row_data) in table_id_to_rows {
-                    let (ch_table_name, nullable_flags) =
-                        table_meta.remove(&table_id).ok_or_else(|| {
-                            etl_error!(
-                                ErrorKind::Unknown,
-                                "ClickHouse insert failed",
-                                format!("Failed to remove metadata for table ID {table_id}")
-                            )
-                        })?;
-                    let client = self.client.clone();
-                    let max_bytes = self.inserter_config.max_bytes_per_insert;
-
-                    join_set.spawn(async move {
-                        let rows: Vec<Vec<ClickHouseValue>> = row_data
-                            .into_iter()
-                            .map(|PendingRow { operation, lsn, cells }| {
-                                let mut values: Vec<ClickHouseValue> =
-                                    cells.into_iter().map(cell_to_clickhouse_value).collect();
-                                values.push(ClickHouseValue::String(operation.to_string()));
-                                values.push(cdc_lsn_to_clickhouse_value(lsn));
-                                values
-                            })
-                            .collect();
-
-                        client
-                            .insert_rows(
-                                &ch_table_name,
-                                rows,
-                                &nullable_flags,
-                                max_bytes,
-                                "streaming",
-                            )
-                            .await
-                    });
-                }
-
-                while let Some(result) = join_set.join_next().await {
-                    result.map_err(|e| {
-                        etl_error!(ErrorKind::ApplyWorkerPanic, "insert task failed", e.to_string())
-                    })??;
-                }
-            }
+            self.flush_pending_rows(pending).await?;
 
             // Process Relation events (schema changes) sequentially.
             while let Some(Event::Relation(_)) = event_iter.peek() {
@@ -680,6 +625,59 @@ where
                 truncate_schemas.values().map(|schema| self.truncate_table_inner(schema)),
             )
             .await?;
+        }
+
+        Ok(())
+    }
+
+    /// Encodes the accumulated `PendingRow` batches and inserts them into
+    /// ClickHouse, one `JoinSet` task per table. No-op if `pending` is empty.
+    ///
+    /// All `ensure_table_exists` calls run sequentially before any insert is
+    /// spawned, so a schema-resolution failure aborts the whole pass without
+    /// any partial-write side effects.
+    async fn flush_pending_rows(
+        &self,
+        pending: HashMap<TableId, (ReplicatedTableSchema, Vec<PendingRow>)>,
+    ) -> EtlResult<()> {
+        if pending.is_empty() {
+            return Ok(());
+        }
+
+        let mut prepared: Vec<(String, Arc<[bool]>, Vec<PendingRow>)> =
+            Vec::with_capacity(pending.len());
+        for (_, (schema, rows)) in pending {
+            let (ch_table_name, nullable_flags) = self.ensure_table_exists(&schema).await?;
+            prepared.push((ch_table_name, nullable_flags, rows));
+        }
+
+        let mut join_set: JoinSet<EtlResult<()>> = JoinSet::new();
+        for (ch_table_name, nullable_flags, rows) in prepared {
+            let client = self.client.clone();
+            let max_bytes = self.inserter_config.max_bytes_per_insert;
+
+            join_set.spawn(async move {
+                let rows: Vec<Vec<ClickHouseValue>> = rows
+                    .into_iter()
+                    .map(|PendingRow { operation, lsn, cells }| {
+                        let mut values: Vec<ClickHouseValue> =
+                            cells.into_iter().map(cell_to_clickhouse_value).collect();
+                        values.push(ClickHouseValue::String(operation.to_string()));
+                        values.push(cdc_lsn_to_clickhouse_value(lsn));
+                        values
+                    })
+                    .collect();
+
+                client
+                    .insert_rows(&ch_table_name, rows, &nullable_flags, max_bytes, "streaming")
+                    .await
+            });
+        }
+
+        while let Some(result) = join_set.join_next().await {
+            result.map_err(|e| {
+                etl_error!(ErrorKind::ApplyWorkerPanic, "insert task failed", e.to_string())
+            })??;
         }
 
         Ok(())

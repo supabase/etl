@@ -1,5 +1,3 @@
-use std::fmt;
-
 use chrono::NaiveDate;
 use etl::{
     error::{ErrorKind, EtlResult},
@@ -54,18 +52,13 @@ pub(crate) fn cell_to_clickhouse_value(cell: Cell) -> ClickHouseValue {
         Cell::F32(v) => ClickHouseValue::Float32(v),
         Cell::F64(v) => ClickHouseValue::Float64(v),
         Cell::Numeric(n) => ClickHouseValue::String(n.to_string()),
-        Cell::Date(d) => {
-            let days =
-                d.signed_duration_since(unix_epoch()).num_days().clamp(0, i64::from(u16::MAX))
-                    as u16;
-            ClickHouseValue::Date(days)
-        }
+        Cell::Date(d) => ClickHouseValue::Date(date_to_days(d)),
         Cell::Time(t) => ClickHouseValue::String(t.to_string()),
         Cell::Timestamp(dt) => ClickHouseValue::DateTime64(dt.and_utc().timestamp_micros()),
         Cell::TimestampTz(dt) => ClickHouseValue::DateTime64(dt.timestamp_micros()),
         Cell::Uuid(u) => ClickHouseValue::Uuid(*u.as_bytes()),
         Cell::Json(j) => ClickHouseValue::String(j.to_string()),
-        Cell::Bytes(b) => ClickHouseValue::String(bytes_to_hex(b)),
+        Cell::Bytes(b) => ClickHouseValue::String(bytes_to_hex(&b)),
         Cell::String(s) => ClickHouseValue::String(s),
         Cell::Array(array_cell) => {
             ClickHouseValue::Array(array_cell_to_clickhouse_values(array_cell))
@@ -73,96 +66,64 @@ pub(crate) fn cell_to_clickhouse_value(cell: Cell) -> ClickHouseValue {
     }
 }
 
+/// Converts an [`ArrayCell`] to a flat `Vec<ClickHouseValue>`, mapping each
+/// `Some(x)` to the matching scalar variant and each `None` to
+/// [`ClickHouseValue::Null`]. Per-element conversions mirror
+/// [`cell_to_clickhouse_value`].
 fn array_cell_to_clickhouse_values(array_cell: ArrayCell) -> Vec<ClickHouseValue> {
     match array_cell {
-        ArrayCell::Bool(v) => {
-            v.into_iter().map(|o| o.map_or(ClickHouseValue::Null, ClickHouseValue::Bool)).collect()
+        ArrayCell::Bool(v) => map_array(v, ClickHouseValue::Bool),
+        ArrayCell::String(v) => map_array(v, ClickHouseValue::String),
+        ArrayCell::I16(v) => map_array(v, ClickHouseValue::Int16),
+        ArrayCell::I32(v) => map_array(v, ClickHouseValue::Int32),
+        ArrayCell::I64(v) => map_array(v, ClickHouseValue::Int64),
+        ArrayCell::U32(v) => map_array(v, ClickHouseValue::UInt32),
+        ArrayCell::F32(v) => map_array(v, ClickHouseValue::Float32),
+        ArrayCell::F64(v) => map_array(v, ClickHouseValue::Float64),
+        ArrayCell::Numeric(v) => map_array(v, |n| ClickHouseValue::String(n.to_string())),
+        ArrayCell::Date(v) => map_array(v, |d| ClickHouseValue::Date(date_to_days(d))),
+        ArrayCell::Time(v) => map_array(v, |t| ClickHouseValue::String(t.to_string())),
+        ArrayCell::Timestamp(v) => {
+            map_array(v, |dt| ClickHouseValue::DateTime64(dt.and_utc().timestamp_micros()))
         }
-        ArrayCell::String(v) => v
-            .into_iter()
-            .map(|o| o.map_or(ClickHouseValue::Null, ClickHouseValue::String))
-            .collect(),
-        ArrayCell::I16(v) => {
-            v.into_iter().map(|o| o.map_or(ClickHouseValue::Null, ClickHouseValue::Int16)).collect()
+        ArrayCell::TimestampTz(v) => {
+            map_array(v, |dt| ClickHouseValue::DateTime64(dt.timestamp_micros()))
         }
-        ArrayCell::I32(v) => {
-            v.into_iter().map(|o| o.map_or(ClickHouseValue::Null, ClickHouseValue::Int32)).collect()
-        }
-        ArrayCell::I64(v) => {
-            v.into_iter().map(|o| o.map_or(ClickHouseValue::Null, ClickHouseValue::Int64)).collect()
-        }
-        ArrayCell::U32(v) => v
-            .into_iter()
-            .map(|o| o.map_or(ClickHouseValue::Null, ClickHouseValue::UInt32))
-            .collect(),
-        ArrayCell::F32(v) => v
-            .into_iter()
-            .map(|o| o.map_or(ClickHouseValue::Null, ClickHouseValue::Float32))
-            .collect(),
-        ArrayCell::F64(v) => v
-            .into_iter()
-            .map(|o| o.map_or(ClickHouseValue::Null, ClickHouseValue::Float64))
-            .collect(),
-        ArrayCell::Numeric(v) => v
-            .into_iter()
-            .map(|o| o.map_or(ClickHouseValue::Null, |n| ClickHouseValue::String(n.to_string())))
-            .collect(),
-        ArrayCell::Date(v) => v
-            .into_iter()
-            .map(|o| {
-                o.map_or(ClickHouseValue::Null, |d| {
-                    let days = d
-                        .signed_duration_since(unix_epoch())
-                        .num_days()
-                        .clamp(0, i64::from(u16::MAX)) as u16;
-                    ClickHouseValue::Date(days)
-                })
-            })
-            .collect(),
-        ArrayCell::Time(v) => v
-            .into_iter()
-            .map(|o| o.map_or(ClickHouseValue::Null, |t| ClickHouseValue::String(t.to_string())))
-            .collect(),
-        ArrayCell::Timestamp(v) => v
-            .into_iter()
-            .map(|o| {
-                o.map_or(ClickHouseValue::Null, |dt| {
-                    ClickHouseValue::DateTime64(dt.and_utc().timestamp_micros())
-                })
-            })
-            .collect(),
-        ArrayCell::TimestampTz(v) => v
-            .into_iter()
-            .map(|o| {
-                o.map_or(ClickHouseValue::Null, |dt| {
-                    ClickHouseValue::DateTime64(dt.timestamp_micros())
-                })
-            })
-            .collect(),
-        ArrayCell::Uuid(v) => v
-            .into_iter()
-            .map(|o| o.map_or(ClickHouseValue::Null, |u| ClickHouseValue::Uuid(*u.as_bytes())))
-            .collect(),
-        ArrayCell::Json(v) => v
-            .into_iter()
-            .map(|o| o.map_or(ClickHouseValue::Null, |j| ClickHouseValue::String(j.to_string())))
-            .collect(),
-        ArrayCell::Bytes(v) => v
-            .into_iter()
-            .map(|o| o.map_or(ClickHouseValue::Null, |b| ClickHouseValue::String(bytes_to_hex(b))))
-            .collect(),
+        ArrayCell::Uuid(v) => map_array(v, |u| ClickHouseValue::Uuid(*u.as_bytes())),
+        ArrayCell::Json(v) => map_array(v, |j| ClickHouseValue::String(j.to_string())),
+        ArrayCell::Bytes(v) => map_array(v, |b| ClickHouseValue::String(bytes_to_hex(&b))),
     }
+}
+
+/// Maps a `Vec<Option<T>>` to `Vec<ClickHouseValue>`, applying `f` to each
+/// `Some` and substituting [`ClickHouseValue::Null`] for each `None`.
+fn map_array<T, F>(v: Vec<Option<T>>, mut f: F) -> Vec<ClickHouseValue>
+where
+    F: FnMut(T) -> ClickHouseValue,
+{
+    v.into_iter()
+        .map(|o| match o {
+            Some(t) => f(t),
+            None => ClickHouseValue::Null,
+        })
+        .collect()
+}
+
+fn date_to_days(d: NaiveDate) -> u16 {
+    d.signed_duration_since(unix_epoch()).num_days().clamp(0, i64::from(u16::MAX)) as u16
 }
 
 fn unix_epoch() -> NaiveDate {
     NaiveDate::from_ymd_opt(1970, 1, 1).expect("valid date")
 }
 
-fn bytes_to_hex(bytes: Vec<u8>) -> String {
+/// Lowercase hex-encodes `bytes` into a fresh `String`.
+fn bytes_to_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        use fmt::Write;
-        let _ = write!(s, "{b:02x}");
+    for &b in bytes {
+        s.push(HEX[(b >> 4) as usize] as char);
+        s.push(HEX[(b & 0x0f) as usize] as char);
     }
     s
 }
@@ -425,10 +386,10 @@ mod tests {
 
     #[test]
     fn hex_encoding() {
-        assert_eq!(bytes_to_hex([].to_vec()), "");
-        assert_eq!(bytes_to_hex([0x00].to_vec()), "00");
-        assert_eq!(bytes_to_hex([0xff].to_vec()), "ff");
-        assert_eq!(bytes_to_hex([0xde, 0xad, 0xbe, 0xef].to_vec()), "deadbeef");
+        assert_eq!(bytes_to_hex(&[]), "");
+        assert_eq!(bytes_to_hex(&[0x00]), "00");
+        assert_eq!(bytes_to_hex(&[0xff]), "ff");
+        assert_eq!(bytes_to_hex(&[0xde, 0xad, 0xbe, 0xef]), "deadbeef");
     }
 
     /// # GIVEN
