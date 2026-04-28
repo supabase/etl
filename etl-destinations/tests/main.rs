@@ -10,3 +10,5 @@ mod ducklake_pipeline;
 mod iceberg_client;
 #[cfg(all(feature = "iceberg", feature = "test-utils"))]
 mod iceberg_destination;
+#[cfg(all(feature = "snowflake", feature = "test-utils"))]
+mod snowflake_auth;

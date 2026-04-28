@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// Snowflake account identifier (e.g. `org-account`).
 pub const SNOWFLAKE_ACCOUNT_ENV: &str = "TESTS_SNOWFLAKE_ACCOUNT";
@@ -36,46 +36,8 @@ pub struct SnowflakeTestConfig {
     pub role: Option<String>,
 }
 
-/// Decides whether we have to skip running tests, due to missing configuration.
-pub fn skip_if_missing_snowflake_env_vars() -> bool {
-    let key_path = std::env::var_os(SNOWFLAKE_PRIVATE_KEY_PATH_ENV);
-    let has_account = std::env::var_os(SNOWFLAKE_ACCOUNT_ENV).is_some();
-    let has_user = std::env::var_os(SNOWFLAKE_USER_ENV).is_some();
-    let has_key_path = key_path.is_some();
-    let has_key_file = key_path.as_ref().is_some_and(|path| Path::new(path).is_file());
-
-    if has_account && has_user && has_key_file {
-        return false;
-    }
-
-    if has_key_path && !has_key_file {
-        eprintln!(
-            "skipping snowflake integration test: {SNOWFLAKE_PRIVATE_KEY_PATH_ENV} does not point \
-             to an existing file"
-        );
-        return true;
-    }
-
-    let mut missing = Vec::new();
-    if !has_account {
-        missing.push(SNOWFLAKE_ACCOUNT_ENV);
-    }
-    if !has_user {
-        missing.push(SNOWFLAKE_USER_ENV);
-    }
-    if !has_key_path {
-        missing.push(SNOWFLAKE_PRIVATE_KEY_PATH_ENV);
-    }
-
-    eprintln!("skipping snowflake integration test: missing {}", missing.join(", "));
-
-    true
-}
-
 /// Loads a [`SnowflakeTestConfig`] from environment variables, panicking on
 /// missing required vars.
-///
-/// Call [`skip_if_missing_snowflake_env_vars`] first to bail out gracefully.
 pub fn load_test_config() -> SnowflakeTestConfig {
     SnowflakeTestConfig {
         account: std::env::var(SNOWFLAKE_ACCOUNT_ENV)
