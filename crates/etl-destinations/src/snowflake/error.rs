@@ -1,7 +1,7 @@
 use etl::error::{ErrorKind, EtlError};
 
 #[derive(Debug, thiserror::Error)]
-pub enum SnowflakeError {
+pub enum Error {
     #[error("HTTP transport error: {0}")]
     HttpTransport(#[from] reqwest::Error),
 
@@ -27,31 +27,25 @@ pub enum SnowflakeError {
     Config(String),
 }
 
-impl From<SnowflakeError> for EtlError {
-    fn from(err: SnowflakeError) -> Self {
+impl From<Error> for EtlError {
+    fn from(err: Error) -> Self {
         let (kind, description) = match &err {
-            SnowflakeError::HttpTransport(_) => {
+            Error::HttpTransport(_) => {
                 (ErrorKind::DestinationError, "Snowflake HTTP transport error")
             }
-            SnowflakeError::HttpStatus { status, .. } if *status >= 500 => {
+            Error::HttpStatus { status, .. } if *status >= 500 => {
                 (ErrorKind::DestinationError, "Snowflake server error")
             }
-            SnowflakeError::HttpStatus { .. } => {
-                (ErrorKind::DestinationError, "Snowflake HTTP error")
-            }
-            SnowflakeError::Auth(_) => {
-                (ErrorKind::DestinationError, "Snowflake authentication failed")
-            }
-            SnowflakeError::Sql { .. } => {
-                (ErrorKind::DestinationError, "Snowflake SQL execution failed")
-            }
-            SnowflakeError::Snowpipe { .. } => {
-                (ErrorKind::DestinationError, "Snowpipe streaming error")
-            }
-            SnowflakeError::Channel(_) => (ErrorKind::DestinationError, "Snowflake channel error"),
-            SnowflakeError::Encoding(_) => (ErrorKind::InvalidData, "Snowflake encoding error"),
-            SnowflakeError::Config(_) => (ErrorKind::ConfigError, "Snowflake configuration error"),
+            Error::HttpStatus { .. } => (ErrorKind::DestinationError, "Snowflake HTTP error"),
+            Error::Auth(_) => (ErrorKind::DestinationError, "Snowflake authentication failed"),
+            Error::Sql { .. } => (ErrorKind::DestinationError, "Snowflake SQL execution failed"),
+            Error::Snowpipe { .. } => (ErrorKind::DestinationError, "Snowpipe streaming error"),
+            Error::Channel(_) => (ErrorKind::DestinationError, "Snowflake channel error"),
+            Error::Encoding(_) => (ErrorKind::InvalidData, "Snowflake encoding error"),
+            Error::Config(_) => (ErrorKind::ConfigError, "Snowflake configuration error"),
         };
         etl::etl_error!(kind, description, err.to_string())
     }
 }
+
+pub type Result<T> = std::result::Result<T, Error>;
