@@ -8,3 +8,5 @@ mod clickhouse;
 mod ducklake;
 #[cfg(all(feature = "iceberg", feature = "test-utils"))]
 mod iceberg;
+#[cfg(all(feature = "snowflake", feature = "test-utils"))]
+mod snowflake_auth;
