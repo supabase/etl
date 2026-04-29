@@ -8,6 +8,9 @@ rust-version.workspace = true
 repository.workspace = true
 homepage.workspace = true
 
+[lib]
+doctest = false
+
 [features]
 utoipa = ["dep:utoipa"]
 supabase = []
@@ -28,6 +31,3 @@ tempfile = { workspace = true }
 
 [lints]
 workspace = true
-
-[lib]
-doctest = false

@@ -16,14 +16,14 @@ egress = []
 default = []
 
 [dependencies]
-etl-config = { workspace = true }
-etl-postgres = { workspace = true, features = ["tokio", "replication"] }
 
 aws-lc-rs = { workspace = true }
 byteorder = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
 const-oid = { workspace = true, default-features = false }
+etl-config = { workspace = true }
+etl-postgres = { workspace = true, features = ["tokio", "replication"] }
 fail = { workspace = true }
 futures = { workspace = true }
 metrics = { workspace = true }
