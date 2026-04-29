@@ -73,6 +73,28 @@ fn build_insert_rows_sql(table_name: &str) -> String {
     format!("INSERT INTO {table_name} FORMAT RowBinary")
 }
 
+/// Kind of DDL being executed; surfaces as a `kind` label on the
+/// `etl_ch_ddl_duration_seconds` histogram so per-operation latencies can be
+/// distinguished (one-shot CREATE vs. online ALTER, etc.).
+#[derive(Copy, Clone)]
+pub(crate) enum DdlKind {
+    CreateTable,
+    AddColumn,
+    DropColumn,
+    RenameColumn,
+}
+
+impl DdlKind {
+    fn as_label(self) -> &'static str {
+        match self {
+            DdlKind::CreateTable => "create_table",
+            DdlKind::AddColumn => "add_column",
+            DdlKind::DropColumn => "drop_column",
+            DdlKind::RenameColumn => "rename_column",
+        }
+    }
+}
+
 /// High-level ClickHouse client used by [`super::core::ClickHouseDestination`].
 ///
 /// Wraps a [`clickhouse::Client`] and exposes typed methods for DDL,
@@ -120,8 +142,13 @@ impl ClickHouseClient {
 
     /// Executes a DDL statement (e.g. `CREATE TABLE IF NOT EXISTS …`) and
     /// records its duration in the `etl_ch_ddl_duration_seconds` histogram
-    /// labelled with `table_name`.
-    pub(crate) async fn execute_ddl(&self, table_name: &str, sql: &str) -> EtlResult<()> {
+    /// labelled with the DDL `kind` and `table_name`.
+    pub(crate) async fn execute_ddl(
+        &self,
+        kind: DdlKind,
+        table_name: &str,
+        sql: &str,
+    ) -> EtlResult<()> {
         let ddl_start = Instant::now();
         let result = self.inner.query(sql).execute().await.map_err(|e| {
             etl_error!(
@@ -130,8 +157,12 @@ impl ClickHouseClient {
                 format!("DDL execution failed: {e}")
             )
         });
-        metrics::histogram!(ETL_CH_DDL_DURATION_SECONDS, "table" => table_name.to_string())
-            .record(ddl_start.elapsed().as_secs_f64());
+        metrics::histogram!(
+            ETL_CH_DDL_DURATION_SECONDS,
+            "kind" => kind.as_label(),
+            "table" => table_name.to_string(),
+        )
+        .record(ddl_start.elapsed().as_secs_f64());
         result
     }
 
@@ -173,13 +204,13 @@ impl ClickHouseClient {
         after_column: &str,
     ) -> EtlResult<()> {
         let sql = build_add_column_sql(table_name, column, after_column);
-        self.execute_ddl(table_name, &sql).await
+        self.execute_ddl(DdlKind::AddColumn, table_name, &sql).await
     }
 
     /// Drops a column from an existing ClickHouse table (idempotent).
     pub(crate) async fn drop_column(&self, table_name: &str, column_name: &str) -> EtlResult<()> {
         let sql = build_drop_column_sql(table_name, column_name);
-        self.execute_ddl(table_name, &sql).await
+        self.execute_ddl(DdlKind::DropColumn, table_name, &sql).await
     }
 
     /// Renames a column in an existing ClickHouse table (idempotent).
@@ -194,7 +225,7 @@ impl ClickHouseClient {
         new_name: &str,
     ) -> EtlResult<()> {
         let sql = build_rename_column_sql(table_name, old_name, new_name);
-        self.execute_ddl(table_name, &sql).await
+        self.execute_ddl(DdlKind::RenameColumn, table_name, &sql).await
     }
 
     /// Executes `TRUNCATE TABLE IF EXISTS` for the supplied table.

@@ -21,7 +21,7 @@ use url::Url;
 
 use crate::{
     clickhouse::{
-        client::{ClickHouseClient, ClickHouseTableColumn},
+        client::{ClickHouseClient, ClickHouseTableColumn, DdlKind},
         encoding::{ClickHouseValue, cell_to_clickhouse_value},
         metrics::register_metrics,
         schema::{CDC_LSN_COLUMN_NAME, CDC_OPERATION_COLUMN_NAME, build_create_table_sql},
@@ -238,7 +238,7 @@ where
 
         let column_schemas: Vec<_> = schema.column_schemas().cloned().collect();
         let ddl = build_create_table_sql(ch_table_name, &column_schemas);
-        self.client.execute_ddl(ch_table_name, &ddl).await?;
+        self.client.execute_ddl(DdlKind::CreateTable, ch_table_name, &ddl).await?;
 
         self.store.store_destination_table_metadata(table_id, metadata.to_applied()).await?;
 
@@ -347,7 +347,7 @@ where
             None => {
                 let column_schemas: Vec<_> = schema.column_schemas().cloned().collect();
                 let ddl = build_create_table_sql(ch_table_name, &column_schemas);
-                self.client.execute_ddl(ch_table_name, &ddl).await?;
+                self.client.execute_ddl(DdlKind::CreateTable, ch_table_name, &ddl).await?;
             }
         }
 
