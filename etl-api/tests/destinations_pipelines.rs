@@ -163,7 +163,7 @@ async fn iceberg_supabase_destination_and_pipeline_can_be_created() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn tenant_cannot_create_more_than_max_destinations_pipelines() {
-    use etl_api::db::pipelines::MAX_PIPELINES_PER_TENANT;
+    use etl_api::data::pipelines::MAX_PIPELINES_PER_TENANT;
 
     init_test_tracing();
     // Arrange

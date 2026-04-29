@@ -7,7 +7,7 @@ use crate::{
     configs::{
         encryption::EncryptionKey, serde::DbSerializationError, source::FullApiSourceConfig,
     },
-    db::{
+    data::{
         sources::{SourcesDbError, create_source},
         tenants::{TenantsDbError, create_tenant},
     },

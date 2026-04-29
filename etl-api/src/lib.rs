@@ -1,7 +1,7 @@
 pub mod authentication;
 pub mod config;
 pub mod configs;
-pub mod db;
+pub mod data;
 pub mod feature_flags;
 pub mod k8s;
 pub mod routes;

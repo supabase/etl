@@ -12,7 +12,7 @@ use crate::{
         pipeline::{ReplicatorResourcesConfig, StoredPipelineConfig},
         source::StoredSourceConfig,
     },
-    db::{
+    data::{
         destinations::Destination,
         images::Image,
         pipelines::{Pipeline, PipelineDeletion},
