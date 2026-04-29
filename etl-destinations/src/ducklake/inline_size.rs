@@ -53,7 +53,7 @@ fn record_pending_inline_data_sizes(
     table_name: &str,
 ) -> DuckLakePendingInlineDataSizes {
     let inlined_bytes = inlined_bytes.max(0) as u64;
-    gauge!(ETL_DUCKLAKE_TABLE_ACTIVE_INLINED_DATA_BYTES, TABLE_LABEL => table_name.to_string())
+    gauge!(ETL_DUCKLAKE_TABLE_ACTIVE_INLINED_DATA_BYTES, TABLE_LABEL => table_name.to_owned())
         .set(inlined_bytes as f64);
     DuckLakePendingInlineDataSizes { inlined_bytes }
 }

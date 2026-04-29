@@ -43,15 +43,15 @@ const APP_NAME_REPLICATOR_STREAMING: &str = "supabase_etl_replicator_streaming";
 /// responsiveness and fail fast when contention occurs, preventing API request
 /// timeouts.
 pub static ETL_API_OPTIONS: LazyLock<PgConnectionOptions> = LazyLock::new(|| PgConnectionOptions {
-    datestyle: COMMON_DATESTYLE.to_string(),
-    intervalstyle: COMMON_INTERVALSTYLE.to_string(),
+    datestyle: COMMON_DATESTYLE.to_owned(),
+    intervalstyle: COMMON_INTERVALSTYLE.to_owned(),
     extra_float_digits: COMMON_EXTRA_FLOAT_DIGITS,
-    client_encoding: COMMON_CLIENT_ENCODING.to_string(),
-    timezone: COMMON_TIMEZONE.to_string(),
+    client_encoding: COMMON_CLIENT_ENCODING.to_owned(),
+    timezone: COMMON_TIMEZONE.to_owned(),
     statement_timeout: 30_000,
     lock_timeout: 5_000,
     idle_in_transaction_session_timeout: 60_000,
-    application_name: APP_NAME_API.to_string(),
+    application_name: APP_NAME_API.to_owned(),
 });
 
 /// Connection options for database migrations.
@@ -61,15 +61,15 @@ pub static ETL_API_OPTIONS: LazyLock<PgConnectionOptions> = LazyLock::new(|| PgC
 /// idle).
 pub static ETL_MIGRATION_OPTIONS: LazyLock<PgConnectionOptions> =
     LazyLock::new(|| PgConnectionOptions {
-        datestyle: COMMON_DATESTYLE.to_string(),
-        intervalstyle: COMMON_INTERVALSTYLE.to_string(),
+        datestyle: COMMON_DATESTYLE.to_owned(),
+        intervalstyle: COMMON_INTERVALSTYLE.to_owned(),
         extra_float_digits: COMMON_EXTRA_FLOAT_DIGITS,
-        client_encoding: COMMON_CLIENT_ENCODING.to_string(),
-        timezone: COMMON_TIMEZONE.to_string(),
+        client_encoding: COMMON_CLIENT_ENCODING.to_owned(),
+        timezone: COMMON_TIMEZONE.to_owned(),
         statement_timeout: 300_000,
         lock_timeout: 10_000,
         idle_in_transaction_session_timeout: 60_000,
-        application_name: APP_NAME_REPLICATOR_MIGRATIONS.to_string(),
+        application_name: APP_NAME_REPLICATOR_MIGRATIONS.to_owned(),
     });
 
 /// Connection options for logical replication streams.
@@ -84,15 +84,15 @@ pub static ETL_MIGRATION_OPTIONS: LazyLock<PgConnectionOptions> =
 /// cause retries that will also fail.
 pub static ETL_REPLICATION_OPTIONS: LazyLock<PgConnectionOptions> =
     LazyLock::new(|| PgConnectionOptions {
-        datestyle: COMMON_DATESTYLE.to_string(),
-        intervalstyle: COMMON_INTERVALSTYLE.to_string(),
+        datestyle: COMMON_DATESTYLE.to_owned(),
+        intervalstyle: COMMON_INTERVALSTYLE.to_owned(),
         extra_float_digits: COMMON_EXTRA_FLOAT_DIGITS,
-        client_encoding: COMMON_CLIENT_ENCODING.to_string(),
-        timezone: COMMON_TIMEZONE.to_string(),
+        client_encoding: COMMON_CLIENT_ENCODING.to_owned(),
+        timezone: COMMON_TIMEZONE.to_owned(),
         statement_timeout: 0,
         lock_timeout: 0,
         idle_in_transaction_session_timeout: 0,
-        application_name: APP_NAME_REPLICATOR_STREAMING.to_string(),
+        application_name: APP_NAME_REPLICATOR_STREAMING.to_owned(),
     });
 
 /// Connection options for accessing ETL state metadata in the source database.
@@ -101,15 +101,15 @@ pub static ETL_REPLICATION_OPTIONS: LazyLock<PgConnectionOptions> =
 /// queries execute quickly and should not block other operations.
 pub static ETL_STATE_MANAGEMENT_OPTIONS: LazyLock<PgConnectionOptions> =
     LazyLock::new(|| PgConnectionOptions {
-        datestyle: COMMON_DATESTYLE.to_string(),
-        intervalstyle: COMMON_INTERVALSTYLE.to_string(),
+        datestyle: COMMON_DATESTYLE.to_owned(),
+        intervalstyle: COMMON_INTERVALSTYLE.to_owned(),
         extra_float_digits: COMMON_EXTRA_FLOAT_DIGITS,
-        client_encoding: COMMON_CLIENT_ENCODING.to_string(),
-        timezone: COMMON_TIMEZONE.to_string(),
+        client_encoding: COMMON_CLIENT_ENCODING.to_owned(),
+        timezone: COMMON_TIMEZONE.to_owned(),
         statement_timeout: 30_000,
         lock_timeout: 10_000,
         idle_in_transaction_session_timeout: 60_000,
-        application_name: APP_NAME_REPLICATOR_STATE.to_string(),
+        application_name: APP_NAME_REPLICATOR_STATE.to_owned(),
     });
 
 /// Postgres server options for ETL workloads.
@@ -169,18 +169,18 @@ impl PgConnectionOptions {
     /// Returns a vector of (key, value) tuples suitable for sqlx configuration.
     pub fn to_key_value_pairs(&self) -> Vec<(String, String)> {
         vec![
-            ("datestyle".to_string(), self.datestyle.clone()),
-            ("intervalstyle".to_string(), self.intervalstyle.clone()),
-            ("extra_float_digits".to_string(), self.extra_float_digits.to_string()),
-            ("client_encoding".to_string(), self.client_encoding.clone()),
-            ("timezone".to_string(), self.timezone.clone()),
-            ("statement_timeout".to_string(), self.statement_timeout.to_string()),
-            ("lock_timeout".to_string(), self.lock_timeout.to_string()),
+            ("datestyle".to_owned(), self.datestyle.clone()),
+            ("intervalstyle".to_owned(), self.intervalstyle.clone()),
+            ("extra_float_digits".to_owned(), self.extra_float_digits.to_string()),
+            ("client_encoding".to_owned(), self.client_encoding.clone()),
+            ("timezone".to_owned(), self.timezone.clone()),
+            ("statement_timeout".to_owned(), self.statement_timeout.to_string()),
+            ("lock_timeout".to_owned(), self.lock_timeout.to_string()),
             (
-                "idle_in_transaction_session_timeout".to_string(),
+                "idle_in_transaction_session_timeout".to_owned(),
                 self.idle_in_transaction_session_timeout.to_string(),
             ),
-            ("application_name".to_string(), self.application_name.clone()),
+            ("application_name".to_owned(), self.application_name.clone()),
         ]
     }
 }
@@ -261,7 +261,7 @@ pub struct TlsConfig {
 impl TlsConfig {
     /// Returns a TLS configuration that disables TLS.
     pub fn disabled() -> Self {
-        Self { trusted_root_certs: "".to_string(), enabled: false }
+        Self { trusted_root_certs: "".to_owned(), enabled: false }
     }
 }
 
@@ -419,22 +419,19 @@ mod tests {
         let pairs = ETL_STATE_MANAGEMENT_OPTIONS.to_key_value_pairs();
 
         assert_eq!(pairs.len(), 9);
-        assert!(pairs.contains(&("datestyle".to_string(), "ISO".to_string())));
-        assert!(pairs.contains(&("intervalstyle".to_string(), "postgres".to_string())));
-        assert!(pairs.contains(&("extra_float_digits".to_string(), "3".to_string())));
-        assert!(pairs.contains(&("client_encoding".to_string(), "UTF8".to_string())));
-        assert!(pairs.contains(&("timezone".to_string(), "UTC".to_string())));
-        assert!(pairs.contains(&("statement_timeout".to_string(), "30000".to_string())));
-        assert!(pairs.contains(&("lock_timeout".to_string(), "10000".to_string())));
+        assert!(pairs.contains(&("datestyle".to_owned(), "ISO".to_owned())));
+        assert!(pairs.contains(&("intervalstyle".to_owned(), "postgres".to_owned())));
+        assert!(pairs.contains(&("extra_float_digits".to_owned(), "3".to_owned())));
+        assert!(pairs.contains(&("client_encoding".to_owned(), "UTF8".to_owned())));
+        assert!(pairs.contains(&("timezone".to_owned(), "UTC".to_owned())));
+        assert!(pairs.contains(&("statement_timeout".to_owned(), "30000".to_owned())));
+        assert!(pairs.contains(&("lock_timeout".to_owned(), "10000".to_owned())));
         assert!(
-            pairs.contains(&(
-                "idle_in_transaction_session_timeout".to_string(),
-                "60000".to_string()
-            ))
+            pairs.contains(&("idle_in_transaction_session_timeout".to_owned(), "60000".to_owned()))
         );
         assert!(pairs.contains(&(
-            "application_name".to_string(),
-            "supabase_etl_replicator_state".to_string()
+            "application_name".to_owned(),
+            "supabase_etl_replicator_state".to_owned()
         )));
     }
 

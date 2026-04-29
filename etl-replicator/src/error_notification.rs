@@ -131,8 +131,7 @@ impl ErrorNotificationClient {
 
         if !response.status().is_success() {
             let status = response.status();
-            let body =
-                response.text().await.unwrap_or_else(|_| "<unable to read body>".to_string());
+            let body = response.text().await.unwrap_or_else(|_| "<unable to read body>".to_owned());
             return Err(format!("API returned status {status}: {body}").into());
         }
 
@@ -178,12 +177,12 @@ mod tests {
         let err1 = EtlError::from((
             ErrorKind::SourceQueryFailed,
             "Query execution failed",
-            "Table 'users' not found".to_string(),
+            "Table 'users' not found".to_owned(),
         ));
         let err2 = EtlError::from((
             ErrorKind::SourceQueryFailed,
             "Query execution failed",
-            "Table 'users' not found".to_string(),
+            "Table 'users' not found".to_owned(),
         ));
 
         let hash1 = compute_error_hash(&err1);

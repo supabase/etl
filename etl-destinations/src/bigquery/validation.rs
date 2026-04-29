@@ -480,7 +480,7 @@ mod tests {
     fn validate_cell_for_bigquery_valid_types() {
         assert!(validate_cell_for_bigquery(&CellNonOptional::Null).is_ok());
         assert!(validate_cell_for_bigquery(&CellNonOptional::Bool(true)).is_ok());
-        assert!(validate_cell_for_bigquery(&CellNonOptional::String("test".to_string())).is_ok());
+        assert!(validate_cell_for_bigquery(&CellNonOptional::String("test".to_owned())).is_ok());
         assert!(validate_cell_for_bigquery(&CellNonOptional::I32(42)).is_ok());
     }
 

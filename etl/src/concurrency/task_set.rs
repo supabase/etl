@@ -8,40 +8,38 @@ use crate::{
     etl_error,
 };
 
-/// Reap completed destination tasks once the tracked set grows past this
-/// threshold.
+/// Reap completed tasks once the tracked set grows past this threshold.
 ///
 /// A value of 32 keeps memory bounded while avoiding a lock-and-reap pass for
-/// every single write.
-const DESTINATION_TASK_REAP_THRESHOLD: usize = 32;
+/// every single spawn.
+const TASK_REAP_THRESHOLD: usize = 32;
 
-/// Tracks destination-owned background tasks and reaps them safely.
+/// Tracks background tasks and reaps them safely.
 ///
-/// This helper is for destinations that want to offload accepted work to
-/// background tasks. The main use case today is the [`write_events`] method.
+/// This helper is for components that want to offload accepted work to
+/// background tasks while still keeping task handles owned and observable.
 ///
 /// It intentionally does not add its own concurrency control. ETL already
-/// limits concurrent destination work through the apply worker and table sync
-/// workers, so this type only manages the lifecycle of spawned destination
-/// tasks: reap completed work during normal operation and shut down outstanding
-/// tasks safely.
+/// limits concurrent work at higher levels, so this type only manages the
+/// lifecycle of spawned tasks: reap completed work during normal operation and
+/// shut down outstanding tasks safely.
 #[derive(Debug)]
-struct DestinationTaskSetInner {
+struct TaskSetInner {
     join_set: JoinSet<()>,
 }
 
-/// Shared handle used by destinations to manage spawned background tasks.
+/// Shared handle used to manage spawned background tasks.
 ///
-/// [`DestinationTaskSet`] is a small lifecycle primitive, not a scheduler.
+/// [`TaskSet`] is a small lifecycle primitive, not a scheduler.
 #[derive(Debug, Clone)]
-pub struct DestinationTaskSet {
-    inner: Arc<Mutex<DestinationTaskSetInner>>,
+pub struct TaskSet {
+    inner: Arc<Mutex<TaskSetInner>>,
 }
 
-impl DestinationTaskSet {
-    /// Creates a new task set for a destination.
+impl TaskSet {
+    /// Creates a new task set.
     pub fn new() -> Self {
-        Self { inner: Arc::new(Mutex::new(DestinationTaskSetInner { join_set: JoinSet::new() })) }
+        Self { inner: Arc::new(Mutex::new(TaskSetInner { join_set: JoinSet::new() })) }
     }
 
     /// Spawns a new tracked background task.
@@ -57,7 +55,7 @@ impl DestinationTaskSet {
     /// justify the lock.
     pub async fn try_reap(&self) -> EtlResult<()> {
         let mut inner = self.inner.lock().await;
-        if inner.join_set.len() <= DESTINATION_TASK_REAP_THRESHOLD {
+        if inner.join_set.len() <= TASK_REAP_THRESHOLD {
             return Ok(());
         }
 
@@ -70,7 +68,7 @@ impl DestinationTaskSet {
 
     /// Waits for all remaining tasks to finish without aborting them.
     ///
-    /// This is useful for destinations that want shutdown to complete
+    /// This is useful for callers that want shutdown to complete
     /// already-accepted work before cleaning up related resources.
     pub async fn drain(&self) -> EtlResult<()> {
         let mut inner = self.inner.lock().await;
@@ -82,13 +80,11 @@ impl DestinationTaskSet {
         Ok(())
     }
 
-    /// Reaps all remaining tasks during shutdown.
+    /// Aborts and reaps all remaining tasks during shutdown.
     ///
-    /// Destination shutdown is a one-shot lifecycle operation. We therefore
-    /// intentionally keep the mutex locked while draining the remaining
-    /// tasks so no new work can be submitted concurrently once shutdown has
-    /// begun. We abort all remaining tasks first so shutdown does
-    /// not wait for background writes that are no longer needed.
+    /// Shutdown is a one-shot lifecycle operation. We therefore intentionally
+    /// keep the mutex locked while draining the remaining tasks so no new work
+    /// can be submitted concurrently once shutdown has begun.
     pub async fn shutdown(&self) -> EtlResult<()> {
         let mut inner = self.inner.lock().await;
 
@@ -113,7 +109,7 @@ impl DestinationTaskSet {
                 if err.is_cancelled() {
                     warn!(
                         error = %err,
-                        "destination background task was cancelled"
+                        "background task was cancelled"
                     );
 
                     return Ok(());
@@ -121,12 +117,12 @@ impl DestinationTaskSet {
 
                 error!(
                     error = %err,
-                    "destination background task panicked"
+                    "background task panicked"
                 );
 
                 Err(etl_error!(
-                    ErrorKind::DestinationError,
-                    "Destination background task panicked",
+                    ErrorKind::InvalidState,
+                    "Background task panicked",
                     err.to_string()
                 ))
             }
@@ -134,7 +130,7 @@ impl DestinationTaskSet {
     }
 }
 
-impl Default for DestinationTaskSet {
+impl Default for TaskSet {
     fn default() -> Self {
         Self::new()
     }

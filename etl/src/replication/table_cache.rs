@@ -137,17 +137,17 @@ mod tests {
     fn create_test_schema() -> ReplicatedTableSchema {
         let schema = TableSchema::with_snapshot_id(
             TableId::new(123),
-            TableName::new("public".to_string(), "test_table".to_string()),
+            TableName::new("public".to_owned(), "test_table".to_owned()),
             vec![
-                ColumnSchema::new("id".to_string(), Type::INT4, -1, 1, Some(1), false),
-                ColumnSchema::new("name".to_string(), Type::TEXT, -1, 2, None, true),
-                ColumnSchema::new("age".to_string(), Type::INT4, -1, 3, None, true),
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
+                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true),
+                ColumnSchema::new("age".to_owned(), Type::INT4, -1, 3, None, true),
             ],
             SnapshotId::new(10.into()),
         );
 
         let replicated_columns: HashSet<String> =
-            ["id".to_string(), "age".to_string()].into_iter().collect();
+            ["id".to_owned(), "age".to_owned()].into_iter().collect();
         let replication_mask =
             etl_postgres::types::ReplicationMask::build(&schema, &replicated_columns);
         let identity_mask = etl_postgres::types::IdentityMask::from_bytes(vec![1, 0, 1]);

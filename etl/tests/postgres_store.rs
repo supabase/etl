@@ -35,7 +35,7 @@ fn test_column(
     primary_key: bool,
 ) -> ColumnSchema {
     ColumnSchema::new(
-        name.to_string(),
+        name.to_owned(),
         typ,
         modifier,
         ordinal_position,
@@ -46,7 +46,7 @@ fn test_column(
 
 fn create_sample_table_schema() -> TableSchema {
     let table_id = TableId::new(12345);
-    let table_name = TableName::new("public".to_string(), "test_table".to_string());
+    let table_name = TableName::new("public".to_owned(), "test_table".to_owned());
     let columns = vec![
         test_column("id", PgType::INT4, -1, 1, false, true),
         test_column("name", PgType::TEXT, -1, 2, true, false),
@@ -58,7 +58,7 @@ fn create_sample_table_schema() -> TableSchema {
 
 fn create_another_table_schema() -> TableSchema {
     let table_id = TableId::new(67890);
-    let table_name = TableName::new("public".to_string(), "another_table".to_string());
+    let table_name = TableName::new("public".to_owned(), "another_table".to_owned());
     let columns = vec![
         test_column("id", PgType::INT8, -1, 1, false, true),
         test_column("description", PgType::VARCHAR, 255, 2, true, false),
@@ -112,8 +112,8 @@ async fn state_store_operations() {
 
     // Test Errored state with retry policy
     let errored_phase = TableReplicationPhase::Errored {
-        reason: "Test error".to_string(),
-        solution: Some("Test solution".to_string()),
+        reason: "Test error".to_owned(),
+        solution: Some("Test solution".to_owned()),
         retry_policy: RetryPolicy::ManualRetry,
         source_err: etl_error!(ErrorKind::Unknown, "test error"),
     };
@@ -360,7 +360,7 @@ async fn schema_store_upsert_replaces_columns() {
 
     // Create initial schema with 3 columns
     let table_id = TableId::new(12345);
-    let table_name = TableName::new("public".to_string(), "test_table".to_string());
+    let table_name = TableName::new("public".to_owned(), "test_table".to_owned());
     let initial_columns = vec![
         test_column("id", PgType::INT4, -1, 1, false, true),
         test_column("name", PgType::TEXT, -1, 2, true, false),
@@ -420,7 +420,7 @@ async fn schema_cache_eviction() {
 
     // Store 3 schema versions for table 1
     let table_id_1 = TableId::new(12345);
-    let table_name_1 = TableName::new("public".to_string(), "test_table".to_string());
+    let table_name_1 = TableName::new("public".to_owned(), "test_table".to_owned());
     for snapshot_id in [0u64, 100, 200] {
         let columns = vec![
             test_column("id", PgType::INT4, -1, 1, false, true),
@@ -433,7 +433,7 @@ async fn schema_cache_eviction() {
 
     // Store 3 schemas for table 2 to verify eviction is per-table
     let table_id_2 = TableId::new(67890);
-    let table_name_2 = TableName::new("public".to_string(), "table_2".to_string());
+    let table_name_2 = TableName::new("public".to_owned(), "table_2".to_owned());
     for snapshot_id in [0u64, 100, 200] {
         let columns = vec![test_column("id", PgType::INT4, -1, 1, false, true)];
         let mut schema = TableSchema::new(table_id_2, table_name_2.clone(), columns);
@@ -478,7 +478,7 @@ async fn schema_store_prunes_obsolete_versions_from_database_and_cache() {
 
     let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
     let table_id = TableId::new(12345);
-    let table_name = TableName::new("public".to_string(), "test_table".to_string());
+    let table_name = TableName::new("public".to_owned(), "test_table".to_owned());
 
     for snapshot_id in [0u64, 100, 200, 300] {
         let columns = vec![
@@ -491,7 +491,7 @@ async fn schema_store_prunes_obsolete_versions_from_database_and_cache() {
     }
 
     let other_table_id = TableId::new(67890);
-    let other_table_name = TableName::new("public".to_string(), "other_table".to_string());
+    let other_table_name = TableName::new("public".to_owned(), "other_table".to_owned());
     for snapshot_id in [0u64, 150] {
         let columns = vec![
             test_column("id", PgType::INT4, -1, 1, false, true),
@@ -503,7 +503,7 @@ async fn schema_store_prunes_obsolete_versions_from_database_and_cache() {
     }
 
     let untouched_table_id = TableId::new(24680);
-    let untouched_table_name = TableName::new("public".to_string(), "untouched_table".to_string());
+    let untouched_table_name = TableName::new("public".to_owned(), "untouched_table".to_owned());
     for snapshot_id in [0u64, 50] {
         let columns = vec![
             test_column("id", PgType::INT4, -1, 1, false, true),
@@ -658,12 +658,12 @@ async fn multiple_pipelines_isolation() {
 
     // Test destination table metadata isolation.
     let metadata1 = DestinationTableMetadata::new_applied(
-        "pipeline1_table".to_string(),
+        "pipeline1_table".to_owned(),
         SnapshotId::initial(),
         ReplicationMask::from_bytes(vec![1, 1, 1]),
     );
     let metadata2 = DestinationTableMetadata::new_applied(
-        "pipeline2_table".to_string(),
+        "pipeline2_table".to_owned(),
         SnapshotId::initial(),
         ReplicationMask::from_bytes(vec![1, 1, 1]),
     );
@@ -677,7 +677,7 @@ async fn multiple_pipelines_isolation() {
             .await
             .unwrap()
             .map(|m| m.destination_table_id),
-        Some("pipeline1_table".to_string())
+        Some("pipeline1_table".to_owned())
     );
     assert_eq!(
         store2
@@ -685,7 +685,7 @@ async fn multiple_pipelines_isolation() {
             .await
             .unwrap()
             .map(|m| m.destination_table_id),
-        Some("pipeline2_table".to_string())
+        Some("pipeline2_table".to_owned())
     );
 
     // Verify isolation persists after loading from database
@@ -697,7 +697,7 @@ async fn multiple_pipelines_isolation() {
             .await
             .unwrap()
             .map(|m| m.destination_table_id),
-        Some("pipeline1_table".to_string())
+        Some("pipeline1_table".to_owned())
     );
 }
 
@@ -713,7 +713,7 @@ async fn errored_state_with_different_retry_policies() {
 
     // Test Errored state with NoRetry policy
     let errored_no_retry = TableReplicationPhase::Errored {
-        reason: "Fatal error".to_string(),
+        reason: "Fatal error".to_owned(),
         solution: None,
         retry_policy: RetryPolicy::NoRetry,
         source_err: etl_error!(ErrorKind::Unknown, "test error"),
@@ -726,8 +726,8 @@ async fn errored_state_with_different_retry_policies() {
     // Test Errored state with TimedRetry policy
     let next_retry = chrono::Utc::now() + chrono::Duration::minutes(5);
     let errored_timed_retry = TableReplicationPhase::Errored {
-        reason: "Temporary error".to_string(),
-        solution: Some("Wait and retry".to_string()),
+        reason: "Temporary error".to_owned(),
+        solution: Some("Wait and retry".to_owned()),
         retry_policy: RetryPolicy::TimedRetry { next_retry },
         source_err: etl_error!(ErrorKind::Unknown, "test error"),
     };
@@ -816,12 +816,12 @@ async fn cleanup_deletes_state_schema_and_metadata_for_table() {
     store.store_table_schema(table_2_schema.clone()).await.unwrap();
 
     let metadata1 = DestinationTableMetadata::new_applied(
-        "dest_table_1".to_string(),
+        "dest_table_1".to_owned(),
         SnapshotId::initial(),
         ReplicationMask::from_bytes(vec![1, 1, 1]),
     );
     let metadata2 = DestinationTableMetadata::new_applied(
-        "dest_table_2".to_string(),
+        "dest_table_2".to_owned(),
         SnapshotId::initial(),
         ReplicationMask::from_bytes(vec![1, 1, 1]),
     );
@@ -998,7 +998,7 @@ async fn replication_mask_roundtrip() {
     // Create a store and save metadata with a specific mask
     let original_mask = ReplicationMask::from_bytes(vec![1, 0, 1, 0, 1, 1, 0, 0]);
     let metadata = DestinationTableMetadata::new_applied(
-        "roundtrip_table".to_string(),
+        "roundtrip_table".to_owned(),
         SnapshotId::initial(),
         original_mask.clone(),
     );

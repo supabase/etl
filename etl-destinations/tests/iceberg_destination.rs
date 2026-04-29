@@ -24,7 +24,7 @@ use crate::support::iceberg::read_all_rows;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn table_copy() {
-    run_table_copy_test(DestinationNamespace::Single("test_namespace".to_string())).await;
+    run_table_copy_test(DestinationNamespace::Single("test_namespace".to_owned())).await;
     run_table_copy_test(DestinationNamespace::OnePerSchema).await;
 }
 
@@ -78,7 +78,7 @@ async fn run_table_copy_test(destination_namespace: DestinationNamespace) {
             client.create_namespace_if_missing(ns).await.unwrap();
             ns.clone()
         }
-        DestinationNamespace::OnePerSchema => TestDatabaseSchema::schema().to_string(),
+        DestinationNamespace::OnePerSchema => TestDatabaseSchema::schema().to_owned(),
     };
 
     let single_destination_namespace = destination_namespace.is_single();
@@ -134,17 +134,17 @@ async fn run_table_copy_test(destination_namespace: DestinationNamespace) {
     let expected_users = vec![
         TableRow::new(vec![
             Cell::I64(1),
-            Cell::String("user_1".to_string()),
+            Cell::String("user_1".to_owned()),
             Cell::I32(1),
             IcebergOperationType::Insert.into(),
-            Cell::String("0000000000000000/0000000000000000".to_string()),
+            Cell::String("0000000000000000/0000000000000000".to_owned()),
         ]),
         TableRow::new(vec![
             Cell::I64(2),
-            Cell::String("user_2".to_string()),
+            Cell::String("user_2".to_owned()),
             Cell::I32(2),
             IcebergOperationType::Insert.into(),
-            Cell::String("0000000000000000/0000000000000000".to_string()),
+            Cell::String("0000000000000000/0000000000000000".to_owned()),
         ]),
     ];
 
@@ -159,15 +159,15 @@ async fn run_table_copy_test(destination_namespace: DestinationNamespace) {
     let expected_orders = vec![
         TableRow::new(vec![
             Cell::I64(1),
-            Cell::String("description_1".to_string()),
+            Cell::String("description_1".to_owned()),
             IcebergOperationType::Insert.into(),
-            Cell::String("0000000000000000/0000000000000000".to_string()),
+            Cell::String("0000000000000000/0000000000000000".to_owned()),
         ]),
         TableRow::new(vec![
             Cell::I64(2),
-            Cell::String("description_2".to_string()),
+            Cell::String("description_2".to_owned()),
             IcebergOperationType::Insert.into(),
-            Cell::String("0000000000000000/0000000000000000".to_string()),
+            Cell::String("0000000000000000/0000000000000000".to_owned()),
         ]),
     ];
 
@@ -189,7 +189,7 @@ async fn run_table_copy_test(destination_namespace: DestinationNamespace) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn cdc_streaming() {
-    run_cdc_streaming_test(DestinationNamespace::Single("test_namespace".to_string())).await;
+    run_cdc_streaming_test(DestinationNamespace::Single("test_namespace".to_owned())).await;
     run_cdc_streaming_test(DestinationNamespace::OnePerSchema).await;
 }
 
@@ -235,7 +235,7 @@ async fn run_cdc_streaming_test(destination_namespace: DestinationNamespace) {
             client.create_namespace_if_missing(ns).await.unwrap();
             ns.clone()
         }
-        DestinationNamespace::OnePerSchema => TestDatabaseSchema::schema().to_string(),
+        DestinationNamespace::OnePerSchema => TestDatabaseSchema::schema().to_owned(),
     };
 
     let single_destination_namespace = destination_namespace.is_single();
@@ -370,35 +370,35 @@ async fn run_cdc_streaming_test(destination_namespace: DestinationNamespace) {
         // Initial insert of user 1
         TableRow::new(vec![
             Cell::I64(1),
-            Cell::String("user_1".to_string()),
+            Cell::String("user_1".to_owned()),
             Cell::I32(1),
             IcebergOperationType::Insert.into(),
         ]),
         // Initial insert of user 2
         TableRow::new(vec![
             Cell::I64(2),
-            Cell::String("user_2".to_string()),
+            Cell::String("user_2".to_owned()),
             Cell::I32(2),
             IcebergOperationType::Insert.into(),
         ]),
         // Update of user 1
         TableRow::new(vec![
             Cell::I64(1),
-            Cell::String("updated_name".to_string()),
+            Cell::String("updated_name".to_owned()),
             Cell::I32(42),
             IcebergOperationType::Update.into(),
         ]),
         // Update of user 2
         TableRow::new(vec![
             Cell::I64(2),
-            Cell::String("updated_name".to_string()),
+            Cell::String("updated_name".to_owned()),
             Cell::I32(42),
             IcebergOperationType::Update.into(),
         ]),
         // Delete of user with id 1 preserves the full old row image.
         TableRow::new(vec![
             Cell::I64(1),
-            Cell::String("updated_name".to_string()),
+            Cell::String("updated_name".to_owned()),
             Cell::I32(42),
             IcebergOperationType::Delete.into(),
         ]),
@@ -425,31 +425,31 @@ async fn run_cdc_streaming_test(destination_namespace: DestinationNamespace) {
         // Initial insert of order 1
         TableRow::new(vec![
             Cell::I64(1),
-            Cell::String("description_1".to_string()),
+            Cell::String("description_1".to_owned()),
             IcebergOperationType::Insert.into(),
         ]),
         // Initial insert of order 2
         TableRow::new(vec![
             Cell::I64(2),
-            Cell::String("description_2".to_string()),
+            Cell::String("description_2".to_owned()),
             IcebergOperationType::Insert.into(),
         ]),
         // Update of order 1
         TableRow::new(vec![
             Cell::I64(1),
-            Cell::String("updated_description".to_string()),
+            Cell::String("updated_description".to_owned()),
             IcebergOperationType::Update.into(),
         ]),
         // Update of order 2
         TableRow::new(vec![
             Cell::I64(2),
-            Cell::String("updated_description".to_string()),
+            Cell::String("updated_description".to_owned()),
             IcebergOperationType::Update.into(),
         ]),
         // Delete of order 2 preserves the full old row image.
         TableRow::new(vec![
             Cell::I64(2),
-            Cell::String("updated_description".to_string()),
+            Cell::String("updated_description".to_owned()),
             IcebergOperationType::Delete.into(),
         ]),
     ];
@@ -468,10 +468,8 @@ async fn run_cdc_streaming_test(destination_namespace: DestinationNamespace) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn cdc_streaming_with_truncate() {
-    run_cdc_streaming_with_truncate_test(DestinationNamespace::Single(
-        "test_namespace".to_string(),
-    ))
-    .await;
+    run_cdc_streaming_with_truncate_test(DestinationNamespace::Single("test_namespace".to_owned()))
+        .await;
     run_cdc_streaming_with_truncate_test(DestinationNamespace::OnePerSchema).await;
 }
 
@@ -515,7 +513,7 @@ async fn run_cdc_streaming_with_truncate_test(destination_namespace: Destination
             client.create_namespace_if_missing(ns).await.unwrap();
             ns.clone()
         }
-        DestinationNamespace::OnePerSchema => TestDatabaseSchema::schema().to_string(),
+        DestinationNamespace::OnePerSchema => TestDatabaseSchema::schema().to_owned(),
     };
 
     let single_destination_namespace = destination_namespace.is_single();
@@ -627,13 +625,13 @@ async fn run_cdc_streaming_with_truncate_test(destination_namespace: Destination
     let expected_users = vec![
         TableRow::new(vec![
             Cell::I64(3),
-            Cell::String("user_3".to_string()),
+            Cell::String("user_3".to_owned()),
             Cell::I32(3),
             IcebergOperationType::Insert.into(),
         ]),
         TableRow::new(vec![
             Cell::I64(4),
-            Cell::String("user_4".to_string()),
+            Cell::String("user_4".to_owned()),
             Cell::I32(4),
             IcebergOperationType::Insert.into(),
         ]),
@@ -650,12 +648,12 @@ async fn run_cdc_streaming_with_truncate_test(destination_namespace: Destination
     let expected_orders = vec![
         TableRow::new(vec![
             Cell::I64(3),
-            Cell::String("description_3".to_string()),
+            Cell::String("description_3".to_owned()),
             IcebergOperationType::Insert.into(),
         ]),
         TableRow::new(vec![
             Cell::I64(4),
-            Cell::String("description_4".to_string()),
+            Cell::String("description_4".to_owned()),
             IcebergOperationType::Insert.into(),
         ]),
     ];

@@ -1331,20 +1331,20 @@ mod tests {
         let base_config = "";
         let replicator_config = ReplicatorConfig {
             destination: DestinationConfig::BigQuery {
-                project_id: "project-id".to_string(),
-                dataset_id: "dataset-id".to_string(),
+                project_id: "project-id".to_owned(),
+                dataset_id: "dataset-id".to_owned(),
                 service_account_key: "sa-key".into(),
                 max_staleness_mins: None,
                 connection_pool_size: 4,
             },
             pipeline: PipelineConfig {
                 id: 42,
-                publication_name: "all-pub".to_string(),
+                publication_name: "all-pub".to_owned(),
                 pg_connection: PgConnectionConfig {
-                    host: "localhost".to_string(),
+                    host: "localhost".to_owned(),
                     port: 5432,
-                    name: "postgres".to_string(),
-                    username: "postgres".to_string(),
+                    name: "postgres".to_owned(),
+                    username: "postgres".to_owned(),
                     password: Some("password".into()),
                     tls: TlsConfig::disabled(),
                     keepalive: TcpKeepaliveConfig::default(),
@@ -1371,8 +1371,8 @@ mod tests {
 
         let files = vec![
             ReplicatorConfigMapFile {
-                filename: "base.json".to_string(),
-                content: base_config.to_string(),
+                filename: "base.json".to_owned(),
+                content: base_config.to_owned(),
             },
             ReplicatorConfigMapFile {
                 filename: format!("{environment}.json"),

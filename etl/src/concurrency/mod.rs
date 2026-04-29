@@ -1,8 +1,11 @@
+//! Concurrency primitives used by ETL workers and destinations.
+
 mod batch_budget;
 mod memory_monitor;
 mod shutdown;
 mod signal;
 mod stream;
+mod task_set;
 
 pub(crate) use batch_budget::{BatchBudgetController, CachedBatchBudget};
 pub(crate) use memory_monitor::MemoryMonitor;
@@ -12,3 +15,4 @@ pub(crate) use stream::{
     BackpressureStream, TryBatchBackpressureStream, apply_worker_apply_stream_id,
     table_sync_worker_apply_stream_id, table_sync_worker_copy_stream_id,
 };
+pub use task_set::TaskSet;

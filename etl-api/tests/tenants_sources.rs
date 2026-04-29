@@ -28,7 +28,7 @@ fn source_config_from_db_config(source_db_config: &PgConnectionConfig) -> FullAp
         password: source_db_config
             .password
             .as_ref()
-            .map(|password| SerializableSecretString::from(password.expose_secret().to_string())),
+            .map(|password| SerializableSecretString::from(password.expose_secret().to_owned())),
     }
 }
 
@@ -40,8 +40,8 @@ async fn tenant_and_source_can_be_created() {
 
     // Act
     let tenant_source = CreateTenantSourceRequest {
-        tenant_id: "abcdefghijklmnopqrst".to_string(),
-        tenant_name: "NewTenant".to_string(),
+        tenant_id: "abcdefghijklmnopqrst".to_owned(),
+        tenant_name: "NewTenant".to_owned(),
         source_name: new_name(),
         source_config: new_source_config(),
     };
@@ -79,8 +79,8 @@ async fn creating_same_tenant_source_twice_returns_409() {
     let app = spawn_test_app().await;
 
     let tenant_source = CreateTenantSourceRequest {
-        tenant_id: "abcdefghijklmnopqrst".to_string(),
-        tenant_name: "DuplicateTenant".to_string(),
+        tenant_id: "abcdefghijklmnopqrst".to_owned(),
+        tenant_name: "DuplicateTenant".to_owned(),
         source_name: new_name(),
         source_config: new_source_config(),
     };
@@ -105,8 +105,8 @@ async fn tenant_and_source_creation_with_matching_trusted_username_succeeds() {
         spawn_test_app_with_trusted_username(Some(trusted_source.trusted_username.clone())).await;
 
     let tenant_source = CreateTenantSourceRequest {
-        tenant_id: "abcdefghijklmnopqrst".to_string(),
-        tenant_name: "TrustedTenant".to_string(),
+        tenant_id: "abcdefghijklmnopqrst".to_owned(),
+        tenant_name: "TrustedTenant".to_owned(),
         source_name: new_name(),
         source_config: source_config_from_db_config(&trusted_source.trusted_config),
     };
@@ -129,12 +129,12 @@ async fn tenant_and_source_creation_with_non_matching_trusted_username_fails() {
     let mut source_db_config = get_test_db_config();
     source_db_config.name = format!("test_source_db_{}", Uuid::new_v4());
 
-    let app = spawn_test_app_with_trusted_username(Some("different_user".to_string())).await;
+    let app = spawn_test_app_with_trusted_username(Some("different_user".to_owned())).await;
     let _source_pool = create_pg_database(&source_db_config).await;
 
     let tenant_source = CreateTenantSourceRequest {
-        tenant_id: "abcdefghijklmnopqrst".to_string(),
-        tenant_name: "UntrustedTenant".to_string(),
+        tenant_id: "abcdefghijklmnopqrst".to_owned(),
+        tenant_name: "UntrustedTenant".to_owned(),
         source_name: new_name(),
         source_config: source_config_from_db_config(&source_db_config),
     };
@@ -158,8 +158,8 @@ async fn tenant_and_source_creation_with_invalid_trusted_role_profile_fails() {
     let _source_pool = create_pg_database(&source_db_config).await;
 
     let tenant_source = CreateTenantSourceRequest {
-        tenant_id: "abcdefghijklmnopqrst".to_string(),
-        tenant_name: "InvalidTrustedTenant".to_string(),
+        tenant_id: "abcdefghijklmnopqrst".to_owned(),
+        tenant_name: "InvalidTrustedTenant".to_owned(),
         source_name: new_name(),
         source_config: source_config_from_db_config(&source_db_config),
     };

@@ -64,11 +64,11 @@ fn event_from_etl_error(err: &EtlError) -> Event<'static> {
     if err.errors().is_some() {
         let leaf_count = count_leaf_errors(err);
         exceptions.push(Exception {
-            ty: "Many".to_string(),
+            ty: "Many".to_owned(),
             value: Some(format!("{leaf_count} errors occurred")),
             ..Default::default()
         });
-        event.extra.insert("etl_error_tree".to_string(), etl_error_tree_to_serde_value(err));
+        event.extra.insert("etl_error_tree".to_owned(), etl_error_tree_to_serde_value(err));
     } else {
         collect_single_etl_exception_chain(err, &mut exceptions);
     }
@@ -133,7 +133,7 @@ fn format_etl_sentry_value(error: &EtlError) -> String {
         Some(detail) if !detail.trim().is_empty() => {
             format!("{description}: {}", detail.lines().collect::<Vec<_>>().join(" "))
         }
-        _ => description.to_string(),
+        _ => description.to_owned(),
     }
 }
 
@@ -176,5 +176,5 @@ fn find_and_parse_backtrace(backtrace: Option<&std::backtrace::Backtrace>) -> Op
 /// Extracts a type name from an error's debug representation.
 fn type_name_from_debug(err: &dyn std::error::Error) -> String {
     let debug = format!("{err:?}");
-    debug.split(['{', '(', ' ']).next().filter(|s| !s.is_empty()).unwrap_or("Error").to_string()
+    debug.split(['{', '(', ' ']).next().filter(|s| !s.is_empty()).unwrap_or("Error").to_owned()
 }

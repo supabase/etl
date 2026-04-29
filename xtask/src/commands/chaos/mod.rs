@@ -163,7 +163,7 @@ impl ChaosClient {
 
         Ok(Self {
             api: Api::namespaced(client.clone(), namespace),
-            namespace: namespace.to_string(),
+            namespace: namespace.to_owned(),
             client,
             dry_run: false,
         })
@@ -251,9 +251,9 @@ impl ChaosClient {
         direction: &str,
     ) -> NetworkChaos {
         let (direction_val, pod_target, external_targets) = match target {
-            Target::All => (Some(direction.to_string()), None, None),
+            Target::All => (Some(direction.to_owned()), None, None),
             Target::Pods(labels) => (
-                Some(direction.to_string()),
+                Some(direction.to_owned()),
                 Some(PodTarget {
                     selector: Selector {
                         namespaces: vec![self.namespace.clone()],
@@ -263,11 +263,11 @@ impl ChaosClient {
                 }),
                 None,
             ),
-            Target::Url(url) => (Some(direction.to_string()), None, Some(vec![url])),
+            Target::Url(url) => (Some(direction.to_owned()), None, Some(vec![url])),
             // ipset hash:net,port rejects 0.0.0.0/0 (/0 mask is invalid as a hash key).
             // Split into two /1 CIDRs that together cover all IPv4 addresses.
             Target::Port(port) => (
-                Some(direction.to_string()),
+                Some(direction.to_owned()),
                 None,
                 Some(vec![format!("0.0.0.0/1:{port}"), format!("128.0.0.0/1:{port}")]),
             ),
@@ -300,9 +300,9 @@ impl ChaosClient {
         direction: &str,
     ) -> NetworkChaos {
         let (direction_val, pod_target, external_targets) = match target {
-            Target::All => (Some(direction.to_string()), None, None),
+            Target::All => (Some(direction.to_owned()), None, None),
             Target::Pods(labels) => (
-                Some(direction.to_string()),
+                Some(direction.to_owned()),
                 Some(PodTarget {
                     selector: Selector {
                         namespaces: vec![self.namespace.clone()],
@@ -312,9 +312,9 @@ impl ChaosClient {
                 }),
                 None,
             ),
-            Target::Url(url) => (Some(direction.to_string()), None, Some(vec![url])),
+            Target::Url(url) => (Some(direction.to_owned()), None, Some(vec![url])),
             Target::Port(port) => (
-                Some(direction.to_string()),
+                Some(direction.to_owned()),
                 None,
                 Some(vec![format!("0.0.0.0/1:{port}"), format!("128.0.0.0/1:{port}")]),
             ),
@@ -350,9 +350,9 @@ impl ChaosClient {
         direction: &str,
     ) -> NetworkChaos {
         let (direction_val, pod_target, external_targets) = match target {
-            Target::All => (Some(direction.to_string()), None, None),
+            Target::All => (Some(direction.to_owned()), None, None),
             Target::Pods(labels) => (
-                Some(direction.to_string()),
+                Some(direction.to_owned()),
                 Some(PodTarget {
                     selector: Selector {
                         namespaces: vec![self.namespace.clone()],
@@ -362,9 +362,9 @@ impl ChaosClient {
                 }),
                 None,
             ),
-            Target::Url(url) => (Some(direction.to_string()), None, Some(vec![url])),
+            Target::Url(url) => (Some(direction.to_owned()), None, Some(vec![url])),
             Target::Port(port) => (
-                Some(direction.to_string()),
+                Some(direction.to_owned()),
                 None,
                 Some(vec![format!("0.0.0.0/1:{port}"), format!("128.0.0.0/1:{port}")]),
             ),
@@ -408,7 +408,7 @@ impl ChaosClient {
                 delay: None,
                 bandwidth: None,
                 duration: None,
-                direction: Some(direction.to_string()),
+                direction: Some(direction.to_owned()),
                 target: None,
                 external_targets: None,
             },
@@ -453,7 +453,7 @@ pub(crate) fn parse_selector(selectors: &[String]) -> anyhow::Result<Labels> {
         .iter()
         .map(|s| {
             s.split_once('=')
-                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .map(|(k, v)| (k.to_owned(), v.to_owned()))
                 .ok_or_else(|| anyhow::anyhow!("invalid selector '{s}', expected key=value"))
         })
         .collect()
@@ -468,7 +468,7 @@ pub(crate) fn app_name_from_labels(labels: &Labels) -> &str {
 
 fn sel(namespace: &str, labels: Labels) -> Selector {
     Selector {
-        namespaces: vec![namespace.to_string()],
+        namespaces: vec![namespace.to_owned()],
         label_selectors: labels.into_iter().collect(),
     }
 }

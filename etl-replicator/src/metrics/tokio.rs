@@ -13,6 +13,7 @@
 use std::time::Duration;
 
 use metrics::{Unit, describe_gauge, gauge};
+use tokio::task::JoinHandle;
 use tracing::debug;
 
 use crate::metrics::{APP_TYPE_LABEL, APP_TYPE_VALUE};
@@ -234,7 +235,7 @@ fn register_metrics() {
 /// Stable metrics are always exported. Additional metrics guarded by
 /// `tokio_unstable` are exported only when the binary is compiled with that cfg
 /// enabled.
-pub(super) fn spawn_tokio_metrics_task() {
+pub(super) fn spawn_tokio_metrics_task() -> JoinHandle<()> {
     register_metrics();
 
     let handle = tokio::runtime::Handle::current();
@@ -360,5 +361,5 @@ pub(super) fn spawn_tokio_metrics_task() {
 
             tokio::time::sleep(POLL_INTERVAL).await;
         }
-    });
+    })
 }

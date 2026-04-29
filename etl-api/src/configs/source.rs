@@ -162,11 +162,11 @@ mod tests {
     #[test]
     fn stored_source_config_encryption_decryption() {
         let config = StoredSourceConfig {
-            host: "localhost".to_string(),
+            host: "localhost".to_owned(),
             port: 5432,
-            name: "testdb".to_string(),
-            username: "user".to_string(),
-            password: Some(SerializableSecretString::from("password".to_string())),
+            name: "testdb".to_owned(),
+            username: "user".to_owned(),
+            password: Some(SerializableSecretString::from("password".to_owned())),
         };
 
         let key = EncryptionKey { id: 1, key: generate_random_key::<32>().unwrap() };
@@ -192,11 +192,11 @@ mod tests {
     #[test]
     fn full_api_source_config_conversion() {
         let full_config = FullApiSourceConfig {
-            host: "localhost".to_string(),
+            host: "localhost".to_owned(),
             port: 5432,
-            name: "testdb".to_string(),
-            username: "user".to_string(),
-            password: Some(SerializableSecretString::from("password".to_string())),
+            name: "testdb".to_owned(),
+            username: "user".to_owned(),
+            password: Some(SerializableSecretString::from("password".to_owned())),
         };
 
         let stored: StoredSourceConfig = full_config.clone().into();

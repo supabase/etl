@@ -140,7 +140,7 @@ impl BigQueryDatabase {
             .expect("Failed to create BigQuery client");
         let dataset_id = random_dataset_id();
 
-        Self { client, project_id, sa_key_path: sa_key_path.to_string(), dataset_id }
+        Self { client, project_id, sa_key_path: sa_key_path.to_owned(), dataset_id }
     }
 
     /// Creates the dataset in BigQuery, retrying on transient errors.

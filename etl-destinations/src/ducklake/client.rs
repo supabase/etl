@@ -693,7 +693,7 @@ mod tests {
         let sql = r#"CREATE TABLE lake."orders" ("id" INTEGER NOT NULL)"#;
         let error = duckdb::Error::DuckDBFailure(
             duckdb::ffi::Error::new(1),
-            Some("parser error".to_string()),
+            Some("parser error".to_owned()),
         );
 
         assert_eq!(

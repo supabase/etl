@@ -133,7 +133,7 @@ struct RetryableAppendRequest {
 /// Builds a concise description for a set of schema-propagation retries.
 fn format_retryable_append_requests(requests: &[RetryableAppendRequest]) -> String {
     match requests.split_first() {
-        None => "schema propagation error".to_string(),
+        None => "schema propagation error".to_owned(),
         Some((first, [])) => first.detail.clone(),
         Some((first, rest)) => {
             let distinct_other_details =
@@ -239,7 +239,7 @@ fn append_processing_result_from_request_error(
 ) -> AppendProcessingResult {
     if is_retryable_schema_propagation_error(&error) {
         let detail =
-            bq_error_to_etl_error(error).detail().unwrap_or("schema propagation error").to_string();
+            bq_error_to_etl_error(error).detail().unwrap_or("schema propagation error").to_owned();
         AppendProcessingResult::Retry {
             pending_requests: append_requests
                 .into_iter()
@@ -652,7 +652,7 @@ impl BigQueryClient {
         let max_staleness_option = if let Some(max_staleness_mins) = max_staleness_mins {
             Self::max_staleness_option(max_staleness_mins)
         } else {
-            "".to_string()
+            "".to_owned()
         };
 
         info!(
@@ -708,7 +708,7 @@ impl BigQueryClient {
         let max_staleness_option = if let Some(max_staleness_mins) = max_staleness_mins {
             Self::max_staleness_option(max_staleness_mins)
         } else {
-            "".to_string()
+            "".to_owned()
         };
 
         info!(%full_table_name, "creating table in bigquery");
@@ -1275,7 +1275,7 @@ impl BigQueryClient {
             &Type::BYTEA => "bytes",
             _ => "string",
         }
-        .to_string()
+        .to_owned()
     }
 
     /// Converts Postgres column schemas to a BigQuery [`TableDescriptor`].
@@ -1359,7 +1359,7 @@ impl BigQueryClient {
 
         field_descriptors.push(FieldDescriptor {
             number,
-            name: BIGQUERY_CDC_SPECIAL_COLUMN.to_string(),
+            name: BIGQUERY_CDC_SPECIAL_COLUMN.to_owned(),
             typ: ColumnType::String,
             mode: ColumnMode::Required,
         });
@@ -1368,7 +1368,7 @@ impl BigQueryClient {
         if use_cdc_sequence_column {
             field_descriptors.push(FieldDescriptor {
                 number,
-                name: BIGQUERY_CDC_SEQUENCE_COLUMN.to_string(),
+                name: BIGQUERY_CDC_SEQUENCE_COLUMN.to_owned(),
                 typ: ColumnType::String,
                 mode: ColumnMode::Required,
             });
@@ -1400,7 +1400,7 @@ mod tests {
         AppendRowsResponse {
             updated_schema: None,
             row_errors: Vec::new(),
-            write_stream: "projects/test/datasets/test/tables/test/streams/_default".to_string(),
+            write_stream: "projects/test/datasets/test/tables/test/streams/_default".to_owned(),
             response: Some(append_rows_response::Response::AppendResult(
                 append_rows_response::AppendResult { offset: None },
             )),
@@ -1419,14 +1419,7 @@ mod tests {
         nullable: bool,
         primary_key_ordinal: Option<i32>,
     ) -> ColumnSchema {
-        ColumnSchema::new(
-            name.to_string(),
-            typ,
-            -1,
-            ordinal_position,
-            primary_key_ordinal,
-            nullable,
-        )
+        ColumnSchema::new(name.to_owned(), typ, -1, ordinal_position, primary_key_ordinal, nullable)
     }
 
     /// Creates a [`ReplicatedTableSchema`] from test columns with all columns
@@ -1435,7 +1428,7 @@ mod tests {
         let column_names: HashSet<String> = columns.iter().map(|c| c.name.clone()).collect();
         let table_schema = Arc::new(TableSchema::new(
             TableId(1), // Dummy table ID
-            TableName::new("public".to_string(), "test_table".to_string()),
+            TableName::new("public".to_owned(), "test_table".to_owned()),
             columns,
         ));
         let replication_mask = ReplicationMask::build_or_all(&table_schema, &column_names);
@@ -1452,7 +1445,7 @@ mod tests {
         let column_names: HashSet<String> = columns.iter().map(|c| c.name.clone()).collect();
         let table_schema = Arc::new(TableSchema::new(
             TableId(1),
-            TableName::new("public".to_string(), "test_table".to_string()),
+            TableName::new("public".to_owned(), "test_table".to_owned()),
             columns,
         ));
         let replication_mask = ReplicationMask::build_or_all(&table_schema, &column_names);

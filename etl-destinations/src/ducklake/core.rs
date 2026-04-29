@@ -11,10 +11,10 @@ use std::{
 };
 
 use etl::{
+    concurrency::TaskSet,
     destination::{
         Destination,
         async_result::{TruncateTableResult, WriteEventsResult, WriteTableRowsResult},
-        task_set::DestinationTaskSet,
     },
     error::{ErrorKind, EtlResult},
     etl_error,
@@ -128,7 +128,7 @@ pub struct DuckLakeDestination<S> {
     /// Shared gate that keeps exclusive background maintenance from overlapping
     /// active foreground or table-scoped mutations.
     checkpoint_gate: Arc<RwLock<()>>,
-    streaming_tasks: DestinationTaskSet,
+    tasks: TaskSet,
     maintenance_worker: Arc<Option<DuckLakeMaintenanceWorker>>,
     metrics_sampler: Arc<Option<DuckLakeMetricsSampler>>,
     table_creation_slots: Arc<Semaphore>,
@@ -158,7 +158,7 @@ where
     }
 
     async fn shutdown(&self) -> EtlResult<()> {
-        self.streaming_tasks.drain().await?;
+        self.tasks.drain().await?;
         self.shutdown_maintenance_worker().await?;
         self.shutdown_metrics_sampler().await?;
 
@@ -193,10 +193,10 @@ where
         events: Vec<Event>,
         async_result: WriteEventsResult<()>,
     ) -> EtlResult<()> {
-        self.streaming_tasks.try_reap().await?;
+        self.tasks.try_reap().await?;
 
         let destination = self.clone();
-        self.streaming_tasks
+        self.tasks
             .spawn(async move {
                 let result = destination.write_events(events).await;
                 async_result.send(result);
@@ -434,8 +434,7 @@ where
         let extension_strategy = current_duckdb_extension_strategy()?;
         let disable_extension_autoload = extension_strategy.disables_autoload();
         let maintenance_target_file_size = Arc::<str>::from(
-            maintenance_target_file_size
-                .unwrap_or_else(|| MAINTENANCE_TARGET_FILE_SIZE.to_string()),
+            maintenance_target_file_size.unwrap_or_else(|| MAINTENANCE_TARGET_FILE_SIZE.to_owned()),
         );
         let expire_snapshots_older_than = Arc::<str>::from(
             resolve_expire_snapshots_older_than(expire_snapshots_older_than.as_deref()).to_owned(),
@@ -541,7 +540,7 @@ where
             pool: Arc::clone(&pool),
             blocking_slots: Arc::clone(&blocking_slots),
             checkpoint_gate: Arc::clone(&checkpoint_gate),
-            streaming_tasks: DestinationTaskSet::new(),
+            tasks: TaskSet::new(),
             maintenance_worker: Arc::new(None),
             metrics_sampler: Arc::new(None),
             table_creation_slots: Arc::new(Semaphore::new(1)),
@@ -1337,10 +1336,10 @@ mod tests {
     fn make_schema(table_id: u32, schema: &str, table: &str) -> TableSchema {
         TableSchema::new(
             TableId::new(table_id),
-            TableName::new(schema.to_string(), table.to_string()),
+            TableName::new(schema.to_owned(), table.to_owned()),
             vec![
-                ColumnSchema::new("id".to_string(), PgType::INT4, -1, 1, Some(1), false),
-                ColumnSchema::new("name".to_string(), PgType::TEXT, -1, 2, None, true),
+                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false),
+                ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, None, true),
             ],
         )
     }
@@ -1348,11 +1347,11 @@ mod tests {
     fn make_alternative_identity_schema() -> ReplicatedTableSchema {
         let table_schema = Arc::new(TableSchema::new(
             TableId::new(2),
-            TableName::new("public".to_string(), "users".to_string()),
+            TableName::new("public".to_owned(), "users".to_owned()),
             vec![
-                ColumnSchema::new("id".to_string(), PgType::INT4, -1, 1, Some(1), false),
-                ColumnSchema::new("email".to_string(), PgType::TEXT, -1, 2, None, false),
-                ColumnSchema::new("payload".to_string(), PgType::TEXT, -1, 3, None, true),
+                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false),
+                ColumnSchema::new("email".to_owned(), PgType::TEXT, -1, 2, None, false),
+                ColumnSchema::new("payload".to_owned(), PgType::TEXT, -1, 3, None, true),
             ],
         ));
 
@@ -1378,7 +1377,7 @@ mod tests {
         let replicated_table_schema = make_alternative_identity_schema();
         let partial_row = PartialTableRow::new(
             3,
-            TableRow::new(vec![Cell::I32(1), Cell::String("alice@example.com".to_string())]),
+            TableRow::new(vec![Cell::I32(1), Cell::String("alice@example.com".to_owned())]),
             vec![2],
         );
 
@@ -1388,7 +1387,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(key_row, TableRow::new(vec![Cell::String("alice@example.com".to_string())]));
+        assert_eq!(key_row, TableRow::new(vec![Cell::String("alice@example.com".to_owned())]));
     }
 
     #[test]
@@ -1396,7 +1395,7 @@ mod tests {
         let replicated_table_schema = make_missing_identity_schema();
         let partial_row = PartialTableRow::new(
             2,
-            TableRow::new(vec![Cell::I32(1), Cell::String("alice".to_string())]),
+            TableRow::new(vec![Cell::I32(1), Cell::String("alice".to_owned())]),
             vec![],
         );
 
@@ -1516,7 +1515,7 @@ mod tests {
         }
 
         "INSTALL ducklake; LOAD ducklake; INSTALL postgres_scanner; LOAD postgres_scanner;"
-            .to_string()
+            .to_owned()
     }
 
     fn open_lake_conn(catalog: &Url, data: &Url) -> Connection {
@@ -1575,16 +1574,16 @@ mod tests {
     fn table_name_escaping() {
         assert_eq!(
             table_name_to_ducklake_table_name(&TableName {
-                schema: "public".to_string(),
-                name: "orders".to_string(),
+                schema: "public".to_owned(),
+                name: "orders".to_owned(),
             })
             .unwrap(),
             "public_orders"
         );
         assert_eq!(
             table_name_to_ducklake_table_name(&TableName {
-                schema: "my_schema".to_string(),
-                name: "my_table".to_string(),
+                schema: "my_schema".to_owned(),
+                name: "my_table".to_owned(),
             })
             .unwrap(),
             "my__schema_my__table"
@@ -1600,7 +1599,7 @@ mod tests {
                  transaction. Transaction conflict - attempting to create table \"public_users\" \
                  in schema \"main\" - but this table has been created by another transaction \
                  already"
-                    .to_string(),
+                    .to_owned(),
             ),
         );
 
@@ -1641,8 +1640,8 @@ mod tests {
                 .write_table_rows(
                     &replicated_table_schema,
                     vec![
-                        TableRow::new(vec![Cell::I32(1), Cell::String("alice".to_string())]),
-                        TableRow::new(vec![Cell::I32(2), Cell::String("bob".to_string())]),
+                        TableRow::new(vec![Cell::I32(1), Cell::String("alice".to_owned())]),
+                        TableRow::new(vec![Cell::I32(2), Cell::String("bob".to_owned())]),
                     ],
                 )
                 .await
@@ -1707,8 +1706,8 @@ mod tests {
                 .write_table_rows(
                     &replicated_table_schema,
                     vec![
-                        TableRow::new(vec![Cell::I32(1), Cell::String("alice".to_string())]),
-                        TableRow::new(vec![Cell::I32(2), Cell::String("bob".to_string())]),
+                        TableRow::new(vec![Cell::I32(1), Cell::String("alice".to_owned())]),
+                        TableRow::new(vec![Cell::I32(2), Cell::String("bob".to_owned())]),
                     ],
                 )
                 .await
@@ -1769,7 +1768,7 @@ mod tests {
             destination
                 .write_table_rows(
                     &replicated_table_schema,
-                    vec![TableRow::new(vec![Cell::I32(1), Cell::String("alice".to_string())])],
+                    vec![TableRow::new(vec![Cell::I32(1), Cell::String("alice".to_owned())])],
                 )
                 .await
                 .expect("failed to write rows");

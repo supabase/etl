@@ -562,7 +562,7 @@ async fn spawn_test_app_with_services(
 
     let config = ApiConfig {
         database: database_config,
-        application: ApplicationSettings { host: base_address.to_string(), port },
+        application: ApplicationSettings { host: base_address.to_owned(), port },
         k8s: K8sConfig::default(),
         encryption_key: ConfigEncryptionKey { id: 0, key: BASE64_STANDARD.encode(key_bytes) },
         api_keys: vec![api_key.clone()],

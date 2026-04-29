@@ -68,7 +68,7 @@ impl TenantError {
             | TenantError::PipelinesDb(PipelinesDbError::Database(_))
             | TenantError::Database(_)
             | TenantError::TrustedRootCerts(_)
-            | TenantError::K8sCore(_) => "internal server error".to_string(),
+            | TenantError::K8sCore(_) => "internal server error".to_owned(),
             // Every other message is ok, as they do not divulge sensitive information
             e => e.to_string(),
         }

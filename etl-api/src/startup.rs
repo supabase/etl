@@ -109,9 +109,9 @@ impl Application {
             Ok(Environment::Dev) => {
                 async {
                     let options = KubeConfigOptions {
-                        context: Some("orbstack".to_string()),
-                        cluster: Some("orbstack".to_string()),
-                        user: Some("orbstack".to_string()),
+                        context: Some("orbstack".to_owned()),
+                        cluster: Some("orbstack".to_owned()),
+                        user: Some("orbstack".to_owned()),
                     };
                     let kube_config = kube::config::Config::from_kubeconfig(&options).await.ok()?;
                     let kube_client: kube::Client = kube_config.try_into().ok()?;

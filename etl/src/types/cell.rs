@@ -350,9 +350,9 @@ mod tests {
         let non_opt = CellNonOptional::try_from(cell).unwrap();
         assert_eq!(non_opt, CellNonOptional::I32(42));
 
-        let cell = Cell::String("test".to_string());
+        let cell = Cell::String("test".to_owned());
         let non_opt = CellNonOptional::try_from(cell).unwrap();
-        assert_eq!(non_opt, CellNonOptional::String("test".to_string()));
+        assert_eq!(non_opt, CellNonOptional::String("test".to_owned()));
 
         let cell = Cell::Null;
         let non_opt = CellNonOptional::try_from(cell).unwrap();
@@ -375,7 +375,7 @@ mod tests {
     #[test]
     fn array_cell_try_from_with_nulls() {
         let array_cell =
-            ArrayCell::String(vec![Some("test".to_string()), None, Some("hello".to_string())]);
+            ArrayCell::String(vec![Some("test".to_owned()), None, Some("hello".to_owned())]);
 
         let result = ArrayCellNonOptional::try_from(array_cell);
         assert!(result.is_err());
@@ -404,8 +404,8 @@ mod tests {
         assert_eq!(Cell::I32(42), Cell::I32(42));
         assert_ne!(Cell::I32(42), Cell::I32(43));
 
-        assert_eq!(Cell::String("test".to_string()), Cell::String("test".to_string()));
-        assert_ne!(Cell::String("test".to_string()), Cell::String("different".to_string()));
+        assert_eq!(Cell::String("test".to_owned()), Cell::String("test".to_owned()));
+        assert_ne!(Cell::String("test".to_owned()), Cell::String("different".to_owned()));
 
         assert_eq!(Cell::Null, Cell::Null);
         assert_ne!(Cell::Null, Cell::I32(0));
@@ -413,7 +413,7 @@ mod tests {
 
     #[test]
     fn cell_types_clone() {
-        let cell = Cell::String("test".to_string());
+        let cell = Cell::String("test".to_owned());
         let cloned = cell.clone();
         assert_eq!(cell, cloned);
 
@@ -427,7 +427,7 @@ mod tests {
         // Test complex array type conversions
         let mixed_types = vec![
             ArrayCell::Bool(vec![Some(true), Some(false)]),
-            ArrayCell::String(vec![Some("hello".to_string()), Some("world".to_string())]),
+            ArrayCell::String(vec![Some("hello".to_owned()), Some("world".to_owned())]),
             ArrayCell::I32(vec![Some(1), Some(2), Some(3)]),
         ];
 

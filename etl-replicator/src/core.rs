@@ -97,10 +97,10 @@ pub(crate) async fn start_replicator_with_config(
             let client = IcebergClient::new_with_supabase_catalog(
                 project_ref,
                 env.get_supabase_domain(),
-                catalog_token.expose_secret().to_string(),
+                catalog_token.expose_secret().to_owned(),
                 warehouse_name.clone(),
-                s3_access_key_id.expose_secret().to_string(),
-                s3_secret_access_key.expose_secret().to_string(),
+                s3_access_key_id.expose_secret().to_owned(),
+                s3_secret_access_key.expose_secret().to_owned(),
                 s3_region.clone(),
             )
             .await
@@ -131,8 +131,8 @@ pub(crate) async fn start_replicator_with_config(
                 catalog_uri.clone(),
                 warehouse_name.clone(),
                 create_props(
-                    s3_access_key_id.expose_secret().to_string(),
-                    s3_secret_access_key.expose_secret().to_string(),
+                    s3_access_key_id.expose_secret().to_owned(),
+                    s3_secret_access_key.expose_secret().to_owned(),
                     s3_endpoint.clone(),
                 ),
             )
@@ -166,11 +166,11 @@ pub(crate) async fn start_replicator_with_config(
 
             let s3_config = match (s3_access_key_id, s3_secret_access_key) {
                 (Some(access_key_id), Some(secret_access_key)) => Some(DucklakeS3Config {
-                    access_key_id: access_key_id.expose_secret().to_string(),
-                    secret_access_key: secret_access_key.expose_secret().to_string(),
-                    region: s3_region.clone().unwrap_or_else(|| "us-east-1".to_string()),
+                    access_key_id: access_key_id.expose_secret().to_owned(),
+                    secret_access_key: secret_access_key.expose_secret().to_owned(),
+                    region: s3_region.clone().unwrap_or_else(|| "us-east-1".to_owned()),
                     endpoint: s3_endpoint.clone(),
-                    url_style: s3_url_style.clone().unwrap_or_else(|| "path".to_string()),
+                    url_style: s3_url_style.clone().unwrap_or_else(|| "path".to_owned()),
                     use_ssl: s3_use_ssl.unwrap_or(false),
                 }),
                 (None, None) => None,
@@ -215,9 +215,9 @@ fn create_props(
 ) -> HashMap<String, String> {
     let mut props: HashMap<String, String> = HashMap::new();
 
-    props.insert(S3_ACCESS_KEY_ID.to_string(), s3_access_key_id);
-    props.insert(S3_SECRET_ACCESS_KEY.to_string(), s3_secret_access_key);
-    props.insert(S3_ENDPOINT.to_string(), s3_endpoint);
+    props.insert(S3_ACCESS_KEY_ID.to_owned(), s3_access_key_id);
+    props.insert(S3_SECRET_ACCESS_KEY.to_owned(), s3_secret_access_key);
+    props.insert(S3_ENDPOINT.to_owned(), s3_endpoint);
 
     props
 }
@@ -256,7 +256,7 @@ where
     // We spawn metrics collection after the pipeline was started, so that if we
     // crash before starting we don't keep emitting metrics that make it look as
     // if the system is running.
-    metrics::spawn_metrics_tasks();
+    let metrics_tasks = metrics::spawn_metrics_tasks();
 
     // Spawn a task to listen for shutdown signals and trigger shutdown.
     let shutdown_tx = pipeline.shutdown_tx();
@@ -300,6 +300,7 @@ where
     // should abort it if it's still running.
     shutdown_handle.abort();
     let _ = shutdown_handle.await;
+    metrics_tasks.abort_and_wait().await;
 
     // Propagate any pipeline error.
     result?;

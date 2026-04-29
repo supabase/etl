@@ -48,12 +48,12 @@ fn table_row_to_sql_literal(row: TableRow) -> String {
 /// Converts a [`Cell`] into a DuckDB SQL literal expression.
 fn cell_to_sql_literal(cell: Cell) -> String {
     match cell {
-        Cell::Null => "NULL".to_string(),
+        Cell::Null => "NULL".to_owned(),
         Cell::Bool(b) => {
             if b {
-                "TRUE".to_string()
+                "TRUE".to_owned()
             } else {
-                "FALSE".to_string()
+                "FALSE".to_owned()
             }
         }
         Cell::String(s) => quote_literal(&s),
@@ -132,52 +132,50 @@ fn array_cell_to_sql_literal(arr: ArrayCell) -> String {
             .into_iter()
             .map(|o| {
                 o.map_or_else(
-                    || "NULL".to_string(),
-                    |value| if value { "TRUE" } else { "FALSE" }.to_string(),
+                    || "NULL".to_owned(),
+                    |value| if value { "TRUE" } else { "FALSE" }.to_owned(),
                 )
             })
             .collect(),
         ArrayCell::String(v) => v
             .into_iter()
-            .map(|o| o.map_or_else(|| "NULL".to_string(), |value| quote_literal(&value)))
+            .map(|o| o.map_or_else(|| "NULL".to_owned(), |value| quote_literal(&value)))
             .collect(),
         ArrayCell::I16(v) => v
             .into_iter()
-            .map(|o| o.map_or_else(|| "NULL".to_string(), |value| value.to_string()))
+            .map(|o| o.map_or_else(|| "NULL".to_owned(), |value| value.to_string()))
             .collect(),
         ArrayCell::I32(v) => v
             .into_iter()
-            .map(|o| o.map_or_else(|| "NULL".to_string(), |value| value.to_string()))
+            .map(|o| o.map_or_else(|| "NULL".to_owned(), |value| value.to_string()))
             .collect(),
         ArrayCell::U32(v) => v
             .into_iter()
-            .map(|o| o.map_or_else(|| "NULL".to_string(), |value| value.to_string()))
+            .map(|o| o.map_or_else(|| "NULL".to_owned(), |value| value.to_string()))
             .collect(),
         ArrayCell::I64(v) => v
             .into_iter()
-            .map(|o| o.map_or_else(|| "NULL".to_string(), |value| value.to_string()))
+            .map(|o| o.map_or_else(|| "NULL".to_owned(), |value| value.to_string()))
             .collect(),
         ArrayCell::F32(v) => v
             .into_iter()
             .map(|o| {
-                o.map_or_else(|| "NULL".to_string(), |value| float_literal(value as f64, false))
+                o.map_or_else(|| "NULL".to_owned(), |value| float_literal(value as f64, false))
             })
             .collect(),
         ArrayCell::F64(v) => v
             .into_iter()
-            .map(|o| o.map_or_else(|| "NULL".to_string(), |value| float_literal(value, true)))
+            .map(|o| o.map_or_else(|| "NULL".to_owned(), |value| float_literal(value, true)))
             .collect(),
         ArrayCell::Numeric(v) => v
             .into_iter()
-            .map(|o| {
-                o.map_or_else(|| "NULL".to_string(), |value| quote_literal(&value.to_string()))
-            })
+            .map(|o| o.map_or_else(|| "NULL".to_owned(), |value| quote_literal(&value.to_string())))
             .collect(),
         ArrayCell::Date(v) => v
             .into_iter()
             .map(|o| {
                 o.map_or_else(
-                    || "NULL".to_string(),
+                    || "NULL".to_owned(),
                     |value| format!("DATE '{}'", value.format("%Y-%m-%d")),
                 )
             })
@@ -186,7 +184,7 @@ fn array_cell_to_sql_literal(arr: ArrayCell) -> String {
             .into_iter()
             .map(|o| {
                 o.map_or_else(
-                    || "NULL".to_string(),
+                    || "NULL".to_owned(),
                     |value| format!("TIME '{}'", value.format("%H:%M:%S%.6f")),
                 )
             })
@@ -195,7 +193,7 @@ fn array_cell_to_sql_literal(arr: ArrayCell) -> String {
             .into_iter()
             .map(|o| {
                 o.map_or_else(
-                    || "NULL".to_string(),
+                    || "NULL".to_owned(),
                     |value| format!("TIMESTAMP '{}'", value.format("%Y-%m-%d %H:%M:%S%.6f")),
                 )
             })
@@ -204,7 +202,7 @@ fn array_cell_to_sql_literal(arr: ArrayCell) -> String {
             .into_iter()
             .map(|o| {
                 o.map_or_else(
-                    || "NULL".to_string(),
+                    || "NULL".to_owned(),
                     |value| format!("TIMESTAMPTZ '{}'", value.format("%Y-%m-%d %H:%M:%S%.6f%:z")),
                 )
             })
@@ -213,7 +211,7 @@ fn array_cell_to_sql_literal(arr: ArrayCell) -> String {
             .into_iter()
             .map(|o| {
                 o.map_or_else(
-                    || "NULL".to_string(),
+                    || "NULL".to_owned(),
                     |value| format!("CAST({} AS UUID)", quote_literal(&value.to_string())),
                 )
             })
@@ -222,7 +220,7 @@ fn array_cell_to_sql_literal(arr: ArrayCell) -> String {
             .into_iter()
             .map(|o| {
                 o.map_or_else(
-                    || "NULL".to_string(),
+                    || "NULL".to_owned(),
                     |value| format!("CAST({} AS JSON)", quote_literal(&value.to_string())),
                 )
             })
@@ -231,7 +229,7 @@ fn array_cell_to_sql_literal(arr: ArrayCell) -> String {
             .into_iter()
             .map(|o| {
                 o.map_or_else(
-                    || "NULL".to_string(),
+                    || "NULL".to_owned(),
                     |value| format!("from_hex('{}')", encode_hex(&value)),
                 )
             })
@@ -245,23 +243,23 @@ fn array_cell_to_sql_literal(arr: ArrayCell) -> String {
 fn float_literal(value: f64, is_double: bool) -> String {
     if value.is_nan() {
         return if is_double {
-            "CAST('NaN' AS DOUBLE)".to_string()
+            "CAST('NaN' AS DOUBLE)".to_owned()
         } else {
-            "CAST('NaN' AS FLOAT)".to_string()
+            "CAST('NaN' AS FLOAT)".to_owned()
         };
     }
     if value == f64::INFINITY {
         return if is_double {
-            "CAST('Infinity' AS DOUBLE)".to_string()
+            "CAST('Infinity' AS DOUBLE)".to_owned()
         } else {
-            "CAST('Infinity' AS FLOAT)".to_string()
+            "CAST('Infinity' AS FLOAT)".to_owned()
         };
     }
     if value == f64::NEG_INFINITY {
         return if is_double {
-            "CAST('-Infinity' AS DOUBLE)".to_string()
+            "CAST('-Infinity' AS DOUBLE)".to_owned()
         } else {
-            "CAST('-Infinity' AS FLOAT)".to_string()
+            "CAST('-Infinity' AS FLOAT)".to_owned()
         };
     }
 
@@ -385,8 +383,8 @@ mod tests {
         assert_eq!(cell_to_value(Cell::Null), Value::Null);
         assert_eq!(cell_to_value(Cell::Bool(true)), Value::Boolean(true));
         assert_eq!(
-            cell_to_value(Cell::String("hello".to_string())),
-            Value::Text("hello".to_string())
+            cell_to_value(Cell::String("hello".to_owned())),
+            Value::Text("hello".to_owned())
         );
         assert_eq!(cell_to_value(Cell::I32(42)), Value::Int(42));
         assert_eq!(cell_to_value(Cell::I64(-1)), Value::BigInt(-1));

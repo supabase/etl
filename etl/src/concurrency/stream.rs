@@ -27,7 +27,7 @@ pub(crate) fn table_sync_worker_apply_stream_id(table_id: TableId) -> String {
 
 /// Builds the stream id for the apply worker's apply stream.
 pub(crate) fn apply_worker_apply_stream_id() -> String {
-    "apply_worker_apply_stream".to_string()
+    "apply_worker_apply_stream".to_owned()
 }
 
 pin_project! {

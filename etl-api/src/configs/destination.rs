@@ -810,9 +810,9 @@ mod tests {
     #[test]
     fn stored_destination_config_encryption_decryption_bigquery() {
         let config = StoredDestinationConfig::BigQuery {
-            project_id: "test-project".to_string(),
-            dataset_id: "test_dataset".to_string(),
-            service_account_key: SerializableSecretString::from("{\"test\": \"key\"}".to_string()),
+            project_id: "test-project".to_owned(),
+            dataset_id: "test_dataset".to_owned(),
+            service_account_key: SerializableSecretString::from("{\"test\": \"key\"}".to_owned()),
             max_staleness_mins: Some(15),
             connection_pool_size: 8,
         };
@@ -854,13 +854,13 @@ mod tests {
     fn stored_destination_config_encryption_decryption_iceberg_supabase() {
         let config = StoredDestinationConfig::Iceberg {
             config: StoredIcebergConfig::Supabase {
-                project_ref: "abcdefghijklmnopqrst".to_string(),
-                warehouse_name: "my-warehouse".to_string(),
-                namespace: Some("my-namespace".to_string()),
-                catalog_token: SerializableSecretString::from("eyJ0eXAiOiJKV1QiLCJhbGciOiJFUzI1NiIsImtpZCI6IjFkNzFjMGEyNmIxMDFjODQ5ZTkxZmQ1NjdjYjA5NTJmIn0.eyJleHAiOjIwNzA3MTcxNjAsImlhdCI6MTc1NjE0NTE1MCwiaXNzIjoic3VwYWJhc2UiLCJyZWYiOiJhYmNkZWZnaGlqbGttbm9wcXJzdCIsInJvbGUiOiJzZXJ2aWNlX3JvbGUifQ.YdTWkkIvwjSkXot3NC07xyjPjGWQMNzLq5EPzumzrdLzuHrj-zuzI-nlyQtQ5V7gZauysm-wGwmpztRXfPc3AQ".to_string()),
-                s3_access_key_id: SerializableSecretString::from("9156667efc2c70d89af6588da86d2924".to_string()),
-                s3_secret_access_key: SerializableSecretString::from("ca833e890916d848c69135924bcd75e5909184814a0ebc6c988937ee094120d4".to_string()),
-                s3_region: "ap-southeast-1".to_string(),
+                project_ref: "abcdefghijklmnopqrst".to_owned(),
+                warehouse_name: "my-warehouse".to_owned(),
+                namespace: Some("my-namespace".to_owned()),
+                catalog_token: SerializableSecretString::from("eyJ0eXAiOiJKV1QiLCJhbGciOiJFUzI1NiIsImtpZCI6IjFkNzFjMGEyNmIxMDFjODQ5ZTkxZmQ1NjdjYjA5NTJmIn0.eyJleHAiOjIwNzA3MTcxNjAsImlhdCI6MTc1NjE0NTE1MCwiaXNzIjoic3VwYWJhc2UiLCJyZWYiOiJhYmNkZWZnaGlqbGttbm9wcXJzdCIsInJvbGUiOiJzZXJ2aWNlX3JvbGUifQ.YdTWkkIvwjSkXot3NC07xyjPjGWQMNzLq5EPzumzrdLzuHrj-zuzI-nlyQtQ5V7gZauysm-wGwmpztRXfPc3AQ".to_owned()),
+                s3_access_key_id: SerializableSecretString::from("9156667efc2c70d89af6588da86d2924".to_owned()),
+                s3_secret_access_key: SerializableSecretString::from("ca833e890916d848c69135924bcd75e5909184814a0ebc6c988937ee094120d4".to_owned()),
+                s3_region: "ap-southeast-1".to_owned(),
             },
         };
 
@@ -920,12 +920,12 @@ mod tests {
         let config = StoredDestinationConfig::Iceberg {
             config: StoredIcebergConfig::Rest {
                 catalog_uri: "https://abcdefghijklmnopqrst.storage.supabase.com/storage/v1/iceberg"
-                    .to_string(),
-                warehouse_name: "my-warehouse".to_string(),
-                namespace: Some("my-namespace".to_string()),
-                s3_access_key_id: SerializableSecretString::from("id".to_string()),
-                s3_secret_access_key: SerializableSecretString::from("key".to_string()),
-                s3_endpoint: "http://localhost:8080".to_string(),
+                    .to_owned(),
+                warehouse_name: "my-warehouse".to_owned(),
+                namespace: Some("my-namespace".to_owned()),
+                s3_access_key_id: SerializableSecretString::from("id".to_owned()),
+                s3_secret_access_key: SerializableSecretString::from("key".to_owned()),
+                s3_endpoint: "http://localhost:8080".to_owned(),
             },
         };
 
@@ -979,9 +979,9 @@ mod tests {
     #[test]
     fn full_api_destination_config_conversion_bigquery() {
         let full_config = FullApiDestinationConfig::BigQuery {
-            project_id: "test-project".to_string(),
-            dataset_id: "test_dataset".to_string(),
-            service_account_key: SerializableSecretString::from("{\"test\": \"key\"}".to_string()),
+            project_id: "test-project".to_owned(),
+            dataset_id: "test_dataset".to_owned(),
+            service_account_key: SerializableSecretString::from("{\"test\": \"key\"}".to_owned()),
             max_staleness_mins: Some(15),
             connection_pool_size: None,
         };
@@ -1028,13 +1028,13 @@ mod tests {
     fn full_api_destination_config_conversion_iceberg_supabase() {
         let full_config = FullApiDestinationConfig::Iceberg {
             config: FullApiIcebergConfig::Supabase {
-                project_ref: "abcdefghijklmnopqrst".to_string(),
-                warehouse_name: "my-warehouse".to_string(),
-                namespace: Some("my-namespace".to_string()),
-                catalog_token: SerializableSecretString::from("eyJ0eXAiOiJKV1QiLCJhbGciOiJFUzI1NiIsImtpZCI6IjFkNzFjMGEyNmIxMDFjODQ5ZTkxZmQ1NjdjYjA5NTJmIn0.eyJleHAiOjIwNzA3MTcxNjAsImlhdCI6MTc1NjE0NTE1MCwiaXNzIjoic3VwYWJhc2UiLCJyZWYiOiJhYmNkZWZnaGlqbGttbm9wcXJzdCIsInJvbGUiOiJzZXJ2aWNlX3JvbGUifQ.YdTWkkIvwjSkXot3NC07xyjPjGWQMNzLq5EPzumzrdLzuHrj-zuzI-nlyQtQ5V7gZauysm-wGwmpztRXfPc3AQ".to_string()),
-                s3_access_key_id: SerializableSecretString::from("9156667efc2c70d89af6588da86d2924".to_string()),
-                s3_secret_access_key: SerializableSecretString::from("ca833e890916d848c69135924bcd75e5909184814a0ebc6c988937ee094120d4".to_string()),
-                s3_region: "ap-southeast-1".to_string(),
+                project_ref: "abcdefghijklmnopqrst".to_owned(),
+                warehouse_name: "my-warehouse".to_owned(),
+                namespace: Some("my-namespace".to_owned()),
+                catalog_token: SerializableSecretString::from("eyJ0eXAiOiJKV1QiLCJhbGciOiJFUzI1NiIsImtpZCI6IjFkNzFjMGEyNmIxMDFjODQ5ZTkxZmQ1NjdjYjA5NTJmIn0.eyJleHAiOjIwNzA3MTcxNjAsImlhdCI6MTc1NjE0NTE1MCwiaXNzIjoic3VwYWJhc2UiLCJyZWYiOiJhYmNkZWZnaGlqbGttbm9wcXJzdCIsInJvbGUiOiJzZXJ2aWNlX3JvbGUifQ.YdTWkkIvwjSkXot3NC07xyjPjGWQMNzLq5EPzumzrdLzuHrj-zuzI-nlyQtQ5V7gZauysm-wGwmpztRXfPc3AQ".to_owned()),
+                s3_access_key_id: SerializableSecretString::from("9156667efc2c70d89af6588da86d2924".to_owned()),
+                s3_secret_access_key: SerializableSecretString::from("ca833e890916d848c69135924bcd75e5909184814a0ebc6c988937ee094120d4".to_owned()),
+                s3_region: "ap-southeast-1".to_owned(),
             },
         };
 
@@ -1091,12 +1091,12 @@ mod tests {
         let full_config = FullApiDestinationConfig::Iceberg {
             config: FullApiIcebergConfig::Rest {
                 catalog_uri: "https://abcdefghijklmnopqrst.storage.supabase.com/storage/v1/iceberg"
-                    .to_string(),
-                warehouse_name: "my-warehouse".to_string(),
-                namespace: Some("my-namespace".to_string()),
-                s3_access_key_id: SerializableSecretString::from("id".to_string()),
-                s3_secret_access_key: SerializableSecretString::from("key".to_string()),
-                s3_endpoint: "http://localhost:8080".to_string(),
+                    .to_owned(),
+                warehouse_name: "my-warehouse".to_owned(),
+                namespace: Some("my-namespace".to_owned()),
+                s3_access_key_id: SerializableSecretString::from("id".to_owned()),
+                s3_secret_access_key: SerializableSecretString::from("key".to_owned()),
+                s3_endpoint: "http://localhost:8080".to_owned(),
             },
         };
 
@@ -1148,19 +1148,19 @@ mod tests {
     #[test]
     fn stored_destination_config_encryption_decryption_ducklake() {
         let config = StoredDestinationConfig::Ducklake {
-            catalog_url: "postgres://user:pass@localhost:5432/ducklake_catalog".to_string(),
-            data_path: "s3://bucket/path".to_string(),
+            catalog_url: "postgres://user:pass@localhost:5432/ducklake_catalog".to_owned(),
+            data_path: "s3://bucket/path".to_owned(),
             pool_size: 8,
-            s3_access_key_id: Some(SerializableSecretString::from("access".to_string())),
-            s3_secret_access_key: Some(SerializableSecretString::from("secret".to_string())),
-            s3_region: Some("us-east-1".to_string()),
-            s3_endpoint: Some("127.0.0.1:5000/s3".to_string()),
-            s3_url_style: Some("path".to_string()),
+            s3_access_key_id: Some(SerializableSecretString::from("access".to_owned())),
+            s3_secret_access_key: Some(SerializableSecretString::from("secret".to_owned())),
+            s3_region: Some("us-east-1".to_owned()),
+            s3_endpoint: Some("127.0.0.1:5000/s3".to_owned()),
+            s3_url_style: Some("path".to_owned()),
             s3_use_ssl: Some(false),
-            metadata_schema: Some("ducklake".to_string()),
-            duckdb_memory_cache_limit: Some("50MB".to_string()),
-            maintenance_target_file_size: Some("10MB".to_string()),
-            expire_snapshots_older_than: Some("7 days".to_string()),
+            metadata_schema: Some("ducklake".to_owned()),
+            duckdb_memory_cache_limit: Some("50MB".to_owned()),
+            maintenance_target_file_size: Some("10MB".to_owned()),
+            expire_snapshots_older_than: Some("7 days".to_owned()),
         };
 
         let key = EncryptionKey { id: 1, key: generate_random_key::<32>().unwrap() };
@@ -1228,8 +1228,8 @@ mod tests {
     #[test]
     fn full_api_destination_config_conversion_ducklake() {
         let full_config = FullApiDestinationConfig::Ducklake {
-            catalog_url: "postgres://user:pass@localhost:5432/ducklake_catalog".to_string(),
-            data_path: "file:///absolute/path/to/lake_data".to_string(),
+            catalog_url: "postgres://user:pass@localhost:5432/ducklake_catalog".to_owned(),
+            data_path: "file:///absolute/path/to/lake_data".to_owned(),
             pool_size: None,
             s3_access_key_id: None,
             s3_secret_access_key: None,
@@ -1237,7 +1237,7 @@ mod tests {
             s3_endpoint: None,
             s3_url_style: None,
             s3_use_ssl: None,
-            metadata_schema: Some("ducklake".to_string()),
+            metadata_schema: Some("ducklake".to_owned()),
             duckdb_memory_cache_limit: None,
             maintenance_target_file_size: None,
             expire_snapshots_older_than: None,
@@ -1285,19 +1285,19 @@ mod tests {
     #[test]
     fn full_api_destination_config_serialization_ducklake() {
         let full_config = FullApiDestinationConfig::Ducklake {
-            catalog_url: "postgres://user:pass@localhost:5432/ducklake_catalog".to_string(),
-            data_path: "s3://bucket/path".to_string(),
+            catalog_url: "postgres://user:pass@localhost:5432/ducklake_catalog".to_owned(),
+            data_path: "s3://bucket/path".to_owned(),
             pool_size: Some(4),
-            s3_access_key_id: Some(SerializableSecretString::from("access".to_string())),
-            s3_secret_access_key: Some(SerializableSecretString::from("secret".to_string())),
-            s3_region: Some("us-east-1".to_string()),
-            s3_endpoint: Some("127.0.0.1:5000/s3".to_string()),
-            s3_url_style: Some("path".to_string()),
+            s3_access_key_id: Some(SerializableSecretString::from("access".to_owned())),
+            s3_secret_access_key: Some(SerializableSecretString::from("secret".to_owned())),
+            s3_region: Some("us-east-1".to_owned()),
+            s3_endpoint: Some("127.0.0.1:5000/s3".to_owned()),
+            s3_url_style: Some("path".to_owned()),
             s3_use_ssl: Some(false),
-            metadata_schema: Some("ducklake".to_string()),
-            duckdb_memory_cache_limit: Some("50MB".to_string()),
-            maintenance_target_file_size: Some("10MB".to_string()),
-            expire_snapshots_older_than: Some("7 days".to_string()),
+            metadata_schema: Some("ducklake".to_owned()),
+            duckdb_memory_cache_limit: Some("50MB".to_owned()),
+            maintenance_target_file_size: Some("10MB".to_owned()),
+            expire_snapshots_older_than: Some("7 days".to_owned()),
         };
 
         assert_json_snapshot!(full_config);
@@ -1365,13 +1365,13 @@ mod tests {
     fn full_api_destination_config_serialization_iceberg_supabase() {
         let full_config = FullApiDestinationConfig::Iceberg {
             config: FullApiIcebergConfig::Supabase {
-                project_ref: "abcdefghijklmnopqrst".to_string(),
-                warehouse_name: "my-warehouse".to_string(),
-                namespace: Some("my-namespace".to_string()),
-                catalog_token: SerializableSecretString::from("token123".to_string()),
-                s3_access_key_id: SerializableSecretString::from("access_key_123".to_string()),
-                s3_secret_access_key: SerializableSecretString::from("secret123".to_string()),
-                s3_region: "us-west-2".to_string(),
+                project_ref: "abcdefghijklmnopqrst".to_owned(),
+                warehouse_name: "my-warehouse".to_owned(),
+                namespace: Some("my-namespace".to_owned()),
+                catalog_token: SerializableSecretString::from("token123".to_owned()),
+                s3_access_key_id: SerializableSecretString::from("access_key_123".to_owned()),
+                s3_secret_access_key: SerializableSecretString::from("secret123".to_owned()),
+                s3_region: "us-west-2".to_owned(),
             },
         };
 
@@ -1430,12 +1430,12 @@ mod tests {
     fn full_api_destination_config_serialization_iceberg_rest() {
         let full_config = FullApiDestinationConfig::Iceberg {
             config: FullApiIcebergConfig::Rest {
-                catalog_uri: "https://catalog.example.com/iceberg".to_string(),
-                warehouse_name: "my-warehouse".to_string(),
-                namespace: Some("my-namespace".to_string()),
-                s3_access_key_id: SerializableSecretString::from("id".to_string()),
-                s3_secret_access_key: SerializableSecretString::from("key".to_string()),
-                s3_endpoint: "http://localhost:8080".to_string(),
+                catalog_uri: "https://catalog.example.com/iceberg".to_owned(),
+                warehouse_name: "my-warehouse".to_owned(),
+                namespace: Some("my-namespace".to_owned()),
+                s3_access_key_id: SerializableSecretString::from("id".to_owned()),
+                s3_secret_access_key: SerializableSecretString::from("key".to_owned()),
+                s3_endpoint: "http://localhost:8080".to_owned(),
             },
         };
 

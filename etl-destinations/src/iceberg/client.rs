@@ -64,8 +64,8 @@ impl IcebergClient {
         warehouse_name: String,
         mut props: HashMap<String, String>,
     ) -> Result<Self, iceberg::Error> {
-        props.insert(REST_CATALOG_PROP_URI.to_string(), catalog_uri);
-        props.insert(REST_CATALOG_PROP_WAREHOUSE.to_string(), warehouse_name);
+        props.insert(REST_CATALOG_PROP_URI.to_owned(), catalog_uri);
+        props.insert(REST_CATALOG_PROP_WAREHOUSE.to_owned(), warehouse_name);
 
         let builder = RestCatalogBuilder::default();
         let catalog = builder.load("RestCatalog", props).await?;
@@ -99,13 +99,13 @@ impl IcebergClient {
         let s3_endpoint = format!("{base_uri}/v1/s3");
 
         let mut props: HashMap<String, String> = HashMap::new();
-        props.insert(CATALOG_TOKEN.to_string(), catalog_token.clone());
-        props.insert(S3_ACCESS_KEY_ID.to_string(), s3_access_key_id);
-        props.insert(S3_SECRET_ACCESS_KEY.to_string(), s3_secret_access_key);
-        props.insert(S3_ENDPOINT.to_string(), s3_endpoint);
-        props.insert(S3_REGION.to_string(), s3_region);
-        props.insert(REST_CATALOG_PROP_URI.to_string(), catalog_uri.clone());
-        props.insert(REST_CATALOG_PROP_WAREHOUSE.to_string(), warehouse_name.clone());
+        props.insert(CATALOG_TOKEN.to_owned(), catalog_token.clone());
+        props.insert(S3_ACCESS_KEY_ID.to_owned(), s3_access_key_id);
+        props.insert(S3_SECRET_ACCESS_KEY.to_owned(), s3_secret_access_key);
+        props.insert(S3_ENDPOINT.to_owned(), s3_endpoint);
+        props.insert(S3_REGION.to_owned(), s3_region);
+        props.insert(REST_CATALOG_PROP_URI.to_owned(), catalog_uri.clone());
+        props.insert(REST_CATALOG_PROP_WAREHOUSE.to_owned(), warehouse_name.clone());
 
         let builder = RestCatalogBuilder::default();
         let inner = builder.load("SupabaseCatalog", props).await?;
@@ -200,17 +200,17 @@ impl IcebergClient {
     fn get_table_properties() -> HashMap<String, String> {
         let mut props = HashMap::new();
         props.insert(
-            TableProperties::PROPERTY_COMMIT_MIN_RETRY_WAIT_MS.to_string(),
-            "100".to_string(),
+            TableProperties::PROPERTY_COMMIT_MIN_RETRY_WAIT_MS.to_owned(),
+            "100".to_owned(),
         );
         props.insert(
-            TableProperties::PROPERTY_COMMIT_MAX_RETRY_WAIT_MS.to_string(),
-            "10000".to_string(),
+            TableProperties::PROPERTY_COMMIT_MAX_RETRY_WAIT_MS.to_owned(),
+            "10000".to_owned(),
         );
-        props.insert(TableProperties::PROPERTY_COMMIT_NUM_RETRIES.to_string(), "10".to_string());
+        props.insert(TableProperties::PROPERTY_COMMIT_NUM_RETRIES.to_owned(), "10".to_owned());
         props.insert(
-            TableProperties::PROPERTY_COMMIT_TOTAL_RETRY_TIME_MS.to_string(),
-            "1800000".to_string(),
+            TableProperties::PROPERTY_COMMIT_TOTAL_RETRY_TIME_MS.to_owned(),
+            "1800000".to_owned(),
         );
         props
     }
@@ -332,7 +332,7 @@ impl IcebergClient {
         // Create location and file name generators
         let location_gen = DefaultLocationGenerator::new(table.metadata().clone())?;
         let file_name_gen = DefaultFileNameGenerator::new(
-            "data".to_string(),
+            "data".to_owned(),
             Some(uuid::Uuid::new_v4().to_string()), // Add unique UUID for each file
             iceberg::spec::DataFileFormat::Parquet,
         );

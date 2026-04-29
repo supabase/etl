@@ -44,7 +44,7 @@ fn source_config_from_db_config(source_db_config: &PgConnectionConfig) -> FullAp
         password: source_db_config
             .password
             .as_ref()
-            .map(|password| SerializableSecretString::from(password.expose_secret().to_string())),
+            .map(|password| SerializableSecretString::from(password.expose_secret().to_owned())),
     }
 }
 
@@ -309,7 +309,7 @@ async fn source_creation_with_non_matching_trusted_username_fails() {
     let mut source_db_config = get_test_db_config();
     source_db_config.name = format!("test_source_db_{}", Uuid::new_v4());
 
-    let different_username = "different_user".to_string();
+    let different_username = "different_user".to_owned();
     let app = spawn_test_app_with_trusted_username(Some(different_username)).await;
     let tenant_id = &create_tenant(&app).await;
 
@@ -342,7 +342,7 @@ async fn source_validation_with_non_matching_trusted_username_returns_failure() 
     let mut source_db_config = get_test_db_config();
     source_db_config.name = format!("test_source_db_{}", Uuid::new_v4());
 
-    let different_username = "different_user".to_string();
+    let different_username = "different_user".to_owned();
     let app = spawn_test_app_with_trusted_username(Some(different_username)).await;
     let tenant_id = &create_tenant(&app).await;
 

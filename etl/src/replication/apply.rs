@@ -3541,7 +3541,7 @@ mod tests {
             replication_progress,
             Duration::from_secs(1),
             SnapshotId::from(start_lsn),
-            "test_slot".to_string(),
+            "test_slot".to_owned(),
         )
     }
 
