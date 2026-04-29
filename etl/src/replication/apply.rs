@@ -612,7 +612,7 @@ impl ApplyLoopState {
 
     /// Takes the schema cleanup task if it has finished.
     fn take_finished_schema_cleanup_task(&mut self) -> Option<JoinHandle<()>> {
-        if self.schema_cleanup_task.as_ref().is_some_and(tokio::task::JoinHandle::is_finished) {
+        if self.schema_cleanup_task.as_ref().is_some_and(JoinHandle::is_finished) {
             self.schema_cleanup_task.take()
         } else {
             None
