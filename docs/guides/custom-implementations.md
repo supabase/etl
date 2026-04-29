@@ -11,9 +11,15 @@ ETL delivers data to destinations in two phases:
 | Phase | Method | When | Data Type |
 |-------|--------|------|-----------|
 | Initial Copy | `write_table_rows()` | Startup | `Vec<TableRow>` |
-| Streaming | `write_events()` | After copy | `Vec<Event>` |
+| Streaming | `write_events()` | After copy | `Vec<Event>` including `Relation` schema events |
 
 **Note:** During initial copy, parallel table sync workers each process their own replication slot, so `Begin` and `Commit` transaction markers may appear multiple times. This does not duplicate actual row data.
+
+Schema changes are surfaced through `Event::Relation`. If your destination
+keeps physical schemas, flush pending writes before handling a relation event,
+apply the supported add/drop/rename diff, then process following row events
+with the new schema. See [Schema Changes](../explanation/schema-changes.md) for
+the current semantics and limitations.
 
 ## Step 1: Create the Project
 
@@ -322,7 +328,7 @@ impl Destination for HttpDestination {
         replicated_table_schema: &ReplicatedTableSchema,
         async_result: TruncateTableResult<()>,
     ) -> EtlResult<()> {
-        let table_name = replicated_table_schema.get_inner().name.to_string();
+        let table_name = replicated_table_schema.name().to_string();
         info!("truncating table {}", table_name);
         let result = self
             .post(&format!("tables/{table_name}/truncate"), json!({}))
@@ -341,7 +347,7 @@ impl Destination for HttpDestination {
             async_result.send(Ok(()));
             return Ok(());
         }
-        let table_name = replicated_table_schema.get_inner().name.to_string();
+        let table_name = replicated_table_schema.name().to_string();
         info!("writing {} rows to table {}", rows.len(), table_name);
 
         let payload = json!({
@@ -370,13 +376,13 @@ impl Destination for HttpDestination {
         let payload = json!({
             "events": events.iter().map(|e| {
                 match e {
-                    Event::Insert(i) => json!({"type": "insert", "table": i.replicated_table_schema.get_inner().name.to_string()}),
-                    Event::Update(u) => json!({"type": "update", "table": u.replicated_table_schema.get_inner().name.to_string()}),
-                    Event::Delete(d) => json!({"type": "delete", "table": d.replicated_table_schema.get_inner().name.to_string()}),
+                    Event::Insert(i) => json!({"type": "insert", "table": i.replicated_table_schema.name().to_string()}),
+                    Event::Update(u) => json!({"type": "update", "table": u.replicated_table_schema.name().to_string()}),
+                    Event::Delete(d) => json!({"type": "delete", "table": d.replicated_table_schema.name().to_string()}),
                     Event::Begin(_) => json!({"type": "begin"}),
                     Event::Commit(_) => json!({"type": "commit"}),
-                    Event::Relation(r) => json!({"type": "relation", "table": r.replicated_table_schema.get_inner().name.to_string()}),
-                    Event::Truncate(t) => json!({"type": "truncate", "tables": t.truncated_tables.iter().map(|table| table.get_inner().name.to_string()).collect::<Vec<_>>() }),
+                    Event::Relation(r) => json!({"type": "relation", "table": r.replicated_table_schema.name().to_string()}),
+                    Event::Truncate(t) => json!({"type": "truncate", "tables": t.truncated_tables.iter().map(|table| table.name().to_string()).collect::<Vec<_>>() }),
                     Event::Unsupported => json!({"type": "unsupported"}),
                 }
             }).collect::<Vec<_>>()

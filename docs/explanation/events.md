@@ -249,7 +249,8 @@ pub struct CommitEvent {
 
 ### Relation
 
-Provides table schema information. Sent before data events for a table.
+Provides table schema information. Sent before data events for a table and
+again after supported schema changes.
 
 ```rust
 pub struct RelationEvent {
@@ -271,6 +272,9 @@ schema version. The order matters only after the masks are applied: stored table
 schemas are also ordered by `attnum`, so
 `ReplicatedTableSchema::column_schemas()` becomes a positional view that matches
 the tuple payloads exactly, even when a publication filters columns.
+
+For DDL behavior, including add/drop/rename semantics and current limitations,
+see [Schema Changes](schema-changes.md).
 
 ## Begin/Commit Behavior
 

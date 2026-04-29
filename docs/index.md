@@ -2,7 +2,7 @@
 
 **Stream Postgres changes anywhere, in real-time**
 
-ETL is a Rust framework for building change data capture (CDC) pipelines on Postgres. Stream inserts, updates, and deletes to BigQuery, Apache Iceberg, or your own custom destinations.
+ETL is a Rust framework for building change data capture (CDC) pipelines on Postgres. Stream inserts, updates, and deletes to stable BigQuery support, in-progress DuckLake support, or your own custom destinations. The Iceberg destination module is deprecated for now.
 
 ## Start Here
 
@@ -11,6 +11,7 @@ ETL is a Rust framework for building change data capture (CDC) pipelines on Post
 | New to Postgres logical replication | [Postgres Replication Concepts](explanation/concepts.md) |
 | Ready to build | [Your First Pipeline](guides/first-pipeline.md) (15 min) |
 | Need custom destinations | [Custom Stores and Destinations](guides/custom-implementations.md) (30 min) |
+| Handling schema changes | [Schema Changes](explanation/schema-changes.md) |
 | Setting up Postgres | [Configure Postgres](guides/configure-postgres.md) |
 
 ## Why ETL?
@@ -24,10 +25,12 @@ ETL is a Rust framework for building change data capture (CDC) pipelines on Post
 ## How It Works
 
 1. **Initial copy**: ETL copies existing table data to your destination
-2. **Streaming**: ETL streams [events](explanation/events.md) (Insert, Update, Delete, and more) in real-time
+2. **Streaming**: ETL streams [events](explanation/events.md) (Insert, Update, Delete, Relation, and more) in real-time
 3. **Recovery**: The [store](explanation/traits.md) persists state so pipelines resume after restarts
 
-See [Architecture](explanation/architecture.md) for details.
+See [Architecture](explanation/architecture.md) for details, and
+[Schema Changes](explanation/schema-changes.md) for DDL semantics and
+limitations.
 
 ## Quick Example
 
@@ -133,8 +136,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 This snippet intentionally shows ETL used as a library with your own destination implementation.
-Built-in destinations such as BigQuery and DuckLake live in `etl-destinations`, but the shared
-pipeline, config, store, and event types should come from `etl`.
+Built-in destination modules live in `etl-destinations`: BigQuery is stable,
+DuckLake is in progress, and Iceberg is deprecated for now. The shared pipeline,
+config, store, and event types should come from `etl`.
 
 ## Documentation
 
