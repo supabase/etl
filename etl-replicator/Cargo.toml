@@ -12,12 +12,12 @@ default = []
 egress = ["etl/egress", "etl-destinations/egress"]
 
 [dependencies]
+
+configcat = { workspace = true }
 etl = { workspace = true }
 etl-config = { workspace = true, features = ["supabase"] }
 etl-destinations = { workspace = true, features = ["bigquery", "iceberg", "ducklake"] }
 etl-telemetry = { workspace = true }
-
-configcat = { workspace = true }
 metrics = { workspace = true }
 reqwest = { workspace = true, features = ["rustls-tls", "json"] }
 rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }

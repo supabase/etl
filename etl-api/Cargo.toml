@@ -11,17 +11,13 @@ homepage.workspace = true
 
 [lib]
 path = "src/lib.rs"
+doctest = false
 
 [[bin]]
 path = "src/main.rs"
 name = "etl-api"
 
 [dependencies]
-etl = { workspace = true }
-etl-config = { workspace = true, features = ["utoipa", "supabase"] }
-etl-destinations = { workspace = true, features = ["bigquery", "iceberg", "ducklake"] }
-etl-postgres = { workspace = true, features = ["replication"] }
-etl-telemetry = { workspace = true }
 
 actix-web = { workspace = true, features = ["macros", "http2"] }
 actix-web-httpauth = { workspace = true }
@@ -33,12 +29,16 @@ base64 = { workspace = true, features = ["std"] }
 chrono = { workspace = true }
 configcat = { workspace = true }
 constant_time_eq = { workspace = true }
+etl = { workspace = true }
+etl-config = { workspace = true, features = ["utoipa", "supabase"] }
+etl-destinations = { workspace = true, features = ["bigquery", "iceberg", "ducklake"] }
+etl-postgres = { workspace = true, features = ["replication"] }
+etl-telemetry = { workspace = true }
 k8s-openapi = { workspace = true, features = ["latest"] }
 kube = { workspace = true, features = ["runtime", "derive", "client", "rustls-tls"] }
 metrics-exporter-prometheus = { workspace = true, features = ["http-listener"] }
 pg_escape = { workspace = true }
 rand = { workspace = true, features = ["std"] }
-reqwest = { workspace = true, features = ["json", "rustls-tls"] }
 rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
 secrecy = { workspace = true }
 sentry = { workspace = true, features = ["actix"] }
@@ -49,16 +49,16 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tracing = { workspace = true, default-features = false }
 tracing-actix-web = { workspace = true, features = ["emit_event_on_error"] }
-url = { workspace = true }
 utoipa = { workspace = true, features = ["actix_extras"] }
 utoipa-swagger-ui = { workspace = true, features = ["actix-web"] }
-uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]
 etl-destinations = { workspace = true, features = ["test-utils", "iceberg", "bigquery", "ducklake"] }
 etl-postgres = { workspace = true, features = ["test-utils", "sqlx"] }
 
 insta = { workspace = true, features = ["json", "redactions"] }
+reqwest = { workspace = true, features = ["json", "rustls-tls"] }
+uuid = { workspace = true, features = ["v4"] }
 
 [[test]]
 name = "main"
