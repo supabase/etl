@@ -9,7 +9,7 @@ use url::Url;
 
 use crate::clickhouse::{
     encoding::{ClickHouseValue, encode_to_row_binary},
-    metrics::ETL_CH_INSERT_DURATION_SECONDS,
+    metrics::{ETL_CH_DDL_DURATION_SECONDS, ETL_CH_INSERT_DURATION_SECONDS},
     schema::{clickhouse_column_type, quote_identifier},
 };
 
@@ -118,15 +118,21 @@ impl ClickHouseClient {
             .map_err(|e| etl_error!(ErrorKind::Unknown, "ClickHouse connectivity check failed", e))
     }
 
-    /// Executes a DDL statement (e.g. `CREATE TABLE IF NOT EXISTS …`).
-    pub(crate) async fn execute_ddl(&self, sql: &str) -> EtlResult<()> {
-        self.inner.query(sql).execute().await.map_err(|e| {
+    /// Executes a DDL statement (e.g. `CREATE TABLE IF NOT EXISTS …`) and
+    /// records its duration in the `etl_ch_ddl_duration_seconds` histogram
+    /// labelled with `table_name`.
+    pub(crate) async fn execute_ddl(&self, table_name: &str, sql: &str) -> EtlResult<()> {
+        let ddl_start = Instant::now();
+        let result = self.inner.query(sql).execute().await.map_err(|e| {
             etl_error!(
                 ErrorKind::Unknown,
                 "ClickHouse DDL failed",
                 format!("DDL execution failed: {e}")
             )
-        })
+        });
+        metrics::histogram!(ETL_CH_DDL_DURATION_SECONDS, "table" => table_name.to_string())
+            .record(ddl_start.elapsed().as_secs_f64());
+        result
     }
 
     /// Returns ClickHouse columns for a table in position order.
@@ -167,13 +173,13 @@ impl ClickHouseClient {
         after_column: &str,
     ) -> EtlResult<()> {
         let sql = build_add_column_sql(table_name, column, after_column);
-        self.execute_ddl(&sql).await
+        self.execute_ddl(table_name, &sql).await
     }
 
     /// Drops a column from an existing ClickHouse table (idempotent).
     pub(crate) async fn drop_column(&self, table_name: &str, column_name: &str) -> EtlResult<()> {
         let sql = build_drop_column_sql(table_name, column_name);
-        self.execute_ddl(&sql).await
+        self.execute_ddl(table_name, &sql).await
     }
 
     /// Renames a column in an existing ClickHouse table (idempotent).
@@ -188,7 +194,7 @@ impl ClickHouseClient {
         new_name: &str,
     ) -> EtlResult<()> {
         let sql = build_rename_column_sql(table_name, old_name, new_name);
-        self.execute_ddl(&sql).await
+        self.execute_ddl(table_name, &sql).await
     }
 
     /// Executes `TRUNCATE TABLE IF EXISTS` for the supplied table.

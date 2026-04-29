@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc, time::Instant};
+use std::{collections::HashMap, sync::Arc};
 
 use etl::{
     destination::{
@@ -23,7 +23,7 @@ use crate::{
     clickhouse::{
         client::{ClickHouseClient, ClickHouseTableColumn},
         encoding::{ClickHouseValue, cell_to_clickhouse_value},
-        metrics::{ETL_CH_DDL_DURATION_SECONDS, register_metrics},
+        metrics::register_metrics,
         schema::{CDC_LSN_COLUMN_NAME, CDC_OPERATION_COLUMN_NAME, build_create_table_sql},
     },
     table_name::try_stringify_table_name,
@@ -238,10 +238,7 @@ where
 
         let column_schemas: Vec<_> = schema.column_schemas().cloned().collect();
         let ddl = build_create_table_sql(ch_table_name, &column_schemas);
-        let ddl_start = Instant::now();
-        self.client.execute_ddl(&ddl).await?;
-        metrics::histogram!(ETL_CH_DDL_DURATION_SECONDS, "table" => ch_table_name.to_string())
-            .record(ddl_start.elapsed().as_secs_f64());
+        self.client.execute_ddl(ch_table_name, &ddl).await?;
 
         self.store.store_destination_table_metadata(table_id, metadata.to_applied()).await?;
 
@@ -350,7 +347,7 @@ where
             None => {
                 let column_schemas: Vec<_> = schema.column_schemas().cloned().collect();
                 let ddl = build_create_table_sql(ch_table_name, &column_schemas);
-                self.client.execute_ddl(&ddl).await?;
+                self.client.execute_ddl(ch_table_name, &ddl).await?;
             }
         }
 
