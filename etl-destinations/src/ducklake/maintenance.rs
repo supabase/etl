@@ -961,7 +961,7 @@ pub(super) fn table_write_slot(
     table_name: &str,
 ) -> Arc<Semaphore> {
     let mut slots = table_write_slots.lock();
-    let slot = slots.entry(table_name.to_string()).or_insert_with(|| Arc::new(Semaphore::new(1)));
+    let slot = slots.entry(table_name.to_owned()).or_insert_with(|| Arc::new(Semaphore::new(1)));
     Arc::clone(slot)
 }
 
@@ -1443,7 +1443,7 @@ fn rewrite_table_data_files(conn: &duckdb::Connection, table_name: &str) -> EtlR
     if FAIL_REWRITE_SINGLE_OUTPUT_FILE_ONCE_FOR_TESTS.swap(false, AtomicOrdering::Relaxed) {
         let source = duckdb::Error::DuckDBFailure(
             duckdb::ffi::Error::new(1),
-            Some("INTERNAL Error: DuckLakeCompaction - expected a single output file".to_string()),
+            Some("INTERNAL Error: DuckLakeCompaction - expected a single output file".to_owned()),
         );
         return Err(etl_error!(
             ErrorKind::DestinationQueryFailed,
@@ -1585,7 +1585,7 @@ mod tests {
         sampled_at: Instant,
         metrics: DuckLakeTableStorageMetrics,
     ) -> TableMetricsSample {
-        TableMetricsSample { table_name: "public_users".to_string(), sampled_at, metrics }
+        TableMetricsSample { table_name: "public_users".to_owned(), sampled_at, metrics }
     }
 
     fn storage_metrics(
@@ -2062,7 +2062,7 @@ mod tests {
             Arc::clone(&checkpoint_gate),
             Arc::clone(&blocking_slots),
             Arc::clone(&table_write_slots),
-            "public_users".to_string(),
+            "public_users".to_owned(),
             TargetedMaintenancePlan {
                 rewrite_reason: Some(MaintenanceReason::IdleRewriteMetricsThreshold),
             },
@@ -2146,7 +2146,7 @@ mod tests {
         let inline_flush_requested = Arc::new(AtomicBool::new(true));
         let pending_inline_flush_requests = PendingInlineFlushRequests::default();
         pending_inline_flush_requests.request(
-            "public_users".to_string(),
+            "public_users".to_owned(),
             MaintenanceReason::PendingInlinedDataBytesThreshold,
         );
 

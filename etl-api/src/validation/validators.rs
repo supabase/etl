@@ -732,9 +732,9 @@ impl Validator for DucklakeValidator {
                 .s3_secret_access_key
                 .clone()
                 .expect("ducklake s3 secret access key should be present"),
-            region: self.s3_region.clone().unwrap_or_else(|| "us-east-1".to_string()),
+            region: self.s3_region.clone().unwrap_or_else(|| "us-east-1".to_owned()),
             endpoint: self.s3_endpoint.clone(),
-            url_style: self.s3_url_style.clone().unwrap_or_else(|| "path".to_string()),
+            url_style: self.s3_url_style.clone().unwrap_or_else(|| "path".to_owned()),
             use_ssl: self.s3_use_ssl.unwrap_or(false),
         });
 
@@ -788,10 +788,10 @@ impl Validator for IcebergValidator {
                 IcebergClient::new_with_supabase_catalog(
                     project_ref,
                     ctx.environment.get_supabase_domain(),
-                    catalog_token.expose_secret().to_string(),
+                    catalog_token.expose_secret().to_owned(),
                     warehouse_name.clone(),
-                    s3_access_key_id.expose_secret().to_string(),
-                    s3_secret_access_key.expose_secret().to_string(),
+                    s3_access_key_id.expose_secret().to_owned(),
+                    s3_secret_access_key.expose_secret().to_owned(),
                     s3_region.clone(),
                 )
                 .await
@@ -806,14 +806,14 @@ impl Validator for IcebergValidator {
             } => {
                 let mut props = HashMap::new();
                 props.insert(
-                    S3_ACCESS_KEY_ID.to_string(),
-                    s3_access_key_id.expose_secret().to_string(),
+                    S3_ACCESS_KEY_ID.to_owned(),
+                    s3_access_key_id.expose_secret().to_owned(),
                 );
                 props.insert(
-                    S3_SECRET_ACCESS_KEY.to_string(),
-                    s3_secret_access_key.expose_secret().to_string(),
+                    S3_SECRET_ACCESS_KEY.to_owned(),
+                    s3_secret_access_key.expose_secret().to_owned(),
                 );
-                props.insert(S3_ENDPOINT.to_string(), s3_endpoint.clone());
+                props.insert(S3_ENDPOINT.to_owned(), s3_endpoint.clone());
 
                 IcebergClient::new_with_rest_catalog(
                     catalog_uri.clone(),
@@ -873,7 +873,7 @@ impl Validator for DestinationValidator {
                 let validator = BigQueryValidator::new(
                     project_id.clone(),
                     dataset_id.clone(),
-                    service_account_key.expose_secret().to_string(),
+                    service_account_key.expose_secret().to_owned(),
                 );
                 validator.validate(ctx).await
             }
@@ -902,8 +902,8 @@ impl Validator for DestinationValidator {
                     pool_size.unwrap_or(
                         etl_config::shared::DestinationConfig::DEFAULT_DUCKLAKE_POOL_SIZE,
                     ),
-                    s3_access_key_id.as_ref().map(|value| value.expose_secret().to_string()),
-                    s3_secret_access_key.as_ref().map(|value| value.expose_secret().to_string()),
+                    s3_access_key_id.as_ref().map(|value| value.expose_secret().to_owned()),
+                    s3_secret_access_key.as_ref().map(|value| value.expose_secret().to_owned()),
                     s3_region.clone(),
                     s3_endpoint.clone(),
                     s3_url_style.clone(),

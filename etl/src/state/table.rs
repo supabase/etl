@@ -597,8 +597,8 @@ mod tests {
 
         // Errored round-trip (source_err is skipped)
         let errored = TableReplicationPhase::Errored {
-            reason: "Test error".to_string(),
-            solution: Some("Test solution".to_string()),
+            reason: "Test error".to_owned(),
+            solution: Some("Test solution".to_owned()),
             retry_policy: RetryPolicy::NoRetry,
             source_err: etl_error!(ErrorKind::Unknown, "test"),
         };
@@ -619,7 +619,7 @@ mod tests {
         if let TableReplicationPhase::Errored { reason, solution, retry_policy, .. } = deserialized
         {
             assert_eq!(reason, "Test error");
-            assert_eq!(solution, Some("Test solution".to_string()));
+            assert_eq!(solution, Some("Test solution".to_owned()));
             assert!(matches!(retry_policy, RetryPolicy::NoRetry));
         } else {
             panic!("Expected Errored variant");
@@ -672,8 +672,8 @@ mod tests {
             TableReplicationPhase::SyncDone { lsn: "0/1000000".parse::<PgLsn>().unwrap() },
             TableReplicationPhase::Ready,
             TableReplicationPhase::Errored {
-                reason: "broken".to_string(),
-                solution: Some("fix it".to_string()),
+                reason: "broken".to_owned(),
+                solution: Some("fix it".to_owned()),
                 retry_policy: RetryPolicy::ManualRetry,
                 source_err: etl_error!(ErrorKind::Unknown, "test"),
             },

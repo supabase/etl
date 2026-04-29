@@ -124,7 +124,7 @@ mod tests {
     fn build_create_table_sql_quotes_identifiers() {
         let sql = build_create_table_sql_ducklake(
             "odd\"table",
-            &[ColumnSchema::new("select".to_string(), Type::INT4, -1, 1, Some(1), false)],
+            &[ColumnSchema::new("select".to_owned(), Type::INT4, -1, 1, Some(1), false)],
         );
 
         assert!(sql.starts_with("CREATE TABLE IF NOT EXISTS \"odd\"\"table\""));

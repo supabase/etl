@@ -16,6 +16,7 @@ use crate::{
     config::PipelineConfig,
     destination::Destination,
     error::{ErrorKind, EtlResult},
+    etl_error,
     metrics::register_metrics,
     replication::{SharedTableCache, client::PgReplicationClient},
     state::table::TableReplicationPhase,
@@ -33,7 +34,14 @@ enum PipelineState {
     /// Pipeline has been created but not yet started.
     NotStarted,
     /// Pipeline is running with active workers.
-    Started { apply_worker: ApplyWorkerHandle, pool: Arc<TableSyncWorkerPool> },
+    Started {
+        /// Handle for the running apply worker.
+        apply_worker: ApplyWorkerHandle,
+        /// Pool that owns all table sync worker tasks.
+        pool: Arc<TableSyncWorkerPool>,
+        /// Background memory monitor used by workers.
+        memory_monitor: MemoryMonitor,
+    },
 }
 
 /// Core ETL pipeline that orchestrates Postgres logical replication.
@@ -123,7 +131,9 @@ where
             pipeline_id = %self.config.id,
             "starting pipeline"
         );
-        // We always start memory monitoring to keep total memory snapshots available.
+
+        // We always start memory monitoring for running workers to keep total memory
+        // snapshots available.
         let memory_monitor = MemoryMonitor::new(
             self.shutdown_tx.subscribe(),
             self.config.memory_backpressure.clone(),
@@ -172,11 +182,11 @@ where
             shared_table_cache,
             self.shutdown_tx.subscribe(),
             table_sync_worker_permits,
-            memory_monitor,
+            memory_monitor.clone(),
         )
         .spawn()?;
 
-        self.state = PipelineState::Started { apply_worker, pool };
+        self.state = PipelineState::Started { apply_worker, pool, memory_monitor };
 
         Ok(())
     }
@@ -193,8 +203,9 @@ where
     ///    workers)
     /// 2. All table sync workers complete
     /// 3. Any errors from workers are aggregated and returned
+    /// 4. Background pipeline tasks complete after shutdown
     pub async fn wait(self) -> EtlResult<()> {
-        let PipelineState::Started { apply_worker, pool } = self.state else {
+        let PipelineState::Started { apply_worker, pool, memory_monitor } = self.state else {
             warn!("pipeline was not started, skipping wait");
 
             return Ok(());
@@ -215,12 +226,6 @@ where
 
             errors.push(err);
 
-            // TODO: in the future we might build a system based on the `ReactiveFuture`
-            // that  automatically sends a shutdown signal to table sync workers
-            // on apply worker failure. If there was an error in the apply
-            // worker, we want to shut down all table sync workers, since
-            // without an apply worker they are lost.
-            //
             // If we fail to send the shutdown signal, we are not going to capture the error
             // since it means that no table sync workers are running, which is
             // fine.
@@ -239,13 +244,29 @@ where
             errors.push(err);
         }
 
-        info!("shutting down destination");
+        info!("waiting for destination shutdown to complete");
 
         // Once all workers completed, we notify the destination of shutting down.
         if let Err(err) = self.destination.shutdown().await {
             warn!("destination shutdown failed, collecting errors");
 
             errors.push(err);
+        }
+
+        info!("waiting for memory monitor to complete");
+
+        // As last thing, we want the memory refresh to be done, so that we can cleanly
+        // terminate the process.
+        if let Err(err) = memory_monitor.wait_for_refresh_task().await {
+            if err.is_cancelled() {
+                warn!(error = %err, "memory monitor task was cancelled");
+            } else {
+                errors.push(etl_error!(
+                    ErrorKind::InvalidState,
+                    "Memory monitor task panicked",
+                    err.to_string()
+                ));
+            }
         }
 
         if !errors.is_empty() {

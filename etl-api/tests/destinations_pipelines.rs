@@ -126,7 +126,7 @@ async fn iceberg_supabase_destination_and_pipeline_can_be_created() {
 
     // Act
     let destination_pipeline = CreateDestinationPipelineRequest {
-        destination_name: "Iceberg Supabase Destination".to_string(),
+        destination_name: "Iceberg Supabase Destination".to_owned(),
         destination_config: new_iceberg_supabase_destination_config(),
         source_id,
         pipeline_config: new_pipeline_config(),
@@ -205,14 +205,14 @@ async fn destination_and_pipeline_with_another_tenants_source_cannot_be_created(
     create_default_image(&app).await;
     let tenant1_id = &create_tenant_with_id_and_name(
         &app,
-        "abcdefghijklmnopqrst".to_string(),
-        "tenant_1".to_string(),
+        "abcdefghijklmnopqrst".to_owned(),
+        "tenant_1".to_owned(),
     )
     .await;
     let tenant2_id = &create_tenant_with_id_and_name(
         &app,
-        "tsrqponmlkjihgfedcba".to_string(),
-        "tenant_2".to_string(),
+        "tsrqponmlkjihgfedcba".to_owned(),
+        "tenant_2".to_owned(),
     )
     .await;
     let source2_id = create_source(&app, tenant2_id).await;
@@ -290,7 +290,7 @@ async fn an_existing_iceberg_supabase_destination_and_pipeline_can_be_updated() 
     let source_id = create_source(&app, tenant_id).await;
     create_default_image(&app).await;
     let destination_pipeline = CreateDestinationPipelineRequest {
-        destination_name: "Iceberg Supabase Destination".to_string(),
+        destination_name: "Iceberg Supabase Destination".to_owned(),
         destination_config: new_iceberg_supabase_destination_config(),
         source_id,
         pipeline_config: new_pipeline_config(),
@@ -303,7 +303,7 @@ async fn an_existing_iceberg_supabase_destination_and_pipeline_can_be_updated() 
 
     // Act
     let destination_pipeline = UpdateDestinationPipelineRequest {
-        destination_name: "Iceberg Supabase Destination (Updated)".to_string(),
+        destination_name: "Iceberg Supabase Destination (Updated)".to_owned(),
         destination_config: updated_iceberg_supabase_destination_config(),
         source_id: new_source_id,
         pipeline_config: updated_pipeline_config(),
@@ -341,14 +341,14 @@ async fn destination_and_pipeline_with_another_tenants_source_cannot_be_updated(
     create_default_image(&app).await;
     let tenant1_id = &create_tenant_with_id_and_name(
         &app,
-        "abcdefghijklmnopqrst".to_string(),
-        "tenant_1".to_string(),
+        "abcdefghijklmnopqrst".to_owned(),
+        "tenant_1".to_owned(),
     )
     .await;
     let tenant2_id = &create_tenant_with_id_and_name(
         &app,
-        "tsrqponmlkjihgfedcba".to_string(),
-        "tenant_2".to_string(),
+        "tsrqponmlkjihgfedcba".to_owned(),
+        "tenant_2".to_owned(),
     )
     .await;
 
@@ -388,14 +388,14 @@ async fn destination_and_pipeline_with_another_tenants_destination_cannot_be_upd
     create_default_image(&app).await;
     let tenant1_id = &create_tenant_with_id_and_name(
         &app,
-        "abcdefghijklmnopqrst".to_string(),
-        "tenant_1".to_string(),
+        "abcdefghijklmnopqrst".to_owned(),
+        "tenant_1".to_owned(),
     )
     .await;
     let tenant2_id = &create_tenant_with_id_and_name(
         &app,
-        "tsrqponmlkjihgfedcba".to_string(),
-        "tenant_2".to_string(),
+        "tsrqponmlkjihgfedcba".to_owned(),
+        "tenant_2".to_owned(),
     )
     .await;
 
@@ -440,14 +440,14 @@ async fn destination_and_pipeline_with_another_tenants_pipeline_cannot_be_update
     create_default_image(&app).await;
     let tenant1_id = &create_tenant_with_id_and_name(
         &app,
-        "abcdefghijklmnopqrst".to_string(),
-        "tenant_1".to_string(),
+        "abcdefghijklmnopqrst".to_owned(),
+        "tenant_1".to_owned(),
     )
     .await;
     let tenant2_id = &create_tenant_with_id_and_name(
         &app,
-        "tsrqponmlkjihgfedcba".to_string(),
-        "tenant_2".to_string(),
+        "tsrqponmlkjihgfedcba".to_owned(),
+        "tenant_2".to_owned(),
     )
     .await;
 

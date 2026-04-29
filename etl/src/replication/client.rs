@@ -583,7 +583,7 @@ impl PgReplicationClient {
         bail!(
             ErrorKind::SourceConnectionFailed,
             "Wal sender timeout not found",
-            "The table pg_settings did not return wal_sender_timeout".to_string()
+            "The table pg_settings did not return wal_sender_timeout".to_owned()
         )
     }
 
@@ -969,7 +969,7 @@ impl PgReplicationClient {
                 table_in_publication = true;
 
                 if let Some(column_name) = row.try_get::<&str>("column_name")? {
-                    column_names.insert(column_name.to_string());
+                    column_names.insert(column_name.to_owned());
                 }
             }
         }
@@ -1424,7 +1424,7 @@ impl PgReplicationClient {
                 let row_filter = row.try_get("row_filter")?;
                 match row_filter {
                     None => return Ok(None),
-                    Some(row_filter) => return Ok(Some(row_filter.to_string())),
+                    Some(row_filter) => return Ok(Some(row_filter.to_owned())),
                 }
             }
         }
@@ -1559,7 +1559,7 @@ impl PgReplicationClient {
                     .ok_or_else(|| {
                         etl_error!(ErrorKind::InvalidState, "pg_export_snapshot returned NULL")
                     })?
-                    .to_string();
+                    .to_owned();
                 return Ok(snapshot_id);
             }
         }
@@ -1642,7 +1642,7 @@ impl PgReplicationClient {
             let end_block_exclusive = ((i + 1) * blocks_per_partition).min(table_blocks);
 
             let partition = if effective_partitions == 1 {
-                CtidPartition::OpenEnd { start_tid: "(0,1)".to_string() }
+                CtidPartition::OpenEnd { start_tid: "(0,1)".to_owned() }
             } else if i == 0 {
                 CtidPartition::OpenStart { end_tid: format!("({end_block_exclusive},1)") }
             } else if i == effective_partitions - 1 {
@@ -1700,10 +1700,10 @@ mod tests {
     #[test]
     fn build_ctid_copy_query_quotes_mixed_case_table_names() {
         let query = PgReplicationClient::build_ctid_copy_query(
-            &TableName::new("public".to_string(), "User".to_string()),
+            &TableName::new("public".to_owned(), "User".to_owned()),
             "\"id\", \"email\"",
             None,
-            &CtidPartition::OpenEnd { start_tid: "(0,1)".to_string() },
+            &CtidPartition::OpenEnd { start_tid: "(0,1)".to_owned() },
         );
 
         assert!(query.contains("from public.\"User\""));
@@ -1713,10 +1713,10 @@ mod tests {
     #[test]
     fn build_ctid_copy_query_quotes_mixed_case_table_names_with_row_filter() {
         let query = PgReplicationClient::build_ctid_copy_query(
-            &TableName::new("public".to_string(), "CommentReadStatus".to_string()),
+            &TableName::new("public".to_owned(), "CommentReadStatus".to_owned()),
             "\"id\"",
             Some("\"tenantId\" is not null"),
-            &CtidPartition::OpenStart { end_tid: "(10,1)".to_string() },
+            &CtidPartition::OpenStart { end_tid: "(10,1)".to_owned() },
         );
 
         assert!(query.contains("from public.\"CommentReadStatus\""));

@@ -47,13 +47,13 @@ impl ReplicatorResourcesConfig {
         if let Some(cpu_request_millicores) = self.cpu_request_millicores
             && cpu_request_millicores <= 0
         {
-            return Err("replicator cpu request must be greater than 0".to_string());
+            return Err("replicator cpu request must be greater than 0".to_owned());
         }
 
         if let Some(memory_request_mib) = self.memory_request_mib
             && memory_request_mib <= 0
         {
-            return Err("replicator memory request must be greater than 0".to_string());
+            return Err("replicator memory request must be greater than 0".to_owned());
         }
 
         Ok(())
@@ -214,7 +214,7 @@ mod tests {
     #[test]
     fn stored_pipeline_config_serialization() {
         let config = StoredPipelineConfig {
-            publication_name: "test_publication".to_string(),
+            publication_name: "test_publication".to_owned(),
             batch: BatchConfig { max_fill_ms: 5000, memory_budget_ratio: 0.2 },
             table_error_retry_delay_ms: 2000,
             table_error_retry_max_attempts: 7,
@@ -253,7 +253,7 @@ mod tests {
     #[test]
     fn full_api_pipeline_config_conversion() {
         let full_config = FullApiPipelineConfig {
-            publication_name: "test_publication".to_string(),
+            publication_name: "test_publication".to_owned(),
             batch: None,
             table_error_retry_delay_ms: None,
             table_error_retry_max_attempts: None,
@@ -279,7 +279,7 @@ mod tests {
     #[test]
     fn full_api_pipeline_config_defaults() {
         let full_config = FullApiPipelineConfig {
-            publication_name: "test_publication".to_string(),
+            publication_name: "test_publication".to_owned(),
             batch: None,
             table_error_retry_delay_ms: None,
             table_error_retry_max_attempts: None,
@@ -320,7 +320,7 @@ mod tests {
     #[test]
     fn stored_pipeline_config_deserializes_without_replicator_resources() {
         let config = StoredPipelineConfig {
-            publication_name: "test_publication".to_string(),
+            publication_name: "test_publication".to_owned(),
             batch: BatchConfig { max_fill_ms: 5000, memory_budget_ratio: 0.2 },
             table_error_retry_delay_ms: 2000,
             table_error_retry_max_attempts: 7,

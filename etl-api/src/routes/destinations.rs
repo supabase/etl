@@ -64,16 +64,16 @@ impl DestinationError {
             // Do not expose internal database details in error messages.
             DestinationError::DestinationsDb(DestinationsDbError::Database(_))
             | DestinationError::PipelinesDb(PipelinesDbError::Database(_))
-            | DestinationError::K8sCore(_) => "internal server error".to_string(),
+            | DestinationError::K8sCore(_) => "internal server error".to_owned(),
             // Do not expose validation error details as they may contain credential info.
             DestinationError::Validation(ValidationError::BigQuery(_)) => {
-                "BigQuery validation failed".to_string()
+                "BigQuery validation failed".to_owned()
             }
             DestinationError::Validation(ValidationError::Iceberg(_)) => {
-                "Iceberg validation failed".to_string()
+                "Iceberg validation failed".to_owned()
             }
             DestinationError::Validation(ValidationError::Database(_)) => {
-                "database validation failed".to_string()
+                "database validation failed".to_owned()
             }
             // Every other message is ok, as they do not divulge sensitive information.
             e => e.to_string(),

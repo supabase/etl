@@ -24,7 +24,7 @@ fn test_column(
     primary_key_ordinal_position: Option<i32>,
 ) -> ColumnSchema {
     ColumnSchema::new(
-        name.to_string(),
+        name.to_owned(),
         typ,
         -1,
         ordinal_position,
@@ -124,7 +124,7 @@ async fn create_table_if_missing() {
     client.create_namespace_if_missing(namespace).await.unwrap();
 
     // Create a sample table schema with all supported types
-    let table_name = "test_table".to_string();
+    let table_name = "test_table".to_owned();
     let column_schemas = vec![
         // Primary key
         test_column("id", Type::INT4, 1, false, Some(1)),
@@ -193,7 +193,7 @@ async fn create_table_if_missing() {
     assert!(client.table_exists(namespace, table_name.clone()).await.unwrap());
 
     // Verify identifier fields are set correctly.
-    let table = client.load_table(namespace.to_string(), table_name.clone()).await.unwrap();
+    let table = client.load_table(namespace.to_owned(), table_name.clone()).await.unwrap();
     let identifier_field_ids: Vec<i32> =
         table.metadata().current_schema().identifier_field_ids().collect();
     // The "id" column is the primary key and should be the only identifier field
@@ -234,7 +234,7 @@ async fn drop_table_if_exists_is_idempotent() {
     client.create_namespace_if_missing(namespace).await.unwrap();
 
     // Create a simple table schema
-    let table_name = "test_table".to_string();
+    let table_name = "test_table".to_owned();
     let column_schemas = vec![test_column("id", Type::INT4, 1, false, Some(1))];
 
     // Create table
@@ -256,7 +256,7 @@ async fn drop_table_if_exists_is_idempotent() {
 
     // Dropping a table that never existed should also succeed and return false
     let dropped =
-        client.drop_table_if_exists(namespace, "nonexistent_table".to_string()).await.unwrap();
+        client.drop_table_if_exists(namespace, "nonexistent_table".to_owned()).await.unwrap();
     assert!(!dropped);
 
     // Manual cleanup
@@ -283,7 +283,7 @@ async fn insert_nullable_scalars() {
     client.create_namespace_if_missing(namespace).await.unwrap();
 
     // Create a sample table schema with all supported types
-    let table_name = "test_table".to_string();
+    let table_name = "test_table".to_owned();
     let column_schemas = vec![
         // Primary key
         test_column("id", Type::INT4, 1, false, Some(1)),
@@ -324,22 +324,22 @@ async fn insert_nullable_scalars() {
 
     let mut table_rows = vec![
         TableRow::new(vec![
-            Cell::I32(42),                           // id
-            Cell::Bool(true),                        // bool_col
-            Cell::String("A".to_string()),           // char_col
-            Cell::String("fixed".to_string()),       // bpchar_col
-            Cell::String("variable".to_string()),    // varchar_col
-            Cell::String("name_value".to_string()),  // name_col
-            Cell::String("test string".to_string()), // text_col
-            Cell::I16(123),                          /* int2_col (maps to Int
-                                                      * in Iceberg, comes
-                                                      * back as I32) TODO:fix
-                                                      * this */
+            Cell::I32(42),                          // id
+            Cell::Bool(true),                       // bool_col
+            Cell::String("A".to_owned()),           // char_col
+            Cell::String("fixed".to_owned()),       // bpchar_col
+            Cell::String("variable".to_owned()),    // varchar_col
+            Cell::String("name_value".to_owned()),  // name_col
+            Cell::String("test string".to_owned()), // text_col
+            Cell::I16(123),                         /* int2_col (maps to Int
+                                                     * in Iceberg, comes
+                                                     * back as I32) TODO:fix
+                                                     * this */
             Cell::I32(456),                  // int4_col
             Cell::I64(9876543210),           // int8_col
             Cell::F32(std::f32::consts::PI), // float4_col
             Cell::F64(std::f64::consts::E),  // float8_col
-            Cell::String("123.456".to_string()), /* numeric_col (maps to
+            Cell::String("123.456".to_owned()), /* numeric_col (maps to
                                               * String in Iceberg) */
             Cell::Date(NaiveDate::from_ymd_opt(2023, 12, 25).unwrap()), // date_col
             Cell::Time(NaiveTime::from_hms_micro_opt(1, 2, 3, 4).unwrap()),
@@ -355,10 +355,10 @@ async fn insert_nullable_scalars() {
                 Utc,
             )),
             Cell::Uuid(Uuid::new_v4()),
-            Cell::String(r#"{"key": "value"}"#.to_string()), /* json_col (maps to String in
-                                                              * Iceberg) */
-            Cell::String(r#"{"key": "value"}"#.to_string()), /* jsonb_col (maps to String in
-                                                              * Iceberg) */
+            Cell::String(r#"{"key": "value"}"#.to_owned()), /* json_col (maps to String in
+                                                             * Iceberg) */
+            Cell::String(r#"{"key": "value"}"#.to_owned()), /* jsonb_col (maps to String in
+                                                             * Iceberg) */
             Cell::U32(12345), // oid_col (maps to Int in Iceberg)
             Cell::Bytes(vec![0x48, 0x65, 0x6c, 0x6c, 0x6f]), // bytea_col (Hello in bytes)
         ]),
@@ -387,10 +387,7 @@ async fn insert_nullable_scalars() {
             Cell::Null,
         ]),
     ];
-    client
-        .insert_rows(namespace.to_string(), table_name.clone(), table_rows.clone())
-        .await
-        .unwrap();
+    client.insert_rows(namespace.to_owned(), table_name.clone(), table_rows.clone()).await.unwrap();
 
     // Change the expected type due to roundtrip issues
     // * Cell::I16 rountrips to Cell::I32,
@@ -399,7 +396,7 @@ async fn insert_nullable_scalars() {
     row.values_mut()[7] = Cell::I32(123);
     row.values_mut()[20] = Cell::I64(12345);
 
-    let read_rows = read_all_rows(&client, namespace.to_string(), table_name.clone()).await;
+    let read_rows = read_all_rows(&client, namespace.to_owned(), table_name.clone()).await;
 
     // Compare the actual values in the read_rows with inserted table_rows
     assert_eq!(read_rows, table_rows);
@@ -432,7 +429,7 @@ async fn insert_non_nullable_scalars() {
     client.create_namespace_if_missing(namespace).await.unwrap();
 
     // Create a sample table schema with all supported types as non-nullable
-    let table_name = "test_table".to_string();
+    let table_name = "test_table".to_owned();
     let column_schemas = vec![
         // Primary key
         test_column("id", Type::INT4, 1, false, Some(1)),
@@ -472,21 +469,21 @@ async fn insert_non_nullable_scalars() {
     client.create_table_if_missing(namespace, table_name.clone(), &column_schemas).await.unwrap();
 
     let mut table_rows = vec![TableRow::new(vec![
-        Cell::I32(42),                           // id
-        Cell::Bool(true),                        // bool_col
-        Cell::String("A".to_string()),           // char_col
-        Cell::String("fixed".to_string()),       // bpchar_col
-        Cell::String("variable".to_string()),    // varchar_col
-        Cell::String("name_value".to_string()),  // name_col
-        Cell::String("test string".to_string()), // text_col
-        Cell::I16(123),                          /* int2_col (maps to Int in
-                                                  * Iceberg, comes back as
-                                                  * I32) TODO:fix this */
+        Cell::I32(42),                          // id
+        Cell::Bool(true),                       // bool_col
+        Cell::String("A".to_owned()),           // char_col
+        Cell::String("fixed".to_owned()),       // bpchar_col
+        Cell::String("variable".to_owned()),    // varchar_col
+        Cell::String("name_value".to_owned()),  // name_col
+        Cell::String("test string".to_owned()), // text_col
+        Cell::I16(123),                         /* int2_col (maps to Int in
+                                                 * Iceberg, comes back as
+                                                 * I32) TODO:fix this */
         Cell::I32(456),                  // int4_col
         Cell::I64(9876543210),           // int8_col
         Cell::F32(std::f32::consts::PI), // float4_col
         Cell::F64(std::f64::consts::E),  // float8_col
-        Cell::String("123.456".to_string()), /* numeric_col (maps to
+        Cell::String("123.456".to_owned()), /* numeric_col (maps to
                                           * String in Iceberg) */
         Cell::Date(NaiveDate::from_ymd_opt(2023, 12, 25).unwrap()), // date_col
         Cell::Time(NaiveTime::from_hms_micro_opt(1, 2, 3, 4).unwrap()),
@@ -502,15 +499,12 @@ async fn insert_non_nullable_scalars() {
             Utc,
         )),
         Cell::Uuid(Uuid::new_v4()),
-        Cell::String(r#"{"key": "value"}"#.to_string()), // json_col (maps to String in Iceberg)
-        Cell::String(r#"{"key": "value"}"#.to_string()), // jsonb_col (maps to String in Iceberg)
-        Cell::U32(12345),                                // oid_col (maps to Int in Iceberg)
+        Cell::String(r#"{"key": "value"}"#.to_owned()), // json_col (maps to String in Iceberg)
+        Cell::String(r#"{"key": "value"}"#.to_owned()), // jsonb_col (maps to String in Iceberg)
+        Cell::U32(12345),                               // oid_col (maps to Int in Iceberg)
         Cell::Bytes(vec![0x48, 0x65, 0x6c, 0x6c, 0x6f]), // bytea_col (Hello in bytes)
     ])];
-    client
-        .insert_rows(namespace.to_string(), table_name.clone(), table_rows.clone())
-        .await
-        .unwrap();
+    client.insert_rows(namespace.to_owned(), table_name.clone(), table_rows.clone()).await.unwrap();
 
     // Change the expected type due to roundtrip issues
     // * Cell::I16 rountrips to Cell::I32,
@@ -519,7 +513,7 @@ async fn insert_non_nullable_scalars() {
     row.values_mut()[7] = Cell::I32(123);
     row.values_mut()[20] = Cell::I64(12345);
 
-    let read_rows = read_all_rows(&client, namespace.to_string(), table_name.clone()).await;
+    let read_rows = read_all_rows(&client, namespace.to_owned(), table_name.clone()).await;
 
     assert_eq!(read_rows.len(), 1);
 
@@ -554,7 +548,7 @@ async fn insert_nullable_array() {
     client.create_namespace_if_missing(namespace).await.unwrap();
 
     // Create a sample table schema with array types for all supported types
-    let table_name = "test_array_table".to_string();
+    let table_name = "test_array_table".to_owned();
     let column_schemas = vec![
         // Primary key
         test_column("id", Type::INT4, 1, false, Some(1)),
@@ -597,22 +591,16 @@ async fn insert_nullable_array() {
         TableRow::new(vec![
             Cell::I32(1),                                                            /* id */
             Cell::Array(ArrayCell::Bool(vec![Some(true), Some(false), Some(true)])), /* bool_array_col */
-            Cell::Array(ArrayCell::String(vec![Some("A".to_string()), Some("B".to_string())])), /* char_array_col */
+            Cell::Array(ArrayCell::String(vec![Some("A".to_owned()), Some("B".to_owned())])), /* char_array_col */
+            Cell::Array(ArrayCell::String(vec![Some("fix1".to_owned()), Some("fix2".to_owned())])), /* bpchar_array_col */
+            Cell::Array(ArrayCell::String(vec![Some("var1".to_owned()), Some("var2".to_owned())])), /* varchar_array_col */
             Cell::Array(ArrayCell::String(vec![
-                Some("fix1".to_string()),
-                Some("fix2".to_string()),
-            ])), /* bpchar_array_col */
-            Cell::Array(ArrayCell::String(vec![
-                Some("var1".to_string()),
-                Some("var2".to_string()),
-            ])), /* varchar_array_col */
-            Cell::Array(ArrayCell::String(vec![
-                Some("name1".to_string()),
-                Some("name2".to_string()),
+                Some("name1".to_owned()),
+                Some("name2".to_owned()),
             ])), /* name_array_col */
             Cell::Array(ArrayCell::String(vec![
-                Some("text1".to_string()),
-                Some("text2".to_string()),
+                Some("text1".to_owned()),
+                Some("text2".to_owned()),
             ])), /* text_array_col */
             Cell::Array(ArrayCell::I16(vec![Some(1), Some(2), Some(3)])), // int2_array_col
             Cell::Array(ArrayCell::I32(vec![Some(10), Some(20), Some(30)])), // int4_array_col
@@ -698,10 +686,7 @@ async fn insert_nullable_array() {
         ]),
     ];
 
-    client
-        .insert_rows(namespace.to_string(), table_name.clone(), table_rows.clone())
-        .await
-        .unwrap();
+    client.insert_rows(namespace.to_owned(), table_name.clone(), table_rows.clone()).await.unwrap();
 
     // Create expected rows with proper type conversions for roundtrip
     let mut expected_rows = table_rows.clone();
@@ -741,7 +726,7 @@ async fn insert_nullable_array() {
         values[20] = Cell::Array(ArrayCell::I64(converted));
     }
 
-    let read_rows = read_all_rows(&client, namespace.to_string(), table_name.clone()).await;
+    let read_rows = read_all_rows(&client, namespace.to_owned(), table_name.clone()).await;
 
     // Compare the actual values in the read_rows with expected table_rows
     assert_table_rows_equal_ignoring_size(&read_rows, &expected_rows);
@@ -775,7 +760,7 @@ async fn insert_non_nullable_array() {
 
     // Create a sample table schema with non-nullable array types for all supported
     // types
-    let table_name = "test_non_nullable_array_table".to_string();
+    let table_name = "test_non_nullable_array_table".to_owned();
     let column_schemas = vec![
         // Primary key
         test_column("id", Type::INT4, 1, false, Some(1)),
@@ -815,13 +800,13 @@ async fn insert_non_nullable_array() {
     client.create_table_if_missing(namespace, table_name.clone(), &column_schemas).await.unwrap();
 
     let table_rows = vec![TableRow::new(vec![
-        Cell::I32(1),                                                                       // id
+        Cell::I32(1),                                                                     // id
         Cell::Array(ArrayCell::Bool(vec![Some(true), Some(false), Some(true)])), // bool_array_col
-        Cell::Array(ArrayCell::String(vec![Some("A".to_string()), Some("B".to_string())])), /* char_array_col */
-        Cell::Array(ArrayCell::String(vec![Some("fix1".to_string()), Some("fix2".to_string())])), /* bpchar_array_col */
-        Cell::Array(ArrayCell::String(vec![Some("var1".to_string()), Some("var2".to_string())])), /* varchar_array_col */
-        Cell::Array(ArrayCell::String(vec![Some("name1".to_string()), Some("name2".to_string())])), /* name_array_col */
-        Cell::Array(ArrayCell::String(vec![Some("text1".to_string()), Some("text2".to_string())])), /* text_array_col */
+        Cell::Array(ArrayCell::String(vec![Some("A".to_owned()), Some("B".to_owned())])), /* char_array_col */
+        Cell::Array(ArrayCell::String(vec![Some("fix1".to_owned()), Some("fix2".to_owned())])), /* bpchar_array_col */
+        Cell::Array(ArrayCell::String(vec![Some("var1".to_owned()), Some("var2".to_owned())])), /* varchar_array_col */
+        Cell::Array(ArrayCell::String(vec![Some("name1".to_owned()), Some("name2".to_owned())])), /* name_array_col */
+        Cell::Array(ArrayCell::String(vec![Some("text1".to_owned()), Some("text2".to_owned())])), /* text_array_col */
         Cell::Array(ArrayCell::I16(vec![Some(1), Some(2), Some(3)])), // int2_array_col
         Cell::Array(ArrayCell::I32(vec![Some(10), Some(20), Some(30)])), // int4_array_col
         Cell::Array(ArrayCell::I64(vec![Some(100), Some(200), Some(300)])), // int8_array_col
@@ -881,10 +866,7 @@ async fn insert_non_nullable_array() {
         ])), // bytea_array_col
     ])];
 
-    client
-        .insert_rows(namespace.to_string(), table_name.clone(), table_rows.clone())
-        .await
-        .unwrap();
+    client.insert_rows(namespace.to_owned(), table_name.clone(), table_rows.clone()).await.unwrap();
 
     // Create expected rows with proper type conversions for roundtrip
     let mut expected_rows = table_rows.clone();
@@ -924,7 +906,7 @@ async fn insert_non_nullable_array() {
         values[20] = Cell::Array(ArrayCell::I64(converted));
     }
 
-    let read_rows = read_all_rows(&client, namespace.to_string(), table_name.clone()).await;
+    let read_rows = read_all_rows(&client, namespace.to_owned(), table_name.clone()).await;
 
     assert_eq!(read_rows.len(), 1);
 

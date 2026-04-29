@@ -24,7 +24,7 @@ impl ImageError {
     fn to_message(&self) -> String {
         match self {
             // Do not expose internal database details in error messages
-            ImageError::ImagesDb(ImagesDbError::Database(_)) => "internal server error".to_string(),
+            ImageError::ImagesDb(ImagesDbError::Database(_)) => "internal server error".to_owned(),
             // Every other message is ok, as they do not divulge sensitive information
             e => e.to_string(),
         }

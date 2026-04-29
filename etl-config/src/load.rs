@@ -234,8 +234,8 @@ mod tests {
 
     fn create_mock_config() -> ApplicationConfig {
         ApplicationConfig {
-            name: "test-app".to_string(),
-            mode: StorageMode::Disk { path: "/tmp/data".to_string(), max_size: 1024 },
+            name: "test-app".to_owned(),
+            mode: StorageMode::Disk { path: "/tmp/data".to_owned(), max_size: 1024 },
         }
     }
 

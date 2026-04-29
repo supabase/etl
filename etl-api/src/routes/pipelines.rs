@@ -168,16 +168,16 @@ impl PipelineError {
             | PipelineError::Database(_)
             | PipelineError::Validation(
                 ValidationError::TrustedRootCerts(_) | ValidationError::Environment(_),
-            ) => "internal server error".to_string(),
+            ) => "internal server error".to_owned(),
             // Do not expose validation error details as they may contain credential info.
             PipelineError::Validation(ValidationError::BigQuery(_)) => {
-                "BigQuery validation failed".to_string()
+                "BigQuery validation failed".to_owned()
             }
             PipelineError::Validation(ValidationError::Iceberg(_)) => {
-                "Iceberg validation failed".to_string()
+                "Iceberg validation failed".to_owned()
             }
             PipelineError::Validation(ValidationError::Database(_)) => {
-                "database validation failed".to_string()
+                "database validation failed".to_owned()
             }
             // Every other message is ok, as they do not divulge sensitive information.
             e => e.to_string(),
@@ -1213,7 +1213,7 @@ pub async fn rollback_tables(
             }
 
             if errored_table_ids.is_empty() {
-                return Err(PipelineError::NotRollbackable("No errored tables found".to_string()));
+                return Err(PipelineError::NotRollbackable("No errored tables found".to_owned()));
             }
 
             errored_table_ids
@@ -1224,7 +1224,7 @@ pub async fn rollback_tables(
 
             if table_ids.is_empty() {
                 return Err(PipelineError::NotRollbackable(
-                    "No tables found for this pipeline".to_string(),
+                    "No tables found for this pipeline".to_owned(),
                 ));
             }
 

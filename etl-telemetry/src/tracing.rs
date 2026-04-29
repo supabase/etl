@@ -214,7 +214,7 @@ where
         map.extend(fields);
     }
 
-    map.insert("name".to_string(), serde_json::Value::String(span.metadata().name().to_string()));
+    map.insert("name".to_owned(), serde_json::Value::String(span.metadata().name().to_owned()));
 
     serde_json::Value::Object(map)
 }
@@ -227,19 +227,19 @@ struct JsonFieldVisitor {
 
 impl tracing::field::Visit for JsonFieldVisitor {
     fn record_f64(&mut self, field: &tracing::field::Field, value: f64) {
-        self.values.insert(field.name().to_string(), serde_json::Value::from(value));
+        self.values.insert(field.name().to_owned(), serde_json::Value::from(value));
     }
 
     fn record_i64(&mut self, field: &tracing::field::Field, value: i64) {
-        self.values.insert(field.name().to_string(), serde_json::Value::from(value));
+        self.values.insert(field.name().to_owned(), serde_json::Value::from(value));
     }
 
     fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
-        self.values.insert(field.name().to_string(), serde_json::Value::from(value));
+        self.values.insert(field.name().to_owned(), serde_json::Value::from(value));
     }
 
     fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
-        self.values.insert(field.name().to_string(), serde_json::Value::from(value));
+        self.values.insert(field.name().to_owned(), serde_json::Value::from(value));
     }
 
     fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
@@ -262,7 +262,7 @@ impl tracing::field::Visit for JsonFieldVisitor {
 
 /// Normalizes raw tracing field names to their emitted representation.
 fn normalize_field_name(field_name: &str) -> String {
-    field_name.strip_prefix("r#").unwrap_or(field_name).to_string()
+    field_name.strip_prefix("r#").unwrap_or(field_name).to_owned()
 }
 
 /// Initializes tracing for the application.

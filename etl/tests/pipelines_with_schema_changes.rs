@@ -47,7 +47,7 @@ fn find_snapshot_index_after(
     expected: &[(&str, Type)],
 ) -> usize {
     let expected =
-        expected.iter().map(|(name, typ)| ((*name).to_string(), typ.clone())).collect::<Vec<_>>();
+        expected.iter().map(|(name, typ)| ((*name).to_owned(), typ.clone())).collect::<Vec<_>>();
 
     snapshots
         .iter()
@@ -784,7 +784,7 @@ async fn partitioned_table_schema_change_updates_relation_message() {
         .await
         .unwrap();
 
-    let publication_name = "test_partitioned_schema_change_pub".to_string();
+    let publication_name = "test_partitioned_schema_change_pub".to_owned();
     database
         .create_publication(&publication_name, std::slice::from_ref(&table_name))
         .await

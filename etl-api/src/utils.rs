@@ -8,7 +8,7 @@ where
     D: Deserializer<'de>,
 {
     let s = String::deserialize(deserializer)?;
-    Ok(s.trim().to_string())
+    Ok(s.trim().to_owned())
 }
 
 /// Deserializes an optional string and trims leading and trailing whitespace if
@@ -18,7 +18,7 @@ where
     D: Deserializer<'de>,
 {
     let opt = Option::<String>::deserialize(deserializer)?;
-    Ok(opt.map(|s| s.trim().to_string()))
+    Ok(opt.map(|s| s.trim().to_owned()))
 }
 
 /// Deserializes an optional secret string and trims leading and trailing
@@ -30,7 +30,7 @@ where
     D: Deserializer<'de>,
 {
     let opt = Option::<String>::deserialize(deserializer)?;
-    Ok(opt.map(|s| SerializableSecretString::from(s.trim().to_string())))
+    Ok(opt.map(|s| SerializableSecretString::from(s.trim().to_owned())))
 }
 
 /// Generates a random alphabetic string of length `len`.
@@ -74,20 +74,20 @@ pub fn parse_docker_image_tag(image: &str) -> String {
         };
 
         if tag.is_empty() {
-            return "unavailable".to_string();
+            return "unavailable".to_owned();
         }
 
-        return tag.to_string();
+        return tag.to_owned();
     }
 
     // No tag in the segment. If there's a digest in the segment, we can't infer a
     // tag.
     if at_pos.is_some() {
-        return "unavailable".to_string();
+        return "unavailable".to_owned();
     }
 
     // No tag and no digest in the segment -> default docker tag is latest
-    "latest".to_string()
+    "latest".to_owned()
 }
 
 #[cfg(test)]
@@ -236,7 +236,7 @@ mod tests {
 
         let json = r#"{"value": "  hello world  "}"#;
         let result: TestStruct = serde_json::from_str(json).unwrap();
-        assert_eq!(result.value, Some("hello world".to_string()));
+        assert_eq!(result.value, Some("hello world".to_owned()));
     }
 
     #[test]
@@ -275,7 +275,7 @@ mod tests {
 
         let json = r#"{"value": ""}"#;
         let result: TestStruct = serde_json::from_str(json).unwrap();
-        assert_eq!(result.value, Some("".to_string()));
+        assert_eq!(result.value, Some("".to_owned()));
     }
 
     #[test]
@@ -288,6 +288,6 @@ mod tests {
 
         let json = r#"{"value": "   "}"#;
         let result: TestStruct = serde_json::from_str(json).unwrap();
-        assert_eq!(result.value, Some("".to_string()));
+        assert_eq!(result.value, Some("".to_owned()));
     }
 }

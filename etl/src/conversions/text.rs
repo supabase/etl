@@ -33,7 +33,7 @@ pub(crate) fn parse_cell_from_postgres_text(typ: &Type, str: &str) -> EtlResult<
             ArrayCell::Bool,
         ),
         Type::CHAR | Type::BPCHAR | Type::VARCHAR | Type::NAME | Type::TEXT => {
-            Ok(Cell::String(str.to_string()))
+            Ok(Cell::String(str.to_owned()))
         }
         Type::CHAR_ARRAY
         | Type::BPCHAR_ARRAY
@@ -41,7 +41,7 @@ pub(crate) fn parse_cell_from_postgres_text(typ: &Type, str: &str) -> EtlResult<
         | Type::NAME_ARRAY
         | Type::TEXT_ARRAY => parse_cell_from_postgres_text_array(
             str,
-            |str| Ok(Some(str.to_string())),
+            |str| Ok(Some(str.to_owned())),
             ArrayCell::String,
         ),
         Type::INT2 => Ok(Cell::I16(str.parse()?)),
@@ -161,7 +161,7 @@ pub(crate) fn parse_cell_from_postgres_text(typ: &Type, str: &str) -> EtlResult<
         Type::OID_ARRAY => {
             parse_cell_from_postgres_text_array(str, |str| Ok(Some(str.parse()?)), ArrayCell::U32)
         }
-        _ => Ok(Cell::String(str.to_string())),
+        _ => Ok(Cell::String(str.to_owned())),
     }
 }
 
@@ -253,7 +253,7 @@ mod tests {
         let cell = parse_cell_from_postgres_text(&Type::TEXT_ARRAY, "{\"a\",\"null\"}").unwrap();
         match cell {
             Cell::Array(ArrayCell::String(v)) => {
-                assert_eq!(v, vec![Some("a".to_string()), Some("null".to_string())]);
+                assert_eq!(v, vec![Some("a".to_owned()), Some("null".to_owned())]);
             }
             _ => panic!("unexpected cell"),
         }
@@ -264,7 +264,7 @@ mod tests {
         let cell = parse_cell_from_postgres_text(&Type::TEXT_ARRAY, "{a,NULL}").unwrap();
         match cell {
             Cell::Array(ArrayCell::String(v)) => {
-                assert_eq!(v, vec![Some("a".to_string()), None]);
+                assert_eq!(v, vec![Some("a".to_owned()), None]);
             }
             _ => panic!("unexpected cell"),
         }
@@ -333,13 +333,13 @@ mod tests {
         let test_string = "Hello, World!";
 
         let cell = parse_cell_from_postgres_text(&Type::TEXT, test_string).unwrap();
-        assert_eq!(cell, Cell::String(test_string.to_string()));
+        assert_eq!(cell, Cell::String(test_string.to_owned()));
 
         let cell = parse_cell_from_postgres_text(&Type::VARCHAR, test_string).unwrap();
-        assert_eq!(cell, Cell::String(test_string.to_string()));
+        assert_eq!(cell, Cell::String(test_string.to_owned()));
 
         let cell = parse_cell_from_postgres_text(&Type::CHAR, test_string).unwrap();
-        assert_eq!(cell, Cell::String(test_string.to_string()));
+        assert_eq!(cell, Cell::String(test_string.to_owned()));
     }
 
     #[test]
@@ -484,9 +484,9 @@ mod tests {
                 assert_eq!(
                     v,
                     vec![
-                        Some("hello".to_string()),
-                        Some("world with spaces".to_string()),
-                        Some("with\"quotes".to_string())
+                        Some("hello".to_owned()),
+                        Some("world with spaces".to_owned()),
+                        Some("with\"quotes".to_owned())
                     ]
                 );
             }
@@ -543,7 +543,7 @@ mod tests {
                 // like table parser
                 assert_eq!(
                     v,
-                    vec![Some("line1\\nline2".to_string()), Some("tab\\there".to_string())]
+                    vec![Some("line1\\nline2".to_owned()), Some("tab\\there".to_owned())]
                 );
             }
             _ => panic!("Expected TEXT array with escape sequences"),
@@ -572,13 +572,13 @@ mod tests {
         use tokio_postgres::types::Type;
         // Create a custom type that's not normally supported
         let custom_type = Type::new(
-            "custom".to_string(),
+            "custom".to_owned(),
             99999,
             tokio_postgres::types::Kind::Simple,
-            "public".to_string(),
+            "public".to_owned(),
         );
 
         let cell = parse_cell_from_postgres_text(&custom_type, "test").unwrap();
-        assert_eq!(cell, Cell::String("test".to_string()));
+        assert_eq!(cell, Cell::String("test".to_owned()));
     }
 }

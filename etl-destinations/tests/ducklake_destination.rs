@@ -72,10 +72,10 @@ async fn acquire_ducklake_test_hook_guard() -> OwnedSemaphorePermit {
 fn make_schema(table_id: u32, schema: &str, table: &str) -> TableSchema {
     TableSchema::new(
         TableId::new(table_id),
-        TableName::new(schema.to_string(), table.to_string()),
+        TableName::new(schema.to_owned(), table.to_owned()),
         vec![
-            ColumnSchema::new("id".to_string(), PgType::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("name".to_string(), PgType::TEXT, -1, 2, None, true),
+            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false),
+            ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, None, true),
         ],
     )
 }
@@ -83,13 +83,13 @@ fn make_schema(table_id: u32, schema: &str, table: &str) -> TableSchema {
 fn make_rich_schema(table_id: u32) -> TableSchema {
     TableSchema::new(
         TableId::new(table_id),
-        TableName::new("public".to_string(), "rich".to_string()),
+        TableName::new("public".to_owned(), "rich".to_owned()),
         vec![
-            ColumnSchema::new("id".to_string(), PgType::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("label".to_string(), PgType::VARCHAR, -1, 2, None, true),
-            ColumnSchema::new("score".to_string(), PgType::FLOAT8, -1, 3, None, true),
-            ColumnSchema::new("active".to_string(), PgType::BOOL, -1, 4, None, true),
-            ColumnSchema::new("birthday".to_string(), PgType::DATE, -1, 5, None, true),
+            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false),
+            ColumnSchema::new("label".to_owned(), PgType::VARCHAR, -1, 2, None, true),
+            ColumnSchema::new("score".to_owned(), PgType::FLOAT8, -1, 3, None, true),
+            ColumnSchema::new("active".to_owned(), PgType::BOOL, -1, 4, None, true),
+            ColumnSchema::new("birthday".to_owned(), PgType::DATE, -1, 5, None, true),
         ],
     )
 }
@@ -291,8 +291,8 @@ async fn write_table_rows_basic() {
         .write_table_rows(
             &replicated_table_schema,
             vec![
-                TableRow::new(vec![Cell::I32(1), Cell::String("Alice".to_string())]),
-                TableRow::new(vec![Cell::I32(2), Cell::String("Bob".to_string())]),
+                TableRow::new(vec![Cell::I32(1), Cell::String("Alice".to_owned())]),
+                TableRow::new(vec![Cell::I32(2), Cell::String("Bob".to_owned())]),
                 TableRow::new(vec![Cell::I32(3), Cell::Null]),
             ],
         )
@@ -350,7 +350,7 @@ async fn write_table_rows_small_batch_stays_inlined_after_return() {
     destination
         .write_table_rows(
             &replicated_table_schema,
-            vec![TableRow::new(vec![Cell::I32(1), Cell::String("first".to_string())])],
+            vec![TableRow::new(vec![Cell::I32(1), Cell::String("first".to_owned())])],
         )
         .await
         .unwrap();
@@ -444,7 +444,7 @@ async fn ducklake_rejects_invalid_expire_snapshots_retention() {
         None,
         None,
         None,
-        Some("definitely not an interval".to_string()),
+        Some("definitely not an interval".to_owned()),
         MemoryStore::new(),
     )
     .await
@@ -495,7 +495,7 @@ async fn write_table_rows_reuses_warm_pooled_connection() {
     destination
         .write_table_rows(
             &replicated_table_schema,
-            vec![TableRow::new(vec![Cell::I32(1), Cell::String("first".to_string())])],
+            vec![TableRow::new(vec![Cell::I32(1), Cell::String("first".to_owned())])],
         )
         .await
         .unwrap();
@@ -504,7 +504,7 @@ async fn write_table_rows_reuses_warm_pooled_connection() {
     destination
         .write_table_rows(
             &replicated_table_schema,
-            vec![TableRow::new(vec![Cell::I32(2), Cell::String("second".to_string())])],
+            vec![TableRow::new(vec![Cell::I32(2), Cell::String("second".to_owned())])],
         )
         .await
         .unwrap();
@@ -554,7 +554,7 @@ async fn write_table_rows_replaces_broken_pooled_connection_after_retry() {
     destination
         .write_table_rows(
             &replicated_table_schema,
-            vec![TableRow::new(vec![Cell::I32(1), Cell::String("first".to_string())])],
+            vec![TableRow::new(vec![Cell::I32(1), Cell::String("first".to_owned())])],
         )
         .await
         .unwrap();
@@ -563,7 +563,7 @@ async fn write_table_rows_replaces_broken_pooled_connection_after_retry() {
     destination
         .write_table_rows(
             &replicated_table_schema,
-            vec![TableRow::new(vec![Cell::I32(2), Cell::String("second".to_string())])],
+            vec![TableRow::new(vec![Cell::I32(2), Cell::String("second".to_owned())])],
         )
         .await
         .unwrap();
@@ -613,8 +613,8 @@ async fn write_table_rows_retry_after_post_commit_failure_is_idempotent() {
         .write_table_rows(
             &replicated_table_schema,
             vec![
-                TableRow::new(vec![Cell::I32(1), Cell::String("alpha".to_string())]),
-                TableRow::new(vec![Cell::I32(2), Cell::String("beta".to_string())]),
+                TableRow::new(vec![Cell::I32(1), Cell::String("alpha".to_owned())]),
+                TableRow::new(vec![Cell::I32(2), Cell::String("beta".to_owned())]),
             ],
         )
         .await
@@ -666,7 +666,7 @@ async fn concurrent_same_table_copy_batches_complete() {
     destination
         .write_table_rows(
             &replicated_table_schema,
-            vec![TableRow::new(vec![Cell::I32(-1), Cell::String("seed".to_string())])],
+            vec![TableRow::new(vec![Cell::I32(-1), Cell::String("seed".to_owned())])],
         )
         .await
         .unwrap();
@@ -825,8 +825,8 @@ async fn truncate_clears_rows() {
         .write_table_rows(
             &replicated_table_schema,
             vec![
-                TableRow::new(vec![Cell::I32(1), Cell::String("first".to_string())]),
-                TableRow::new(vec![Cell::I32(2), Cell::String("second".to_string())]),
+                TableRow::new(vec![Cell::I32(1), Cell::String("first".to_owned())]),
+                TableRow::new(vec![Cell::I32(2), Cell::String("second".to_owned())]),
             ],
         )
         .await
@@ -884,8 +884,8 @@ async fn truncate_clears_copy_markers_for_recopy() {
     .unwrap();
 
     let rows = vec![
-        TableRow::new(vec![Cell::I32(1), Cell::String("first".to_string())]),
-        TableRow::new(vec![Cell::I32(2), Cell::String("second".to_string())]),
+        TableRow::new(vec![Cell::I32(1), Cell::String("first".to_owned())]),
+        TableRow::new(vec![Cell::I32(2), Cell::String("second".to_owned())]),
     ];
 
     destination.write_table_rows(&replicated_table_schema, rows.clone()).await.unwrap();
@@ -936,7 +936,7 @@ async fn write_events() {
                 commit_lsn: lsn,
                 tx_ordinal: 0,
                 replicated_table_schema: replicated_table_schema.clone(),
-                table_row: TableRow::new(vec![Cell::I32(1), Cell::String("Widget".to_string())]),
+                table_row: TableRow::new(vec![Cell::I32(1), Cell::String("Widget".to_owned())]),
             }),
             Event::Update(UpdateEvent {
                 start_lsn: lsn,
@@ -945,7 +945,7 @@ async fn write_events() {
                 replicated_table_schema: replicated_table_schema.clone(),
                 updated_table_row: UpdatedTableRow::Full(TableRow::new(vec![
                     Cell::I32(1),
-                    Cell::String("Gadget".to_string()),
+                    Cell::String("Gadget".to_owned()),
                 ])),
                 old_table_row: None,
             }),
@@ -954,7 +954,7 @@ async fn write_events() {
                 commit_lsn: lsn,
                 tx_ordinal: 2,
                 replicated_table_schema: replicated_table_schema.clone(),
-                table_row: TableRow::new(vec![Cell::I32(2), Cell::String("Spare".to_string())]),
+                table_row: TableRow::new(vec![Cell::I32(2), Cell::String("Spare".to_owned())]),
             }),
             Event::Delete(DeleteEvent {
                 start_lsn: lsn,
@@ -963,7 +963,7 @@ async fn write_events() {
                 replicated_table_schema: replicated_table_schema.clone(),
                 old_table_row: Some(OldTableRow::Full(TableRow::new(vec![
                     Cell::I32(2),
-                    Cell::String("Spare".to_string()),
+                    Cell::String("Spare".to_owned()),
                 ]))),
             }),
         ])
@@ -1026,7 +1026,7 @@ async fn write_events_small_batch_stays_inlined_after_return() {
             commit_lsn: lsn,
             tx_ordinal: 0,
             replicated_table_schema: replicated_table_schema.clone(),
-            table_row: TableRow::new(vec![Cell::I32(1), Cell::String("created".to_string())]),
+            table_row: TableRow::new(vec![Cell::I32(1), Cell::String("created".to_owned())]),
         })])
         .await
         .unwrap();
@@ -1080,7 +1080,7 @@ async fn write_events_with_old_row_update() {
                 commit_lsn: lsn,
                 tx_ordinal: 0,
                 replicated_table_schema: replicated_table_schema.clone(),
-                table_row: TableRow::new(vec![Cell::I32(1), Cell::String("Widget".to_string())]),
+                table_row: TableRow::new(vec![Cell::I32(1), Cell::String("Widget".to_owned())]),
             }),
             Event::Update(UpdateEvent {
                 start_lsn: lsn,
@@ -1089,11 +1089,11 @@ async fn write_events_with_old_row_update() {
                 replicated_table_schema: replicated_table_schema.clone(),
                 updated_table_row: UpdatedTableRow::Full(TableRow::new(vec![
                     Cell::I32(1),
-                    Cell::String("Gadget".to_string()),
+                    Cell::String("Gadget".to_owned()),
                 ])),
                 old_table_row: Some(OldTableRow::Full(TableRow::new(vec![
                     Cell::I32(1),
-                    Cell::String("Widget".to_string()),
+                    Cell::String("Widget".to_owned()),
                 ]))),
             }),
         ])
@@ -1152,7 +1152,7 @@ async fn write_events_with_partial_updates() {
     destination
         .write_table_rows(
             &replicated_schema,
-            vec![TableRow::new(vec![Cell::I32(1), Cell::String("seed".to_string())])],
+            vec![TableRow::new(vec![Cell::I32(1), Cell::String("seed".to_owned())])],
         )
         .await
         .unwrap();
@@ -1167,7 +1167,7 @@ async fn write_events_with_partial_updates() {
                 replicated_table_schema: replicated_schema.clone(),
                 updated_table_row: UpdatedTableRow::Partial(PartialTableRow::new(
                     2,
-                    TableRow::new(vec![Cell::I32(1), Cell::String("grown".to_string())]),
+                    TableRow::new(vec![Cell::I32(1), Cell::String("grown".to_owned())]),
                     vec![],
                 )),
                 old_table_row: Some(OldTableRow::Key(TableRow::new(vec![Cell::I32(1)]))),
@@ -1179,7 +1179,7 @@ async fn write_events_with_partial_updates() {
                 replicated_table_schema: replicated_schema.clone(),
                 updated_table_row: UpdatedTableRow::Partial(PartialTableRow::new(
                     2,
-                    TableRow::new(vec![Cell::I32(1), Cell::String("ripe".to_string())]),
+                    TableRow::new(vec![Cell::I32(1), Cell::String("ripe".to_owned())]),
                     vec![],
                 )),
                 old_table_row: Some(OldTableRow::Key(TableRow::new(vec![Cell::I32(1)]))),
@@ -1245,7 +1245,7 @@ async fn write_events_without_replica_identity_rejects_mutations() {
     destination
         .write_table_rows(
             &replicated_schema,
-            vec![TableRow::new(vec![Cell::I32(1), Cell::String("seed".to_string())])],
+            vec![TableRow::new(vec![Cell::I32(1), Cell::String("seed".to_owned())])],
         )
         .await
         .unwrap();
@@ -1259,7 +1259,7 @@ async fn write_events_without_replica_identity_rejects_mutations() {
             replicated_table_schema: replicated_schema.clone(),
             updated_table_row: UpdatedTableRow::Full(TableRow::new(vec![
                 Cell::I32(1),
-                Cell::String("grown".to_string()),
+                Cell::String("grown".to_owned()),
             ])),
             old_table_row: None,
         })])
@@ -1337,7 +1337,7 @@ async fn write_events_replay_is_idempotent() {
             commit_lsn: lsn,
             tx_ordinal: 0,
             replicated_table_schema: replicated_table_schema.clone(),
-            table_row: TableRow::new(vec![Cell::I32(1), Cell::String("draft".to_string())]),
+            table_row: TableRow::new(vec![Cell::I32(1), Cell::String("draft".to_owned())]),
         }),
         Event::Update(UpdateEvent {
             start_lsn: lsn,
@@ -1346,11 +1346,11 @@ async fn write_events_replay_is_idempotent() {
             replicated_table_schema: replicated_table_schema.clone(),
             updated_table_row: UpdatedTableRow::Full(TableRow::new(vec![
                 Cell::I32(1),
-                Cell::String("paid".to_string()),
+                Cell::String("paid".to_owned()),
             ])),
             old_table_row: Some(OldTableRow::Full(TableRow::new(vec![
                 Cell::I32(1),
-                Cell::String("draft".to_string()),
+                Cell::String("draft".to_owned()),
             ]))),
         }),
         Event::Insert(InsertEvent {
@@ -1358,7 +1358,7 @@ async fn write_events_replay_is_idempotent() {
             commit_lsn: lsn,
             tx_ordinal: 2,
             replicated_table_schema: replicated_table_schema.clone(),
-            table_row: TableRow::new(vec![Cell::I32(2), Cell::String("temp".to_string())]),
+            table_row: TableRow::new(vec![Cell::I32(2), Cell::String("temp".to_owned())]),
         }),
         Event::Delete(DeleteEvent {
             start_lsn: lsn,
@@ -1367,7 +1367,7 @@ async fn write_events_replay_is_idempotent() {
             replicated_table_schema: replicated_table_schema.clone(),
             old_table_row: Some(OldTableRow::Full(TableRow::new(vec![
                 Cell::I32(2),
-                Cell::String("temp".to_string()),
+                Cell::String("temp".to_owned()),
             ]))),
         }),
     ];
@@ -1433,7 +1433,7 @@ async fn write_events_same_commit_lsn_higher_tx_ordinal_still_applies() {
             commit_lsn: lsn,
             tx_ordinal: 0,
             replicated_table_schema: replicated_table_schema.clone(),
-            table_row: TableRow::new(vec![Cell::I32(1), Cell::String("queued".to_string())]),
+            table_row: TableRow::new(vec![Cell::I32(1), Cell::String("queued".to_owned())]),
         })])
         .await
         .unwrap();
@@ -1445,11 +1445,11 @@ async fn write_events_same_commit_lsn_higher_tx_ordinal_still_applies() {
             replicated_table_schema: replicated_table_schema.clone(),
             updated_table_row: UpdatedTableRow::Full(TableRow::new(vec![
                 Cell::I32(1),
-                Cell::String("posted".to_string()),
+                Cell::String("posted".to_owned()),
             ])),
             old_table_row: Some(OldTableRow::Full(TableRow::new(vec![
                 Cell::I32(1),
-                Cell::String("queued".to_string()),
+                Cell::String("queued".to_owned()),
             ]))),
         })])
         .await
@@ -1631,7 +1631,7 @@ async fn write_events_reuses_one_staging_table_per_atomic_batch() {
                 commit_lsn: lsn,
                 tx_ordinal: 0,
                 replicated_table_schema: replicated_table_schema.clone(),
-                table_row: TableRow::new(vec![Cell::I32(1), Cell::String("before".to_string())]),
+                table_row: TableRow::new(vec![Cell::I32(1), Cell::String("before".to_owned())]),
             }),
             Event::Update(UpdateEvent {
                 start_lsn: lsn,
@@ -1640,11 +1640,11 @@ async fn write_events_reuses_one_staging_table_per_atomic_batch() {
                 replicated_table_schema: replicated_table_schema.clone(),
                 updated_table_row: UpdatedTableRow::Full(TableRow::new(vec![
                     Cell::I32(1),
-                    Cell::String("after".to_string()),
+                    Cell::String("after".to_owned()),
                 ])),
                 old_table_row: Some(OldTableRow::Full(TableRow::new(vec![
                     Cell::I32(1),
-                    Cell::String("before".to_string()),
+                    Cell::String("before".to_owned()),
                 ]))),
             }),
             Event::Insert(InsertEvent {
@@ -1652,7 +1652,7 @@ async fn write_events_reuses_one_staging_table_per_atomic_batch() {
                 commit_lsn: lsn,
                 tx_ordinal: 2,
                 replicated_table_schema: replicated_table_schema.clone(),
-                table_row: TableRow::new(vec![Cell::I32(2), Cell::String("tail".to_string())]),
+                table_row: TableRow::new(vec![Cell::I32(2), Cell::String("tail".to_owned())]),
             }),
         ])
         .await
@@ -1674,7 +1674,7 @@ async fn write_events_reuses_one_staging_table_per_atomic_batch() {
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
-    assert_eq!(rows, vec![(1, "after".to_string()), (2, "tail".to_string())]);
+    assert_eq!(rows, vec![(1, "after".to_owned()), (2, "tail".to_owned())]);
 
     reset_ducklake_test_hooks();
 }
@@ -1713,7 +1713,7 @@ async fn applied_batches_table_uses_data_inlining() {
     destination
         .write_table_rows(
             &replicated_table_schema,
-            vec![TableRow::new(vec![Cell::I32(1), Cell::String("created".to_string())])],
+            vec![TableRow::new(vec![Cell::I32(1), Cell::String("created".to_owned())])],
         )
         .await
         .unwrap();
@@ -1768,14 +1768,14 @@ async fn write_events_mixed_multi_table_batches() {
                 commit_lsn: lsn,
                 tx_ordinal: 0,
                 replicated_table_schema: replicated_table_schema_a.clone(),
-                table_row: TableRow::new(vec![Cell::I32(1), Cell::String("a-one".to_string())]),
+                table_row: TableRow::new(vec![Cell::I32(1), Cell::String("a-one".to_owned())]),
             }),
             Event::Insert(InsertEvent {
                 start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 1,
                 replicated_table_schema: replicated_table_schema_b.clone(),
-                table_row: TableRow::new(vec![Cell::I32(1), Cell::String("b-one".to_string())]),
+                table_row: TableRow::new(vec![Cell::I32(1), Cell::String("b-one".to_owned())]),
             }),
             Event::Update(UpdateEvent {
                 start_lsn: lsn,
@@ -1784,11 +1784,11 @@ async fn write_events_mixed_multi_table_batches() {
                 replicated_table_schema: replicated_table_schema_a.clone(),
                 updated_table_row: UpdatedTableRow::Full(TableRow::new(vec![
                     Cell::I32(1),
-                    Cell::String("a-one-updated".to_string()),
+                    Cell::String("a-one-updated".to_owned()),
                 ])),
                 old_table_row: Some(OldTableRow::Full(TableRow::new(vec![
                     Cell::I32(1),
-                    Cell::String("a-one".to_string()),
+                    Cell::String("a-one".to_owned()),
                 ]))),
             }),
             Event::Insert(InsertEvent {
@@ -1796,7 +1796,7 @@ async fn write_events_mixed_multi_table_batches() {
                 commit_lsn: lsn,
                 tx_ordinal: 3,
                 replicated_table_schema: replicated_table_schema_b.clone(),
-                table_row: TableRow::new(vec![Cell::I32(2), Cell::String("b-two".to_string())]),
+                table_row: TableRow::new(vec![Cell::I32(2), Cell::String("b-two".to_owned())]),
             }),
             Event::Delete(DeleteEvent {
                 start_lsn: lsn,
@@ -1805,7 +1805,7 @@ async fn write_events_mixed_multi_table_batches() {
                 replicated_table_schema: replicated_table_schema_b.clone(),
                 old_table_row: Some(OldTableRow::Full(TableRow::new(vec![
                     Cell::I32(1),
-                    Cell::String("b-one".to_string()),
+                    Cell::String("b-one".to_owned()),
                 ]))),
             }),
         ])
@@ -1897,8 +1897,8 @@ async fn write_events_truncate_retry_after_post_commit_failure_is_idempotent() {
         .write_table_rows(
             &replicated_table_schema,
             vec![
-                TableRow::new(vec![Cell::I32(1), Cell::String("before-1".to_string())]),
-                TableRow::new(vec![Cell::I32(2), Cell::String("before-2".to_string())]),
+                TableRow::new(vec![Cell::I32(1), Cell::String("before-1".to_owned())]),
+                TableRow::new(vec![Cell::I32(2), Cell::String("before-2".to_owned())]),
             ],
         )
         .await
@@ -1923,7 +1923,7 @@ async fn write_events_truncate_retry_after_post_commit_failure_is_idempotent() {
                 replicated_table_schema: replicated_table_schema.clone(),
                 table_row: TableRow::new(vec![
                     Cell::I32(3),
-                    Cell::String("after-truncate".to_string()),
+                    Cell::String("after-truncate".to_owned()),
                 ]),
             }),
         ])
@@ -1998,7 +1998,7 @@ async fn write_events_retry_after_post_commit_failure_is_idempotent() {
                 commit_lsn: lsn,
                 tx_ordinal: 0,
                 replicated_table_schema: replicated_table_schema.clone(),
-                table_row: TableRow::new(vec![Cell::I32(1), Cell::String("queued".to_string())]),
+                table_row: TableRow::new(vec![Cell::I32(1), Cell::String("queued".to_owned())]),
             }),
             Event::Update(UpdateEvent {
                 start_lsn: lsn,
@@ -2007,11 +2007,11 @@ async fn write_events_retry_after_post_commit_failure_is_idempotent() {
                 replicated_table_schema: replicated_table_schema.clone(),
                 updated_table_row: UpdatedTableRow::Full(TableRow::new(vec![
                     Cell::I32(1),
-                    Cell::String("posted".to_string()),
+                    Cell::String("posted".to_owned()),
                 ])),
                 old_table_row: Some(OldTableRow::Full(TableRow::new(vec![
                     Cell::I32(1),
-                    Cell::String("queued".to_string()),
+                    Cell::String("queued".to_owned()),
                 ]))),
             }),
             Event::Insert(InsertEvent {
@@ -2019,7 +2019,7 @@ async fn write_events_retry_after_post_commit_failure_is_idempotent() {
                 commit_lsn: lsn,
                 tx_ordinal: 2,
                 replicated_table_schema: replicated_table_schema.clone(),
-                table_row: TableRow::new(vec![Cell::I32(2), Cell::String("tmp".to_string())]),
+                table_row: TableRow::new(vec![Cell::I32(2), Cell::String("tmp".to_owned())]),
             }),
             Event::Delete(DeleteEvent {
                 start_lsn: lsn,
@@ -2028,7 +2028,7 @@ async fn write_events_retry_after_post_commit_failure_is_idempotent() {
                 replicated_table_schema: replicated_table_schema.clone(),
                 old_table_row: Some(OldTableRow::Full(TableRow::new(vec![
                     Cell::I32(2),
-                    Cell::String("tmp".to_string()),
+                    Cell::String("tmp".to_owned()),
                 ]))),
             }),
         ])
@@ -2161,7 +2161,7 @@ async fn type_mapping_round_trip() {
             &replicated_table_schema,
             vec![TableRow::new(vec![
                 Cell::I32(42),
-                Cell::String("hello".to_string()),
+                Cell::String("hello".to_owned()),
                 Cell::F64(PI),
                 Cell::Bool(true),
                 Cell::Date(NaiveDate::from_ymd_opt(2024, 6, 15).unwrap()),

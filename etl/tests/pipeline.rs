@@ -46,7 +46,7 @@ fn test_column(
     primary_key: bool,
 ) -> ColumnSchema {
     ColumnSchema::new(
-        name.to_string(),
+        name.to_owned(),
         typ,
         -1,
         ordinal_position,
@@ -591,7 +591,7 @@ async fn publication_changes_are_correctly_handled() {
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
-        publication_name.to_string(),
+        publication_name.to_owned(),
         store.clone(),
         destination.clone(),
     );
@@ -649,7 +649,7 @@ async fn publication_changes_are_correctly_handled() {
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
-        publication_name.to_string(),
+        publication_name.to_owned(),
         store.clone(),
         destination.clone(),
     );
@@ -846,7 +846,7 @@ async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart()
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
-        publication_name.to_string(),
+        publication_name.to_owned(),
         store.clone(),
         destination.clone(),
     );
@@ -897,7 +897,7 @@ async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart()
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
-        publication_name.to_string(),
+        publication_name.to_owned(),
         store.clone(),
         destination.clone(),
     );
@@ -1373,7 +1373,7 @@ async fn table_without_primary_key_is_errored() {
     let table_id =
         database.create_table(table_name.clone(), false, &[("name", "text")]).await.unwrap();
 
-    let publication_name = "test_pub".to_string();
+    let publication_name = "test_pub".to_owned();
     database
         .create_publication(&publication_name, std::slice::from_ref(&table_name))
         .await
@@ -1446,7 +1446,7 @@ async fn pipeline_respects_column_level_publication() {
         .unwrap();
 
     // Create publication with only a subset of columns.
-    let publication_name = "test_pub".to_string();
+    let publication_name = "test_pub".to_owned();
     database
         .run_sql(&format!(
             "create publication {} for table {} (id, name, age)",

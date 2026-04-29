@@ -171,9 +171,9 @@ mod tests {
     fn test_schema(table_id: TableId, snapshot_id: u64) -> TableSchema {
         TableSchema::with_snapshot_id(
             table_id,
-            TableName::new("public".to_string(), format!("table_{table_id}")),
+            TableName::new("public".to_owned(), format!("table_{table_id}")),
             vec![
-                ColumnSchema::new("id".to_string(), Type::INT8, -1, 1, Some(1), false),
+                ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, Some(1), false),
                 ColumnSchema::new(format!("col_at_{snapshot_id}"), Type::TEXT, -1, 2, None, true),
             ],
             SnapshotId::from(snapshot_id),

@@ -58,8 +58,8 @@ impl BatchConfig {
     pub fn validate(&self) -> Result<(), ValidationError> {
         if !(0.0..=1.0).contains(&self.memory_budget_ratio) || self.memory_budget_ratio == 0.0 {
             return Err(ValidationError::InvalidFieldValue {
-                field: "batch.memory_budget_ratio".to_string(),
-                constraint: "must be in the (0.0, 1.0] interval".to_string(),
+                field: "batch.memory_budget_ratio".to_owned(),
+                constraint: "must be in the (0.0, 1.0] interval".to_owned(),
             });
         }
 
@@ -177,22 +177,22 @@ impl MemoryBackpressureConfig {
     pub fn validate(&self) -> Result<(), ValidationError> {
         if !(0.0..=1.0).contains(&self.activate_threshold) || self.activate_threshold == 0.0 {
             return Err(ValidationError::InvalidFieldValue {
-                field: "memory_backpressure.activate_threshold".to_string(),
-                constraint: "must be in the (0.0, 1.0] interval".to_string(),
+                field: "memory_backpressure.activate_threshold".to_owned(),
+                constraint: "must be in the (0.0, 1.0] interval".to_owned(),
             });
         }
 
         if !(0.0..=1.0).contains(&self.resume_threshold) || self.resume_threshold == 1.0 {
             return Err(ValidationError::InvalidFieldValue {
-                field: "memory_backpressure.resume_threshold".to_string(),
-                constraint: "must be in the [0.0, 1.0) interval".to_string(),
+                field: "memory_backpressure.resume_threshold".to_owned(),
+                constraint: "must be in the [0.0, 1.0) interval".to_owned(),
             });
         }
 
         if self.resume_threshold >= self.activate_threshold {
             return Err(ValidationError::InvalidFieldValue {
-                field: "memory_backpressure.resume_threshold".to_string(),
-                constraint: "must be lower than memory_backpressure.activate_threshold".to_string(),
+                field: "memory_backpressure.resume_threshold".to_owned(),
+                constraint: "must be lower than memory_backpressure.activate_threshold".to_owned(),
             });
         }
 
@@ -293,22 +293,22 @@ impl PipelineConfig {
 
         if self.max_table_sync_workers == 0 {
             return Err(ValidationError::InvalidFieldValue {
-                field: "max_table_sync_workers".to_string(),
-                constraint: "must be greater than 0".to_string(),
+                field: "max_table_sync_workers".to_owned(),
+                constraint: "must be greater than 0".to_owned(),
             });
         }
 
         if self.table_error_retry_max_attempts == 0 {
             return Err(ValidationError::InvalidFieldValue {
-                field: "table_error_retry_max_attempts".to_string(),
-                constraint: "must be greater than 0".to_string(),
+                field: "table_error_retry_max_attempts".to_owned(),
+                constraint: "must be greater than 0".to_owned(),
             });
         }
 
         if self.max_copy_connections_per_table == 0 {
             return Err(ValidationError::InvalidFieldValue {
-                field: "max_copy_connections_per_table".to_string(),
-                constraint: "must be greater than 0".to_string(),
+                field: "max_copy_connections_per_table".to_owned(),
+                constraint: "must be greater than 0".to_owned(),
             });
         }
 
@@ -318,8 +318,8 @@ impl PipelineConfig {
 
         if self.memory_refresh_interval_ms == 0 {
             return Err(ValidationError::InvalidFieldValue {
-                field: "memory_refresh_interval_ms".to_string(),
-                constraint: "must be greater than 0".to_string(),
+                field: "memory_refresh_interval_ms".to_owned(),
+                constraint: "must be greater than 0".to_owned(),
             });
         }
 

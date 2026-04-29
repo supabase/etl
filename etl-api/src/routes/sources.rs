@@ -68,7 +68,7 @@ impl SourceError {
             SourceError::SourcesDb(SourcesDbError::Database(_))
             | SourceError::PipelinesDb(PipelinesDbError::Database(_))
             | SourceError::Validation(_)
-            | SourceError::K8sCore(_) => "internal server error".to_string(),
+            | SourceError::K8sCore(_) => "internal server error".to_owned(),
             // Every other message is ok, as they do not divulge sensitive information
             e => e.to_string(),
         }

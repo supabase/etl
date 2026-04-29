@@ -53,10 +53,8 @@ async fn tenant_can_be_created() {
     let app = spawn_test_app().await;
 
     // Act
-    let tenant = CreateTenantRequest {
-        id: "abcdefghijklmnopqrst".to_string(),
-        name: "NewTenant".to_string(),
-    };
+    let tenant =
+        CreateTenantRequest { id: "abcdefghijklmnopqrst".to_owned(), name: "NewTenant".to_owned() };
     let response = app.create_tenant(&tenant).await;
 
     // Assert
@@ -81,8 +79,8 @@ async fn creating_duplicate_tenant_returns_409() {
     let app = spawn_test_app().await;
 
     let tenant = CreateTenantRequest {
-        id: "abcdefghijklmnopqrst".to_string(),
-        name: "DuplicateTenant".to_string(),
+        id: "abcdefghijklmnopqrst".to_owned(),
+        name: "DuplicateTenant".to_owned(),
     };
 
     // Act - Create the tenant the first time
@@ -104,7 +102,7 @@ async fn create_or_update_tenant_creates_a_new_tenant() {
 
     // Act
     let tenant_id = "abcdefghijklmnopqrst";
-    let tenant = CreateOrUpdateTenantRequest { name: "NewTenant".to_string() };
+    let tenant = CreateOrUpdateTenantRequest { name: "NewTenant".to_owned() };
     let response = app.create_or_update_tenant(tenant_id, &tenant).await;
 
     // Assert
@@ -130,10 +128,10 @@ async fn create_or_update_tenant_updates_an_existing_tenant() {
 
     // Act
     let tenant_id = "abcdefghijklmnopqrst";
-    let tenant = CreateOrUpdateTenantRequest { name: "NewTenant".to_string() };
+    let tenant = CreateOrUpdateTenantRequest { name: "NewTenant".to_owned() };
     let response = app.create_or_update_tenant(tenant_id, &tenant).await;
     assert!(response.status().is_success());
-    let tenant = CreateOrUpdateTenantRequest { name: "UpdatedTenant".to_string() };
+    let tenant = CreateOrUpdateTenantRequest { name: "UpdatedTenant".to_owned() };
     let response = app.create_or_update_tenant(tenant_id, &tenant).await;
 
     // Assert
@@ -156,10 +154,8 @@ async fn an_existing_tenant_can_be_read() {
     init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
-    let tenant = CreateTenantRequest {
-        id: "abcdefghijklmnopqrst".to_string(),
-        name: "NewTenant".to_string(),
-    };
+    let tenant =
+        CreateTenantRequest { id: "abcdefghijklmnopqrst".to_owned(), name: "NewTenant".to_owned() };
     let response = app.create_tenant(&tenant).await;
     let response: CreateTenantResponse =
         response.json().await.expect("failed to deserialize response");
@@ -194,17 +190,15 @@ async fn an_existing_tenant_can_be_updated() {
     init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
-    let tenant = CreateTenantRequest {
-        id: "abcdefghijklmnopqrst".to_string(),
-        name: "NewTenant".to_string(),
-    };
+    let tenant =
+        CreateTenantRequest { id: "abcdefghijklmnopqrst".to_owned(), name: "NewTenant".to_owned() };
     let response = app.create_tenant(&tenant).await;
     let response: CreateTenantResponse =
         response.json().await.expect("failed to deserialize response");
     let tenant_id = &response.id;
 
     // Act
-    let updated_tenant = UpdateTenantRequest { name: "UpdatedTenant".to_string() };
+    let updated_tenant = UpdateTenantRequest { name: "UpdatedTenant".to_owned() };
     let response = app.update_tenant(tenant_id, &updated_tenant).await;
 
     // Assert
@@ -223,7 +217,7 @@ async fn non_existing_tenant_cannot_be_updated() {
     let app = spawn_test_app().await;
 
     // Act
-    let updated_tenant = UpdateTenantRequest { name: "UpdatedTenant".to_string() };
+    let updated_tenant = UpdateTenantRequest { name: "UpdatedTenant".to_owned() };
     let response = app.update_tenant("42", &updated_tenant).await;
 
     // Assert
@@ -235,10 +229,8 @@ async fn an_existing_tenant_can_be_deleted() {
     init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
-    let tenant = CreateTenantRequest {
-        id: "abcdefghijklmnopqrst".to_string(),
-        name: "NewTenant".to_string(),
-    };
+    let tenant =
+        CreateTenantRequest { id: "abcdefghijklmnopqrst".to_owned(), name: "NewTenant".to_owned() };
     let response = app.create_tenant(&tenant).await;
     let response: CreateTenantResponse =
         response.json().await.expect("failed to deserialize response");
@@ -302,14 +294,14 @@ async fn tenant_with_inactive_pipelines_can_be_deleted_and_uninstalls_source_sta
     let tenant_id = &create_tenant(&app).await;
 
     let source = CreateSourceRequest {
-        name: "Test Source".to_string(),
+        name: "Test Source".to_owned(),
         config: FullApiSourceConfig {
             host: trusted_source.trusted_config.host.clone(),
             port: trusted_source.trusted_config.port,
             name: trusted_source.trusted_config.name.clone(),
             username: trusted_source.trusted_config.username.clone(),
             password: trusted_source.trusted_config.password.as_ref().map(|password| {
-                SerializableSecretString::from(password.expose_secret().to_string())
+                SerializableSecretString::from(password.expose_secret().to_owned())
             }),
         },
     };
@@ -421,14 +413,14 @@ async fn all_tenants_can_be_read() {
     let app = spawn_test_app().await;
     let tenant1_id = create_tenant_with_id_and_name(
         &app,
-        "abcdefghijklmnopqrst".to_string(),
-        "Tenant1".to_string(),
+        "abcdefghijklmnopqrst".to_owned(),
+        "Tenant1".to_owned(),
     )
     .await;
     let tenant2_id = create_tenant_with_id_and_name(
         &app,
-        "tsrqponmlkjihgfedcba".to_string(),
-        "Tenant2".to_string(),
+        "tsrqponmlkjihgfedcba".to_owned(),
+        "Tenant2".to_owned(),
     )
     .await;
 

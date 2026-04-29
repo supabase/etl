@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use metrics::{Unit, describe_gauge, gauge};
 use tikv_jemalloc_ctl::{epoch, opt, raw, stats};
+use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
 use crate::metrics::{APP_TYPE_LABEL, APP_TYPE_VALUE};
@@ -206,7 +207,7 @@ fn register_metrics() {
 /// This function should be called after
 /// [`etl_telemetry::metrics::init_metrics`] to ensure the metrics recorder is
 /// installed.
-pub(super) fn spawn_jemalloc_metrics_task() {
+pub(super) fn spawn_jemalloc_metrics_task() -> JoinHandle<()> {
     register_metrics();
     log_jemalloc_config();
 
@@ -305,5 +306,5 @@ pub(super) fn spawn_jemalloc_metrics_task() {
 
             tokio::time::sleep(POLL_INTERVAL).await;
         }
-    });
+    })
 }
