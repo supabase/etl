@@ -45,8 +45,13 @@ const MAINTENANCE_FLUSH_POLL_INTERVAL: Duration = Duration::from_secs(30);
 const MAINTENANCE_EXPIRE_SNAPSHOTS_INTERVAL: Duration = Duration::from_secs(5 * 60 * 60);
 /// Fixed cadence for cleaning up old DuckLake files.
 const MAINTENANCE_CLEANUP_OLD_FILES_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
-/// Pending inlined bytes threshold that triggers a background inline flush.
-const MAINTENANCE_PENDING_INLINED_DATA_BYTES_THRESHOLD: u64 = 10_000_000;
+/// Estimated ratio from raw row payload to compressed parquet bytes.
+const PARQUET_COMPRESSION_RATIO_ESTIMATE: u64 = 3;
+/// Pending inlined bytes threshold that triggers a background inline flush. We
+/// multiply using `PARQUET_COMPRESSION_RATIO_ESTIMATE` to make sure we won't
+/// get too small data files
+const MAINTENANCE_PENDING_INLINED_DATA_BYTES_THRESHOLD: u64 =
+    10_000_000 * PARQUET_COMPRESSION_RATIO_ESTIMATE;
 /// Minimum idle window before targeted table maintenance runs, to not have
 /// maintenances ran too frequently.
 const MAINTENANCE_TABLE_COMPACTION_IDLE_THRESHOLD: Duration = Duration::from_secs(90);

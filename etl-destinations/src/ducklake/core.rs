@@ -693,7 +693,13 @@ where
             return Ok(());
         }
 
-        self.maybe_run_requested_inline_flush().await?;
+        if let Err(error) = self.maybe_run_requested_inline_flush().await {
+            tracing::error!(
+                table = %table_name,
+                error = ?error,
+                "ducklake inline flush failed"
+            );
+        }
 
         // Copy batches for the same table must still serialize so concurrent
         // callers do not race each other inside DuckDB.
@@ -727,7 +733,12 @@ where
     /// streaming replay watermark so retries can safely detect already
     /// committed work.
     async fn write_events_inner(&self, events: Vec<Event>) -> EtlResult<()> {
-        self.maybe_run_requested_inline_flush().await?;
+        if let Err(error) = self.maybe_run_requested_inline_flush().await {
+            tracing::error!(
+                error = ?error,
+                "ducklake inline flush failed"
+            );
+        }
         let mut event_iter = events.into_iter().peekable();
 
         while event_iter.peek().is_some() {
