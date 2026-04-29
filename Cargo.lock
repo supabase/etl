@@ -1823,7 +1823,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-actix-web",
- "url",
  "utoipa",
  "utoipa-swagger-ui",
  "uuid",
@@ -1918,10 +1917,8 @@ name = "etl-postgres"
 version = "0.1.0"
 dependencies = [
  "bytes",
- "chrono",
  "etl-config",
  "pg_escape",
- "serde",
  "serde_json",
  "sqlx",
  "thiserror 2.0.18",

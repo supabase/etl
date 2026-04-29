@@ -27,3 +27,7 @@ workspace = true
 [[bench]]
 name = "table_copies"
 harness = false
+
+[lib]
+test = false
+doctest = false

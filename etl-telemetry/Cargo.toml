@@ -23,3 +23,7 @@ tracing-subscriber = { workspace = true, default-features = true, features = ["j
 
 [lints]
 workspace = true
+
+[lib]
+test = false
+doctest = false

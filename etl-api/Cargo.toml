@@ -11,6 +11,7 @@ homepage.workspace = true
 
 [lib]
 path = "src/lib.rs"
+doctest = false
 
 [[bin]]
 path = "src/main.rs"
@@ -38,7 +39,6 @@ kube = { workspace = true, features = ["runtime", "derive", "client", "rustls-tl
 metrics-exporter-prometheus = { workspace = true, features = ["http-listener"] }
 pg_escape = { workspace = true }
 rand = { workspace = true, features = ["std"] }
-reqwest = { workspace = true, features = ["json", "rustls-tls"] }
 rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
 secrecy = { workspace = true }
 sentry = { workspace = true, features = ["actix"] }
@@ -49,16 +49,16 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tracing = { workspace = true, default-features = false }
 tracing-actix-web = { workspace = true, features = ["emit_event_on_error"] }
-url = { workspace = true }
 utoipa = { workspace = true, features = ["actix_extras"] }
 utoipa-swagger-ui = { workspace = true, features = ["actix-web"] }
-uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]
 etl-destinations = { workspace = true, features = ["test-utils", "iceberg", "bigquery", "ducklake"] }
 etl-postgres = { workspace = true, features = ["test-utils", "sqlx"] }
 
 insta = { workspace = true, features = ["json", "redactions"] }
+reqwest = { workspace = true, features = ["json", "rustls-tls"] }
+uuid = { workspace = true, features = ["v4"] }
 
 [[test]]
 name = "main"
