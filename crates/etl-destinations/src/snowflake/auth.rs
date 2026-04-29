@@ -10,7 +10,7 @@ use secrecy::ExposeSecret as _;
 use sha2::Digest as _;
 use tokio::{sync::Mutex, time::Instant};
 
-use crate::snowflake::{Error, Result};
+use crate::snowflake::{Config, Error, Result};
 
 /// Self-signed JWT validity window (Snowflake rejects JWTs older than this).
 const TOKEN_LIFETIME_SECS: u64 = 3600;
@@ -29,7 +29,17 @@ pub struct ScopedToken {
 
 /// Abstracts the HTTP call that exchanges a self-signed JWT for a scoped token.
 pub trait TokenExchanger: Send + Sync {
-    fn exchange(&self, host: &str, jwt: &str) -> impl Future<Output = Result<ScopedToken>> + Send;
+    fn exchange(&self, account_url: &str, jwt: &str) -> impl Future<Output = Result<ScopedToken>> + Send;
+}
+
+/// Provides a valid bearer token and supports invalidation.
+pub trait TokenProvider: Send + Sync {
+    /// Return a valid bearer token, refreshing it if necessary.
+    fn get_token(&self) -> impl Future<Output = Result<String>> + Send;
+
+    /// Invalidate any cached token, forcing a fresh exchange on the next
+    /// [`get_token`](Self::get_token) call.
+    fn invalidate_token(&self) -> impl Future<Output = ()> + Send;
 }
 
 /// Production implementation that calls Snowflake's OAuth endpoint over HTTP.
@@ -44,8 +54,8 @@ impl HttpExchanger {
 }
 
 impl TokenExchanger for HttpExchanger {
-    async fn exchange(&self, host: &str, jwt: &str) -> Result<ScopedToken> {
-        let url = format!("https://{host}/oauth/token");
+    async fn exchange(&self, account_url: &str, jwt: &str) -> Result<ScopedToken> {
+        let url = format!("{account_url}/oauth/token");
         let body =
             format!("grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion={jwt}");
 
@@ -82,7 +92,7 @@ impl TokenExchanger for HttpExchanger {
 /// Signs a JWT locally, exchanges it for a short-lived scoped token via
 /// Snowflake's OAuth endpoint, and caches the result.
 pub struct AuthManager<E: TokenExchanger = HttpExchanger> {
-    host: String,
+    account_url: String,
     account: String,
     user: String,
     encoding_key: EncodingKey,
@@ -96,18 +106,14 @@ impl AuthManager<HttpExchanger> {
     ///
     /// Creates its own internal `reqwest::Client` via `HttpExchanger`.
     pub fn new(
-        account: &str,
-        user: &str,
+        config: &Config,
         private_key_path: &str,
         passphrase: Option<&secrecy::SecretString>,
-        host: Option<&str>,
     ) -> Result<Self> {
         Self::with_exchanger(
-            account,
-            user,
+            config,
             private_key_path,
             passphrase,
-            host,
             HttpExchanger::new(reqwest::Client::new()),
         )
     }
@@ -119,11 +125,9 @@ impl<E: TokenExchanger> AuthManager<E> {
     /// The public-key fingerprint is derived and reused for every JWT.
     /// Accepts PKCS#8 (encrypted or plain) and PKCS#1 PEM formats.
     pub fn with_exchanger(
-        account: &str,
-        user: &str,
+        config: &Config,
         private_key_path: &str,
         passphrase: Option<&secrecy::SecretString>,
-        host: Option<&str>,
         exchanger: E,
     ) -> Result<Self> {
         let pem = std::fs::read_to_string(private_key_path)
@@ -154,15 +158,10 @@ impl<E: TokenExchanger> AuthManager<E> {
             .map_err(|e| Error::Auth(format!("failed to convert key to PKCS1 DER: {e}")))?;
         let encoding_key = EncodingKey::from_rsa_der(pkcs1_der.as_bytes());
 
-        // Configure Snowflake endpoint used to obtain scoped token.
-        let account = account.to_uppercase();
-        let host =
-            host.map(String::from).unwrap_or_else(|| format!("{account}.snowflakecomputing.com"));
-
         Ok(Self {
-            host,
-            account,
-            user: user.to_uppercase(),
+            account_url: config.account_url.clone(),
+            account: config.account_id.to_uppercase(),
+            user: config.username.to_uppercase(),
             encoding_key,
             key_fingerprint,
             cached_token: tokio::sync::Mutex::new(None),
@@ -191,11 +190,11 @@ impl<E: TokenExchanger> AuthManager<E> {
         jsonwebtoken::encode(&Header::new(Algorithm::RS256), &claims, &self.encoding_key)
             .map_err(|e| Error::Auth(format!("failed to sign JWT: {e}")))
     }
+}
 
-    /// Return a valid scoped token.
-    ///
-    /// The token is refreshed, if necessary.
-    pub async fn get_token(&self) -> Result<String> {
+impl<E: TokenExchanger> TokenProvider for AuthManager<E> {
+    /// Return a valid scoped token, refreshing it if necessary.
+    async fn get_token(&self) -> Result<String> {
         let mut cached = self.cached_token.lock().await;
 
         if let Some(ref token) = *cached {
@@ -207,11 +206,19 @@ impl<E: TokenExchanger> AuthManager<E> {
         tracing::debug!("refreshing Snowflake scoped token");
 
         let jwt = self.generate_jwt()?;
-        let scoped = self.exchanger.exchange(&self.host, &jwt).await?;
+        let scoped = self.exchanger.exchange(&self.account_url, &jwt).await?;
         let access_token = scoped.access_token.clone();
         *cached = Some(scoped);
 
         Ok(access_token)
+    }
+
+    /// Invalidate the cached scoped token.
+    ///
+    /// The next call to [`TokenProvider::get_token`] will perform a fresh
+    /// token exchange.
+    async fn invalidate_token(&self) {
+        *self.cached_token.lock().await = None;
     }
 }
 
@@ -248,7 +255,7 @@ mod tests {
     struct TestExchanger;
 
     impl TokenExchanger for TestExchanger {
-        async fn exchange(&self, _host: &str, _jwt: &str) -> Result<ScopedToken> {
+        async fn exchange(&self, _account_url: &str, _jwt: &str) -> Result<ScopedToken> {
             Ok(ScopedToken {
                 access_token: "fresh-token-from-exchange".to_string(),
                 expires_at: Instant::now() + Duration::from_secs(3600),
@@ -273,8 +280,13 @@ mod tests {
         make_test_manager_with_account("ORG-ACCT", "USER")
     }
 
-    fn make_test_manager_with_account(account: &str, user: &str) -> AuthManager<TestExchanger> {
-        AuthManager::with_exchanger(account, user, TEST_KEY_PATH, None, None, TestExchanger)
+    fn make_test_manager_with_account(
+        account_id: &str,
+        username: &str,
+    ) -> AuthManager<TestExchanger> {
+        let config = Config::new(account_id, username, "TEST_DB", "PUBLIC");
+
+        AuthManager::with_exchanger(&config, TEST_KEY_PATH, None, TestExchanger)
             .expect("AuthManager::with_exchanger")
     }
 
@@ -328,6 +340,12 @@ mod tests {
         let b64_part = &fp["SHA256:".len()..];
         let decoded = base64_engine::STANDARD.decode(b64_part).expect("base64 decode fingerprint");
         assert_eq!(decoded.len(), 32, "SHA-256 digest must be 32 bytes");
+    }
+
+    #[test]
+    fn config_derives_account_url() {
+        let config = Config::new("ORG-ACCT", "USER", "TEST_DB", "PUBLIC");
+        assert_eq!(config.account_url, "https://ORG-ACCT.snowflakecomputing.com");
     }
 
     #[tokio::test]
