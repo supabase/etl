@@ -4,7 +4,7 @@ use sqlx::{
     PgExecutor, PgPool, Row,
     postgres::{PgRow, types::Oid as SqlxTableId},
 };
-use tokio_postgres::types::Type as PgType;
+use tokio_postgres::types::{PgLsn, Type as PgType};
 
 use crate::types::{ColumnSchema, SnapshotId, TableId, TableName, TableSchema};
 
@@ -403,6 +403,64 @@ where
     )
     .bind(pipeline_id)
     .bind(SqlxTableId(table_id.into_inner()))
+    .execute(executor)
+    .await?;
+
+    Ok(result.rows_affected())
+}
+
+/// Deletes obsolete table schema versions for a pipeline.
+///
+/// For each table, finds the newest schema version at or before that table's
+/// retention LSN and deletes older schema versions. Versions at or
+/// after that retained snapshot are left untouched. Column rows are removed by
+/// the `table_columns.table_schema_id` `ON DELETE CASCADE` constraint, and the
+/// single `DELETE` statement is atomic in PostgreSQL.
+pub async fn delete_obsolete_table_schema_versions<'c, E>(
+    executor: E,
+    pipeline_id: i64,
+    retention_lsns: &HashMap<TableId, PgLsn>,
+) -> Result<u64, sqlx::Error>
+where
+    E: PgExecutor<'c>,
+{
+    if retention_lsns.is_empty() {
+        return Ok(0);
+    }
+
+    let mut table_ids = Vec::with_capacity(retention_lsns.len());
+    let mut retention_lsn_values = Vec::with_capacity(retention_lsns.len());
+    for (table_id, retention_lsn) in retention_lsns {
+        table_ids.push(SqlxTableId(table_id.into_inner()));
+        retention_lsn_values.push(retention_lsn.to_string());
+    }
+
+    let result = sqlx::query(
+        r#"
+        with cleanup_retentions as (
+            select table_id, retention_lsn::pg_lsn as retention_lsn
+            from unnest($2::oid[], $3::text[])
+                as cleanup(table_id, retention_lsn)
+        ),
+        retained_snapshots as (
+            select ts.table_id, max(ts.snapshot_id) as retained_snapshot_id
+            from etl.table_schemas ts
+            join cleanup_retentions cleanup
+              on cleanup.table_id = ts.table_id
+            where ts.pipeline_id = $1
+              and ts.snapshot_id <= cleanup.retention_lsn
+            group by ts.table_id
+        )
+        delete from etl.table_schemas ts
+        using retained_snapshots rs
+        where ts.pipeline_id = $1
+          and ts.table_id = rs.table_id
+          and ts.snapshot_id < rs.retained_snapshot_id
+        "#,
+    )
+    .bind(pipeline_id)
+    .bind(table_ids)
+    .bind(retention_lsn_values)
     .execute(executor)
     .await?;
 

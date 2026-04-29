@@ -319,7 +319,7 @@ pub(crate) fn parse_replicated_column_names(
 /// Returns the set of relation-message key column names.
 ///
 /// PostgreSQL exposes replica-identity mode on the relation itself and
-/// key-column membership on each [`RelationBody`] column. For
+/// key-column membership on each [`protocol::RelationBody`] column. For
 /// `REPLICA IDENTITY FULL`, every replicated column belongs to the old-row
 /// identity. Otherwise the low bit of the column flags marks identity
 /// membership. The column order is the same `attnum` order described in

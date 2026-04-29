@@ -416,7 +416,7 @@ where
 /// Creates an [`EtlError`] from a vector of errors for aggregation.
 ///
 /// If the vector contains exactly one error, returns that error directly
-/// without wrapping it in the [`ErrorRepr::Many`] variant.
+/// without wrapping it in the `ErrorRepr::Many` variant.
 impl<E> From<Vec<E>> for EtlError
 where
     E: Into<EtlError>,

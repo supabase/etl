@@ -2,11 +2,13 @@
 //!
 //! This module provides storage traits and implementations for maintaining ETL
 //! pipeline state across restarts. It includes state tracking for replication
-//! progress, table schemas, and synchronization status.
+//! progress, versioned table schemas, destination table metadata, and
+//! synchronization status.
 //!
 //! Storage is divided into three main categories:
 //! - [`state`] - Replication progress and table synchronization states
-//! - [`schema`] - Database schema information and versioned schema storage
+//! - [`schema`] - Database schema information, versioned schema storage, and
+//!   obsolete schema pruning
 //! - [`cleanup`] - Cleanup methods that span both stores
 //!
 //! The [`both`] module provides combined implementations that handle both

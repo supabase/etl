@@ -172,7 +172,7 @@ struct Inner {
 ///
 /// Designed for high concurrency with minimal locking:
 /// - Configuration and client are accessible without locks
-/// - Only caches and state mappings require synchronization
+/// - Only caches and destination table metadata require synchronization
 /// - Multiple write operations can execute concurrently
 #[derive(Debug, Clone)]
 pub struct BigQueryDestination<S> {
@@ -465,7 +465,8 @@ where
         inner.created_tables.insert(table_id.clone());
     }
 
-    /// Retrieves the current sequenced table ID from the destination metadata.
+    /// Retrieves the current sequenced table ID from the destination table
+    /// metadata.
     async fn get_sequenced_bigquery_table_id(
         &self,
         table_id: &TableId,
@@ -508,7 +509,7 @@ where
             .create_or_replace_view(&self.dataset_id, view_name, &target_table_id.to_string())
             .await?;
 
-        // We insert/overwrite the new (view -> sequenced bigquery table id) mapping
+        // We insert/overwrite the cached view target.
         inner.created_views.insert(view_name.clone(), target_table_id.clone());
 
         debug!(
@@ -606,7 +607,7 @@ where
         let table_id = new_replicated_table_schema.id();
         let new_snapshot_id = new_replicated_table_schema.inner().snapshot_id;
 
-        // Get current applied destination metadata. If the table is still in
+        // Get current applied destination table metadata. If the table is still in
         // `Applying`, the state store surfaces that as an error.
         let Some(metadata) =
             self.state_store.get_applied_destination_table_metadata(table_id).await?
@@ -987,9 +988,9 @@ where
 
             // We need to determine the current sequenced table ID for this table.
             //
-            // If no mapping exists, it means the table was never created in BigQuery (e.g.,
-            // due to validation errors during copy). In this case, we skip the
-            // truncate since there's nothing to truncate.
+            // If no destination table metadata exists, it means the table was never created
+            // in BigQuery (e.g., due to validation errors during copy). In this
+            // case, we skip the truncate since there's nothing to truncate.
             let Some(sequenced_bigquery_table_id) =
                 self.get_sequenced_bigquery_table_id(&table_id).await?
             else {
@@ -1049,13 +1050,14 @@ where
             // - Table created, but view update failed -> in this case the system will still
             //   point to table 'n', so the restart will reprocess events on table 'n', the
             //   table 'n + 1' will be recreated and the view will be updated to point to
-            //   the new table. No mappings are changed.
-            // - Table created, view updated, but mapping update failed -> in this case the
-            //   system will still point to table 'n' but the customer will see the empty
-            //   state of table 'n + 1' until the system heals. Healing happens when the
-            //   system is restarted, the mapping points to 'n' meaning that events will be
-            //   reprocessed and applied on table 'n' and then once the truncate is
-            //   successfully processed, the system should be consistent.
+            //   the new table. No destination table metadata is changed.
+            // - Table created, view updated, but destination table metadata update failed
+            //   -> in this case the system will still point to table 'n' but the customer
+            //   will see the empty state of table 'n + 1' until the system heals. Healing
+            //   happens when the system is restarted, the destination table metadata points
+            //   to 'n' meaning that events will be reprocessed and applied on table 'n' and
+            //   then once the truncate is successfully processed, the system should be
+            //   consistent.
 
             info!(
                 table_id = table_id.0,

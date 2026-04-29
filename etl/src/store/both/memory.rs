@@ -14,7 +14,7 @@ use crate::{
     },
     store::{
         cleanup::CleanupStore,
-        schema::SchemaStore,
+        schema::{SchemaStore, TableSchemaRetention, TableSchemaSnapshots},
         state::{DestinationTablesMetadata, StateStore, TableReplicationStates},
     },
     types::{SnapshotId, TableId, TableSchema},
@@ -32,9 +32,8 @@ struct Inner {
     /// provides visibility into table state evolution. Entries are
     /// chronologically ordered.
     table_state_history: HashMap<TableId, Vec<TableReplicationPhase>>,
-    /// Cached table schemas keyed by (TableId, SnapshotId) for versioning
-    /// support.
-    table_schemas: HashMap<(TableId, SnapshotId), Arc<TableSchema>>,
+    /// Cached table schema snapshots.
+    table_schemas: Arc<TableSchemaSnapshots>,
     /// Cached destination table metadata indexed by table ID.
     destination_tables_metadata: DestinationTablesMetadata,
 }
@@ -64,8 +63,8 @@ impl MemoryStore {
         let inner = Inner {
             table_replication_states: Arc::new(BTreeMap::new()),
             table_state_history: HashMap::new(),
-            table_schemas: HashMap::new(),
-            destination_tables_metadata: Arc::new(HashMap::new()),
+            table_schemas: Arc::new(TableSchemaSnapshots::default()),
+            destination_tables_metadata: Arc::new(BTreeMap::new()),
         };
 
         Self { inner: Arc::new(Mutex::new(inner)) }
@@ -202,21 +201,13 @@ impl SchemaStore for MemoryStore {
     ) -> EtlResult<Option<Arc<TableSchema>>> {
         let inner = self.inner.lock().await;
 
-        // Find the best matching schema (largest snapshot_id <= requested).
-        let best_match = inner
-            .table_schemas
-            .iter()
-            .filter(|((tid, sid), _)| *tid == *table_id && *sid <= snapshot_id)
-            .max_by_key(|((_, sid), _)| *sid)
-            .map(|(_, schema)| Arc::clone(schema));
-
-        Ok(best_match)
+        Ok(inner.table_schemas.get_at_or_before(*table_id, snapshot_id))
     }
 
     async fn get_table_schemas(&self) -> EtlResult<Vec<Arc<TableSchema>>> {
         let inner = self.inner.lock().await;
 
-        Ok(inner.table_schemas.values().map(Arc::clone).collect())
+        Ok(inner.table_schemas.all())
     }
 
     async fn load_table_schemas(&self) -> EtlResult<usize> {
@@ -228,10 +219,16 @@ impl SchemaStore for MemoryStore {
     async fn store_table_schema(&self, table_schema: TableSchema) -> EtlResult<Arc<TableSchema>> {
         let mut inner = self.inner.lock().await;
 
-        let key = (table_schema.id, table_schema.snapshot_id);
-        let table_schema = Arc::new(table_schema);
-        inner.table_schemas.insert(key, Arc::clone(&table_schema));
-        Ok(table_schema)
+        Ok(Arc::make_mut(&mut inner.table_schemas).insert(table_schema))
+    }
+
+    async fn prune_table_schemas(
+        &self,
+        table_schema_retentions: HashMap<TableId, TableSchemaRetention>,
+    ) -> EtlResult<u64> {
+        let mut inner = self.inner.lock().await;
+
+        Ok(Arc::make_mut(&mut inner.table_schemas).prune(&table_schema_retentions))
     }
 }
 
@@ -241,8 +238,8 @@ impl CleanupStore for MemoryStore {
 
         Arc::make_mut(&mut inner.table_replication_states).remove(&table_id);
         inner.table_state_history.remove(&table_id);
-        // Remove all schema versions for this table
-        inner.table_schemas.retain(|(tid, _), _| *tid != table_id);
+        // Remove all schema versions for this table.
+        Arc::make_mut(&mut inner.table_schemas).remove_table(table_id);
         Arc::make_mut(&mut inner.destination_tables_metadata).remove(&table_id);
 
         Ok(())

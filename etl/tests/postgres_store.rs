@@ -1,5 +1,7 @@
 #![cfg(feature = "test-utils")]
 
+use std::collections::HashMap;
+
 use etl::{
     error::ErrorKind,
     etl_error,
@@ -8,7 +10,9 @@ use etl::{
         table::{RetryPolicy, TableReplicationPhase},
     },
     store::{
-        both::postgres::PostgresStore, cleanup::CleanupStore, schema::SchemaStore,
+        both::postgres::PostgresStore,
+        cleanup::CleanupStore,
+        schema::{SchemaStore, TableSchemaRetention},
         state::StateStore,
     },
     test_utils::database::spawn_source_database,
@@ -466,6 +470,156 @@ async fn schema_cache_eviction() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn schema_store_prunes_obsolete_versions_from_database_and_cache() {
+    init_test_tracing();
+
+    let database = spawn_source_database().await;
+    let pipeline_id = 1;
+
+    let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
+    let table_id = TableId::new(12345);
+    let table_name = TableName::new("public".to_string(), "test_table".to_string());
+
+    for snapshot_id in [0u64, 100, 200, 300] {
+        let columns = vec![
+            test_column("id", PgType::INT4, -1, 1, false, true),
+            test_column(&format!("col_at_{snapshot_id}"), PgType::TEXT, -1, 2, true, false),
+        ];
+        let mut table_schema = TableSchema::new(table_id, table_name.clone(), columns);
+        table_schema.snapshot_id = SnapshotId::from(snapshot_id);
+        store.store_table_schema(table_schema).await.unwrap();
+    }
+
+    let other_table_id = TableId::new(67890);
+    let other_table_name = TableName::new("public".to_string(), "other_table".to_string());
+    for snapshot_id in [0u64, 150] {
+        let columns = vec![
+            test_column("id", PgType::INT4, -1, 1, false, true),
+            test_column(&format!("other_col_at_{snapshot_id}"), PgType::TEXT, -1, 2, true, false),
+        ];
+        let mut table_schema = TableSchema::new(other_table_id, other_table_name.clone(), columns);
+        table_schema.snapshot_id = SnapshotId::from(snapshot_id);
+        store.store_table_schema(table_schema).await.unwrap();
+    }
+
+    let untouched_table_id = TableId::new(24680);
+    let untouched_table_name = TableName::new("public".to_string(), "untouched_table".to_string());
+    for snapshot_id in [0u64, 50] {
+        let columns = vec![
+            test_column("id", PgType::INT4, -1, 1, false, true),
+            test_column(
+                &format!("untouched_col_at_{snapshot_id}"),
+                PgType::TEXT,
+                -1,
+                2,
+                true,
+                false,
+            ),
+        ];
+        let mut table_schema =
+            TableSchema::new(untouched_table_id, untouched_table_name.clone(), columns);
+        table_schema.snapshot_id = SnapshotId::from(snapshot_id);
+        store.store_table_schema(table_schema).await.unwrap();
+    }
+
+    let pool = connect_to_source_database(&database.config, 1, 1, None).await.unwrap();
+    let obsolete_schema_ids: Vec<i64> = sqlx::query_scalar(
+        r#"
+        select id
+        from etl.table_schemas
+        where pipeline_id = $1
+          and (
+              (table_id = $2 and snapshot_id < $3::pg_lsn)
+              or (table_id = $4 and snapshot_id < $5::pg_lsn)
+          )
+        "#,
+    )
+    .bind(pipeline_id as i64)
+    .bind(SqlxTableId(table_id.into_inner()))
+    .bind(SnapshotId::from(200u64).to_pg_lsn_string())
+    .bind(SqlxTableId(other_table_id.into_inner()))
+    .bind(SnapshotId::from(150u64).to_pg_lsn_string())
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(obsolete_schema_ids.len(), 3);
+
+    let obsolete_column_count_before: i64 = sqlx::query_scalar(
+        "select count(*) from etl.table_columns where table_schema_id = any($1)",
+    )
+    .bind(&obsolete_schema_ids)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(obsolete_column_count_before > 0);
+
+    let deleted = store
+        .prune_table_schemas(HashMap::from([
+            (table_id, TableSchemaRetention::SnapshotId(SnapshotId::from(200u64))),
+            (other_table_id, TableSchemaRetention::SnapshotId(SnapshotId::from(200u64))),
+        ]))
+        .await
+        .unwrap();
+    assert_eq!(deleted, 3);
+
+    let cached_schemas = store.get_table_schemas().await.unwrap();
+    let table_snapshots: Vec<_> =
+        cached_schemas.iter().filter(|schema| schema.id == table_id).collect();
+    assert_eq!(table_snapshots.len(), 2);
+    assert!(table_snapshots.iter().any(|schema| schema.snapshot_id == SnapshotId::from(200u64)));
+    assert!(table_snapshots.iter().any(|schema| schema.snapshot_id == SnapshotId::from(300u64)));
+
+    let other_table_snapshots: Vec<_> =
+        cached_schemas.iter().filter(|schema| schema.id == other_table_id).collect();
+    assert_eq!(other_table_snapshots.len(), 1);
+    assert_eq!(other_table_snapshots[0].snapshot_id, SnapshotId::from(150u64));
+
+    let untouched_table_snapshots: Vec<_> =
+        cached_schemas.iter().filter(|schema| schema.id == untouched_table_id).collect();
+    assert_eq!(untouched_table_snapshots.len(), 2);
+
+    let schema_count: i64 = sqlx::query_scalar(
+        "select count(*) from etl.table_schemas where pipeline_id = $1 and table_id = $2",
+    )
+    .bind(pipeline_id as i64)
+    .bind(SqlxTableId(table_id.into_inner()))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(schema_count, 2);
+
+    let untouched_schema_count: i64 = sqlx::query_scalar(
+        "select count(*) from etl.table_schemas where pipeline_id = $1 and table_id = $2",
+    )
+    .bind(pipeline_id as i64)
+    .bind(SqlxTableId(untouched_table_id.into_inner()))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(untouched_schema_count, 2);
+
+    let obsolete_column_count_after: i64 = sqlx::query_scalar(
+        "select count(*) from etl.table_columns where table_schema_id = any($1)",
+    )
+    .bind(&obsolete_schema_ids)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(obsolete_column_count_after, 0);
+
+    let old_schema = store.get_table_schema(&table_id, SnapshotId::from(100u64)).await.unwrap();
+    assert!(old_schema.is_none());
+
+    let retained_schema =
+        store.get_table_schema(&table_id, SnapshotId::from(250u64)).await.unwrap().unwrap();
+    assert_eq!(retained_schema.snapshot_id, SnapshotId::from(200u64));
+
+    let latest_schema =
+        store.get_table_schema(&table_id, SnapshotId::max()).await.unwrap().unwrap();
+    assert_eq!(latest_schema.snapshot_id, SnapshotId::from(300u64));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn multiple_pipelines_isolation() {
     init_test_tracing();
 
@@ -502,7 +656,7 @@ async fn multiple_pipelines_isolation() {
     assert_eq!(schemas2.len(), 1);
     assert_eq!(schemas2[0].id, table_schema2.id);
 
-    // Test destination metadata isolation
+    // Test destination table metadata isolation.
     let metadata1 = DestinationTableMetadata::new_applied(
         "pipeline1_table".to_string(),
         SnapshotId::initial(),
