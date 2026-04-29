@@ -1,8 +1,4 @@
-use std::{
-    collections::{BTreeMap, HashMap},
-    future::Future,
-    sync::Arc,
-};
+use std::{collections::BTreeMap, future::Future, sync::Arc};
 
 use crate::{
     error::EtlResult,
@@ -17,7 +13,7 @@ use crate::{
 pub type TableReplicationStates = Arc<BTreeMap<TableId, TableReplicationPhase>>;
 
 /// Arc-wrapped dictionary of destination table metadata.
-pub(crate) type DestinationTablesMetadata = Arc<HashMap<TableId, DestinationTableMetadata>>;
+pub(crate) type DestinationTablesMetadata = Arc<BTreeMap<TableId, DestinationTableMetadata>>;
 
 /// Trait for storing and retrieving table replication state and destination
 /// metadata.

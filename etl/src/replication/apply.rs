@@ -1635,8 +1635,7 @@ where
 
             // We determine whether the confirmed flush lsn or the snapshot id is the new
             // retention limit. We could use a normal PgLsn type for handling
-            // this, but to make the implementation
-            //
+            // this, but to make the implementation more explicit we use an enum.
             let retention = if confirmed_flush_lsn <= destination_retention_snapshot_id.into_inner()
             {
                 TableSchemaRetention::ConfirmedFlushLsn(confirmed_flush_lsn)

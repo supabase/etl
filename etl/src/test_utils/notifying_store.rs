@@ -16,7 +16,7 @@ use crate::{
     },
     store::{
         cleanup::CleanupStore,
-        schema::{SchemaStore, TableSchemaRetention},
+        schema::{SchemaStore, TableSchemaRetention, TableSchemaSnapshots},
         state::{DestinationTablesMetadata, StateStore, TableReplicationStates},
     },
     test_utils::notify::TimedNotify,
@@ -40,7 +40,7 @@ type TableSchemaPruneCondition = Arc<Notify>;
 struct Inner {
     table_replication_states: TableReplicationStates,
     table_state_history: HashMap<TableId, Vec<TableReplicationPhase>>,
-    table_schemas: HashMap<TableId, Vec<Arc<TableSchema>>>,
+    table_schemas: Arc<TableSchemaSnapshots>,
     destination_tables_metadata: DestinationTablesMetadata,
     table_state_type_conditions: Vec<TableStateTypeCondition>,
     table_state_conditions: Vec<TableStateCondition>,
@@ -77,7 +77,7 @@ impl Inner {
         });
 
         self.table_schema_count_conditions.retain(|(tid, expected_count, notify)| {
-            let schemas_count = self.table_schemas.get(tid).map_or(0, Vec::len);
+            let schemas_count = self.table_schemas.table_len(*tid);
             let should_retain = schemas_count < *expected_count;
             if !should_retain {
                 notify.notify_one();
@@ -111,8 +111,8 @@ impl NotifyingStore {
         let inner = Inner {
             table_replication_states: Arc::new(BTreeMap::new()),
             table_state_history: HashMap::new(),
-            table_schemas: HashMap::new(),
-            destination_tables_metadata: Arc::new(HashMap::new()),
+            table_schemas: Arc::new(TableSchemaSnapshots::default()),
+            destination_tables_metadata: Arc::new(BTreeMap::new()),
             table_state_type_conditions: Vec::new(),
             table_state_conditions: Vec::new(),
             table_schema_count_conditions: Vec::new(),
@@ -133,32 +133,34 @@ impl NotifyingStore {
     pub async fn get_latest_table_schemas(&self) -> HashMap<TableId, TableSchema> {
         let inner = self.inner.read().await;
 
-        // Return the latest schema version for each table (last in the Vec).
-        inner
-            .table_schemas
-            .iter()
-            .filter_map(|(table_id, schemas)| {
-                schemas.last().map(|schema| (*table_id, Arc::as_ref(schema).clone()))
-            })
-            .collect()
+        let mut table_schemas = HashMap::new();
+        for schema in inner.table_schemas.all() {
+            table_schemas
+                .entry(schema.id)
+                .and_modify(|current: &mut TableSchema| {
+                    if current.snapshot_id < schema.snapshot_id {
+                        *current = Arc::as_ref(&schema).clone();
+                    }
+                })
+                .or_insert_with(|| Arc::as_ref(&schema).clone());
+        }
+
+        table_schemas
     }
 
     /// Returns all stored schema snapshots grouped by table.
     pub async fn get_table_schemas(&self) -> HashMap<TableId, Vec<(SnapshotId, TableSchema)>> {
         let inner = self.inner.read().await;
 
-        // Return schemas in insertion order per table.
-        inner
-            .table_schemas
-            .iter()
-            .map(|(table_id, schemas)| {
-                let schemas_with_ids: Vec<_> = schemas
-                    .iter()
-                    .map(|schema| (schema.snapshot_id, Arc::as_ref(schema).clone()))
-                    .collect();
-                (*table_id, schemas_with_ids)
-            })
-            .collect()
+        let mut table_schemas: HashMap<TableId, Vec<_>> = HashMap::new();
+        for schema in inner.table_schemas.all() {
+            table_schemas
+                .entry(schema.id)
+                .or_default()
+                .push((schema.snapshot_id, Arc::as_ref(&schema).clone()));
+        }
+
+        table_schemas
     }
 
     /// Registers a notification that fires when a future state update reaches
@@ -371,49 +373,25 @@ impl SchemaStore for NotifyingStore {
     ) -> EtlResult<Option<Arc<TableSchema>>> {
         let inner = self.inner.read().await;
 
-        // Find the best matching schema (largest snapshot_id <= requested).
-        let best_match = inner.table_schemas.get(table_id).and_then(|schemas| {
-            schemas
-                .iter()
-                .filter(|schema| schema.snapshot_id <= snapshot_id)
-                .max_by_key(|schema| schema.snapshot_id)
-                .map(Arc::clone)
-        });
-
-        Ok(best_match)
+        Ok(inner.table_schemas.get_at_or_before(*table_id, snapshot_id))
     }
 
     async fn get_table_schemas(&self) -> EtlResult<Vec<Arc<TableSchema>>> {
         let inner = self.inner.read().await;
 
-        Ok(inner
-            .table_schemas
-            .values()
-            .flat_map(|schemas| schemas.iter().map(Arc::clone))
-            .collect())
+        Ok(inner.table_schemas.all())
     }
 
     async fn load_table_schemas(&self) -> EtlResult<usize> {
         let inner = self.inner.read().await;
 
-        Ok(inner.table_schemas.values().map(Vec::len).sum())
+        Ok(inner.table_schemas.len())
     }
 
     async fn store_table_schema(&self, table_schema: TableSchema) -> EtlResult<Arc<TableSchema>> {
         let mut inner = self.inner.write().await;
 
-        let table_id = table_schema.id;
-        let snapshot_id = table_schema.snapshot_id;
-        let table_schema = Arc::new(table_schema);
-
-        let schemas = inner.table_schemas.entry(table_id).or_default();
-        if let Some(existing_schema) =
-            schemas.iter_mut().find(|schema| schema.snapshot_id == snapshot_id)
-        {
-            *existing_schema = Arc::clone(&table_schema);
-        } else {
-            schemas.push(Arc::clone(&table_schema));
-        }
+        let table_schema = Arc::make_mut(&mut inner.table_schemas).insert(table_schema);
 
         inner.check_conditions();
 
@@ -425,27 +403,7 @@ impl SchemaStore for NotifyingStore {
         table_schema_retentions: HashMap<TableId, TableSchemaRetention>,
     ) -> EtlResult<u64> {
         let mut inner = self.inner.write().await;
-        let mut removed_count = 0u64;
-
-        for (table_id, schemas) in &mut inner.table_schemas {
-            if let Some(retention) = table_schema_retentions.get(table_id) {
-                let retention_snapshot_id = SnapshotId::from(retention.to_lsn());
-                let retained_snapshot_id = schemas
-                    .iter()
-                    .map(|schema| schema.snapshot_id)
-                    .filter(|snapshot_id| *snapshot_id <= retention_snapshot_id)
-                    .max();
-
-                let Some(retained_snapshot_id) = retained_snapshot_id else {
-                    continue;
-                };
-
-                let before_count = schemas.len();
-                schemas.retain(|schema| schema.snapshot_id >= retained_snapshot_id);
-                removed_count =
-                    removed_count.saturating_add(before_count.saturating_sub(schemas.len()) as u64);
-            }
-        }
+        let removed_count = Arc::make_mut(&mut inner.table_schemas).prune(&table_schema_retentions);
 
         if removed_count > 0 {
             for notify in std::mem::take(&mut inner.table_schema_prune_conditions) {
@@ -463,7 +421,7 @@ impl CleanupStore for NotifyingStore {
 
         Arc::make_mut(&mut inner.table_replication_states).remove(&table_id);
         inner.table_state_history.remove(&table_id);
-        inner.table_schemas.remove(&table_id);
+        Arc::make_mut(&mut inner.table_schemas).remove_table(table_id);
         Arc::make_mut(&mut inner.destination_tables_metadata).remove(&table_id);
 
         Ok(())

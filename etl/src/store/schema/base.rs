@@ -1,34 +1,10 @@
 use std::{collections::HashMap, sync::Arc};
 
-use tokio_postgres::types::PgLsn;
-
+use super::table::TableSchemaRetention;
 use crate::{
     error::EtlResult,
     types::{SnapshotId, TableId, TableSchema},
 };
-
-/// Per-table schema cleanup retention boundary.
-///
-/// Retention can be bounded by a stored schema snapshot that the destination
-/// still needs, or by the replication slot's confirmed flush LSN. Both are LSN
-/// values, but the variant records why that boundary was chosen.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TableSchemaRetention {
-    /// Retain schemas according to a destination-useful schema snapshot.
-    SnapshotId(SnapshotId),
-    /// Retain schemas according to the replication slot's confirmed flush LSN.
-    ConfirmedFlushLsn(PgLsn),
-}
-
-impl TableSchemaRetention {
-    /// Returns the underlying LSN used as the retention boundary.
-    pub fn to_lsn(self) -> PgLsn {
-        match self {
-            Self::SnapshotId(snapshot_id) => snapshot_id.into(),
-            Self::ConfirmedFlushLsn(lsn) => lsn,
-        }
-    }
-}
 
 /// Trait for storing and retrieving database table schema information.
 ///
@@ -89,7 +65,5 @@ pub trait SchemaStore {
     fn prune_table_schemas(
         &self,
         _table_schema_retentions: HashMap<TableId, TableSchemaRetention>,
-    ) -> impl Future<Output = EtlResult<u64>> + Send {
-        async { Ok(0) }
-    }
+    ) -> impl Future<Output = EtlResult<u64>> + Send;
 }
