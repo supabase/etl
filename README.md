@@ -55,7 +55,7 @@ another coordination service to run a pipeline.
 
 ```mermaid
 flowchart LR
-    Postgres["Postgres publication"] --> ETL["ETL<br/>copy + stream + resume"]
+    Postgres["Postgres publication"] --> ETL["ETL<br/>copy + stream"]
     ETL --> Destination["Destination"]
 ```
 
@@ -78,7 +78,6 @@ replication stream, and a state/schema store for recovery:
 | Configurable throughput | Tune batching, parallel table sync, retries, and memory backpressure. |
 | Extensible runtime | Implement custom destinations and state/schema stores. |
 | Typed Rust API | Work with structured events, rows, schemas, and errors. |
-| Destination modules | BigQuery is stable, DuckLake is in progress, and Iceberg is deprecated for now. |
 
 ## Requirements
 
@@ -96,8 +95,9 @@ For detailed configuration instructions, see the [Configure Postgres documentati
 ## Get Started
 
 ETL is currently installed from Git while we prepare for a crates.io release.
-Choose the destination features you need. For a first production deployment,
-start with the stable BigQuery module:
+Choose the destination features you need.
+
+For a first production deployment, start with the stable BigQuery module:
 
 ```toml
 [dependencies]
