@@ -38,31 +38,66 @@
   </p>
 </p>
 
-ETL is a Rust framework by [Supabase](https://supabase.com) for building high‑performance, real‑time data replication apps on Postgres. It sits on top of Postgres [logical replication](https://www.postgresql.org/docs/current/protocol-logical-replication.html) and gives you a clean, Rust‑native API for streaming changes to your own destinations.
+ETL is a Rust framework by [Supabase](https://supabase.com) for building
+high-performance, real-time data replication apps on Postgres.
 
-## Features
+It sits on top of Postgres
+[logical replication](https://www.postgresql.org/docs/current/protocol-logical-replication.html)
+and gives you Rust-native building blocks for copying existing data, streaming
+ongoing changes, and writing them to your own destination. Run it as a
+standalone replicator binary or embed it as a library in your own Rust service.
 
-- **Real‑time replication**: stream changes in real time to your own destinations
-- **High performance**: configurable batching and parallelism to maximize throughput
-- **Fault-tolerant**: robust error handling and retry logic built-in
-- **Extensible**: implement your own custom destinations and state/schema stores
-- **Destination modules**: stable BigQuery support, DuckLake in progress, and Iceberg deprecated for now
-- **Type-safe**: fully typed Rust API with compile-time guarantees
+ETL is intentionally cheap to operate: it is one lightweight Rust process on
+top of Postgres logical replication. You do not need Kafka, Flink, Debezium, or
+another coordination service to run a pipeline.
+
+## What ETL Does
+
+```mermaid
+flowchart LR
+    Postgres["Postgres publication"] --> ETL["ETL<br/>copy + stream + resume"]
+    ETL --> Destination["Destination"]
+```
+
+ETL runs as one process that coordinates an initial copy, a continuous
+replication stream, and a state/schema store for recovery:
+
+1. **Initial copy** backfills the existing rows covered by a Postgres publication.
+2. **Streaming replication** forwards ongoing inserts, updates, deletes, truncates, and schema events.
+3. **State recovery** lets a durable store resume table state, schema versions, and destination metadata after restarts.
+
+## Why ETL?
+
+| Capability | What it gives you |
+| --- | --- |
+| Real-time replication | Stream Postgres changes as they happen. |
+| Initial copy | Backfill existing table data before CDC begins. |
+| Schema changes | Track simple DDL changes today; destination-specific DDL behavior is documented in [Schema Changes](https://supabase.github.io/etl/explanation/schema-changes/). |
+| Cheap operations | Run one lightweight Rust process without Kafka, Flink, Debezium, or extra control-plane infrastructure. |
+| Library or binary | Use ETL as a standalone replicator or embed it in your own Rust application. |
+| Configurable throughput | Tune batching, parallel table sync, retries, and memory backpressure. |
+| Extensible runtime | Implement custom destinations and state/schema stores. |
+| Typed Rust API | Work with structured events, rows, schemas, and errors. |
+| Destination modules | BigQuery is stable, DuckLake is in progress, and Iceberg is deprecated for now. |
 
 ## Requirements
 
-**PostgreSQL Version:** ETL officially supports and tests against **PostgreSQL 14, 15, 16, 17, and 18**.
+ETL officially supports and tests against **PostgreSQL 14, 15, 16, 17, and
+18**.
 
-- **PostgreSQL 15+** is recommended for access to advanced publication features including:
+- **PostgreSQL 15+** is recommended for advanced publication features:
   - Column-level filtering
   - Row-level filtering with `WHERE` clauses
   - `FOR ALL TABLES IN SCHEMA` syntax
+- **PostgreSQL 14** is supported with table-level publication filtering.
 
 For detailed configuration instructions, see the [Configure Postgres documentation](https://supabase.github.io/etl/guides/configure-postgres/).
 
 ## Get Started
 
-Install via Git while we prepare for a crates.io release:
+ETL is currently installed from Git while we prepare for a crates.io release.
+Choose the destination features you need. For a first production deployment,
+start with the stable BigQuery module:
 
 ```toml
 [dependencies]
@@ -71,7 +106,8 @@ etl-destinations = { git = "https://github.com/supabase/etl", features = ["bigqu
 tokio = { version = "1", features = ["full"] }
 ```
 
-Quick example using the BigQuery destination:
+Then create a pipeline that reads from a Postgres publication and writes to
+BigQuery.
 
 ```rust
 use etl::{
@@ -130,7 +166,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Start the pipeline.
     let mut pipeline = Pipeline::new(config, store, destination);
     pipeline.start().await?;
-  
+
     // Wait for the pipeline indefinitely.
     pipeline.wait().await?;
 
@@ -138,22 +174,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-For tutorials and deeper guidance, see the [Documentation](https://supabase.github.io/etl) or jump into the [examples](etl-examples/README.md), which document the runnable `bigquery` and `ducklake` binaries in `etl-examples`.
+For a guided walkthrough, start with
+[Your First Pipeline](https://supabase.github.io/etl/guides/first-pipeline/).
+For runnable destination examples, see [`etl-examples`](etl-examples/README.md).
 
 ## Destinations
 
-ETL is designed to be extensible. You can implement your own destinations, and the project currently ships with these destination modules:
+ETL is designed to be extensible: you can implement your own destination, or use
+one of the modules shipped in `etl-destinations`.
 
-- **BigQuery** – stable, full CRUD-capable replication for analytics workloads
-- **DuckLake** – in progress, open data lake replication with local or S3-compatible storage
-- **Apache Iceberg** – deprecated for now; the module remains available, but new deployments should prefer BigQuery or DuckLake
+| Feature | Destination | Status | Notes |
+| --- | --- | --- | --- |
+| `bigquery` | Google BigQuery | Stable | Full CRUD-capable replication for analytics workloads. |
+| `ducklake` | DuckLake | In progress | Open data lake replication with local or S3-compatible storage. |
+| `iceberg` | Apache Iceberg | Deprecated for now | The module remains available, but new deployments should prefer BigQuery or DuckLake. |
 
-Enable the destinations you need through the `etl-destinations` crate:
+Enable one or more destination modules with crate features:
 
 ```toml
 [dependencies]
 etl = { git = "https://github.com/supabase/etl" }
-etl-destinations = { git = "https://github.com/supabase/etl", features = ["bigquery", "ducklake", "iceberg"] }
+etl-destinations = { git = "https://github.com/supabase/etl", features = ["bigquery", "ducklake"] }
 ```
 
 ## Development

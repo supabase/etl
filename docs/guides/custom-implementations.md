@@ -11,9 +11,15 @@ ETL delivers data to destinations in two phases:
 | Phase | Method | When | Data Type |
 |-------|--------|------|-----------|
 | Initial Copy | `write_table_rows()` | Startup | `Vec<TableRow>` |
-| Streaming | `write_events()` | After copy | `Vec<Event>` |
+| Streaming | `write_events()` | After copy | `Vec<Event>` including `Relation` schema events |
 
 **Note:** During initial copy, parallel table sync workers each process their own replication slot, so `Begin` and `Commit` transaction markers may appear multiple times. This does not duplicate actual row data.
+
+Schema changes are surfaced through `Event::Relation`. If your destination
+keeps physical schemas, flush pending writes before handling a relation event,
+apply the supported add/drop/rename diff, then process following row events
+with the new schema. See [Schema Changes](../explanation/schema-changes.md) for
+the current semantics and limitations.
 
 ## Step 1: Create the Project
 

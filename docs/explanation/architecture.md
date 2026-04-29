@@ -55,6 +55,16 @@ Once tables are copied, the **Apply Worker** streams ongoing changes from the Po
 2. Batches events for efficiency
 3. Sends batches to the destination via `write_events()`
 
+### Schema Changes
+
+ETL supports schema changes for simple `ALTER TABLE` column evolution. A
+source-side event trigger emits internal DDL messages for published permanent
+tables, ETL stores a new schema snapshot, and destinations observe the change
+through a fresh `Relation` event before following row events. Today ETL
+intentionally models add, drop, and rename column cases; broader DDL behavior
+is being improved. See [Schema Changes](schema-changes.md) for exact semantics
+and limitations.
+
 ## Core Components
 
 ### Pipeline
