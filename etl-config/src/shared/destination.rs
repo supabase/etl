@@ -88,6 +88,8 @@ pub enum DestinationConfig {
         duckdb_memory_cache_limit: Option<String>,
         /// Optional DuckLake maintenance target file size.
         maintenance_target_file_size: Option<String>,
+        /// Optional DuckLake snapshot-retention interval.
+        expire_snapshots_older_than: Option<String>,
     },
 }
 
@@ -275,6 +277,8 @@ pub enum DestinationConfigWithoutSecrets {
         duckdb_memory_cache_limit: Option<String>,
         /// Optional DuckLake maintenance target file size.
         maintenance_target_file_size: Option<String>,
+        /// Optional DuckLake snapshot-retention interval.
+        expire_snapshots_older_than: Option<String>,
     },
 }
 
@@ -312,6 +316,7 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
                 metadata_schema,
                 duckdb_memory_cache_limit,
                 maintenance_target_file_size,
+                expire_snapshots_older_than,
             } => DestinationConfigWithoutSecrets::Ducklake {
                 catalog_url,
                 data_path,
@@ -323,6 +328,7 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
                 metadata_schema,
                 duckdb_memory_cache_limit,
                 maintenance_target_file_size,
+                expire_snapshots_older_than,
             },
         }
     }

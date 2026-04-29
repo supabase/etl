@@ -133,6 +133,13 @@ pub enum FullApiDestinationConfig {
             deserialize_with = "crate::utils::trim_option_string"
         )]
         maintenance_target_file_size: Option<String>,
+        #[schema(example = "7 days")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "crate::utils::trim_option_string"
+        )]
+        expire_snapshots_older_than: Option<String>,
     },
 }
 
@@ -206,6 +213,7 @@ impl From<StoredDestinationConfig> for FullApiDestinationConfig {
                 metadata_schema,
                 duckdb_memory_cache_limit,
                 maintenance_target_file_size,
+                expire_snapshots_older_than,
             } => Self::Ducklake {
                 catalog_url,
                 data_path,
@@ -219,6 +227,7 @@ impl From<StoredDestinationConfig> for FullApiDestinationConfig {
                 metadata_schema,
                 duckdb_memory_cache_limit,
                 maintenance_target_file_size,
+                expire_snapshots_older_than,
             },
         }
     }
@@ -255,6 +264,7 @@ pub enum StoredDestinationConfig {
         metadata_schema: Option<String>,
         duckdb_memory_cache_limit: Option<String>,
         maintenance_target_file_size: Option<String>,
+        expire_snapshots_older_than: Option<String>,
     },
 }
 
@@ -331,6 +341,7 @@ impl StoredDestinationConfig {
                 metadata_schema,
                 duckdb_memory_cache_limit,
                 maintenance_target_file_size,
+                expire_snapshots_older_than,
             } => DestinationConfig::Ducklake {
                 catalog_url,
                 data_path,
@@ -344,6 +355,7 @@ impl StoredDestinationConfig {
                 metadata_schema,
                 duckdb_memory_cache_limit,
                 maintenance_target_file_size,
+                expire_snapshots_older_than,
             },
         }
     }
@@ -420,6 +432,7 @@ impl From<FullApiDestinationConfig> for StoredDestinationConfig {
                 metadata_schema,
                 duckdb_memory_cache_limit,
                 maintenance_target_file_size,
+                expire_snapshots_older_than,
             } => Self::Ducklake {
                 catalog_url,
                 data_path,
@@ -433,6 +446,7 @@ impl From<FullApiDestinationConfig> for StoredDestinationConfig {
                 metadata_schema,
                 duckdb_memory_cache_limit,
                 maintenance_target_file_size,
+                expire_snapshots_older_than,
             },
         }
     }
@@ -544,6 +558,7 @@ impl Encrypt<EncryptedStoredDestinationConfig> for StoredDestinationConfig {
                 metadata_schema,
                 duckdb_memory_cache_limit,
                 maintenance_target_file_size,
+                expire_snapshots_older_than,
             } => {
                 let s3_access_key_id = s3_access_key_id
                     .map(|value| encrypt_text(value.expose_secret().to_owned(), encryption_key))
@@ -565,6 +580,7 @@ impl Encrypt<EncryptedStoredDestinationConfig> for StoredDestinationConfig {
                     metadata_schema,
                     duckdb_memory_cache_limit,
                     maintenance_target_file_size,
+                    expire_snapshots_older_than,
                 })
             }
         }
@@ -606,6 +622,7 @@ pub enum EncryptedStoredDestinationConfig {
         metadata_schema: Option<String>,
         duckdb_memory_cache_limit: Option<String>,
         maintenance_target_file_size: Option<String>,
+        expire_snapshots_older_than: Option<String>,
     },
 }
 
@@ -727,6 +744,7 @@ impl Decrypt<StoredDestinationConfig> for EncryptedStoredDestinationConfig {
                 metadata_schema,
                 duckdb_memory_cache_limit,
                 maintenance_target_file_size,
+                expire_snapshots_older_than,
             } => Ok(StoredDestinationConfig::Ducklake {
                 catalog_url,
                 data_path,
@@ -748,6 +766,7 @@ impl Decrypt<StoredDestinationConfig> for EncryptedStoredDestinationConfig {
                 metadata_schema,
                 duckdb_memory_cache_limit,
                 maintenance_target_file_size,
+                expire_snapshots_older_than,
             }),
         }
     }
@@ -1325,6 +1344,7 @@ mod tests {
             metadata_schema: Some("ducklake".to_string()),
             duckdb_memory_cache_limit: Some("50MB".to_string()),
             maintenance_target_file_size: Some("10MB".to_string()),
+            expire_snapshots_older_than: Some("7 days".to_string()),
         };
 
         let key = EncryptionKey { id: 1, key: generate_random_key::<32>().unwrap() };
@@ -1347,6 +1367,7 @@ mod tests {
                     metadata_schema: m1,
                     duckdb_memory_cache_limit: memory1,
                     maintenance_target_file_size: target1,
+                    expire_snapshots_older_than: expire1,
                 },
                 StoredDestinationConfig::Ducklake {
                     catalog_url: c2,
@@ -1361,6 +1382,7 @@ mod tests {
                     metadata_schema: m2,
                     duckdb_memory_cache_limit: memory2,
                     maintenance_target_file_size: target2,
+                    expire_snapshots_older_than: expire2,
                 },
             ) => {
                 assert_eq!(c1, c2);
@@ -1381,6 +1403,7 @@ mod tests {
                 assert_eq!(m1, m2);
                 assert_eq!(memory1, memory2);
                 assert_eq!(target1, target2);
+                assert_eq!(expire1, expire2);
             }
             _ => panic!("Config types don't match"),
         }
@@ -1401,6 +1424,7 @@ mod tests {
             metadata_schema: Some("ducklake".to_string()),
             duckdb_memory_cache_limit: None,
             maintenance_target_file_size: None,
+            expire_snapshots_older_than: None,
         };
 
         let stored: StoredDestinationConfig = full_config.clone().into();
@@ -1415,6 +1439,7 @@ mod tests {
                     metadata_schema: m1,
                     duckdb_memory_cache_limit: memory1,
                     maintenance_target_file_size: target1,
+                    expire_snapshots_older_than: expire1,
                     ..
                 },
                 FullApiDestinationConfig::Ducklake {
@@ -1424,6 +1449,7 @@ mod tests {
                     metadata_schema: m2,
                     duckdb_memory_cache_limit: memory2,
                     maintenance_target_file_size: target2,
+                    expire_snapshots_older_than: expire2,
                     ..
                 },
             ) => {
@@ -1434,6 +1460,7 @@ mod tests {
                 assert_eq!(m1, m2);
                 assert_eq!(memory1, memory2);
                 assert_eq!(target1, target2);
+                assert_eq!(expire1, expire2);
             }
             _ => panic!("Config types don't match"),
         }
@@ -1454,6 +1481,7 @@ mod tests {
             metadata_schema: Some("ducklake".to_string()),
             duckdb_memory_cache_limit: Some("50MB".to_string()),
             maintenance_target_file_size: Some("10MB".to_string()),
+            expire_snapshots_older_than: Some("7 days".to_string()),
         };
 
         assert_json_snapshot!(full_config);
@@ -1475,6 +1503,7 @@ mod tests {
                     metadata_schema: m1,
                     duckdb_memory_cache_limit: memory1,
                     maintenance_target_file_size: target1,
+                    expire_snapshots_older_than: expire1,
                 },
                 FullApiDestinationConfig::Ducklake {
                     catalog_url: c2,
@@ -1489,6 +1518,7 @@ mod tests {
                     metadata_schema: m2,
                     duckdb_memory_cache_limit: memory2,
                     maintenance_target_file_size: target2,
+                    expire_snapshots_older_than: expire2,
                 },
             ) => {
                 assert_eq!(c1, &c2);
@@ -1509,6 +1539,7 @@ mod tests {
                 assert_eq!(m1, &m2);
                 assert_eq!(memory1, &memory2);
                 assert_eq!(target1, &target2);
+                assert_eq!(expire1, &expire2);
             }
             _ => panic!("Deserialization failed or variant mismatch"),
         }

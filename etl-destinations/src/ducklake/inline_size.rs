@@ -91,7 +91,7 @@ fn pending_inline_data_bytes_query(metadata_schema: &str) -> String {
                      )
                  ),
                  0
-             ) AS total_bytes
+             )::BIGINT AS total_bytes
              FROM target_inline_tables
          ),
          inline_delete_bytes AS (
@@ -106,7 +106,7 @@ fn pending_inline_data_bytes_query(metadata_schema: &str) -> String {
                      )
                  ),
                  0
-             ) AS total_bytes
+             )::BIGINT AS total_bytes
          )
          SELECT
              (SELECT total_bytes FROM inline_data_bytes)
@@ -144,6 +144,7 @@ mod tests {
         assert!(sql.contains("duck'lake"));
         assert!(sql.contains(r#"format('%I.%I', 'duck''lake'"#));
         assert!(sql.contains("SUM("));
+        assert!(sql.contains(")::BIGINT AS total_bytes"));
     }
 
     #[tokio::test]

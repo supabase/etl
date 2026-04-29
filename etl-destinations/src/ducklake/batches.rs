@@ -23,8 +23,8 @@ use etl::{
     error::{ErrorKind, EtlResult},
     etl_error,
     types::{
-        Cell, EventSequenceKey, OldTableRow, PartialTableRow, ReplicatedTableSchema, SizeHint,
-        TableRow, UpdatedTableRow,
+        Cell, EventSequenceKey, OldTableRow, PartialTableRow, ReplicatedTableSchema, TableRow,
+        UpdatedTableRow,
     },
 };
 use metrics::{counter, histogram};
@@ -162,18 +162,6 @@ impl TrackedTableMutation {
     /// Returns the stable event sequence key for this mutation.
     fn sequence_key(&self) -> EventSequenceKey {
         EventSequenceKey::new(self.commit_lsn, self.tx_ordinal)
-    }
-
-    /// Returns the approximate payload bytes that this mutation contributes to
-    /// inline-maintenance accounting.
-    pub(super) fn write_activity_size_hint(&self) -> u64 {
-        match &self.mutation {
-            TableMutation::Insert(row) | TableMutation::Replace(row) => row.size_hint() as u64,
-            TableMutation::Delete(row) => row.size_hint() as u64,
-            TableMutation::Update { delete_row, new_row } => {
-                (delete_row.size_hint() as u64).saturating_add(new_row.size_hint() as u64)
-            }
-        }
     }
 }
 

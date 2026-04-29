@@ -34,7 +34,6 @@ use crate::ducklake::{
         ETL_DUCKLAKE_MAINTENANCE_IN_PROGRESS, ETL_DUCKLAKE_MAINTENANCE_SKIPPED_TOTAL,
         ETL_DUCKLAKE_MAINTENANCE_STARTED_TOTAL, MAINTENANCE_OPERATION_LABEL,
         MAINTENANCE_OUTCOME_LABEL, MAINTENANCE_REASON_LABEL, MAINTENANCE_TASK_LABEL, RESULT_LABEL,
-        SMALL_FILE_SIZE_BYTES,
     },
 };
 
@@ -42,17 +41,12 @@ use crate::ducklake::{
 const MAINTENANCE_POOL_SIZE: u32 = 1;
 /// Poll interval for checking per-table inline flush thresholds.
 const MAINTENANCE_FLUSH_POLL_INTERVAL: Duration = Duration::from_secs(30);
+/// Fixed cadence for expiring old DuckLake snapshots.
+const MAINTENANCE_EXPIRE_SNAPSHOTS_INTERVAL: Duration = Duration::from_secs(5 * 60 * 60);
+/// Fixed cadence for cleaning up old DuckLake files.
+const MAINTENANCE_CLEANUP_OLD_FILES_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 /// Pending inlined bytes threshold that triggers a background inline flush.
 const MAINTENANCE_PENDING_INLINED_DATA_BYTES_THRESHOLD: u64 = 10_000_000;
-/// Estimated ratio from raw row payload to compressed parquet bytes.
-const PARQUET_COMPRESSION_RATIO_ESTIMATE: u64 = 4;
-/// Fallback estimated pending bytes threshold when inline-size sampling is
-/// unavailable.
-const MAINTENANCE_PENDING_BYTES_THRESHOLD: u64 =
-    SMALL_FILE_SIZE_BYTES as u64 * PARQUET_COMPRESSION_RATIO_ESTIMATE;
-/// Optional pending inserted-rows threshold that triggers a background inline
-/// flush.
-const MAINTENANCE_PENDING_ROWS_THRESHOLD: Option<u64> = None;
 /// Minimum idle window before targeted table maintenance runs, to not have
 /// maintenances ran too frequently.
 const MAINTENANCE_TABLE_COMPACTION_IDLE_THRESHOLD: Duration = Duration::from_secs(90);
@@ -72,6 +66,7 @@ const MAINTENANCE_EMERGENCY_REWRITE_DELETED_ROW_RATIO_THRESHOLD: f64 = 0.25;
 pub(super) const NOTIFICATION_SEND_TIMEOUT: Duration = Duration::from_secs(5);
 
 const MAINTENANCE_TASK_FLUSH: &str = "flush";
+const MAINTENANCE_TASK_CATALOG_MAINTENANCE: &str = "catalog_maintenance";
 const MAINTENANCE_TASK_TARGETED_MAINTENANCE: &str = "targeted_maintenance";
 
 #[cfg(test)]
@@ -81,6 +76,8 @@ static FAIL_REWRITE_SINGLE_OUTPUT_FILE_ONCE_FOR_TESTS: AtomicBool = AtomicBool::
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MaintenanceOperation {
     FlushInlinedData,
+    ExpireSnapshots,
+    CleanupOldFiles,
     RewriteDataFiles,
 }
 
@@ -89,6 +86,8 @@ impl MaintenanceOperation {
     fn as_str(self) -> &'static str {
         match self {
             Self::FlushInlinedData => "flush_inlined_data",
+            Self::ExpireSnapshots => "expire_snapshots",
+            Self::CleanupOldFiles => "cleanup_old_files",
             Self::RewriteDataFiles => "rewrite_data_files",
         }
     }
@@ -99,8 +98,8 @@ impl MaintenanceOperation {
 #[allow(clippy::enum_variant_names)]
 enum MaintenanceReason {
     PendingInlinedDataBytesThreshold,
-    PendingBytesThreshold,
-    PendingInsertedRowsThreshold,
+    SnapshotRetentionThreshold,
+    CleanupIntervalElapsed,
     IdleRewriteMetricsThreshold,
     EmergencyRewriteMetricsThreshold,
 }
@@ -110,8 +109,8 @@ impl MaintenanceReason {
     fn as_str(self) -> &'static str {
         match self {
             Self::PendingInlinedDataBytesThreshold => "pending_inlined_data_bytes_threshold",
-            Self::PendingBytesThreshold => "pending_bytes_threshold",
-            Self::PendingInsertedRowsThreshold => "pending_inserted_rows_threshold",
+            Self::SnapshotRetentionThreshold => "snapshot_retention_threshold",
+            Self::CleanupIntervalElapsed => "cleanup_interval_elapsed",
             Self::IdleRewriteMetricsThreshold => "idle_rewrite_metrics_threshold",
             Self::EmergencyRewriteMetricsThreshold => "emergency_rewrite_metrics_threshold",
         }
@@ -154,8 +153,6 @@ impl From<u64> for MaintenanceOutcome {
 #[derive(Clone, Debug, Default)]
 pub(super) struct TableWriteActivity {
     pub(super) table_name: DuckLakeTableName,
-    pub(super) approx_bytes: u64,
-    pub(super) inserted_rows: u64,
 }
 
 /// Table-health metrics sent from the background sampler to maintenance.
@@ -237,11 +234,63 @@ impl TargetedMaintenancePlan {
     }
 }
 
+/// Static configuration for periodic catalog-level maintenance.
+#[derive(Debug, Clone)]
+struct CatalogMaintenanceConfig {
+    expire_snapshots_older_than: Arc<str>,
+    expire_snapshots_interval: Duration,
+    cleanup_old_files_interval: Duration,
+}
+
+impl CatalogMaintenanceConfig {
+    /// Builds the fixed catalog-maintenance configuration.
+    fn new(expire_snapshots_older_than: Arc<str>) -> Self {
+        Self {
+            expire_snapshots_older_than,
+            expire_snapshots_interval: MAINTENANCE_EXPIRE_SNAPSHOTS_INTERVAL,
+            cleanup_old_files_interval: MAINTENANCE_CLEANUP_OLD_FILES_INTERVAL,
+        }
+    }
+}
+
+/// Periodic catalog-maintenance state tracked by the background worker.
+#[derive(Debug, Default)]
+struct CatalogMaintenanceState {
+    last_expire_snapshots_completed_at: Option<Instant>,
+    last_cleanup_old_files_completed_at: Option<Instant>,
+}
+
+impl CatalogMaintenanceState {
+    /// Returns whether snapshot expiration is due now.
+    fn expire_snapshots_due(&self, now: Instant, interval: Duration) -> bool {
+        match self.last_expire_snapshots_completed_at {
+            Some(last_completed_at) => now.saturating_duration_since(last_completed_at) >= interval,
+            None => true,
+        }
+    }
+
+    /// Returns whether old-file cleanup is due now.
+    fn cleanup_old_files_due(&self, now: Instant, interval: Duration) -> bool {
+        match self.last_cleanup_old_files_completed_at {
+            Some(last_completed_at) => now.saturating_duration_since(last_completed_at) >= interval,
+            None => true,
+        }
+    }
+
+    /// Records one successful snapshot-expiration run.
+    fn complete_expire_snapshots(&mut self, now: Instant) {
+        self.last_expire_snapshots_completed_at = Some(now);
+    }
+
+    /// Records one successful cleanup-old-files run.
+    fn complete_cleanup_old_files(&mut self, now: Instant) {
+        self.last_cleanup_old_files_completed_at = Some(now);
+    }
+}
+
 /// Coalesced maintenance state for one DuckLake table.
 #[derive(Debug, Default)]
 struct TableMaintenanceState {
-    pending_bytes: u64,
-    pending_inserted_rows: u64,
     dirty_since_compaction: bool,
     last_write_at: Option<Instant>,
     latest_pending_inline_data_sizes: Option<DuckLakePendingInlineDataSizes>,
@@ -254,10 +303,7 @@ struct TableMaintenanceState {
 
 impl TableMaintenanceState {
     /// Aggregates one write notification into the existing table state.
-    fn record_write_activity(&mut self, notification: &TableWriteActivity, now: Instant) {
-        self.pending_bytes = self.pending_bytes.saturating_add(notification.approx_bytes);
-        self.pending_inserted_rows =
-            self.pending_inserted_rows.saturating_add(notification.inserted_rows);
+    fn record_write_activity(&mut self, now: Instant) {
         self.dirty_since_compaction = true;
         self.last_write_at = Some(now);
     }
@@ -276,11 +322,6 @@ impl TableMaintenanceState {
     fn record_metrics_sample(&mut self, sample: TableMetricsSample) {
         self.latest_storage_metrics = Some(sample.metrics);
         self.latest_storage_metrics_sampled_at = Some(sample.sampled_at);
-    }
-
-    /// Returns whether the table still has pending inline work.
-    fn has_pending_flush_work(&self) -> bool {
-        self.pending_bytes > 0 || self.pending_inserted_rows > 0
     }
 
     /// Returns whether the current dirty period still needs an inline-size
@@ -307,31 +348,10 @@ impl TableMaintenanceState {
     }
 
     /// Returns the primary reason that pending inlined work should be flushed.
-    fn flush_reason(&self, now: Instant) -> Option<MaintenanceReason> {
-        self.flush_reason_with_pending_rows_threshold(now, MAINTENANCE_PENDING_ROWS_THRESHOLD)
-    }
-
-    /// Returns the primary reason that pending inlined work should be flushed.
-    fn flush_reason_with_pending_rows_threshold(
-        &self,
-        _now: Instant,
-        pending_rows_threshold: Option<u64>,
-    ) -> Option<MaintenanceReason> {
+    fn flush_reason(&self) -> Option<MaintenanceReason> {
         if let Some(sizes) = self.current_pending_inline_data_sizes() {
-            return (sizes.inlined_bytes
-                >= (MAINTENANCE_PENDING_INLINED_DATA_BYTES_THRESHOLD
-                    * PARQUET_COMPRESSION_RATIO_ESTIMATE))
+            return (sizes.inlined_bytes >= MAINTENANCE_PENDING_INLINED_DATA_BYTES_THRESHOLD)
                 .then_some(MaintenanceReason::PendingInlinedDataBytesThreshold);
-        }
-
-        if self.pending_bytes >= MAINTENANCE_PENDING_BYTES_THRESHOLD {
-            return Some(MaintenanceReason::PendingBytesThreshold);
-        }
-
-        if let Some(pending_rows_threshold) = pending_rows_threshold
-            && self.pending_inserted_rows >= pending_rows_threshold
-        {
-            return Some(MaintenanceReason::PendingInsertedRowsThreshold);
         }
 
         None
@@ -339,8 +359,6 @@ impl TableMaintenanceState {
 
     /// Clears pending flush counters after a successful flush/materialization.
     fn clear_pending_flush(&mut self, now: Instant) {
-        self.pending_bytes = 0;
-        self.pending_inserted_rows = 0;
         self.latest_pending_inline_data_sizes = Some(DuckLakePendingInlineDataSizes::default());
         self.latest_pending_inline_data_sampled_at = Some(now);
     }
@@ -551,6 +569,25 @@ fn record_skipped_targeted_maintenance(plan: TargetedMaintenancePlan) {
     }
 }
 
+/// Records skipped catalog-maintenance operations when the worker cannot enter
+/// the exclusive safe point yet.
+fn record_skipped_catalog_maintenance(expire_snapshots_due: bool, cleanup_old_files_due: bool) {
+    if expire_snapshots_due {
+        record_ducklake_maintenance_skipped(
+            MAINTENANCE_TASK_CATALOG_MAINTENANCE,
+            MaintenanceOperation::ExpireSnapshots,
+            MaintenanceReason::SnapshotRetentionThreshold,
+        );
+    }
+    if cleanup_old_files_due {
+        record_ducklake_maintenance_skipped(
+            MAINTENANCE_TASK_CATALOG_MAINTENANCE,
+            MaintenanceOperation::CleanupOldFiles,
+            MaintenanceReason::CleanupIntervalElapsed,
+        );
+    }
+}
+
 /// Returns whether this maintenance failure matches a known DuckLake compaction
 /// bug.
 fn is_known_ducklake_compaction_single_output_file_error(error: &EtlError) -> bool {
@@ -691,6 +728,7 @@ pub(super) fn spawn_ducklake_maintenance_worker(
     inline_flush_requested: Arc<AtomicBool>,
     pending_inline_flush_requests: Arc<PendingInlineFlushRequests>,
     pending_inline_size_sampler: Option<DuckLakePendingInlineSizeSampler>,
+    expire_snapshots_older_than: Arc<str>,
 ) -> EtlResult<DuckLakeMaintenanceWorker> {
     let mut pool = LazyDuckLakePool::new(manager, MAINTENANCE_POOL_SIZE, "maintenance");
     pool.warm_in_background();
@@ -703,6 +741,7 @@ pub(super) fn spawn_ducklake_maintenance_worker(
         inline_flush_requested,
         pending_inline_flush_requests,
         pending_inline_size_sampler,
+        CatalogMaintenanceConfig::new(expire_snapshots_older_than),
         notification_rx,
         shutdown_rx,
     ));
@@ -723,6 +762,7 @@ async fn run_ducklake_maintenance_worker(
     inline_flush_requested: Arc<AtomicBool>,
     pending_inline_flush_requests: Arc<PendingInlineFlushRequests>,
     pending_inline_size_sampler: Option<DuckLakePendingInlineSizeSampler>,
+    catalog_maintenance_config: CatalogMaintenanceConfig,
     mut notification_rx: mpsc::Receiver<TableMaintenanceNotification>,
     mut shutdown_rx: watch::Receiver<()>,
 ) {
@@ -731,6 +771,7 @@ async fn run_ducklake_maintenance_worker(
     flush_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     let mut table_states: HashMap<DuckLakeTableName, TableMaintenanceState> = HashMap::new();
+    let mut catalog_maintenance_state = CatalogMaintenanceState::default();
 
     loop {
         tokio::select! {
@@ -748,8 +789,6 @@ async fn run_ducklake_maintenance_worker(
                 apply_maintenance_notification(&mut table_states, notification);
             }
             _ = flush_interval.tick() => {
-                let mut now = Instant::now();
-
                 for (table_name, table_state) in &mut table_states {
                     if let Some(pending_inline_size_sampler) = &pending_inline_size_sampler
                         && table_state.needs_pending_inline_data_sizes_sample()
@@ -759,7 +798,7 @@ async fn run_ducklake_maintenance_worker(
                                 table_state.record_pending_inline_data_sizes(Instant::now(), sizes);
                             }
                             Err(error) => {
-                                warn!(
+                                tracing::error!(
                                     table = %table_name,
                                     error = ?error,
                                     "ducklake inline-size sampler query failed"
@@ -769,11 +808,11 @@ async fn run_ducklake_maintenance_worker(
                     }
 
                     // If it needs to be flushed
-                    if let Some(reason) = table_state.flush_reason(now) {
+                    if let Some(reason) = table_state.flush_reason() {
                         pending_inline_flush_requests.request(table_name.clone(), reason);
                         inline_flush_requested.store(true, AtomicOrdering::Release);
                     }
-                    now = Instant::now();
+                    let now = Instant::now();
 
                     if !ENABLE_TARGETED_TABLE_MAINTENANCE {
                         continue;
@@ -858,10 +897,17 @@ async fn run_ducklake_maintenance_worker(
                 }
 
                 table_states.retain(|_, state| {
-                    state.has_pending_flush_work()
-                        || state.dirty_since_compaction
-                        || state.latest_storage_metrics.is_some()
+                    state.dirty_since_compaction || state.latest_storage_metrics.is_some()
                 });
+
+                maybe_run_catalog_maintenance(
+                    &mut pool,
+                    Arc::clone(&checkpoint_gate),
+                    Arc::clone(&blocking_slots),
+                    &catalog_maintenance_config,
+                    &mut catalog_maintenance_state,
+                )
+                .await;
             }
         }
     }
@@ -876,11 +922,11 @@ fn apply_maintenance_notification(
     match notification {
         TableMaintenanceNotification::WriteActivity(activity) => {
             table_states
-                .entry(activity.table_name.clone())
-                .and_modify(|state| state.record_write_activity(&activity, now))
+                .entry(activity.table_name)
+                .and_modify(|state| state.record_write_activity(now))
                 .or_insert_with(|| {
                     let mut state = TableMaintenanceState::default();
-                    state.record_write_activity(&activity, now);
+                    state.record_write_activity(now);
                     state
                 });
         }
@@ -958,6 +1004,95 @@ async fn run_targeted_table_maintenance(
             Err(error)
         }
     })
+}
+
+/// Runs catalog-level DuckLake maintenance when its fixed cadence is due.
+async fn maybe_run_catalog_maintenance(
+    pool: &mut LazyDuckLakePool,
+    checkpoint_gate: Arc<RwLock<()>>,
+    blocking_slots: Arc<Semaphore>,
+    config: &CatalogMaintenanceConfig,
+    state: &mut CatalogMaintenanceState,
+) {
+    let now = Instant::now();
+    let expire_snapshots_due = state.expire_snapshots_due(now, config.expire_snapshots_interval);
+    let cleanup_old_files_due = state.cleanup_old_files_due(now, config.cleanup_old_files_interval);
+
+    if !expire_snapshots_due && !cleanup_old_files_due {
+        return;
+    }
+
+    let Ok(_checkpoint_guard) = checkpoint_gate.try_write_owned() else {
+        record_skipped_catalog_maintenance(expire_snapshots_due, cleanup_old_files_due);
+        return;
+    };
+
+    let pool = match pool.get_or_init_pool().await {
+        Ok(pool) => pool,
+        Err(error) => {
+            warn!(error = ?error, "ducklake maintenance pool initialization failed");
+            return;
+        }
+    };
+
+    match run_catalog_maintenance(
+        pool,
+        Arc::clone(&blocking_slots),
+        Arc::clone(&config.expire_snapshots_older_than),
+        expire_snapshots_due,
+        cleanup_old_files_due,
+    )
+    .await
+    {
+        Ok((expired_snapshots, cleaned_up_files)) => {
+            let completed_at = Instant::now();
+            if expire_snapshots_due {
+                state.complete_expire_snapshots(completed_at);
+            }
+            if cleanup_old_files_due {
+                state.complete_cleanup_old_files(completed_at);
+            }
+            info!(
+                expire_snapshots_older_than = %config.expire_snapshots_older_than,
+                expire_snapshots_due,
+                cleanup_old_files_due,
+                expired_snapshots,
+                cleaned_up_files,
+                "ducklake catalog maintenance completed"
+            );
+        }
+        Err(error) => {
+            warn!(
+                expire_snapshots_older_than = %config.expire_snapshots_older_than,
+                error = ?error,
+                "ducklake catalog maintenance failed"
+            );
+        }
+    }
+}
+
+/// Runs catalog-level maintenance inside one DuckDB blocking operation.
+async fn run_catalog_maintenance(
+    pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
+    blocking_slots: Arc<Semaphore>,
+    expire_snapshots_older_than: Arc<str>,
+    expire_snapshots_due: bool,
+    cleanup_old_files_due: bool,
+) -> EtlResult<(u64, u64)> {
+    run_duckdb_blocking(
+        pool,
+        blocking_slots,
+        DuckDbBlockingOperationKind::Maintenance,
+        move |conn| {
+            run_catalog_maintenance_blocking(
+                conn,
+                expire_snapshots_older_than.as_ref(),
+                expire_snapshots_due,
+                cleanup_old_files_due,
+            )
+        },
+    )
+    .await
 }
 
 /// Runs requested inline flushes before foreground ingestion begins.
@@ -1107,6 +1242,140 @@ fn run_targeted_table_maintenance_blocking(
     );
 
     Ok(rewrite_outcome.unwrap_or(MaintenanceOutcome::Noop))
+}
+
+/// Builds the DuckLake snapshot-expiration call for one retention window.
+fn expire_snapshots_sql(expire_snapshots_older_than: &str) -> String {
+    format!(
+        "CALL ducklake_expire_snapshots({}, older_than => CAST(now() AS TIMESTAMP) - CAST({} AS \
+         INTERVAL));",
+        quote_literal(LAKE_CATALOG),
+        quote_literal(expire_snapshots_older_than),
+    )
+}
+
+/// Builds the DuckLake old-file cleanup call for one retention window.
+fn cleanup_old_files_sql(expire_snapshots_older_than: &str) -> String {
+    format!(
+        "CALL ducklake_cleanup_old_files({}, older_than => CAST(now() AS TIMESTAMP) - CAST({} AS \
+         INTERVAL));",
+        quote_literal(LAKE_CATALOG),
+        quote_literal(expire_snapshots_older_than),
+    )
+}
+
+/// Counts the rows returned by one DuckLake maintenance call.
+fn count_ducklake_maintenance_rows(
+    conn: &duckdb::Connection,
+    sql: &str,
+    description: &'static str,
+) -> EtlResult<u64> {
+    let mut statement = conn.prepare(sql).map_err(|source| {
+        etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            description,
+            format_query_error_detail(sql, &source),
+            source: source
+        )
+    })?;
+    let mut rows = statement.query([]).map_err(|source| {
+        etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            description,
+            format_query_error_detail(sql, &source),
+            source: source
+        )
+    })?;
+    let mut count = 0u64;
+
+    while let Some(_row) = rows.next().map_err(|source| {
+        etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            description,
+            format_query_error_detail(sql, &source),
+            source: source
+        )
+    })? {
+        count = count.saturating_add(1);
+    }
+
+    Ok(count)
+}
+
+/// Runs DuckLake catalog maintenance and records per-operation outcomes.
+fn run_catalog_maintenance_blocking(
+    conn: &duckdb::Connection,
+    expire_snapshots_older_than: &str,
+    expire_snapshots_due: bool,
+    cleanup_old_files_due: bool,
+) -> EtlResult<(u64, u64)> {
+    let mut expired_snapshots = 0u64;
+    let mut cleaned_up_files = 0u64;
+
+    if expire_snapshots_due {
+        let expire_reason = MaintenanceReason::SnapshotRetentionThreshold;
+        let expire_started = Instant::now();
+        let _expire_guard = DuckLakeMaintenanceInProgressGuard::start(
+            MAINTENANCE_TASK_CATALOG_MAINTENANCE,
+            MaintenanceOperation::ExpireSnapshots,
+            expire_reason,
+        );
+        let expire_sql = expire_snapshots_sql(expire_snapshots_older_than);
+        expired_snapshots =
+            count_ducklake_maintenance_rows(conn, &expire_sql, "DuckLake expire snapshots failed")
+                .inspect_err(|_error| {
+                    record_ducklake_maintenance_duration(
+                        MAINTENANCE_TASK_CATALOG_MAINTENANCE,
+                        MaintenanceOperation::ExpireSnapshots,
+                        expire_reason,
+                        MaintenanceOutcome::Failed,
+                        expire_started.elapsed().as_secs_f64(),
+                    );
+                })?;
+        let expire_outcome = MaintenanceOutcome::from(expired_snapshots);
+        record_ducklake_maintenance_duration(
+            MAINTENANCE_TASK_CATALOG_MAINTENANCE,
+            MaintenanceOperation::ExpireSnapshots,
+            expire_reason,
+            expire_outcome,
+            expire_started.elapsed().as_secs_f64(),
+        );
+    }
+
+    if cleanup_old_files_due {
+        let cleanup_reason = MaintenanceReason::CleanupIntervalElapsed;
+        let cleanup_started = Instant::now();
+        let _cleanup_guard = DuckLakeMaintenanceInProgressGuard::start(
+            MAINTENANCE_TASK_CATALOG_MAINTENANCE,
+            MaintenanceOperation::CleanupOldFiles,
+            cleanup_reason,
+        );
+        let cleanup_sql = cleanup_old_files_sql(expire_snapshots_older_than);
+        cleaned_up_files = count_ducklake_maintenance_rows(
+            conn,
+            &cleanup_sql,
+            "DuckLake cleanup old files failed",
+        )
+        .inspect_err(|_error| {
+            record_ducklake_maintenance_duration(
+                MAINTENANCE_TASK_CATALOG_MAINTENANCE,
+                MaintenanceOperation::CleanupOldFiles,
+                cleanup_reason,
+                MaintenanceOutcome::Failed,
+                cleanup_started.elapsed().as_secs_f64(),
+            );
+        })?;
+        let cleanup_outcome = MaintenanceOutcome::from(cleaned_up_files);
+        record_ducklake_maintenance_duration(
+            MAINTENANCE_TASK_CATALOG_MAINTENANCE,
+            MaintenanceOperation::CleanupOldFiles,
+            cleanup_reason,
+            cleanup_outcome,
+            cleanup_started.elapsed().as_secs_f64(),
+        );
+    }
+
+    Ok((expired_snapshots, cleaned_up_files))
 }
 
 /// Flushes inlined user data for one table after the write transaction commits.
@@ -1307,10 +1576,6 @@ mod tests {
             .unwrap_or(0.0)
     }
 
-    fn write_activity(approx_bytes: u64, inserted_rows: u64) -> TableWriteActivity {
-        TableWriteActivity { table_name: "public_users".to_string(), approx_bytes, inserted_rows }
-    }
-
     fn table_metrics_sample(
         sampled_at: Instant,
         metrics: DuckLakeTableStorageMetrics,
@@ -1348,7 +1613,7 @@ mod tests {
             &rendered_before,
             MAINTENANCE_TASK_FLUSH,
             MaintenanceOperation::FlushInlinedData,
-            MaintenanceReason::PendingBytesThreshold,
+            MaintenanceReason::PendingInlinedDataBytesThreshold,
             MaintenanceOutcome::Applied,
         );
         let rewrite_before = maintenance_duration_count(
@@ -1362,7 +1627,7 @@ mod tests {
         record_ducklake_maintenance_duration(
             MAINTENANCE_TASK_FLUSH,
             MaintenanceOperation::FlushInlinedData,
-            MaintenanceReason::PendingBytesThreshold,
+            MaintenanceReason::PendingInlinedDataBytesThreshold,
             MaintenanceOutcome::Applied,
             0.25,
         );
@@ -1379,7 +1644,7 @@ mod tests {
             &rendered_after,
             MAINTENANCE_TASK_FLUSH,
             MaintenanceOperation::FlushInlinedData,
-            MaintenanceReason::PendingBytesThreshold,
+            MaintenanceReason::PendingInlinedDataBytesThreshold,
             MaintenanceOutcome::Applied,
         );
         let rewrite_after = maintenance_duration_count(
@@ -1488,42 +1753,74 @@ mod tests {
         assert!(skipped_after > skipped_before, "rewrite skip count did not increase");
     }
 
+    #[tokio::test]
+    async fn catalog_maintenance_busy_emits_skip_counter_for_both_operations() {
+        let handle = init_metrics_handle().expect("failed to initialize prometheus handle");
+        register_metrics();
+
+        let rendered_before = handle.render();
+        let expire_before = maintenance_skipped_counter_value(
+            &rendered_before,
+            MAINTENANCE_TASK_CATALOG_MAINTENANCE,
+            MaintenanceOperation::ExpireSnapshots,
+            MaintenanceReason::SnapshotRetentionThreshold,
+        );
+        let cleanup_before = maintenance_skipped_counter_value(
+            &rendered_before,
+            MAINTENANCE_TASK_CATALOG_MAINTENANCE,
+            MaintenanceOperation::CleanupOldFiles,
+            MaintenanceReason::CleanupIntervalElapsed,
+        );
+
+        record_skipped_catalog_maintenance(true, true);
+
+        let rendered_after = handle.render();
+        let expire_after = maintenance_skipped_counter_value(
+            &rendered_after,
+            MAINTENANCE_TASK_CATALOG_MAINTENANCE,
+            MaintenanceOperation::ExpireSnapshots,
+            MaintenanceReason::SnapshotRetentionThreshold,
+        );
+        let cleanup_after = maintenance_skipped_counter_value(
+            &rendered_after,
+            MAINTENANCE_TASK_CATALOG_MAINTENANCE,
+            MaintenanceOperation::CleanupOldFiles,
+            MaintenanceReason::CleanupIntervalElapsed,
+        );
+
+        assert!(expire_after > expire_before, "expire snapshots skip count did not increase");
+        assert!(cleanup_after > cleanup_before, "cleanup old files skip count did not increase");
+    }
+
     #[test]
-    fn table_maintenance_state_prefers_pending_bytes_flush_reason() {
+    fn table_maintenance_state_without_sample_or_row_threshold_does_not_flush() {
         let now = Instant::now();
         let mut state = TableMaintenanceState::default();
-        state.record_write_activity(&write_activity(MAINTENANCE_PENDING_BYTES_THRESHOLD, 1), now);
+        state.record_write_activity(now);
 
-        assert_eq!(
-            state.flush_reason_with_pending_rows_threshold(now, Some(1)),
-            Some(MaintenanceReason::PendingBytesThreshold)
-        );
+        assert_eq!(state.flush_reason(), None);
     }
 
     #[test]
     fn table_maintenance_state_uses_sampled_inline_data_bytes_flush_reason() {
         let now = Instant::now();
         let mut state = TableMaintenanceState::default();
-        state.record_write_activity(&write_activity(1, 1), now);
+        state.record_write_activity(now);
         state.record_pending_inline_data_sizes(
             now + Duration::from_secs(1),
             DuckLakePendingInlineDataSizes {
-                inlined_bytes: MAINTENANCE_PENDING_INLINED_DATA_BYTES_THRESHOLD
-                    * PARQUET_COMPRESSION_RATIO_ESTIMATE,
+                inlined_bytes: MAINTENANCE_PENDING_INLINED_DATA_BYTES_THRESHOLD,
             },
         );
 
-        assert_eq!(
-            state.flush_reason(now + Duration::from_secs(2)),
-            Some(MaintenanceReason::PendingInlinedDataBytesThreshold)
-        );
+        assert_eq!(state.flush_reason(), Some(MaintenanceReason::PendingInlinedDataBytesThreshold));
     }
 
     #[test]
-    fn table_maintenance_state_prefers_sampled_inline_data_over_estimated_bytes() {
+    fn table_maintenance_state_ignores_below_threshold_sampled_inline_data() {
         let now = Instant::now();
         let mut state = TableMaintenanceState::default();
-        state.record_write_activity(&write_activity(MAINTENANCE_PENDING_BYTES_THRESHOLD, 1), now);
+        state.record_write_activity(now);
         state.record_pending_inline_data_sizes(
             now + Duration::from_secs(1),
             DuckLakePendingInlineDataSizes {
@@ -1531,29 +1828,14 @@ mod tests {
             },
         );
 
-        assert_eq!(state.flush_reason(now + Duration::from_secs(2)), None);
-    }
-
-    #[test]
-    fn table_maintenance_state_uses_pending_inserted_rows_flush_reason_when_enabled() {
-        let now = Instant::now();
-        let mut state = TableMaintenanceState::default();
-        state.record_write_activity(
-            &write_activity(MAINTENANCE_PENDING_BYTES_THRESHOLD - 1, 10_000),
-            now,
-        );
-
-        assert_eq!(
-            state.flush_reason_with_pending_rows_threshold(now, Some(10_000)),
-            Some(MaintenanceReason::PendingInsertedRowsThreshold)
-        );
+        assert_eq!(state.flush_reason(), None);
     }
 
     #[test]
     fn table_maintenance_state_selects_idle_rewrite_from_delete_pressure() {
         let now = Instant::now();
         let mut state = TableMaintenanceState::default();
-        state.record_write_activity(&write_activity(1024, 1), now);
+        state.record_write_activity(now);
         state.record_metrics_sample(table_metrics_sample(
             now + Duration::from_secs(1),
             storage_metrics(10, 20_000_000, 2, 1000, 32, 10_000, 150),
@@ -1574,7 +1856,7 @@ mod tests {
     fn table_maintenance_state_selects_emergency_rewrite_from_delete_pressure() {
         let now = Instant::now();
         let mut state = TableMaintenanceState::default();
-        state.record_write_activity(&write_activity(1024, 1), now);
+        state.record_write_activity(now);
         state.record_metrics_sample(table_metrics_sample(
             now + Duration::from_secs(1),
             storage_metrics(10, 20_000_000, 2, 1000, 128, 10_000, 150),
@@ -1597,6 +1879,46 @@ mod tests {
         assert_eq!(MaintenanceOutcome::from(3), MaintenanceOutcome::Applied);
     }
 
+    #[test]
+    fn catalog_maintenance_state_tracks_independent_due_intervals() {
+        let now = Instant::now();
+        let mut state = CatalogMaintenanceState::default();
+
+        assert!(state.expire_snapshots_due(now, MAINTENANCE_EXPIRE_SNAPSHOTS_INTERVAL));
+        assert!(state.cleanup_old_files_due(now, MAINTENANCE_CLEANUP_OLD_FILES_INTERVAL));
+
+        state.complete_expire_snapshots(now);
+        state.complete_cleanup_old_files(now);
+
+        assert!(!state.expire_snapshots_due(
+            now + MAINTENANCE_EXPIRE_SNAPSHOTS_INTERVAL - Duration::from_secs(1),
+            MAINTENANCE_EXPIRE_SNAPSHOTS_INTERVAL
+        ));
+        assert!(state.expire_snapshots_due(
+            now + MAINTENANCE_EXPIRE_SNAPSHOTS_INTERVAL,
+            MAINTENANCE_EXPIRE_SNAPSHOTS_INTERVAL
+        ));
+        assert!(!state.cleanup_old_files_due(
+            now + MAINTENANCE_CLEANUP_OLD_FILES_INTERVAL - Duration::from_secs(1),
+            MAINTENANCE_CLEANUP_OLD_FILES_INTERVAL
+        ));
+        assert!(state.cleanup_old_files_due(
+            now + MAINTENANCE_CLEANUP_OLD_FILES_INTERVAL,
+            MAINTENANCE_CLEANUP_OLD_FILES_INTERVAL
+        ));
+    }
+
+    #[test]
+    fn catalog_maintenance_sql_builders_use_interval_casts() {
+        let expire_sql = expire_snapshots_sql("2 days");
+        let cleanup_sql = cleanup_old_files_sql("2 days");
+
+        assert!(expire_sql.contains("ducklake_expire_snapshots"));
+        assert!(cleanup_sql.contains("ducklake_cleanup_old_files"));
+        assert!(expire_sql.contains("CAST('2 days' AS INTERVAL)"));
+        assert!(cleanup_sql.contains("CAST('2 days' AS INTERVAL)"));
+    }
+
     #[tokio::test]
     async fn flush_failure_records_failed_metric() {
         let handle = init_metrics_handle().expect("failed to initialize prometheus handle");
@@ -1608,14 +1930,14 @@ mod tests {
             &rendered_before,
             MAINTENANCE_TASK_FLUSH,
             MaintenanceOperation::FlushInlinedData,
-            MaintenanceReason::PendingBytesThreshold,
+            MaintenanceReason::PendingInlinedDataBytesThreshold,
             MaintenanceOutcome::Failed,
         );
 
         let error = flush_table_inlined_data_in_background_blocking(
             &conn,
             "public_users",
-            MaintenanceReason::PendingBytesThreshold,
+            MaintenanceReason::PendingInlinedDataBytesThreshold,
         )
         .expect_err("flush should fail without ducklake functions");
 
@@ -1626,7 +1948,7 @@ mod tests {
             &rendered_after,
             MAINTENANCE_TASK_FLUSH,
             MaintenanceOperation::FlushInlinedData,
-            MaintenanceReason::PendingBytesThreshold,
+            MaintenanceReason::PendingInlinedDataBytesThreshold,
             MaintenanceOutcome::Failed,
         );
 
@@ -1669,6 +1991,46 @@ mod tests {
         );
 
         assert!(failed_after > failed_before, "rewrite failed duration count did not increase");
+    }
+
+    #[tokio::test]
+    async fn catalog_expire_failure_records_failed_duration() {
+        let handle = init_metrics_handle().expect("failed to initialize prometheus handle");
+        register_metrics();
+        let conn = duckdb::Connection::open_in_memory().expect("failed to open in-memory duckdb");
+
+        let rendered_before = handle.render();
+        let failed_before = maintenance_duration_count(
+            &rendered_before,
+            MAINTENANCE_TASK_CATALOG_MAINTENANCE,
+            MaintenanceOperation::ExpireSnapshots,
+            MaintenanceReason::SnapshotRetentionThreshold,
+            MaintenanceOutcome::Failed,
+        );
+
+        let error = run_catalog_maintenance_blocking(&conn, "7 days", true, true)
+            .expect_err("catalog maintenance should fail without ducklake functions");
+
+        assert!(matches!(error.kind(), ErrorKind::DestinationQueryFailed));
+
+        let rendered_after = handle.render();
+        let failed_after = maintenance_duration_count(
+            &rendered_after,
+            MAINTENANCE_TASK_CATALOG_MAINTENANCE,
+            MaintenanceOperation::ExpireSnapshots,
+            MaintenanceReason::SnapshotRetentionThreshold,
+            MaintenanceOutcome::Failed,
+        );
+        let cleanup_failed_after = maintenance_duration_count(
+            &rendered_after,
+            MAINTENANCE_TASK_CATALOG_MAINTENANCE,
+            MaintenanceOperation::CleanupOldFiles,
+            MaintenanceReason::CleanupIntervalElapsed,
+            MaintenanceOutcome::Failed,
+        );
+
+        assert!(failed_after > failed_before, "expire snapshots failed duration did not increase");
+        assert_eq!(cleanup_failed_after, 0.0, "cleanup should not run after expiration fails");
     }
 
     #[cfg(feature = "test-utils")]
@@ -1741,6 +2103,7 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(PendingInlineFlushRequests::default()),
             None,
+            Arc::<str>::from("7 days"),
         )
         .expect("failed to spawn maintenance worker");
 
@@ -1777,15 +2140,17 @@ mod tests {
         let mutation_guard = Arc::clone(&checkpoint_gate).read_owned().await;
         let inline_flush_requested = Arc::new(AtomicBool::new(true));
         let pending_inline_flush_requests = PendingInlineFlushRequests::default();
-        pending_inline_flush_requests
-            .request("public_users".to_string(), MaintenanceReason::PendingBytesThreshold);
+        pending_inline_flush_requests.request(
+            "public_users".to_string(),
+            MaintenanceReason::PendingInlinedDataBytesThreshold,
+        );
 
         let rendered_before = handle.render();
         let skipped_before = maintenance_skipped_counter_value(
             &rendered_before,
             MAINTENANCE_TASK_FLUSH,
             MaintenanceOperation::FlushInlinedData,
-            MaintenanceReason::PendingBytesThreshold,
+            MaintenanceReason::PendingInlinedDataBytesThreshold,
         );
 
         maybe_run_requested_inline_flush(
@@ -1804,14 +2169,14 @@ mod tests {
             &rendered_after,
             MAINTENANCE_TASK_FLUSH,
             MaintenanceOperation::FlushInlinedData,
-            MaintenanceReason::PendingBytesThreshold,
+            MaintenanceReason::PendingInlinedDataBytesThreshold,
         );
 
         assert!(skipped_after > skipped_before);
         assert!(inline_flush_requested.load(AtomicOrdering::Acquire));
         assert_eq!(
             pending_inline_flush_requests.requests.lock().get("public_users"),
-            Some(&MaintenanceReason::PendingBytesThreshold)
+            Some(&MaintenanceReason::PendingInlinedDataBytesThreshold)
         );
 
         drop(mutation_guard);
@@ -1827,20 +2192,20 @@ mod tests {
             &rendered_before,
             MAINTENANCE_TASK_FLUSH,
             MaintenanceOperation::FlushInlinedData,
-            MaintenanceReason::PendingBytesThreshold,
+            MaintenanceReason::PendingInlinedDataBytesThreshold,
         );
         let duration_before = maintenance_duration_count(
             &rendered_before,
             MAINTENANCE_TASK_FLUSH,
             MaintenanceOperation::FlushInlinedData,
-            MaintenanceReason::PendingBytesThreshold,
+            MaintenanceReason::PendingInlinedDataBytesThreshold,
             MaintenanceOutcome::SkippedBusy,
         );
 
         record_ducklake_maintenance_skipped(
             MAINTENANCE_TASK_FLUSH,
             MaintenanceOperation::FlushInlinedData,
-            MaintenanceReason::PendingBytesThreshold,
+            MaintenanceReason::PendingInlinedDataBytesThreshold,
         );
 
         let rendered_after = handle.render();
@@ -1848,13 +2213,13 @@ mod tests {
             &rendered_after,
             MAINTENANCE_TASK_FLUSH,
             MaintenanceOperation::FlushInlinedData,
-            MaintenanceReason::PendingBytesThreshold,
+            MaintenanceReason::PendingInlinedDataBytesThreshold,
         );
         let duration_after = maintenance_duration_count(
             &rendered_after,
             MAINTENANCE_TASK_FLUSH,
             MaintenanceOperation::FlushInlinedData,
-            MaintenanceReason::PendingBytesThreshold,
+            MaintenanceReason::PendingInlinedDataBytesThreshold,
             MaintenanceOutcome::SkippedBusy,
         );
 

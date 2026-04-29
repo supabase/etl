@@ -21,8 +21,8 @@ use etl::{
     state::destination_metadata::DestinationTableMetadata,
     store::{schema::SchemaStore, state::StateStore},
     types::{
-        Event, EventSequenceKey, OldTableRow, PartialTableRow, ReplicatedTableSchema, SizeHint,
-        TableId, TableName, TableRow, UpdatedTableRow,
+        Event, EventSequenceKey, OldTableRow, PartialTableRow, ReplicatedTableSchema, TableId,
+        TableName, TableRow, UpdatedTableRow,
     },
 };
 use metrics::gauge;
@@ -56,7 +56,8 @@ use crate::{
         },
         config::{
             MAINTENANCE_TARGET_FILE_SIZE, build_setup_plan, current_duckdb_extension_strategy,
-            maintenance_target_file_size_sql,
+            maintenance_target_file_size_sql, resolve_expire_snapshots_older_than,
+            validate_expire_snapshots_older_than_sql,
         },
         inline_size::DuckLakePendingInlineSizeSampler,
         maintenance::{
@@ -388,6 +389,8 @@ where
     ///   (e.g. `"150MB"`). Defaults to `150MB`.
     /// - `maintenance_target_file_size`: Optional DuckLake maintenance
     ///   `target_file_size` value (e.g. `"10MB"`). Defaults to `10MB`.
+    /// - `expire_snapshots_older_than`: Optional DuckLake snapshot-retention
+    ///   interval (e.g. `"7 days"`). Defaults to `7 days`.
     /// - `duckdb_log`: Optional DuckDB log storage and shutdown dump paths.
     /// - On Linux and macOS, DuckDB extensions are loaded from vendored local
     ///   files when a vendored directory is available. The root directory can
@@ -407,6 +410,7 @@ where
         metadata_schema: Option<String>,
         duckdb_memory_cache_limit: Option<String>,
         maintenance_target_file_size: Option<String>,
+        expire_snapshots_older_than: Option<String>,
         store: S,
     ) -> EtlResult<Self> {
         register_metrics();
@@ -432,6 +436,9 @@ where
         let maintenance_target_file_size = Arc::<str>::from(
             maintenance_target_file_size
                 .unwrap_or_else(|| MAINTENANCE_TARGET_FILE_SIZE.to_string()),
+        );
+        let expire_snapshots_older_than = Arc::<str>::from(
+            resolve_expire_snapshots_older_than(expire_snapshots_older_than.as_deref()).to_owned(),
         );
         if let crate::ducklake::config::DuckDbExtensionStrategy::VendoredLocal { platform_dir } =
             extension_strategy
@@ -478,6 +485,31 @@ where
                         source: error
                     )
                 })?;
+                Ok(())
+            },
+        )
+        .await?;
+        let expire_snapshots_validation_sql =
+            validate_expire_snapshots_older_than_sql(expire_snapshots_older_than.as_ref());
+        let expire_snapshots_older_than_for_error = Arc::clone(&expire_snapshots_older_than);
+        run_duckdb_blocking(
+            Arc::clone(&pool),
+            Arc::clone(&blocking_slots),
+            DuckDbBlockingOperationKind::Foreground,
+            move |conn| -> EtlResult<()> {
+                conn.query_row(&expire_snapshots_validation_sql, [], |_row| Ok(())).map_err(
+                    |source| {
+                        etl_error!(
+                            ErrorKind::ConfigError,
+                            "DuckLake expire_snapshots_older_than configuration failed",
+                            format!(
+                                "invalid expire_snapshots_older_than value `{}`",
+                                expire_snapshots_older_than_for_error
+                            ),
+                            source: source
+                        )
+                    },
+                )?;
                 Ok(())
             },
         )
@@ -537,6 +569,7 @@ where
                 Arc::clone(&inline_flush_requested),
                 Arc::clone(&inline_flush_requests),
                 pending_inline_size_sampler,
+                Arc::clone(&expire_snapshots_older_than),
             )?
             .into(),
         );
@@ -662,9 +695,6 @@ where
 
         self.maybe_run_requested_inline_flush().await?;
 
-        let approx_bytes = table_rows.iter().map(|row| row.size_hint() as u64).sum::<u64>();
-        let inserted_rows = table_rows.len() as u64;
-
         // Copy batches for the same table must still serialize so concurrent
         // callers do not race each other inside DuckDB.
         self.ensure_applied_batches_table_exists().await?;
@@ -680,7 +710,7 @@ where
         )
         .await?;
         self.notify_background_maintenance(TableMaintenanceNotification::WriteActivity(
-            TableWriteActivity { table_name, approx_bytes, inserted_rows },
+            TableWriteActivity { table_name },
         ))
         .await;
 
@@ -856,12 +886,9 @@ where
 
                         let maintenance_notification =
                             maintenance_worker.as_ref().as_ref().map(|_| {
-                                TableMaintenanceNotification::WriteActivity(
-                                    table_write_activity_for_mutations(
-                                        destination_table_name.clone(),
-                                        pending_mutations.as_slice(),
-                                    ),
-                                )
+                                TableMaintenanceNotification::WriteActivity(TableWriteActivity {
+                                    table_name: destination_table_name.clone(),
+                                })
                             });
                         let prepared_batches = prepare_mutation_table_batches(
                             &replicated_table_schema,
@@ -1196,27 +1223,6 @@ async fn read_table_streaming_progress_sequence_key_blocking(
     .await
 }
 
-/// Recomputes maintenance stats from the suffix of mutations that still needs
-/// applying.
-fn table_write_activity_for_mutations(
-    table_name: DuckLakeTableName,
-    tracked_mutations: &[TrackedTableMutation],
-) -> TableWriteActivity {
-    let mut write_activity = TableWriteActivity { table_name, approx_bytes: 0, inserted_rows: 0 };
-
-    for tracked_mutation in tracked_mutations {
-        // This is only a fallback estimate for catalogs where we cannot sample
-        // actual inlined-table sizes directly. The optional row-threshold path
-        // is disabled today, so we treat each mutation as one unit of fallback
-        // activity to keep mutation-only streams visible to maintenance.
-        write_activity.approx_bytes =
-            write_activity.approx_bytes.saturating_add(tracked_mutation.write_activity_size_hint());
-        write_activity.inserted_rows = write_activity.inserted_rows.saturating_add(1);
-    }
-
-    write_activity
-}
-
 #[cfg(feature = "test-utils")]
 struct PausedStreamingWriteHook {
     reached_tx: oneshot::Sender<()>,
@@ -1297,8 +1303,8 @@ mod tests {
         config::{PgConnectionConfig, TcpKeepaliveConfig, TlsConfig},
         store::{both::memory::MemoryStore, schema::SchemaStore},
         types::{
-            Cell, ColumnSchema, IdentityMask, OldTableRow, PartialTableRow, PgLsn, ReplicationMask,
-            SizeHint, TableRow, TableSchema, Type as PgType, UpdatedTableRow,
+            Cell, ColumnSchema, IdentityMask, PartialTableRow, ReplicationMask, TableRow,
+            TableSchema, Type as PgType,
         },
     };
     use etl_postgres::tokio::test_utils::PgDatabase;
@@ -1354,40 +1360,6 @@ mod tests {
             ReplicationMask::all(&table_schema),
             IdentityMask::from_bytes(vec![0, 0]),
         )
-    }
-
-    #[test]
-    fn table_write_activity_for_mutations_counts_partial_updates_and_deletes() {
-        let delete_row = OldTableRow::Key(TableRow::new(vec![Cell::I32(1)]));
-        let update_delete_row = OldTableRow::Key(TableRow::new(vec![Cell::I32(1)]));
-        let partial_row = UpdatedTableRow::Partial(PartialTableRow::new(
-            2,
-            TableRow::new(vec![Cell::I32(1), Cell::String("grown".to_string())]),
-            vec![],
-        ));
-        let expected_bytes = delete_row.size_hint() as u64
-            + update_delete_row.size_hint() as u64
-            + partial_row.size_hint() as u64;
-        let write_activity = table_write_activity_for_mutations(
-            "public_users".to_string(),
-            &[
-                TrackedTableMutation::new(
-                    PgLsn::from(100),
-                    PgLsn::from(100),
-                    0,
-                    TableMutation::Delete(delete_row),
-                ),
-                TrackedTableMutation::new(
-                    PgLsn::from(100),
-                    PgLsn::from(100),
-                    1,
-                    TableMutation::Update { delete_row: update_delete_row, new_row: partial_row },
-                ),
-            ],
-        );
-
-        assert_eq!(write_activity.approx_bytes, expected_bytes);
-        assert_eq!(write_activity.inserted_rows, 2);
     }
 
     #[test]
@@ -1625,186 +1597,194 @@ mod tests {
         assert!(!is_create_table_conflict(&error, "public_orders"));
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn query_table_storage_metrics_reads_ducklake_metadata() {
-        let dir = TempDir::new().expect("failed to create temp dir");
-        let data = path_to_file_url(&dir.path().join("data"));
-        let (_catalog_database, catalog) = create_catalog_database().await;
-        let store = MemoryStore::new();
-        let schema = make_schema(1, "public", "users");
-        let replicated_table_schema = ReplicatedTableSchema::all(Arc::new(schema.clone()));
-        let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
+    mod postgres_backed {
+        use super::*;
 
-        store.store_table_schema(schema.clone()).await.expect("failed to seed schema");
+        #[tokio::test(flavor = "multi_thread")]
+        async fn query_table_storage_metrics_reads_ducklake_metadata() {
+            let dir = TempDir::new().expect("failed to create temp dir");
+            let data = path_to_file_url(&dir.path().join("data"));
+            let (_catalog_database, catalog) = create_catalog_database().await;
+            let store = MemoryStore::new();
+            let schema = make_schema(1, "public", "users");
+            let replicated_table_schema = ReplicatedTableSchema::all(Arc::new(schema.clone()));
+            let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
-        let destination = DuckLakeDestination::new(
-            catalog.clone(),
-            data.clone(),
-            1,
-            None,
-            None,
-            None,
-            None,
-            store,
-        )
-        .await
-        .expect("failed to create destination");
+            store.store_table_schema(schema.clone()).await.expect("failed to seed schema");
 
-        destination
-            .write_table_rows(
-                &replicated_table_schema,
-                vec![
-                    TableRow::new(vec![Cell::I32(1), Cell::String("alice".to_string())]),
-                    TableRow::new(vec![Cell::I32(2), Cell::String("bob".to_string())]),
-                ],
+            let destination = DuckLakeDestination::new(
+                catalog.clone(),
+                data.clone(),
+                1,
+                None,
+                None,
+                None,
+                None,
+                None,
+                store,
             )
             .await
-            .expect("failed to write rows");
+            .expect("failed to create destination");
 
-        let conn = open_lake_conn_when_table_visible(&catalog, &data, &table_name).await;
-        let metadata_schema = resolve_ducklake_metadata_schema_blocking(&conn)
-            .expect("failed to resolve metadata schema");
-        let metadata_pg_pool =
-            build_ducklake_metadata_pg_pool(&catalog).expect("failed to create metadata pool");
-        let _rows_flushed = flush_table_inlined_data(&conn, &table_name)
-            .expect("failed to materialize inlined rows for storage metrics test");
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let metrics = loop {
-            let metrics =
-                query_table_storage_metrics(&metadata_pg_pool, &metadata_schema, &table_name)
-                    .await
-                    .expect("failed to query storage metrics");
-            if metrics.active_data_files >= 1 {
-                break metrics;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "timed out waiting for storage metrics after materialization"
-            );
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        };
+            destination
+                .write_table_rows(
+                    &replicated_table_schema,
+                    vec![
+                        TableRow::new(vec![Cell::I32(1), Cell::String("alice".to_string())]),
+                        TableRow::new(vec![Cell::I32(2), Cell::String("bob".to_string())]),
+                    ],
+                )
+                .await
+                .expect("failed to write rows");
 
-        assert!(metrics.active_data_files >= 1);
-        assert!(metrics.active_data_bytes > 0);
-        assert_eq!(metrics.active_delete_files, 0);
-        assert_eq!(metrics.deleted_rows, 0);
-    }
+            let conn = open_lake_conn_when_table_visible(&catalog, &data, &table_name).await;
+            let metadata_schema = resolve_ducklake_metadata_schema_blocking(&conn)
+                .expect("failed to resolve metadata schema");
+            let metadata_pg_pool =
+                build_ducklake_metadata_pg_pool(&catalog).expect("failed to create metadata pool");
+            let _rows_flushed = flush_table_inlined_data(&conn, &table_name)
+                .expect("failed to materialize inlined rows for storage metrics test");
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let metrics = loop {
+                let metrics =
+                    query_table_storage_metrics(&metadata_pg_pool, &metadata_schema, &table_name)
+                        .await
+                        .expect("failed to query storage metrics");
+                if metrics.active_data_files >= 1 {
+                    break metrics;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "timed out waiting for storage metrics after materialization"
+                );
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            };
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn query_catalog_maintenance_metrics_reports_active_data_files_total() {
-        let dir = TempDir::new().expect("failed to create temp dir");
-        let data = path_to_file_url(&dir.path().join("data"));
-        let (_catalog_database, catalog) = create_catalog_database().await;
-        let store = MemoryStore::new();
-        let schema = make_schema(1, "public", "users");
-        let replicated_table_schema = ReplicatedTableSchema::all(Arc::new(schema.clone()));
-        let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
+            assert!(metrics.active_data_files >= 1);
+            assert!(metrics.active_data_bytes > 0);
+            assert_eq!(metrics.active_delete_files, 0);
+            assert_eq!(metrics.deleted_rows, 0);
+        }
 
-        store.store_table_schema(schema.clone()).await.expect("failed to seed schema");
+        #[tokio::test(flavor = "multi_thread")]
+        async fn query_catalog_maintenance_metrics_reports_active_data_files_total() {
+            let dir = TempDir::new().expect("failed to create temp dir");
+            let data = path_to_file_url(&dir.path().join("data"));
+            let (_catalog_database, catalog) = create_catalog_database().await;
+            let store = MemoryStore::new();
+            let schema = make_schema(1, "public", "users");
+            let replicated_table_schema = ReplicatedTableSchema::all(Arc::new(schema.clone()));
+            let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
-        let destination = DuckLakeDestination::new(
-            catalog.clone(),
-            data.clone(),
-            1,
-            None,
-            None,
-            None,
-            None,
-            store,
-        )
-        .await
-        .expect("failed to create destination");
+            store.store_table_schema(schema.clone()).await.expect("failed to seed schema");
 
-        destination
-            .write_table_rows(
-                &replicated_table_schema,
-                vec![
-                    TableRow::new(vec![Cell::I32(1), Cell::String("alice".to_string())]),
-                    TableRow::new(vec![Cell::I32(2), Cell::String("bob".to_string())]),
-                ],
+            let destination = DuckLakeDestination::new(
+                catalog.clone(),
+                data.clone(),
+                1,
+                None,
+                None,
+                None,
+                None,
+                None,
+                store,
             )
             .await
-            .expect("failed to write rows");
+            .expect("failed to create destination");
 
-        let conn = open_lake_conn_when_table_visible(&catalog, &data, &table_name).await;
-        let metadata_schema = resolve_ducklake_metadata_schema_blocking(&conn)
-            .expect("failed to resolve metadata schema");
-        let metadata_pg_pool =
-            build_ducklake_metadata_pg_pool(&catalog).expect("failed to create metadata pool");
-        let _rows_flushed = flush_table_inlined_data(&conn, &table_name)
-            .expect("failed to materialize inlined rows for catalog metrics test");
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let metrics = loop {
+            destination
+                .write_table_rows(
+                    &replicated_table_schema,
+                    vec![
+                        TableRow::new(vec![Cell::I32(1), Cell::String("alice".to_string())]),
+                        TableRow::new(vec![Cell::I32(2), Cell::String("bob".to_string())]),
+                    ],
+                )
+                .await
+                .expect("failed to write rows");
+
+            let conn = open_lake_conn_when_table_visible(&catalog, &data, &table_name).await;
+            let metadata_schema = resolve_ducklake_metadata_schema_blocking(&conn)
+                .expect("failed to resolve metadata schema");
+            let metadata_pg_pool =
+                build_ducklake_metadata_pg_pool(&catalog).expect("failed to create metadata pool");
+            let _rows_flushed = flush_table_inlined_data(&conn, &table_name)
+                .expect("failed to materialize inlined rows for catalog metrics test");
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let metrics = loop {
+                let metrics =
+                    query_catalog_maintenance_metrics(&metadata_pg_pool, &metadata_schema)
+                        .await
+                        .expect("failed to query catalog maintenance metrics");
+                if metrics.active_data_files_total >= 1 {
+                    break metrics;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "timed out waiting for active data files total after materialization"
+                );
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            };
+
+            assert!(metrics.active_data_files_total >= 1);
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn query_catalog_maintenance_metrics_reads_ducklake_metadata() {
+            let dir = TempDir::new().expect("failed to create temp dir");
+            let data = path_to_file_url(&dir.path().join("data"));
+            let (_catalog_database, catalog) = create_catalog_database().await;
+            let store = MemoryStore::new();
+            let schema = make_schema(1, "public", "users");
+            let replicated_table_schema = ReplicatedTableSchema::all(Arc::new(schema.clone()));
+            let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
+
+            store.store_table_schema(schema.clone()).await.expect("failed to seed schema");
+
+            let destination = DuckLakeDestination::new(
+                catalog.clone(),
+                data.clone(),
+                1,
+                None,
+                None,
+                None,
+                None,
+                None,
+                store,
+            )
+            .await
+            .expect("failed to create destination");
+
+            destination
+                .write_table_rows(
+                    &replicated_table_schema,
+                    vec![TableRow::new(vec![Cell::I32(1), Cell::String("alice".to_string())])],
+                )
+                .await
+                .expect("failed to write rows");
+            destination
+                .truncate_table(&replicated_table_schema)
+                .await
+                .expect("failed to truncate table");
+
+            destination.shutdown().await.expect("failed to shutdown destination");
+            drop(destination);
+
+            let conn = open_lake_conn_when_table_visible(&catalog, &data, &table_name).await;
+            let metadata_schema = resolve_ducklake_metadata_schema_blocking(&conn)
+                .expect("failed to resolve metadata schema");
+            let metadata_pg_pool =
+                build_ducklake_metadata_pg_pool(&catalog).expect("failed to create metadata pool");
             let metrics = query_catalog_maintenance_metrics(&metadata_pg_pool, &metadata_schema)
                 .await
                 .expect("failed to query catalog maintenance metrics");
-            if metrics.active_data_files_total >= 1 {
-                break metrics;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "timed out waiting for active data files total after materialization"
-            );
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        };
 
-        assert!(metrics.active_data_files_total >= 1);
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn query_catalog_maintenance_metrics_reads_ducklake_metadata() {
-        let dir = TempDir::new().expect("failed to create temp dir");
-        let data = path_to_file_url(&dir.path().join("data"));
-        let (_catalog_database, catalog) = create_catalog_database().await;
-        let store = MemoryStore::new();
-        let schema = make_schema(1, "public", "users");
-        let replicated_table_schema = ReplicatedTableSchema::all(Arc::new(schema.clone()));
-        let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
-
-        store.store_table_schema(schema.clone()).await.expect("failed to seed schema");
-
-        let destination = DuckLakeDestination::new(
-            catalog.clone(),
-            data.clone(),
-            1,
-            None,
-            None,
-            None,
-            None,
-            store,
-        )
-        .await
-        .expect("failed to create destination");
-
-        destination
-            .write_table_rows(
-                &replicated_table_schema,
-                vec![TableRow::new(vec![Cell::I32(1), Cell::String("alice".to_string())])],
-            )
-            .await
-            .expect("failed to write rows");
-        destination
-            .truncate_table(&replicated_table_schema)
-            .await
-            .expect("failed to truncate table");
-
-        destination.shutdown().await.expect("failed to shutdown destination");
-        drop(destination);
-
-        let conn = open_lake_conn_when_table_visible(&catalog, &data, &table_name).await;
-        let metadata_schema = resolve_ducklake_metadata_schema_blocking(&conn)
-            .expect("failed to resolve metadata schema");
-        let metadata_pg_pool =
-            build_ducklake_metadata_pg_pool(&catalog).expect("failed to create metadata pool");
-        let metrics = query_catalog_maintenance_metrics(&metadata_pg_pool, &metadata_schema)
-            .await
-            .expect("failed to query catalog maintenance metrics");
-
-        assert!(metrics.active_data_files_total >= 0);
-        assert!(metrics.snapshots_total >= 1);
-        assert!(metrics.oldest_snapshot_age_seconds >= 0);
-        assert!(metrics.files_scheduled_for_deletion_total >= 0);
-        assert!(metrics.files_scheduled_for_deletion_bytes >= 0);
-        assert!(metrics.oldest_scheduled_deletion_age_seconds >= 0);
+            assert!(metrics.active_data_files_total >= 0);
+            assert!(metrics.snapshots_total >= 1);
+            assert!(metrics.oldest_snapshot_age_seconds >= 0);
+            assert!(metrics.files_scheduled_for_deletion_total >= 0);
+            assert!(metrics.files_scheduled_for_deletion_bytes >= 0);
+            assert!(metrics.oldest_scheduled_deletion_age_seconds >= 0);
+        }
     }
 }

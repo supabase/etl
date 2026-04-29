@@ -698,6 +698,7 @@ struct DucklakeValidator {
     metadata_schema: Option<String>,
     duckdb_memory_cache_limit: Option<String>,
     maintenance_target_file_size: Option<String>,
+    expire_snapshots_older_than: Option<String>,
 }
 
 impl DucklakeValidator {
@@ -715,6 +716,7 @@ impl DucklakeValidator {
         metadata_schema: Option<String>,
         duckdb_memory_cache_limit: Option<String>,
         maintenance_target_file_size: Option<String>,
+        expire_snapshots_older_than: Option<String>,
     ) -> Self {
         Self {
             catalog_url,
@@ -729,6 +731,7 @@ impl DucklakeValidator {
             metadata_schema,
             duckdb_memory_cache_limit,
             maintenance_target_file_size,
+            expire_snapshots_older_than,
         }
     }
 }
@@ -790,6 +793,7 @@ impl Validator for DucklakeValidator {
             self.metadata_schema.clone(),
             self.duckdb_memory_cache_limit.clone(),
             self.maintenance_target_file_size.clone(),
+            self.expire_snapshots_older_than.clone(),
             MemoryStore::new(),
         )
         .await
@@ -946,6 +950,7 @@ impl Validator for DestinationValidator {
                 metadata_schema,
                 duckdb_memory_cache_limit,
                 maintenance_target_file_size,
+                expire_snapshots_older_than,
             } => {
                 let validator = DucklakeValidator::new(
                     catalog_url.clone(),
@@ -962,6 +967,7 @@ impl Validator for DestinationValidator {
                     metadata_schema.clone(),
                     duckdb_memory_cache_limit.clone(),
                     maintenance_target_file_size.clone(),
+                    expire_snapshots_older_than.clone(),
                 );
                 validator.validate(ctx).await
             }

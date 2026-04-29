@@ -102,6 +102,7 @@ postgres-replication = { git = "https://github.com/iambriccardo/rust-postgres", 
 prost = { version = "0.14.1", default-features = false }
 r2d2 = { version = "0.8", default-features = false }
 rand = { version = "0.9.2", default-features = false }
+regex = { version = "1.12.3", default-features = false, features = ["std", "unicode"] }
 reqwest = { version = "0.12.22", default-features = false }
 rustls = { version = "0.23.31", default-features = false }
 secrecy = { version = "0.10.3", default-features = false }

@@ -45,6 +45,7 @@
 - Never create commits, push branches, open pull requests, or perform other git write actions unless the user explicitly instructs you to do so.
 - Keep the workspace on the stable toolchain from `rust-toolchain.toml` for build, lint, and test commands; use the pinned nightly formatter only through `./scripts/fmt` and `./scripts/fmt-check`.
 - Treat `Cargo.toml` workspace lints, `rustfmt.toml`, and compiler diagnostics as the source of truth for enforceable style and correctness rules. Prefer adding or tightening static checks over adding prose rules here.
+- Always run the clippy lint command listed in commands section at the end to check everything compile properly.
 
 ## Rust Style
 - This section is only for project-specific judgment that is not already covered by rustfmt, rustc, or Clippy.
@@ -101,6 +102,7 @@
 - When fixing a specific crate, run the narrowest relevant tests first, then broaden if needed.
 - Add or update tests when behavior changes, regressions are possible, or new logic is introduced.
 - Register `NotifyingStore::notify_on_*` and `TestDestinationWrapper::wait_for_*` handles before the producer can fire. These helpers only arm on updates that arrive *after* registration, so register the notifier first, then start the producer.
+- If your tests need `TESTS_DATABASE_HOST` to be set or a test instance of PostgreSQL you can use `cargo xtask postgres create` command to spawn a postgres instance
 
   ```rust
   let ready = store.notify_on_table_state_type(id, Ready).await;
