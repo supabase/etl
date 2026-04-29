@@ -11,7 +11,7 @@ use utoipa::ToSchema;
 use crate::{
     config::ApiConfig,
     configs::encryption::EncryptionKey,
-    db::{
+    data::{
         self, connect_to_source_database_from_api,
         sources::SourcesDbError,
         tables::{Table, TablesDbError},
@@ -105,7 +105,7 @@ pub async fn read_table_names(
     let tenant_id = extract_tenant_id(&req)?;
     let source_id = source_id.into_inner();
 
-    let source_config = db::sources::read_source(&**pool, tenant_id, source_id, &encryption_key)
+    let source_config = data::sources::read_source(&**pool, tenant_id, source_id, &encryption_key)
         .await?
         .map(|s| s.config)
         .ok_or(TableError::SourceNotFound(source_id))?;
@@ -114,7 +114,7 @@ pub async fn read_table_names(
     let source_pool =
         connect_to_source_database_from_api(&source_config.into_connection_config(tls_config))
             .await?;
-    let tables = db::tables::get_tables(&source_pool).await?;
+    let tables = data::tables::get_tables(&source_pool).await?;
     let response = ReadTablesResponse { tables };
 
     Ok(Json(response))

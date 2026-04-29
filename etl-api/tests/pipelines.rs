@@ -254,7 +254,7 @@ async fn pipeline_replicator_resources_are_persisted_and_used_on_start() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn tenant_cannot_create_more_than_max_pipelines() {
-    use etl_api::db::pipelines::MAX_PIPELINES_PER_TENANT;
+    use etl_api::data::pipelines::MAX_PIPELINES_PER_TENANT;
 
     init_test_tracing();
     // Arrange

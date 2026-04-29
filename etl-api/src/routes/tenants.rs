@@ -15,8 +15,8 @@ use utoipa::ToSchema;
 use crate::{
     config::ApiConfig,
     configs::encryption::EncryptionKey,
-    db,
-    db::{
+    data,
+    data::{
         connect_to_source_database_from_api,
         pipelines::{
             PipelinesDbError, delete_pipeline_replication_slots, delete_pipelines_source_state,
@@ -168,7 +168,7 @@ pub async fn create_tenant(
 
     root_span.record("project", &tenant.id);
 
-    let id = db::tenants::create_tenant(&**pool, &tenant.id, &tenant.name).await?;
+    let id = data::tenants::create_tenant(&**pool, &tenant.id, &tenant.name).await?;
 
     let response = CreateTenantResponse { id };
 
@@ -201,7 +201,7 @@ pub async fn create_or_update_tenant(
 
     root_span.record("project", &tenant_id);
 
-    let id = db::tenants::create_or_update_tenant(&**pool, &tenant_id, &tenant.name).await?;
+    let id = data::tenants::create_or_update_tenant(&**pool, &tenant_id, &tenant.name).await?;
     let response = CreateOrUpdateTenantResponse { id };
 
     Ok(Json(response))
@@ -230,7 +230,7 @@ pub async fn read_tenant(
 
     root_span.record("project", &tenant_id);
 
-    let response = db::tenants::read_tenant(&**pool, &tenant_id)
+    let response = data::tenants::read_tenant(&**pool, &tenant_id)
         .await?
         .map(|t| ReadTenantResponse { id: t.id, name: t.name })
         .ok_or(TenantError::TenantNotFound(tenant_id))?;
@@ -264,7 +264,7 @@ pub async fn update_tenant(
 
     root_span.record("project", &tenant_id);
 
-    db::tenants::update_tenant(&**pool, &tenant_id, &tenant.name)
+    data::tenants::update_tenant(&**pool, &tenant_id, &tenant.name)
         .await?
         .ok_or(TenantError::TenantNotFound(tenant_id))?;
 
@@ -307,7 +307,7 @@ pub async fn delete_tenant(
     }
 
     let sources =
-        db::sources::read_all_source_connections(&**pool, &tenant_id, &encryption_key).await?;
+        data::sources::read_all_source_connections(&**pool, &tenant_id, &encryption_key).await?;
     let tls_config = trusted_root_certs_cache.get_tls_config(api_config.source.tls_enabled).await?;
     let mut pipelines_by_source = std::collections::BTreeMap::new();
     for pipeline in pipelines {
@@ -343,7 +343,7 @@ pub async fn delete_tenant(
         let mut source_txn = source_pool.begin().await?;
         let deleted_pipeline_ids =
             delete_pipelines_source_state(source_txn.deref_mut(), &source_pipelines).await?;
-        db::sources::uninstall_source_installation(source_txn.deref_mut()).await?;
+        data::sources::uninstall_source_installation(source_txn.deref_mut()).await?;
         source_txn.commit().await?;
         for pipeline_id in deleted_pipeline_ids {
             delete_pipeline_replication_slots(&source_pool, pipeline_id).await?;
@@ -353,7 +353,7 @@ pub async fn delete_tenant(
     // Deleting the tenant is enough for API-side cleanup because Postgres cascades
     // tenant-owned rows in the app schema; we only clean source databases
     // manually above.
-    db::tenants::delete_tenant(&**pool, &tenant_id).await?;
+    data::tenants::delete_tenant(&**pool, &tenant_id).await?;
 
     Ok(HttpResponse::Ok().finish())
 }
@@ -369,7 +369,7 @@ pub async fn delete_tenant(
 )]
 #[get("/tenants")]
 pub async fn read_all_tenants(pool: Data<PgPool>) -> Result<impl Responder, TenantError> {
-    let tenants: Vec<ReadTenantResponse> = db::tenants::read_all_tenants(&**pool)
+    let tenants: Vec<ReadTenantResponse> = data::tenants::read_all_tenants(&**pool)
         .await?
         .drain(..)
         .map(|t| ReadTenantResponse { id: t.id, name: t.name })

@@ -19,8 +19,8 @@ use utoipa::ToSchema;
 use crate::{
     config::ApiConfig,
     configs::{encryption::EncryptionKey, pipeline::FullApiPipelineConfig},
-    db,
-    db::{
+    data,
+    data::{
         connect_to_source_database_from_api,
         destinations::{DestinationsDbError, destination_exists},
         images::ImagesDbError,
@@ -137,7 +137,7 @@ impl From<PipelinesDbError> for PipelineError {
     fn from(e: PipelinesDbError) -> Self {
         match e {
             PipelinesDbError::Database(err)
-                if db::utils::is_unique_constraint_violation_error(&err) =>
+                if data::utils::is_unique_constraint_violation_error(&err) =>
             {
                 Self::DuplicatePipeline
             }
@@ -550,7 +550,7 @@ pub async fn create_pipeline(
     let mut txn = pool.begin().await?;
 
     // Verify source exists
-    db::sources::read_source(txn.deref_mut(), tenant_id, pipeline.source_id, &encryption_key)
+    data::sources::read_source(txn.deref_mut(), tenant_id, pipeline.source_id, &encryption_key)
         .await?
         .ok_or(PipelineError::SourceNotFound(pipeline.source_id))?;
 
@@ -565,16 +565,16 @@ pub async fn create_pipeline(
     )
     .await;
     let pipeline_count =
-        db::pipelines::count_pipelines_for_tenant(txn.deref_mut(), tenant_id).await?;
+        data::pipelines::count_pipelines_for_tenant(txn.deref_mut(), tenant_id).await?;
     if pipeline_count >= max_pipelines {
         return Err(PipelineError::PipelineLimitReached { limit: max_pipelines });
     }
 
-    let image = db::images::read_default_image(txn.deref_mut())
+    let image = data::images::read_default_image(txn.deref_mut())
         .await?
         .ok_or(PipelineError::NoDefaultImageFound)?;
 
-    let id = db::pipelines::create_pipeline(
+    let id = data::pipelines::create_pipeline(
         &mut txn,
         tenant_id,
         pipeline.source_id,
@@ -613,7 +613,7 @@ pub async fn read_pipeline(
     let tenant_id = extract_tenant_id(&req)?;
     let pipeline_id = pipeline_id.into_inner();
 
-    let response = db::pipelines::read_pipeline(&**pool, tenant_id, pipeline_id)
+    let response = data::pipelines::read_pipeline(&**pool, tenant_id, pipeline_id)
         .await?
         .map(|pipeline| {
             Ok::<ReadPipelineResponse, serde_json::Error>(ReadPipelineResponse {
@@ -671,7 +671,7 @@ pub async fn update_pipeline(
     let mut txn = pool.begin().await?;
 
     // Verify source exists
-    db::sources::read_source(txn.deref_mut(), tenant_id, pipeline.source_id, &encryption_key)
+    data::sources::read_source(txn.deref_mut(), tenant_id, pipeline.source_id, &encryption_key)
         .await?
         .ok_or(PipelineError::SourceNotFound(pipeline.source_id))?;
 
@@ -679,7 +679,7 @@ pub async fn update_pipeline(
         return Err(PipelineError::DestinationNotFound(pipeline.destination_id));
     }
 
-    db::pipelines::update_pipeline(
+    data::pipelines::update_pipeline(
         txn.deref_mut(),
         tenant_id,
         pipeline_id,
@@ -754,7 +754,7 @@ pub async fn delete_pipeline(
     }
 
     let tls_config = trusted_root_certs_cache.get_tls_config(api_config.source.tls_enabled).await?;
-    let source = db::sources::read_source_connection(
+    let source = data::sources::read_source_connection(
         &**pool,
         tenant_id,
         pipeline.source_id,
@@ -802,7 +802,7 @@ pub async fn read_all_pipelines(
     let tenant_id = extract_tenant_id(&req)?;
 
     let mut pipelines = vec![];
-    for pipeline in db::pipelines::read_all_pipelines(&**pool, tenant_id).await? {
+    for pipeline in data::pipelines::read_all_pipelines(&**pool, tenant_id).await? {
         let pipeline = ReadPipelineResponse {
             id: pipeline.id,
             tenant_id: pipeline.tenant_id,
@@ -898,7 +898,7 @@ pub async fn stop_pipeline(
 
     let mut txn = pool.begin().await?;
     let replicator =
-        db::replicators::read_replicator_by_pipeline_id(txn.deref_mut(), tenant_id, pipeline_id)
+        data::replicators::read_replicator_by_pipeline_id(txn.deref_mut(), tenant_id, pipeline_id)
             .await?
             .ok_or(PipelineError::ReplicatorNotFound(pipeline_id))?;
 
@@ -930,7 +930,7 @@ pub async fn stop_all_pipelines(
     let k8s_client = k8s_client.into_inner();
 
     let mut txn = pool.begin().await?;
-    let replicators = db::replicators::read_replicators(txn.deref_mut(), tenant_id).await?;
+    let replicators = data::replicators::read_replicators(txn.deref_mut(), tenant_id).await?;
     for replicator in replicators {
         delete_pipeline_resources_in_k8s(k8s_client.as_ref(), tenant_id, replicator).await?;
     }
@@ -965,15 +965,15 @@ pub async fn get_pipeline_version(
     let mut txn = pool.begin().await?;
 
     let replicator =
-        db::replicators::read_replicator_by_pipeline_id(txn.deref_mut(), tenant_id, pipeline_id)
+        data::replicators::read_replicator_by_pipeline_id(txn.deref_mut(), tenant_id, pipeline_id)
             .await?
             .ok_or(PipelineError::ReplicatorNotFound(pipeline_id))?;
 
-    let current_image = db::images::read_image_by_replicator_id(txn.deref_mut(), replicator.id)
+    let current_image = data::images::read_image_by_replicator_id(txn.deref_mut(), replicator.id)
         .await?
         .ok_or(PipelineError::ImageNotFound(replicator.id))?;
 
-    let default_image = db::images::read_default_image(txn.deref_mut()).await?;
+    let default_image = data::images::read_default_image(txn.deref_mut()).await?;
 
     txn.commit().await?;
 
@@ -1019,7 +1019,7 @@ pub async fn get_pipeline_status(
     let k8s_client = k8s_client.into_inner();
 
     let replicator =
-        db::replicators::read_replicator_by_pipeline_id(&**pool, tenant_id, pipeline_id)
+        data::replicators::read_replicator_by_pipeline_id(&**pool, tenant_id, pipeline_id)
             .await?
             .ok_or(PipelineError::ReplicatorNotFound(pipeline_id))?;
 
@@ -1061,13 +1061,13 @@ pub async fn get_pipeline_replication_status(
     let mut txn = pool.begin().await?;
 
     // Read the pipeline to ensure it exists and get the source configuration
-    let pipeline = db::pipelines::read_pipeline(txn.deref_mut(), tenant_id, pipeline_id)
+    let pipeline = data::pipelines::read_pipeline(txn.deref_mut(), tenant_id, pipeline_id)
         .await?
         .ok_or(PipelineError::PipelineNotFound(pipeline_id))?;
 
     // Get the source configuration
     let source =
-        db::sources::read_source(txn.deref_mut(), tenant_id, pipeline.source_id, &encryption_key)
+        data::sources::read_source(txn.deref_mut(), tenant_id, pipeline.source_id, &encryption_key)
             .await?
             .ok_or(PipelineError::SourceNotFound(pipeline.source_id))?;
 
@@ -1159,13 +1159,13 @@ pub async fn rollback_tables(
     let mut txn = pool.begin().await?;
 
     // Read the pipeline to ensure it exists and get the source configuration
-    let pipeline = db::pipelines::read_pipeline(txn.deref_mut(), tenant_id, pipeline_id)
+    let pipeline = data::pipelines::read_pipeline(txn.deref_mut(), tenant_id, pipeline_id)
         .await?
         .ok_or(PipelineError::PipelineNotFound(pipeline_id))?;
 
     // Get the source configuration
     let source =
-        db::sources::read_source(txn.deref_mut(), tenant_id, pipeline.source_id, &encryption_key)
+        data::sources::read_source(txn.deref_mut(), tenant_id, pipeline.source_id, &encryption_key)
             .await?
             .ok_or(PipelineError::SourceNotFound(pipeline.source_id))?;
 
@@ -1315,7 +1315,7 @@ pub async fn update_pipeline_version(
     // Only allow updating to the current default image. The client must provide the
     // version id and it must match the default version id. If it does not, we
     // consider this a race condition and we fail the update.
-    let default_image = db::images::read_default_image(txn.deref_mut())
+    let default_image = data::images::read_default_image(txn.deref_mut())
         .await?
         .ok_or(PipelineError::NoDefaultImageFound)?;
 
@@ -1327,7 +1327,7 @@ pub async fn update_pipeline_version(
 
     // If the image ids are different, we change the database entry.
     if target_image.id != current_image.id {
-        db::replicators::update_replicator_image(
+        data::replicators::update_replicator_image(
             txn.deref_mut(),
             tenant_id,
             replicator.id,
@@ -1401,7 +1401,7 @@ pub async fn validate_pipeline(
     validate_pipeline_request(&request.config)?;
 
     let source =
-        db::sources::read_source(pool.as_ref(), tenant_id, request.source_id, &encryption_key)
+        data::sources::read_source(pool.as_ref(), tenant_id, request.source_id, &encryption_key)
             .await?
             .ok_or(PipelineError::SourceNotFound(request.source_id))?;
 
