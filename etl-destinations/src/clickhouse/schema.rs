@@ -64,22 +64,6 @@ pub(crate) fn quote_identifier(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
 }
 
-/// Converts a Postgres `schema.table` name into a single-segment ClickHouse
-/// table name.
-///
-/// Schema and table are joined with `_`; any literal `_` in either component
-/// is doubled to `__` so the join character is unambiguous and the original
-/// pair can be recovered by splitting on a single underscore.
-///
-/// Examples:
-/// - `public.orders`  -> `public_orders`
-/// - `my_schema.t`    -> `my__schema_t`
-pub fn table_name_to_clickhouse_table_name(schema: &str, table: &str) -> String {
-    let escaped_schema = schema.replace('_', "__");
-    let escaped_table = table.replace('_', "__");
-    format!("{escaped_schema}_{escaped_table}")
-}
-
 /// Returns the full ClickHouse type string for a column, with Nullable
 /// wrapping.
 ///
@@ -130,19 +114,6 @@ mod tests {
     }
 
     #[test]
-    fn table_name_escaping() {
-        assert_eq!(table_name_to_clickhouse_table_name("public", "orders"), "public_orders");
-        assert_eq!(
-            table_name_to_clickhouse_table_name("my_schema", "my_table"),
-            "my__schema_my__table"
-        );
-        assert_eq!(
-            table_name_to_clickhouse_table_name("public", "my__table"),
-            "public_my____table"
-        );
-    }
-
-    #[test]
     fn build_create_table_sql_quotes_identifiers() {
         let schemas = vec![ColumnSchema {
             name: "id\"value".to_string(),
@@ -152,8 +123,9 @@ mod tests {
             primary_key_ordinal_position: Some(1),
             nullable: false,
         }];
-        let table_name = table_name_to_clickhouse_table_name("sche\"ma", "ta\"ble");
-        let sql = build_create_table_sql(&table_name, &schemas);
+        // Pre-encoded table name with embedded quotes to verify the SQL
+        // builder quotes/escapes the identifier itself.
+        let sql = build_create_table_sql("sche\"ma_ta\"ble", &schemas);
 
         assert!(
             sql.contains("CREATE TABLE IF NOT EXISTS \"sche\"\"ma_ta\"\"ble\""),

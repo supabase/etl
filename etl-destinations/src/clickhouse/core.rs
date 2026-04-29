@@ -19,14 +19,14 @@ use tokio::task::JoinSet;
 use tracing::{debug, info, warn};
 use url::Url;
 
-use crate::clickhouse::{
-    client::{ClickHouseClient, ClickHouseTableColumn},
-    encoding::{ClickHouseValue, cell_to_clickhouse_value},
-    metrics::{ETL_CH_DDL_DURATION_SECONDS, register_metrics},
-    schema::{
-        CDC_LSN_COLUMN_NAME, CDC_OPERATION_COLUMN_NAME, build_create_table_sql,
-        table_name_to_clickhouse_table_name,
+use crate::{
+    clickhouse::{
+        client::{ClickHouseClient, ClickHouseTableColumn},
+        encoding::{ClickHouseValue, cell_to_clickhouse_value},
+        metrics::{ETL_CH_DDL_DURATION_SECONDS, register_metrics},
+        schema::{CDC_LSN_COLUMN_NAME, CDC_OPERATION_COLUMN_NAME, build_create_table_sql},
     },
+    table_name::try_stringify_table_name,
 };
 
 /// Postgres CDC operation kind. Written to the `cdc_operation` column as the
@@ -258,9 +258,7 @@ where
         &self,
         schema: &ReplicatedTableSchema,
     ) -> EtlResult<(String, Arc<[bool]>)> {
-        let table_name = schema.name();
-        let ch_table_name =
-            table_name_to_clickhouse_table_name(&table_name.schema, &table_name.name);
+        let ch_table_name = try_stringify_table_name(schema.name())?;
 
         if let Some(flags) = self.table_cache.read().get(&ch_table_name).cloned() {
             return Ok((ch_table_name, flags));
