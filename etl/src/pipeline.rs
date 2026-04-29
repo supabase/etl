@@ -226,12 +226,6 @@ where
 
             errors.push(err);
 
-            // TODO: in the future we might build a system based on the `ReactiveFuture`
-            // that  automatically sends a shutdown signal to table sync workers
-            // on apply worker failure. If there was an error in the apply
-            // worker, we want to shut down all table sync workers, since
-            // without an apply worker they are lost.
-            //
             // If we fail to send the shutdown signal, we are not going to capture the error
             // since it means that no table sync workers are running, which is
             // fine.
@@ -250,7 +244,7 @@ where
             errors.push(err);
         }
 
-        info!("shutting down destination");
+        info!("waiting for destination shutdown to complete");
 
         // Once all workers completed, we notify the destination of shutting down.
         if let Err(err) = self.destination.shutdown().await {
@@ -261,9 +255,8 @@ where
 
         info!("waiting for memory monitor to complete");
 
-        // Ensure the refresh task has observed shutdown even if the apply worker exited
-        // without the caller explicitly triggering shutdown first.
-        let _ = self.shutdown_tx.shutdown();
+        // As last thing, we want the memory refresh to be done, so that we can cleanly
+        // terminate the process.
         if let Err(err) = memory_monitor.wait_for_refresh_task().await {
             if err.is_cancelled() {
                 warn!(error = %err, "memory monitor task was cancelled");
