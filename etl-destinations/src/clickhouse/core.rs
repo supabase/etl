@@ -1,7 +1,6 @@
 use std::{collections::HashMap, sync::Arc, time::Instant};
 
 use etl::{
-    bail,
     destination::{
         Destination,
         async_result::{TruncateTableResult, WriteEventsResult, WriteTableRowsResult},
@@ -279,12 +278,16 @@ where
                 )
                 .await?;
             }
-            Some(metadata) if metadata.is_applying() => {
-                self.recover_applying_metadata(table_id, &ch_table_name, schema, metadata).await?;
+            Some(metadata) => {
+                if metadata.is_applying() {
+                    self.recover_applying_metadata(table_id, &ch_table_name, schema, metadata)
+                        .await?;
+                }
+                // Otherwise the metadata is already `Applied`: this branch
+                // runs after `handle_relation_event` invalidated the cache,
+                // so no DDL is needed and we just fall through to recompute
+                // nullable flags below.
             }
-            // Applied metadata, cache miss after `handle_relation_event`
-            // invalidated the cache. No DDL needed.
-            Some(_applied) => {}
         }
 
         // Compute nullable flags from the actual ClickHouse schema. This matters after
@@ -400,19 +403,21 @@ where
         let new_snapshot_id = new_schema.inner().snapshot_id;
         let new_replication_mask = new_schema.replication_mask().clone();
 
-        let Some(metadata) = self.store.get_applied_destination_table_metadata(table_id).await?
-        else {
-            bail!(
-                ErrorKind::CorruptedTableSchema,
-                "Missing destination table metadata",
-                format!(
-                    "No destination table metadata found for table {} when processing schema \
-                     change. The metadata should have been recorded during initial table \
-                     synchronization.",
-                    table_id
-                )
-            );
-        };
+        let metadata =
+            self.store.get_applied_destination_table_metadata(table_id).await?.ok_or_else(
+                || {
+                    etl_error!(
+                        ErrorKind::CorruptedTableSchema,
+                        "Missing destination table metadata",
+                        format!(
+                            "No destination table metadata found for table {} when processing \
+                             schema change. The metadata should have been recorded during initial \
+                             table synchronization.",
+                            table_id
+                        )
+                    )
+                },
+            )?;
 
         let current_snapshot_id = metadata.snapshot_id;
         let current_replication_mask = metadata.replication_mask.clone();
@@ -783,6 +788,15 @@ where
     fn name() -> &'static str {
         "clickhouse"
     }
+
+    // The trait methods below intentionally do not use `?` on the inner work.
+    // Errors must reach the caller via `async_result.send(result)`, not via the
+    // outer `EtlResult<()>`; using `?` would short-circuit before `send` runs
+    // and leave the receiver waiting. The outer return value just signals
+    // "work accepted, watch the channel for completion". `AsyncResult::send`
+    // itself returns `()`, and its `Drop` impl synthesizes a "dropped without
+    // sending" error if the path ever skips `send`, so the receiver is never
+    // silently abandoned.
 
     async fn truncate_table(
         &self,

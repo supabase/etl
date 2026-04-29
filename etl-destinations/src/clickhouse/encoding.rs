@@ -201,7 +201,7 @@ pub(crate) fn rb_encode_value(val: ClickHouseValue, buf: &mut Vec<u8>) -> EtlRes
 
 /// Encodes a complete row into `buf`, selecting nullable vs non-nullable
 /// encoding per column.
-pub(crate) fn rb_encode_row(
+pub(crate) fn encode_to_row_binary(
     values: Vec<ClickHouseValue>,
     nullable_flags: &[bool],
     buf: &mut Vec<u8>,
@@ -403,9 +403,10 @@ mod tests {
     }
 
     #[test]
-    fn rb_encode_row_rejects_fewer_values_than_nullable_flags() {
+    fn encode_to_row_binary_rejects_fewer_values_than_nullable_flags() {
         let mut buf = vec![0xaa];
-        let result = rb_encode_row(vec![ClickHouseValue::Int32(1)], &[false, false], &mut buf);
+        let result =
+            encode_to_row_binary(vec![ClickHouseValue::Int32(1)], &[false, false], &mut buf);
 
         assert!(result.is_err(), "row width mismatch must error");
         let err = result.unwrap_err();
@@ -416,9 +417,9 @@ mod tests {
     }
 
     #[test]
-    fn rb_encode_row_rejects_more_values_than_nullable_flags() {
+    fn encode_to_row_binary_rejects_more_values_than_nullable_flags() {
         let mut buf = vec![0xaa];
-        let result = rb_encode_row(
+        let result = encode_to_row_binary(
             vec![ClickHouseValue::Int32(1), ClickHouseValue::Int32(2)],
             &[false],
             &mut buf,

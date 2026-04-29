@@ -8,7 +8,7 @@ use etl::{
 use url::Url;
 
 use crate::clickhouse::{
-    encoding::{ClickHouseValue, rb_encode_row},
+    encoding::{ClickHouseValue, encode_to_row_binary},
     metrics::ETL_CH_INSERT_DURATION_SECONDS,
     schema::{clickhouse_column_type, quote_identifier},
 };
@@ -239,7 +239,7 @@ impl ClickHouseClient {
             while bytes < max_bytes_per_insert {
                 let Some(row) = rows.next() else { break };
                 row_buf.clear();
-                rb_encode_row(row, nullable_flags, &mut row_buf)?;
+                encode_to_row_binary(row, nullable_flags, &mut row_buf)?;
                 insert.write_buffered(&row_buf);
                 bytes += row_buf.len() as u64;
             }
