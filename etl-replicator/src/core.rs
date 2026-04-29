@@ -196,6 +196,11 @@ pub(crate) async fn start_replicator_with_config(
             let pipeline = Pipeline::new(replicator_config.pipeline, state_store, destination);
             start_pipeline(pipeline).await?;
         }
+        DestinationConfig::Snowflake { .. } => {
+            return Err(ReplicatorError::config(std::io::Error::other(
+                "Snowflake destination is not yet implemented",
+            )));
+        }
     }
 
     Ok(())
