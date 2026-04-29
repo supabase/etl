@@ -2,7 +2,7 @@
 
 **Stream Postgres changes anywhere, in real-time**
 
-ETL is a Rust framework for building change data capture (CDC) pipelines on Postgres. Stream inserts, updates, and deletes to BigQuery, Apache Iceberg, or your own custom destinations.
+ETL is a Rust framework for building change data capture (CDC) pipelines on Postgres. Stream inserts, updates, and deletes to stable BigQuery support, in-progress DuckLake support, or your own custom destinations. The Iceberg destination module is deprecated for now.
 
 ## Start Here
 
@@ -133,8 +133,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 This snippet intentionally shows ETL used as a library with your own destination implementation.
-Built-in destinations such as BigQuery and DuckLake live in `etl-destinations`, but the shared
-pipeline, config, store, and event types should come from `etl`.
+Built-in destination modules live in `etl-destinations`: BigQuery is stable,
+DuckLake is in progress, and Iceberg is deprecated for now. The shared pipeline,
+config, store, and event types should come from `etl`.
 
 ## Documentation
 

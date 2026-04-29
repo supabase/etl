@@ -5,10 +5,10 @@ Postgres to various destinations using the ETL pipeline.
 
 ## Available Examples
 
-| Example | Binary | Destination |
-|---------|--------|-------------|
-| [BigQuery](#bigquery) | `bigquery` | Google BigQuery (cloud data warehouse) |
-| [DuckLake](#ducklake) | `ducklake` | DuckLake (open data lake format) |
+| Example | Binary | Destination | Status |
+|---------|--------|-------------|--------|
+| [BigQuery](#bigquery) | `bigquery` | Google BigQuery (cloud data warehouse) | Stable |
+| [DuckLake](#ducklake) | `ducklake` | DuckLake (open data lake format) | In progress |
 
 ---
 

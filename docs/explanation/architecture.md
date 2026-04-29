@@ -22,7 +22,7 @@ flowchart LR
     end
 
     subgraph Target
-        Dest["Destination<br>(BigQuery, Iceberg, Custom)"]
+        Dest["Destination<br>(BigQuery, DuckLake, Iceberg, Custom)"]
     end
 
     WAL --> Apply

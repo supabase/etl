@@ -12,7 +12,7 @@
 
 ## Before You Start
 
-- Rust 1.75 or later
+- Rust 1.93.1, matching `rust-toolchain.toml`
 - Postgres server (local or remote)
 - Basic familiarity with Rust and SQL
 

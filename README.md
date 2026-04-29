@@ -46,7 +46,7 @@ ETL is a Rust framework by [Supabase](https://supabase.com) for building high‑
 - **High performance**: configurable batching and parallelism to maximize throughput
 - **Fault-tolerant**: robust error handling and retry logic built-in
 - **Extensible**: implement your own custom destinations and state/schema stores
-- **Production destinations**: BigQuery and Apache Iceberg officially supported
+- **Destination modules**: stable BigQuery support, DuckLake in progress, and Iceberg deprecated for now
 - **Type-safe**: fully typed Rust API with compile-time guarantees
 
 ## Requirements
@@ -67,15 +67,20 @@ Install via Git while we prepare for a crates.io release:
 ```toml
 [dependencies]
 etl = { git = "https://github.com/supabase/etl" }
+etl-destinations = { git = "https://github.com/supabase/etl", features = ["bigquery"] }
+tokio = { version = "1", features = ["full"] }
 ```
 
 Quick example using the BigQuery destination:
 
 ```rust
 use etl::{
-    config::{BatchConfig, PgConnectionConfig, PipelineConfig, TlsConfig},
+    config::{
+        BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PgConnectionConfig,
+        PipelineConfig, TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
+    },
     pipeline::Pipeline,
-    store::both::memory::MemoryStore,
+    store::MemoryStore,
 };
 use etl_destinations::bigquery::BigQueryDestination;
 
@@ -86,30 +91,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         port: 5432,
         name: "mydb".into(),
         username: "postgres".into(),
-        password: Some("password".into()),
+        password: Some("password".to_string().into()),
         tls: TlsConfig { enabled: false, trusted_root_certs: String::new() },
+        keepalive: TcpKeepaliveConfig::default(),
     };
 
     let store = MemoryStore::new();
+    let pipeline_id = 1;
     let destination = BigQueryDestination::new_with_key_path(
         "my-gcp-project".into(),
         "my_dataset".into(),
         "/path/to/service-account-key.json",
         None,
         1,
-        1,
+        pipeline_id,
         store.clone(),
     )
     .await?;
 
     let config = PipelineConfig {
-        id: 1,
+        id: pipeline_id,
         publication_name: "my_publication".into(),
         pg_connection: pg,
-        batch: BatchConfig { max_size: 1000, max_fill_ms: 5000 },
+        batch: BatchConfig {
+            max_fill_ms: 5000,
+            memory_budget_ratio: 0.2,
+        },
         table_error_retry_delay_ms: 10_000,
         table_error_retry_max_attempts: 5,
         max_table_sync_workers: 4,
+        max_copy_connections_per_table: PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE,
+        memory_refresh_interval_ms: 100,
+        memory_backpressure: Some(MemoryBackpressureConfig::default()),
+        table_sync_copy: TableSyncCopyConfig::default(),
+        invalidated_slot_behavior: InvalidatedSlotBehavior::default(),
     };
 
     // Start the pipeline.
@@ -127,17 +142,18 @@ For tutorials and deeper guidance, see the [Documentation](https://supabase.gith
 
 ## Destinations
 
-ETL is designed to be extensible. You can implement your own destinations, and the project currently ships with the following maintained options:
+ETL is designed to be extensible. You can implement your own destinations, and the project currently ships with these destination modules:
 
-- **BigQuery** – full CRUD-capable replication for analytics workloads
-- **Apache Iceberg** – append-only log of operations (updates coming soon)
+- **BigQuery** – stable, full CRUD-capable replication for analytics workloads
+- **DuckLake** – in progress, open data lake replication with local or S3-compatible storage
+- **Apache Iceberg** – deprecated for now; the module remains available, but new deployments should prefer BigQuery or DuckLake
 
 Enable the destinations you need through the `etl-destinations` crate:
 
 ```toml
 [dependencies]
 etl = { git = "https://github.com/supabase/etl" }
-etl-destinations = { git = "https://github.com/supabase/etl", features = ["bigquery"] }
+etl-destinations = { git = "https://github.com/supabase/etl", features = ["bigquery", "ducklake", "iceberg"] }
 ```
 
 ## Development
