@@ -48,7 +48,6 @@ use etl::{
     store::both::memory::MemoryStore,
 };
 use etl_destinations::clickhouse::{ClickHouseDestination, ClickHouseInserterConfig};
-use sysinfo::MemoryRefreshKind;
 use tokio::signal;
 use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -206,21 +205,6 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         max_copy_connections_per_table: PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE,
     };
 
-    // Compute max_bytes_per_insert using the same formula as
-    // BatchBudget::ideal_batch_size_bytes:   total_memory * memory_budget_ratio
-    // / max_table_sync_workers
-    let max_bytes_per_insert = {
-        let mut sys = sysinfo::System::new();
-        sys.refresh_memory_specifics(MemoryRefreshKind::nothing().with_ram());
-        let total_memory = match sys.cgroup_limits() {
-            Some(cgroup) => cgroup.total_memory,
-            None => sys.total_memory(),
-        };
-        let budget =
-            (total_memory as f64 * f64::from(BatchConfig::DEFAULT_MEMORY_BUDGET_RATIO)) as u64;
-        (budget / u64::from(args.clickhouse_args.max_table_sync_workers)).max(1)
-    };
-
     // Initialize the ClickHouse destination.
     // Tables are created automatically as append-only MergeTree tables.
     let clickhouse_destination = ClickHouseDestination::new(
@@ -228,7 +212,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         args.clickhouse_args.clickhouse_user,
         args.clickhouse_args.clickhouse_password,
         args.clickhouse_args.clickhouse_database,
-        ClickHouseInserterConfig { max_bytes_per_insert },
+        ClickHouseInserterConfig::default(),
         store.clone(),
     )?;
 

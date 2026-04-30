@@ -145,15 +145,28 @@ fn nullable_flags_from_clickhouse_columns(
 /// `write_events` call.
 ///
 /// The upstream `BatchConfig::max_fill_ms` controls when `write_events` is
-/// called; these limits prevent unbounded memory use for very large batches
+/// called; this limit prevents unbounded memory use for very large batches
 /// (e.g. initial copy).
 pub struct ClickHouseInserterConfig {
-    /// Start a new INSERT after this many uncompressed bytes.
-    ///
-    /// Derive this from `BatchConfig::memory_budget_ratio * total_memory /
-    /// max_table_sync_workers` (the same formula used by
-    /// `BatchBudget::ideal_batch_size_bytes`).
+    /// Start a new INSERT after this many uncompressed bytes. Fixed cap
+    /// because incoming and outgoing buffers can both be near-full at once;
+    /// could be made tunable later if needed.
     pub max_bytes_per_insert: u64,
+}
+
+impl ClickHouseInserterConfig {
+    /// Default per-INSERT byte cap. 64 MiB lands in the upper end of
+    /// ClickHouse's recommended bulk-insert range (10k - 100k rows per
+    /// INSERT) for typical CDC payload widths.
+    ///
+    /// See <https://clickhouse.com/docs/optimize/bulk-inserts>.
+    pub const DEFAULT_MAX_BYTES_PER_INSERT: u64 = 64 * 1024 * 1024;
+}
+
+impl Default for ClickHouseInserterConfig {
+    fn default() -> Self {
+        Self { max_bytes_per_insert: Self::DEFAULT_MAX_BYTES_PER_INSERT }
+    }
 }
 
 /// CDC-capable ClickHouse destination that replicates Postgres tables.

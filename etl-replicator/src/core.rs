@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use etl::{
-    config::{IcebergConfig, MemoryBackpressureConfig},
+    config::IcebergConfig,
     destination::Destination,
     pipeline::Pipeline,
     store::{
@@ -24,7 +24,6 @@ use etl_destinations::{
     },
 };
 use secrecy::ExposeSecret;
-use sysinfo::{MemoryRefreshKind, RefreshKind, System};
 use tokio::signal::unix::{SignalKind, signal};
 use tracing::{error, info, warn};
 
@@ -201,32 +200,12 @@ pub(crate) async fn start_replicator_with_config(
             start_pipeline(pipeline).await?;
         }
         DestinationConfig::ClickHouse { url, user, password, database } => {
-            let mut sys = System::new_with_specifics(
-                RefreshKind::nothing().with_memory(MemoryRefreshKind::everything()),
-            );
-            sys.refresh_memory_specifics(sysinfo::MemoryRefreshKind::nothing().with_ram());
-            let total_memory_bytes = match sys.cgroup_limits() {
-                Some(cgroup) => cgroup.total_memory,
-                None => sys.total_memory(),
-            };
-            let max_bytes_per_insert = (total_memory_bytes as f64
-                * replicator_config
-                    .pipeline
-                    .memory_backpressure
-                    .as_ref()
-                    .map_or(MemoryBackpressureConfig::default().activate_threshold, |config| {
-                        config.activate_threshold
-                    }) as f64
-                / replicator_config.pipeline.max_table_sync_workers as f64)
-                as u64;
-
-            let inserter_config = ClickHouseInserterConfig { max_bytes_per_insert };
             let destination = ClickHouseDestination::new(
                 url.clone(),
                 user,
                 password.as_ref().map(|p| p.expose_secret().to_string()),
                 database,
-                inserter_config,
+                ClickHouseInserterConfig::default(),
                 state_store.clone(),
             )?;
 
