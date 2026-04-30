@@ -9,6 +9,7 @@ anyhow = { workspace = true }
 clap = { workspace = true, features = ["derive", "std", "help", "usage", "error-context", "env"] }
 k8s-openapi = { workspace = true, features = ["latest"] }
 kube = { workspace = true, features = ["client", "derive", "rustls-tls", "ring"] }
+reqwest = { workspace = true, features = ["rustls-tls", "json"] }
 schemars = "0.8"
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

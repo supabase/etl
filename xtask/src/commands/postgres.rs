@@ -48,19 +48,19 @@ struct StartArgs {
     /// Postgres image tag.
     #[arg(long, env = "POSTGRES_VERSION", default_value = DEFAULT_PG_VERSION)]
     pg_version: String,
-
     /// Number of Postgres clusters to start.
     #[arg(long, env = "NUM_LOCAL_DATABASES", default_value_t = DEFAULT_PG_SHARD_COUNT)]
     shards: u16,
-
     /// Base port for the first cluster. Additional clusters use consecutive
     /// ports.
     #[arg(long, env = "TESTS_DATABASE_START_PORT", default_value_t = DEFAULT_BASE_PORT)]
     base_port: u16,
-
     /// Postgres user for health checks.
     #[arg(long, env = "POSTGRES_USER", default_value = DEFAULT_PG_USER)]
     pg_user: String,
+    /// Start only source Postgres instead of the full local development stack.
+    #[arg(long, default_value_t = false)]
+    source_only: bool,
 }
 
 impl PostgresArgs {
@@ -82,15 +82,18 @@ impl StartArgs {
         }
 
         eprintln!(
-            "starting {} Postgres {} clusters on ports {}..{}.",
+            "starting {} Postgres {} clusters on ports {}..{}{}.",
             self.shards,
             self.pg_version,
             self.base_port,
             self.base_port + self.shards - 1,
+            if self.source_only { " with source Postgres only" } else { "" },
         );
 
-        // Start the full stack (Postgres, Lakekeeper, MinIO, etc.) on the base port.
-        self.docker_compose_up(&self.pg_version, None, &[])?;
+        // Start the full stack on the base port unless the caller only needs source
+        // Postgres.
+        let first_shard_services = if self.source_only { &["source-postgres"][..] } else { &[] };
+        self.docker_compose_up(&self.pg_version, None, first_shard_services)?;
 
         // Start additional source-postgres containers on subsequent ports.
         for shard in 2..=self.shards {
