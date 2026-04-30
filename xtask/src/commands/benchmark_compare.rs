@@ -140,6 +140,7 @@ struct WorkflowRun {
     run_number: u64,
     html_url: String,
     conclusion: Option<String>,
+    head_sha: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -157,6 +158,7 @@ struct Artifact {
 struct PreviousSource {
     reports: Reports,
     run: Option<WorkflowRun>,
+    code_compare: Option<CodeCompare>,
 }
 
 struct Comparison {
@@ -164,11 +166,18 @@ struct Comparison {
     failures: Vec<String>,
 }
 
+struct CodeCompare {
+    previous_sha: String,
+    current_sha: String,
+    url: String,
+}
+
 struct GitHubContext {
     token: String,
     repo: String,
     current_run_id: u64,
     ref_name: String,
+    current_sha: Option<String>,
 }
 
 struct GitHubClient {
@@ -189,9 +198,12 @@ impl BenchmarkCompareArgs {
         let output =
             self.output.clone().unwrap_or_else(|| self.current_dir.join("benchmark-comparison.md"));
         let comparison = match self.previous_source().await? {
-            Some(previous) => {
-                compare_reports(&previous.reports, &current_reports, previous.run.as_ref())
-            }
+            Some(previous) => compare_reports(
+                &previous.reports,
+                &current_reports,
+                previous.run.as_ref(),
+                previous.code_compare.as_ref(),
+            ),
             None => Comparison { markdown: render_missing_previous(&self), failures: Vec::new() },
         };
 
@@ -220,7 +232,7 @@ impl BenchmarkCompareArgs {
             let reports = load_reports(previous_dir).with_context(|| {
                 format!("failed to load reports from {}", previous_dir.display())
             })?;
-            return Ok(Some(PreviousSource { reports, run: None }));
+            return Ok(Some(PreviousSource { reports, run: None, code_compare: None }));
         }
 
         let Some(context) = self.github_context() else {
@@ -232,12 +244,13 @@ impl BenchmarkCompareArgs {
         };
 
         let client = GitHubClient::new(context.token.clone(), context.repo.clone())?;
-        let Some((reports, run)) = self.load_github_previous_reports(&client, &context).await?
+        let Some((reports, run, code_compare)) =
+            self.load_github_previous_reports(&client, &context).await?
         else {
             return Ok(None);
         };
 
-        Ok(Some(PreviousSource { reports, run: Some(run) }))
+        Ok(Some(PreviousSource { reports, run: Some(run), code_compare }))
     }
 
     fn github_context(&self) -> Option<GitHubContext> {
@@ -245,14 +258,15 @@ impl BenchmarkCompareArgs {
         let repo = env::var("GITHUB_REPOSITORY").ok()?;
         let current_run_id = env::var("GITHUB_RUN_ID").ok()?.parse().ok()?;
         let ref_name = self.ref_name.clone().or_else(|| env::var("GITHUB_REF_NAME").ok())?;
-        Some(GitHubContext { token, repo, current_run_id, ref_name })
+        let current_sha = env::var("GITHUB_SHA").ok();
+        Some(GitHubContext { token, repo, current_run_id, ref_name, current_sha })
     }
 
     async fn load_github_previous_reports(
         &self,
         client: &GitHubClient,
         context: &GitHubContext,
-    ) -> Result<Option<(Reports, WorkflowRun)>> {
+    ) -> Result<Option<(Reports, WorkflowRun, Option<CodeCompare>)>> {
         let runs = client.workflow_runs(&self.workflow, &context.ref_name).await?;
         for run in runs {
             if run.id == context.current_run_id || run.conclusion.as_deref() != Some("success") {
@@ -276,7 +290,8 @@ impl BenchmarkCompareArgs {
                     self.artifact_name, run.run_number
                 )
             })?;
-            return Ok(Some((reports, run)));
+            let code_compare = code_compare(&context.repo, &run, context.current_sha.as_deref());
+            return Ok(Some((reports, run, code_compare)));
         }
 
         eprintln!(
@@ -417,7 +432,7 @@ fn load_reports(dir: &Path) -> Result<Reports> {
 
 fn render_missing_previous(args: &BenchmarkCompareArgs) -> String {
     format!(
-        "## Benchmark Comparison\n\nNo previous benchmark artifact was available. In GitHub \
+        "## 📈 Benchmark comparison\n\nℹ️ No previous benchmark artifact was available. In GitHub \
          Actions, this compares against the most recent successful `{}` artifact from `{}` on the \
          same ref. Locally, pass `--previous-dir`.",
         args.artifact_name, args.workflow
@@ -428,14 +443,25 @@ fn compare_reports(
     previous_reports: &Reports,
     current_reports: &Reports,
     previous_run: Option<&WorkflowRun>,
+    code_compare: Option<&CodeCompare>,
 ) -> Comparison {
-    let mut lines = vec!["## Benchmark Comparison".to_owned(), String::new()];
+    let mut lines = vec!["## 📈 Benchmark comparison".to_owned(), String::new()];
     let mut failures = Vec::new();
     if let Some(previous_run) = previous_run {
         lines.push(format!(
-            "Compared with previous successful run [#{}]({}).",
-            previous_run.run_number, previous_run.html_url
+            "Compared with previous successful run [#{}]({}) at `{}`.",
+            previous_run.run_number,
+            previous_run.html_url,
+            previous_run.head_sha.as_deref().map_or("unknown commit", short_sha)
         ));
+        if let Some(code_compare) = code_compare {
+            lines.push(format!(
+                "Code diff: [`{}...{}`]({}).",
+                short_sha(&code_compare.previous_sha),
+                short_sha(&code_compare.current_sha),
+                code_compare.url
+            ));
+        }
     } else {
         lines.push("Compared with local previous benchmark results.".to_owned());
     }
@@ -454,12 +480,12 @@ fn compare_reports(
     for benchmark in common_benchmarks {
         let previous = previous_reports.get(&benchmark).expect("benchmark key exists");
         let current = current_reports.get(&benchmark).expect("benchmark key exists");
-        lines.push(format!("### {benchmark}"));
+        lines.push(format!("### {}", benchmark_title(&benchmark)));
 
         let changes = config_changes(previous, current);
         if !changes.is_empty() {
             lines.push(String::new());
-            lines.push(format!("> Benchmark configuration differs: {}.", changes.join(", ")));
+            lines.push(format!("> ⚠️ Benchmark configuration differs: {}.", changes.join(", ")));
         }
 
         lines.push(String::new());
@@ -491,17 +517,17 @@ fn compare_reports(
         lines.push(String::new());
         if changes.is_empty() {
             if benchmark_failures.is_empty() {
-                lines.push("Regression gate: passed.".to_owned());
+                lines.push("✅ Regression gate: passed.".to_owned());
             } else {
-                lines.push("Regression gate: failed.".to_owned());
+                lines.push("🚨 Regression gate: failed.".to_owned());
                 for failure in &benchmark_failures {
-                    lines.push(format!("- {failure}"));
+                    lines.push(format!("- 🚨 {failure}"));
                 }
                 failures.extend(benchmark_failures);
             }
         } else {
             lines.push(
-                "Regression gate: skipped because benchmark configuration differs.".to_owned(),
+                "⚠️ Regression gate: skipped because benchmark configuration differs.".to_owned(),
             );
         }
         lines.push(String::new());
@@ -518,10 +544,10 @@ fn compare_reports(
         .cloned()
         .collect::<Vec<_>>();
     if !previous_only.is_empty() {
-        lines.push(format!("Previous-only reports: {}.", previous_only.join(", ")));
+        lines.push(format!("ℹ️ Previous-only reports: {}.", previous_only.join(", ")));
     }
     if !current_only.is_empty() {
-        lines.push(format!("Current-only reports: {}.", current_only.join(", ")));
+        lines.push(format!("ℹ️ Current-only reports: {}.", current_only.join(", ")));
     }
 
     Comparison { markdown: lines.join("\n"), failures }
@@ -533,6 +559,36 @@ fn metrics_for(benchmark: &str) -> &'static [Metric] {
         "table_streaming" => TABLE_STREAMING_METRICS,
         _ => &[],
     }
+}
+
+fn benchmark_title(benchmark: &str) -> String {
+    match benchmark {
+        "table_copy" => "📦 Table copy".to_owned(),
+        "table_streaming" => "🔁 Table streaming".to_owned(),
+        benchmark => benchmark.to_owned(),
+    }
+}
+
+fn code_compare(
+    repo: &str,
+    previous_run: &WorkflowRun,
+    current_sha: Option<&str>,
+) -> Option<CodeCompare> {
+    let previous_sha = previous_run.head_sha.as_deref()?.trim();
+    let current_sha = current_sha?.trim();
+    if previous_sha.is_empty() || current_sha.is_empty() {
+        return None;
+    }
+
+    Some(CodeCompare {
+        previous_sha: previous_sha.to_owned(),
+        current_sha: current_sha.to_owned(),
+        url: format!("https://github.com/{repo}/compare/{previous_sha}...{current_sha}"),
+    })
+}
+
+fn short_sha(sha: &str) -> &str {
+    sha.get(..7).unwrap_or(sha)
 }
 
 fn config_changes(previous: &Value, current: &Value) -> Vec<String> {
@@ -639,8 +695,8 @@ fn format_change_result(
     current: &Value,
 ) -> &'static str {
     match policy {
-        RegressionPolicy::Informational => "info",
-        RegressionPolicy::HigherIsBetter { .. } => {
+        RegressionPolicy::Informational => "ℹ️ info",
+        RegressionPolicy::HigherIsBetter { max_drop_pct } => {
             let Some(previous) = numeric_value(previous) else {
                 return "";
             };
@@ -648,14 +704,23 @@ fn format_change_result(
                 return "";
             };
             if current > previous {
-                "better"
+                "✅ better"
             } else if current < previous {
-                "worse"
+                if previous <= 0.0 {
+                    "⚠️ worse"
+                } else {
+                    let drop_pct = ((previous - current) / previous) * 100.0;
+                    if drop_pct > max_drop_pct {
+                        "🚨 regression"
+                    } else {
+                        "⚠️ within threshold"
+                    }
+                }
             } else {
-                "same"
+                "➖ same"
             }
         }
-        RegressionPolicy::LowerIsBetter { .. } => {
+        RegressionPolicy::LowerIsBetter { max_increase_pct } => {
             let Some(previous) = numeric_value(previous) else {
                 return "";
             };
@@ -663,11 +728,20 @@ fn format_change_result(
                 return "";
             };
             if current < previous {
-                "better"
+                "✅ better"
             } else if current > previous {
-                "worse"
+                if previous <= 0.0 {
+                    "⚠️ worse"
+                } else {
+                    let increase_pct = ((current - previous) / previous) * 100.0;
+                    if increase_pct > max_increase_pct {
+                        "🚨 regression"
+                    } else {
+                        "⚠️ within threshold"
+                    }
+                }
             } else {
-                "same"
+                "➖ same"
             }
         }
     }
@@ -741,7 +815,7 @@ mod tests {
     use serde_json::json;
 
     use crate::commands::benchmark_compare::{
-        Reports, compare_reports, config_changes, regression_failures,
+        CodeCompare, Reports, WorkflowRun, compare_reports, config_changes, regression_failures,
     };
 
     #[test]
@@ -843,19 +917,69 @@ mod tests {
             }),
         );
 
-        let comparison = compare_reports(&previous, &current, None);
+        let comparison = compare_reports(&previous, &current, None, None);
 
-        assert!(comparison.markdown.contains("| Rows/s | 1000 | 1100 | +100 (+10.00%) | better |"));
+        assert!(
+            comparison.markdown.contains("| Rows/s | 1000 | 1100 | +100 (+10.00%) | ✅ better |")
+        );
+        assert!(
+            comparison.markdown.contains(
+                "| Est. decoded MiB/s | 100 | 90 | -10 (-10.00%) | ⚠️ within threshold |"
+            )
+        );
         assert!(
             comparison
                 .markdown
-                .contains("| Est. decoded MiB/s | 100 | 90 | -10 (-10.00%) | worse |")
+                .contains("| Copy wait ms | 1000 | 900 | -100 (-10.00%) | ✅ better |")
         );
         assert!(
-            comparison.markdown.contains("| Copy wait ms | 1000 | 900 | -100 (-10.00%) | better |")
+            comparison
+                .markdown
+                .contains("| Total ms | 1000 | 1100 | +100 (+10.00%) | ⚠️ within threshold |")
+        );
+    }
+
+    #[test]
+    fn compare_reports_labels_threshold_breaking_changes_as_regressions() {
+        let mut previous = Reports::new();
+        previous.insert(
+            "table_streaming".to_owned(),
+            json!({
+                "benchmark": "table_streaming",
+                "destination": "null",
+                "table_count": 8,
+                "duration_seconds": 60,
+                "end_to_end_with_shutdown_events_per_second": 1_000.0,
+                "end_to_end_with_shutdown_estimated_mib_per_second": 100.0,
+                "total_ms": 1_000.0
+            }),
+        );
+
+        let mut current = Reports::new();
+        current.insert(
+            "table_streaming".to_owned(),
+            json!({
+                "benchmark": "table_streaming",
+                "destination": "null",
+                "table_count": 8,
+                "duration_seconds": 60,
+                "end_to_end_with_shutdown_events_per_second": 800.0,
+                "end_to_end_with_shutdown_estimated_mib_per_second": 80.0,
+                "total_ms": 1_250.0
+            }),
+        );
+
+        let comparison = compare_reports(&previous, &current, None, None);
+
+        assert!(
+            comparison
+                .markdown
+                .contains("| Events/s | 1000 | 800 | -200 (-20.00%) | 🚨 regression |")
         );
         assert!(
-            comparison.markdown.contains("| Total ms | 1000 | 1100 | +100 (+10.00%) | worse |")
+            comparison
+                .markdown
+                .contains("| Total ms | 1000 | 1250 | +250 (+25.00%) | 🚨 regression |")
         );
     }
 
@@ -887,7 +1011,7 @@ mod tests {
             }),
         );
 
-        let comparison = compare_reports(&previous, &current, None);
+        let comparison = compare_reports(&previous, &current, None, None);
 
         assert!(comparison.failures.is_empty());
         assert!(
@@ -895,5 +1019,55 @@ mod tests {
                 .markdown
                 .contains("Regression gate: skipped because benchmark configuration differs.")
         );
+    }
+
+    #[test]
+    fn compare_reports_links_previous_run_and_commit_diff() {
+        let mut previous = Reports::new();
+        previous.insert(
+            "table_copy".to_owned(),
+            json!({
+                "benchmark": "table_copy",
+                "destination": "null",
+                "table_count": 8,
+                "rows_per_second": 1_000.0
+            }),
+        );
+
+        let mut current = Reports::new();
+        current.insert(
+            "table_copy".to_owned(),
+            json!({
+                "benchmark": "table_copy",
+                "destination": "null",
+                "table_count": 8,
+                "rows_per_second": 1_100.0
+            }),
+        );
+
+        let previous_run = WorkflowRun {
+            id: 1,
+            run_number: 42,
+            html_url: "https://github.com/supabase/etl/actions/runs/42".to_owned(),
+            conclusion: Some("success".to_owned()),
+            head_sha: Some("abc123456789".to_owned()),
+        };
+        let code_compare = CodeCompare {
+            previous_sha: "abc123456789".to_owned(),
+            current_sha: "def567890123".to_owned(),
+            url: "https://github.com/supabase/etl/compare/abc123456789...def567890123".to_owned(),
+        };
+
+        let comparison =
+            compare_reports(&previous, &current, Some(&previous_run), Some(&code_compare));
+
+        assert!(
+            comparison.markdown.contains(
+                "Compared with previous successful run [#42](https://github.com/supabase/etl/actions/runs/42) at `abc1234`."
+            )
+        );
+        assert!(comparison.markdown.contains(
+            "Code diff: [`abc1234...def5678`](https://github.com/supabase/etl/compare/abc123456789...def567890123)."
+        ));
     }
 }

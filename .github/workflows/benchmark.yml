@@ -177,7 +177,7 @@ jobs:
           fi
 
           {
-            echo "## Benchmark environment"
+            echo "## 🖥️ Benchmark environment"
             echo
             echo "| Setting | Value |"
             echo "| --- | --- |"
@@ -303,20 +303,20 @@ jobs:
           table_streaming = load("table_streaming.json")
 
           print()
-          print("## Benchmark results")
+          print("## 📊 Benchmark results")
           print()
 
           summary = []
           if table_copy:
               summary.append([
-                  "Table copy",
+                  "📦 Table copy",
                   f"{number(table_copy.get('rows_per_second'))} rows/s",
                   f"{number(table_copy.get('estimated_mib_per_second'))} MiB/s",
                   seconds(table_copy.get("total_ms")),
               ])
           if table_streaming:
               summary.append([
-                  "Table streaming",
+                  "🔁 Table streaming",
                   f"{number(table_streaming.get('end_to_end_with_shutdown_events_per_second'))} events/s",
                   f"{number(table_streaming.get('end_to_end_with_shutdown_estimated_mib_per_second'))} MiB/s",
                   seconds(table_streaming.get("total_ms")),
@@ -330,7 +330,7 @@ jobs:
               raise SystemExit(0)
 
           if table_copy:
-              print("### Table copy")
+              print("### 📦 Table copy")
               table(
                   ["Metric", "Value"],
                   [
@@ -345,7 +345,7 @@ jobs:
               print()
 
           if table_streaming:
-              print("### Table streaming")
+              print("### 🔁 Table streaming")
               stats = table_streaming.get("destination_stats", {})
               table(
                   ["Metric", "Value"],
