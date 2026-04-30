@@ -45,7 +45,12 @@
 - Never create commits, push branches, open pull requests, or perform other git write actions unless the user explicitly instructs you to do so.
 - Keep the workspace on the stable toolchain from `rust-toolchain.toml` for build, lint, and test commands; use the pinned nightly formatter only through `./scripts/fmt` and `./scripts/fmt-check`.
 - Treat `Cargo.toml` workspace lints, `rustfmt.toml`, and compiler diagnostics as the source of truth for enforceable style and correctness rules. Prefer adding or tightening static checks over adding prose rules here.
-- Always run the clippy lint command listed in commands section at the end to check everything compile properly.
+- Run Clippy, builds, and tests intentionally when they are relevant: for example
+  after changing Rust code, when compiler/lint diagnostics indicate a problem,
+  when workflow assumptions changed, or when the user asks for verification. Do
+  not run expensive checks reflexively for unrelated documentation, YAML-only, or
+  similarly low-risk edits; in those cases, run the smallest relevant validation
+  instead and report what actually ran.
 
 ## Rust Style
 - This section is only for project-specific judgment that is not already covered by rustfmt, rustc, or Clippy.
