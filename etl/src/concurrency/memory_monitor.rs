@@ -24,14 +24,14 @@ use crate::{
 };
 /// Represents a memory snapshot.
 #[derive(Debug, Clone, Copy)]
-pub struct MemorySnapshot {
+struct MemorySnapshot {
     used: u64,
     total: u64,
 }
 
 impl MemorySnapshot {
     /// Refreshes memory readings from the operating system.
-    pub fn from_system(system: &mut sysinfo::System) -> Self {
+    fn from_system(system: &mut sysinfo::System) -> Self {
         system.refresh_memory_specifics(sysinfo::MemoryRefreshKind::nothing().with_ram());
 
         match system.cgroup_limits() {
