@@ -1,6 +1,8 @@
 #[cfg(feature = "bigquery")]
 use std::sync::Once;
 use std::{
+    fs,
+    path::Path,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -33,9 +35,6 @@ use serde::Serialize;
 use sqlx::{Connection, Executor, PgConnection, PgPool, postgres::PgPoolOptions};
 use tokio::sync::Notify;
 use tracing::info;
-
-/// Prefix used for machine-readable benchmark result lines.
-pub const BENCHMARK_RESULT_PREFIX: &str = "BENCHMARK_RESULT ";
 
 /// Default batch fill time for benchmark runs.
 pub const BENCHMARK_DEFAULT_BATCH_MAX_FILL_MS: u64 = 1_000;
@@ -714,14 +713,64 @@ pub async fn cleanup_replication_slots(
     Ok(())
 }
 
-/// Prints a machine-readable benchmark report.
-pub fn print_report<T>(report: &T) -> Result<()>
+/// Writes a machine-readable benchmark report.
+pub fn write_report<T>(report: &T, path: &Path) -> Result<()>
 where
     T: Serialize,
 {
-    let json = serde_json::to_string(report)?;
-    println!("{BENCHMARK_RESULT_PREFIX}{json}");
-    Ok(())
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create report directory {}", parent.display()))?;
+    }
+    let json = serde_json::to_string_pretty(report)?;
+    fs::write(path, format!("{json}\n"))
+        .with_context(|| format!("failed to write benchmark report to {}", path.display()))
+}
+
+/// Formats an integer with thousands separators.
+pub fn format_integer(value: u128) -> String {
+    let value = value.to_string();
+    let mut formatted = String::with_capacity(value.len() + value.len() / 3);
+    let first_group_len = value.len() % 3;
+
+    for (idx, ch) in value.chars().enumerate() {
+        if idx > 0
+            && (idx == first_group_len
+                || (idx > first_group_len && (idx - first_group_len).is_multiple_of(3)))
+        {
+            formatted.push(',');
+        }
+        formatted.push(ch);
+    }
+
+    formatted
+}
+
+/// Formats a floating-point value with thousands separators.
+pub fn format_decimal(value: f64, digits: usize) -> String {
+    let raw = format!("{value:.digits$}");
+    let Some((integer, fraction)) = raw.split_once('.') else {
+        return raw;
+    };
+    format!("{}.{}", format_integer_str(integer), fraction)
+}
+
+/// Formats a millisecond duration for terminal output.
+pub fn format_duration_ms(ms: u128) -> String {
+    if ms >= 1_000 {
+        format!("{} s", format_decimal(ms as f64 / 1_000.0, 2))
+    } else {
+        format!("{} ms", format_integer(ms))
+    }
+}
+
+fn format_integer_str(value: &str) -> String {
+    let Some(unsigned) = value.strip_prefix('-') else {
+        return format_integer(value.parse::<u128>().unwrap_or(0));
+    };
+    format!("-{}", format_integer(unsigned.parse::<u128>().unwrap_or(0)))
 }
 
 /// Returns duration as milliseconds.

@@ -20,22 +20,38 @@ on:
         description: Optional go-tpc prepare threads. Empty derives from warehouses and runner CPUs.
         required: false
         default: ""
-      streaming_events:
-        description: Number of table-streaming insert events in count mode.
+      streaming_workload:
+        description: Workload used for table streaming.
         required: true
-        default: "1000000"
+        type: choice
+        options:
+          - tpcc
+          - synthetic
+        default: tpcc
+      streaming_events:
+        description: Number of synthetic table-streaming insert events in count mode.
+        required: true
+        default: "10000"
       streaming_duration_seconds:
-        description: Optional duration mode for table-streaming. Empty uses streaming_events.
+        description: Duration for TPC-C streaming, or synthetic duration mode.
         required: false
-        default: ""
+        default: "60"
       streaming_insert_batch_size:
-        description: Rows inserted per streaming producer transaction.
+        description: Rows inserted per synthetic streaming producer transaction.
         required: true
         default: "5000"
       streaming_producer_concurrency:
-        description: Optional streaming producer concurrency. Empty derives from warehouses and runner CPUs.
+        description: Optional synthetic streaming producer concurrency. Empty derives from warehouses and runner CPUs.
         required: false
         default: ""
+      streaming_tpcc_threads:
+        description: Optional go-tpc run threads for table streaming. Empty derives from warehouses and runner CPUs.
+        required: false
+        default: ""
+      streaming_drain_quiet_ms:
+        description: Quiet period with no CDC events before TPC-C streaming is considered drained.
+        required: true
+        default: "2000"
       max_table_sync_workers:
         description: Maximum table sync workers.
         required: true
@@ -48,6 +64,11 @@ on:
         description: Maximum stream batch fill time in milliseconds.
         required: true
         default: "1000"
+      enable_memory_backpressure:
+        description: Enable ETL memory backpressure during the benchmark.
+        required: true
+        type: boolean
+        default: false
       destination:
         description: Destination to benchmark.
         required: true
@@ -164,8 +185,10 @@ jobs:
             --username "$POSTGRES_USER"
             --password "$POSTGRES_PASSWORD"
             --warehouses "${{ inputs.warehouses }}"
+            --streaming-workload "${{ inputs.streaming_workload }}"
             --streaming-events "${{ inputs.streaming_events }}"
             --streaming-insert-batch-size "${{ inputs.streaming_insert_batch_size }}"
+            --streaming-drain-quiet-ms "${{ inputs.streaming_drain_quiet_ms }}"
             --max-table-sync-workers "${{ inputs.max_table_sync_workers }}"
             --max-copy-connections-per-table "${{ inputs.max_copy_connections_per_table }}"
             --batch-max-fill-ms "${{ inputs.batch_max_fill_ms }}"
@@ -183,6 +206,14 @@ jobs:
 
           if [[ -n "${{ inputs.streaming_producer_concurrency }}" ]]; then
             args+=(--streaming-producer-concurrency "${{ inputs.streaming_producer_concurrency }}")
+          fi
+
+          if [[ -n "${{ inputs.streaming_tpcc_threads }}" ]]; then
+            args+=(--streaming-tpcc-threads "${{ inputs.streaming_tpcc_threads }}")
+          fi
+
+          if [[ "${{ inputs.enable_memory_backpressure }}" == "true" ]]; then
+            args+=(--enable-memory-backpressure)
           fi
 
           if [[ "${{ inputs.force_prepare }}" == "true" ]]; then

@@ -20,7 +20,7 @@ const DEFAULT_TPCC_TABLES: &str =
 const DEFAULT_PUBLICATION_NAME: &str = "bench_pub";
 const DEFAULT_STREAMING_PUBLICATION_NAME: &str = "bench_streaming_pub";
 const DEFAULT_STREAMING_TABLE_NAME: &str = "etl_streaming_benchmark";
-const BENCHMARK_RESULT_PREFIX: &str = "BENCHMARK_RESULT ";
+const DEFAULT_STREAMING_DURATION_SECONDS: u64 = 60;
 const DEFAULT_TPCC_THREADS_PER_WAREHOUSE: usize = 8;
 const DEFAULT_TPCC_THREADS_PER_CPU: usize = 4;
 const DEFAULT_TPCC_MIN_THREADS: usize = 8;
@@ -93,6 +93,9 @@ pub(crate) struct BenchmarkArgs {
     /// Streaming benchmark table name.
     #[arg(long, default_value = DEFAULT_STREAMING_TABLE_NAME)]
     streaming_table_name: String,
+    /// Streaming workload to benchmark.
+    #[arg(long, value_enum, default_value = "tpcc")]
+    streaming_workload: StreamingWorkload,
     /// Number of insert events for table-streaming count mode.
     #[arg(long, default_value_t = 10_000)]
     streaming_events: u64,
@@ -107,6 +110,16 @@ pub(crate) struct BenchmarkArgs {
     /// value.
     #[arg(long)]
     streaming_producer_concurrency: Option<u16>,
+    /// TPC-C thread concurrency used by table-streaming.
+    #[arg(long)]
+    streaming_tpcc_threads: Option<u16>,
+    /// Quiet period with no CDC events before TPC-C streaming is considered
+    /// drained.
+    #[arg(long, default_value_t = 2_000)]
+    streaming_drain_quiet_ms: u64,
+    /// Poll interval used while waiting for TPC-C CDC events to drain.
+    #[arg(long, default_value_t = 250)]
+    streaming_drain_poll_ms: u64,
     /// Maximum batch fill time in milliseconds.
     #[arg(long, default_value_t = 1_000)]
     batch_max_fill_ms: u64,
@@ -119,6 +132,10 @@ pub(crate) struct BenchmarkArgs {
     /// Maximum parallel copy connections per table.
     #[arg(long, default_value_t = 2)]
     max_copy_connections_per_table: u16,
+    /// Enable ETL memory backpressure. Benchmark orchestration disables it by
+    /// default.
+    #[arg(long, default_value_t = false)]
+    enable_memory_backpressure: bool,
     /// Disable ETL memory backpressure.
     #[arg(long, default_value_t = false)]
     disable_memory_backpressure: bool,
@@ -134,11 +151,19 @@ enum Destination {
     BigQuery,
 }
 
+#[derive(ValueEnum, Clone, Copy, Debug, Eq, PartialEq)]
+enum StreamingWorkload {
+    Tpcc,
+    Synthetic,
+}
+
 impl BenchmarkArgs {
     pub(crate) fn run(self) -> Result<()> {
         self.validate()?;
         check_command("psql")?;
-        if !self.skip_prepare && !self.skip_table_copy {
+        let runs_tpcc_streaming = self.runs_tpcc_streaming();
+        let needs_tpcc_tables = self.needs_tpcc_tables();
+        if (!self.skip_prepare && needs_tpcc_tables) || runs_tpcc_streaming {
             check_command("go-tpc")?;
         }
 
@@ -149,6 +174,8 @@ impl BenchmarkArgs {
         let streaming_producer_concurrency = self
             .streaming_producer_concurrency
             .unwrap_or_else(|| recommended_streaming_producers(self.warehouses));
+        let streaming_tpcc_threads =
+            self.streaming_tpcc_threads.unwrap_or_else(|| recommended_threads(self.warehouses));
         let pipeline_id_base = benchmark_pipeline_id_base()?;
         let table_copy_pipeline_id = pipeline_id_base;
         let table_streaming_pipeline_id =
@@ -158,31 +185,47 @@ impl BenchmarkArgs {
         eprintln!("  database: {}@{}:{}", self.database, self.host, self.port);
         eprintln!("  warehouses: {}", self.warehouses);
         eprintln!("  tpcc threads: {tpcc_threads}");
+        eprintln!("  streaming workload: {}", self.streaming_workload.as_arg());
+        if self.streaming_workload == StreamingWorkload::Tpcc {
+            eprintln!("  streaming tpcc threads: {streaming_tpcc_threads}");
+        }
         eprintln!("  pipeline id base: {pipeline_id_base}");
         eprintln!("  destination: {}", self.destination.as_arg());
+        eprintln!(
+            "  memory backpressure: {}",
+            if self.memory_backpressure_enabled() { "enabled" } else { "disabled" }
+        );
         eprintln!("  output dir: {}", self.output_dir.display());
 
         self.ensure_database()?;
 
-        if !self.skip_table_copy {
-            if !self.skip_prepare {
-                self.prepare_tpcc(tpcc_threads)?;
-            }
+        if needs_tpcc_tables && !self.skip_prepare {
+            self.prepare_tpcc(tpcc_threads)?;
+        } else if needs_tpcc_tables {
+            self.ensure_tpcc_tables_exist()?;
+        }
 
+        if !self.skip_table_copy {
             let selected_tables = self.validated_tpcc_tables()?;
             let table_ids = self.fetch_table_ids(&selected_tables)?;
             let expected_row_count = self.fetch_expected_row_count(&selected_tables)?;
             self.create_publication(&self.publication_name, &selected_tables)?;
 
-            let report =
-                self.run_table_copy(&table_ids, expected_row_count, table_copy_pipeline_id)?;
-            write_report(&self.output_dir, "table_copy", &report)?;
+            self.run_table_copy(
+                &table_ids,
+                expected_row_count,
+                table_copy_pipeline_id,
+                self.output_dir.join("table_copy.json"),
+            )?;
         }
 
         if !self.skip_table_streaming {
-            let report = self
-                .run_table_streaming(streaming_producer_concurrency, table_streaming_pipeline_id)?;
-            write_report(&self.output_dir, "table_streaming", &report)?;
+            self.run_table_streaming(
+                streaming_producer_concurrency,
+                streaming_tpcc_threads,
+                table_streaming_pipeline_id,
+                self.output_dir.join("table_streaming.json"),
+            )?;
         }
 
         Ok(())
@@ -195,6 +238,21 @@ impl BenchmarkArgs {
 
         if self.skip_table_copy && self.skip_table_streaming {
             bail!("at least one benchmark must run");
+        }
+
+        if self.streaming_drain_quiet_ms == 0 {
+            bail!("--streaming-drain-quiet-ms must be greater than 0");
+        }
+
+        if self.streaming_drain_poll_ms == 0 {
+            bail!("--streaming-drain-poll-ms must be greater than 0");
+        }
+
+        if self.streaming_workload == StreamingWorkload::Synthetic
+            && self.streaming_duration_seconds.is_none()
+            && self.streaming_events == 0
+        {
+            bail!("--streaming-events must be greater than 0 for synthetic count mode");
         }
 
         if matches!(self.destination, Destination::BigQuery) {
@@ -285,6 +343,10 @@ impl BenchmarkArgs {
 
     fn tpcc_tables_exist(&self) -> Result<bool> {
         let tables = self.validated_tpcc_tables()?;
+        self.tpcc_tables_exist_for(&tables)
+    }
+
+    fn tpcc_tables_exist_for(&self, tables: &[String]) -> Result<bool> {
         let names = tables.iter().map(|table| quote_literal(table)).collect::<Vec<_>>().join(",");
         let count = self.psql_query(
             &self.database,
@@ -294,6 +356,19 @@ impl BenchmarkArgs {
             ),
         )?;
         Ok(count.trim().parse::<usize>()? == tables.len())
+    }
+
+    fn ensure_tpcc_tables_exist(&self) -> Result<()> {
+        let tables = self.validated_tpcc_tables()?;
+        if self.tpcc_tables_exist_for(&tables)? {
+            return Ok(());
+        }
+
+        bail!(
+            "TPC-C tables are missing in database '{}'; rerun without --skip-prepare or pass \
+             --force-prepare",
+            self.database
+        )
     }
 
     fn validated_tpcc_tables(&self) -> Result<Vec<String>> {
@@ -362,12 +437,15 @@ impl BenchmarkArgs {
         table_ids: &str,
         expected_row_count: u64,
         pipeline_id: u64,
-    ) -> Result<Value> {
+        report_path: PathBuf,
+    ) -> Result<()> {
         let mut args = vec!["--log-target".to_owned(), "terminal".to_owned(), "run".to_owned()];
         self.push_common_benchmark_args(&mut args);
         self.push_tuning_args(&mut args);
         self.push_destination_args(&mut args);
         args.extend([
+            "--report-path".to_owned(),
+            report_path.display().to_string(),
             "--pipeline-id".to_owned(),
             pipeline_id.to_string(),
             "--publication-name".to_owned(),
@@ -378,19 +456,29 @@ impl BenchmarkArgs {
             expected_row_count.to_string(),
         ]);
 
-        run_benchmark_binary("table_copy", self.destination, &args)
+        run_benchmark_binary("table_copy", self.destination, &args, &report_path)
     }
 
-    fn run_table_streaming(&self, producer_concurrency: u16, pipeline_id: u64) -> Result<Value> {
+    fn run_table_streaming(
+        &self,
+        producer_concurrency: u16,
+        tpcc_threads: u16,
+        pipeline_id: u64,
+        report_path: PathBuf,
+    ) -> Result<()> {
         let mut args = vec!["--log-target".to_owned(), "terminal".to_owned(), "run".to_owned()];
         self.push_common_benchmark_args(&mut args);
         self.push_tuning_args(&mut args);
         self.push_destination_args(&mut args);
         args.extend([
+            "--report-path".to_owned(),
+            report_path.display().to_string(),
             "--pipeline-id".to_owned(),
             pipeline_id.to_string(),
             "--publication-name".to_owned(),
             self.streaming_publication_name.clone(),
+            "--workload".to_owned(),
+            self.streaming_workload.as_arg().to_owned(),
             "--table-name".to_owned(),
             self.streaming_table_name.clone(),
             "--event-count".to_owned(),
@@ -399,13 +487,41 @@ impl BenchmarkArgs {
             self.streaming_insert_batch_size.to_string(),
             "--producer-concurrency".to_owned(),
             producer_concurrency.to_string(),
+            "--tpcc-warehouses".to_owned(),
+            self.warehouses.to_string(),
+            "--tpcc-threads".to_owned(),
+            tpcc_threads.to_string(),
+            "--drain-quiet-ms".to_owned(),
+            self.streaming_drain_quiet_ms.to_string(),
+            "--drain-poll-ms".to_owned(),
+            self.streaming_drain_poll_ms.to_string(),
         ]);
 
-        if let Some(duration_seconds) = self.streaming_duration_seconds {
-            args.extend(["--duration-seconds".to_owned(), duration_seconds.to_string()]);
+        match self.streaming_workload {
+            StreamingWorkload::Tpcc => {
+                let selected_tables = self.validated_tpcc_tables()?;
+                let table_ids = self.fetch_table_ids(&selected_tables)?;
+                self.create_publication(&self.streaming_publication_name, &selected_tables)?;
+                args.extend([
+                    "--table-ids".to_owned(),
+                    table_ids,
+                    "--create-table=false".to_owned(),
+                    "--reset-table=false".to_owned(),
+                    "--create-publication=false".to_owned(),
+                    "--duration-seconds".to_owned(),
+                    self.streaming_duration_seconds
+                        .unwrap_or(DEFAULT_STREAMING_DURATION_SECONDS)
+                        .to_string(),
+                ]);
+            }
+            StreamingWorkload::Synthetic => {
+                if let Some(duration_seconds) = self.streaming_duration_seconds {
+                    args.extend(["--duration-seconds".to_owned(), duration_seconds.to_string()]);
+                }
+            }
         }
 
-        run_benchmark_binary("table_streaming", self.destination, &args)
+        run_benchmark_binary("table_streaming", self.destination, &args, &report_path)
     }
 
     fn push_common_benchmark_args(&self, args: &mut Vec<String>) {
@@ -435,7 +551,7 @@ impl BenchmarkArgs {
             self.max_copy_connections_per_table.to_string(),
         ]);
 
-        if self.disable_memory_backpressure {
+        if !self.memory_backpressure_enabled() {
             args.push("--disable-memory-backpressure".to_owned());
         }
     }
@@ -500,6 +616,18 @@ impl BenchmarkArgs {
 
         command.output().context("failed to run psql")
     }
+
+    fn memory_backpressure_enabled(&self) -> bool {
+        self.enable_memory_backpressure && !self.disable_memory_backpressure
+    }
+
+    fn runs_tpcc_streaming(&self) -> bool {
+        !self.skip_table_streaming && self.streaming_workload == StreamingWorkload::Tpcc
+    }
+
+    fn needs_tpcc_tables(&self) -> bool {
+        !self.skip_table_copy || self.runs_tpcc_streaming()
+    }
 }
 
 impl Destination {
@@ -507,6 +635,15 @@ impl Destination {
         match self {
             Self::Null => "null",
             Self::BigQuery => "bigquery",
+        }
+    }
+}
+
+impl StreamingWorkload {
+    fn as_arg(self) -> &'static str {
+        match self {
+            Self::Tpcc => "tpcc",
+            Self::Synthetic => "synthetic",
         }
     }
 }
@@ -557,9 +694,10 @@ fn run_benchmark_binary(
     binary_name: &str,
     destination: Destination,
     binary_args: &[String],
-) -> Result<Value> {
+    report_path: &Path,
+) -> Result<()> {
     let mut command = Command::new("cargo");
-    command.args(["run", "-p", "etl-benchmarks", "--release"]);
+    command.args(["run", "--quiet", "-p", "etl-benchmarks", "--release"]);
     if matches!(destination, Destination::BigQuery) {
         command.args(["--features", "bigquery"]);
     }
@@ -580,24 +718,16 @@ fn run_benchmark_binary(
         bail!("benchmark {binary_name} failed");
     }
 
-    parse_benchmark_result(&stdout)
-        .with_context(|| format!("benchmark {binary_name} did not print a result JSON line"))
-}
-
-fn parse_benchmark_result(stdout: &str) -> Option<Value> {
-    stdout.lines().rev().find_map(|line| {
-        let json = line.strip_prefix(BENCHMARK_RESULT_PREFIX)?;
-        serde_json::from_str(json).ok()
-    })
-}
-
-fn write_report(output_dir: &Path, name: &str, report: &Value) -> Result<()> {
-    let path = output_dir.join(format!("{name}.json"));
-    let json = serde_json::to_string_pretty(report)?;
-    fs::write(&path, format!("{json}\n"))
-        .with_context(|| format!("failed to write benchmark report to {}", path.display()))?;
-    eprintln!("wrote {}", path.display());
+    read_report(report_path)
+        .with_context(|| format!("benchmark {binary_name} did not write a valid report"))?;
     Ok(())
+}
+
+fn read_report(path: &Path) -> Result<Value> {
+    let json = fs::read_to_string(path)
+        .with_context(|| format!("failed to read benchmark report {}", path.display()))?;
+    serde_json::from_str(&json)
+        .with_context(|| format!("failed to parse benchmark report {}", path.display()))
 }
 
 fn quote_identifier(identifier: &str) -> Result<String> {

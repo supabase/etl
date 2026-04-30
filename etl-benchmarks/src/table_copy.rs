@@ -1,4 +1,7 @@
-use std::time::{Duration, Instant};
+use std::{
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -10,17 +13,15 @@ use etl::{
 use etl_config::shared::TableSyncCopyConfig;
 use etl_postgres::types::TableId;
 use serde::Serialize;
-use tokio::{task::JoinSet, time::timeout};
+use tokio::task::JoinSet;
 use tracing::info;
 
 use crate::common::{
     BenchDestination, DestinationArgs, DestinationStatsSnapshot, DestinationType, LogTarget,
     PgConnectionArgs, PipelineTuningArgs, bytes_to_mib, cleanup_replication_slots, duration_millis,
-    init_benchmark_tracing, mib_per_second, per_second, pipeline_config, print_report,
-    run_etl_migrations,
+    format_decimal, format_duration_ms, format_integer, init_benchmark_tracing, mib_per_second,
+    per_second, pipeline_config, run_etl_migrations, write_report,
 };
-
-const TABLE_COPY_WAIT_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 
 /// Command-line arguments for the table-copy benchmark.
 #[derive(Parser, Debug)]
@@ -63,6 +64,9 @@ pub struct RunArgs {
     /// Expected total row count for validation.
     #[arg(long)]
     expected_row_count: Option<u64>,
+    /// Write a machine-readable JSON report to this path.
+    #[arg(long)]
+    report_path: Option<PathBuf>,
 }
 
 /// Machine-readable table-copy benchmark report.
@@ -134,7 +138,9 @@ async fn run(args: RunArgs) -> Result<()> {
     let pipeline_start_ms = duration_millis(start_started.elapsed());
 
     let copy_started = Instant::now();
-    let copy_result = wait_for_table_copies(table_copy_notifications).await;
+    let copy_result =
+        wait_for_table_copies(&destination, args.expected_row_count, table_copy_notifications)
+            .await;
     let copy_wait_duration = copy_started.elapsed();
 
     let shutdown_started = Instant::now();
@@ -182,28 +188,40 @@ async fn run(args: RunArgs) -> Result<()> {
     };
 
     print_summary(&report);
-    print_report(&report)?;
+    if let Some(report_path) = &args.report_path {
+        write_report(&report, report_path)?;
+        println!("Report written to {}", report_path.display());
+    }
     Ok(())
 }
 
 fn print_summary(report: &TableCopyReport) {
     println!();
     println!("Table copy benchmark");
-    println!("  destination: {}", destination_label(report.destination));
-    println!("  publication: {}", report.publication_name);
+    println!("  Destination   {}", destination_label(report.destination));
+    println!("  Publication   {}", report.publication_name);
+    println!("  Tables        {}", format_integer(report.table_count as u128));
+    println!();
+    println!("  Data");
+    println!("    Rows copied     {}", format_integer(u128::from(report.copied_rows)));
+    if let Some(expected) = report.expected_row_count {
+        println!("    Rows expected   {}", format_integer(u128::from(expected)));
+    }
+    println!("    Decoded estimate  {} MiB", format_decimal(report.estimated_copied_mib, 2));
     println!(
-        "  copied: {} rows across {} table(s), {:.2} MiB estimated",
-        report.copied_rows, report.table_count, report.estimated_copied_mib
+        "    Row batches     {}",
+        format_integer(u128::from(report.destination_stats.table_row_batches))
     );
-    println!(
-        "  throughput: {:.2} rows/s, {:.2} estimated MiB/s",
-        report.rows_per_second, report.estimated_mib_per_second
-    );
-    println!(
-        "  timing: start={}ms, copy_wait={}ms, shutdown={}ms, total={}ms",
-        report.pipeline_start_ms, report.copy_wait_ms, report.shutdown_ms, report.total_ms
-    );
-    println!("  batches: {} table-row batch(es)", report.destination_stats.table_row_batches);
+    println!();
+    println!("  Throughput");
+    println!("    Rows/s            {}", format_decimal(report.rows_per_second, 2));
+    println!("    Est. decoded MiB/s {}", format_decimal(report.estimated_mib_per_second, 2));
+    println!();
+    println!("  Timing");
+    println!("    Pipeline start  {}", format_duration_ms(report.pipeline_start_ms));
+    println!("    Copy wait       {}", format_duration_ms(report.copy_wait_ms));
+    println!("    Shutdown        {}", format_duration_ms(report.shutdown_ms));
+    println!("    Total           {}", format_duration_ms(report.total_ms));
     println!();
 }
 
@@ -242,32 +260,61 @@ async fn register_table_copy_notifications(
     Ok(notifications)
 }
 
-async fn wait_for_table_copies(notifications: Vec<TableCopyNotifications>) -> Result<()> {
-    timeout(TABLE_COPY_WAIT_TIMEOUT, async move {
-        let mut tasks = JoinSet::new();
-        for notification in notifications {
-            tasks.spawn(async move {
-                let table_id = notification.table_id;
-                tokio::select! {
-                    () = notification.finished.inner().notified() => Ok(()),
-                    () = notification.errored.inner().notified() => {
-                        bail!("table {table_id} entered errored state during table-copy benchmark")
-                    }
+async fn wait_for_table_copies(
+    destination: &BenchDestination,
+    expected_row_count: Option<u64>,
+    notifications: Vec<TableCopyNotifications>,
+) -> Result<()> {
+    if let Some(expected_row_count) = expected_row_count {
+        return wait_for_expected_rows(destination, expected_row_count, notifications).await;
+    }
+
+    let mut tasks = JoinSet::new();
+    for notification in notifications {
+        tasks.spawn(async move {
+            let table_id = notification.table_id;
+            tokio::select! {
+                () = notification.finished.inner().notified() => Ok(()),
+                () = notification.errored.inner().notified() => {
+                    bail!("table {table_id} entered errored state during table-copy benchmark")
                 }
-            });
+            }
+        });
+    }
+
+    while let Some(result) = tasks.join_next().await {
+        result.context("table-copy wait task panicked")??;
+    }
+
+    Ok(())
+}
+
+async fn wait_for_expected_rows(
+    destination: &BenchDestination,
+    expected_row_count: u64,
+    notifications: Vec<TableCopyNotifications>,
+) -> Result<()> {
+    let mut errors = JoinSet::new();
+    for notification in notifications {
+        errors.spawn(async move {
+            let table_id = notification.table_id;
+            notification.errored.inner().notified().await;
+            bail!("table {table_id} entered errored state during table-copy benchmark")
+        });
+    }
+
+    loop {
+        if destination.stats().table_rows >= expected_row_count {
+            return Ok(());
         }
 
-        while let Some(result) = tasks.join_next().await {
-            result.context("table-copy wait task panicked")??;
+        tokio::select! {
+            result = errors.join_next() => {
+                if let Some(result) = result {
+                    result.context("table-copy error wait task panicked")??;
+                }
+            }
+            () = tokio::time::sleep(Duration::from_millis(100)) => {}
         }
-
-        Ok(())
-    })
-    .await
-    .with_context(|| {
-        format!(
-            "timed out after {}s waiting for table copies to finish",
-            TABLE_COPY_WAIT_TIMEOUT.as_secs()
-        )
-    })?
+    }
 }

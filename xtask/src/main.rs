@@ -14,7 +14,7 @@ struct Args {
 #[derive(Subcommand)]
 enum Command {
     /// Prepare and run ETL benchmarks.
-    Benchmark(BenchmarkArgs),
+    Benchmark(Box<BenchmarkArgs>),
     /// Compare benchmark reports with a previous run.
     #[command(name = "benchmark-compare")]
     BenchmarkCompare(BenchmarkCompareArgs),

@@ -23,7 +23,7 @@ const TABLE_COPY_METRICS: &[Metric] = &[
     Metric { key: "copied_rows", label: "Rows copied", policy: RegressionPolicy::Exact },
     Metric {
         key: "estimated_copied_mib",
-        label: "Estimated MiB",
+        label: "Est. decoded MiB",
         policy: RegressionPolicy::Informational,
     },
     Metric {
@@ -33,7 +33,7 @@ const TABLE_COPY_METRICS: &[Metric] = &[
     },
     Metric {
         key: "estimated_mib_per_second",
-        label: "Estimated MiB/s",
+        label: "Est. decoded MiB/s",
         policy: RegressionPolicy::HigherIsBetter { max_drop_pct: 15.0 },
     },
     Metric {
@@ -48,41 +48,25 @@ const TABLE_COPY_METRICS: &[Metric] = &[
     },
 ];
 const TABLE_STREAMING_METRICS: &[Metric] = &[
-    Metric { key: "produced_events", label: "Produced events", policy: RegressionPolicy::Exact },
+    Metric {
+        key: "produced_events",
+        label: "Produced events",
+        policy: RegressionPolicy::Informational,
+    },
     Metric {
         key: "observed_cdc_events",
         label: "Observed CDC events",
-        policy: RegressionPolicy::Exact,
-    },
-    Metric {
-        key: "producer_events_per_second",
-        label: "Producer events/s",
-        policy: RegressionPolicy::HigherIsBetter { max_drop_pct: 30.0 },
-    },
-    Metric {
-        key: "end_to_end_events_per_second",
-        label: "Dispatch events/s",
-        policy: RegressionPolicy::HigherIsBetter { max_drop_pct: 15.0 },
+        policy: RegressionPolicy::Informational,
     },
     Metric {
         key: "end_to_end_with_shutdown_events_per_second",
-        label: "Destination-drained events/s",
-        policy: RegressionPolicy::HigherIsBetter { max_drop_pct: 15.0 },
-    },
-    Metric {
-        key: "end_to_end_estimated_mib_per_second",
-        label: "Dispatch MiB/s",
+        label: "Events/s",
         policy: RegressionPolicy::HigherIsBetter { max_drop_pct: 15.0 },
     },
     Metric {
         key: "end_to_end_with_shutdown_estimated_mib_per_second",
-        label: "Destination-drained MiB/s",
+        label: "Est. decoded MiB/s",
         policy: RegressionPolicy::HigherIsBetter { max_drop_pct: 15.0 },
-    },
-    Metric {
-        key: "drain_events_per_second",
-        label: "Catch-up drain events/s",
-        policy: RegressionPolicy::HigherIsBetter { max_drop_pct: 25.0 },
     },
     Metric {
         key: "total_ms",
@@ -92,12 +76,17 @@ const TABLE_STREAMING_METRICS: &[Metric] = &[
 ];
 const CONFIG_KEYS: &[&str] = &[
     "destination",
+    "workload",
     "table_count",
     "expected_row_count",
     "requested_event_count",
     "duration_seconds",
     "insert_batch_size",
     "producer_concurrency",
+    "tpcc_warehouses",
+    "tpcc_threads",
+    "drain_quiet_ms",
+    "drain_poll_ms",
     "batch_max_fill_ms",
     "max_table_sync_workers",
     "max_copy_connections_per_table",

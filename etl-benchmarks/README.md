@@ -15,7 +15,9 @@ Use the direct benchmark binaries only when developing the benchmark code itself
 ## What Is Measured
 
 - `table_copy`: initial table-copy throughput for selected TPC-C tables.
-- `table_streaming`: CDC insert streaming throughput for a single benchmark table.
+- `table_streaming`: CDC throughput for a TPC-C transaction workload. A
+  synthetic insert-only workload remains available for fast benchmark
+  development with `--streaming-workload synthetic`.
 
 Both benchmarks support:
 
@@ -23,9 +25,10 @@ Both benchmarks support:
   decoding, batching, and pipeline overhead without destination write cost.
 - `bigquery`: writes to BigQuery. Use this for end-to-end destination throughput.
 
-Both benchmarks print a human-readable summary and a machine-readable
-`BENCHMARK_RESULT {...}` JSON line. `xtask` also writes pretty JSON files to the
-output directory.
+Both benchmarks print a human-readable summary. When `--report-path` is set, they
+also persist a pretty JSON report for automation. `xtask` always sets
+`--report-path` so GitHub CI can compare stable files instead of scraping
+terminal output.
 
 ## Prerequisites
 
@@ -62,18 +65,22 @@ cargo xtask postgres start --shards 1 --base-port 5430 --source-only
 `xtask benchmark` creates the `bench` database if it does not exist. TPC-C data
 is generated into that database by `go-tpc`.
 
+`xtask benchmark` disables ETL memory backpressure by default so throughput
+smoke runs do not park behind local memory heuristics. Pass
+`--enable-memory-backpressure` when you explicitly want to include that behavior
+in a benchmark run.
+
 ## Quick Smoke Run
 
 Use this while iterating on benchmark code. It prepares one TPC-C warehouse,
-runs table copy, inserts 1,000 CDC rows, waits until ETL observes those rows,
-and writes reports under `target/bench-results-smoke/`.
+runs table copy, runs a 10-second TPC-C streaming workload with inserts,
+updates, and deletes, drains CDC, and writes reports under
+`target/bench-results-smoke/`.
 
 ```bash
 cargo xtask benchmark \
   --warehouses 1 \
-  --streaming-events 1000 \
-  --streaming-insert-batch-size 100 \
-  --streaming-producer-concurrency 4 \
+  --streaming-duration-seconds 10 \
   --batch-max-fill-ms 100 \
   --max-table-sync-workers 2 \
   --max-copy-connections-per-table 1 \
@@ -92,8 +99,7 @@ developer machine:
 cargo xtask benchmark \
   --force-prepare \
   --warehouses 10 \
-  --streaming-events 1000000 \
-  --streaming-insert-batch-size 5000 \
+  --streaming-duration-seconds 300 \
   --batch-max-fill-ms 1000 \
   --max-table-sync-workers 8 \
   --max-copy-connections-per-table 4 \
@@ -103,8 +109,8 @@ cargo xtask benchmark \
 Use `--force-prepare` when changing the warehouse count for an existing local
 benchmark database. Without it, `xtask` reuses the existing TPC-C tables.
 
-`--tpcc-threads` is optional. When omitted, `xtask` derives the `go-tpc` loader
-concurrency as:
+`--tpcc-threads` is optional. When omitted, `xtask` derives the `go-tpc`
+prepare concurrency as:
 
 ```text
 max(warehouses * 8, available_cpus * 4), clamped to 8..128
@@ -127,19 +133,38 @@ Table-copy row count is controlled by TPC-C warehouse count:
 - `--tpcc-threads`: controls `go-tpc` load concurrency, not dataset size.
 - `--tpcc-tables`: controls which prepared TPC-C tables are copied.
 
-CDC streaming row insertion is controlled separately:
+The default TPC-C table set intentionally excludes `history` because `go-tpc`
+creates it without a primary key in Postgres, while ETL requires primary keys
+for replicated tables.
 
+TPC-C streaming is controlled by:
+
+- `--streaming-workload tpcc`: the default. It runs `go-tpc tpcc run` against
+  the prepared TPC-C tables after the ETL pipeline is ready.
+- `--streaming-duration-seconds`: duration for the TPC-C workload. The default
+  is 60 seconds.
+- `--streaming-tpcc-threads`: optional `go-tpc tpcc run` concurrency. Empty
+  means xtask derives it with the same warehouse and CPU formula as prepare.
+- `--streaming-drain-quiet-ms`: quiet period with no new CDC events before the
+  stream is considered drained. The default is 2 seconds.
+
+Synthetic streaming is controlled separately and is mainly for quick local
+development:
+
+- `--streaming-workload synthetic`: inserts into `etl_streaming_benchmark`.
 - `--streaming-events`: exact number of source rows to insert in count mode.
 - `--streaming-duration-seconds`: insert for a fixed duration instead of a fixed
   row count.
 - `--streaming-insert-batch-size`: rows inserted per producer transaction.
 - `--streaming-producer-concurrency`: number of concurrent insert producers.
 
-In count mode, the benchmark arms the destination counter for
-`--streaming-events`, inserts that many rows into the source table, then waits
-until ETL observes the same number of CDC data events. In duration mode, it
-inserts until the duration expires, records the produced row count, and then
-waits for ETL to drain that produced count.
+In TPC-C streaming mode, the workload itself determines the event mix via
+`go-tpc`'s NewOrder, Payment, OrderStatus, Delivery, and StockLevel
+transactions. The report infers the processed event count from destination
+observations after the stream drains. In synthetic count mode, the benchmark
+arms the destination counter for `--streaming-events`, inserts that many rows
+into the source table, then waits until ETL observes the same number of CDC data
+events.
 
 ## Copy-Only And Streaming-Only
 
@@ -159,21 +184,21 @@ Run only the table-streaming benchmark:
 cargo xtask benchmark \
   --skip-table-copy \
   --skip-prepare \
-  --streaming-events 1000000 \
-  --streaming-insert-batch-size 5000 \
-  --streaming-producer-concurrency 16 \
+  --streaming-duration-seconds 300 \
   --output-dir target/bench-results-streaming
 ```
 
-Use `--streaming-duration-seconds` instead of `--streaming-events` to run the
-producer for a fixed duration and then wait for ETL to drain all produced events:
+Use the synthetic workload when you want the old insert-only fixed-count smoke
+benchmark:
 
 ```bash
 cargo xtask benchmark \
   --skip-table-copy \
   --skip-prepare \
-  --streaming-duration-seconds 300 \
-  --streaming-insert-batch-size 5000
+  --streaming-workload synthetic \
+  --streaming-events 1000000 \
+  --streaming-insert-batch-size 5000 \
+  --streaming-producer-concurrency 16
 ```
 
 ## BigQuery Runs
@@ -187,7 +212,7 @@ cargo xtask benchmark \
   --bq-dataset-id my_dataset \
   --bq-sa-key-file /path/to/service-account-key.json \
   --warehouses 10 \
-  --streaming-events 1000000
+  --streaming-duration-seconds 300
 ```
 
 The `null` destination is useful for measuring how fast ETL can produce data.
@@ -208,8 +233,8 @@ With the GitHub CLI:
 gh workflow run benchmark.yml \
   -f benchmark_runner=blacksmith-16vcpu-ubuntu-2404 \
   -f warehouses=10 \
-  -f streaming_events=1000000 \
-  -f streaming_insert_batch_size=5000 \
+  -f streaming_workload=tpcc \
+  -f streaming_duration_seconds=300 \
   -f max_table_sync_workers=8 \
   -f max_copy_connections_per_table=4 \
   -f batch_max_fill_ms=1000 \
@@ -222,15 +247,20 @@ Important workflow inputs:
   `blacksmith-16vcpu-ubuntu-2404`, or `blacksmith-32vcpu-ubuntu-2404`.
 - `warehouses`: number of TPC-C warehouses to prepare.
 - `tpcc_threads`: optional `go-tpc` prepare threads. Empty means xtask derives it.
-- `streaming_events`: fixed CDC insert count.
-- `streaming_duration_seconds`: optional duration mode. Empty uses
-  `streaming_events`.
-- `streaming_insert_batch_size`: rows per producer transaction.
-- `streaming_producer_concurrency`: optional producer concurrency. Empty means
+- `streaming_workload`: `tpcc` by default, or `synthetic` for insert-only smoke
+  runs.
+- `streaming_duration_seconds`: TPC-C workload duration. Defaults to 60.
+- `streaming_tpcc_threads`: optional `go-tpc tpcc run` threads. Empty means
   xtask derives it.
+- `streaming_events`: synthetic fixed CDC insert count.
+- `streaming_insert_batch_size`: synthetic rows per producer transaction.
+- `streaming_producer_concurrency`: optional synthetic producer concurrency.
+- `streaming_drain_quiet_ms`: CDC quiet period before TPC-C drain completes.
 - `max_table_sync_workers`: table-copy worker parallelism.
 - `max_copy_connections_per_table`: per-table copy connection parallelism.
 - `batch_max_fill_ms`: stream batch fill timeout.
+- `enable_memory_backpressure`: opt into ETL memory backpressure. Defaults to
+  `false` for benchmark runs.
 - `destination`: `null` or `bigquery`.
 - `force_prepare`: drop and regenerate TPC-C tables before running.
 - `skip_table_copy`: skip table copy.
@@ -247,10 +277,12 @@ successful `benchmark-results` artifact on the same ref, and uploads
 
 If no previous successful run exists, the comparison writes a "no previous
 benchmark artifact" summary and passes. If a comparable previous run exists, the
-comparison fails the workflow when exact count metrics change or when throughput
-and timing metrics regress beyond their per-metric thresholds. If benchmark
-configuration differs, the comparison still prints the diff table but skips the
-regression gate for that benchmark.
+comparison fails the workflow when exact copy count metrics change or when
+throughput and timing metrics regress beyond their per-metric thresholds.
+TPC-C streaming event counts are informational because the transaction workload
+is duration-based and naturally varies between runs. If benchmark configuration
+differs, the comparison still prints the diff table but skips the regression
+gate for that benchmark.
 
 The comparison is also available locally when you have two result directories:
 
@@ -271,33 +303,46 @@ Example table-copy summary:
 
 ```text
 Table copy benchmark
-  destination: null
-  copied: 568405 rows across 8 table(s), 305.18 MiB estimated
-  throughput: 87738.47 rows/s, 47.11 estimated MiB/s
-  timing: start=38ms, copy_wait=6478ms, shutdown=4ms, total=6724ms
-  batches: 41 table-row batch(es)
+  Destination   null
+  Publication   bench_pub
+  Tables        8
+
+  Data
+    Rows copied       568,405
+    Rows expected     568,405
+    Decoded estimate  305.18 MiB
+
+  Throughput
+    Rows/s              87,738.47
+    Est. decoded MiB/s  47.11
 ```
 
 Example table-streaming summary:
 
 ```text
 Table streaming benchmark
-  destination: null
-  CDC events: produced=1000, observed=1000, estimated payload=0.28 MiB
-  event mix: inserts=1000, updates=0, deletes=0, relations=1, tx=20, total=1021
-  producer: 25903.41 events/s over 38ms
-  dispatch: 8326.44 events/s, 2.35 estimated MiB/s over 120ms
-  destination-drained: 8275.61 events/s, 2.34 estimated MiB/s over 120ms
-  catch-up drain: 12270.84 events/s, 3.46 estimated MiB/s over 81ms
+  Destination   null
+  Workload      tpcc
+  Publication   bench_streaming_pub
+  Source tables  8 TPC-C tables
+
+  CDC
+    Produced       inferred from observed CDC
+    Observed       42,318 events
+    Decoded estimate  11.94 MiB
+
+  Throughput
+    Events/s             6,842.31
+    Est. decoded MiB/s   1.93
+    Elapsed              6.18 s
 ```
 
 The main fields to compare across runs are:
 
 - rows or CDC events processed
 - rows/events per second
-- estimated MiB per second
-- copy wait, producer, catch-up drain, destination-drain, shutdown, and total
-  timings
+- estimated decoded MiB per second
+- copy wait, streaming elapsed, shutdown, and total timings
 - destination batch counts and max event batch size
 - CDC event mix: inserts, updates, deletes, relations, and transaction events
 
@@ -327,13 +372,15 @@ cargo run -p etl-benchmarks --release --bin table_copy -- --log-target terminal 
   --username postgres \
   --password postgres \
   --publication-name bench_pub \
-  --table-ids <customer_oid>,<district_oid> \
+  --table-ids <customer_oid>,<district_oid>,<item_oid>,<new_order_oid>,<order_line_oid>,<orders_oid>,<stock_oid>,<warehouse_oid> \
   --destination null
 ```
 
 Replace the placeholder OIDs with values returned by the `psql` query.
+Add `--report-path target/bench-results/table_copy.json` when you want a
+machine-readable report from a direct run.
 
-Direct streaming benchmark:
+Direct TPC-C streaming benchmark:
 
 ```bash
 cargo run -p etl-benchmarks --release --bin table_streaming -- --log-target terminal run \
@@ -343,9 +390,16 @@ cargo run -p etl-benchmarks --release --bin table_streaming -- --log-target term
   --username postgres \
   --password postgres \
   --publication-name bench_streaming_pub \
-  --table-name etl_streaming_benchmark \
-  --event-count 1000000 \
-  --insert-batch-size 5000 \
-  --producer-concurrency 16 \
+  --workload tpcc \
+  --table-ids <customer_oid>,<district_oid>,<item_oid>,<new_order_oid>,<order_line_oid>,<orders_oid>,<stock_oid>,<warehouse_oid> \
+  --create-table=false \
+  --reset-table=false \
+  --create-publication=false \
+  --duration-seconds 60 \
+  --tpcc-warehouses 1 \
+  --tpcc-threads 8 \
   --destination null
 ```
+
+Add `--report-path target/bench-results/table_streaming.json` when you want a
+machine-readable report from a direct run.
