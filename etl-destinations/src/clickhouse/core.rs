@@ -10,8 +10,8 @@ use etl::{
     state::destination_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus},
     store::{schema::SchemaStore, state::StateStore},
     types::{
-        Cell, Event, OldTableRow, PgLsn, ReplicatedTableSchema, SchemaDiff, TableId, TableRow,
-        Type, UpdatedTableRow, is_array_type,
+        Cell, Event, IdentityType, OldTableRow, PgLsn, ReplicatedTableSchema, SchemaDiff, TableId,
+        TableRow, Type, UpdatedTableRow, is_array_type,
     },
 };
 use parking_lot::RwLock;
@@ -268,6 +268,7 @@ where
         &self,
         schema: &ReplicatedTableSchema,
     ) -> EtlResult<(String, Arc<[bool]>)> {
+        validate_replica_identity_for_clickhouse(schema)?;
         let clickhouse_table_name = try_stringify_table_name(schema.name())?;
 
         if let Some(flags) = self.table_cache.read().get(&clickhouse_table_name).cloned() {
@@ -414,6 +415,8 @@ where
     /// Handles a schema change event (Relation) by computing the diff and
     /// applying ALTER TABLE statements.
     async fn handle_relation_event(&self, new_schema: &ReplicatedTableSchema) -> EtlResult<()> {
+        validate_replica_identity_for_clickhouse(new_schema)?;
+
         let table_id = new_schema.id();
         let new_snapshot_id = new_schema.inner().snapshot_id;
         let new_replication_mask = new_schema.replication_mask().clone();
@@ -746,11 +749,43 @@ where
     }
 }
 
+/// Rejects replica identities the ClickHouse destination cannot represent.
+///
+/// `expand_key_row` assumes the key-only old-row image carries primary-key
+/// values, so the row identity must match the primary key. `Full` is also
+/// fine because it bypasses `expand_key_row` entirely. `AlternativeKey`
+/// (a non-PK unique index) and `Missing` would either land identity values
+/// in the wrong PK slots or leave us without enough data to write a
+/// well-formed tombstone.
+fn validate_replica_identity_for_clickhouse(
+    replicated_table_schema: &ReplicatedTableSchema,
+) -> EtlResult<()> {
+    match replicated_table_schema.identity_type() {
+        IdentityType::PrimaryKey | IdentityType::Full => Ok(()),
+        identity_type => Err(etl_error!(
+            ErrorKind::SourceSchemaError,
+            "ClickHouse requires primary-key or full replica identity",
+            format!(
+                "Table '{}' uses replica identity {:?}. ClickHouse needs the source row identity \
+                 to match the primary key (so DELETE tombstones land in the right PK slots) or to \
+                 carry the full row image. Configure REPLICA IDENTITY DEFAULT (when the PK is the \
+                 natural identity) or REPLICA IDENTITY FULL.",
+                replicated_table_schema.name(),
+                identity_type
+            )
+        )),
+    }
+}
+
 /// Expands a key-only delete row to full column width for RowBinary encoding.
 ///
 /// PK columns keep their real values. Non-PK columns get `Cell::Null` if
 /// nullable, or a type-appropriate zero value if non-nullable (since RowBinary
 /// rejects NULL for non-nullable columns).
+///
+/// Caller must ensure the source replica identity is `PrimaryKey` (or `Full`,
+/// in which case this function isn't invoked) -- see
+/// [`validate_replica_identity_for_clickhouse`].
 fn expand_key_row(key_row: TableRow, schema: &ReplicatedTableSchema) -> TableRow {
     let key_cells = key_row.into_values();
     let mut key_iter = key_cells.into_iter();
@@ -868,10 +903,59 @@ where
 
 #[cfg(test)]
 mod tests {
+    use etl::types::{ColumnSchema, IdentityMask, ReplicationMask, TableName, TableSchema};
+
     use super::*;
 
     fn clickhouse_column(name: &str, type_name: &str) -> ClickHouseTableColumn {
         ClickHouseTableColumn { name: name.to_string(), type_name: type_name.to_string() }
+    }
+
+    fn replicated_schema(identity_type: IdentityType) -> ReplicatedTableSchema {
+        let table_schema = Arc::new(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_string(), "users".to_string()),
+            vec![
+                ColumnSchema::new("id".to_string(), Type::INT4, -1, 1, Some(1), false),
+                ColumnSchema::new("name".to_string(), Type::TEXT, -1, 2, None, true),
+            ],
+        ));
+        let replication_mask = ReplicationMask::all(&table_schema);
+        let identity_mask = match identity_type {
+            IdentityType::Full => IdentityMask::from_bytes(vec![1, 1]),
+            IdentityType::PrimaryKey => IdentityMask::from_bytes(vec![1, 0]),
+            IdentityType::AlternativeKey => IdentityMask::from_bytes(vec![0, 1]),
+            IdentityType::Missing => IdentityMask::from_bytes(vec![0, 0]),
+        };
+        ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask)
+    }
+
+    #[test]
+    fn validate_replica_identity_for_clickhouse_accepts_primary_key() {
+        validate_replica_identity_for_clickhouse(&replicated_schema(IdentityType::PrimaryKey))
+            .unwrap();
+    }
+
+    #[test]
+    fn validate_replica_identity_for_clickhouse_accepts_full() {
+        validate_replica_identity_for_clickhouse(&replicated_schema(IdentityType::Full)).unwrap();
+    }
+
+    #[test]
+    fn validate_replica_identity_for_clickhouse_rejects_alternative_key() {
+        let err = validate_replica_identity_for_clickhouse(&replicated_schema(
+            IdentityType::AlternativeKey,
+        ))
+        .unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::SourceSchemaError);
+    }
+
+    #[test]
+    fn validate_replica_identity_for_clickhouse_rejects_missing() {
+        let err =
+            validate_replica_identity_for_clickhouse(&replicated_schema(IdentityType::Missing))
+                .unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::SourceSchemaError);
     }
 
     #[test]
