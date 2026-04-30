@@ -130,6 +130,7 @@ pub(crate) struct BenchmarkArgs {
 #[derive(ValueEnum, Clone, Copy, Debug)]
 enum Destination {
     Null,
+    #[value(name = "bigquery")]
     BigQuery,
 }
 
@@ -198,15 +199,15 @@ impl BenchmarkArgs {
 
         if matches!(self.destination, Destination::BigQuery) {
             if self.bq_project_id.as_deref().is_none_or(|project_id| project_id.trim().is_empty()) {
-                bail!("--bq-project-id is required for --destination big-query");
+                bail!("--bq-project-id is required for --destination bigquery");
             }
 
             if self.bq_dataset_id.as_deref().is_none_or(|dataset_id| dataset_id.trim().is_empty()) {
-                bail!("--bq-dataset-id is required for --destination big-query");
+                bail!("--bq-dataset-id is required for --destination bigquery");
             }
 
             let Some(sa_key_file) = &self.bq_sa_key_file else {
-                bail!("--bq-sa-key-file is required for --destination big-query");
+                bail!("--bq-sa-key-file is required for --destination bigquery");
             };
 
             if !sa_key_file.exists() {
@@ -377,7 +378,7 @@ impl BenchmarkArgs {
             expected_row_count.to_string(),
         ]);
 
-        run_cargo_bench("table_copy", self.destination, &args)
+        run_benchmark_binary("table_copy", self.destination, &args)
     }
 
     fn run_table_streaming(&self, producer_concurrency: u16, pipeline_id: u64) -> Result<Value> {
@@ -404,7 +405,7 @@ impl BenchmarkArgs {
             args.extend(["--duration-seconds".to_owned(), duration_seconds.to_string()]);
         }
 
-        run_cargo_bench("table_streaming", self.destination, &args)
+        run_benchmark_binary("table_streaming", self.destination, &args)
     }
 
     fn push_common_benchmark_args(&self, args: &mut Vec<String>) {
@@ -505,7 +506,7 @@ impl Destination {
     fn as_arg(self) -> &'static str {
         match self {
             Self::Null => "null",
-            Self::BigQuery => "big-query",
+            Self::BigQuery => "bigquery",
         }
     }
 }
@@ -552,21 +553,21 @@ fn check_command(command: &str) -> Result<()> {
     bail!("required command '{command}' was not found")
 }
 
-fn run_cargo_bench(
-    bench_name: &str,
+fn run_benchmark_binary(
+    binary_name: &str,
     destination: Destination,
-    bench_args: &[String],
+    binary_args: &[String],
 ) -> Result<Value> {
     let mut command = Command::new("cargo");
-    command.args(["bench", "-p", "etl-benchmarks"]);
+    command.args(["run", "-p", "etl-benchmarks", "--release"]);
     if matches!(destination, Destination::BigQuery) {
         command.args(["--features", "bigquery"]);
     }
-    command.args(["--bench", bench_name, "--"]).args(bench_args);
+    command.args(["--bin", binary_name, "--"]).args(binary_args);
 
-    eprintln!("running cargo bench -p etl-benchmarks --bench {bench_name}.");
+    eprintln!("running cargo run -p etl-benchmarks --release --bin {binary_name}.");
     let output =
-        command.output().with_context(|| format!("failed to run benchmark {bench_name}"))?;
+        command.output().with_context(|| format!("failed to run benchmark {binary_name}"))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -576,11 +577,11 @@ fn run_cargo_bench(
     io::stdout().flush().context("failed to flush benchmark stdout")?;
 
     if !output.status.success() {
-        bail!("benchmark {bench_name} failed");
+        bail!("benchmark {binary_name} failed");
     }
 
     parse_benchmark_result(&stdout)
-        .with_context(|| format!("benchmark {bench_name} did not print a result JSON line"))
+        .with_context(|| format!("benchmark {binary_name} did not print a result JSON line"))
 }
 
 fn parse_benchmark_result(stdout: &str) -> Option<Value> {

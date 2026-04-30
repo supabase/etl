@@ -21,7 +21,7 @@ Both benchmarks support:
 
 - `null`: acknowledges and discards writes. Use this to measure source extraction,
   decoding, batching, and pipeline overhead without destination write cost.
-- `big-query`: writes to BigQuery. Use this for end-to-end destination throughput.
+- `bigquery`: writes to BigQuery. Use this for end-to-end destination throughput.
 
 Both benchmarks print a human-readable summary and a machine-readable
 `BENCHMARK_RESULT {...}` JSON line. `xtask` also writes pretty JSON files to the
@@ -117,6 +117,30 @@ loader concurrency:
 cargo xtask benchmark --warehouses 20 --tpcc-threads 128
 ```
 
+## Controlling Row Counts
+
+Table-copy row count is controlled by TPC-C warehouse count:
+
+- `--warehouses`: controls the TPC-C dataset size loaded into Postgres.
+- `--force-prepare`: drops and regenerates the TPC-C tables. Use this when
+  changing `--warehouses` on an existing benchmark database.
+- `--tpcc-threads`: controls `go-tpc` load concurrency, not dataset size.
+- `--tpcc-tables`: controls which prepared TPC-C tables are copied.
+
+CDC streaming row insertion is controlled separately:
+
+- `--streaming-events`: exact number of source rows to insert in count mode.
+- `--streaming-duration-seconds`: insert for a fixed duration instead of a fixed
+  row count.
+- `--streaming-insert-batch-size`: rows inserted per producer transaction.
+- `--streaming-producer-concurrency`: number of concurrent insert producers.
+
+In count mode, the benchmark arms the destination counter for
+`--streaming-events`, inserts that many rows into the source table, then waits
+until ETL observes the same number of CDC data events. In duration mode, it
+inserts until the duration expires, records the produced row count, and then
+waits for ETL to drain that produced count.
+
 ## Copy-Only And Streaming-Only
 
 Run only the table-copy benchmark:
@@ -158,7 +182,7 @@ For BigQuery, provide destination configuration and service account credentials:
 
 ```bash
 cargo xtask benchmark \
-  --destination big-query \
+  --destination bigquery \
   --bq-project-id my-gcp-project \
   --bq-dataset-id my_dataset \
   --bq-sa-key-file /path/to/service-account-key.json \
@@ -168,6 +192,8 @@ cargo xtask benchmark \
 
 The `null` destination is useful for measuring how fast ETL can produce data.
 BigQuery runs are the comparable end-to-end destination benchmark.
+The BigQuery dataset must already exist; the benchmark creates destination
+tables and views inside it, but it does not create the dataset.
 
 ## GitHub Actions
 
@@ -205,18 +231,32 @@ Important workflow inputs:
 - `max_table_sync_workers`: table-copy worker parallelism.
 - `max_copy_connections_per_table`: per-table copy connection parallelism.
 - `batch_max_fill_ms`: stream batch fill timeout.
-- `destination`: `null` or `big-query`.
+- `destination`: `null` or `bigquery`.
 - `force_prepare`: drop and regenerate TPC-C tables before running.
 - `skip_table_copy`: skip table copy.
 - `skip_table_streaming`: skip table streaming.
 
 For BigQuery workflow runs, set the repository secret
-`BENCHMARK_BQ_SA_KEY_JSON`, then pass `destination=big-query`,
-`bq_project_id`, and `bq_dataset_id`.
+`BENCHMARK_BQ_SA_KEY_JSON`, then pass `destination=bigquery`,
+`bq_project_id`, and an existing `bq_dataset_id`.
 
 The workflow starts only source Postgres, installs pinned `go-tpc`, runs
-`cargo xtask benchmark`, and uploads `target/bench-results/*.json` as the
-`benchmark-results` artifact.
+`cargo xtask benchmark`, compares the new reports against the most recent
+successful `benchmark-results` artifact on the same ref, and uploads
+`target/bench-results/*.json` plus `target/bench-results/*.md`.
+
+The comparison is also available locally when you have two result directories:
+
+```bash
+cargo xtask benchmark-compare \
+  --previous-dir target/bench-results-old \
+  --current-dir target/bench-results \
+  --output target/bench-results/benchmark-comparison.md
+```
+
+In GitHub Actions mode, `benchmark-compare` uses `GITHUB_TOKEN`,
+`GITHUB_REPOSITORY`, `GITHUB_RUN_ID`, and `GITHUB_REF_NAME` to find the previous
+successful `workflow_dispatch` run for `benchmark.yml`.
 
 ## Reading The Output
 
@@ -273,7 +313,7 @@ psql "postgres://postgres:postgres@localhost:5430/bench" \
 Then run:
 
 ```bash
-cargo bench -p etl-benchmarks --bench table_copy -- --log-target terminal run \
+cargo run -p etl-benchmarks --release --bin table_copy -- --log-target terminal run \
   --host localhost \
   --port 5430 \
   --database bench \
@@ -289,7 +329,7 @@ Replace the placeholder OIDs with values returned by the `psql` query.
 Direct streaming benchmark:
 
 ```bash
-cargo bench -p etl-benchmarks --bench table_streaming -- --log-target terminal run \
+cargo run -p etl-benchmarks --release --bin table_streaming -- --log-target terminal run \
   --host localhost \
   --port 5430 \
   --database bench \

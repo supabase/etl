@@ -64,13 +64,32 @@ impl From<LogTarget> for Environment {
 }
 
 /// Destination used by benchmark runs.
-#[derive(ValueEnum, Debug, Clone, Copy, Serialize)]
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DestinationType {
     /// Use a null destination that acknowledges all writes.
     Null,
     /// Use BigQuery as the destination.
+    #[value(name = "bigquery")]
     BigQuery,
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::ValueEnum;
+
+    use crate::common::DestinationType;
+
+    #[test]
+    fn bigquery_destination_uses_bigquery_for_cli() {
+        assert_eq!(DestinationType::from_str("bigquery", false), Ok(DestinationType::BigQuery));
+    }
+
+    #[test]
+    fn bigquery_destination_uses_snake_case_for_serde() {
+        let value = serde_json::to_value(DestinationType::BigQuery).unwrap();
+        assert_eq!(value, "big_query");
+    }
 }
 
 /// Postgres connection arguments shared by benchmark commands.

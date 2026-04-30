@@ -1,14 +1,16 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use etl::{
-    pipeline::Pipeline, state::table::TableReplicationPhaseType,
-    test_utils::notifying_store::NotifyingStore,
+    pipeline::Pipeline,
+    state::table::TableReplicationPhaseType,
+    test_utils::{notify::TimedNotify, notifying_store::NotifyingStore},
 };
 use etl_config::shared::TableSyncCopyConfig;
 use etl_postgres::types::TableId;
 use serde::Serialize;
+use tokio::{task::JoinSet, time::timeout};
 use tracing::info;
 
 use crate::common::{
@@ -17,6 +19,8 @@ use crate::common::{
     init_benchmark_tracing, mib_per_second, per_second, pipeline_config, print_report,
     run_etl_migrations,
 };
+
+const TABLE_COPY_WAIT_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 
 /// Command-line arguments for the table-copy benchmark.
 #[derive(Parser, Debug)]
@@ -59,9 +63,6 @@ pub struct RunArgs {
     /// Expected total row count for validation.
     #[arg(long)]
     expected_row_count: Option<u64>,
-    /// Compatibility flag appended by `cargo bench`.
-    #[arg(long, hide = true)]
-    bench: bool,
 }
 
 /// Machine-readable table-copy benchmark report.
@@ -101,8 +102,6 @@ pub async fn main() -> Result<()> {
 }
 
 async fn run(args: RunArgs) -> Result<()> {
-    let _ = args.bench;
-
     if args.table_ids.is_empty() {
         bail!("--table-ids must include at least one table");
     }
@@ -124,7 +123,7 @@ async fn run(args: RunArgs) -> Result<()> {
 
     config.validate().context("invalid pipeline config")?;
 
-    let table_copied_notifications = register_finished_copy_notifications(&store, &args.table_ids)
+    let table_copy_notifications = register_table_copy_notifications(&store, &args.table_ids)
         .await
         .context("failed to register table-copy notifications")?;
 
@@ -135,16 +134,18 @@ async fn run(args: RunArgs) -> Result<()> {
     let pipeline_start_ms = duration_millis(start_started.elapsed());
 
     let copy_started = Instant::now();
-    for notification in table_copied_notifications {
-        notification.inner().notified().await;
-    }
+    let copy_result = wait_for_table_copies(table_copy_notifications).await;
     let copy_wait_duration = copy_started.elapsed();
 
     let shutdown_started = Instant::now();
-    pipeline.shutdown_and_wait().await.context("failed to shut down pipeline")?;
+    let shutdown_result = pipeline.shutdown_and_wait().await;
     let shutdown_ms = duration_millis(shutdown_started.elapsed());
 
-    cleanup_replication_slots(&args.pg, args.pipeline_id, &args.table_ids).await?;
+    let cleanup_result =
+        cleanup_replication_slots(&args.pg, args.pipeline_id, &args.table_ids).await;
+    shutdown_result.context("failed to shut down pipeline")?;
+    cleanup_result?;
+    copy_result?;
 
     let destination_stats = destination.stats();
     let copied_rows = destination_stats.table_rows;
@@ -209,25 +210,64 @@ fn print_summary(report: &TableCopyReport) {
 fn destination_label(destination: DestinationType) -> &'static str {
     match destination {
         DestinationType::Null => "null",
-        DestinationType::BigQuery => "big-query",
+        DestinationType::BigQuery => "bigquery",
     }
 }
 
-async fn register_finished_copy_notifications(
+struct TableCopyNotifications {
+    table_id: u32,
+    finished: TimedNotify,
+    errored: TimedNotify,
+}
+
+async fn register_table_copy_notifications(
     store: &NotifyingStore,
     table_ids: &[u32],
-) -> Result<Vec<etl::test_utils::notify::TimedNotify>> {
+) -> Result<Vec<TableCopyNotifications>> {
     let mut notifications = Vec::with_capacity(table_ids.len());
     for table_id in table_ids {
-        notifications.push(
-            store
-                .notify_on_table_state_type(
-                    TableId::new(*table_id),
-                    TableReplicationPhaseType::FinishedCopy,
-                )
-                .await,
-        );
+        let table_id = *table_id;
+        let finished = store
+            .notify_on_table_state_type(
+                TableId::new(table_id),
+                TableReplicationPhaseType::FinishedCopy,
+            )
+            .await;
+        let errored = store
+            .notify_on_table_state_type(TableId::new(table_id), TableReplicationPhaseType::Errored)
+            .await;
+        notifications.push(TableCopyNotifications { table_id, finished, errored });
     }
 
     Ok(notifications)
+}
+
+async fn wait_for_table_copies(notifications: Vec<TableCopyNotifications>) -> Result<()> {
+    timeout(TABLE_COPY_WAIT_TIMEOUT, async move {
+        let mut tasks = JoinSet::new();
+        for notification in notifications {
+            tasks.spawn(async move {
+                let table_id = notification.table_id;
+                tokio::select! {
+                    () = notification.finished.inner().notified() => Ok(()),
+                    () = notification.errored.inner().notified() => {
+                        bail!("table {table_id} entered errored state during table-copy benchmark")
+                    }
+                }
+            });
+        }
+
+        while let Some(result) = tasks.join_next().await {
+            result.context("table-copy wait task panicked")??;
+        }
+
+        Ok(())
+    })
+    .await
+    .with_context(|| {
+        format!(
+            "timed out after {}s waiting for table copies to finish",
+            TABLE_COPY_WAIT_TIMEOUT.as_secs()
+        )
+    })?
 }

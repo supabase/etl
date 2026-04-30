@@ -54,14 +54,14 @@ on:
         type: choice
         options:
           - null
-          - big-query
+          - bigquery
         default: "null"
       bq_project_id:
-        description: BigQuery project ID when destination is big-query.
+        description: BigQuery project ID when destination is bigquery.
         required: false
         default: ""
       bq_dataset_id:
-        description: BigQuery dataset ID when destination is big-query.
+        description: BigQuery dataset ID when destination is bigquery.
         required: false
         default: ""
       force_prepare:
@@ -89,6 +89,7 @@ env:
   POSTGRES_HOST: localhost
 
 permissions:
+  actions: read
   contents: read
 
 concurrency:
@@ -121,6 +122,9 @@ jobs:
           if ! command -v psql >/dev/null 2>&1; then
             missing_packages+=(postgresql-client)
           fi
+          if ! command -v unzip >/dev/null 2>&1; then
+            missing_packages+=(unzip)
+          fi
           if (( ${#missing_packages[@]} > 0 )); then
             sudo apt-get update
             sudo apt-get install -y "${missing_packages[@]}"
@@ -135,7 +139,7 @@ jobs:
             cargo xtask postgres start --shards 1 --base-port "$POSTGRES_PORT" --source-only
 
       - name: Prepare BigQuery key
-        if: inputs.destination == 'big-query'
+        if: inputs.destination == 'bigquery'
         env:
           BQ_SA_KEY_JSON: ${{ secrets.BENCHMARK_BQ_SA_KEY_JSON }}
         run: |
@@ -193,7 +197,7 @@ jobs:
             args+=(--skip-table-streaming)
           fi
 
-          if [[ "${{ inputs.destination }}" == "big-query" ]]; then
+          if [[ "${{ inputs.destination }}" == "bigquery" ]]; then
             args+=(--bq-project-id "${{ inputs.bq_project_id }}")
             args+=(--bq-dataset-id "${{ inputs.bq_dataset_id }}")
             args+=(--bq-sa-key-file "$BQ_SA_KEY_FILE")
@@ -201,9 +205,22 @@ jobs:
 
           cargo xtask "${args[@]}"
 
+      - name: Compare benchmark results
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cargo xtask benchmark-compare \
+            --current-dir target/bench-results \
+            --output target/bench-results/benchmark-comparison.md
+          cat target/bench-results/benchmark-comparison.md >> "$GITHUB_STEP_SUMMARY"
+
       - name: Upload benchmark results
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: benchmark-results
-          path: target/bench-results/*.json
+          path: |
+            target/bench-results/*.json
+            target/bench-results/*.md
           if-no-files-found: error

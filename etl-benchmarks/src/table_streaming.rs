@@ -85,9 +85,6 @@ pub struct RunArgs {
     /// Number of concurrent insert producers.
     #[arg(long, default_value_t = 1)]
     producer_concurrency: u16,
-    /// Compatibility flag appended by `cargo bench`.
-    #[arg(long, hide = true)]
-    bench: bool,
 }
 
 /// Machine-readable table-streaming benchmark report.
@@ -142,8 +139,6 @@ pub async fn main() -> Result<()> {
 }
 
 async fn run(args: RunArgs) -> Result<()> {
-    let _ = args.bench;
-
     validate_args(&args)?;
     info!("starting table-streaming benchmark");
 
@@ -341,7 +336,7 @@ fn print_summary(report: &TableStreamingReport) {
 fn destination_label(destination: DestinationType) -> &'static str {
     match destination {
         DestinationType::Null => "null",
-        DestinationType::BigQuery => "big-query",
+        DestinationType::BigQuery => "bigquery",
     }
 }
 

@@ -33,11 +33,3 @@ tracing = { workspace = true, default-features = true }
 
 [lints]
 workspace = true
-
-[[bench]]
-name = "table_copy"
-harness = false
-
-[[bench]]
-name = "table_streaming"
-harness = false
