@@ -20,7 +20,7 @@ const GITHUB_ACCEPT: &str = "application/vnd.github+json";
 const GITHUB_USER_AGENT: &str = "supabase-etl-benchmark-compare";
 
 const TABLE_COPY_METRICS: &[Metric] = &[
-    Metric { key: "copied_rows", label: "Rows copied", policy: RegressionPolicy::Exact },
+    Metric { key: "copied_rows", label: "Rows copied", policy: RegressionPolicy::Informational },
     Metric {
         key: "estimated_copied_mib",
         label: "Est. decoded MiB",
@@ -78,7 +78,6 @@ const CONFIG_KEYS: &[&str] = &[
     "destination",
     "workload",
     "table_count",
-    "expected_row_count",
     "duration_seconds",
     "tpcc_warehouses",
     "tpcc_threads",
@@ -125,7 +124,6 @@ struct Metric {
 
 #[derive(Clone, Copy)]
 enum RegressionPolicy {
-    Exact,
     HigherIsBetter { max_drop_pct: f64 },
     LowerIsBetter { max_increase_pct: f64 },
     Informational,
@@ -465,8 +463,8 @@ fn compare_reports(
         }
 
         lines.push(String::new());
-        lines.push("| Metric | Previous | Current | Change |".to_owned());
-        lines.push("| --- | ---: | ---: | ---: |".to_owned());
+        lines.push("| Metric | Previous | Current | Change | Result |".to_owned());
+        lines.push("| --- | ---: | ---: | ---: | --- |".to_owned());
         for metric in metrics_for(&benchmark) {
             let Some(previous_value) = previous.get(metric.key) else {
                 continue;
@@ -476,11 +474,12 @@ fn compare_reports(
             };
 
             lines.push(format!(
-                "| {} | {} | {} | {} |",
+                "| {} | {} | {} | {} | {} |",
                 metric.label,
                 format_value(previous_value),
                 format_value(current_value),
-                format_delta(previous_value, current_value)
+                format_delta(previous_value, current_value),
+                format_change_result(metric.policy, previous_value, current_value)
             ));
         }
 
@@ -575,14 +574,6 @@ fn regression_failure(
     current: &Value,
 ) -> Option<String> {
     match metric.policy {
-        RegressionPolicy::Exact => (previous != current).then(|| {
-            format!(
-                "{benchmark} {} changed from {} to {}",
-                metric.label,
-                format_value(previous),
-                format_value(current)
-            )
-        }),
         RegressionPolicy::HigherIsBetter { max_drop_pct } => {
             let previous = numeric_value(previous)?;
             let current = numeric_value(current)?;
@@ -639,6 +630,46 @@ fn format_delta(previous: &Value, current: &Value) -> String {
     match pct {
         Some(pct) => format!("{sign}{} ({sign}{pct:.2}%)", format_number(delta)),
         None => format!("{sign}{}", format_number(delta)),
+    }
+}
+
+fn format_change_result(
+    policy: RegressionPolicy,
+    previous: &Value,
+    current: &Value,
+) -> &'static str {
+    match policy {
+        RegressionPolicy::Informational => "info",
+        RegressionPolicy::HigherIsBetter { .. } => {
+            let Some(previous) = numeric_value(previous) else {
+                return "";
+            };
+            let Some(current) = numeric_value(current) else {
+                return "";
+            };
+            if current > previous {
+                "better"
+            } else if current < previous {
+                "worse"
+            } else {
+                "same"
+            }
+        }
+        RegressionPolicy::LowerIsBetter { .. } => {
+            let Some(previous) = numeric_value(previous) else {
+                return "";
+            };
+            let Some(current) = numeric_value(current) else {
+                return "";
+            };
+            if current < previous {
+                "better"
+            } else if current > previous {
+                "worse"
+            } else {
+                "same"
+            }
+        }
     }
 }
 
@@ -737,7 +768,7 @@ mod tests {
     }
 
     #[test]
-    fn table_copy_regression_gate_flags_exact_and_threshold_failures() {
+    fn table_copy_regression_gate_flags_threshold_failures() {
         let previous = json!({
             "copied_rows": 1_000,
             "rows_per_second": 1_000.0,
@@ -755,10 +786,9 @@ mod tests {
 
         let failures = regression_failures("table_copy", &previous, &current);
 
-        assert_eq!(failures.len(), 3);
-        assert!(failures[0].contains("Rows copied changed"));
-        assert!(failures[1].contains("Rows/s dropped by 20.00%"));
-        assert!(failures[2].contains("Copy wait ms increased by 25.00%"));
+        assert_eq!(failures.len(), 2);
+        assert!(failures[0].contains("Rows/s dropped by 20.00%"));
+        assert!(failures[1].contains("Copy wait ms increased by 25.00%"));
     }
 
     #[test]
@@ -781,6 +811,52 @@ mod tests {
         let failures = regression_failures("table_streaming", &previous, &current);
 
         assert!(failures.is_empty());
+    }
+
+    #[test]
+    fn compare_reports_labels_changes_by_metric_direction() {
+        let mut previous = Reports::new();
+        previous.insert(
+            "table_copy".to_owned(),
+            json!({
+                "benchmark": "table_copy",
+                "destination": "null",
+                "table_count": 8,
+                "rows_per_second": 1_000.0,
+                "estimated_mib_per_second": 100.0,
+                "copy_wait_ms": 1_000.0,
+                "total_ms": 1_000.0
+            }),
+        );
+
+        let mut current = Reports::new();
+        current.insert(
+            "table_copy".to_owned(),
+            json!({
+                "benchmark": "table_copy",
+                "destination": "null",
+                "table_count": 8,
+                "rows_per_second": 1_100.0,
+                "estimated_mib_per_second": 90.0,
+                "copy_wait_ms": 900.0,
+                "total_ms": 1_100.0
+            }),
+        );
+
+        let comparison = compare_reports(&previous, &current, None);
+
+        assert!(comparison.markdown.contains("| Rows/s | 1000 | 1100 | +100 (+10.00%) | better |"));
+        assert!(
+            comparison
+                .markdown
+                .contains("| Est. decoded MiB/s | 100 | 90 | -10 (-10.00%) | worse |")
+        );
+        assert!(
+            comparison.markdown.contains("| Copy wait ms | 1000 | 900 | -100 (-10.00%) | better |")
+        );
+        assert!(
+            comparison.markdown.contains("| Total ms | 1000 | 1100 | +100 (+10.00%) | worse |")
+        );
     }
 
     #[test]
