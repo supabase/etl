@@ -32,7 +32,10 @@ use etl_config::{
 use etl_destinations::bigquery::BigQueryDestination;
 use etl_telemetry::tracing::{LogFlusher, init_tracing};
 use serde::Serialize;
-use sqlx::{Connection, Executor, PgConnection, PgPool, postgres::PgPoolOptions};
+use sqlx::{
+    Connection, Executor, PgConnection, PgPool,
+    postgres::{PgConnectOptions, PgPoolOptions, PgSslMode},
+};
 use tokio::sync::Notify;
 use tracing::info;
 
@@ -598,41 +601,34 @@ pub fn init_benchmark_tracing(log_target: LogTarget, name: &str) -> Result<LogFl
     Ok(init_tracing(name)?)
 }
 
-/// Builds a Postgres connection string for benchmark helpers.
-pub fn connection_string(args: &PgConnectionArgs) -> String {
-    let mut connection_string = match &args.password {
-        Some(password) => {
-            format!(
-                "postgres://{}:{}@{}:{}/{}",
-                args.username, password, args.host, args.port, args.database
-            )
-        }
-        None => {
-            format!("postgres://{}@{}:{}/{}", args.username, args.host, args.port, args.database)
-        }
-    };
+/// Builds Postgres connection options for benchmark helpers.
+fn pg_connect_options(args: &PgConnectionArgs) -> PgConnectOptions {
+    let mut options = PgConnectOptions::new()
+        .host(&args.host)
+        .port(args.port)
+        .database(&args.database)
+        .username(&args.username)
+        .ssl_mode(if args.tls_enabled { PgSslMode::Require } else { PgSslMode::Disable });
 
-    if args.tls_enabled {
-        connection_string.push_str("?sslmode=require");
-    } else {
-        connection_string.push_str("?sslmode=disable");
+    if let Some(password) = &args.password {
+        options = options.password(password);
     }
 
-    connection_string
+    options
 }
 
 /// Opens a Postgres pool for benchmark helpers.
 pub async fn pg_pool(args: &PgConnectionArgs) -> Result<PgPool> {
     PgPoolOptions::new()
         .max_connections(16)
-        .connect(&connection_string(args))
+        .connect_with(pg_connect_options(args))
         .await
         .context("failed to connect to Postgres")
 }
 
 /// Applies ETL source-side migrations required by replication triggers/state.
 pub async fn run_etl_migrations(args: &PgConnectionArgs) -> Result<()> {
-    let mut connection = PgConnection::connect(&connection_string(args))
+    let mut connection = PgConnection::connect_with(&pg_connect_options(args))
         .await
         .context("failed to connect to Postgres for ETL migrations")?;
 

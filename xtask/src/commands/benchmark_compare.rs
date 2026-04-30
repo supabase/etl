@@ -79,15 +79,14 @@ const CONFIG_KEYS: &[&str] = &[
     "workload",
     "table_count",
     "expected_row_count",
-    "requested_event_count",
     "duration_seconds",
-    "insert_batch_size",
-    "producer_concurrency",
     "tpcc_warehouses",
     "tpcc_threads",
     "drain_quiet_ms",
     "drain_poll_ms",
     "batch_max_fill_ms",
+    "memory_budget_ratio",
+    "memory_backpressure_enabled",
     "max_table_sync_workers",
     "max_copy_connections_per_table",
 ];
@@ -541,10 +540,19 @@ fn config_changes(previous: &Value, current: &Value) -> Vec<String> {
     CONFIG_KEYS
         .iter()
         .filter_map(|key| {
-            let previous = previous.get(*key)?;
-            let current = current.get(*key)?;
-            (previous != current)
-                .then(|| format!("`{key}` {} -> {}", format_value(previous), format_value(current)))
+            let previous = previous.get(*key);
+            let current = current.get(*key);
+            if previous.is_none() && current.is_none() {
+                return None;
+            }
+
+            (previous != current).then(|| {
+                format!(
+                    "`{key}` {} -> {}",
+                    format_optional_value(previous),
+                    format_optional_value(current)
+                )
+            })
         })
         .collect()
 }
@@ -647,6 +655,10 @@ fn format_value(value: &Value) -> String {
     }
 }
 
+fn format_optional_value(value: Option<&Value>) -> String {
+    value.map_or_else(|| "<missing>".to_owned(), format_value)
+}
+
 fn format_number(value: f64) -> String {
     if value.fract() == 0.0 {
         format!("{value:.0}")
@@ -691,4 +703,121 @@ fn encode_path_segment(value: &str) -> String {
             byte => format!("%{byte:02X}"),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use crate::commands::benchmark_compare::{
+        Reports, compare_reports, config_changes, regression_failures,
+    };
+
+    #[test]
+    fn config_changes_detects_changed_and_missing_fields() {
+        let previous = json!({
+            "destination": "null",
+            "memory_budget_ratio": 0.2
+        });
+        let current = json!({
+            "destination": "null",
+            "memory_budget_ratio": 0.3,
+            "memory_backpressure_enabled": false
+        });
+
+        let changes = config_changes(&previous, &current);
+
+        assert_eq!(
+            changes,
+            vec![
+                "`memory_budget_ratio` 0.2000 -> 0.3000",
+                "`memory_backpressure_enabled` <missing> -> false"
+            ]
+        );
+    }
+
+    #[test]
+    fn table_copy_regression_gate_flags_exact_and_threshold_failures() {
+        let previous = json!({
+            "copied_rows": 1_000,
+            "rows_per_second": 1_000.0,
+            "estimated_mib_per_second": 100.0,
+            "copy_wait_ms": 1_000.0,
+            "total_ms": 1_000.0
+        });
+        let current = json!({
+            "copied_rows": 900,
+            "rows_per_second": 800.0,
+            "estimated_mib_per_second": 90.0,
+            "copy_wait_ms": 1_250.0,
+            "total_ms": 1_100.0
+        });
+
+        let failures = regression_failures("table_copy", &previous, &current);
+
+        assert_eq!(failures.len(), 3);
+        assert!(failures[0].contains("Rows copied changed"));
+        assert!(failures[1].contains("Rows/s dropped by 20.00%"));
+        assert!(failures[2].contains("Copy wait ms increased by 25.00%"));
+    }
+
+    #[test]
+    fn table_streaming_regression_gate_allows_improvements() {
+        let previous = json!({
+            "produced_events": 1_000,
+            "observed_cdc_events": 1_000,
+            "end_to_end_with_shutdown_events_per_second": 1_000.0,
+            "end_to_end_with_shutdown_estimated_mib_per_second": 100.0,
+            "total_ms": 1_000.0
+        });
+        let current = json!({
+            "produced_events": 2_000,
+            "observed_cdc_events": 2_000,
+            "end_to_end_with_shutdown_events_per_second": 1_200.0,
+            "end_to_end_with_shutdown_estimated_mib_per_second": 120.0,
+            "total_ms": 900.0
+        });
+
+        let failures = regression_failures("table_streaming", &previous, &current);
+
+        assert!(failures.is_empty());
+    }
+
+    #[test]
+    fn compare_reports_skips_regression_gate_when_config_differs() {
+        let mut previous = Reports::new();
+        previous.insert(
+            "table_streaming".to_owned(),
+            json!({
+                "benchmark": "table_streaming",
+                "destination": "null",
+                "memory_budget_ratio": 0.2,
+                "end_to_end_with_shutdown_events_per_second": 1_000.0,
+                "end_to_end_with_shutdown_estimated_mib_per_second": 100.0,
+                "total_ms": 1_000.0
+            }),
+        );
+
+        let mut current = Reports::new();
+        current.insert(
+            "table_streaming".to_owned(),
+            json!({
+                "benchmark": "table_streaming",
+                "destination": "null",
+                "memory_budget_ratio": 0.3,
+                "end_to_end_with_shutdown_events_per_second": 100.0,
+                "end_to_end_with_shutdown_estimated_mib_per_second": 10.0,
+                "total_ms": 10_000.0
+            }),
+        );
+
+        let comparison = compare_reports(&previous, &current, None);
+
+        assert!(comparison.failures.is_empty());
+        assert!(
+            comparison
+                .markdown
+                .contains("Regression gate: skipped because benchmark configuration differs.")
+        );
+    }
 }

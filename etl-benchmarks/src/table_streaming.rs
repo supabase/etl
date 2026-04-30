@@ -124,6 +124,7 @@ struct TableStreamingReport {
     max_copy_connections_per_table: u16,
     batch_max_fill_ms: u64,
     memory_budget_ratio: f32,
+    memory_backpressure_enabled: bool,
     destination_stats: DestinationStatsSnapshot,
 }
 
@@ -254,6 +255,7 @@ async fn run(args: RunArgs) -> Result<()> {
         max_copy_connections_per_table: args.tuning.max_copy_connections_per_table,
         batch_max_fill_ms: args.tuning.batch_max_fill_ms,
         memory_budget_ratio: args.tuning.memory_budget_ratio,
+        memory_backpressure_enabled: !args.tuning.disable_memory_backpressure,
         destination_stats,
     };
 

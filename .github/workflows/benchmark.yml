@@ -153,7 +153,12 @@ jobs:
 
       - name: Record benchmark environment
         env:
+          BENCHMARK_RUNNER_INPUT: ${{ inputs.benchmark_runner }}
+          DESTINATION_INPUT: ${{ inputs.destination }}
+          ENABLE_MEMORY_BACKPRESSURE_INPUT: ${{ inputs.enable_memory_backpressure }}
+          MEMORY_BUDGET_RATIO_INPUT: ${{ inputs.memory_budget_ratio }}
           TPCC_THREADS_INPUT: ${{ inputs.tpcc_threads }}
+          WAREHOUSES_INPUT: ${{ inputs.warehouses }}
         run: |
           set -euo pipefail
           mkdir -p target/bench-results
@@ -171,22 +176,37 @@ jobs:
             echo
             echo "| Setting | Value |"
             echo "| --- | --- |"
-            echo "| Runner | ${{ inputs.benchmark_runner }} |"
+            echo "| Runner | ${BENCHMARK_RUNNER_INPUT} |"
             echo "| CPUs | $(nproc) |"
             echo "| Host memory | $(awk '/MemTotal/ { printf \"%.2f GiB\", $2 / 1024 / 1024 }' /proc/meminfo) |"
             echo "| Cgroup memory limit | ${cgroup_memory_limit} |"
-            echo "| Warehouses | ${{ inputs.warehouses }} |"
+            echo "| Warehouses | ${WAREHOUSES_INPUT} |"
             echo "| TPC-C threads | ${tpcc_threads} |"
-            echo "| Memory budget ratio | ${{ inputs.memory_budget_ratio }} |"
-            echo "| Memory backpressure | ${{ inputs.enable_memory_backpressure }} |"
-            echo "| Destination | ${{ inputs.destination }} |"
+            echo "| Memory budget ratio | ${MEMORY_BUDGET_RATIO_INPUT} |"
+            echo "| Memory backpressure | ${ENABLE_MEMORY_BACKPRESSURE_INPUT} |"
+            echo "| Destination | ${DESTINATION_INPUT} |"
           } > target/bench-results/benchmark-environment.md
 
           cat target/bench-results/benchmark-environment.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Run benchmarks
         env:
+          BATCH_MAX_FILL_MS_INPUT: ${{ inputs.batch_max_fill_ms }}
+          BQ_DATASET_ID_INPUT: ${{ inputs.bq_dataset_id }}
+          BQ_PROJECT_ID_INPUT: ${{ inputs.bq_project_id }}
           BQ_SA_KEY_FILE: ${{ runner.temp }}/bigquery-key.json
+          DESTINATION_INPUT: ${{ inputs.destination }}
+          ENABLE_MEMORY_BACKPRESSURE_INPUT: ${{ inputs.enable_memory_backpressure }}
+          FORCE_PREPARE_INPUT: ${{ inputs.force_prepare }}
+          MAX_COPY_CONNECTIONS_PER_TABLE_INPUT: ${{ inputs.max_copy_connections_per_table }}
+          MAX_TABLE_SYNC_WORKERS_INPUT: ${{ inputs.max_table_sync_workers }}
+          MEMORY_BUDGET_RATIO_INPUT: ${{ inputs.memory_budget_ratio }}
+          SKIP_TABLE_COPY_INPUT: ${{ inputs.skip_table_copy }}
+          SKIP_TABLE_STREAMING_INPUT: ${{ inputs.skip_table_streaming }}
+          STREAMING_DRAIN_QUIET_MS_INPUT: ${{ inputs.streaming_drain_quiet_ms }}
+          STREAMING_DURATION_SECONDS_INPUT: ${{ inputs.streaming_duration_seconds }}
+          TPCC_THREADS_INPUT: ${{ inputs.tpcc_threads }}
+          WAREHOUSES_INPUT: ${{ inputs.warehouses }}
         run: |
           set -euo pipefail
 
@@ -197,43 +217,43 @@ jobs:
             --database "$POSTGRES_DB"
             --username "$POSTGRES_USER"
             --password "$POSTGRES_PASSWORD"
-            --warehouses "${{ inputs.warehouses }}"
-            --streaming-drain-quiet-ms "${{ inputs.streaming_drain_quiet_ms }}"
-            --max-table-sync-workers "${{ inputs.max_table_sync_workers }}"
-            --max-copy-connections-per-table "${{ inputs.max_copy_connections_per_table }}"
-            --batch-max-fill-ms "${{ inputs.batch_max_fill_ms }}"
-            --memory-budget-ratio "${{ inputs.memory_budget_ratio }}"
-            --destination "${{ inputs.destination }}"
+            --warehouses "$WAREHOUSES_INPUT"
+            --streaming-drain-quiet-ms "$STREAMING_DRAIN_QUIET_MS_INPUT"
+            --max-table-sync-workers "$MAX_TABLE_SYNC_WORKERS_INPUT"
+            --max-copy-connections-per-table "$MAX_COPY_CONNECTIONS_PER_TABLE_INPUT"
+            --batch-max-fill-ms "$BATCH_MAX_FILL_MS_INPUT"
+            --memory-budget-ratio "$MEMORY_BUDGET_RATIO_INPUT"
+            --destination "$DESTINATION_INPUT"
             --output-dir target/bench-results
           )
 
-          if [[ -n "${{ inputs.tpcc_threads }}" ]]; then
-            args+=(--tpcc-threads "${{ inputs.tpcc_threads }}")
+          if [[ -n "$TPCC_THREADS_INPUT" ]]; then
+            args+=(--tpcc-threads "$TPCC_THREADS_INPUT")
           fi
 
-          if [[ -n "${{ inputs.streaming_duration_seconds }}" ]]; then
-            args+=(--streaming-duration-seconds "${{ inputs.streaming_duration_seconds }}")
+          if [[ -n "$STREAMING_DURATION_SECONDS_INPUT" ]]; then
+            args+=(--streaming-duration-seconds "$STREAMING_DURATION_SECONDS_INPUT")
           fi
 
-          if [[ "${{ inputs.enable_memory_backpressure }}" == "true" ]]; then
+          if [[ "$ENABLE_MEMORY_BACKPRESSURE_INPUT" == "true" ]]; then
             args+=(--enable-memory-backpressure)
           fi
 
-          if [[ "${{ inputs.force_prepare }}" == "true" ]]; then
+          if [[ "$FORCE_PREPARE_INPUT" == "true" ]]; then
             args+=(--force-prepare)
           fi
 
-          if [[ "${{ inputs.skip_table_copy }}" == "true" ]]; then
+          if [[ "$SKIP_TABLE_COPY_INPUT" == "true" ]]; then
             args+=(--skip-table-copy)
           fi
 
-          if [[ "${{ inputs.skip_table_streaming }}" == "true" ]]; then
+          if [[ "$SKIP_TABLE_STREAMING_INPUT" == "true" ]]; then
             args+=(--skip-table-streaming)
           fi
 
-          if [[ "${{ inputs.destination }}" == "bigquery" ]]; then
-            args+=(--bq-project-id "${{ inputs.bq_project_id }}")
-            args+=(--bq-dataset-id "${{ inputs.bq_dataset_id }}")
+          if [[ "$DESTINATION_INPUT" == "bigquery" ]]; then
+            args+=(--bq-project-id "$BQ_PROJECT_ID_INPUT")
+            args+=(--bq-dataset-id "$BQ_DATASET_ID_INPUT")
             args+=(--bq-sa-key-file "$BQ_SA_KEY_FILE")
           fi
 
