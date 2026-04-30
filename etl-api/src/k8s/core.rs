@@ -12,7 +12,7 @@ use crate::{
         pipeline::{ReplicatorResourcesConfig, StoredPipelineConfig},
         source::StoredSourceConfig,
     },
-    db::{
+    data::{
         destinations::Destination,
         images::Image,
         pipelines::{Pipeline, PipelineDeletion},
@@ -222,7 +222,7 @@ fn build_secrets_from_configs(
     match destination_config {
         StoredDestinationConfig::BigQuery { service_account_key, .. } => Secrets::BigQuery {
             postgres_password,
-            big_query_service_account_key: service_account_key.expose_secret().to_string(),
+            big_query_service_account_key: service_account_key.expose_secret().to_owned(),
         },
         StoredDestinationConfig::Iceberg { config: StoredIcebergConfig::Rest { .. } } => {
             Secrets::None
@@ -237,23 +237,23 @@ fn build_secrets_from_configs(
                 },
         } => Secrets::Iceberg {
             postgres_password,
-            catalog_token: catalog_token.expose_secret().to_string(),
-            s3_access_key_id: s3_access_key_id.expose_secret().to_string(),
-            s3_secret_access_key: s3_secret_access_key.expose_secret().to_string(),
+            catalog_token: catalog_token.expose_secret().to_owned(),
+            s3_access_key_id: s3_access_key_id.expose_secret().to_owned(),
+            s3_secret_access_key: s3_secret_access_key.expose_secret().to_owned(),
         },
         StoredDestinationConfig::ClickHouse { password, .. } => Secrets::ClickHouse {
             postgres_password,
-            password: password.as_ref().map(|p| p.expose_secret().to_string()),
+            password: password.as_ref().map(|p| p.expose_secret().to_owned()),
         },
         StoredDestinationConfig::Ducklake { s3_access_key_id, s3_secret_access_key, .. } => {
             Secrets::Ducklake {
                 postgres_password,
                 s3_access_key_id: s3_access_key_id
                     .as_ref()
-                    .map(|value| value.expose_secret().to_string()),
+                    .map(|value| value.expose_secret().to_owned()),
                 s3_secret_access_key: s3_secret_access_key
                     .as_ref()
-                    .map(|value| value.expose_secret().to_string()),
+                    .map(|value| value.expose_secret().to_owned()),
             }
         }
     }
@@ -369,7 +369,7 @@ async fn create_or_update_replicator_config(
 
     let files = vec![
         ReplicatorConfigMapFile {
-            filename: "base.json".to_string(),
+            filename: "base.json".to_owned(),
             // For our setup, we don't need to add config params to the base config file; everything
             // is added directly in the environment-specific config file.
             content: "{}".to_owned(),
@@ -492,20 +492,20 @@ mod tests {
 
     fn source_config_with_password() -> StoredSourceConfig {
         StoredSourceConfig {
-            host: "localhost".to_string(),
+            host: "localhost".to_owned(),
             port: 5432,
-            name: "postgres".to_string(),
-            username: "postgres".to_string(),
-            password: Some(SerializableSecretString::from("password".to_string())),
+            name: "postgres".to_owned(),
+            username: "postgres".to_owned(),
+            password: Some(SerializableSecretString::from("password".to_owned())),
         }
     }
 
     fn clickhouse_destination_config(password: Option<&str>) -> StoredDestinationConfig {
         StoredDestinationConfig::ClickHouse {
             url: "http://localhost:8123".parse().unwrap(),
-            user: "default".to_string(),
+            user: "default".to_owned(),
             password: password.map(ToOwned::to_owned).map(SerializableSecretString::from),
-            database: "default".to_string(),
+            database: "default".to_owned(),
         }
     }
 
@@ -648,8 +648,8 @@ mod tests {
         assert_eq!(
             client.calls(),
             vec![
-                "postgres:tenant-42:password".to_string(),
-                "clickhouse:tenant-42:clickhouse-password".to_string(),
+                "postgres:tenant-42:password".to_owned(),
+                "clickhouse:tenant-42:clickhouse-password".to_owned(),
             ]
         );
     }
@@ -667,8 +667,8 @@ mod tests {
         assert_eq!(
             client.calls(),
             vec![
-                "postgres:tenant-42:password".to_string(),
-                "delete-clickhouse:tenant-42".to_string(),
+                "postgres:tenant-42:password".to_owned(),
+                "delete-clickhouse:tenant-42".to_owned(),
             ]
         );
     }
@@ -676,18 +676,18 @@ mod tests {
     #[tokio::test]
     async fn ducklake_creates_postgres_and_s3_secrets() {
         let source_config = StoredSourceConfig {
-            host: "localhost".to_string(),
+            host: "localhost".to_owned(),
             port: 5432,
-            name: "postgres".to_string(),
-            username: "postgres".to_string(),
-            password: Some(SerializableSecretString::from("password".to_string())),
+            name: "postgres".to_owned(),
+            username: "postgres".to_owned(),
+            password: Some(SerializableSecretString::from("password".to_owned())),
         };
         let destination_config = StoredDestinationConfig::Ducklake {
-            catalog_url: "postgres://catalog".to_string(),
-            data_path: "s3://bucket/path".to_string(),
+            catalog_url: "postgres://catalog".to_owned(),
+            data_path: "s3://bucket/path".to_owned(),
             pool_size: 4,
-            s3_access_key_id: Some(SerializableSecretString::from("key-id".to_string())),
-            s3_secret_access_key: Some(SerializableSecretString::from("secret-key".to_string())),
+            s3_access_key_id: Some(SerializableSecretString::from("key-id".to_owned())),
+            s3_secret_access_key: Some(SerializableSecretString::from("secret-key".to_owned())),
             s3_region: None,
             s3_endpoint: None,
             s3_url_style: None,
@@ -706,8 +706,8 @@ mod tests {
         assert_eq!(
             client.calls(),
             vec![
-                "postgres:tenant-42:password".to_string(),
-                "ducklake:tenant-42:key-id:secret-key".to_string(),
+                "postgres:tenant-42:password".to_owned(),
+                "ducklake:tenant-42:key-id:secret-key".to_owned(),
             ]
         );
     }
@@ -715,15 +715,15 @@ mod tests {
     #[tokio::test]
     async fn ducklake_without_s3_still_creates_postgres_secret() {
         let source_config = StoredSourceConfig {
-            host: "localhost".to_string(),
+            host: "localhost".to_owned(),
             port: 5432,
-            name: "postgres".to_string(),
-            username: "postgres".to_string(),
-            password: Some(SerializableSecretString::from("password".to_string())),
+            name: "postgres".to_owned(),
+            username: "postgres".to_owned(),
+            password: Some(SerializableSecretString::from("password".to_owned())),
         };
         let destination_config = StoredDestinationConfig::Ducklake {
-            catalog_url: "postgres://catalog".to_string(),
-            data_path: "file:///tmp/lake".to_string(),
+            catalog_url: "postgres://catalog".to_owned(),
+            data_path: "file:///tmp/lake".to_owned(),
             pool_size: 4,
             s3_access_key_id: None,
             s3_secret_access_key: None,
@@ -744,10 +744,7 @@ mod tests {
 
         assert_eq!(
             client.calls(),
-            vec![
-                "postgres:tenant-42:password".to_string(),
-                "delete-ducklake:tenant-42".to_string(),
-            ]
+            vec!["postgres:tenant-42:password".to_owned(), "delete-ducklake:tenant-42".to_owned(),]
         );
     }
 }

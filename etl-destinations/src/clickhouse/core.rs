@@ -81,8 +81,8 @@ fn clickhouse_type_expects_nullable_marker(type_name: &str) -> bool {
 fn expected_clickhouse_column_names(schema: &ReplicatedTableSchema) -> Vec<String> {
     let mut names: Vec<String> =
         schema.column_schemas().map(|column| column.name.clone()).collect();
-    names.push(CDC_OPERATION_COLUMN_NAME.to_string());
-    names.push(CDC_LSN_COLUMN_NAME.to_string());
+    names.push(CDC_OPERATION_COLUMN_NAME.to_owned());
+    names.push(CDC_LSN_COLUMN_NAME.to_owned());
     names
 }
 
@@ -243,7 +243,7 @@ where
         replication_mask: etl::types::ReplicationMask,
     ) -> EtlResult<()> {
         let metadata = DestinationTableMetadata::new_applying(
-            clickhouse_table_name.to_string(),
+            clickhouse_table_name.to_owned(),
             snapshot_id,
             replication_mask,
         );
@@ -908,16 +908,16 @@ mod tests {
     use super::*;
 
     fn clickhouse_column(name: &str, type_name: &str) -> ClickHouseTableColumn {
-        ClickHouseTableColumn { name: name.to_string(), type_name: type_name.to_string() }
+        ClickHouseTableColumn { name: name.to_owned(), type_name: type_name.to_owned() }
     }
 
     fn replicated_schema(identity_type: IdentityType) -> ReplicatedTableSchema {
         let table_schema = Arc::new(TableSchema::new(
             TableId::new(1),
-            TableName::new("public".to_string(), "users".to_string()),
+            TableName::new("public".to_owned(), "users".to_owned()),
             vec![
-                ColumnSchema::new("id".to_string(), Type::INT4, -1, 1, Some(1), false),
-                ColumnSchema::new("name".to_string(), Type::TEXT, -1, 2, None, true),
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
+                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true),
             ],
         ));
         let replication_mask = ReplicationMask::all(&table_schema);
@@ -971,11 +971,11 @@ mod tests {
     #[test]
     fn nullable_flags_use_clickhouse_destination_nullability() {
         let expected_names = vec![
-            "id".to_string(),
-            "score".to_string(),
-            "tags".to_string(),
-            CDC_OPERATION_COLUMN_NAME.to_string(),
-            CDC_LSN_COLUMN_NAME.to_string(),
+            "id".to_owned(),
+            "score".to_owned(),
+            "tags".to_owned(),
+            CDC_OPERATION_COLUMN_NAME.to_owned(),
+            CDC_LSN_COLUMN_NAME.to_owned(),
         ];
         let actual_columns = vec![
             clickhouse_column("id", "Int64"),
@@ -994,7 +994,7 @@ mod tests {
 
     #[test]
     fn nullable_flags_reject_clickhouse_column_count_mismatch() {
-        let expected_names = vec!["id".to_string(), CDC_OPERATION_COLUMN_NAME.to_string()];
+        let expected_names = vec!["id".to_owned(), CDC_OPERATION_COLUMN_NAME.to_owned()];
         let actual_columns = vec![clickhouse_column("id", "Int64")];
 
         let err =
@@ -1007,7 +1007,7 @@ mod tests {
 
     #[test]
     fn nullable_flags_reject_clickhouse_column_order_mismatch() {
-        let expected_names = vec!["id".to_string(), "name".to_string()];
+        let expected_names = vec!["id".to_owned(), "name".to_owned()];
         let actual_columns =
             vec![clickhouse_column("name", "String"), clickhouse_column("id", "Int64")];
 

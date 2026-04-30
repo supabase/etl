@@ -9,7 +9,7 @@ use sqlx::PgPool;
 use thiserror::Error;
 use utoipa::ToSchema;
 
-use crate::{db, db::images::ImagesDbError, routes::ErrorMessage};
+use crate::{data, data::images::ImagesDbError, routes::ErrorMessage};
 
 #[derive(Debug, Error)]
 enum ImageError {
@@ -24,7 +24,7 @@ impl ImageError {
     fn to_message(&self) -> String {
         match self {
             // Do not expose internal database details in error messages
-            ImageError::ImagesDb(ImagesDbError::Database(_)) => "internal server error".to_string(),
+            ImageError::ImagesDb(ImagesDbError::Database(_)) => "internal server error".to_owned(),
             // Every other message is ok, as they do not divulge sensitive information
             e => e.to_string(),
         }
@@ -105,7 +105,7 @@ pub async fn create_image(
 ) -> Result<impl Responder, ImageError> {
     let image = image.into_inner();
 
-    let id = db::images::create_image(&pool, &image.name, image.is_default).await?;
+    let id = data::images::create_image(&pool, &image.name, image.is_default).await?;
 
     let response = CreateImageResponse { id };
 
@@ -132,7 +132,7 @@ pub async fn read_image(
 ) -> Result<impl Responder, ImageError> {
     let image_id = image_id.into_inner();
 
-    let response = db::images::read_image(&**pool, image_id)
+    let response = data::images::read_image(&**pool, image_id)
         .await?
         .map(|s| ReadImageResponse { id: s.id, name: s.name, is_default: s.is_default })
         .ok_or(ImageError::ImageNotFound(image_id))?;
@@ -163,7 +163,7 @@ pub async fn update_image(
     let image_id = image_id.into_inner();
     let image = image.into_inner();
 
-    db::images::update_image(&pool, image_id, &image.name, image.is_default)
+    data::images::update_image(&pool, image_id, &image.name, image.is_default)
         .await?
         .ok_or(ImageError::ImageNotFound(image_id))?;
 
@@ -190,7 +190,9 @@ pub async fn delete_image(
 ) -> Result<impl Responder, ImageError> {
     let image_id = image_id.into_inner();
 
-    db::images::delete_image(&pool, image_id).await?.ok_or(ImageError::ImageNotFound(image_id))?;
+    data::images::delete_image(&pool, image_id)
+        .await?
+        .ok_or(ImageError::ImageNotFound(image_id))?;
 
     Ok(HttpResponse::Ok().finish())
 }
@@ -207,7 +209,7 @@ pub async fn delete_image(
 #[get("/images")]
 pub async fn read_all_images(pool: Data<PgPool>) -> Result<impl Responder, ImageError> {
     let mut images = vec![];
-    for image in db::images::read_all_images(&**pool).await? {
+    for image in data::images::read_all_images(&**pool).await? {
         let image =
             ReadImageResponse { id: image.id, name: image.name, is_default: image.is_default };
         images.push(image);

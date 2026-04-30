@@ -30,7 +30,6 @@ use std::{collections::HashMap, sync::Arc};
 
 use etl_postgres::types::{ReplicatedTableSchema, SnapshotId, TableId};
 use tokio::sync::RwLock;
-use tracing::warn;
 
 /// Shared per-table protocol state used to decode logical replication messages.
 #[derive(Debug, Clone)]
@@ -84,6 +83,13 @@ impl SharedTableCache {
         guard.get(table_id).cloned()
     }
 
+    /// Returns the current active table ids in the cache, which represent the
+    /// active tables being replicated.
+    pub(crate) async fn active_table_ids(&self) -> Vec<TableId> {
+        let guard = self.inner.read().await;
+        guard.keys().copied().collect()
+    }
+
     /// Records that a table is waiting for a new relation-state refresh for
     /// the supplied snapshot.
     pub(crate) async fn note_waiting_for_relation(
@@ -103,34 +109,18 @@ impl SharedTableCache {
         self.upsert(table_id, SharedTableState::Ready { replicated_table_schema }).await;
     }
 
-    /// Inserts or updates shared table state when the incoming snapshot is not
-    /// stale.
+    /// Inserts or updates shared table state.
+    ///
+    /// This cache is deliberately oblivious to ordering and ownership. It
+    /// assumes workers call it only after the apply loop has established table
+    /// ownership, and it follows the order of those calls even when a reconnect
+    /// replays older WAL.
     async fn upsert(&self, table_id: TableId, new_state: SharedTableState) {
         let mut guard = self.inner.write().await;
-        let snapshot_id = new_state.snapshot_id();
-        match guard.get_mut(&table_id) {
-            Some(state) if state.snapshot_id() > snapshot_id => {
-                warn!(
-                    table_id = %table_id,
-                    current_snapshot_id = %state.snapshot_id(),
-                    requested_snapshot_id = %snapshot_id,
-                    "shared table cache received a stale snapshot update; this may indicate out-of-order protocol state"
-                );
-
-                debug_assert!(
-                    state.snapshot_id() <= snapshot_id,
-                    "shared table cache received stale snapshot update for table {table_id}: \
-                     current={}, requested={}",
-                    state.snapshot_id(),
-                    snapshot_id
-                );
-            }
-            Some(state) => {
-                *state = new_state;
-            }
-            None => {
-                guard.insert(table_id, new_state);
-            }
+        if let Some(state) = guard.get_mut(&table_id) {
+            *state = new_state;
+        } else {
+            guard.insert(table_id, new_state);
         }
     }
 }
@@ -147,17 +137,17 @@ mod tests {
     fn create_test_schema() -> ReplicatedTableSchema {
         let schema = TableSchema::with_snapshot_id(
             TableId::new(123),
-            TableName::new("public".to_string(), "test_table".to_string()),
+            TableName::new("public".to_owned(), "test_table".to_owned()),
             vec![
-                ColumnSchema::new("id".to_string(), Type::INT4, -1, 1, Some(1), false),
-                ColumnSchema::new("name".to_string(), Type::TEXT, -1, 2, None, true),
-                ColumnSchema::new("age".to_string(), Type::INT4, -1, 3, None, true),
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
+                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true),
+                ColumnSchema::new("age".to_owned(), Type::INT4, -1, 3, None, true),
             ],
             SnapshotId::new(10.into()),
         );
 
         let replicated_columns: HashSet<String> =
-            ["id".to_string(), "age".to_string()].into_iter().collect();
+            ["id".to_owned(), "age".to_owned()].into_iter().collect();
         let replication_mask =
             etl_postgres::types::ReplicationMask::build(&schema, &replicated_columns);
         let identity_mask = etl_postgres::types::IdentityMask::from_bytes(vec![1, 0, 1]);
@@ -199,15 +189,18 @@ mod tests {
         assert!(matches!(state, SharedTableState::WaitingForRelation { .. }));
     }
 
-    #[should_panic(expected = "shared table cache received stale snapshot update")]
     #[tokio::test]
-    async fn older_snapshot_panics() {
+    async fn older_snapshot_rewinds_to_waiting_relation() {
         let cache = SharedTableCache::new();
         let table_id = TableId::new(123);
         let replicated_table_schema = create_test_schema();
 
         cache.note_ready(table_id, replicated_table_schema).await;
         cache.note_waiting_for_relation(table_id, SnapshotId::new(9.into())).await;
+
+        let state = cache.get(&table_id).await.expect("table state should exist");
+        assert_eq!(state.snapshot_id(), SnapshotId::new(9.into()));
+        assert!(matches!(state, SharedTableState::WaitingForRelation { .. }));
     }
 
     #[tokio::test]
@@ -243,5 +236,22 @@ mod tests {
         let state = cache.get(&table_id).await.expect("table state should exist");
         assert_eq!(state.snapshot_id(), snapshot_id);
         assert!(state.replicated_table_schema().is_none());
+    }
+
+    #[tokio::test]
+    async fn active_table_ids_returns_current_tables() {
+        let cache = SharedTableCache::new();
+        let ready_table_id = TableId::new(123);
+        let waiting_table_id = TableId::new(456);
+        let waiting_snapshot_id = SnapshotId::new(20.into());
+
+        cache.note_ready(ready_table_id, create_test_schema()).await;
+        cache.note_waiting_for_relation(waiting_table_id, waiting_snapshot_id).await;
+
+        let table_ids = cache.active_table_ids().await;
+
+        assert_eq!(table_ids.len(), 2);
+        assert!(table_ids.contains(&ready_table_id));
+        assert!(table_ids.contains(&waiting_table_id));
     }
 }

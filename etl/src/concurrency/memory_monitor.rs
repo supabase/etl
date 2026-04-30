@@ -1,7 +1,7 @@
 use std::{
     pin::Pin,
     sync::{
-        Arc,
+        Arc, Mutex, PoisonError,
         atomic::{AtomicU64, Ordering},
     },
     task::{Context, Poll},
@@ -11,7 +11,11 @@ use std::{
 use etl_config::shared::MemoryBackpressureConfig;
 use futures::Stream;
 use metrics::{counter, gauge, histogram};
-use tokio::{sync::watch, time::MissedTickBehavior};
+use tokio::{
+    sync::watch,
+    task::{JoinError, JoinHandle},
+    time::MissedTickBehavior,
+};
 use tokio_stream::wrappers::WatchStream;
 use tracing::{info, trace};
 
@@ -54,8 +58,13 @@ impl MemorySnapshot {
 /// Internal shared state for memory backpressure.
 #[derive(Debug)]
 struct MemoryMonitorInner {
+    /// Handle for the task that refreshes memory snapshots.
+    refresh_task: Mutex<Option<JoinHandle<()>>>,
+    /// Optional backpressure state derived from memory snapshots.
     backpressure: Option<BackpressureMonitorInner>,
+    /// Latest total memory snapshot in bytes.
     total_memory_bytes: AtomicU64,
+    /// Interval between memory refreshes in milliseconds.
     memory_refresh_interval_ms: u64,
 }
 
@@ -107,6 +116,7 @@ impl MemoryMonitor {
 
         let this = Self {
             inner: Arc::new(MemoryMonitorInner {
+                refresh_task: Mutex::new(None),
                 backpressure,
                 total_memory_bytes: AtomicU64::new(startup_snapshot.total),
                 memory_refresh_interval_ms,
@@ -114,7 +124,7 @@ impl MemoryMonitor {
         };
 
         let this_clone = this.clone();
-        tokio::spawn(async move {
+        let refresh_task = tokio::spawn(async move {
             let refresh_interval =
                 Duration::from_millis(this_clone.inner.memory_refresh_interval_ms);
 
@@ -190,6 +200,8 @@ impl MemoryMonitor {
                 }
             }
         });
+        *this.inner.refresh_task.lock().unwrap_or_else(PoisonError::into_inner) =
+            Some(refresh_task);
 
         this
     }
@@ -220,6 +232,18 @@ impl MemoryMonitor {
     /// Returns the shared atomic that stores total memory in bytes.
     pub(crate) fn total_memory_bytes(&self) -> u64 {
         self.inner.total_memory_bytes.load(Ordering::Relaxed)
+    }
+
+    /// Waits for the refresh task to finish after shutdown.
+    pub(crate) async fn wait_for_refresh_task(&self) -> Result<(), JoinError> {
+        let refresh_task =
+            self.inner.refresh_task.lock().unwrap_or_else(PoisonError::into_inner).take();
+
+        if let Some(refresh_task) = refresh_task {
+            refresh_task.await?;
+        }
+
+        Ok(())
     }
 
     /// Updates the backpressure active state and notifies subscribers when it
@@ -279,6 +303,7 @@ impl MemoryMonitor {
     pub(crate) fn new_for_test() -> Self {
         Self {
             inner: Arc::new(MemoryMonitorInner {
+                refresh_task: Mutex::new(None),
                 backpressure: Some(BackpressureMonitorInner {
                     active_tx: watch::channel(false).0,
                     config: MemoryBackpressureConfig::default(),

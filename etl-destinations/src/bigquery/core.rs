@@ -8,10 +8,10 @@ use std::{
 
 use etl::{
     bail,
+    concurrency::TaskSet,
     destination::{
         Destination,
         async_result::{TruncateTableResult, WriteEventsResult, WriteTableRowsResult},
-        task_set::DestinationTaskSet,
     },
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
@@ -124,7 +124,7 @@ impl FromStr for SequencedBigQueryTableId {
                 )
             })?;
 
-            Ok(SequencedBigQueryTableId(table_name.to_string(), sequence_number))
+            Ok(SequencedBigQueryTableId(table_name.to_owned(), sequence_number))
         } else {
             bail!(
                 ErrorKind::DestinationTableNameInvalid,
@@ -165,6 +165,13 @@ struct Inner {
     created_views: HashMap<BigQueryTableId, SequencedBigQueryTableId>,
 }
 
+impl Inner {
+    /// Creates empty synchronized destination state.
+    fn new() -> Self {
+        Self { created_tables: HashSet::new(), created_views: HashMap::new() }
+    }
+}
+
 /// A BigQuery destination that implements the ETL [`Destination`] trait.
 ///
 /// Provides Postgres-to-BigQuery data pipeline functionality including
@@ -172,7 +179,7 @@ struct Inner {
 ///
 /// Designed for high concurrency with minimal locking:
 /// - Configuration and client are accessible without locks
-/// - Only caches and state mappings require synchronization
+/// - Only caches and destination table metadata require synchronization
 /// - Multiple write operations can execute concurrently
 #[derive(Debug, Clone)]
 pub struct BigQueryDestination<S> {
@@ -182,7 +189,7 @@ pub struct BigQueryDestination<S> {
     pipeline_id: PipelineId,
     state_store: S,
     inner: Arc<Mutex<Inner>>,
-    streaming_tasks: DestinationTaskSet,
+    tasks: TaskSet,
 }
 
 impl<S> BigQueryDestination<S>
@@ -204,16 +211,14 @@ where
     ) -> Self {
         register_metrics();
 
-        let inner = Inner { created_tables: HashSet::new(), created_views: HashMap::new() };
-
         Self {
             client,
             dataset_id,
             max_staleness_mins,
             pipeline_id,
             state_store,
-            inner: Arc::new(Mutex::new(inner)),
-            streaming_tasks: DestinationTaskSet::new(),
+            inner: Arc::new(Mutex::new(Inner::new())),
+            tasks: TaskSet::new(),
         }
     }
 
@@ -237,7 +242,6 @@ where
 
         let client =
             BigQueryClient::new_with_key_path(project_id, sa_key, connection_pool_size).await?;
-        let inner = Inner { created_tables: HashSet::new(), created_views: HashMap::new() };
 
         Ok(Self {
             client,
@@ -245,8 +249,8 @@ where
             max_staleness_mins,
             pipeline_id,
             state_store,
-            inner: Arc::new(Mutex::new(inner)),
-            streaming_tasks: DestinationTaskSet::new(),
+            inner: Arc::new(Mutex::new(Inner::new())),
+            tasks: TaskSet::new(),
         })
     }
 
@@ -269,7 +273,6 @@ where
         register_metrics();
 
         let client = BigQueryClient::new_with_key(project_id, sa_key, connection_pool_size).await?;
-        let inner = Inner { created_tables: HashSet::new(), created_views: HashMap::new() };
 
         Ok(Self {
             client,
@@ -277,8 +280,8 @@ where
             max_staleness_mins,
             pipeline_id,
             state_store,
-            inner: Arc::new(Mutex::new(inner)),
-            streaming_tasks: DestinationTaskSet::new(),
+            inner: Arc::new(Mutex::new(Inner::new())),
+            tasks: TaskSet::new(),
         })
     }
     /// Creates a new [`BigQueryDestination`] using Application Default
@@ -299,7 +302,6 @@ where
         register_metrics();
 
         let client = BigQueryClient::new_with_adc(project_id, connection_pool_size).await?;
-        let inner = Inner { created_tables: HashSet::new(), created_views: HashMap::new() };
 
         Ok(Self {
             client,
@@ -307,8 +309,8 @@ where
             max_staleness_mins,
             pipeline_id,
             state_store,
-            inner: Arc::new(Mutex::new(inner)),
-            streaming_tasks: DestinationTaskSet::new(),
+            inner: Arc::new(Mutex::new(Inner::new())),
+            tasks: TaskSet::new(),
         })
     }
 
@@ -343,7 +345,6 @@ where
             connection_pool_size,
         )
         .await?;
-        let inner = Inner { created_tables: HashSet::new(), created_views: HashMap::new() };
 
         Ok(Self {
             client,
@@ -351,8 +352,8 @@ where
             max_staleness_mins,
             pipeline_id,
             state_store: store,
-            inner: Arc::new(Mutex::new(inner)),
-            streaming_tasks: DestinationTaskSet::new(),
+            inner: Arc::new(Mutex::new(Inner::new())),
+            tasks: TaskSet::new(),
         })
     }
 
@@ -465,7 +466,8 @@ where
         inner.created_tables.insert(table_id.clone());
     }
 
-    /// Retrieves the current sequenced table ID from the destination metadata.
+    /// Retrieves the current sequenced table ID from the destination table
+    /// metadata.
     async fn get_sequenced_bigquery_table_id(
         &self,
         table_id: &TableId,
@@ -508,7 +510,7 @@ where
             .create_or_replace_view(&self.dataset_id, view_name, &target_table_id.to_string())
             .await?;
 
-        // We insert/overwrite the new (view -> sequenced bigquery table id) mapping
+        // We insert/overwrite the cached view target.
         inner.created_views.insert(view_name.clone(), target_table_id.clone());
 
         debug!(
@@ -606,7 +608,7 @@ where
         let table_id = new_replicated_table_schema.id();
         let new_snapshot_id = new_replicated_table_schema.inner().snapshot_id;
 
-        // Get current applied destination metadata. If the table is still in
+        // Get current applied destination table metadata. If the table is still in
         // `Applying`, the state store surfaces that as an error.
         let Some(metadata) =
             self.state_store.get_applied_destination_table_metadata(table_id).await?
@@ -987,9 +989,9 @@ where
 
             // We need to determine the current sequenced table ID for this table.
             //
-            // If no mapping exists, it means the table was never created in BigQuery (e.g.,
-            // due to validation errors during copy). In this case, we skip the
-            // truncate since there's nothing to truncate.
+            // If no destination table metadata exists, it means the table was never created
+            // in BigQuery (e.g., due to validation errors during copy). In this
+            // case, we skip the truncate since there's nothing to truncate.
             let Some(sequenced_bigquery_table_id) =
                 self.get_sequenced_bigquery_table_id(&table_id).await?
             else {
@@ -1049,13 +1051,14 @@ where
             // - Table created, but view update failed -> in this case the system will still
             //   point to table 'n', so the restart will reprocess events on table 'n', the
             //   table 'n + 1' will be recreated and the view will be updated to point to
-            //   the new table. No mappings are changed.
-            // - Table created, view updated, but mapping update failed -> in this case the
-            //   system will still point to table 'n' but the customer will see the empty
-            //   state of table 'n + 1' until the system heals. Healing happens when the
-            //   system is restarted, the mapping points to 'n' meaning that events will be
-            //   reprocessed and applied on table 'n' and then once the truncate is
-            //   successfully processed, the system should be consistent.
+            //   the new table. No destination table metadata is changed.
+            // - Table created, view updated, but destination table metadata update failed
+            //   -> in this case the system will still point to table 'n' but the customer
+            //   will see the empty state of table 'n + 1' until the system heals. Healing
+            //   happens when the system is restarted, the destination table metadata points
+            //   to 'n' meaning that events will be reprocessed and applied on table 'n' and
+            //   then once the truncate is successfully processed, the system should be
+            //   consistent.
 
             info!(
                 table_id = table_id.0,
@@ -1066,27 +1069,29 @@ where
             // We remove the old table from the cache since it's no longer necessary.
             inner.created_tables.remove(&sequenced_bigquery_table_id);
 
-            // Schedule cleanup of the previous table. We do not care to track this task
-            // since if it fails, users can clean up the table on their own, but
-            // the view will still point to the new data.
+            // Schedule tracked cleanup of the previous table. The task handles cleanup
+            // errors internally because the view already points to the new data.
             let client = self.client.clone();
             let dataset_id = self.dataset_id.clone();
-            tokio::spawn(async move {
-                if let Err(err) =
-                    client.drop_table(&dataset_id, &sequenced_bigquery_table_id.to_string()).await
-                {
-                    warn!(
-                        %sequenced_bigquery_table_id,
-                        error = %err,
-                        "failed to drop previous table"
-                    );
-                } else {
-                    info!(
-                        %sequenced_bigquery_table_id,
-                        "successfully cleaned up previous table"
-                    );
-                }
-            });
+            self.tasks
+                .spawn(async move {
+                    if let Err(err) = client
+                        .drop_table(&dataset_id, &sequenced_bigquery_table_id.to_string())
+                        .await
+                    {
+                        warn!(
+                            %sequenced_bigquery_table_id,
+                            error = %err,
+                            "failed to drop previous table"
+                        );
+                    } else {
+                        info!(
+                            %sequenced_bigquery_table_id,
+                            "successfully cleaned up previous table"
+                        );
+                    }
+                })
+                .await;
         }
 
         Ok(())
@@ -1145,7 +1150,7 @@ where
     }
 
     async fn shutdown(&self) -> EtlResult<()> {
-        self.streaming_tasks.shutdown().await
+        self.tasks.shutdown().await
     }
 
     async fn truncate_table(
@@ -1153,6 +1158,8 @@ where
         replicated_table_schema: &ReplicatedTableSchema,
         async_result: TruncateTableResult<()>,
     ) -> EtlResult<()> {
+        self.tasks.try_reap().await?;
+
         let result =
             self.process_truncate_for_schemas(iter::once(replicated_table_schema.clone())).await;
         async_result.send(result);
@@ -1166,6 +1173,8 @@ where
         table_rows: Vec<TableRow>,
         async_result: WriteTableRowsResult<()>,
     ) -> EtlResult<()> {
+        self.tasks.try_reap().await?;
+
         let result =
             BigQueryDestination::write_table_rows(self, replicated_table_schema, table_rows).await;
         async_result.send(result);
@@ -1178,10 +1187,10 @@ where
         events: Vec<Event>,
         async_result: WriteEventsResult<()>,
     ) -> EtlResult<()> {
-        self.streaming_tasks.try_reap().await?;
+        self.tasks.try_reap().await?;
 
         let destination = self.clone();
-        self.streaming_tasks
+        self.tasks
             .spawn(async move {
                 let result = destination.write_events(events).await;
                 async_result.send(result);
@@ -1585,10 +1594,10 @@ mod tests {
     fn replicated_schema(identity_type: IdentityType) -> ReplicatedTableSchema {
         let table_schema = Arc::new(TableSchema::new(
             TableId::new(1),
-            TableName::new("public".to_string(), "users".to_string()),
+            TableName::new("public".to_owned(), "users".to_owned()),
             vec![
-                ColumnSchema::new("id".to_string(), Type::INT4, -1, 1, Some(1), false),
-                ColumnSchema::new("name".to_string(), Type::TEXT, -1, 2, None, true),
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
+                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true),
             ],
         ));
         let replication_mask = etl::types::ReplicationMask::all(&table_schema);
@@ -1604,21 +1613,21 @@ mod tests {
 
     #[test]
     fn table_name_to_bigquery_table_id_no_underscores() {
-        let table_name = TableName::new("schema".to_string(), "table".to_string());
+        let table_name = TableName::new("schema".to_owned(), "table".to_owned());
         assert_eq!(table_name_to_bigquery_table_id(&table_name).unwrap(), "schema_table");
     }
 
     #[test]
     fn table_name_to_bigquery_table_id_with_underscores() {
-        let table_name = TableName::new("a_b".to_string(), "c_d".to_string());
+        let table_name = TableName::new("a_b".to_owned(), "c_d".to_owned());
         assert_eq!(table_name_to_bigquery_table_id(&table_name).unwrap(), "a__b_c__d");
     }
 
     #[test]
     fn table_name_to_bigquery_table_id_collision_prevention() {
         // These two cases previously collided to "a_b_c"
-        let table_name1 = TableName::new("a_b".to_string(), "c".to_string());
-        let table_name2 = TableName::new("a".to_string(), "b_c".to_string());
+        let table_name1 = TableName::new("a_b".to_owned(), "c".to_owned());
+        let table_name2 = TableName::new("a".to_owned(), "b_c".to_owned());
 
         let id1 = table_name_to_bigquery_table_id(&table_name1).unwrap();
         let id2 = table_name_to_bigquery_table_id(&table_name2).unwrap();
@@ -1630,7 +1639,7 @@ mod tests {
 
     #[test]
     fn table_name_to_bigquery_table_id_multiple_underscores() {
-        let table_name = TableName::new("a__b".to_string(), "c__d".to_string());
+        let table_name = TableName::new("a__b".to_owned(), "c__d".to_owned());
         assert_eq!(table_name_to_bigquery_table_id(&table_name).unwrap(), "a____b_c____d");
     }
 
@@ -1668,21 +1677,21 @@ mod tests {
 
     #[test]
     fn sequenced_bigquery_table_id_new() {
-        let table_id = SequencedBigQueryTableId::new("users_table".to_string());
+        let table_id = SequencedBigQueryTableId::new("users_table".to_owned());
         assert_eq!(table_id.to_bigquery_table_id(), "users_table");
         assert_eq!(table_id.1, 0);
     }
 
     #[test]
     fn sequenced_bigquery_table_id_new_with_underscores() {
-        let table_id = SequencedBigQueryTableId::new("a__b_c__d".to_string());
+        let table_id = SequencedBigQueryTableId::new("a__b_c__d".to_owned());
         assert_eq!(table_id.to_bigquery_table_id(), "a__b_c__d");
         assert_eq!(table_id.1, 0);
     }
 
     #[test]
     fn sequenced_bigquery_table_id_next() {
-        let table_id = SequencedBigQueryTableId::new("users_table".to_string());
+        let table_id = SequencedBigQueryTableId::new("users_table".to_owned());
         let next_table_id = table_id.next();
 
         assert_eq!(table_id.1, 0);
@@ -1692,7 +1701,7 @@ mod tests {
 
     #[test]
     fn sequenced_bigquery_table_id_next_increments_correctly() {
-        let table_id = SequencedBigQueryTableId("test_table".to_string(), 42);
+        let table_id = SequencedBigQueryTableId("test_table".to_owned(), 42);
         let next_table_id = table_id.next();
 
         assert_eq!(next_table_id.1, 43);
@@ -1701,7 +1710,7 @@ mod tests {
 
     #[test]
     fn sequenced_bigquery_table_id_next_max_value() {
-        let table_id = SequencedBigQueryTableId("test_table".to_string(), u64::MAX - 1);
+        let table_id = SequencedBigQueryTableId("test_table".to_owned(), u64::MAX - 1);
         let next_table_id = table_id.next();
 
         assert_eq!(next_table_id.1, u64::MAX);
@@ -1710,19 +1719,19 @@ mod tests {
 
     #[test]
     fn sequenced_bigquery_table_id_to_bigquery_table_id() {
-        let table_id = SequencedBigQueryTableId("users_table".to_string(), 123);
+        let table_id = SequencedBigQueryTableId("users_table".to_owned(), 123);
         assert_eq!(table_id.to_bigquery_table_id(), "users_table");
     }
 
     #[test]
     fn sequenced_bigquery_table_id_to_bigquery_table_id_with_underscores() {
-        let table_id = SequencedBigQueryTableId("a__b_c__d".to_string(), 42);
+        let table_id = SequencedBigQueryTableId("a__b_c__d".to_owned(), 42);
         assert_eq!(table_id.to_bigquery_table_id(), "a__b_c__d");
     }
 
     #[test]
     fn sequenced_bigquery_table_id_to_bigquery_table_id_zero_sequence() {
-        let table_id = SequencedBigQueryTableId("simple_table".to_string(), 0);
+        let table_id = SequencedBigQueryTableId("simple_table".to_owned(), 0);
         assert_eq!(table_id.to_bigquery_table_id(), "simple_table");
     }
 
@@ -1967,7 +1976,7 @@ mod tests {
     fn calculate_target_batches_single_small_row() {
         // Create a single row with one small string value
         let rows = vec![
-            BigQueryTableRow::try_from(TableRow::new(vec![Cell::String("test".to_string())]))
+            BigQueryTableRow::try_from(TableRow::new(vec![Cell::String("test".to_owned())]))
                 .unwrap(),
         ];
         let result = calculate_target_batches_for_table_copy(&rows).unwrap();
@@ -2021,11 +2030,11 @@ mod tests {
     fn bigquery_delete_key_row_encodes_identity_and_cdc_tags_against_descriptor_numbers() {
         let table_schema = Arc::new(TableSchema::new(
             TableId::new(1),
-            TableName::new("public".to_string(), "users".to_string()),
+            TableName::new("public".to_owned(), "users".to_owned()),
             vec![
-                ColumnSchema::new("id".to_string(), Type::INT4, -1, 1, Some(1), false),
-                ColumnSchema::new("name".to_string(), Type::TEXT, -1, 2, None, false),
-                ColumnSchema::new("age".to_string(), Type::INT4, -1, 3, None, false),
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
+                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, false),
+                ColumnSchema::new("age".to_owned(), Type::INT4, -1, 3, None, false),
             ],
         ));
         let replicated_table_schema = ReplicatedTableSchema::from_masks(
@@ -2037,7 +2046,7 @@ mod tests {
         let row = bigquery_delete_row(
             &replicated_table_schema,
             OldTableRow::Key(TableRow::new(vec![Cell::I32(42)])),
-            "lsn:1".to_string(),
+            "lsn:1".to_owned(),
         )
         .unwrap();
 
@@ -2065,11 +2074,11 @@ mod tests {
     fn bigquery_delete_full_row_omits_non_primary_key_source_columns() {
         let table_schema = Arc::new(TableSchema::new(
             TableId::new(1),
-            TableName::new("public".to_string(), "users".to_string()),
+            TableName::new("public".to_owned(), "users".to_owned()),
             vec![
-                ColumnSchema::new("id".to_string(), Type::INT4, -1, 1, Some(1), false),
-                ColumnSchema::new("name".to_string(), Type::TEXT, -1, 2, None, false),
-                ColumnSchema::new("age".to_string(), Type::INT4, -1, 3, None, false),
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
+                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, false),
+                ColumnSchema::new("age".to_owned(), Type::INT4, -1, 3, None, false),
             ],
         ));
         let replicated_table_schema = ReplicatedTableSchema::from_masks(
@@ -2082,10 +2091,10 @@ mod tests {
             &replicated_table_schema,
             OldTableRow::Full(TableRow::new(vec![
                 Cell::I32(42),
-                Cell::String("alice".to_string()),
+                Cell::String("alice".to_owned()),
                 Cell::I32(7),
             ])),
-            "lsn:1".to_string(),
+            "lsn:1".to_owned(),
         )
         .unwrap();
 
@@ -2093,8 +2102,8 @@ mod tests {
             row.debug_cells(),
             vec![
                 (1, CellNonOptional::I32(42)),
-                (4, CellNonOptional::String("DELETE".to_string())),
-                (5, CellNonOptional::String("lsn:1".to_string())),
+                (4, CellNonOptional::String("DELETE".to_owned())),
+                (5, CellNonOptional::String("lsn:1".to_owned())),
             ]
         );
     }
@@ -2106,7 +2115,7 @@ mod tests {
 
         let rows = bigquery_update_rows(
             &replicated_table_schema,
-            TableRow::new(vec![Cell::I32(2), Cell::String("updated".to_string())]),
+            TableRow::new(vec![Cell::I32(2), Cell::String("updated".to_owned())]),
             Some(OldTableRow::Key(TableRow::new(vec![Cell::I32(1)]))),
             sequence_key,
         )
@@ -2117,11 +2126,11 @@ mod tests {
             rows[0].debug_cells(),
             vec![
                 (1, CellNonOptional::I32(1)),
-                (3, CellNonOptional::String("DELETE".to_string())),
+                (3, CellNonOptional::String("DELETE".to_owned())),
                 (
                     4,
                     CellNonOptional::String(
-                        "0000000000000001/0000000000000000/0000000000000000".to_string(),
+                        "0000000000000001/0000000000000000/0000000000000000".to_owned(),
                     ),
                 ),
             ]
@@ -2130,12 +2139,12 @@ mod tests {
             rows[1].debug_cells(),
             vec![
                 (1, CellNonOptional::I32(2)),
-                (2, CellNonOptional::String("updated".to_string())),
-                (3, CellNonOptional::String("UPSERT".to_string())),
+                (2, CellNonOptional::String("updated".to_owned())),
+                (3, CellNonOptional::String("UPSERT".to_owned())),
                 (
                     4,
                     CellNonOptional::String(
-                        "0000000000000001/0000000000000000/0000000000000001".to_string(),
+                        "0000000000000001/0000000000000000/0000000000000001".to_owned(),
                     ),
                 ),
             ]
@@ -2149,7 +2158,7 @@ mod tests {
 
         let rows = bigquery_update_rows(
             &replicated_table_schema,
-            TableRow::new(vec![Cell::I32(1), Cell::String("updated".to_string())]),
+            TableRow::new(vec![Cell::I32(1), Cell::String("updated".to_owned())]),
             Some(OldTableRow::Key(TableRow::new(vec![Cell::I32(1)]))),
             sequence_key,
         )
@@ -2160,12 +2169,12 @@ mod tests {
             rows[0].debug_cells(),
             vec![
                 (1, CellNonOptional::I32(1)),
-                (2, CellNonOptional::String("updated".to_string())),
-                (3, CellNonOptional::String("UPSERT".to_string())),
+                (2, CellNonOptional::String("updated".to_owned())),
+                (3, CellNonOptional::String("UPSERT".to_owned())),
                 (
                     4,
                     CellNonOptional::String(
-                        "0000000000000001/0000000000000000/0000000000000000".to_string(),
+                        "0000000000000001/0000000000000000/0000000000000000".to_owned(),
                     ),
                 ),
             ]
@@ -2179,10 +2188,10 @@ mod tests {
 
         let rows = bigquery_update_rows(
             &replicated_table_schema,
-            TableRow::new(vec![Cell::I32(2), Cell::String("updated".to_string())]),
+            TableRow::new(vec![Cell::I32(2), Cell::String("updated".to_owned())]),
             Some(OldTableRow::Full(TableRow::new(vec![
                 Cell::I32(1),
-                Cell::String("before".to_string()),
+                Cell::String("before".to_owned()),
             ]))),
             sequence_key,
         )
@@ -2193,11 +2202,11 @@ mod tests {
             rows[0].debug_cells(),
             vec![
                 (1, CellNonOptional::I32(1)),
-                (3, CellNonOptional::String("DELETE".to_string())),
+                (3, CellNonOptional::String("DELETE".to_owned())),
                 (
                     4,
                     CellNonOptional::String(
-                        "0000000000000001/0000000000000000/0000000000000000".to_string(),
+                        "0000000000000001/0000000000000000/0000000000000000".to_owned(),
                     ),
                 ),
             ]
@@ -2206,12 +2215,12 @@ mod tests {
             rows[1].debug_cells(),
             vec![
                 (1, CellNonOptional::I32(2)),
-                (2, CellNonOptional::String("updated".to_string())),
-                (3, CellNonOptional::String("UPSERT".to_string())),
+                (2, CellNonOptional::String("updated".to_owned())),
+                (3, CellNonOptional::String("UPSERT".to_owned())),
                 (
                     4,
                     CellNonOptional::String(
-                        "0000000000000001/0000000000000000/0000000000000001".to_string(),
+                        "0000000000000001/0000000000000000/0000000000000001".to_owned(),
                     ),
                 ),
             ]

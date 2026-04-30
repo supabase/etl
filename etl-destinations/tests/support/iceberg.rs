@@ -59,7 +59,7 @@ fn arrow_value_to_cell(array: &ArrayRef, row_idx: usize) -> Cell {
         }
         DataType::Utf8 => {
             let arr = array.as_any().downcast_ref::<StringArray>().unwrap();
-            Cell::String(arr.value(row_idx).to_string())
+            Cell::String(arr.value(row_idx).to_owned())
         }
         DataType::LargeBinary => {
             let arr = array.as_any().downcast_ref::<LargeBinaryArray>().unwrap();
@@ -192,7 +192,7 @@ fn arrow_value_to_cell(array: &ArrayRef, row_idx: usize) -> Cell {
                         if string_array.is_null(i) {
                             values.push(None);
                         } else {
-                            values.push(Some(string_array.value(i).to_string()));
+                            values.push(Some(string_array.value(i).to_owned()));
                         }
                     }
 

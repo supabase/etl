@@ -5,11 +5,11 @@ Postgres to various destinations using the ETL pipeline.
 
 ## Available Examples
 
-| Example | Binary | Destination |
-|---------|--------|-------------|
-| [BigQuery](#bigquery) | `bigquery` | Google BigQuery (cloud data warehouse) |
-| [ClickHouse](#clickhouse-setup) | `clickhouse` | ClickHouse (column-oriented OLAP database) |
-| [DuckLake](#ducklake) | `ducklake` | DuckLake (open data lake format) |
+| Example | Binary | Destination | Status |
+|---------|--------|-------------|--------|
+| [BigQuery](#bigquery) | `bigquery` | Google BigQuery (cloud data warehouse) | Stable |
+| [ClickHouse](#clickhouse-setup) | `clickhouse` | ClickHouse (column-oriented OLAP database) | In progress |
+| [DuckLake](#ducklake) | `ducklake` | DuckLake (open data lake format) | In progress |
 
 ---
 

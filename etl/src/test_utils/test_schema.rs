@@ -26,7 +26,7 @@ fn test_column(
     primary_key: bool,
 ) -> ColumnSchema {
     ColumnSchema::new(
-        name.to_string(),
+        name.to_owned(),
         typ,
         -1,
         ordinal_position,

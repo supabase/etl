@@ -32,11 +32,11 @@ Before running the API, you must have:
 - A running Postgres instance reachable via `DATABASE_URL`.
 - The `etl-api` database schema applied (SQLx migrations).
 
-Quickest way: use the setup script to start Postgres (via Docker) and run migrations automatically.
+For the full local development stack, use the setup script to start Postgres,
+run migrations, and apply the local Kubernetes resources.
 
 ```bash
-# Starts a local Postgres (if needed) and applies etl-api migrations
-./scripts/init_db.sh
+./scripts/init.sh
 ```
 
 Alternative: if you already have a Postgres database, set `DATABASE_URL` and apply migrations manually:

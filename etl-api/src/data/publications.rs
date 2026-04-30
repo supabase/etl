@@ -6,7 +6,7 @@ use sqlx::{Executor, PgPool, Row};
 use thiserror::Error;
 use utoipa::ToSchema;
 
-use crate::db::tables::Table;
+use crate::data::tables::Table;
 
 #[derive(Debug, Error)]
 pub enum PublicationsDbError {

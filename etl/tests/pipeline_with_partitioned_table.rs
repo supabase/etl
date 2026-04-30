@@ -18,7 +18,7 @@ use rand::random;
 use tokio_postgres::types::Type;
 
 fn quoted_qualified_table_name(schema: &str, table: &str) -> String {
-    TableName::new(schema.to_string(), table.to_string()).as_quoted_identifier()
+    TableName::new(schema.to_owned(), table.to_owned()).as_quoted_identifier()
 }
 
 /// Tests that initial COPY replicates all rows from a partitioned table.
@@ -44,7 +44,7 @@ async fn partitioned_table_copy_replicates_existing_data() {
         .await
         .unwrap();
 
-    let publication_name = "test_partitioned_pub".to_string();
+    let publication_name = "test_partitioned_pub".to_owned();
     database
         .create_publication(&publication_name, std::slice::from_ref(&table_name))
         .await
@@ -144,7 +144,7 @@ async fn partitioned_table_copy_and_streams_new_data_from_new_partition() {
         .await
         .unwrap();
 
-    let publication_name = "test_partitioned_pub_late".to_string();
+    let publication_name = "test_partitioned_pub_late".to_owned();
     database
         .create_publication(&publication_name, std::slice::from_ref(&table_name))
         .await
@@ -235,7 +235,7 @@ async fn partition_drop_does_not_emit_delete_or_truncate() {
         .await
         .unwrap();
 
-    let publication_name = "test_partitioned_pub_drop".to_string();
+    let publication_name = "test_partitioned_pub_drop".to_owned();
     database
         .create_publication(&publication_name, std::slice::from_ref(&table_name))
         .await
@@ -329,7 +329,7 @@ async fn parent_table_truncate_does_emit_truncate_event() {
         .await
         .unwrap();
 
-    let publication_name = "test_partitioned_pub_truncate".to_string();
+    let publication_name = "test_partitioned_pub_truncate".to_owned();
     database
         .create_publication(&publication_name, std::slice::from_ref(&table_name))
         .await
@@ -397,7 +397,7 @@ async fn child_table_truncate_does_not_emit_truncate_event() {
         .await
         .unwrap();
 
-    let publication_name = "test_partitioned_pub_truncate".to_string();
+    let publication_name = "test_partitioned_pub_truncate".to_owned();
     database
         .create_publication(&publication_name, std::slice::from_ref(&table_name))
         .await
@@ -480,7 +480,7 @@ async fn partition_detach_with_explicit_publication_does_not_replicate_detached_
         .unwrap();
 
     // Create explicit publication for parent table only.
-    let publication_name = "test_partitioned_pub_detach".to_string();
+    let publication_name = "test_partitioned_pub_detach".to_owned();
     database
         .create_publication(&publication_name, std::slice::from_ref(&table_name))
         .await
@@ -592,7 +592,7 @@ async fn partition_detach_with_all_tables_publication_does_not_replicate_detache
         .unwrap();
 
     // Create FOR ALL TABLES publication.
-    let publication_name = "test_all_tables_pub_detach".to_string();
+    let publication_name = "test_all_tables_pub_detach".to_owned();
     database.create_publication_for_all(&publication_name, None).await.unwrap();
 
     let state_store = NotifyingStore::new();
@@ -714,7 +714,7 @@ async fn partition_detach_with_all_tables_publication_does_replicate_detached_in
         .unwrap();
 
     // Create FOR ALL TABLES publication.
-    let publication_name = "test_all_tables_restart".to_string();
+    let publication_name = "test_all_tables_restart".to_owned();
     database.create_publication_for_all(&publication_name, None).await.unwrap();
 
     let state_store = NotifyingStore::new();
@@ -832,7 +832,7 @@ async fn partition_detach_with_schema_publication_does_not_replicate_detached_in
         .unwrap();
 
     // Create FOR TABLES IN SCHEMA publication.
-    let publication_name = "test_schema_pub_detach".to_string();
+    let publication_name = "test_schema_pub_detach".to_owned();
     database.create_publication_for_all(&publication_name, Some(&table_name.schema)).await.unwrap();
 
     let state_store = NotifyingStore::new();
@@ -965,7 +965,7 @@ async fn partition_detach_with_schema_publication_does_replicate_detached_insert
         .unwrap();
 
     // Create FOR TABLES IN SCHEMA publication.
-    let publication_name = "test_schema_pub_restart".to_string();
+    let publication_name = "test_schema_pub_restart".to_owned();
     database.create_publication_for_all(&publication_name, Some(&table_name.schema)).await.unwrap();
 
     let state_store = NotifyingStore::new();
@@ -1205,7 +1205,7 @@ async fn nested_partitioned_table_copy_and_cdc() {
         .await
         .unwrap();
 
-    let publication_name = "test_nested_partitioned_pub".to_string();
+    let publication_name = "test_nested_partitioned_pub".to_owned();
     database
         .create_publication(&publication_name, std::slice::from_ref(&table_name))
         .await
@@ -1351,7 +1351,7 @@ async fn partitioned_table_with_publish_via_partition_root_false_and_partitioned
         .await
         .unwrap();
 
-    let publication_name = "test_partitioned_pub".to_string();
+    let publication_name = "test_partitioned_pub".to_owned();
     database
         .create_publication_with_config(&publication_name, std::slice::from_ref(&table_name), false)
         .await
@@ -1388,7 +1388,7 @@ async fn partitioned_table_with_publish_via_partition_root_false_and_no_partitio
         .await
         .unwrap();
 
-    let publication_name = "test_non_partitioned_pub".to_string();
+    let publication_name = "test_non_partitioned_pub".to_owned();
     database
         .create_publication_with_config(&publication_name, std::slice::from_ref(&table_name), false)
         .await

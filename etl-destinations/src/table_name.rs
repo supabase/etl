@@ -64,7 +64,7 @@ mod tests {
 
     #[test]
     fn stringifies_valid_table_name() {
-        let table_name = TableName::new("a_b".to_string(), "c_d".to_string());
+        let table_name = TableName::new("a_b".to_owned(), "c_d".to_owned());
         let escaped = try_stringify_table_name(&table_name).unwrap();
 
         assert_eq!(escaped, "a__b_c__d");
@@ -72,7 +72,7 @@ mod tests {
 
     #[test]
     fn rejects_leading_underscore() {
-        let table_name = TableName::new("_schema".to_string(), "users".to_string());
+        let table_name = TableName::new("_schema".to_owned(), "users".to_owned());
         let err = try_stringify_table_name(&table_name).unwrap_err();
 
         assert_eq!(err.kind(), ErrorKind::ValidationError);
@@ -84,7 +84,7 @@ mod tests {
 
     #[test]
     fn rejects_trailing_underscore() {
-        let table_name = TableName::new("public".to_string(), "users_".to_string());
+        let table_name = TableName::new("public".to_owned(), "users_".to_owned());
         let err = try_stringify_table_name(&table_name).unwrap_err();
 
         assert_eq!(err.kind(), ErrorKind::ValidationError);
@@ -96,8 +96,8 @@ mod tests {
 
     #[test]
     fn prevents_collisions_between_schema_and_table_underscores() {
-        let table_name1 = TableName::new("a_b".to_string(), "c".to_string());
-        let table_name2 = TableName::new("a".to_string(), "b_c".to_string());
+        let table_name1 = TableName::new("a_b".to_owned(), "c".to_owned());
+        let table_name2 = TableName::new("a".to_owned(), "b_c".to_owned());
 
         let id1 = try_stringify_table_name(&table_name1).unwrap();
         let id2 = try_stringify_table_name(&table_name2).unwrap();
@@ -109,7 +109,7 @@ mod tests {
 
     #[test]
     fn preserves_multiple_underscores() {
-        let table_name = TableName::new("a__b".to_string(), "c__d".to_string());
+        let table_name = TableName::new("a__b".to_owned(), "c__d".to_owned());
 
         assert_eq!(try_stringify_table_name(&table_name).unwrap(), "a____b_c____d");
     }

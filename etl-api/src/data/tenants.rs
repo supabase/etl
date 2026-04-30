@@ -38,7 +38,7 @@ where
         if let sqlx::Error::Database(db_err) = &e
             && db_err.is_unique_violation()
         {
-            return TenantsDbError::Conflict(tenant_id.to_string());
+            return TenantsDbError::Conflict(tenant_id.to_owned());
         }
         TenantsDbError::Database(e)
     })?;

@@ -416,7 +416,7 @@ where
 /// Creates an [`EtlError`] from a vector of errors for aggregation.
 ///
 /// If the vector contains exactly one error, returns that error directly
-/// without wrapping it in the [`ErrorRepr::Many`] variant.
+/// without wrapping it in the `ErrorRepr::Many` variant.
 impl<E> From<Vec<E>> for EtlError
 where
     E: Into<EtlError>,
@@ -1006,7 +1006,7 @@ mod tests {
         let err = EtlError::from((
             ErrorKind::SourceQueryFailed,
             "SQL query execution failed",
-            "Table 'users' doesn't exist".to_string(),
+            "Table 'users' doesn't exist".to_owned(),
         ));
         assert_eq!(err.kind(), ErrorKind::SourceQueryFailed);
         assert_eq!(err.detail(), Some("Table 'users' doesn't exist"));
@@ -1036,7 +1036,7 @@ mod tests {
             EtlError::from((
                 ErrorKind::ValidationError,
                 "Invalid schema",
-                "Missing required field".to_string(),
+                "Missing required field".to_owned(),
             )),
             EtlError::from((ErrorKind::ConversionError, "Type mismatch")),
         ];
@@ -1239,12 +1239,12 @@ mod tests {
         let err1 = EtlError::from((
             ErrorKind::SourceQueryFailed,
             "Query failed",
-            "Table 'users' not found".to_string(),
+            "Table 'users' not found".to_owned(),
         ));
         let err2 = EtlError::from((
             ErrorKind::SourceQueryFailed,
             "Query failed",
-            "Table 'orders' not found".to_string(),
+            "Table 'orders' not found".to_owned(),
         ));
 
         let mut hasher1 = DefaultHasher::new();

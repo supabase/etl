@@ -8,6 +8,9 @@ rust-version.workspace = true
 repository.workspace = true
 homepage.workspace = true
 
+[lib]
+doctest = false
+
 [features]
 test-utils = []
 tokio = []
@@ -16,12 +19,10 @@ bigquery = []
 replication = ["sqlx"]
 
 [dependencies]
-etl-config = { workspace = true }
 
 bytes = { workspace = true }
-chrono = { workspace = true, features = ["serde"] }
+etl-config = { workspace = true }
 pg_escape = { workspace = true }
-serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sqlx = { workspace = true, features = ["runtime-tokio-rustls", "macros", "postgres", "json", "migrate"] }
 thiserror = { workspace = true }

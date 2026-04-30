@@ -12,7 +12,7 @@ use utoipa::ToSchema;
 use crate::{
     config::ApiConfig,
     configs::encryption::EncryptionKey,
-    db::{
+    data::{
         self, connect_to_source_database_from_api,
         publications::{Publication, PublicationsDbError},
         sources::SourcesDbError,
@@ -52,7 +52,7 @@ impl PublicationError {
             // Do not expose internal database details in error messages
             PublicationError::SourcesDb(SourcesDbError::Database(_))
             | PublicationError::PublicationsDb(PublicationsDbError::Database(_)) => {
-                "internal server error".to_string()
+                "internal server error".to_owned()
             }
             // Every other message is ok, as they do not divulge sensitive information
             e => e.to_string(),
@@ -128,7 +128,7 @@ pub async fn create_publication(
     let tenant_id = extract_tenant_id(&req)?;
     let source_id = source_id.into_inner();
 
-    let source_config = db::sources::read_source(&**pool, tenant_id, source_id, &encryption_key)
+    let source_config = data::sources::read_source(&**pool, tenant_id, source_id, &encryption_key)
         .await?
         .map(|s| s.config)
         .ok_or(PublicationError::SourceNotFound(source_id))?;
@@ -139,7 +139,7 @@ pub async fn create_publication(
             .await?;
     let publication = publication.0;
     let publication = Publication { name: publication.name, tables: publication.tables };
-    db::publications::create_publication(&publication, &source_pool).await?;
+    data::publications::create_publication(&publication, &source_pool).await?;
 
     Ok(HttpResponse::Ok().finish())
 }
@@ -170,7 +170,7 @@ pub async fn read_publication(
     let tenant_id = extract_tenant_id(&req)?;
     let (source_id, publication_name) = source_id_and_pub_name.into_inner();
 
-    let source_config = db::sources::read_source(&**pool, tenant_id, source_id, &encryption_key)
+    let source_config = data::sources::read_source(&**pool, tenant_id, source_id, &encryption_key)
         .await?
         .map(|s| s.config)
         .ok_or(PublicationError::SourceNotFound(source_id))?;
@@ -179,7 +179,7 @@ pub async fn read_publication(
     let source_pool =
         connect_to_source_database_from_api(&source_config.into_connection_config(tls_config))
             .await?;
-    let publications = db::publications::read_publication(&publication_name, &source_pool)
+    let publications = data::publications::read_publication(&publication_name, &source_pool)
         .await?
         .ok_or(PublicationError::PublicationNotFound(publication_name))?;
 
@@ -214,7 +214,7 @@ pub async fn update_publication(
     let tenant_id = extract_tenant_id(&req)?;
     let (source_id, publication_name) = source_id_and_pub_name.into_inner();
 
-    let source_config = db::sources::read_source(&**pool, tenant_id, source_id, &encryption_key)
+    let source_config = data::sources::read_source(&**pool, tenant_id, source_id, &encryption_key)
         .await?
         .map(|s| s.config)
         .ok_or(PublicationError::SourceNotFound(source_id))?;
@@ -225,7 +225,7 @@ pub async fn update_publication(
             .await?;
     let publication = publication.0;
     let publication = Publication { name: publication_name, tables: publication.tables };
-    db::publications::update_publication(&publication, &source_pool).await?;
+    data::publications::update_publication(&publication, &source_pool).await?;
 
     Ok(HttpResponse::Ok().finish())
 }
@@ -256,7 +256,7 @@ pub async fn delete_publication(
     let tenant_id = extract_tenant_id(&req)?;
     let (source_id, publication_name) = source_id_and_pub_name.into_inner();
 
-    let source_config = db::sources::read_source(&**pool, tenant_id, source_id, &encryption_key)
+    let source_config = data::sources::read_source(&**pool, tenant_id, source_id, &encryption_key)
         .await?
         .map(|s| s.config)
         .ok_or(PublicationError::SourceNotFound(source_id))?;
@@ -265,7 +265,7 @@ pub async fn delete_publication(
     let source_pool =
         connect_to_source_database_from_api(&source_config.into_connection_config(tls_config))
             .await?;
-    db::publications::drop_publication(&publication_name, &source_pool).await?;
+    data::publications::drop_publication(&publication_name, &source_pool).await?;
 
     Ok(HttpResponse::Ok().finish())
 }
@@ -294,7 +294,7 @@ pub async fn read_all_publications(
     let tenant_id = extract_tenant_id(&req)?;
     let source_id = source_id.into_inner();
 
-    let source_config = db::sources::read_source(&**pool, tenant_id, source_id, &encryption_key)
+    let source_config = data::sources::read_source(&**pool, tenant_id, source_id, &encryption_key)
         .await?
         .map(|s| s.config)
         .ok_or(PublicationError::SourceNotFound(source_id))?;
@@ -303,7 +303,7 @@ pub async fn read_all_publications(
     let source_pool =
         connect_to_source_database_from_api(&source_config.into_connection_config(tls_config))
             .await?;
-    let publications = db::publications::read_all_publications(&source_pool).await?;
+    let publications = data::publications::read_all_publications(&source_pool).await?;
     let response = ReadPublicationsResponse { publications };
 
     Ok(Json(response))

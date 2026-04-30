@@ -160,7 +160,7 @@ impl ClickHouseClient {
         metrics::histogram!(
             ETL_CLICKHOUSE_DDL_DURATION_SECONDS,
             "kind" => kind.as_label(),
-            "table" => table_name.to_string(),
+            "table" => table_name.to_owned(),
         )
         .record(ddl_start.elapsed().as_secs_f64());
         result
@@ -290,7 +290,7 @@ impl ClickHouseClient {
             })?;
             metrics::histogram!(
                 ETL_CLICKHOUSE_INSERT_DURATION_SECONDS,
-                "table" => table_name.to_string(),
+                "table" => table_name.to_owned(),
                 "source" => source
             )
             .record(insert_start.elapsed().as_secs_f64());
@@ -308,7 +308,7 @@ mod tests {
 
     fn column_schema(name: &str) -> ColumnSchema {
         ColumnSchema {
-            name: name.to_string(),
+            name: name.to_owned(),
             typ: Type::INT4,
             modifier: -1,
             ordinal_position: 1,

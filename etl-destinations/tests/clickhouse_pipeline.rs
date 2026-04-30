@@ -435,7 +435,7 @@ async fn all_types_table_copy() {
     );
     assert_eq!(
         r2.text_array_col,
-        vec![Some("alpha".to_string()), Some("beta".to_string())],
+        vec![Some("alpha".to_owned()), Some("beta".to_owned())],
         "row 2 text_array_col mismatch -- nullable-array encoding bug likely present"
     );
 }
@@ -683,7 +683,7 @@ async fn boundary_values_table_copy() {
     );
     assert_eq!(
         r.text_array_col,
-        vec![Some("a".to_string()), None, Some("c".to_string())],
+        vec![Some("a".to_owned()), None, Some("c".to_owned())],
         "interior NULL in text array must be preserved"
     );
 
@@ -696,7 +696,7 @@ async fn boundary_values_table_copy() {
     );
     assert_eq!(r.nullable_int, None);
     assert_eq!(r.int_array_col, vec![Some(99)], "single-element array");
-    assert_eq!(r.text_array_col, vec![Some("only".to_string())], "single-element array");
+    assert_eq!(r.text_array_col, vec![Some("only".to_owned())], "single-element array");
 
     // Row 4: multi-byte UTF-8 preserved byte-for-byte.
     let r = &rows[3];
@@ -708,7 +708,7 @@ async fn boundary_values_table_copy() {
     assert_eq!(r.nullable_int, Some(0), "zero must not become NULL");
     assert_eq!(
         r.text_array_col,
-        vec![Some("日本語".to_string()), Some("中文".to_string())],
+        vec![Some("日本語".to_owned()), Some("中文".to_owned())],
         "multi-byte UTF-8 in arrays must round-trip exactly"
     );
 }
@@ -1638,7 +1638,7 @@ async fn delete_with_default_replica_identity() {
     assert_eq!(r.text_col, "keep");
     assert_eq!(r.integer_col, 10);
     assert!(r.boolean_col);
-    assert_eq!(r.nullable_text, Some("present".to_string()));
+    assert_eq!(r.nullable_text, Some("present".to_owned()));
     assert_eq!(r.int_array_col, vec![Some(1), Some(2), Some(3)]);
     assert_eq!(r.cdc_operation, "INSERT");
 
@@ -1971,11 +1971,11 @@ async fn schema_change_add_column() {
     assert_eq!(
         final_column_types,
         vec![
-            ("id".to_string(), "Int64".to_string()),
-            ("name".to_string(), "String".to_string()),
-            ("age".to_string(), "Int32".to_string()),
-            ("email".to_string(), "Nullable(String)".to_string()),
-            ("score".to_string(), "Nullable(Int32)".to_string()),
+            ("id".to_owned(), "Int64".to_owned()),
+            ("name".to_owned(), "String".to_owned()),
+            ("age".to_owned(), "Int32".to_owned()),
+            ("email".to_owned(), "Nullable(String)".to_owned()),
+            ("score".to_owned(), "Nullable(Int32)".to_owned()),
         ]
     );
 
@@ -1993,7 +1993,7 @@ async fn schema_change_add_column() {
     assert_eq!(rows[1].id, 2);
     assert_eq!(rows[1].name, "Bob");
     assert_eq!(rows[1].age, 30);
-    assert_eq!(rows[1].email, Some("bob@example.com".to_string()));
+    assert_eq!(rows[1].email, Some("bob@example.com".to_owned()));
     assert_eq!(rows[1].score, Some(7));
     assert_eq!(rows[1].cdc_operation, "INSERT");
 
@@ -2177,15 +2177,15 @@ async fn schema_change_add_drop_rename() {
     // Alice: pre-change row.
     assert_eq!(rows[0].id, 1);
     assert_eq!(rows[0].full_name, "Alice", "renamed column should preserve data");
-    assert_eq!(rows[0].status, Some("active".to_string()));
+    assert_eq!(rows[0].status, Some("active".to_owned()));
     assert_eq!(rows[0].email, None, "Alice's email should be NULL (added after her row)");
     assert_eq!(rows[0].cdc_operation, "INSERT");
 
     // Bob: post-change row.
     assert_eq!(rows[1].id, 2);
     assert_eq!(rows[1].full_name, "Bob");
-    assert_eq!(rows[1].status, Some("pending".to_string()));
-    assert_eq!(rows[1].email, Some("bob@example.com".to_string()));
+    assert_eq!(rows[1].status, Some("pending".to_owned()));
+    assert_eq!(rows[1].email, Some("bob@example.com".to_owned()));
     assert_eq!(rows[1].cdc_operation, "INSERT");
 
     // Metadata snapshot_id should have advanced.

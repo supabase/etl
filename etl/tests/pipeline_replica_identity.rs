@@ -123,19 +123,19 @@ fn find_delete_event(events: &[Event]) -> &etl::types::DeleteEvent {
 fn full_row(name: &str, surname: &str, city: &str, large_text: &str) -> TableRow {
     TableRow::new(vec![
         Cell::I64(INITIAL_ID),
-        Cell::String(name.to_string()),
-        Cell::String(surname.to_string()),
-        Cell::String(city.to_string()),
-        Cell::String(large_text.to_string()),
+        Cell::String(name.to_owned()),
+        Cell::String(surname.to_owned()),
+        Cell::String(city.to_owned()),
+        Cell::String(large_text.to_owned()),
     ])
 }
 
 fn default_identity_row(surname: &str) -> TableRow {
-    TableRow::new(vec![Cell::I64(INITIAL_ID), Cell::String(surname.to_string())])
+    TableRow::new(vec![Cell::I64(INITIAL_ID), Cell::String(surname.to_owned())])
 }
 
 fn using_index_identity_row(name: &str, surname: &str) -> TableRow {
-    TableRow::new(vec![Cell::String(name.to_string()), Cell::String(surname.to_string())])
+    TableRow::new(vec![Cell::String(name.to_owned()), Cell::String(surname.to_owned())])
 }
 
 async fn run_replica_identity_scenario(
@@ -225,7 +225,7 @@ async fn run_replica_identity_scenario(
     let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
-    let publication_name = "test_pub_replica_identity".to_string();
+    let publication_name = "test_pub_replica_identity".to_owned();
     database
         .create_publication(&publication_name, std::slice::from_ref(&table_name))
         .await
@@ -351,9 +351,9 @@ async fn default_replica_identity_with_composite_primary_key_handles_partial_and
             5,
             TableRow::new(vec![
                 Cell::I64(INITIAL_ID),
-                Cell::String(INITIAL_NAME.to_string()),
-                Cell::String(INITIAL_SURNAME.to_string()),
-                Cell::String(UPDATED_CITY.to_string()),
+                Cell::String(INITIAL_NAME.to_owned()),
+                Cell::String(INITIAL_SURNAME.to_owned()),
+                Cell::String(UPDATED_CITY.to_owned()),
             ]),
             vec![4],
         ))
@@ -497,9 +497,9 @@ async fn using_index_replica_identity_keeps_key_rows_in_table_order() {
             5,
             TableRow::new(vec![
                 Cell::I64(INITIAL_ID),
-                Cell::String(INITIAL_NAME.to_string()),
-                Cell::String(INITIAL_SURNAME.to_string()),
-                Cell::String(UPDATED_CITY.to_string()),
+                Cell::String(INITIAL_NAME.to_owned()),
+                Cell::String(INITIAL_SURNAME.to_owned()),
+                Cell::String(UPDATED_CITY.to_owned()),
             ]),
             vec![4],
         ))

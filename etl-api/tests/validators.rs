@@ -41,11 +41,11 @@ fn create_iceberg_config(warehouse_name: &str) -> FullApiDestinationConfig {
     FullApiDestinationConfig::Iceberg {
         config: FullApiIcebergConfig::Rest {
             catalog_uri: format!("{LAKEKEEPER_URL}/catalog"),
-            warehouse_name: warehouse_name.to_string(),
-            s3_access_key_id: SerializableSecretString::from(MINIO_USERNAME.to_string()),
-            s3_secret_access_key: SerializableSecretString::from(MINIO_PASSWORD.to_string()),
-            s3_endpoint: MINIO_URL.to_string(),
-            namespace: Some("test".to_string()),
+            warehouse_name: warehouse_name.to_owned(),
+            s3_access_key_id: SerializableSecretString::from(MINIO_USERNAME.to_owned()),
+            s3_secret_access_key: SerializableSecretString::from(MINIO_PASSWORD.to_owned()),
+            s3_endpoint: MINIO_URL.to_owned(),
+            namespace: Some("test".to_owned()),
         },
     }
 }
@@ -56,9 +56,9 @@ fn create_bigquery_config(
     sa_key: &str,
 ) -> FullApiDestinationConfig {
     FullApiDestinationConfig::BigQuery {
-        project_id: project_id.to_string(),
-        dataset_id: dataset_id.to_string(),
-        service_account_key: SerializableSecretString::from(sa_key.to_string()),
+        project_id: project_id.to_owned(),
+        dataset_id: dataset_id.to_owned(),
+        service_account_key: SerializableSecretString::from(sa_key.to_owned()),
         max_staleness_mins: None,
         connection_pool_size: None,
     }
@@ -66,7 +66,7 @@ fn create_bigquery_config(
 
 fn create_pipeline_config(publication_name: &str) -> FullApiPipelineConfig {
     FullApiPipelineConfig {
-        publication_name: publication_name.to_string(),
+        publication_name: publication_name.to_owned(),
         batch: Some(BatchConfig {
             max_fill_ms: BatchConfig::DEFAULT_MAX_FILL_MS,
             memory_budget_ratio: BatchConfig::DEFAULT_MEMORY_BUDGET_RATIO,
@@ -182,7 +182,7 @@ async fn validate_source_with_trusted_username_mismatch() {
     let environment = Environment::load().expect("Failed to load environment");
     let ctx = ValidationContext::builder(environment)
         .source_pool(pool)
-        .trusted_username(Some("different_user".to_string()))
+        .trusted_username(Some("different_user".to_owned()))
         .build();
 
     let failures = validate_source(&ctx).await.unwrap();
@@ -200,7 +200,7 @@ async fn validate_destination_includes_source_validation() {
     let environment = Environment::load().expect("Failed to load environment");
     let ctx = ValidationContext::builder(environment)
         .source_pool(ctx.source_pool.expect("source pool should be present for validation"))
-        .trusted_username(Some("different_user".to_string()))
+        .trusted_username(Some("different_user".to_owned()))
         .build();
 
     let failures =
@@ -220,7 +220,7 @@ async fn validate_pipeline_includes_source_validation() {
     let environment = Environment::load().expect("Failed to load environment");
     let ctx = ValidationContext::builder(environment)
         .source_pool(ctx.source_pool.expect("source pool should be present for validation"))
-        .trusted_username(Some("different_user".to_string()))
+        .trusted_username(Some("different_user".to_owned()))
         .build();
 
     let failures = validate_pipeline(&ctx, &create_pipeline_config("test_pub")).await.unwrap();

@@ -16,7 +16,7 @@ use crate::{
         encryption::EncryptionKey,
         source::{FullApiSourceConfig, StoredSourceConfig},
     },
-    db::{self, tenants::TenantsDbError, tenants_sources::TenantSourceDbError},
+    data::{self, tenants::TenantsDbError, tenants_sources::TenantSourceDbError},
     k8s::TrustedRootCertsCache,
     routes::{ErrorMessage, common, utils},
     validation::ValidationError,
@@ -47,7 +47,7 @@ impl TenantSourceError {
                 | TenantSourceDbError::Tenants(_),
             )
             | TenantSourceError::Database(_)
-            | TenantSourceError::Validation(_) => "internal server error".to_string(),
+            | TenantSourceError::Validation(_) => "internal server error".to_owned(),
             // Every other message is ok, as they do not divulge sensitive information
             e => e.to_string(),
         }
@@ -148,7 +148,7 @@ pub async fn create_tenant_and_source(
     .await?;
 
     let mut txn = pool.begin().await?;
-    let (tenant_id, source_id) = db::tenants_sources::create_tenant_and_source(
+    let (tenant_id, source_id) = data::tenants_sources::create_tenant_and_source(
         &mut txn,
         &tenant_and_source.tenant_id,
         &tenant_and_source.tenant_name,

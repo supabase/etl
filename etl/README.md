@@ -21,8 +21,8 @@ The ETL core implements a pipeline architecture that replicates data from Postgr
 - **Table Sync Worker**: Handles initial copying of existing table data and processes CDC events until it has caught up
   to the apply worker
 - **State Store**: Stores the state of the pipeline
-- **Schema Store**: Stores the table schemas of the tables involved in the replication
-- **Cleanup Store**: Provides atomic cleanup primitives that delete stored state, schema, and mappings for tables removed from a publication (does not touch destination data)
+- **Schema Store**: Stores versioned table schemas and prunes obsolete schema versions after acknowledged progress
+- **Cleanup Store**: Provides atomic cleanup primitives that delete stored state, schema, and destination table metadata for tables removed from a publication (does not touch destination data)
 
 ### Information Flow
 

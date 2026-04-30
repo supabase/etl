@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use etl::{
     error::{EtlError, EtlResult},
@@ -8,7 +8,7 @@ use etl::{
     },
     store::{
         cleanup::CleanupStore,
-        schema::SchemaStore,
+        schema::{SchemaStore, TableSchemaRetention},
         state::{StateStore, TableReplicationStates},
     },
     types::{SnapshotId, TableId, TableSchema},
@@ -170,6 +170,13 @@ where
 
     async fn store_table_schema(&self, table_schema: TableSchema) -> EtlResult<Arc<TableSchema>> {
         self.inner.store_table_schema(table_schema).await
+    }
+
+    async fn prune_table_schemas(
+        &self,
+        table_schema_retentions: HashMap<TableId, TableSchemaRetention>,
+    ) -> EtlResult<u64> {
+        self.inner.prune_table_schemas(table_schema_retentions).await
     }
 }
 

@@ -93,7 +93,7 @@ pub fn ducklake_load_sql() -> String {
 
     "INSTALL ducklake; LOAD ducklake; INSTALL json; LOAD json; INSTALL parquet; LOAD parquet; \
      INSTALL postgres_scanner; LOAD postgres_scanner;"
-        .to_string()
+        .to_owned()
 }
 
 pub async fn create_test_lake(test_name: &str) -> DuckLakeTestEnv {

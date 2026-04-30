@@ -75,7 +75,7 @@ pub(super) fn clickhouse_column_type(col: &ColumnSchema, force_nullable: bool) -
         format!("Array(Nullable({elem}))")
     } else {
         let base = postgres_column_type_to_clickhouse_sql(&col.typ);
-        if col.nullable || force_nullable { format!("Nullable({base})") } else { base.to_string() }
+        if col.nullable || force_nullable { format!("Nullable({base})") } else { base.to_owned() }
     }
 }
 
@@ -116,7 +116,7 @@ mod tests {
     #[test]
     fn build_create_table_sql_quotes_identifiers() {
         let schemas = vec![ColumnSchema {
-            name: "id\"value".to_string(),
+            name: "id\"value".to_owned(),
             typ: Type::INT4,
             modifier: -1,
             ordinal_position: 1,
@@ -180,7 +180,7 @@ mod tests {
     fn build_create_table_sql_nullable() {
         let schemas = vec![
             ColumnSchema {
-                name: "id".to_string(),
+                name: "id".to_owned(),
                 typ: Type::INT4,
                 modifier: -1,
                 ordinal_position: 1,
@@ -188,7 +188,7 @@ mod tests {
                 nullable: false,
             },
             ColumnSchema {
-                name: "name".to_string(),
+                name: "name".to_owned(),
                 typ: Type::TEXT,
                 modifier: -1,
                 ordinal_position: 2,
@@ -204,7 +204,7 @@ mod tests {
     #[test]
     fn build_create_table_sql_cdc_columns() {
         let schemas = vec![ColumnSchema {
-            name: "id".to_string(),
+            name: "id".to_owned(),
             typ: Type::INT4,
             modifier: -1,
             ordinal_position: 1,
@@ -221,7 +221,7 @@ mod tests {
     #[test]
     fn build_create_table_sql_array_columns() {
         let schemas = vec![ColumnSchema {
-            name: "tags".to_string(),
+            name: "tags".to_owned(),
             typ: Type::TEXT_ARRAY,
             modifier: -1,
             ordinal_position: 1,

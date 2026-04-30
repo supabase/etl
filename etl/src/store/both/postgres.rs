@@ -29,16 +29,13 @@ use crate::{
     },
     store::{
         cleanup::CleanupStore,
-        schema::SchemaStore,
+        schema::{SchemaStore, TableSchemaRetention, TableSchemaSnapshots},
         state::{DestinationTablesMetadata, StateStore, TableReplicationStates},
     },
     types::{PipelineId, ReplicationMask, SnapshotId, TableId, TableSchema},
 };
 
 /// Maximum number of connections in the pool.
-///
-/// Set to 2 to allow some concurrency since database operations are performed
-/// before acquiring the cache lock.
 const MAX_POOL_CONNECTIONS: u32 = 2;
 
 /// Duration after which idle connections are closed.
@@ -113,21 +110,24 @@ fn emit_table_metrics(counts_by_phase: &HashMap<&'static str, u64>) {
 }
 
 /// Inner state of [`PostgresStore`].
+///
+/// TODO: rework the locking implementation. The store currently serializes
+/// operations with one coarse lock for consistency, but a finer-grained
+/// per-table locking algorithm would improve throughput.
 #[derive(Debug)]
 struct Inner {
     /// Count of number of tables in each phase. Used for metrics.
     phase_counts: HashMap<&'static str, u64>,
     /// Cached table replication states indexed by table ID.
     table_states: TableReplicationStates,
-    /// Cached table schemas indexed by (table_id, snapshot_id) for versioning
-    /// support.
+    /// Cached table schema snapshots.
     ///
     /// This cache is optimized for keeping the most actively used schemas in
     /// memory, not all historical snapshots. Schemas are loaded on-demand
     /// from the database when not found in cache. During normal operation,
     /// this typically contains only the latest schema version for each
     /// table, since that's what the replication pipeline actively uses.
-    table_schemas: HashMap<(TableId, SnapshotId), Arc<TableSchema>>,
+    table_schemas: Arc<TableSchemaSnapshots>,
     /// Cached destination table metadata indexed by table ID.
     destination_tables_metadata: DestinationTablesMetadata,
 }
@@ -172,38 +172,6 @@ impl Inner {
             }
         }
     }
-
-    /// Inserts a schema into the cache and evicts older snapshots if necessary.
-    ///
-    /// Maintains at most [`MAX_CACHED_SCHEMAS_PER_TABLE`] snapshots per table,
-    /// evicting the oldest snapshots when the limit is exceeded.
-    fn insert_schema_with_eviction(&mut self, table_schema: Arc<TableSchema>) {
-        let table_id = table_schema.id;
-        let snapshot_id = table_schema.snapshot_id;
-
-        // Insert the new schema.
-        self.table_schemas.insert((table_id, snapshot_id), table_schema);
-
-        // Collect all snapshot_ids for this table.
-        let mut snapshots_for_table: Vec<SnapshotId> = self
-            .table_schemas
-            .keys()
-            .filter(|(tid, _)| *tid == table_id)
-            .map(|(_, sid)| *sid)
-            .collect();
-
-        // If we exceed the limit, evict oldest snapshots.
-        if snapshots_for_table.len() > MAX_CACHED_SCHEMAS_PER_TABLE {
-            // Sort ascending so oldest are first.
-            snapshots_for_table.sort();
-
-            // Remove oldest entries until we're at the limit.
-            let to_remove = snapshots_for_table.len() - MAX_CACHED_SCHEMAS_PER_TABLE;
-            for &old_snapshot_id in snapshots_for_table.iter().take(to_remove) {
-                self.table_schemas.remove(&(table_id, old_snapshot_id));
-            }
-        }
-    }
 }
 
 /// Postgres-backed storage for ETL pipeline state and schema information.
@@ -219,22 +187,10 @@ impl Inner {
 ///
 /// # Concurrency Model
 ///
-/// Write operations follow a DB-first pattern: the database is updated first,
-/// then the in-memory cache. This ensures that if a crash occurs after the DB
-/// write but before the cache update, the correct state is reloaded from DB on
-/// restart (the database is the source of truth).
-///
-/// The application-level lock is only held for brief cache updates, minimizing
-/// the critical section to increase performance. This design assumes no
-/// concurrent updates to the same table: the `apply_worker` and
-/// `table_sync_worker` coordinate through state transitions and never race on
-/// the same table.
-///
-/// If this invariant is violated, there could be some execution orders that
-/// could result in an inconsistent state. For example, there could be two state
-/// updates u1 and u2 being run in sequence. However, then u2 lands before u1
-/// due to network latency, which causes the in-memory code to be updated to the
-/// result of u2 and then later to u1, causing an inconsistent state.
+/// Store operations hold the application-level lock across the database work
+/// and the cache update. This keeps the persistent state and in-memory cache
+/// ordered consistently, at the cost of serializing operations that could
+/// eventually be independent with finer-grained per-table locking.
 #[derive(Debug, Clone)]
 pub struct PostgresStore {
     pipeline_id: PipelineId,
@@ -247,7 +203,7 @@ impl PostgresStore {
     ///
     /// Runs the required ETL migrations and then creates a lazily-connected
     /// pool with automatic idle timeout. Connections are established on
-    /// first use and automatically closed after [`IDLE_TIMEOUT`] of
+    /// first use and automatically closed after `IDLE_TIMEOUT` of
     /// inactivity.
     pub async fn new(
         pipeline_id: PipelineId,
@@ -261,8 +217,8 @@ impl PostgresStore {
         let inner = Inner {
             phase_counts: HashMap::new(),
             table_states: Arc::new(BTreeMap::new()),
-            table_schemas: HashMap::new(),
-            destination_tables_metadata: Arc::new(HashMap::new()),
+            table_schemas: Arc::new(TableSchemaSnapshots::default()),
+            destination_tables_metadata: Arc::new(BTreeMap::new()),
         };
 
         Ok(Self { pipeline_id, pool, inner: Arc::new(Mutex::new(inner)) })
@@ -304,6 +260,7 @@ impl StateStore for PostgresStore {
     async fn load_table_replication_states(&self) -> EtlResult<usize> {
         debug!("loading table replication states from postgres state store");
 
+        let mut inner = self.inner.lock().await;
         let replication_state_rows =
             state::get_table_replication_state_rows(&self.pool, self.pipeline_id as i64).await?;
 
@@ -316,10 +273,6 @@ impl StateStore for PostgresStore {
 
         let table_states_len = table_states.len();
 
-        // For performance reasons, since we load the replication states only once
-        // during startup and from a single thread, we can afford to have a
-        // short critical section.
-        let mut inner = self.inner.lock().await;
         inner.init_phase_counts(&table_states);
         inner.table_states = Arc::new(table_states);
         emit_table_metrics(&inner.phase_counts);
@@ -349,7 +302,9 @@ impl StateStore for PostgresStore {
                 })
                 .collect::<EtlResult<Vec<_>>>()?;
 
-        // Perform all database updates in a single transaction
+        let mut inner = self.inner.lock().await;
+
+        // Perform all database updates in a single transaction.
         let mut tx = self.pool.begin().await?;
         for (table_id, state_type, metadata) in db_updates {
             state::update_replication_state_raw(
@@ -363,8 +318,7 @@ impl StateStore for PostgresStore {
         }
         tx.commit().await?;
 
-        // Update the cache
-        let mut inner = self.inner.lock().await;
+        // Update the cache.
         for (table_id, state) in updates {
             inner.set_table_state(table_id, state);
         }
@@ -380,6 +334,7 @@ impl StateStore for PostgresStore {
         &self,
         table_id: TableId,
     ) -> EtlResult<TableReplicationPhase> {
+        let mut inner = self.inner.lock().await;
         let mut tx = self.pool.begin().await?;
 
         let restored_row =
@@ -396,7 +351,6 @@ impl StateStore for PostgresStore {
         let restored_phase = TableReplicationPhase::from_state_row(restored_row)?;
         tx.commit().await?;
 
-        let mut inner = self.inner.lock().await;
         inner.set_table_state(table_id, restored_phase.clone());
         emit_table_metrics(&inner.phase_counts);
 
@@ -405,8 +359,8 @@ impl StateStore for PostgresStore {
 
     /// Retrieves destination table metadata for a specific table from cache.
     ///
-    /// This method provides fast access to destination metadata by reading
-    /// from the in-memory cache.
+    /// This method provides fast access to destination table metadata by
+    /// reading from the in-memory cache.
     async fn get_destination_table_metadata(
         &self,
         table_id: TableId,
@@ -437,6 +391,7 @@ impl StateStore for PostgresStore {
     async fn load_destination_tables_metadata(&self) -> EtlResult<usize> {
         debug!("loading destination tables metadata from postgres state store");
 
+        let mut inner = self.inner.lock().await;
         let rows = destination_metadata::load_destination_tables_metadata(
             &self.pool,
             self.pipeline_id as i64,
@@ -450,7 +405,7 @@ impl StateStore for PostgresStore {
             )
         })?;
 
-        let mut metadata: HashMap<TableId, DestinationTableMetadata> = HashMap::new();
+        let mut metadata: BTreeMap<TableId, DestinationTableMetadata> = BTreeMap::new();
         for (table_id, row) in rows {
             metadata.insert(
                 table_id,
@@ -465,7 +420,6 @@ impl StateStore for PostgresStore {
         }
 
         let metadata_len = metadata.len();
-        let mut inner = self.inner.lock().await;
         inner.destination_tables_metadata = Arc::new(metadata);
 
         info!(count = metadata_len, "loaded destination tables metadata from postgres state store");
@@ -485,6 +439,7 @@ impl StateStore for PostgresStore {
             "storing destination table metadata"
         );
 
+        let mut inner = self.inner.lock().await;
         destination_metadata::store_destination_table_metadata(
             &self.pool,
             self.pipeline_id as i64,
@@ -504,7 +459,6 @@ impl StateStore for PostgresStore {
             )
         })?;
 
-        let mut inner = self.inner.lock().await;
         Arc::make_mut(&mut inner.destination_tables_metadata).insert(table_id, metadata);
 
         Ok(())
@@ -524,26 +478,11 @@ impl SchemaStore for PostgresStore {
         table_id: &TableId,
         snapshot_id: SnapshotId,
     ) -> EtlResult<Option<Arc<TableSchema>>> {
-        // First, check if we have a cached schema that matches the criteria.
-        //
-        // We can afford to hold the lock only for this short critical section since we
-        // assume that there is not really concurrency at the table level since
-        // each table is processed by exactly one worker.
-        {
-            let inner = self.inner.lock().await;
+        let mut inner = self.inner.lock().await;
 
-            // Find the best matching schema in the cache (largest snapshot_id <=
-            // requested).
-            let newest_table_schema = inner
-                .table_schemas
-                .iter()
-                .filter(|((tid, sid), _)| *tid == *table_id && *sid <= snapshot_id)
-                .max_by_key(|((_, sid), _)| *sid)
-                .map(|(_, schema)| Arc::clone(schema));
-
-            if newest_table_schema.is_some() {
-                return Ok(newest_table_schema);
-            }
+        let newest_table_schema = inner.table_schemas.get_at_or_before(*table_id, snapshot_id);
+        if newest_table_schema.is_some() {
+            return Ok(newest_table_schema);
         }
 
         debug!(
@@ -574,16 +513,10 @@ impl SchemaStore for PostgresStore {
             return Ok(None);
         };
 
-        let result = {
-            let mut inner = self.inner.lock().await;
-
-            let table_schema = Arc::new(table_schema);
-            inner.insert_schema_with_eviction(Arc::clone(&table_schema));
-
-            Some(table_schema)
-        };
-
-        Ok(result)
+        Ok(Some(
+            Arc::make_mut(&mut inner.table_schemas)
+                .insert_with_eviction(table_schema, MAX_CACHED_SCHEMAS_PER_TABLE),
+        ))
     }
 
     /// Retrieves all cached table schemas as a vector.
@@ -593,7 +526,7 @@ impl SchemaStore for PostgresStore {
     async fn get_table_schemas(&self) -> EtlResult<Vec<Arc<TableSchema>>> {
         let inner = self.inner.lock().await;
 
-        Ok(inner.table_schemas.values().map(Arc::clone).collect())
+        Ok(inner.table_schemas.all())
     }
 
     /// Loads table schemas from Postgres into memory cache.
@@ -605,6 +538,7 @@ impl SchemaStore for PostgresStore {
     async fn load_table_schemas(&self) -> EtlResult<usize> {
         debug!("loading table schemas from postgres state store");
 
+        let mut inner = self.inner.lock().await;
         let table_schemas = schema::load_table_schemas(&self.pool, self.pipeline_id as i64)
             .await
             .map_err(|err| {
@@ -616,12 +550,7 @@ impl SchemaStore for PostgresStore {
         })?;
         let table_schemas_len = table_schemas.len();
 
-        let mut inner = self.inner.lock().await;
-        inner.table_schemas.clear();
-        for table_schema in table_schemas {
-            let key = (table_schema.id, table_schema.snapshot_id);
-            inner.table_schemas.insert(key, Arc::new(table_schema));
-        }
+        Arc::make_mut(&mut inner.table_schemas).replace_all(table_schemas);
 
         info!(count = table_schemas_len, "loaded table schemas from postgres state store");
 
@@ -636,6 +565,7 @@ impl SchemaStore for PostgresStore {
     async fn store_table_schema(&self, table_schema: TableSchema) -> EtlResult<Arc<TableSchema>> {
         debug!(table_name = %table_schema.name, snapshot_id = %table_schema.snapshot_id, "storing table schema");
 
+        let mut inner = self.inner.lock().await;
         schema::store_table_schema(&self.pool, self.pipeline_id as i64, &table_schema)
             .await
             .map_err(|err| {
@@ -646,17 +576,52 @@ impl SchemaStore for PostgresStore {
                 )
             })?;
 
-        let mut inner = self.inner.lock().await;
-        let table_schema = Arc::new(table_schema);
-        inner.insert_schema_with_eviction(Arc::clone(&table_schema));
+        Ok(Arc::make_mut(&mut inner.table_schemas)
+            .insert_with_eviction(table_schema, MAX_CACHED_SCHEMAS_PER_TABLE))
+    }
 
-        Ok(table_schema)
+    async fn prune_table_schemas(
+        &self,
+        table_schema_retentions: HashMap<TableId, TableSchemaRetention>,
+    ) -> EtlResult<u64> {
+        let mut inner = self.inner.lock().await;
+        let retention_lsns = table_schema_retentions
+            .iter()
+            .map(|(table_id, retention)| (*table_id, retention.to_lsn()))
+            .collect::<HashMap<_, _>>();
+        let deleted_count = schema::delete_obsolete_table_schema_versions(
+            &self.pool,
+            self.pipeline_id as i64,
+            &retention_lsns,
+        )
+        .await
+        .map_err(|err| {
+            etl_error!(
+                ErrorKind::SourceQueryFailed,
+                "Obsolete table schema deletion failed",
+                format!("Failed to delete obsolete table schemas from PostgreSQL: {}", err)
+            )
+        })?;
+
+        let cached_count = Arc::make_mut(&mut inner.table_schemas).prune(&table_schema_retentions);
+
+        if deleted_count > 0 || cached_count > 0 {
+            info!(
+                deleted_count,
+                cached_count,
+                table_count = table_schema_retentions.len(),
+                "pruned obsolete table schema versions"
+            );
+        }
+
+        Ok(deleted_count)
     }
 }
 
 impl CleanupStore for PostgresStore {
     /// Removes all state for a table from both database and cache.
     async fn cleanup_table_state(&self, table_id: TableId) -> EtlResult<()> {
+        let mut inner = self.inner.lock().await;
         let mut tx = self.pool.begin().await?;
 
         destination_metadata::delete_destination_table_metadata(
@@ -688,10 +653,8 @@ impl CleanupStore for PostgresStore {
 
         tx.commit().await?;
 
-        let mut inner = self.inner.lock().await;
-
         inner.remove_table_state(table_id);
-        inner.table_schemas.retain(|(tid, _), _| *tid != table_id);
+        Arc::make_mut(&mut inner.table_schemas).remove_table(table_id);
         Arc::make_mut(&mut inner.destination_tables_metadata).remove(&table_id);
         emit_table_metrics(&inner.phase_counts);
 

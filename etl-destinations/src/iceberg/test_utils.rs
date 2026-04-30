@@ -28,9 +28,9 @@ pub fn get_catalog_url() -> String {
 /// Creates S3 properties for connecting to MinIO.
 pub fn create_minio_props() -> HashMap<String, String> {
     let mut props: HashMap<String, String> = HashMap::new();
-    props.insert(S3_ACCESS_KEY_ID.to_string(), MINIO_USERNAME.to_string());
-    props.insert(S3_SECRET_ACCESS_KEY.to_string(), MINIO_PASSWORD.to_string());
-    props.insert(S3_ENDPOINT.to_string(), MINIO_URL.to_string());
+    props.insert(S3_ACCESS_KEY_ID.to_owned(), MINIO_USERNAME.to_owned());
+    props.insert(S3_SECRET_ACCESS_KEY.to_owned(), MINIO_PASSWORD.to_owned());
+    props.insert(S3_ENDPOINT.to_owned(), MINIO_URL.to_owned());
 
     props
 }
@@ -108,17 +108,17 @@ impl Default for CreateWarehouseRequest {
         CreateWarehouseRequest {
             delete_profile: DeleteProfile { r#type: DeleteProfileType::Hard },
             storage_credential: StorageCredential {
-                aws_access_key_id: MINIO_USERNAME.to_string(),
-                aws_secret_access_key: MINIO_PASSWORD.to_string(),
+                aws_access_key_id: MINIO_USERNAME.to_owned(),
+                aws_secret_access_key: MINIO_PASSWORD.to_owned(),
                 credential_type: CredentialType::AccessKey,
                 r#type: StorageType::S3,
             },
             storage_profile: StorageProfile {
-                bucket: "dev-and-test".to_string(),
-                region: "local-01".to_string(),
+                bucket: "dev-and-test".to_owned(),
+                region: "local-01".to_owned(),
                 sts_enabled: false,
                 r#type: StorageType::S3,
-                endpoint: "http://object-store-minio:9000".to_string(),
+                endpoint: "http://object-store-minio:9000".to_owned(),
                 path_style_access: true,
                 flavor: Flavor::MinIO,
                 key_prefix: Uuid::new_v4().to_string(),

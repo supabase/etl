@@ -148,8 +148,8 @@ impl K8sClient for MockK8sClient {
             // Use a dummy certificate for tests - the actual TLS connection won't use this
             // since test postgres doesn't have TLS enabled
             map.insert(
-                TRUSTED_ROOT_CERT_KEY_NAME.to_string(),
-                "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----".to_string(),
+                TRUSTED_ROOT_CERT_KEY_NAME.to_owned(),
+                "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----".to_owned(),
             );
             let cm = ConfigMap { data: Some(map), ..ConfigMap::default() };
             Ok(cm)

@@ -18,7 +18,7 @@ fn resolve_target(
                 .iter()
                 .map(|s| {
                     s.split_once('=')
-                        .map(|(k, v)| (k.to_string(), v.to_string()))
+                        .map(|(k, v)| (k.to_owned(), v.to_owned()))
                         .ok_or_else(|| anyhow::anyhow!("invalid label '{s}', expected key=value"))
                 })
                 .collect::<anyhow::Result<Vec<_>>>()?;

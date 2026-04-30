@@ -1,6 +1,6 @@
 ---
-source: etl-api/src/db/sources.rs
-expression: deserialized.unwrap()
+source: etl-api/src/data/sources.rs
+expression: deserialized_config
 ---
 StoredSourceConfig {
     host: "localhost",

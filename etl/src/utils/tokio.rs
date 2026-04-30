@@ -243,10 +243,10 @@ mod tests {
 
         let tls = MakeRustlsConnect::new(config);
 
-        let host = std::env::var("TESTS_DATABASE_HOST").unwrap_or_else(|_| "localhost".to_string());
-        let port = std::env::var("TESTS_DATABASE_PORT").unwrap_or_else(|_| "5430".to_string());
+        let host = std::env::var("TESTS_DATABASE_HOST").unwrap_or_else(|_| "localhost".to_owned());
+        let port = std::env::var("TESTS_DATABASE_PORT").unwrap_or_else(|_| "5430".to_owned());
         let user =
-            std::env::var("TESTS_DATABASE_USERNAME").unwrap_or_else(|_| "postgres".to_string());
+            std::env::var("TESTS_DATABASE_USERNAME").unwrap_or_else(|_| "postgres".to_owned());
         let connection_string = format!("sslmode=require host={host} port={port} user={user}");
 
         let (client, conn) =

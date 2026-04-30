@@ -713,7 +713,7 @@ fn build_timestamptz_list_array(rows: &[TableRow], field_idx: usize, field: Fiel
     let tz = if let DataType::Timestamp(TimeUnit::Microsecond, Some(tz_str)) = field.data_type() {
         Arc::clone(tz_str)
     } else {
-        Arc::from("+00:00".to_string()) // Default to UTC
+        Arc::from("+00:00".to_owned()) // Default to UTC
     };
 
     let mut list_builder = ListBuilder::new(TimestampMicrosecondBuilder::new().with_timezone(tz))
@@ -971,7 +971,7 @@ mod tests {
         assert_eq!(cell_to_bool(&Cell::Bool(true)), Some(true));
         assert_eq!(cell_to_bool(&Cell::Bool(false)), Some(false));
         assert_eq!(cell_to_bool(&Cell::Null), None);
-        assert_eq!(cell_to_bool(&Cell::String("true".to_string())), None);
+        assert_eq!(cell_to_bool(&Cell::String("true".to_owned())), None);
         assert_eq!(cell_to_bool(&Cell::I32(1)), None);
     }
 
@@ -981,7 +981,7 @@ mod tests {
         assert_eq!(cell_to_i32(&Cell::I32(42)), Some(42));
         assert_eq!(cell_to_i32(&Cell::Null), None);
         assert_eq!(cell_to_i32(&Cell::I64(42)), None);
-        assert_eq!(cell_to_i32(&Cell::String("42".to_string())), None);
+        assert_eq!(cell_to_i32(&Cell::String("42".to_owned())), None);
     }
 
     #[test]
@@ -992,7 +992,7 @@ mod tests {
         assert_eq!(cell_to_i64(&Cell::U32(u32::MAX)), Some(u32::MAX as i64)); // Overflow case
         assert_eq!(cell_to_i64(&Cell::Null), None);
         assert_eq!(cell_to_i64(&Cell::I32(42)), None);
-        assert_eq!(cell_to_i64(&Cell::String("42".to_string())), None);
+        assert_eq!(cell_to_i64(&Cell::String("42".to_owned())), None);
     }
 
     #[test]
@@ -1019,7 +1019,7 @@ mod tests {
         assert_eq!(cell_to_bytes(&Cell::Bytes(test_bytes.clone())), Some(test_bytes));
         assert_eq!(cell_to_bytes(&Cell::Bytes(vec![])), Some(vec![]));
         assert_eq!(cell_to_bytes(&Cell::Null), None);
-        assert_eq!(cell_to_bytes(&Cell::String("hello".to_string())), None);
+        assert_eq!(cell_to_bytes(&Cell::String("hello".to_owned())), None);
     }
 
     #[test]
@@ -1031,7 +1031,7 @@ mod tests {
         assert_eq!(cell_to_date32(&Cell::Date(test_date)), Some(expected_days));
         assert_eq!(cell_to_date32(&Cell::Date(UNIX_EPOCH)), Some(0));
         assert_eq!(cell_to_date32(&Cell::Null), None);
-        assert_eq!(cell_to_date32(&Cell::String("2023-05-15".to_string())), None);
+        assert_eq!(cell_to_date32(&Cell::String("2023-05-15".to_owned())), None);
     }
 
     #[test]
@@ -1043,7 +1043,7 @@ mod tests {
         assert_eq!(cell_to_time64(&Cell::Time(test_time)), expected_micros);
         assert_eq!(cell_to_time64(&Cell::Time(MIDNIGHT)), Some(0));
         assert_eq!(cell_to_time64(&Cell::Null), None);
-        assert_eq!(cell_to_time64(&Cell::String("12:30:45".to_string())), None);
+        assert_eq!(cell_to_time64(&Cell::String("12:30:45".to_owned())), None);
     }
 
     #[test]
@@ -1054,7 +1054,7 @@ mod tests {
 
         assert_eq!(cell_to_timestamp(&Cell::Timestamp(test_ts)), Some(expected_micros));
         assert_eq!(cell_to_timestamp(&Cell::Null), None);
-        assert_eq!(cell_to_timestamp(&Cell::String("2001-09-09 01:46:40".to_string())), None);
+        assert_eq!(cell_to_timestamp(&Cell::String("2001-09-09 01:46:40".to_owned())), None);
     }
 
     #[test]
@@ -1065,7 +1065,7 @@ mod tests {
 
         assert_eq!(cell_to_timestamptz(&Cell::TimestampTz(test_ts)), Some(expected_micros));
         assert_eq!(cell_to_timestamptz(&Cell::Null), None);
-        assert_eq!(cell_to_timestamptz(&Cell::String("2001-09-09T01:46:40Z".to_string())), None);
+        assert_eq!(cell_to_timestamptz(&Cell::String("2001-09-09T01:46:40Z".to_owned())), None);
     }
 
     #[test]
@@ -1088,7 +1088,7 @@ mod tests {
         assert_eq!(cell_to_string(&Cell::Null), None);
         assert_eq!(cell_to_string(&Cell::Bool(true)), None);
         assert_eq!(cell_to_string(&Cell::Bool(false)), None);
-        assert_eq!(cell_to_string(&Cell::String("hello".to_string())), Some("hello".to_string()));
+        assert_eq!(cell_to_string(&Cell::String("hello".to_owned())), Some("hello".to_owned()));
         assert_eq!(cell_to_string(&Cell::I16(42)), None);
         assert_eq!(cell_to_string(&Cell::I32(-42)), None);
         assert_eq!(cell_to_string(&Cell::U32(42)), None);
@@ -1126,7 +1126,7 @@ mod tests {
             TableRow::new(vec![Cell::Bool(true)]),
             TableRow::new(vec![Cell::Bool(false)]),
             TableRow::new(vec![Cell::Null]),
-            TableRow::new(vec![Cell::String("not bool".to_string())]),
+            TableRow::new(vec![Cell::String("not bool".to_owned())]),
         ];
 
         let array_ref = build_array_for_field(&rows, 0, &DataType::Boolean);
@@ -1145,7 +1145,7 @@ mod tests {
             TableRow::new(vec![Cell::I16(42)]),
             TableRow::new(vec![Cell::I32(-123)]),
             TableRow::new(vec![Cell::Null]),
-            TableRow::new(vec![Cell::String("not int".to_string())]),
+            TableRow::new(vec![Cell::String("not int".to_owned())]),
         ];
 
         let array_ref = build_array_for_field(&rows, 0, &DataType::Int32);
@@ -1220,7 +1220,7 @@ mod tests {
     #[test]
     fn build_string_array() {
         let rows = vec![
-            TableRow::new(vec![Cell::String("hello".to_string())]),
+            TableRow::new(vec![Cell::String("hello".to_owned())]),
             TableRow::new(vec![Cell::Bool(true)]), // Converted to string
             TableRow::new(vec![Cell::I32(42)]),    // Converted to string
             TableRow::new(vec![Cell::Null]),
@@ -1243,7 +1243,7 @@ mod tests {
             TableRow::new(vec![Cell::Bytes(test_bytes.clone())]),
             TableRow::new(vec![Cell::Bytes(vec![])]),
             TableRow::new(vec![Cell::Null]),
-            TableRow::new(vec![Cell::String("not bytes".to_string())]),
+            TableRow::new(vec![Cell::String("not bytes".to_owned())]),
         ];
 
         let array_ref = build_array_for_field(&rows, 0, &DataType::LargeBinary);
@@ -1267,7 +1267,7 @@ mod tests {
             TableRow::new(vec![Cell::Date(test_date)]),
             TableRow::new(vec![Cell::Date(UNIX_EPOCH)]),
             TableRow::new(vec![Cell::Null]),
-            TableRow::new(vec![Cell::String("2023-05-15".to_string())]),
+            TableRow::new(vec![Cell::String("2023-05-15".to_owned())]),
         ];
 
         let array_ref = build_array_for_field(&rows, 0, &DataType::Date32);
@@ -1290,7 +1290,7 @@ mod tests {
             TableRow::new(vec![Cell::Time(test_time)]),
             TableRow::new(vec![Cell::Time(MIDNIGHT)]),
             TableRow::new(vec![Cell::Null]),
-            TableRow::new(vec![Cell::String("12:30:45".to_string())]),
+            TableRow::new(vec![Cell::String("12:30:45".to_owned())]),
         ];
 
         let array_ref = build_array_for_field(&rows, 0, &DataType::Time64(TimeUnit::Microsecond));
@@ -1313,7 +1313,7 @@ mod tests {
         let rows = vec![
             TableRow::new(vec![Cell::Timestamp(test_ts)]),
             TableRow::new(vec![Cell::Null]),
-            TableRow::new(vec![Cell::String("2001-09-09 01:46:40".to_string())]),
+            TableRow::new(vec![Cell::String("2001-09-09 01:46:40".to_owned())]),
         ];
 
         let array_ref =
@@ -1336,7 +1336,7 @@ mod tests {
         let rows = vec![
             TableRow::new(vec![Cell::TimestampTz(test_ts)]),
             TableRow::new(vec![Cell::Null]),
-            TableRow::new(vec![Cell::String("2001-09-09T01:46:40Z".to_string())]),
+            TableRow::new(vec![Cell::String("2001-09-09T01:46:40Z".to_owned())]),
         ];
 
         let array_ref = build_array_for_field(
@@ -1382,10 +1382,10 @@ mod tests {
         use arrow::datatypes::{Field, Schema};
 
         let rows = vec![
-            TableRow::new(vec![Cell::I32(42), Cell::String("hello".to_string()), Cell::Bool(true)]),
+            TableRow::new(vec![Cell::I32(42), Cell::String("hello".to_owned()), Cell::Bool(true)]),
             TableRow::new(vec![
                 Cell::I32(100),
-                Cell::String("world".to_string()),
+                Cell::String("world".to_owned()),
                 Cell::Bool(false),
             ]),
         ];
@@ -1423,7 +1423,7 @@ mod tests {
 
         let rows = vec![
             TableRow::new(vec![Cell::I32(42), Cell::Null]),
-            TableRow::new(vec![Cell::Null, Cell::String("test".to_string())]),
+            TableRow::new(vec![Cell::Null, Cell::String("test".to_owned())]),
         ];
 
         let schema = Schema::new(vec![
@@ -1601,7 +1601,7 @@ mod tests {
         // Test what happens when row has different number of columns than schema
         let rows = vec![TableRow::new(vec![
             Cell::I32(1),
-            Cell::String("test".to_string()),
+            Cell::String("test".to_owned()),
             Cell::Bool(true), // Extra column not in schema
         ])];
 
@@ -1630,7 +1630,7 @@ mod tests {
     #[test]
     fn cell_to_array_cell_fn() {
         let bool_array = ArrayCell::Bool(vec![Some(true), Some(false), None]);
-        let string_array = ArrayCell::String(vec![Some("hello".to_string()), None]);
+        let string_array = ArrayCell::String(vec![Some("hello".to_owned()), None]);
 
         // Test extraction from Cell::Array
         assert!(cell_to_array_cell(&Cell::Array(bool_array.clone())).is_some());
@@ -1639,7 +1639,7 @@ mod tests {
         // Test non-array cells return None
         assert!(cell_to_array_cell(&Cell::Null).is_none());
         assert!(cell_to_array_cell(&Cell::Bool(true)).is_none());
-        assert!(cell_to_array_cell(&Cell::String("test".to_string())).is_none());
+        assert!(cell_to_array_cell(&Cell::String("test".to_owned())).is_none());
         assert!(cell_to_array_cell(&Cell::I32(42)).is_none());
 
         // Verify the extracted array cell is the same
@@ -1668,7 +1668,7 @@ mod tests {
             TableRow::new(vec![Cell::Array(ArrayCell::Bool(vec![Some(true)]))]),
             TableRow::new(vec![Cell::Array(ArrayCell::Bool(vec![]))]), // Empty array,
             TableRow::new(vec![Cell::Null]),                           // Null cell,
-            TableRow::new(vec![Cell::String("not an array".to_string())]), // Non-array cell,
+            TableRow::new(vec![Cell::String("not an array".to_owned())]), // Non-array cell,
         ];
 
         let array_ref = build_boolean_list_array(&rows, 0, field_ref);
@@ -1922,8 +1922,8 @@ mod tests {
 
         let rows = vec![
             TableRow::new(vec![Cell::Array(ArrayCell::String(vec![
-                Some("hello".to_string()),
-                Some("world".to_string()),
+                Some("hello".to_owned()),
+                Some("world".to_owned()),
                 None,
             ]))]),
             TableRow::new(vec![Cell::Array(ArrayCell::Numeric(vec![
@@ -2352,7 +2352,7 @@ mod tests {
 
         let rows = vec![
             TableRow::new(vec![Cell::Array(ArrayCell::String(vec![
-                Some("hello".to_string()),
+                Some("hello".to_owned()),
                 None,
             ]))]),
             TableRow::new(vec![Cell::Array(ArrayCell::Bool(vec![Some(true), Some(false), None]))]),
@@ -2515,7 +2515,7 @@ mod tests {
                 1, // 1 null
             ),
             (
-                ArrayCell::String(vec![Some("hello".to_string()), None]),
+                ArrayCell::String(vec![Some("hello".to_owned()), None]),
                 vec!["hello"],
                 1, // 1 null
             ),
@@ -2700,7 +2700,7 @@ mod tests {
                 Cell::I32(1),
                 Cell::Array(ArrayCell::Bool(vec![Some(true), Some(false)])),
                 Cell::Array(ArrayCell::I32(vec![Some(10), Some(20), None])),
-                Cell::Array(ArrayCell::String(vec![Some("hello".to_string()), None])),
+                Cell::Array(ArrayCell::String(vec![Some("hello".to_owned()), None])),
                 Cell::Array(ArrayCell::Uuid(vec![Some(test_uuid)])),
                 Cell::Array(ArrayCell::Date(vec![Some(test_date), None])),
             ]),
@@ -2855,14 +2855,14 @@ mod tests {
         // Test mixing scalar and array columns in the same record batch
         let rows = vec![
             TableRow::new(vec![
-                Cell::String("record1".to_string()),
+                Cell::String("record1".to_owned()),
                 Cell::I32(42),
                 Cell::Array(ArrayCell::F32(vec![Some(1.1), Some(2.2)])),
                 Cell::Bool(true),
-                Cell::Array(ArrayCell::String(vec![Some("a".to_string()), Some("b".to_string())])),
+                Cell::Array(ArrayCell::String(vec![Some("a".to_owned()), Some("b".to_owned())])),
             ]),
             TableRow::new(vec![
-                Cell::String("record2".to_string()),
+                Cell::String("record2".to_owned()),
                 Cell::I32(84),
                 Cell::Array(ArrayCell::F32(vec![])), // Empty float array
                 Cell::Bool(false),

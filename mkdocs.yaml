@@ -18,6 +18,7 @@ nav:
       - Postgres Replication Concepts: explanation/concepts.md
       - Architecture: explanation/architecture.md
       - Event Types: explanation/events.md
+      - Schema Changes: explanation/schema-changes.md
       - Extension Points: explanation/traits.md
 
 theme:

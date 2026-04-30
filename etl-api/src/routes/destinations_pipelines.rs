@@ -18,8 +18,8 @@ use crate::{
         destination::FullApiDestinationConfig, encryption::EncryptionKey,
         pipeline::FullApiPipelineConfig,
     },
-    db,
-    db::{
+    data,
+    data::{
         connect_to_source_database_from_api,
         destinations::{DestinationsDbError, destination_exists},
         destinations_pipelines::DestinationPipelinesDbError,
@@ -103,7 +103,7 @@ impl From<DestinationPipelinesDbError> for DestinationPipelineError {
     fn from(e: DestinationPipelinesDbError) -> Self {
         match e {
             DestinationPipelinesDbError::Database(err)
-                if db::utils::is_unique_constraint_violation_error(&err) =>
+                if data::utils::is_unique_constraint_violation_error(&err) =>
             {
                 DestinationPipelineError::DuplicatePipeline
             }
@@ -125,7 +125,7 @@ impl DestinationPipelineError {
             | DestinationPipelineError::PipelinesDb(PipelinesDbError::Database(_))
             | DestinationPipelineError::Database(_)
             | DestinationPipelineError::Validation(_)
-            | DestinationPipelineError::K8sCore(_) => "internal server error".to_string(),
+            | DestinationPipelineError::K8sCore(_) => "internal server error".to_owned(),
             // Every other message is ok, as they do not divulge sensitive information.
             e => e.to_string(),
         }
@@ -247,7 +247,7 @@ pub async fn create_destination_and_pipeline(
     let mut txn = pool.begin().await?;
 
     // Verify source exists
-    db::sources::read_source(
+    data::sources::read_source(
         txn.deref_mut(),
         tenant_id,
         destination_and_pipeline.source_id,
@@ -267,12 +267,12 @@ pub async fn create_destination_and_pipeline(
         return Err(DestinationPipelineError::PipelineLimitReached { limit: max_pipelines });
     }
 
-    let image = db::images::read_default_image(&**pool)
+    let image = data::images::read_default_image(&**pool)
         .await?
         .ok_or(DestinationPipelineError::NoDefaultImageFound)?;
 
     let (destination_id, pipeline_id) =
-        db::destinations_pipelines::create_destination_and_pipeline(
+        data::destinations_pipelines::create_destination_and_pipeline(
             &mut txn,
             tenant_id,
             destination_and_pipeline.source_id,
@@ -324,7 +324,7 @@ pub async fn update_destination_and_pipeline(
     let mut txn = pool.begin().await?;
 
     // Verify source exists
-    db::sources::read_source(
+    data::sources::read_source(
         txn.deref_mut(),
         tenant_id,
         destination_and_pipeline.source_id,
@@ -348,7 +348,7 @@ pub async fn update_destination_and_pipeline(
         ));
     }
 
-    db::destinations_pipelines::update_destination_and_pipeline(
+    data::destinations_pipelines::update_destination_and_pipeline(
         txn,
         tenant_id,
         destination_id,
@@ -419,7 +419,7 @@ pub async fn delete_destination_and_pipeline(
     }
 
     let tls_config = trusted_root_certs_cache.get_tls_config(api_config.source.tls_enabled).await?;
-    let source = db::sources::read_source_connection(
+    let source = data::sources::read_source_connection(
         &**pool,
         tenant_id,
         pipeline.source_id,
@@ -443,7 +443,7 @@ pub async fn delete_destination_and_pipeline(
         read_pipelines_for_destination_for_deletion(api_txn.deref_mut(), tenant_id, destination_id)
             .await?;
     let destination_deleted = if remaining_pipelines.is_empty() {
-        db::destinations::delete_destination(api_txn.deref_mut(), tenant_id, destination_id)
+        data::destinations::delete_destination(api_txn.deref_mut(), tenant_id, destination_id)
             .await?
             .ok_or(DestinationPipelineError::DestinationNotFound(destination_id))?;
         true

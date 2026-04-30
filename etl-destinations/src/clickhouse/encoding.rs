@@ -254,7 +254,7 @@ mod tests {
     #[test]
     fn cell_to_clickhouse_value_string() {
         if let ClickHouseValue::String(s) =
-            cell_to_clickhouse_value(Cell::String("hello".to_string()))
+            cell_to_clickhouse_value(Cell::String("hello".to_owned()))
         {
             assert_eq!(s, "hello");
         } else {
@@ -318,7 +318,7 @@ mod tests {
         assert_eq!(buf, u64::MAX.to_le_bytes());
 
         buf.clear();
-        rb_encode_value(ClickHouseValue::String("hi".to_string()), &mut buf).unwrap();
+        rb_encode_value(ClickHouseValue::String("hi".to_owned()), &mut buf).unwrap();
         assert_eq!(buf, [2, b'h', b'i']); // varint(2) + bytes
 
         buf.clear();

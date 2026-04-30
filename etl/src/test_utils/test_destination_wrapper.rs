@@ -12,6 +12,7 @@ use tokio::{
 };
 
 use crate::{
+    concurrency::TaskSet,
     destination::{
         Destination,
         async_result::{
@@ -92,6 +93,7 @@ impl<D> Inner<D> {
 #[derive(Clone)]
 pub struct TestDestinationWrapper<D> {
     inner: Arc<RwLock<Inner<D>>>,
+    tasks: TaskSet,
 }
 
 impl<D: fmt::Debug> fmt::Debug for TestDestinationWrapper<D> {
@@ -125,7 +127,7 @@ impl<D> TestDestinationWrapper<D> {
             shutdown_called: false,
         };
 
-        Self { inner: Arc::new(RwLock::new(inner)) }
+        Self { inner: Arc::new(RwLock::new(inner)), tasks: TaskSet::new() }
     }
 
     /// Returns all table rows written through the wrapper.
@@ -316,6 +318,8 @@ where
         events: Vec<Event>,
         async_result: WriteEventsResult<()>,
     ) -> EtlResult<()> {
+        self.tasks.try_reap().await?;
+
         let destination = {
             let inner = self.inner.read().await;
             inner.wrapped_destination.clone()
@@ -341,22 +345,24 @@ where
         // the method, so it's not needed to simulate asynchronous work to make
         // the code continue and do something else in the meanwhile.
         let inner = Arc::clone(&self.inner);
-        tokio::spawn(async move {
-            // We send the result back before doing the internal checks for this utility, to
-            // avoid checking before the apply loop received the result.
-            let result = pending_result.await.into_result();
-            let should_record_events = result.is_ok();
-            async_result.send(result);
+        self.tasks
+            .spawn(async move {
+                // We send the result back before doing the internal checks for this utility, to
+                // avoid checking before the apply loop received the result.
+                let result = pending_result.await.into_result();
+                let should_record_events = result.is_ok();
+                async_result.send(result);
 
-            {
-                let mut inner = inner.write().await;
-                if should_record_events {
-                    inner.events.extend(events);
+                {
+                    let mut inner = inner.write().await;
+                    if should_record_events {
+                        inner.events.extend(events);
+                    }
+
+                    inner.check_conditions();
                 }
-
-                inner.check_conditions();
-            }
-        });
+            })
+            .await;
 
         Ok(())
     }
@@ -367,13 +373,20 @@ where
             inner.wrapped_destination.clone()
         };
 
-        let result = destination.shutdown().await;
+        let mut errors = Vec::new();
+        if let Err(err) = destination.shutdown().await {
+            errors.push(err);
+        }
+
+        if let Err(err) = self.tasks.drain().await {
+            errors.push(err);
+        }
 
         {
             let mut inner = self.inner.write().await;
             inner.shutdown_called = true;
         }
 
-        result
+        if errors.is_empty() { Ok(()) } else { Err(errors.into()) }
     }
 }

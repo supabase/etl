@@ -8,6 +8,7 @@
 //! cycle.
 
 use std::{
+    collections::HashMap,
     fmt::{Display, Formatter},
     future::Future,
     pin::Pin,
@@ -31,13 +32,14 @@ use postgres_replication::{
 };
 use tokio::{
     pin,
-    sync::{Semaphore, watch},
+    sync::{Mutex, Semaphore, watch},
+    task::JoinHandle,
 };
 use tokio_postgres::types::PgLsn;
 use tracing::{debug, error, info, warn};
 
 #[cfg(feature = "failpoints")]
-use crate::failpoints::{SEND_STATUS_UPDATE_FP, etl_fail_point_active};
+use crate::failpoints::{FORCE_SCHEMA_CLEANUP_FP, SEND_STATUS_UPDATE_FP, etl_fail_point_active};
 use crate::{
     bail,
     concurrency::{
@@ -64,15 +66,20 @@ use crate::{
     metrics::{
         ACTION_LABEL, COMMAND_TAG_LABEL, DESTINATION_LABEL, ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
         ETL_DDL_SCHEMA_CHANGE_COLUMNS, ETL_DDL_SCHEMA_CHANGES_TOTAL, ETL_EVENTS_PROCESSED_TOTAL,
-        ETL_REPLICATION_MESSAGES_TOTAL, ETL_TRANSACTION_DURATION_SECONDS, ETL_TRANSACTION_SIZE,
+        ETL_REPLICATION_MESSAGES_TOTAL, ETL_SCHEMA_CLEANUP_ERRORS_TOTAL,
+        ETL_SCHEMA_CLEANUP_PRUNED_VERSIONS_TOTAL, ETL_SCHEMA_CLEANUP_TABLES_TOTAL,
+        ETL_SCHEMA_CLEANUPS_TOTAL, ETL_TRANSACTION_DURATION_SECONDS, ETL_TRANSACTION_SIZE,
         ETL_TRANSACTIONS_TOTAL, OUTCOME_LABEL, WORKER_TYPE_LABEL,
     },
     replication::{
-        EventsStream, SharedTableCache, StatusUpdateType,
+        EventsStream, SharedTableCache, StatusUpdateResult, StatusUpdateType,
         client::{PgReplicationClient, PostgresConnectionUpdate},
     },
     state::table::{TableReplicationError, TableReplicationPhase, TableReplicationPhaseType},
-    store::{schema::SchemaStore, state::StateStore},
+    store::{
+        schema::{SchemaStore, TableSchemaRetention},
+        state::StateStore,
+    },
     types::{Event, PipelineId, RelationEvent, SizeHint},
     workers::{TableSyncWorker, TableSyncWorkerPool, TableSyncWorkerState},
 };
@@ -100,6 +107,13 @@ const KEEP_ALIVE_DEADLINE_FRACTION: f64 = 0.6;
 /// deadline at that scale would make the apply loop spin sending forced keep
 /// alives, which is not operationally useful. We clamp to `100ms`.
 const MIN_KEEP_ALIVE_DEADLINE_DURATION: Duration = Duration::from_millis(100);
+/// Minimum interval between best-effort schema cleanup tasks during normal
+/// replication.
+///
+/// Cleanup is considered only after status updates, because those are the
+/// points where the slot's confirmed flush LSN may have advanced. The next
+/// deadline is scheduled when the previous cleanup task finishes.
+const SCHEMA_CLEANUP_INTERVAL: Duration = Duration::from_hours(1);
 
 /// Type of worker driving the apply loop.
 #[derive(Debug, Copy, Clone)]
@@ -348,6 +362,25 @@ impl HandleMessageResult {
     }
 }
 
+/// Running schema cleanup marker.
+///
+/// Finishing the marker schedules the next cleanup deadline. This keeps the
+/// deadline mutex private while allowing a cleanup run to reset it after it
+/// either finishes or decides not to spawn background work.
+#[derive(Debug)]
+struct SchemaCleanupRun {
+    /// Shared cleanup deadline owned by [`ApplyLoopState`].
+    deadline: Arc<Mutex<Option<Instant>>>,
+}
+
+impl SchemaCleanupRun {
+    /// Schedules the next cleanup after the current run finishes.
+    async fn finish(self) {
+        let mut deadline = self.deadline.lock().await;
+        *deadline = Some(Instant::now() + SCHEMA_CLEANUP_INTERVAL);
+    }
+}
+
 /// Mutable runtime state that evolves throughout the apply loop.
 #[derive(Debug)]
 struct ApplyLoopState {
@@ -400,6 +433,15 @@ struct ApplyLoopState {
     /// can always resolve the latest schema version whose snapshot is less
     /// than or equal to the worker's start point.
     bootstrap_snapshot_id: SnapshotId,
+    /// Replication slot name used by this loop.
+    slot_name: String,
+    /// Shared schema cleanup deadline.
+    ///
+    /// `None` means a cleanup run has claimed the deadline. The run resets this
+    /// after it either finishes or decides not to spawn background work.
+    schema_cleanup_deadline: Arc<Mutex<Option<Instant>>>,
+    /// Background schema cleanup task owned by this apply loop.
+    schema_cleanup_task: Option<JoinHandle<()>>,
 }
 
 impl ApplyLoopState {
@@ -408,6 +450,7 @@ impl ApplyLoopState {
         replication_progress: ReplicationProgress,
         keep_alive_deadline_duration: Duration,
         bootstrap_snapshot_id: SnapshotId,
+        slot_name: String,
     ) -> Self {
         Self {
             last_commit_end_lsn: None,
@@ -425,6 +468,11 @@ impl ApplyLoopState {
             exit_intent: None,
             processing_paused: false,
             bootstrap_snapshot_id,
+            slot_name,
+            schema_cleanup_deadline: Arc::new(Mutex::new(Some(
+                Instant::now() + SCHEMA_CLEANUP_INTERVAL,
+            ))),
+            schema_cleanup_task: None,
         }
     }
 
@@ -451,6 +499,11 @@ impl ApplyLoopState {
     /// state.
     fn bootstrap_snapshot_id(&self) -> SnapshotId {
         self.bootstrap_snapshot_id
+    }
+
+    /// Returns the replication slot name used by this loop.
+    fn slot_name(&self) -> &str {
+        &self.slot_name
     }
 
     /// Sets the batch flush deadline, if not already set.
@@ -521,6 +574,65 @@ impl ApplyLoopState {
         } else {
             self.replication_progress.last_flush_lsn
         }
+    }
+
+    /// Tries to mark schema cleanup as running if the deadline has elapsed.
+    async fn try_start_schema_cleanup(&self) -> Option<SchemaCleanupRun> {
+        let mut schema_cleanup_deadline = self.schema_cleanup_deadline.lock().await;
+        let deadline = (*schema_cleanup_deadline)?;
+
+        #[cfg(feature = "failpoints")]
+        if etl_fail_point_active(FORCE_SCHEMA_CLEANUP_FP) {
+            *schema_cleanup_deadline = None;
+
+            return Some(SchemaCleanupRun { deadline: Arc::clone(&self.schema_cleanup_deadline) });
+        }
+
+        if Instant::now() < deadline {
+            return None;
+        }
+
+        *schema_cleanup_deadline = None;
+
+        Some(SchemaCleanupRun { deadline: Arc::clone(&self.schema_cleanup_deadline) })
+    }
+
+    /// Moves the schema cleanup deadline into the past for tests.
+    #[cfg(test)]
+    async fn expire_schema_cleanup_deadline(&self) {
+        let mut schema_cleanup_deadline = self.schema_cleanup_deadline.lock().await;
+        *schema_cleanup_deadline =
+            Some(Instant::now() - SCHEMA_CLEANUP_INTERVAL - Duration::from_secs(1));
+    }
+
+    /// Returns `true` if a schema cleanup task is still recorded.
+    fn has_schema_cleanup_task(&self) -> bool {
+        self.schema_cleanup_task.is_some()
+    }
+
+    /// Takes the schema cleanup task if it has finished.
+    fn take_finished_schema_cleanup_task(&mut self) -> Option<JoinHandle<()>> {
+        if self.schema_cleanup_task.as_ref().is_some_and(JoinHandle::is_finished) {
+            self.schema_cleanup_task.take()
+        } else {
+            None
+        }
+    }
+
+    /// Takes the schema cleanup task, whether it has finished or not.
+    fn take_schema_cleanup_task(&mut self) -> Option<JoinHandle<()>> {
+        self.schema_cleanup_task.take()
+    }
+
+    /// Sets the currently running schema cleanup task.
+    fn set_schema_cleanup_task(&mut self, task: JoinHandle<()>) {
+        self.schema_cleanup_task = Some(task);
+    }
+
+    /// Schedules schema cleanup again after the configured interval.
+    async fn reset_schema_cleanup_deadline(&self) {
+        let mut schema_cleanup_deadline = self.schema_cleanup_deadline.lock().await;
+        *schema_cleanup_deadline = Some(Instant::now() + SCHEMA_CLEANUP_INTERVAL);
     }
 
     /// Returns true if the apply loop is in the middle of processing a
@@ -620,8 +732,6 @@ impl ApplyLoopState {
 /// [`ApplyLoop`] encapsulates the apply loop's immutable dependencies plus its
 /// mutable runtime state.
 pub(crate) struct ApplyLoop<S, D> {
-    /// Unique identifier for the pipeline.
-    pipeline_id: PipelineId,
     /// Shared immutable configuration.
     config: Arc<PipelineConfig>,
     /// Schema store for table schemas.
@@ -704,14 +814,16 @@ where
         let initial_progress =
             ReplicationProgress { last_received_lsn: start_lsn, last_flush_lsn: start_lsn };
 
+        let slot_name: String = worker_type.build_etl_replication_slot(pipeline_id).try_into()?;
+
         let state = ApplyLoopState::new(
             initial_progress,
             keep_alive_deadline_duration,
             bootstrap_snapshot_id,
+            slot_name,
         );
 
         let mut apply_loop = Self {
-            pipeline_id,
             config: Arc::clone(&config),
             schema_store,
             destination,
@@ -725,7 +837,20 @@ where
             state,
         };
 
-        apply_loop.run(replication_client, start_lsn).await
+        apply_loop.run_with_teardown(replication_client, start_lsn).await
+    }
+
+    /// Runs the apply loop and performs teardown work before returning.
+    async fn run_with_teardown(
+        &mut self,
+        replication_client: PgReplicationClient,
+        start_lsn: PgLsn,
+    ) -> EtlResult<ApplyLoopResult> {
+        let result = self.run(replication_client, start_lsn).await;
+
+        self.drain_schema_cleanup_task().await;
+
+        result
     }
 
     /// Runs the main event processing loop.
@@ -734,14 +859,12 @@ where
         replication_client: PgReplicationClient,
         start_lsn: PgLsn,
     ) -> EtlResult<ApplyLoopResult> {
-        let slot_name: String = self
-            .worker_context
-            .worker_type()
-            .build_etl_replication_slot(self.pipeline_id)
-            .try_into()?;
-
         let logical_replication_stream = replication_client
-            .start_logical_replication(&self.config.publication_name, &slot_name, start_lsn)
+            .start_logical_replication(
+                &self.config.publication_name,
+                self.state.slot_name(),
+                start_lsn,
+            )
             .await?;
 
         let events_stream = EventsStream::wrap(logical_replication_stream);
@@ -763,21 +886,21 @@ where
                 return Ok(self.finish_shutdown());
             }
 
-            let result = match &self.state.shutdown_state {
+            let iteration_result = match &self.state.shutdown_state {
                 ShutdownState::NoShutdown => {
                     self.run_active_iteration(
                         events_stream.as_mut(),
                         &replication_client,
                         &mut connection_updates_rx,
                     )
-                    .await?
+                    .await
                 }
                 ShutdownState::DrainingForShutdown => {
                     self.run_draining_shutdown_iteration(
                         events_stream.as_mut(),
                         &mut connection_updates_rx,
                     )
-                    .await?
+                    .await
                 }
                 ShutdownState::WaitingForPrimaryKeepAlive { acked_flush_lsn } => {
                     self.run_shutdown_wait_iteration(
@@ -785,9 +908,10 @@ where
                         &mut connection_updates_rx,
                         *acked_flush_lsn,
                     )
-                    .await?
+                    .await
                 }
             };
+            let result = iteration_result?;
 
             if let Some(result) = result {
                 return Ok(result);
@@ -1297,7 +1421,7 @@ where
         force: bool,
         status_update_type: StatusUpdateType,
     ) -> EtlResult<()> {
-        events_stream
+        let status_update_result = events_stream
             .as_mut()
             .stream_mut()
             .send_status_update(
@@ -1306,7 +1430,260 @@ where
                 force,
                 status_update_type,
             )
-            .await
+            .await?;
+
+        // If we sent a status update, we check if we can perform schema cleanup for old
+        // table schema snapshots.
+        if let StatusUpdateResult::Sent = status_update_result {
+            self.maybe_spawn_schema_cleanup().await?;
+        }
+
+        Ok(())
+    }
+
+    /// Attempts to spawn a best-effort task that prunes obsolete schema
+    /// versions.
+    ///
+    /// Cleanup is interval-gated on the status-update path, but the loop reads
+    /// the slot's actual `confirmed_flush_lsn` and determines table ownership
+    /// before spawning the pruning task. This avoids using the optimistic
+    /// status update boundary, which is acceptable for replaying data but
+    /// can break decoding if schema versions are pruned before PostgreSQL
+    /// stores the acknowledgement.
+    async fn maybe_spawn_schema_cleanup(&mut self) -> EtlResult<()> {
+        self.collect_finished_schema_cleanup_task().await;
+
+        if self.state.has_schema_cleanup_task() {
+            return Ok(());
+        }
+
+        let Some(schema_cleanup_run) = self.state.try_start_schema_cleanup().await else {
+            return Ok(());
+        };
+
+        let worker_type = self.worker_context.worker_type();
+
+        // We load the confirmed flush lsn from the slot that is being used by this
+        // apply loop.
+        let confirmed_flush_lsn = match self.get_actual_confirmed_flush_lsn().await {
+            Ok(confirmed_flush_lsn) => confirmed_flush_lsn,
+            Err(err) => {
+                warn!(
+                    %worker_type,
+                    error = %err,
+                    "skipping schema cleanup because slot progress could not be confirmed"
+                );
+
+                schema_cleanup_run.finish().await;
+
+                return Ok(());
+            }
+        };
+
+        // We get the table retention boundaries that this apply loop instance
+        // can safely prune up to. The map is frozen before the background task
+        // is spawned, so any concurrent progress can only make this cleanup
+        // conservative.
+        let table_schema_retentions =
+            match self.get_table_schema_retentions(confirmed_flush_lsn).await {
+                Ok(table_schema_retentions) => table_schema_retentions,
+                Err(err) => {
+                    error!(
+                        %worker_type,
+                        error = %err,
+                        "failed to determine schema cleanup ownership"
+                    );
+
+                    schema_cleanup_run.finish().await;
+
+                    return Ok(());
+                }
+            };
+
+        // If there are no tables to try to prune, we don't want to attempt it.
+        if table_schema_retentions.is_empty() {
+            schema_cleanup_run.finish().await;
+
+            return Ok(());
+        }
+
+        let schema_store = self.schema_store.clone();
+        let table_count = table_schema_retentions.len() as u64;
+
+        // At this point we know the retention boundaries to check for pruning,
+        // so we can offload this to a background task to not stall the worker.
+        // This is fine since those boundaries are frozen, so this task can take
+        // its time to do the job without interfering with the apply loop. Also,
+        // no more than one pruning task can occur at the same time within an
+        // apply loop instance, so this makes this even safer.
+        let cleanup_fut = async move {
+            match schema_store.prune_table_schemas(table_schema_retentions).await {
+                Ok(deleted_count) => {
+                    counter!(
+                        ETL_SCHEMA_CLEANUPS_TOTAL,
+                        WORKER_TYPE_LABEL => worker_type.as_str(),
+                    )
+                    .increment(1);
+
+                    counter!(
+                        ETL_SCHEMA_CLEANUP_TABLES_TOTAL,
+                        WORKER_TYPE_LABEL => worker_type.as_str(),
+                    )
+                    .increment(table_count);
+
+                    counter!(
+                        ETL_SCHEMA_CLEANUP_PRUNED_VERSIONS_TOTAL,
+                        WORKER_TYPE_LABEL => worker_type.as_str(),
+                    )
+                    .increment(deleted_count);
+
+                    if deleted_count > 0 {
+                        info!(
+                            %worker_type,
+                            deleted_count,
+                            "completed obsolete table schema cleanup"
+                        );
+                    }
+                }
+                Err(err) => {
+                    counter!(
+                        ETL_SCHEMA_CLEANUP_ERRORS_TOTAL,
+                        WORKER_TYPE_LABEL => worker_type.as_str(),
+                    )
+                    .increment(1);
+
+                    error!(
+                        %worker_type,
+                        error = %err,
+                        "failed to clean up obsolete table schemas"
+                    );
+                }
+            };
+        };
+
+        let cleanup_task = tokio::spawn(async move {
+            cleanup_fut.await;
+            schema_cleanup_run.finish().await;
+        });
+        self.state.set_schema_cleanup_task(cleanup_task);
+
+        Ok(())
+    }
+
+    /// Returns the slot-confirmed flush LSN to use as the cleanup boundary.
+    ///
+    /// Streaming status updates are optimistic: after sending one, the client
+    /// can keep processing and tolerate replay if PostgreSQL never stores the
+    /// acknowledgement. Schema cleanup is different because deleting a schema
+    /// that may still be needed on replay can stop decoding, so cleanup reads
+    /// `confirmed_flush_lsn` from the replication slot.
+    async fn get_actual_confirmed_flush_lsn(&self) -> EtlResult<PgLsn> {
+        let replication_client =
+            PgReplicationClient::connect(self.config.pg_connection.clone()).await?;
+        let slot = replication_client.get_slot(&self.state.slot_name).await?;
+
+        Ok(slot.confirmed_flush_lsn)
+    }
+
+    /// Returns schema retention boundaries for tables this worker may clean up.
+    ///
+    /// The shared cache is used only to find active tables, and the worker's
+    /// normal ownership check decides which of those tables can be considered.
+    /// A table's cleanup boundary is capped both by the slot's confirmed flush
+    /// LSN and by the earliest destination metadata snapshot that may still be
+    /// needed.
+    async fn get_table_schema_retentions(
+        &self,
+        confirmed_flush_lsn: PgLsn,
+    ) -> EtlResult<HashMap<TableId, TableSchemaRetention>> {
+        let active_table_ids = self.shared_table_cache.active_table_ids().await;
+        let mut table_schema_retentions = HashMap::with_capacity(active_table_ids.len());
+
+        for table_id in active_table_ids {
+            // Only prune snapshots for tables this worker would apply at this
+            // flush position. This keeps table sync workers limited to their
+            // assigned table while preserving apply worker ownership rules.
+            let should_apply_changes =
+                self.should_apply_changes(table_id, confirmed_flush_lsn).await?;
+
+            if !should_apply_changes {
+                continue;
+            }
+
+            // We try to load the destination table metadata to see if it is referencing a
+            // snapshot id that would be cleaned up if we were to just use the
+            // confirmed flush lsn as the boundary.
+            //
+            // If there is no metadata, we play it safe and skip the pruning for this table.
+            let Some(destination_table_metadata) =
+                self.schema_store.get_destination_table_metadata(table_id).await?
+            else {
+                debug!(
+                    %table_id,
+                    "skipping schema cleanup for table without destination metadata"
+                );
+
+                continue;
+            };
+
+            // We take the earliest snapshot id that is still needed by the destination
+            // table metadata.
+            let destination_retention_snapshot_id = destination_table_metadata
+                .previous_snapshot_id
+                .unwrap_or(destination_table_metadata.snapshot_id)
+                .min(destination_table_metadata.snapshot_id);
+
+            // We determine whether the confirmed flush lsn or the snapshot id is the new
+            // retention limit. We could use a normal PgLsn type for handling
+            // this, but to make the implementation more explicit we use an enum.
+            let retention = if confirmed_flush_lsn <= destination_retention_snapshot_id.into_inner()
+            {
+                TableSchemaRetention::ConfirmedFlushLsn(confirmed_flush_lsn)
+            } else {
+                TableSchemaRetention::SnapshotId(destination_retention_snapshot_id)
+            };
+
+            table_schema_retentions.insert(table_id, retention);
+        }
+
+        Ok(table_schema_retentions)
+    }
+
+    /// Records the result of a completed background schema cleanup task.
+    async fn handle_schema_cleanup_task_result(
+        &mut self,
+        cleanup_result: Result<(), tokio::task::JoinError>,
+    ) {
+        if let Err(err) = cleanup_result {
+            self.state.reset_schema_cleanup_deadline().await;
+
+            let worker_type = self.worker_context.worker_type();
+            counter!(
+                ETL_SCHEMA_CLEANUP_ERRORS_TOTAL,
+                WORKER_TYPE_LABEL => worker_type.as_str(),
+            )
+            .increment(1);
+
+            error!(
+                %worker_type,
+                error = %err,
+                "schema cleanup task failed before completing"
+            );
+        }
+    }
+
+    /// Collects the schema cleanup task if it has completed.
+    async fn collect_finished_schema_cleanup_task(&mut self) {
+        if let Some(cleanup_task) = self.state.take_finished_schema_cleanup_task() {
+            self.handle_schema_cleanup_task_result(cleanup_task.await).await;
+        }
+    }
+
+    /// Joins the background schema cleanup task before the apply loop exits.
+    async fn drain_schema_cleanup_task(&mut self) {
+        if let Some(cleanup_task) = self.state.take_schema_cleanup_task() {
+            self.handle_schema_cleanup_task_result(cleanup_task.await).await;
+        }
     }
 
     /// Waits for the pending flush result, if any.
@@ -1731,7 +2108,6 @@ where
 
             return Err(err);
         }
-
         // The next post-DDL DML will cause pgoutput to synthesize a fresh `RELATION`
         // message for this table. Record the new snapshot and clear any cached
         // mask now so relation handling rebuilds it from the schema version we
@@ -3150,4 +3526,37 @@ async fn get_replicated_table_schema(
     };
 
     Ok(replicated_table_schema)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn apply_loop_state() -> ApplyLoopState {
+        let start_lsn = PgLsn::from(100u64);
+        let replication_progress =
+            ReplicationProgress { last_received_lsn: start_lsn, last_flush_lsn: start_lsn };
+
+        ApplyLoopState::new(
+            replication_progress,
+            Duration::from_secs(1),
+            SnapshotId::from(start_lsn),
+            "test_slot".to_owned(),
+        )
+    }
+
+    #[tokio::test]
+    async fn schema_cleanup_uses_deadline_between_runs() {
+        let state = apply_loop_state();
+
+        state.expire_schema_cleanup_deadline().await;
+
+        let schema_cleanup_run = state.try_start_schema_cleanup().await.unwrap();
+
+        assert!(state.try_start_schema_cleanup().await.is_none());
+
+        schema_cleanup_run.finish().await;
+
+        assert!(state.try_start_schema_cleanup().await.is_none());
+    }
 }

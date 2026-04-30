@@ -72,7 +72,7 @@ async fn iceberg_supabase_destination_can_be_created() {
 
     // Act
     let destination = CreateDestinationRequest {
-        name: "Iceberg Supabase Destination".to_string(),
+        name: "Iceberg Supabase Destination".to_owned(),
         config: new_iceberg_supabase_destination_config(),
     };
     let response = app.create_destination(tenant_id, &destination).await;
@@ -163,7 +163,7 @@ async fn an_existing_iceberg_supabase_destination_can_be_updated() {
     let tenant_id = &create_tenant(&app).await;
 
     let destination = CreateDestinationRequest {
-        name: "Iceberg Supabase Destination".to_string(),
+        name: "Iceberg Supabase Destination".to_owned(),
         config: new_iceberg_supabase_destination_config(),
     };
     let response = app.create_destination(tenant_id, &destination).await;
@@ -173,7 +173,7 @@ async fn an_existing_iceberg_supabase_destination_can_be_updated() {
 
     // Act
     let updated_config = UpdateDestinationRequest {
-        name: "Iceberg Supabase Destination (Updated)".to_string(),
+        name: "Iceberg Supabase Destination (Updated)".to_owned(),
         config: updated_iceberg_supabase_destination_config(),
     };
     let response = app.update_destination(tenant_id, destination_id, &updated_config).await;

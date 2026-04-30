@@ -2,8 +2,8 @@
 
 use etl::{
     failpoints::{
-        SEND_STATUS_UPDATE_FP, START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP,
-        START_TABLE_SYNC_DURING_DATA_SYNC_FP,
+        FORCE_SCHEMA_CLEANUP_FP, SEND_STATUS_UPDATE_FP,
+        START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP, START_TABLE_SYNC_DURING_DATA_SYNC_FP,
     },
     state::table::{RetryPolicy, TableReplicationPhase, TableReplicationPhaseType},
     store::state::StateStore,
@@ -1029,6 +1029,82 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
 
     assert_eq!(grouped.get(&(EventType::Relation, table_id)).unwrap().len(), 2);
     assert_eq!(grouped.get(&(EventType::Insert, table_id)).unwrap().len(), 3);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn schema_snapshots_are_pruned_after_confirmed_progress() {
+    let _scenario = FailScenario::setup();
+
+    init_test_tracing();
+
+    let (database, table_name, table_id, store, destination, pipeline, _pipeline_id, _publication) =
+        create_database_and_ready_pipeline_with_table(
+            "schema_cleanup",
+            &[("name", "text not null"), ("age", "integer not null")],
+        )
+        .await;
+
+    let events_notify = destination
+        .wait_for_events_count(vec![(EventType::Relation, 2), (EventType::Insert, 2)])
+        .await;
+
+    database
+        .alter_table(
+            table_name.clone(),
+            &[TableModification::AddColumn {
+                name: "email",
+                data_type: "text not null default 'unknown@example.com'",
+            }],
+        )
+        .await
+        .unwrap();
+
+    database
+        .insert_values(
+            table_name.clone(),
+            &["name", "age", "email"],
+            &[&"Alice", &25, &"alice@example.com"],
+        )
+        .await
+        .unwrap();
+
+    database
+        .alter_table(table_name.clone(), &[TableModification::DropColumn { name: "age" }])
+        .await
+        .unwrap();
+
+    database
+        .insert_values(table_name.clone(), &["name", "email"], &[&"Bob", &"bob@example.com"])
+        .await
+        .unwrap();
+
+    events_notify.notified().await;
+
+    let table_schemas = store.get_table_schemas().await;
+    let before_snapshots = table_schemas.get(&table_id).unwrap();
+    assert_table_schema_snapshots(
+        before_snapshots,
+        &[
+            &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4)],
+            &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4), ("email", Type::TEXT)],
+            &[("id", Type::INT8), ("name", Type::TEXT), ("email", Type::TEXT)],
+        ],
+    );
+
+    let prune_notify = store.notify_on_table_schema_prune().await;
+
+    fail::cfg(FORCE_SCHEMA_CLEANUP_FP, "return").unwrap();
+
+    prune_notify.notified().await;
+
+    fail::remove(FORCE_SCHEMA_CLEANUP_FP);
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let table_schemas = store.get_table_schemas().await;
+    let after_snapshots = table_schemas.get(&table_id).unwrap();
+    assert_eq!(after_snapshots.len(), 1);
+    assert_eq!(after_snapshots[0], before_snapshots[2]);
 }
 
 #[tokio::test(flavor = "multi_thread")]

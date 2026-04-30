@@ -21,7 +21,7 @@ use crate::{
         destination::FullApiDestinationConfig, pipeline::FullApiPipelineConfig,
         source::StoredSourceConfig,
     },
-    db::connect_to_source_database_from_api,
+    data::connect_to_source_database_from_api,
     k8s::{TrustedRootCertsCache, TrustedRootCertsError},
     validation::validators::{DestinationValidator, PipelineValidator, SourceValidator},
 };

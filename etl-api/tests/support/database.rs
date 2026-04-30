@@ -79,10 +79,10 @@ pub async fn create_test_source_database(
         password: source_db_config
             .password
             .as_ref()
-            .map(|p| SerializableSecretString::from(p.expose_secret().to_string())),
+            .map(|p| SerializableSecretString::from(p.expose_secret().to_owned())),
     };
 
-    let source = CreateSourceRequest { name: "Test Source".to_string(), config: source_config };
+    let source = CreateSourceRequest { name: "Test Source".to_owned(), config: source_config };
 
     let response = app.create_source(tenant_id, &source).await;
     let response: CreateSourceResponse =

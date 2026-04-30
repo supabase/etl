@@ -254,7 +254,7 @@ async fn pipeline_replicator_resources_are_persisted_and_used_on_start() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn tenant_cannot_create_more_than_max_pipelines() {
-    use etl_api::db::pipelines::MAX_PIPELINES_PER_TENANT;
+    use etl_api::data::pipelines::MAX_PIPELINES_PER_TENANT;
 
     init_test_tracing();
     // Arrange
@@ -290,14 +290,14 @@ async fn pipeline_with_another_tenants_source_cannot_be_created() {
     create_default_image(&app).await;
     let tenant1_id = &create_tenant_with_id_and_name(
         &app,
-        "abcdefghijklmnopqrst".to_string(),
-        "tenant_1".to_string(),
+        "abcdefghijklmnopqrst".to_owned(),
+        "tenant_1".to_owned(),
     )
     .await;
     let tenant2_id = &create_tenant_with_id_and_name(
         &app,
-        "tsrqponmlkjihgfedcba".to_string(),
-        "tenant_2".to_string(),
+        "tsrqponmlkjihgfedcba".to_owned(),
+        "tenant_2".to_owned(),
     )
     .await;
     let source2_id = create_source(&app, tenant2_id).await;
@@ -323,14 +323,14 @@ async fn pipeline_with_another_tenants_destination_cannot_be_created() {
     create_default_image(&app).await;
     let tenant1_id = &create_tenant_with_id_and_name(
         &app,
-        "abcdefghijklmnopqrst".to_string(),
-        "tenant_1".to_string(),
+        "abcdefghijklmnopqrst".to_owned(),
+        "tenant_1".to_owned(),
     )
     .await;
     let tenant2_id = &create_tenant_with_id_and_name(
         &app,
-        "tsrqponmlkjihgfedcba".to_string(),
-        "tenant_2".to_string(),
+        "tsrqponmlkjihgfedcba".to_owned(),
+        "tenant_2".to_owned(),
     )
     .await;
     let source1_id = create_source(&app, tenant1_id).await;
@@ -542,14 +542,14 @@ async fn pipeline_with_another_tenants_source_cannot_be_updated() {
     create_default_image(&app).await;
     let tenant1_id = &create_tenant_with_id_and_name(
         &app,
-        "abcdefghijklmnopqrst".to_string(),
-        "tenant_1".to_string(),
+        "abcdefghijklmnopqrst".to_owned(),
+        "tenant_1".to_owned(),
     )
     .await;
     let tenant2_id = &create_tenant_with_id_and_name(
         &app,
-        "tsrqponmlkjihgfedcba".to_string(),
-        "tenant_2".to_string(),
+        "tsrqponmlkjihgfedcba".to_owned(),
+        "tenant_2".to_owned(),
     )
     .await;
     let source1_id = create_source(&app, tenant1_id).await;
@@ -586,14 +586,14 @@ async fn pipeline_with_another_tenants_destination_cannot_be_updated() {
     create_default_image(&app).await;
     let tenant1_id = &create_tenant_with_id_and_name(
         &app,
-        "abcdefghijklmnopqrst".to_string(),
-        "tenant_1".to_string(),
+        "abcdefghijklmnopqrst".to_owned(),
+        "tenant_1".to_owned(),
     )
     .await;
     let tenant2_id = &create_tenant_with_id_and_name(
         &app,
-        "tsrqponmlkjihgfedcba".to_string(),
-        "tenant_2".to_string(),
+        "tsrqponmlkjihgfedcba".to_owned(),
+        "tenant_2".to_owned(),
     )
     .await;
     let source1_id = create_source(&app, tenant1_id).await;
@@ -847,7 +847,7 @@ async fn pipeline_version_update_skips_k8s_reconcile_when_pipeline_is_stopped() 
     let source_id = create_source(&app, &tenant_id).await;
     let destination_id = create_destination(&app, &tenant_id).await;
     let old_image_id =
-        create_image_with_name(&app, "supabase/replicator:1.2.3".to_string(), true).await;
+        create_image_with_name(&app, "supabase/replicator:1.2.3".to_owned(), true).await;
 
     let pipeline_id = {
         let req =
@@ -859,7 +859,7 @@ async fn pipeline_version_update_skips_k8s_reconcile_when_pipeline_is_stopped() 
     };
 
     let default_image_id =
-        create_image_with_name(&app, "supabase/replicator:1.3.0".to_string(), true).await;
+        create_image_with_name(&app, "supabase/replicator:1.3.0".to_owned(), true).await;
 
     // Act
     let update_request = UpdatePipelineVersionRequest { version_id: default_image_id };
@@ -915,7 +915,7 @@ async fn update_version_fails_when_version_is_not_default() {
 
     // Create a non-default image
     let non_default_image_id =
-        create_image_with_name(&app, "another/image".to_string(), false).await;
+        create_image_with_name(&app, "another/image".to_owned(), false).await;
 
     // Act - attempt update with a non-default image id
     let update_request = UpdatePipelineVersionRequest { version_id: non_default_image_id };
@@ -1117,7 +1117,7 @@ async fn rollback_tables_with_full_reset_succeeds() {
     .await
     .unwrap();
 
-    // Insert destination metadata for this table
+    // Insert destination table metadata for this table.
     sqlx::query(
         "insert into etl.destination_tables_metadata (pipeline_id, table_id, \
          destination_table_id, snapshot_id, schema_status, replication_mask) values ($1, $2, \
@@ -1184,7 +1184,7 @@ async fn rollback_tables_with_full_reset_succeeds() {
     .unwrap();
     assert_eq!(schema_count_after, 1);
 
-    // Verify destination metadata was not deleted.
+    // Verify destination table metadata was not deleted.
     let metadata_count_after: i64 = sqlx::query_scalar(
         "select count(*) from etl.destination_tables_metadata where pipeline_id = $1 and table_id \
          = $2",
@@ -1220,7 +1220,7 @@ async fn rollback_to_init_keeps_schemas_and_metadata() {
     )
     .await;
 
-    // Insert table schema and mapping
+    // Insert table schema and destination table metadata.
     let table_schema_id: i64 = sqlx::query_scalar(
         "insert into etl.table_schemas (pipeline_id, table_id, schema_name, table_name) values \
          ($1, $2, 'test', 'test_users') returning id",
@@ -1279,7 +1279,7 @@ async fn rollback_to_init_keeps_schemas_and_metadata() {
     .unwrap();
     assert_eq!(schema_count, 1);
 
-    // Verify destination metadata was not deleted.
+    // Verify destination table metadata was not deleted.
     let metadata_count: i64 = sqlx::query_scalar(
         "select count(*) from etl.destination_tables_metadata where pipeline_id = $1 and table_id \
          = $2",
@@ -1316,7 +1316,7 @@ async fn rollback_to_non_starting_state_keeps_schemas_and_metadata() {
     )
     .await;
 
-    // Insert table schema and mapping
+    // Insert table schema and destination table metadata.
     let table_schema_id: i64 = sqlx::query_scalar(
         "insert into etl.table_schemas (pipeline_id, table_id, schema_name, table_name) values \
          ($1, $2, 'test', 'test_users') returning id",
@@ -1375,7 +1375,7 @@ async fn rollback_to_non_starting_state_keeps_schemas_and_metadata() {
     .unwrap();
     assert_eq!(schema_count, 1);
 
-    // Verify destination metadata was NOT deleted
+    // Verify destination table metadata was NOT deleted.
     let metadata_count: i64 = sqlx::query_scalar(
         "select count(*) from etl.destination_tables_metadata where pipeline_id = $1 and table_id \
          = $2",
@@ -1534,7 +1534,7 @@ async fn pipeline_version_returns_current_version_and_no_new_version_when_defaul
     let destination_id = create_destination(&app, &tenant_id).await;
 
     // Create a default image without a tag -> should parse to "latest".
-    create_image_with_name(&app, "some/image".to_string(), true).await;
+    create_image_with_name(&app, "some/image".to_owned(), true).await;
 
     let pipeline_id = {
         let req =
@@ -1567,7 +1567,7 @@ async fn pipeline_version_includes_new_default_version_when_available() {
 
     // Initial default image for pipeline creation
     let old_default_image_id =
-        create_image_with_name(&app, "supabase/replicator:1.2.3".to_string(), true).await;
+        create_image_with_name(&app, "supabase/replicator:1.2.3".to_owned(), true).await;
 
     let pipeline_id = {
         let req =
@@ -1580,7 +1580,7 @@ async fn pipeline_version_includes_new_default_version_when_available() {
 
     // Create a new default image (should flip default)
     let default_image_id =
-        create_image_with_name(&app, "supabase/replicator:1.3.0".to_string(), true).await;
+        create_image_with_name(&app, "supabase/replicator:1.3.0".to_owned(), true).await;
 
     // Act
     let response = app.get_pipeline_version(&tenant_id, pipeline_id).await;

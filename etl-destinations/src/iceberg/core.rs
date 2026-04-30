@@ -5,10 +5,10 @@ use std::{
 };
 
 use etl::{
+    concurrency::TaskSet,
     destination::{
         Destination,
         async_result::{TruncateTableResult, WriteEventsResult, WriteTableRowsResult},
-        task_set::DestinationTaskSet,
     },
     error::{ErrorKind, EtlResult},
     etl_error,
@@ -103,7 +103,7 @@ pub struct IcebergDestination<S> {
     client: IcebergClient,
     store: S,
     inner: Arc<Mutex<Inner>>,
-    streaming_tasks: DestinationTaskSet,
+    tasks: TaskSet,
 }
 
 /// Namespace in the destination where the tables will be copied
@@ -184,7 +184,7 @@ where
                 created_namespaces: HashSet::new(),
                 namespace,
             })),
-            streaming_tasks: DestinationTaskSet::new(),
+            tasks: TaskSet::new(),
         }
     }
 
@@ -492,7 +492,7 @@ where
 
         // We prepare the namespace.
         let namespace = schema_to_namespace(&table_name.schema);
-        let namespace = inner.namespace.get_or(&namespace).to_string();
+        let namespace = inner.namespace.get_or(&namespace).to_owned();
         let namespace = self.create_namespace_if_missing(inner, namespace).await?;
 
         // If the table is already in the cache, we skip the creation. This works
@@ -590,7 +590,7 @@ where
     }
 
     async fn shutdown(&self) -> EtlResult<()> {
-        self.streaming_tasks.shutdown().await
+        self.tasks.shutdown().await
     }
 
     /// Truncates the specified table by dropping and recreating it.
@@ -636,10 +636,10 @@ where
         events: Vec<Event>,
         async_result: WriteEventsResult<()>,
     ) -> EtlResult<()> {
-        self.streaming_tasks.try_reap().await?;
+        self.tasks.try_reap().await?;
 
         let destination = self.clone();
-        self.streaming_tasks
+        self.tasks
             .spawn(async move {
                 let result = destination.write_events(events).await;
                 async_result.send(result);
@@ -682,7 +682,7 @@ fn find_unique_column_name(column_schemas: &[ColumnSchema], new_column_name: &st
     loop {
         let final_name = match suffix {
             Some(s) => format!("{new_column_name}_{s}"),
-            None => new_column_name.to_string(),
+            None => new_column_name.to_owned(),
         };
 
         let found = column_schemas.iter().any(|cs| cs.name == final_name);
@@ -754,10 +754,10 @@ mod tests {
     fn replicated_schema(identity_type: IdentityType) -> ReplicatedTableSchema {
         let table_schema = Arc::new(TableSchema::new(
             TableId::new(1),
-            TableName::new("public".to_string(), "users".to_string()),
+            TableName::new("public".to_owned(), "users".to_owned()),
             vec![
-                ColumnSchema::new("id".to_string(), Type::INT4, -1, 1, Some(1), false),
-                ColumnSchema::new("name".to_string(), Type::TEXT, -1, 2, None, true),
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
+                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true),
             ],
         ));
         let replication_mask = ReplicationMask::all(&table_schema);
@@ -783,25 +783,18 @@ mod tests {
         nullable: bool,
         primary_key_ordinal: Option<i32>,
     ) -> ColumnSchema {
-        ColumnSchema::new(
-            name.to_string(),
-            typ,
-            -1,
-            ordinal_position,
-            primary_key_ordinal,
-            nullable,
-        )
+        ColumnSchema::new(name.to_owned(), typ, -1, ordinal_position, primary_key_ordinal, nullable)
     }
 
     #[test]
     fn can_find_unique_column_name() {
         let column_schemas = vec![];
         let col_name = find_unique_column_name(&column_schemas, CDC_OPERATION_COLUMN_NAME);
-        assert_eq!(col_name, CDC_OPERATION_COLUMN_NAME.to_string());
+        assert_eq!(col_name, CDC_OPERATION_COLUMN_NAME.to_owned());
 
         let column_schemas = vec![test_column("id", Type::BOOL, 1, false, Some(1))];
         let col_name = find_unique_column_name(&column_schemas, CDC_OPERATION_COLUMN_NAME);
-        assert_eq!(col_name, CDC_OPERATION_COLUMN_NAME.to_string());
+        assert_eq!(col_name, CDC_OPERATION_COLUMN_NAME.to_owned());
 
         let column_schemas = vec![
             test_column("id", Type::BOOL, 1, false, Some(1)),

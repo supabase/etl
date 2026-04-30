@@ -41,7 +41,7 @@ fn test_column(
     primary_key: bool,
 ) -> ColumnSchema {
     ColumnSchema::new(
-        name.to_string(),
+        name.to_owned(),
         typ,
         -1,
         ordinal_position,
@@ -66,7 +66,7 @@ fn column_schemas_from_ddl_message(message: &JsonValue) -> Vec<ColumnSchema> {
         .iter()
         .map(|column| {
             ColumnSchema::new(
-                column["attname"].as_str().unwrap().to_string(),
+                column["attname"].as_str().unwrap().to_owned(),
                 convert_type_oid_to_type(column["atttypid"].as_u64().unwrap() as u32),
                 column["atttypmod"].as_i64().unwrap() as i32,
                 column["attnum"].as_i64().unwrap() as i32,
@@ -234,7 +234,7 @@ async fn collect_stream_markers(
                         column["attname"]
                             .as_str()
                             .expect("ddl message column should have attname")
-                            .to_string()
+                            .to_owned()
                     })
                     .collect();
 
@@ -245,7 +245,7 @@ async fn collect_stream_markers(
                     .columns()
                     .iter()
                     .map(|column| {
-                        column.name().expect("relation column name should decode").to_string()
+                        column.name().expect("relation column name should decode").to_owned()
                     })
                     .collect();
 
@@ -343,7 +343,7 @@ fn observed_tuple_cells(tuple: &postgres_replication::protocol::Tuple) -> Vec<Ob
                 ObservedTupleCell::UnchangedToast
             }
             postgres_replication::protocol::TupleData::Text(bytes) => {
-                ObservedTupleCell::Text(std::str::from_utf8(bytes).unwrap().to_string())
+                ObservedTupleCell::Text(std::str::from_utf8(bytes).unwrap().to_owned())
             }
             postgres_replication::protocol::TupleData::Binary(_) => {
                 panic!("unexpected binary tuple data in test")
@@ -1854,28 +1854,22 @@ async fn same_transaction_ddl_messages_precede_relation_and_insert_in_pgoutput()
         vec![
             StreamMarker::Begin,
             StreamMarker::DdlMessage(vec![
-                "id".to_string(),
-                "name".to_string(),
-                "age".to_string(),
-                "status".to_string(),
+                "id".to_owned(),
+                "name".to_owned(),
+                "age".to_owned(),
+                "status".to_owned(),
             ]),
             StreamMarker::Relation(vec![
-                "id".to_string(),
-                "name".to_string(),
-                "age".to_string(),
-                "status".to_string(),
+                "id".to_owned(),
+                "name".to_owned(),
+                "age".to_owned(),
+                "status".to_owned(),
             ]),
             StreamMarker::Insert,
-            StreamMarker::DdlMessage(vec![
-                "id".to_string(),
-                "name".to_string(),
-                "status".to_string(),
-            ]),
-            StreamMarker::Relation(vec![
-                "id".to_string(),
-                "name".to_string(),
-                "status".to_string(),
-            ]),
+            StreamMarker::DdlMessage(
+                vec!["id".to_owned(), "name".to_owned(), "status".to_owned(),]
+            ),
+            StreamMarker::Relation(vec!["id".to_owned(), "name".to_owned(), "status".to_owned(),]),
             StreamMarker::Insert,
             StreamMarker::Commit,
         ]
@@ -2047,7 +2041,7 @@ async fn table_copy_stream_with_ctid_partition() {
     let (transaction, _) =
         client.create_slot_with_transaction(&test_slot_name("my_slot")).await.unwrap();
 
-    let column_schemas = &[ColumnSchema::new("age".to_string(), Type::INT4, -1, 1, None, true)];
+    let column_schemas = &[ColumnSchema::new("age".to_owned(), Type::INT4, -1, 1, None, true)];
 
     let partitions = transaction.plan_ctid_partitions(table_id, 4).await.unwrap();
     assert!(!partitions.is_empty(), "expected at least one partition for non-empty table");
@@ -2090,10 +2084,10 @@ async fn pgoutput_default_replica_identity_uses_replica_identity_not_primary_key
                 key_tuple: None,
                 old_tuple: None,
                 new_tuple: vec![
-                    ObservedTupleCell::Text("1".to_string()),
-                    ObservedTupleCell::Text("alice".to_string()),
-                    ObservedTupleCell::Text("smith".to_string()),
-                    ObservedTupleCell::Text("vienna".to_string()),
+                    ObservedTupleCell::Text("1".to_owned()),
+                    ObservedTupleCell::Text("alice".to_owned()),
+                    ObservedTupleCell::Text("smith".to_owned()),
+                    ObservedTupleCell::Text("vienna".to_owned()),
                     ObservedTupleCell::UnchangedToast,
                 ],
             },
@@ -2101,35 +2095,35 @@ async fn pgoutput_default_replica_identity_uses_replica_identity_not_primary_key
                 key_tuple: None,
                 old_tuple: None,
                 new_tuple: vec![
-                    ObservedTupleCell::Text("1".to_string()),
-                    ObservedTupleCell::Text("alice".to_string()),
-                    ObservedTupleCell::Text("smith".to_string()),
-                    ObservedTupleCell::Text("vienna".to_string()),
+                    ObservedTupleCell::Text("1".to_owned()),
+                    ObservedTupleCell::Text("alice".to_owned()),
+                    ObservedTupleCell::Text("smith".to_owned()),
+                    ObservedTupleCell::Text("vienna".to_owned()),
                     ObservedTupleCell::Text("b".repeat(REPLICA_IDENTITY_LARGE_TEXT_SIZE_BYTES),),
                 ],
             },
             ObservedChangeMessage::Update {
                 key_tuple: Some(vec![
-                    ObservedTupleCell::Text("1".to_string()),
+                    ObservedTupleCell::Text("1".to_owned()),
                     ObservedTupleCell::Null,
-                    ObservedTupleCell::Text("smith".to_string()),
+                    ObservedTupleCell::Text("smith".to_owned()),
                     ObservedTupleCell::Null,
                     ObservedTupleCell::Null,
                 ]),
                 old_tuple: None,
                 new_tuple: vec![
-                    ObservedTupleCell::Text("1".to_string()),
-                    ObservedTupleCell::Text("alice".to_string()),
-                    ObservedTupleCell::Text("smithers".to_string()),
-                    ObservedTupleCell::Text("vienna".to_string()),
+                    ObservedTupleCell::Text("1".to_owned()),
+                    ObservedTupleCell::Text("alice".to_owned()),
+                    ObservedTupleCell::Text("smithers".to_owned()),
+                    ObservedTupleCell::Text("vienna".to_owned()),
                     ObservedTupleCell::Text("c".repeat(REPLICA_IDENTITY_LARGE_TEXT_SIZE_BYTES),),
                 ],
             },
             ObservedChangeMessage::Delete {
                 key_tuple: Some(vec![
-                    ObservedTupleCell::Text("1".to_string()),
+                    ObservedTupleCell::Text("1".to_owned()),
                     ObservedTupleCell::Null,
-                    ObservedTupleCell::Text("smithers".to_string()),
+                    ObservedTupleCell::Text("smithers".to_owned()),
                     ObservedTupleCell::Null,
                     ObservedTupleCell::Null,
                 ]),
@@ -2150,10 +2144,10 @@ async fn pgoutput_using_index_replica_identity_tracks_alternative_identity_colum
                 key_tuple: None,
                 old_tuple: None,
                 new_tuple: vec![
-                    ObservedTupleCell::Text("1".to_string()),
-                    ObservedTupleCell::Text("alice".to_string()),
-                    ObservedTupleCell::Text("smith".to_string()),
-                    ObservedTupleCell::Text("vienna".to_string()),
+                    ObservedTupleCell::Text("1".to_owned()),
+                    ObservedTupleCell::Text("alice".to_owned()),
+                    ObservedTupleCell::Text("smith".to_owned()),
+                    ObservedTupleCell::Text("vienna".to_owned()),
                     ObservedTupleCell::UnchangedToast,
                 ],
             },
@@ -2161,35 +2155,35 @@ async fn pgoutput_using_index_replica_identity_tracks_alternative_identity_colum
                 key_tuple: None,
                 old_tuple: None,
                 new_tuple: vec![
-                    ObservedTupleCell::Text("1".to_string()),
-                    ObservedTupleCell::Text("alice".to_string()),
-                    ObservedTupleCell::Text("smith".to_string()),
-                    ObservedTupleCell::Text("vienna".to_string()),
+                    ObservedTupleCell::Text("1".to_owned()),
+                    ObservedTupleCell::Text("alice".to_owned()),
+                    ObservedTupleCell::Text("smith".to_owned()),
+                    ObservedTupleCell::Text("vienna".to_owned()),
                     ObservedTupleCell::Text("b".repeat(REPLICA_IDENTITY_LARGE_TEXT_SIZE_BYTES),),
                 ],
             },
             ObservedChangeMessage::Update {
                 key_tuple: Some(vec![
                     ObservedTupleCell::Null,
-                    ObservedTupleCell::Text("alice".to_string()),
-                    ObservedTupleCell::Text("smith".to_string()),
+                    ObservedTupleCell::Text("alice".to_owned()),
+                    ObservedTupleCell::Text("smith".to_owned()),
                     ObservedTupleCell::Null,
                     ObservedTupleCell::Null,
                 ]),
                 old_tuple: None,
                 new_tuple: vec![
-                    ObservedTupleCell::Text("1".to_string()),
-                    ObservedTupleCell::Text("alicia".to_string()),
-                    ObservedTupleCell::Text("smith".to_string()),
-                    ObservedTupleCell::Text("vienna".to_string()),
+                    ObservedTupleCell::Text("1".to_owned()),
+                    ObservedTupleCell::Text("alicia".to_owned()),
+                    ObservedTupleCell::Text("smith".to_owned()),
+                    ObservedTupleCell::Text("vienna".to_owned()),
                     ObservedTupleCell::Text("c".repeat(REPLICA_IDENTITY_LARGE_TEXT_SIZE_BYTES),),
                 ],
             },
             ObservedChangeMessage::Delete {
                 key_tuple: Some(vec![
                     ObservedTupleCell::Null,
-                    ObservedTupleCell::Text("alicia".to_string()),
-                    ObservedTupleCell::Text("smith".to_string()),
+                    ObservedTupleCell::Text("alicia".to_owned()),
+                    ObservedTupleCell::Text("smith".to_owned()),
                     ObservedTupleCell::Null,
                     ObservedTupleCell::Null,
                 ]),
@@ -2209,61 +2203,61 @@ async fn pgoutput_full_replica_identity_always_sends_full_old_rows() {
             ObservedChangeMessage::Update {
                 key_tuple: None,
                 old_tuple: Some(vec![
-                    ObservedTupleCell::Text("1".to_string()),
-                    ObservedTupleCell::Text("alice".to_string()),
-                    ObservedTupleCell::Text("smith".to_string()),
-                    ObservedTupleCell::Text("rome".to_string()),
+                    ObservedTupleCell::Text("1".to_owned()),
+                    ObservedTupleCell::Text("alice".to_owned()),
+                    ObservedTupleCell::Text("smith".to_owned()),
+                    ObservedTupleCell::Text("rome".to_owned()),
                     ObservedTupleCell::Text("a".repeat(REPLICA_IDENTITY_LARGE_TEXT_SIZE_BYTES),),
                 ]),
                 new_tuple: vec![
-                    ObservedTupleCell::Text("1".to_string()),
-                    ObservedTupleCell::Text("alice".to_string()),
-                    ObservedTupleCell::Text("smith".to_string()),
-                    ObservedTupleCell::Text("vienna".to_string()),
+                    ObservedTupleCell::Text("1".to_owned()),
+                    ObservedTupleCell::Text("alice".to_owned()),
+                    ObservedTupleCell::Text("smith".to_owned()),
+                    ObservedTupleCell::Text("vienna".to_owned()),
                     ObservedTupleCell::UnchangedToast,
                 ],
             },
             ObservedChangeMessage::Update {
                 key_tuple: None,
                 old_tuple: Some(vec![
-                    ObservedTupleCell::Text("1".to_string()),
-                    ObservedTupleCell::Text("alice".to_string()),
-                    ObservedTupleCell::Text("smith".to_string()),
-                    ObservedTupleCell::Text("vienna".to_string()),
+                    ObservedTupleCell::Text("1".to_owned()),
+                    ObservedTupleCell::Text("alice".to_owned()),
+                    ObservedTupleCell::Text("smith".to_owned()),
+                    ObservedTupleCell::Text("vienna".to_owned()),
                     ObservedTupleCell::Text("a".repeat(REPLICA_IDENTITY_LARGE_TEXT_SIZE_BYTES),),
                 ]),
                 new_tuple: vec![
-                    ObservedTupleCell::Text("1".to_string()),
-                    ObservedTupleCell::Text("alice".to_string()),
-                    ObservedTupleCell::Text("smith".to_string()),
-                    ObservedTupleCell::Text("vienna".to_string()),
+                    ObservedTupleCell::Text("1".to_owned()),
+                    ObservedTupleCell::Text("alice".to_owned()),
+                    ObservedTupleCell::Text("smith".to_owned()),
+                    ObservedTupleCell::Text("vienna".to_owned()),
                     ObservedTupleCell::Text("b".repeat(REPLICA_IDENTITY_LARGE_TEXT_SIZE_BYTES),),
                 ],
             },
             ObservedChangeMessage::Update {
                 key_tuple: None,
                 old_tuple: Some(vec![
-                    ObservedTupleCell::Text("1".to_string()),
-                    ObservedTupleCell::Text("alice".to_string()),
-                    ObservedTupleCell::Text("smith".to_string()),
-                    ObservedTupleCell::Text("vienna".to_string()),
+                    ObservedTupleCell::Text("1".to_owned()),
+                    ObservedTupleCell::Text("alice".to_owned()),
+                    ObservedTupleCell::Text("smith".to_owned()),
+                    ObservedTupleCell::Text("vienna".to_owned()),
                     ObservedTupleCell::Text("b".repeat(REPLICA_IDENTITY_LARGE_TEXT_SIZE_BYTES),),
                 ]),
                 new_tuple: vec![
-                    ObservedTupleCell::Text("1".to_string()),
-                    ObservedTupleCell::Text("alice".to_string()),
-                    ObservedTupleCell::Text("smithers".to_string()),
-                    ObservedTupleCell::Text("vienna".to_string()),
+                    ObservedTupleCell::Text("1".to_owned()),
+                    ObservedTupleCell::Text("alice".to_owned()),
+                    ObservedTupleCell::Text("smithers".to_owned()),
+                    ObservedTupleCell::Text("vienna".to_owned()),
                     ObservedTupleCell::Text("c".repeat(REPLICA_IDENTITY_LARGE_TEXT_SIZE_BYTES),),
                 ],
             },
             ObservedChangeMessage::Delete {
                 key_tuple: None,
                 old_tuple: Some(vec![
-                    ObservedTupleCell::Text("1".to_string()),
-                    ObservedTupleCell::Text("alice".to_string()),
-                    ObservedTupleCell::Text("smithers".to_string()),
-                    ObservedTupleCell::Text("vienna".to_string()),
+                    ObservedTupleCell::Text("1".to_owned()),
+                    ObservedTupleCell::Text("alice".to_owned()),
+                    ObservedTupleCell::Text("smithers".to_owned()),
+                    ObservedTupleCell::Text("vienna".to_owned()),
                     ObservedTupleCell::Text("c".repeat(REPLICA_IDENTITY_LARGE_TEXT_SIZE_BYTES),),
                 ]),
             },

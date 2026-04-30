@@ -18,7 +18,7 @@ use crate::support::test_app::TestApp;
 
 /// Creates a default image and returns its id.
 pub async fn create_default_image(app: &TestApp) -> i64 {
-    create_image_with_name(app, "some/image".to_string(), true).await
+    create_image_with_name(app, "some/image".to_owned(), true).await
 }
 
 /// Creates an image with the provided name and default flag and returns its id.
@@ -37,21 +37,21 @@ pub mod destinations {
 
     /// Returns a default destination name.
     pub fn new_name() -> String {
-        "BigQuery Destination".to_string()
+        "BigQuery Destination".to_owned()
     }
 
     /// Returns an updated destination name.
     pub fn updated_name() -> String {
-        "BigQuery Destination (Updated)".to_string()
+        "BigQuery Destination (Updated)".to_owned()
     }
 
     /// Returns an updated destination config.
     pub fn updated_destination_config() -> FullApiDestinationConfig {
         FullApiDestinationConfig::BigQuery {
-            project_id: "project-id-updated".to_string(),
-            dataset_id: "dataset-id-updated".to_string(),
+            project_id: "project-id-updated".to_owned(),
+            dataset_id: "dataset-id-updated".to_owned(),
             service_account_key: SerializableSecretString::from(
-                "service-account-key-updated".to_string(),
+                "service-account-key-updated".to_owned(),
             ),
             max_staleness_mins: Some(10),
             connection_pool_size: Some(1),
@@ -61,9 +61,9 @@ pub mod destinations {
     /// Returns a default destination config (BigQuery).
     pub fn new_bigquery_destination_config() -> FullApiDestinationConfig {
         FullApiDestinationConfig::BigQuery {
-            project_id: "project-id".to_string(),
-            dataset_id: "dataset-id".to_string(),
-            service_account_key: SerializableSecretString::from("service-account-key".to_string()),
+            project_id: "project-id".to_owned(),
+            dataset_id: "dataset-id".to_owned(),
+            service_account_key: SerializableSecretString::from("service-account-key".to_owned()),
             max_staleness_mins: None,
             connection_pool_size: Some(1),
         }
@@ -75,17 +75,17 @@ pub mod destinations {
 
         FullApiDestinationConfig::Iceberg {
             config: FullApiIcebergConfig::Supabase {
-                project_ref: "abcdefghijklmnopqrst".to_string(),
-                warehouse_name: "my-warehouse".to_string(),
-                namespace: Some("my-namespace".to_string()),
+                project_ref: "abcdefghijklmnopqrst".to_owned(),
+                warehouse_name: "my-warehouse".to_owned(),
+                namespace: Some("my-namespace".to_owned()),
                 catalog_token: SerializableSecretString::from(
-                    "eyJ0eXAiOiJKV1QiLCJhbGciOiJFUzI1NiIsImtpZCI6IjFkNzFjMGEyNmIxMDFjODQ5ZTkxZmQ1NjdjYjA5NTJmIn0.eyJleHAiOjIwNzA3MTcxNjAsImlhdCI6MTc1NjE0NTE1MCwiaXNzIjoic3VwYWJhc2UiLCJyZWYiOiJhYmNkZWZnaGlqbGttbm9wcXJzdCIsInJvbGUiOiJzZXJ2aWNlX3JvbGUifQ.YdTWkkIvwjSkXot3NC07xyjPjGWQMNzLq5EPzumzrdLzuHrj-zuzI-nlyQtQ5V7gZauysm-wGwmpztRXfPc3AQ".to_string()
+                    "eyJ0eXAiOiJKV1QiLCJhbGciOiJFUzI1NiIsImtpZCI6IjFkNzFjMGEyNmIxMDFjODQ5ZTkxZmQ1NjdjYjA5NTJmIn0.eyJleHAiOjIwNzA3MTcxNjAsImlhdCI6MTc1NjE0NTE1MCwiaXNzIjoic3VwYWJhc2UiLCJyZWYiOiJhYmNkZWZnaGlqbGttbm9wcXJzdCIsInJvbGUiOiJzZXJ2aWNlX3JvbGUifQ.YdTWkkIvwjSkXot3NC07xyjPjGWQMNzLq5EPzumzrdLzuHrj-zuzI-nlyQtQ5V7gZauysm-wGwmpztRXfPc3AQ".to_owned()
                 ),
-                s3_access_key_id: SerializableSecretString::from("9156667efc2c70d89af6588da86d2924".to_string()),
+                s3_access_key_id: SerializableSecretString::from("9156667efc2c70d89af6588da86d2924".to_owned()),
                 s3_secret_access_key: SerializableSecretString::from(
-                    "ca833e890916d848c69135924bcd75e5909184814a0ebc6c988937ee094120d4".to_string()
+                    "ca833e890916d848c69135924bcd75e5909184814a0ebc6c988937ee094120d4".to_owned()
                 ),
-                s3_region: "ap-southeast-1".to_string(),
+                s3_region: "ap-southeast-1".to_owned(),
             },
         }
     }
@@ -96,17 +96,17 @@ pub mod destinations {
 
         FullApiDestinationConfig::Iceberg {
             config: FullApiIcebergConfig::Supabase {
-                project_ref: "tsrqponmlkjihgfedcba".to_string(),
-                warehouse_name: "my-updated-warehouse".to_string(),
-                namespace: Some("my-updated-namespace".to_string()),
+                project_ref: "tsrqponmlkjihgfedcba".to_owned(),
+                warehouse_name: "my-updated-warehouse".to_owned(),
+                namespace: Some("my-updated-namespace".to_owned()),
                 catalog_token: SerializableSecretString::from(
-                    "eyJ0eXAiOiJKV1QiLCJhbGciOiJFUzI1NiIsImtpZCI6IjJlOGQxZDNjN2MyMTJkOTU4ZmEyOGU2ZDhjZDEwYTMzIn0.eyJleHAiOjIwNzA3MTcxNjAsImlhdCI6MTc1NjE0NTE1MCwiaXNzIjoic3VwYWJhc2UiLCJyZWYiOiJ0c3JxcG9ubWxramloZ2ZlZGNiYSIsInJvbGUiOiJzZXJ2aWNlX3JvbGUifQ.UpdatedTokenSignatureForTesting".to_string()
+                    "eyJ0eXAiOiJKV1QiLCJhbGciOiJFUzI1NiIsImtpZCI6IjJlOGQxZDNjN2MyMTJkOTU4ZmEyOGU2ZDhjZDEwYTMzIn0.eyJleHAiOjIwNzA3MTcxNjAsImlhdCI6MTc1NjE0NTE1MCwiaXNzIjoic3VwYWJhc2UiLCJyZWYiOiJ0c3JxcG9ubWxramloZ2ZlZGNiYSIsInJvbGUiOiJzZXJ2aWNlX3JvbGUifQ.UpdatedTokenSignatureForTesting".to_owned()
                 ),
-                s3_access_key_id: SerializableSecretString::from("updated9156667efc2c70d89af6588da86d2924".to_string()),
+                s3_access_key_id: SerializableSecretString::from("updated9156667efc2c70d89af6588da86d2924".to_owned()),
                 s3_secret_access_key: SerializableSecretString::from(
-                    "updatedca833e890916d848c69135924bcd75e5909184814a0ebc6c988937ee094120d4".to_string()
+                    "updatedca833e890916d848c69135924bcd75e5909184814a0ebc6c988937ee094120d4".to_owned()
                 ),
-                s3_region: "us-west-2".to_string(),
+                s3_region: "us-west-2".to_owned(),
             },
         }
     }
@@ -144,33 +144,33 @@ pub mod sources {
 
     /// Returns a default source name.
     pub fn new_name() -> String {
-        "Postgres Source".to_string()
+        "Postgres Source".to_owned()
     }
 
     /// Returns a default Postgres source config.
     pub fn new_source_config() -> FullApiSourceConfig {
         FullApiSourceConfig {
-            host: "localhost".to_string(),
+            host: "localhost".to_owned(),
             port: 5432,
-            name: "postgres".to_string(),
-            username: "postgres".to_string(),
-            password: Some(SerializableSecretString::from("postgres".to_string())),
+            name: "postgres".to_owned(),
+            username: "postgres".to_owned(),
+            password: Some(SerializableSecretString::from("postgres".to_owned())),
         }
     }
 
     /// Returns an updated source name.
     pub fn updated_name() -> String {
-        "Postgres Source (Updated)".to_string()
+        "Postgres Source (Updated)".to_owned()
     }
 
     /// Returns an updated Postgres source config.
     pub fn updated_source_config() -> FullApiSourceConfig {
         FullApiSourceConfig {
-            host: "example.com".to_string(),
+            host: "example.com".to_owned(),
             port: 2345,
-            name: "sergtsop".to_string(),
-            username: "sergtsop".to_string(),
-            password: Some(SerializableSecretString::from("sergtsop".to_string())),
+            name: "sergtsop".to_owned(),
+            username: "sergtsop".to_owned(),
+            password: Some(SerializableSecretString::from("sergtsop".to_owned())),
         }
     }
 
@@ -204,8 +204,8 @@ pub mod tenants {
     pub async fn create_tenant(app: &TestApp) -> String {
         create_tenant_with_id_and_name(
             app,
-            "abcdefghijklmnopqrst".to_string(),
-            "NewTenant".to_string(),
+            "abcdefghijklmnopqrst".to_owned(),
+            "NewTenant".to_owned(),
         )
         .await
     }

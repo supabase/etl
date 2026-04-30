@@ -12,8 +12,8 @@ use utoipa::ToSchema;
 
 use crate::{
     configs::{destination::FullApiDestinationConfig, encryption::EncryptionKey},
-    db,
-    db::{
+    data,
+    data::{
         destinations::{DestinationsDbError, destination_exists},
         pipelines::{PipelinesDbError, read_pipelines_for_destination_for_deletion},
     },
@@ -64,16 +64,16 @@ impl DestinationError {
             // Do not expose internal database details in error messages.
             DestinationError::DestinationsDb(DestinationsDbError::Database(_))
             | DestinationError::PipelinesDb(PipelinesDbError::Database(_))
-            | DestinationError::K8sCore(_) => "internal server error".to_string(),
+            | DestinationError::K8sCore(_) => "internal server error".to_owned(),
             // Do not expose validation error details as they may contain credential info.
             DestinationError::Validation(ValidationError::BigQuery(_)) => {
-                "BigQuery validation failed".to_string()
+                "BigQuery validation failed".to_owned()
             }
             DestinationError::Validation(ValidationError::Iceberg(_)) => {
-                "Iceberg validation failed".to_string()
+                "Iceberg validation failed".to_owned()
             }
             DestinationError::Validation(ValidationError::Database(_)) => {
-                "database validation failed".to_string()
+                "database validation failed".to_owned()
             }
             // Every other message is ok, as they do not divulge sensitive information.
             e => e.to_string(),
@@ -196,7 +196,7 @@ pub async fn create_destination(
     let tenant_id = extract_tenant_id(&req)?;
     let destination = destination.into_inner();
 
-    let id = db::destinations::create_destination(
+    let id = data::destinations::create_destination(
         &**pool,
         tenant_id,
         &destination.name,
@@ -235,7 +235,7 @@ pub async fn read_destination(
     let destination_id = destination_id.into_inner();
 
     let response =
-        db::destinations::read_destination(&**pool, tenant_id, destination_id, &encryption_key)
+        data::destinations::read_destination(&**pool, tenant_id, destination_id, &encryption_key)
             .await?
             .map(|destination| ReadDestinationResponse {
                 id: destination.id,
@@ -275,7 +275,7 @@ pub async fn update_destination(
     let destination_id = destination_id.into_inner();
     let destination = destination.into_inner();
 
-    db::destinations::update_destination(
+    data::destinations::update_destination(
         &**pool,
         tenant_id,
         &destination.name,
@@ -335,7 +335,7 @@ pub async fn delete_destination(
     // concurrent pipeline creation here. A pipeline can still appear between
     // the check and the final delete, in which case the database constraints
     // are the last line of defense.
-    db::destinations::delete_destination(&**pool, tenant_id, destination_id)
+    data::destinations::delete_destination(&**pool, tenant_id, destination_id)
         .await?
         .ok_or(DestinationError::DestinationNotFound(destination_id))?;
 
@@ -364,7 +364,7 @@ pub async fn read_all_destinations(
 
     let mut destinations = vec![];
     for destination in
-        db::destinations::read_all_destinations(&**pool, tenant_id, &encryption_key).await?
+        data::destinations::read_all_destinations(&**pool, tenant_id, &encryption_key).await?
     {
         let destination = ReadDestinationResponse {
             id: destination.id,

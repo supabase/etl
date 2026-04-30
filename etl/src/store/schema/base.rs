@@ -1,5 +1,6 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
+use super::table::TableSchemaRetention;
 use crate::{
     error::EtlResult,
     types::{SnapshotId, TableId, TableSchema},
@@ -10,7 +11,8 @@ use crate::{
 /// [`SchemaStore`] implementations are responsible for defining how the schema
 /// information is stored and retrieved. The store supports schema versioning
 /// where each schema version is identified by a snapshot_id (the start_lsn of
-/// the DDL message that created it).
+/// the DDL message that created it). Stores may prune obsolete versions after
+/// replication progress has been acknowledged.
 ///
 /// Implementations should ensure thread-safety and handle concurrent access to
 /// the data.
@@ -50,4 +52,18 @@ pub trait SchemaStore {
         &self,
         table_schema: TableSchema,
     ) -> impl Future<Output = EtlResult<Arc<TableSchema>>> + Send;
+
+    /// Prunes obsolete table schema versions for tables at safe cleanup points.
+    ///
+    /// For each table id, implementations should find the newest schema version
+    /// at or before that table's retention LSN, preserve it, and remove older
+    /// versions. Versions newer than the retention LSN must also be preserved
+    /// because PostgreSQL may replay them, or the destination may need them for
+    /// schema application.
+    ///
+    /// Returns the number of schema versions removed.
+    fn prune_table_schemas(
+        &self,
+        _table_schema_retentions: HashMap<TableId, TableSchemaRetention>,
+    ) -> impl Future<Output = EtlResult<u64>> + Send;
 }

@@ -21,7 +21,7 @@ use crate::{
     authentication::auth_validator,
     config::ApiConfig,
     configs::encryption,
-    db::publications::Publication,
+    data::publications::Publication,
     feature_flags::{FeatureFlagsClient, init_feature_flags},
     k8s::{K8sClient, K8sError, TrustedRootCertsCache, http::HttpK8sClient},
     routes::{
@@ -109,9 +109,9 @@ impl Application {
             Ok(Environment::Dev) => {
                 async {
                     let options = KubeConfigOptions {
-                        context: Some("orbstack".to_string()),
-                        cluster: Some("orbstack".to_string()),
-                        user: Some("orbstack".to_string()),
+                        context: Some("orbstack".to_owned()),
+                        cluster: Some("orbstack".to_owned()),
+                        user: Some("orbstack".to_owned()),
                     };
                     let kube_config = kube::config::Config::from_kubeconfig(&options).await.ok()?;
                     let kube_client: kube::Client = kube_config.try_into().ok()?;

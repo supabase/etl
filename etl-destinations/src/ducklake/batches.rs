@@ -311,7 +311,7 @@ pub(super) async fn ensure_applied_batches_table_exists(
              );"#
     );
     let created = Arc::clone(&applied_batches_table_created);
-    let table_name = APPLIED_BATCHES_TABLE.to_string();
+    let table_name = APPLIED_BATCHES_TABLE.to_owned();
 
     run_duckdb_blocking(
         pool,
@@ -380,7 +380,7 @@ pub(super) async fn ensure_streaming_progress_table_exists(
              );"#
     );
     let created = Arc::clone(&streaming_progress_table_created);
-    let table_name = STREAMING_PROGRESS_TABLE.to_string();
+    let table_name = STREAMING_PROGRESS_TABLE.to_owned();
 
     run_duckdb_blocking(
         pool,
@@ -972,7 +972,7 @@ fn push_prepared_mutation_batch(
     let mutations = tracked_mutations.into_iter().map(|tracked| tracked.mutation).collect();
 
     prepared_batches.push(PreparedDuckLakeTableBatch {
-        table_name: table_name.to_string(),
+        table_name: table_name.to_owned(),
         batch_id: identity.batch_id,
         batch_kind: DuckLakeTableBatchKind::Mutation,
         first_start_lsn: identity.first_start_lsn,
@@ -1557,7 +1557,7 @@ impl ReusableStagingTable {
     /// Creates a fresh staging-table manager for one destination table.
     fn new(table_name: &str) -> Self {
         Self {
-            table_name: table_name.to_string(),
+            table_name: table_name.to_owned(),
             staging_name: format!("__staging_{table_name}"),
             created: false,
         }
@@ -1798,7 +1798,7 @@ fn apply_truncate_batch_action(conn: &duckdb::Connection, table_name: &str) -> E
 
 /// Formats an optional LSN for marker-table inserts.
 fn optional_lsn_to_sql_literal(lsn: Option<PgLsn>) -> String {
-    lsn.map_or_else(|| "NULL".to_string(), |value| u64::from(value).to_string())
+    lsn.map_or_else(|| "NULL".to_owned(), |value| u64::from(value).to_string())
 }
 
 /// Applies one prepared table mutation inside an open transaction.
@@ -2006,14 +2006,14 @@ static STAGING_TABLE_CREATIONS_BY_TABLE: LazyLock<Mutex<HashMap<String, usize>>>
 /// batch.
 #[cfg(feature = "test-utils")]
 pub fn arm_fail_after_atomic_batch_commit_once_for_tests(table_name: &str) {
-    *FAIL_AFTER_ATOMIC_BATCH_COMMIT_TABLE.lock() = Some(table_name.to_string());
+    *FAIL_AFTER_ATOMIC_BATCH_COMMIT_TABLE.lock() = Some(table_name.to_owned());
 }
 
 /// Arms a test hook that injects one post-commit failure for the next copy
 /// batch.
 #[cfg(feature = "test-utils")]
 pub fn arm_fail_after_copy_batch_commit_once_for_tests(table_name: &str) {
-    *FAIL_AFTER_COPY_BATCH_COMMIT_TABLE.lock() = Some(table_name.to_string());
+    *FAIL_AFTER_COPY_BATCH_COMMIT_TABLE.lock() = Some(table_name.to_owned());
 }
 
 /// Clears DuckLake destination test hooks.
@@ -2090,10 +2090,10 @@ mod tests {
     fn make_schema() -> TableSchema {
         TableSchema::new(
             TableId::new(1),
-            TableName::new("public".to_string(), "users".to_string()),
+            TableName::new("public".to_owned(), "users".to_owned()),
             vec![
-                ColumnSchema::new("id".to_string(), PgType::INT4, -1, 1, Some(1), false),
-                ColumnSchema::new("name".to_string(), PgType::TEXT, -1, 2, None, true),
+                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false),
+                ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, None, true),
             ],
         )
     }
@@ -2106,15 +2106,15 @@ mod tests {
     fn delete_predicate_from_row_uses_only_replica_identity_columns() {
         let replicated_table_schema = ReplicatedTableSchema::all(Arc::new(TableSchema::new(
             TableId::new(1),
-            TableName::new("public".to_string(), "users".to_string()),
+            TableName::new("public".to_owned(), "users".to_owned()),
             vec![
-                ColumnSchema::new("tenant_id".to_string(), PgType::INT4, -1, 1, Some(1), false),
-                ColumnSchema::new("id".to_string(), PgType::INT4, -1, 2, Some(2), false),
-                ColumnSchema::new("name".to_string(), PgType::TEXT, -1, 3, None, true),
+                ColumnSchema::new("tenant_id".to_owned(), PgType::INT4, -1, 1, Some(1), false),
+                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 2, Some(2), false),
+                ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 3, None, true),
             ],
         )));
         let row =
-            TableRow::new(vec![Cell::I32(7), Cell::I32(42), Cell::String("alice".to_string())]);
+            TableRow::new(vec![Cell::I32(7), Cell::I32(42), Cell::String("alice".to_owned())]);
 
         assert_eq!(
             delete_predicate_from_row(&replicated_table_schema, &row).unwrap(),
@@ -2126,11 +2126,11 @@ mod tests {
     fn delete_predicate_from_row_supports_alternative_identity_without_primary_key() {
         let table_schema = Arc::new(TableSchema::new(
             TableId::new(1),
-            TableName::new("public".to_string(), "users".to_string()),
+            TableName::new("public".to_owned(), "users".to_owned()),
             vec![
-                ColumnSchema::new("id".to_string(), PgType::INT4, -1, 1, None, false),
-                ColumnSchema::new("email".to_string(), PgType::TEXT, -1, 2, None, false),
-                ColumnSchema::new("name".to_string(), PgType::TEXT, -1, 3, None, true),
+                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, None, false),
+                ColumnSchema::new("email".to_owned(), PgType::TEXT, -1, 2, None, false),
+                ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 3, None, true),
             ],
         ));
         let replicated_table_schema = ReplicatedTableSchema::from_masks(
@@ -2140,8 +2140,8 @@ mod tests {
         );
         let row = TableRow::new(vec![
             Cell::I32(7),
-            Cell::String("alice@example.com".to_string()),
-            Cell::String("alice".to_string()),
+            Cell::String("alice@example.com".to_owned()),
+            Cell::String("alice".to_owned()),
         ]);
 
         assert_eq!(
@@ -2154,11 +2154,11 @@ mod tests {
     fn delete_predicate_from_row_uses_full_replica_identity_columns() {
         let table_schema = Arc::new(TableSchema::new(
             TableId::new(1),
-            TableName::new("public".to_string(), "users".to_string()),
+            TableName::new("public".to_owned(), "users".to_owned()),
             vec![
-                ColumnSchema::new("id".to_string(), PgType::INT4, -1, 1, Some(1), false),
-                ColumnSchema::new("email".to_string(), PgType::TEXT, -1, 2, None, false),
-                ColumnSchema::new("name".to_string(), PgType::TEXT, -1, 3, None, true),
+                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false),
+                ColumnSchema::new("email".to_owned(), PgType::TEXT, -1, 2, None, false),
+                ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 3, None, true),
             ],
         ));
         let replicated_table_schema = ReplicatedTableSchema::from_masks(
@@ -2168,8 +2168,8 @@ mod tests {
         );
         let row = TableRow::new(vec![
             Cell::I32(7),
-            Cell::String("alice@example.com".to_string()),
-            Cell::String("alice".to_string()),
+            Cell::String("alice@example.com".to_owned()),
+            Cell::String("alice".to_owned()),
         ]);
 
         assert_eq!(
@@ -2186,7 +2186,7 @@ mod tests {
             ReplicationMask::all(&table_schema),
             IdentityMask::from_bytes(vec![0, 0]),
         );
-        let row = TableRow::new(vec![Cell::I32(1), Cell::String("alice".to_string())]);
+        let row = TableRow::new(vec![Cell::I32(1), Cell::String("alice".to_owned())]);
 
         let error = delete_predicate_from_row(&replicated_table_schema, &row).unwrap_err();
 
@@ -2197,7 +2197,7 @@ mod tests {
     #[test]
     fn prepare_table_mutations_replace_emits_delete_then_upsert() {
         let replicated_table_schema = make_replicated_schema();
-        let row = TableRow::new(vec![Cell::I32(1), Cell::String("alice".to_string())]);
+        let row = TableRow::new(vec![Cell::I32(1), Cell::String("alice".to_owned())]);
 
         let prepared =
             prepare_table_mutations(&replicated_table_schema, vec![TableMutation::Replace(row)])
@@ -2206,7 +2206,7 @@ mod tests {
         assert_eq!(prepared.len(), 2);
         match &prepared[0] {
             PreparedTableMutation::Delete { predicates, origin } => {
-                assert_eq!(predicates, &vec!["id = 1".to_string()]);
+                assert_eq!(predicates, &vec!["id = 1".to_owned()]);
                 assert_eq!(origin, &"replace");
             }
             PreparedTableMutation::Upsert(_) | PreparedTableMutation::Update { .. } => {
@@ -2235,7 +2235,7 @@ mod tests {
                 delete_row: OldTableRow::Key(TableRow::new(vec![Cell::I32(1)])),
                 new_row: UpdatedTableRow::Partial(PartialTableRow::new(
                     2,
-                    TableRow::new(vec![Cell::I32(1), Cell::String("after".to_string())]),
+                    TableRow::new(vec![Cell::I32(1), Cell::String("after".to_owned())]),
                     vec![],
                 )),
             }],
@@ -2245,7 +2245,7 @@ mod tests {
         assert_eq!(prepared.len(), 1);
         match &prepared[0] {
             PreparedTableMutation::Update { assignments, predicate } => {
-                assert_eq!(assignments, &vec!["id = 1".to_string(), "name = 'after'".to_string()]);
+                assert_eq!(assignments, &vec!["id = 1".to_owned(), "name = 'after'".to_owned()]);
                 assert_eq!(predicate, "id = 1");
             }
             PreparedTableMutation::Upsert(_) | PreparedTableMutation::Delete { .. } => {
@@ -2258,12 +2258,12 @@ mod tests {
     fn prepare_table_mutations_update_uses_alternative_identity_key_for_changed_key_update() {
         let table_schema = Arc::new(TableSchema::new(
             TableId::new(1),
-            TableName::new("public".to_string(), "users".to_string()),
+            TableName::new("public".to_owned(), "users".to_owned()),
             vec![
-                ColumnSchema::new("id".to_string(), PgType::INT4, -1, 1, Some(1), false),
-                ColumnSchema::new("email".to_string(), PgType::TEXT, -1, 2, None, false),
-                ColumnSchema::new("name".to_string(), PgType::TEXT, -1, 3, None, true),
-                ColumnSchema::new("payload".to_string(), PgType::TEXT, -1, 4, None, true),
+                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false),
+                ColumnSchema::new("email".to_owned(), PgType::TEXT, -1, 2, None, false),
+                ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 3, None, true),
+                ColumnSchema::new("payload".to_owned(), PgType::TEXT, -1, 4, None, true),
             ],
         ));
         let replicated_table_schema = ReplicatedTableSchema::from_masks(
@@ -2276,14 +2276,14 @@ mod tests {
             &replicated_table_schema,
             vec![TableMutation::Update {
                 delete_row: OldTableRow::Key(TableRow::new(vec![Cell::String(
-                    "alice@example.com".to_string(),
+                    "alice@example.com".to_owned(),
                 )])),
                 new_row: UpdatedTableRow::Partial(PartialTableRow::new(
                     4,
                     TableRow::new(vec![
                         Cell::I32(1),
-                        Cell::String("alice@new.example.com".to_string()),
-                        Cell::String("ripe".to_string()),
+                        Cell::String("alice@new.example.com".to_owned()),
+                        Cell::String("ripe".to_owned()),
                     ]),
                     vec![3],
                 )),
@@ -2297,9 +2297,9 @@ mod tests {
                 assert_eq!(
                     assignments,
                     &vec![
-                        "id = 1".to_string(),
-                        "email = 'alice@new.example.com'".to_string(),
-                        "name = 'ripe'".to_string(),
+                        "id = 1".to_owned(),
+                        "email = 'alice@new.example.com'".to_owned(),
+                        "name = 'ripe'".to_owned(),
                     ]
                 );
                 assert_eq!(predicate, "email = 'alice@example.com'");
@@ -2314,12 +2314,12 @@ mod tests {
     fn prepare_table_mutations_update_uses_full_replica_identity_predicate() {
         let table_schema = Arc::new(TableSchema::new(
             TableId::new(1),
-            TableName::new("public".to_string(), "users".to_string()),
+            TableName::new("public".to_owned(), "users".to_owned()),
             vec![
-                ColumnSchema::new("id".to_string(), PgType::INT4, -1, 1, Some(1), false),
-                ColumnSchema::new("email".to_string(), PgType::TEXT, -1, 2, None, false),
-                ColumnSchema::new("name".to_string(), PgType::TEXT, -1, 3, None, true),
-                ColumnSchema::new("payload".to_string(), PgType::TEXT, -1, 4, None, true),
+                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false),
+                ColumnSchema::new("email".to_owned(), PgType::TEXT, -1, 2, None, false),
+                ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 3, None, true),
+                ColumnSchema::new("payload".to_owned(), PgType::TEXT, -1, 4, None, true),
             ],
         ));
         let replicated_table_schema = ReplicatedTableSchema::from_masks(
@@ -2333,16 +2333,16 @@ mod tests {
             vec![TableMutation::Update {
                 delete_row: OldTableRow::Full(TableRow::new(vec![
                     Cell::I32(1),
-                    Cell::String("alice@example.com".to_string()),
-                    Cell::String("seed".to_string()),
-                    Cell::String("toast".to_string()),
+                    Cell::String("alice@example.com".to_owned()),
+                    Cell::String("seed".to_owned()),
+                    Cell::String("toast".to_owned()),
                 ])),
                 new_row: UpdatedTableRow::Partial(PartialTableRow::new(
                     4,
                     TableRow::new(vec![
                         Cell::I32(1),
-                        Cell::String("alice@example.com".to_string()),
-                        Cell::String("grown".to_string()),
+                        Cell::String("alice@example.com".to_owned()),
+                        Cell::String("grown".to_owned()),
                     ]),
                     vec![3],
                 )),
@@ -2356,9 +2356,9 @@ mod tests {
                 assert_eq!(
                     assignments,
                     &vec![
-                        "id = 1".to_string(),
-                        "email = 'alice@example.com'".to_string(),
-                        "name = 'grown'".to_string(),
+                        "id = 1".to_owned(),
+                        "email = 'alice@example.com'".to_owned(),
+                        "name = 'grown'".to_owned(),
                     ]
                 );
                 assert_eq!(
@@ -2378,7 +2378,7 @@ mod tests {
         let replicated_table_schema = make_replicated_schema();
         let batches = prepare_mutation_table_batches(
             &replicated_table_schema,
-            "public_users".to_string(),
+            "public_users".to_owned(),
             vec![
                 TrackedTableMutation::new(
                     PgLsn::from(10),
@@ -2386,7 +2386,7 @@ mod tests {
                     0,
                     TableMutation::Insert(TableRow::new(vec![
                         Cell::I32(1),
-                        Cell::String("alice".to_string()),
+                        Cell::String("alice".to_owned()),
                     ])),
                 ),
                 TrackedTableMutation::new(
@@ -2395,7 +2395,7 @@ mod tests {
                     1,
                     TableMutation::Insert(TableRow::new(vec![
                         Cell::I32(2),
-                        Cell::String("bob".to_string()),
+                        Cell::String("bob".to_owned()),
                     ])),
                 ),
             ],
@@ -2428,7 +2428,7 @@ mod tests {
         let replicated_table_schema = make_replicated_schema();
         let batches = prepare_mutation_table_batches(
             &replicated_table_schema,
-            "public_users".to_string(),
+            "public_users".to_owned(),
             vec![
                 TrackedTableMutation::new(
                     PgLsn::from(100),
@@ -2436,7 +2436,7 @@ mod tests {
                     0,
                     TableMutation::Insert(TableRow::new(vec![
                         Cell::I32(0),
-                        Cell::String("seed".to_string()),
+                        Cell::String("seed".to_owned()),
                     ])),
                 ),
                 TrackedTableMutation::new(
@@ -2445,7 +2445,7 @@ mod tests {
                     1,
                     TableMutation::Delete(OldTableRow::Full(TableRow::new(vec![
                         Cell::I32(0),
-                        Cell::String("seed".to_string()),
+                        Cell::String("seed".to_owned()),
                     ]))),
                 ),
                 TrackedTableMutation::new(
@@ -2454,7 +2454,7 @@ mod tests {
                     2,
                     TableMutation::Insert(TableRow::new(vec![
                         Cell::I32(999),
-                        Cell::String("tail".to_string()),
+                        Cell::String("tail".to_owned()),
                     ])),
                 ),
             ],
@@ -2485,7 +2485,7 @@ mod tests {
         let replicated_table_schema = make_replicated_schema();
         let batches = prepare_mutation_table_batches(
             &replicated_table_schema,
-            "public_users".to_string(),
+            "public_users".to_owned(),
             vec![
                 TrackedTableMutation::new(
                     PgLsn::from(100),
@@ -2493,7 +2493,7 @@ mod tests {
                     0,
                     TableMutation::Delete(OldTableRow::Full(TableRow::new(vec![
                         Cell::I32(1),
-                        Cell::String("alice".to_string()),
+                        Cell::String("alice".to_owned()),
                     ]))),
                 ),
                 TrackedTableMutation::new(
@@ -2502,7 +2502,7 @@ mod tests {
                     0,
                     TableMutation::Delete(OldTableRow::Full(TableRow::new(vec![
                         Cell::I32(2),
-                        Cell::String("bob".to_string()),
+                        Cell::String("bob".to_owned()),
                     ]))),
                 ),
             ],
@@ -2516,7 +2516,7 @@ mod tests {
                 match &prepared[0] {
                     PreparedTableMutation::Delete { predicates, origin } => {
                         assert_eq!(origin, &"delete");
-                        assert_eq!(predicates, &vec!["id = 1".to_string(), "id = 2".to_string()]);
+                        assert_eq!(predicates, &vec!["id = 1".to_owned(), "id = 2".to_owned()]);
                     }
                     PreparedTableMutation::Upsert(_) | PreparedTableMutation::Update { .. } => {
                         panic!("expected delete batch")
@@ -2532,7 +2532,7 @@ mod tests {
         let replicated_table_schema = make_replicated_schema();
         let batches = prepare_mutation_table_batches(
             &replicated_table_schema,
-            "public_users".to_string(),
+            "public_users".to_owned(),
             vec![
                 TrackedTableMutation::new(
                     PgLsn::from(100),
@@ -2541,11 +2541,11 @@ mod tests {
                     TableMutation::Update {
                         delete_row: OldTableRow::Full(TableRow::new(vec![
                             Cell::I32(1),
-                            Cell::String("before-a".to_string()),
+                            Cell::String("before-a".to_owned()),
                         ])),
                         new_row: UpdatedTableRow::Full(TableRow::new(vec![
                             Cell::I32(1),
-                            Cell::String("after-a".to_string()),
+                            Cell::String("after-a".to_owned()),
                         ])),
                     },
                 ),
@@ -2556,11 +2556,11 @@ mod tests {
                     TableMutation::Update {
                         delete_row: OldTableRow::Full(TableRow::new(vec![
                             Cell::I32(2),
-                            Cell::String("before-b".to_string()),
+                            Cell::String("before-b".to_owned()),
                         ])),
                         new_row: UpdatedTableRow::Full(TableRow::new(vec![
                             Cell::I32(2),
-                            Cell::String("after-b".to_string()),
+                            Cell::String("after-b".to_owned()),
                         ])),
                     },
                 ),
@@ -2605,7 +2605,7 @@ mod tests {
             .collect();
         let batches = prepare_mutation_table_batches(
             &replicated_table_schema,
-            "public_users".to_string(),
+            "public_users".to_owned(),
             tracked,
         )
         .unwrap();
@@ -2642,7 +2642,7 @@ mod tests {
         let replicated_table_schema = make_replicated_schema();
         let batches = prepare_mutation_table_batches(
             &replicated_table_schema,
-            "public_users".to_string(),
+            "public_users".to_owned(),
             vec![
                 TrackedTableMutation::new(
                     PgLsn::from(100),
@@ -2650,7 +2650,7 @@ mod tests {
                     0,
                     TableMutation::Insert(TableRow::new(vec![
                         Cell::I32(0),
-                        Cell::String("seed".to_string()),
+                        Cell::String("seed".to_owned()),
                     ])),
                 ),
                 TrackedTableMutation::new(
@@ -2660,11 +2660,11 @@ mod tests {
                     TableMutation::Update {
                         delete_row: OldTableRow::Full(TableRow::new(vec![
                             Cell::I32(0),
-                            Cell::String("seed".to_string()),
+                            Cell::String("seed".to_owned()),
                         ])),
                         new_row: UpdatedTableRow::Full(TableRow::new(vec![
                             Cell::I32(0),
-                            Cell::String("grown".to_string()),
+                            Cell::String("grown".to_owned()),
                         ])),
                     },
                 ),
@@ -2674,7 +2674,7 @@ mod tests {
                     2,
                     TableMutation::Insert(TableRow::new(vec![
                         Cell::I32(999),
-                        Cell::String("tail".to_string()),
+                        Cell::String("tail".to_owned()),
                     ])),
                 ),
             ],
@@ -2714,7 +2714,7 @@ mod tests {
                     0,
                     TableMutation::Insert(TableRow::new(vec![
                         Cell::I32(1),
-                        Cell::String("one".to_string()),
+                        Cell::String("one".to_owned()),
                     ])),
                 ),
                 TrackedTableMutation::new(
@@ -2723,7 +2723,7 @@ mod tests {
                     0,
                     TableMutation::Insert(TableRow::new(vec![
                         Cell::I32(2),
-                        Cell::String("two".to_string()),
+                        Cell::String("two".to_owned()),
                     ])),
                 ),
                 TrackedTableMutation::new(
@@ -2732,7 +2732,7 @@ mod tests {
                     0,
                     TableMutation::Insert(TableRow::new(vec![
                         Cell::I32(3),
-                        Cell::String("three".to_string()),
+                        Cell::String("three".to_owned()),
                     ])),
                 ),
             ],
@@ -2769,7 +2769,7 @@ mod tests {
                 0,
                 TableMutation::Insert(TableRow::new(vec![
                     Cell::I32(1),
-                    Cell::String("alice".to_string()),
+                    Cell::String("alice".to_owned()),
                 ])),
             ),
             TrackedTableMutation::new(
@@ -2778,7 +2778,7 @@ mod tests {
                 1,
                 TableMutation::Delete(OldTableRow::Full(TableRow::new(vec![
                     Cell::I32(1),
-                    Cell::String("alice".to_string()),
+                    Cell::String("alice".to_owned()),
                 ]))),
             ),
         ];
@@ -2808,7 +2808,7 @@ mod tests {
                     0,
                     TableMutation::Insert(TableRow::new(vec![
                         Cell::I32(1),
-                        Cell::String("alice".to_string()),
+                        Cell::String("alice".to_owned()),
                     ])),
                 ),
                 TrackedTableMutation::new(
@@ -2817,7 +2817,7 @@ mod tests {
                     1,
                     TableMutation::Insert(TableRow::new(vec![
                         Cell::I32(2),
-                        Cell::String("bob".to_string()),
+                        Cell::String("bob".to_owned()),
                     ])),
                 ),
             ],
@@ -2833,7 +2833,7 @@ mod tests {
                     0,
                     TableMutation::Insert(TableRow::new(vec![
                         Cell::I32(2),
-                        Cell::String("bob".to_string()),
+                        Cell::String("bob".to_owned()),
                     ])),
                 ),
                 TrackedTableMutation::new(
@@ -2842,7 +2842,7 @@ mod tests {
                     1,
                     TableMutation::Insert(TableRow::new(vec![
                         Cell::I32(1),
-                        Cell::String("alice".to_string()),
+                        Cell::String("alice".to_owned()),
                     ])),
                 ),
             ],
@@ -2857,7 +2857,7 @@ mod tests {
                 0,
                 TableMutation::Insert(TableRow::new(vec![
                     Cell::I32(1),
-                    Cell::String("alice".to_string()),
+                    Cell::String("alice".to_owned()),
                 ])),
             )],
         )

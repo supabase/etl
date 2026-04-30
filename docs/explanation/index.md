@@ -16,7 +16,9 @@
 
 3. **[Event Types](events.md)**: All events your destination receives - Insert, Update, Delete, Begin, Commit, and their fields.
 
-4. **[Extension Points](traits.md)**: The traits you implement - Destination, SchemaStore, StateStore, CleanupStore.
+4. **[Schema Changes](schema-changes.md)**: How ETL handles DDL, `Relation` events, add/drop/rename semantics, and current limitations.
+
+5. **[Extension Points](traits.md)**: The traits you implement - Destination, SchemaStore, StateStore, CleanupStore.
 
 ## Next Steps
 

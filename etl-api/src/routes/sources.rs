@@ -15,8 +15,8 @@ use crate::{
         encryption::EncryptionKey,
         source::{FullApiSourceConfig, StoredSourceConfig, StrippedApiSourceConfig},
     },
-    db,
-    db::{
+    data,
+    data::{
         pipelines::{PipelinesDbError, read_pipelines_for_source_for_deletion},
         sources::{SourcesDbError, source_exists},
     },
@@ -68,7 +68,7 @@ impl SourceError {
             SourceError::SourcesDb(SourcesDbError::Database(_))
             | SourceError::PipelinesDb(PipelinesDbError::Database(_))
             | SourceError::Validation(_)
-            | SourceError::K8sCore(_) => "internal server error".to_string(),
+            | SourceError::K8sCore(_) => "internal server error".to_owned(),
             // Every other message is ok, as they do not divulge sensitive information
             e => e.to_string(),
         }
@@ -213,7 +213,7 @@ pub async fn create_source(
     )
     .await?;
 
-    let id = db::sources::create_source(
+    let id = data::sources::create_source(
         &**pool,
         tenant_id,
         &source.name,
@@ -288,7 +288,7 @@ pub async fn read_source(
     let tenant_id = extract_tenant_id(&req)?;
     let source_id = source_id.into_inner();
 
-    let response = db::sources::read_source(&**pool, tenant_id, source_id, &encryption_key)
+    let response = data::sources::read_source(&**pool, tenant_id, source_id, &encryption_key)
         .await?
         .map(|s| ReadSourceResponse {
             id: s.id,
@@ -338,7 +338,7 @@ pub async fn update_source(
     )
     .await?;
 
-    db::sources::update_source(
+    data::sources::update_source(
         &**pool,
         tenant_id,
         &source.name,
@@ -397,7 +397,7 @@ pub async fn delete_source(
     // concurrent pipeline creation here. A pipeline can still appear between
     // the check and the final delete, in which case the database constraints
     // are the last line of defense.
-    db::sources::delete_source(&**pool, tenant_id, source_id)
+    data::sources::delete_source(&**pool, tenant_id, source_id)
         .await?
         .ok_or(SourceError::SourceNotFound(source_id))?;
 
@@ -425,7 +425,7 @@ pub async fn read_all_sources(
     let tenant_id = extract_tenant_id(&req)?;
 
     let mut sources = vec![];
-    for source in db::sources::read_all_sources(&**pool, tenant_id, &encryption_key).await? {
+    for source in data::sources::read_all_sources(&**pool, tenant_id, &encryption_key).await? {
         let source = ReadSourceResponse {
             id: source.id,
             tenant_id: source.tenant_id,

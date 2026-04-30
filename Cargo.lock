@@ -1133,6 +1133,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "cityhash-rs"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "93a719913643003b84bd13022b4b7e703c09342cd03b679c4641c7d2e50dc34d"
+
+[[package]]
 name = "clap"
 version = "4.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1181,6 +1187,7 @@ dependencies = [
  "bnum",
  "bstr",
  "bytes",
+ "cityhash-rs",
  "clickhouse-macros",
  "clickhouse-types",
  "futures-channel",
@@ -1189,6 +1196,7 @@ dependencies = [
  "hyper",
  "hyper-rustls",
  "hyper-util",
+ "lz4_flex 0.11.6",
  "polonius-the-crab",
  "quanta",
  "rustls",
@@ -1987,10 +1995,8 @@ name = "etl-postgres"
 version = "0.1.0"
 dependencies = [
  "bytes",
- "chrono",
  "etl-config",
  "pg_escape",
- "serde",
  "serde_json",
  "sqlx",
  "thiserror 2.0.18",
@@ -3504,6 +3510,12 @@ checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 
 [[package]]
 name = "lz4_flex"
+version = "0.11.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "373f5eceeeab7925e0c1098212f2fbc4d416adec9d35051a6ab251e824c1854a"
+
+[[package]]
+name = "lz4_flex"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "98c23545df7ecf1b16c303910a69b079e8e251d60f7dd2cc9b4177f2afaf1746"
@@ -4188,7 +4200,7 @@ dependencies = [
  "futures",
  "half",
  "hashbrown 0.16.1",
- "lz4_flex",
+ "lz4_flex 0.12.1",
  "num-bigint",
  "num-integer",
  "num-traits",

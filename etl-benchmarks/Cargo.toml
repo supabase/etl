@@ -8,14 +8,18 @@ rust-version.workspace = true
 repository.workspace = true
 homepage.workspace = true
 
+[lib]
+test = false
+doctest = false
+
 [dev-dependencies]
+
+clap = { workspace = true, default-features = true, features = ["std", "derive"] }
 etl = { workspace = true, features = ["test-utils"] }
 etl-config = { workspace = true }
 etl-destinations = { workspace = true, features = ["bigquery"] }
 etl-postgres = { workspace = true, features = ["sqlx"] }
 etl-telemetry = { workspace = true }
-
-clap = { workspace = true, default-features = true, features = ["std", "derive"] }
 rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
 sqlx = { workspace = true, features = ["runtime-tokio-rustls", "postgres"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "signal"] }

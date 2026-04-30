@@ -207,7 +207,7 @@ mod tests {
         async fn get_config_map(&self, config_map_name: &str) -> Result<ConfigMap, K8sError> {
             if config_map_name == TRUSTED_ROOT_CERT_CONFIG_MAP_NAME {
                 let mut map = BTreeMap::new();
-                map.insert(TRUSTED_ROOT_CERT_KEY_NAME.to_string(), self.certs.clone());
+                map.insert(TRUSTED_ROOT_CERT_KEY_NAME.to_owned(), self.certs.clone());
                 Ok(ConfigMap { data: Some(map), ..ConfigMap::default() })
             } else {
                 Ok(ConfigMap::default())
@@ -250,7 +250,7 @@ mod tests {
     #[tokio::test]
     async fn cache_returns_certs() {
         let expected_certs = "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----";
-        let client = Arc::new(MockK8sClient { certs: expected_certs.to_string() });
+        let client = Arc::new(MockK8sClient { certs: expected_certs.to_owned() });
         let cache = TrustedRootCertsCache::new(client);
 
         let result = cache.get().await.unwrap();
@@ -260,7 +260,7 @@ mod tests {
     #[tokio::test]
     async fn cache_returns_cached_value() {
         let expected_certs = "cached-certs";
-        let client = Arc::new(MockK8sClient { certs: expected_certs.to_string() });
+        let client = Arc::new(MockK8sClient { certs: expected_certs.to_owned() });
         let cache = TrustedRootCertsCache::new(client);
 
         // First call fetches from K8s

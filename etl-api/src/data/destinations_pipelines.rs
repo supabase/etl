@@ -10,7 +10,7 @@ use crate::{
         pipeline::FullApiPipelineConfig,
         serde::{DbDeserializationError, DbSerializationError},
     },
-    db::{
+    data::{
         destinations::{DestinationsDbError, create_destination, update_destination},
         pipelines::{PipelinesDbError, create_pipeline, update_pipeline},
     },

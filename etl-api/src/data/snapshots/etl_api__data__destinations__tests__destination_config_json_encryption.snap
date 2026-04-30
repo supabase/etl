@@ -1,5 +1,5 @@
 ---
-source: etl-api/src/db/destinations.rs
+source: etl-api/src/data/destinations.rs
 expression: config_in_db
 ---
 {

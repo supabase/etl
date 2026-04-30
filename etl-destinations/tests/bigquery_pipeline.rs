@@ -455,7 +455,7 @@ async fn table_primary_key_update_rewrites_row() {
     // key is a valid PostgreSQL shape: the update carries an old key row plus
     // a full new row image.
     let updated_id = 10i64;
-    let updated_name = "user_10".to_string();
+    let updated_name = "user_10".to_owned();
     let updated_age = 10i32;
     database
         .update_values_where(
@@ -542,7 +542,7 @@ async fn table_full_replica_identity_update_preserves_unchanged_toasted_columns(
     let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
-    let publication_name = "test_pub_full_replica_identity".to_string();
+    let publication_name = "test_pub_full_replica_identity".to_owned();
     database
         .create_publication(&publication_name, std::slice::from_ref(&table_name))
         .await
@@ -566,7 +566,7 @@ async fn table_full_replica_identity_update_preserves_unchanged_toasted_columns(
     // With REPLICA IDENTITY FULL, PostgreSQL sends a full old row for updates.
     // That means unchanged external TOAST values can be reconstructed and the
     // destination should receive a full new row image.
-    let updated_name = "alicia".to_string();
+    let updated_name = "alicia".to_owned();
     let update_notify = destination.wait_for_events_count(vec![(EventType::Update, 1)]).await;
 
     database
@@ -591,7 +591,7 @@ async fn table_full_replica_identity_update_preserves_unchanged_toasted_columns(
         update.old_table_row,
         Some(OldTableRow::Full(TableRow::new(vec![
             Cell::I64(1),
-            Cell::String("alice".to_string()),
+            Cell::String("alice".to_owned()),
             Cell::String(initial_large_text.clone()),
         ])))
     );
@@ -768,7 +768,7 @@ async fn table_nullable_scalar_columns() {
     let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
-    let publication_name = "test_pub".to_string();
+    let publication_name = "test_pub".to_owned();
     database
         .create_publication(&publication_name, std::slice::from_ref(&table_name))
         .await
@@ -833,7 +833,7 @@ async fn table_nullable_scalar_columns() {
 
     // Define test values
     let updated_bool = true;
-    let updated_text = "updated_text".to_string();
+    let updated_text = "updated_text".to_owned();
     let updated_i2 = 42i16;
     let updated_i4 = 1000i32;
     let updated_i8 = 123456789i64;
@@ -965,7 +965,7 @@ async fn table_nullable_array_columns() {
     let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
-    let publication_name = "test_pub_array".to_string();
+    let publication_name = "test_pub_array".to_owned();
     database
         .create_publication(&publication_name, std::slice::from_ref(&table_name))
         .await
@@ -1033,7 +1033,7 @@ async fn table_nullable_array_columns() {
 
     // Define test array values
     let updated_bool_arr = vec![true, false, true];
-    let updated_text_arr = vec!["hello".to_string(), "world".to_string()];
+    let updated_text_arr = vec!["hello".to_owned(), "world".to_owned()];
     let updated_i2_arr = vec![1i16, 2i16, 3i16];
     let updated_i4_arr = vec![100i32, 200i32];
     let updated_i8_arr = vec![1000i64, 2000i64, 3000i64];
@@ -1182,7 +1182,7 @@ async fn table_non_nullable_scalar_columns() {
     let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
-    let publication_name = "test_pub_non_null".to_string();
+    let publication_name = "test_pub_non_null".to_owned();
     database
         .create_publication(&publication_name, std::slice::from_ref(&table_name))
         .await
@@ -1208,7 +1208,7 @@ async fn table_non_nullable_scalar_columns() {
 
     // Define test values - all non-null
     let test_bool = true;
-    let test_text = "test_text".to_string();
+    let test_text = "test_text".to_owned();
     let test_i2 = 42i16;
     let test_i4 = 1000i32;
     let test_i8 = 123456789i64;
@@ -1288,7 +1288,7 @@ async fn table_non_nullable_scalar_columns() {
 
     // Define updated test values
     let updated_bool = false;
-    let updated_text = "updated_text".to_string();
+    let updated_text = "updated_text".to_owned();
     let updated_i2 = 84i16;
     let updated_i4 = 2000i32;
     let updated_i8 = 987654321i64;
@@ -1420,7 +1420,7 @@ async fn table_non_nullable_array_columns() {
     let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
-    let publication_name = "test_pub_non_null_array".to_string();
+    let publication_name = "test_pub_non_null_array".to_owned();
     database
         .create_publication(&publication_name, std::slice::from_ref(&table_name))
         .await
@@ -1446,7 +1446,7 @@ async fn table_non_nullable_array_columns() {
 
     // Define test array values - all non-null
     let test_bool_arr = vec![true, false, true];
-    let test_text_arr = vec!["hello".to_string(), "world".to_string()];
+    let test_text_arr = vec!["hello".to_owned(), "world".to_owned()];
     let test_i2_arr = vec![1i16, 2i16, 3i16];
     let test_i4_arr = vec![100i32, 200i32];
     let test_i8_arr = vec![1000i64, 2000i64, 3000i64];
@@ -1543,7 +1543,7 @@ async fn table_non_nullable_array_columns() {
 
     // Define updated test array values
     let updated_bool_arr = vec![false, true];
-    let updated_text_arr = vec!["updated".to_string(), "arrays".to_string(), "test".to_string()];
+    let updated_text_arr = vec!["updated".to_owned(), "arrays".to_owned(), "test".to_owned()];
     let updated_i2_arr = vec![10i16, 20i16];
     let updated_i4_arr = vec![500i32, 600i32, 700i32];
     let updated_i8_arr = vec![5000i64, 6000i64];
@@ -1668,7 +1668,7 @@ async fn table_array_with_null_values() {
     let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
-    let publication_name = "test_pub_array_nulls".to_string();
+    let publication_name = "test_pub_array_nulls".to_owned();
     database
         .create_publication(&publication_name, std::slice::from_ref(&table_name))
         .await
@@ -1863,7 +1863,7 @@ async fn table_validation_out_of_bounds_values() {
     let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
-    let publication_name = "test_pub_validation".to_string();
+    let publication_name = "test_pub_validation".to_owned();
     database
         .create_publication(
             &publication_name,
@@ -1930,7 +1930,7 @@ async fn table_schema_change() {
     let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
-    let publication_name = "test_pub_multi_ops".to_string();
+    let publication_name = "test_pub_multi_ops".to_owned();
     database
         .create_publication(&publication_name, std::slice::from_ref(&table_name))
         .await

@@ -414,7 +414,7 @@ mod tests {
     fn bigquery_table_row_try_from_valid() {
         let table_row = TableRow::new(vec![
             Cell::I32(42),
-            Cell::String("test".to_string()),
+            Cell::String("test".to_owned()),
             Cell::Bool(true),
             Cell::Null,
         ]);
@@ -438,7 +438,7 @@ mod tests {
     #[test]
     fn bigquery_table_row_try_from_invalid_numeric_infinity() {
         let table_row = TableRow::new(vec![
-            Cell::String("valid".to_string()),
+            Cell::String("valid".to_owned()),
             Cell::Numeric(PgNumeric::PositiveInfinity),
         ]);
 
@@ -498,9 +498,9 @@ mod tests {
     fn bigquery_table_row_try_from_valid_array() {
         let valid_array = etl::types::ArrayCell::I32(vec![Some(1), Some(2), Some(3)]);
         let table_row = TableRow::new(vec![
-            Cell::String("prefix".to_string()),
+            Cell::String("prefix".to_owned()),
             Cell::Array(valid_array),
-            Cell::String("suffix".to_string()),
+            Cell::String("suffix".to_owned()),
         ]);
 
         let result = BigQueryTableRow::try_from(table_row);

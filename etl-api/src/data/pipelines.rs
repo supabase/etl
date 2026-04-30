@@ -10,8 +10,8 @@ use crate::{
         pipeline::{FullApiPipelineConfig, StoredPipelineConfig},
         serde::{DbDeserializationError, DbSerializationError, deserialize_from_value, serialize},
     },
-    db,
-    db::{
+    data,
+    data::{
         destinations::Destination,
         images::Image,
         replicators::{Replicator, ReplicatorsDbError, create_replicator},
@@ -233,7 +233,7 @@ pub async fn delete_pipeline_api_and_source_state(
     delete_pipeline(&mut *api_connection, tenant_id, pipeline.id).await?;
 
     // Manually delete the replicator since there's no cascade constraint.
-    db::replicators::delete_replicator(&mut *api_connection, tenant_id, pipeline.replicator_id)
+    data::replicators::delete_replicator(&mut *api_connection, tenant_id, pipeline.replicator_id)
         .await?;
 
     delete_pipeline_source_state(source_connection, pipeline.id).await
@@ -243,8 +243,8 @@ pub async fn delete_pipeline_source_state(
     source_connection: &mut PgConnection,
     pipeline_id: i64,
 ) -> Result<(), PipelinesDbError> {
-    // Delete state, schema, and destination metadata from the source database, only
-    // if ETL tables exist.
+    // Delete state, schema, and destination table metadata from the source
+    // database, only if ETL tables exist.
     if health::etl_tables_present(&mut *source_connection).await? {
         state::delete_replication_state_for_all_tables(&mut *source_connection, pipeline_id)
             .await?;
@@ -428,20 +428,20 @@ pub async fn read_pipeline_components(
         .ok_or(PipelineError::PipelineNotFound(pipeline_id))?;
 
     let replicator =
-        db::replicators::read_replicator_by_pipeline_id(&mut *connection, tenant_id, pipeline_id)
+        data::replicators::read_replicator_by_pipeline_id(&mut *connection, tenant_id, pipeline_id)
             .await?
             .ok_or(PipelineError::ReplicatorNotFound(pipeline_id))?;
 
-    let image = db::images::read_image_by_replicator_id(&mut *connection, replicator.id)
+    let image = data::images::read_image_by_replicator_id(&mut *connection, replicator.id)
         .await?
         .ok_or(PipelineError::ImageNotFound(replicator.id))?;
 
     let source =
-        db::sources::read_source(&mut *connection, tenant_id, pipeline.source_id, encryption_key)
+        data::sources::read_source(&mut *connection, tenant_id, pipeline.source_id, encryption_key)
             .await?
             .ok_or(PipelineError::SourceNotFound(pipeline.source_id))?;
 
-    let destination = db::destinations::read_destination(
+    let destination = data::destinations::read_destination(
         &mut *connection,
         tenant_id,
         pipeline.destination_id,

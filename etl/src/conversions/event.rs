@@ -319,7 +319,7 @@ pub(crate) fn parse_replicated_column_names(
 /// Returns the set of relation-message key column names.
 ///
 /// PostgreSQL exposes replica-identity mode on the relation itself and
-/// key-column membership on each [`RelationBody`] column. For
+/// key-column membership on each [`protocol::RelationBody`] column. For
 /// `REPLICA IDENTITY FULL`, every replicated column belongs to the old-row
 /// identity. Otherwise the low bit of the column flags marks identity
 /// membership. The column order is the same `attnum` order described in
@@ -989,7 +989,7 @@ mod tests {
     fn event_schema(columns: Vec<ColumnSchema>) -> ReplicatedTableSchema {
         let table_schema = Arc::new(TableSchema::new(
             TableId::new(42),
-            TableName::new("public".to_string(), "test".to_string()),
+            TableName::new("public".to_owned(), "test".to_owned()),
             columns,
         ));
 
@@ -998,23 +998,23 @@ mod tests {
 
     fn composite_primary_key_schema() -> ReplicatedTableSchema {
         event_schema(vec![
-            ColumnSchema::new("id".to_string(), Type::INT8, -1, 1, Some(2), false),
-            ColumnSchema::new("name".to_string(), Type::TEXT, -1, 2, None, false),
-            ColumnSchema::new("surname".to_string(), Type::TEXT, -1, 3, Some(1), false),
-            ColumnSchema::new("city".to_string(), Type::TEXT, -1, 4, None, false),
-            ColumnSchema::new("large_text".to_string(), Type::TEXT, -1, 5, None, false),
+            ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, Some(2), false),
+            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, false),
+            ColumnSchema::new("surname".to_owned(), Type::TEXT, -1, 3, Some(1), false),
+            ColumnSchema::new("city".to_owned(), Type::TEXT, -1, 4, None, false),
+            ColumnSchema::new("large_text".to_owned(), Type::TEXT, -1, 5, None, false),
         ])
     }
 
     fn alternative_identity_schema() -> ReplicatedTableSchema {
         let table_schema = Arc::new(TableSchema::new(
             TableId::new(43),
-            TableName::new("public".to_string(), "users".to_string()),
+            TableName::new("public".to_owned(), "users".to_owned()),
             vec![
-                ColumnSchema::new("id".to_string(), Type::INT8, -1, 1, Some(2), false),
-                ColumnSchema::new("name".to_string(), Type::TEXT, -1, 2, None, false),
-                ColumnSchema::new("surname".to_string(), Type::TEXT, -1, 3, Some(1), false),
-                ColumnSchema::new("city".to_string(), Type::TEXT, -1, 4, None, false),
+                ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, Some(2), false),
+                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, false),
+                ColumnSchema::new("surname".to_owned(), Type::TEXT, -1, 3, Some(1), false),
+                ColumnSchema::new("city".to_owned(), Type::TEXT, -1, 4, None, false),
             ],
         ));
 
@@ -1028,12 +1028,12 @@ mod tests {
     fn full_identity_schema() -> ReplicatedTableSchema {
         let table_schema = Arc::new(TableSchema::new(
             TableId::new(44),
-            TableName::new("public".to_string(), "users".to_string()),
+            TableName::new("public".to_owned(), "users".to_owned()),
             vec![
-                ColumnSchema::new("id".to_string(), Type::INT8, -1, 1, Some(2), false),
-                ColumnSchema::new("name".to_string(), Type::TEXT, -1, 2, None, false),
-                ColumnSchema::new("surname".to_string(), Type::TEXT, -1, 3, Some(1), false),
-                ColumnSchema::new("city".to_string(), Type::TEXT, -1, 4, None, false),
+                ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, Some(2), false),
+                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, false),
+                ColumnSchema::new("surname".to_owned(), Type::TEXT, -1, 3, Some(1), false),
+                ColumnSchema::new("city".to_owned(), Type::TEXT, -1, 4, None, false),
             ],
         ));
 
@@ -1156,16 +1156,16 @@ mod tests {
     fn build_identity_classifies_using_index_with_primary_key_columns_as_primary_key() {
         let table_schema = TableSchema::new(
             TableId::new(42),
-            TableName::new("public".to_string(), "test".to_string()),
+            TableName::new("public".to_owned(), "test".to_owned()),
             vec![
-                ColumnSchema::new("id".to_string(), Type::INT8, -1, 1, Some(1), false),
-                ColumnSchema::new("email".to_string(), Type::TEXT, -1, 2, None, false),
+                ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, Some(1), false),
+                ColumnSchema::new("email".to_owned(), Type::TEXT, -1, 2, None, false),
             ],
         );
         let replication_mask = ReplicationMask::all(&table_schema);
         let identity = IdentityMessage {
             primary_key_attnums: vec![1],
-            relreplident: "i".to_string(),
+            relreplident: "i".to_owned(),
             replica_identity_index_attnums: vec![1],
         };
 
@@ -1184,16 +1184,16 @@ mod tests {
     fn build_identity_classifies_using_index_with_distinct_columns_as_alternative_key() {
         let table_schema = TableSchema::new(
             TableId::new(42),
-            TableName::new("public".to_string(), "test".to_string()),
+            TableName::new("public".to_owned(), "test".to_owned()),
             vec![
-                ColumnSchema::new("id".to_string(), Type::INT8, -1, 1, Some(1), false),
-                ColumnSchema::new("email".to_string(), Type::TEXT, -1, 2, None, false),
+                ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, Some(1), false),
+                ColumnSchema::new("email".to_owned(), Type::TEXT, -1, 2, None, false),
             ],
         );
         let replication_mask = ReplicationMask::all(&table_schema);
         let identity = IdentityMessage {
             primary_key_attnums: vec![1],
-            relreplident: "i".to_string(),
+            relreplident: "i".to_owned(),
             replica_identity_index_attnums: vec![2],
         };
 
@@ -1211,8 +1211,8 @@ mod tests {
     #[test]
     fn convert_tuple_to_row_rejects_missing_non_nullable_columns_for_full_rows() {
         let column_schemas = [
-            ColumnSchema::new("id".to_string(), Type::INT8, -1, 1, Some(1), false),
-            ColumnSchema::new("d".to_string(), Type::DATE, -1, 2, None, false),
+            ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, Some(1), false),
+            ColumnSchema::new("d".to_owned(), Type::DATE, -1, 2, None, false),
         ];
         let tuple_data = [TupleData::Text(b"1".to_vec().into()), TupleData::Null];
 
@@ -1225,8 +1225,8 @@ mod tests {
     #[test]
     fn convert_update_tuple_to_new_table_row_returns_partial_when_toast_cannot_be_recovered() {
         let replicated_table_schema = event_schema(vec![
-            ColumnSchema::new("id".to_string(), Type::INT8, -1, 1, Some(1), false),
-            ColumnSchema::new("payload".to_string(), Type::TEXT, -1, 2, None, false),
+            ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, Some(1), false),
+            ColumnSchema::new("payload".to_owned(), Type::TEXT, -1, 2, None, false),
         ]);
         let tuple_data = [TupleData::Text(b"1".to_vec().into()), TupleData::UnchangedToast];
 
@@ -1247,11 +1247,11 @@ mod tests {
     #[test]
     fn convert_update_tuple_to_new_table_row_reuses_old_value_when_available() {
         let replicated_table_schema = event_schema(vec![
-            ColumnSchema::new("id".to_string(), Type::INT8, -1, 1, Some(1), false),
-            ColumnSchema::new("payload".to_string(), Type::TEXT, -1, 2, None, false),
+            ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, Some(1), false),
+            ColumnSchema::new("payload".to_owned(), Type::TEXT, -1, 2, None, false),
         ]);
         let tuple_data = [TupleData::Text(b"1".to_vec().into()), TupleData::UnchangedToast];
-        let original_old_row = TableRow::new(vec![Cell::I64(1), Cell::String("toast".to_string())]);
+        let original_old_row = TableRow::new(vec![Cell::I64(1), Cell::String("toast".to_owned())]);
         let old_table_row = OldTableRow::Full(original_old_row.clone());
 
         let row = convert_update_tuple_to_updated_table_row(
@@ -1265,7 +1265,7 @@ mod tests {
             row,
             UpdatedTableRow::Full(TableRow::new(vec![
                 Cell::I64(1),
-                Cell::String("toast".to_string())
+                Cell::String("toast".to_owned())
             ]))
         );
         assert_eq!(old_table_row, OldTableRow::Full(original_old_row));
@@ -1274,12 +1274,12 @@ mod tests {
     #[test]
     fn convert_update_tuple_to_new_table_row_reuses_key_value_when_column_is_in_key() {
         let replicated_table_schema = event_schema(vec![
-            ColumnSchema::new("id".to_string(), Type::INT8, -1, 1, Some(1), false),
-            ColumnSchema::new("payload".to_string(), Type::TEXT, -1, 2, Some(2), false),
+            ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, Some(1), false),
+            ColumnSchema::new("payload".to_owned(), Type::TEXT, -1, 2, Some(2), false),
         ]);
         let tuple_data = [TupleData::Text(b"2".to_vec().into()), TupleData::UnchangedToast];
         let old_table_row =
-            OldTableRow::Key(TableRow::new(vec![Cell::I64(1), Cell::String("toast".to_string())]));
+            OldTableRow::Key(TableRow::new(vec![Cell::I64(1), Cell::String("toast".to_owned())]));
 
         let row = convert_update_tuple_to_updated_table_row(
             &replicated_table_schema,
@@ -1292,7 +1292,7 @@ mod tests {
             row,
             UpdatedTableRow::Full(TableRow::new(vec![
                 Cell::I64(2),
-                Cell::String("toast".to_string())
+                Cell::String("toast".to_owned())
             ]))
         );
     }
@@ -1301,12 +1301,12 @@ mod tests {
     fn normalize_key_tuple_to_row_accepts_full_width_tuple_and_filters_identity_columns() {
         let table_schema = Arc::new(TableSchema::new(
             TableId::new(1),
-            TableName::new("public".to_string(), "users".to_string()),
+            TableName::new("public".to_owned(), "users".to_owned()),
             vec![
-                ColumnSchema::new("id".to_string(), Type::INT8, -1, 1, Some(2), false),
-                ColumnSchema::new("name".to_string(), Type::TEXT, -1, 2, None, false),
-                ColumnSchema::new("surname".to_string(), Type::TEXT, -1, 3, Some(1), false),
-                ColumnSchema::new("payload".to_string(), Type::TEXT, -1, 4, None, false),
+                ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, Some(2), false),
+                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, false),
+                ColumnSchema::new("surname".to_owned(), Type::TEXT, -1, 3, Some(1), false),
+                ColumnSchema::new("payload".to_owned(), Type::TEXT, -1, 4, None, false),
             ],
         ));
         let replicated_table_schema = ReplicatedTableSchema::from_masks(
@@ -1323,19 +1323,19 @@ mod tests {
 
         let row = normalize_key_tuple_to_row(&replicated_table_schema, &tuple_data).unwrap();
 
-        assert_eq!(row, TableRow::new(vec![Cell::I64(1), Cell::String("smith".to_string())]));
+        assert_eq!(row, TableRow::new(vec![Cell::I64(1), Cell::String("smith".to_owned())]));
     }
 
     #[test]
     fn normalize_key_tuple_to_row_accepts_dense_key_tuple() {
         let table_schema = Arc::new(TableSchema::new(
             TableId::new(1),
-            TableName::new("public".to_string(), "users".to_string()),
+            TableName::new("public".to_owned(), "users".to_owned()),
             vec![
-                ColumnSchema::new("id".to_string(), Type::INT8, -1, 1, Some(2), false),
-                ColumnSchema::new("name".to_string(), Type::TEXT, -1, 2, None, false),
-                ColumnSchema::new("surname".to_string(), Type::TEXT, -1, 3, Some(1), false),
-                ColumnSchema::new("payload".to_string(), Type::TEXT, -1, 4, None, false),
+                ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, Some(2), false),
+                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, false),
+                ColumnSchema::new("surname".to_owned(), Type::TEXT, -1, 3, Some(1), false),
+                ColumnSchema::new("payload".to_owned(), Type::TEXT, -1, 4, None, false),
             ],
         ));
         let replicated_table_schema = ReplicatedTableSchema::from_masks(
@@ -1348,7 +1348,7 @@ mod tests {
 
         let row = normalize_key_tuple_to_row(&replicated_table_schema, &tuple_data).unwrap();
 
-        assert_eq!(row, TableRow::new(vec![Cell::I64(1), Cell::String("smith".to_string())]));
+        assert_eq!(row, TableRow::new(vec![Cell::I64(1), Cell::String("smith".to_owned())]));
     }
 
     #[test]
@@ -1374,10 +1374,10 @@ mod tests {
             event.updated_table_row,
             UpdatedTableRow::Full(TableRow::new(vec![
                 Cell::I64(1),
-                Cell::String("alice".to_string()),
-                Cell::String("smith".to_string()),
-                Cell::String("vienna".to_string()),
-                Cell::String("toast".to_string()),
+                Cell::String("alice".to_owned()),
+                Cell::String("smith".to_owned()),
+                Cell::String("vienna".to_owned()),
+                Cell::String("toast".to_owned()),
             ]))
         );
     }
@@ -1407,9 +1407,9 @@ mod tests {
                 5,
                 TableRow::new(vec![
                     Cell::I64(1),
-                    Cell::String("alice".to_string()),
-                    Cell::String("smith".to_string()),
-                    Cell::String("vienna".to_string()),
+                    Cell::String("alice".to_owned()),
+                    Cell::String("smith".to_owned()),
+                    Cell::String("vienna".to_owned()),
                 ]),
                 vec![4],
             ))
@@ -1444,7 +1444,7 @@ mod tests {
             event.old_table_row,
             Some(OldTableRow::Key(TableRow::new(vec![
                 Cell::I64(1),
-                Cell::String("smith".to_string()),
+                Cell::String("smith".to_owned()),
             ])))
         );
     }
@@ -1474,17 +1474,17 @@ mod tests {
         assert_eq!(
             event.old_table_row,
             Some(OldTableRow::Key(TableRow::new(vec![
-                Cell::String("alice".to_string()),
-                Cell::String("smith".to_string()),
+                Cell::String("alice".to_owned()),
+                Cell::String("smith".to_owned()),
             ])))
         );
         assert_eq!(
             event.updated_table_row,
             UpdatedTableRow::Full(TableRow::new(vec![
                 Cell::I64(1),
-                Cell::String("alice".to_string()),
-                Cell::String("smith".to_string()),
-                Cell::String("vienna".to_string()),
+                Cell::String("alice".to_owned()),
+                Cell::String("smith".to_owned()),
+                Cell::String("vienna".to_owned()),
             ]))
         );
     }
@@ -1515,9 +1515,9 @@ mod tests {
             event.old_table_row,
             Some(OldTableRow::Full(TableRow::new(vec![
                 Cell::I64(1),
-                Cell::String("alice".to_string()),
-                Cell::String("smith".to_string()),
-                Cell::String("rome".to_string()),
+                Cell::String("alice".to_owned()),
+                Cell::String("smith".to_owned()),
+                Cell::String("rome".to_owned()),
             ])))
         );
     }
@@ -1541,8 +1541,8 @@ mod tests {
         assert_eq!(
             event.old_table_row,
             Some(OldTableRow::Key(TableRow::new(vec![
-                Cell::String("alice".to_string()),
-                Cell::String("smith".to_string()),
+                Cell::String("alice".to_owned()),
+                Cell::String("smith".to_owned()),
             ])))
         );
     }

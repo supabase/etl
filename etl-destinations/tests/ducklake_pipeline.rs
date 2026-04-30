@@ -179,11 +179,11 @@ async fn table_copy_and_streaming_with_restart() {
     let conn = open_lake_conn(&catalog_url, &data_url);
     assert_eq!(
         query_user_rows(&conn, &users_table_name),
-        vec![(1, "user_1".to_string(), 1), (2, "user_2".to_string(), 2),]
+        vec![(1, "user_1".to_owned(), 1), (2, "user_2".to_owned(), 2),]
     );
     assert_eq!(
         query_order_rows(&conn, &orders_table_name),
-        vec![(1, "description_1".to_string()), (2, "description_2".to_string()),]
+        vec![(1, "description_1".to_owned()), (2, "description_2".to_owned()),]
     );
     drop(conn);
 
@@ -219,19 +219,19 @@ async fn table_copy_and_streaming_with_restart() {
     assert_eq!(
         query_user_rows(&conn, &users_table_name),
         vec![
-            (1, "user_1".to_string(), 1),
-            (2, "user_2".to_string(), 2),
-            (3, "user_3".to_string(), 3),
-            (4, "user_4".to_string(), 4),
+            (1, "user_1".to_owned(), 1),
+            (2, "user_2".to_owned(), 2),
+            (3, "user_3".to_owned(), 3),
+            (4, "user_4".to_owned(), 4),
         ]
     );
     assert_eq!(
         query_order_rows(&conn, &orders_table_name),
         vec![
-            (1, "description_1".to_string()),
-            (2, "description_2".to_string()),
-            (3, "description_3".to_string()),
-            (4, "description_4".to_string()),
+            (1, "description_1".to_owned()),
+            (2, "description_2".to_owned()),
+            (3, "description_3".to_owned()),
+            (4, "description_4".to_owned()),
         ]
     );
 }
@@ -287,7 +287,7 @@ async fn table_insert_update_delete() {
     checkpoint_lake(&catalog_url, &data_url);
 
     let conn = open_lake_conn(&catalog_url, &data_url);
-    assert_eq!(query_user_rows(&conn, &users_table_name), vec![(1, "user_1".to_string(), 1)]);
+    assert_eq!(query_user_rows(&conn, &users_table_name), vec![(1, "user_1".to_owned(), 1)]);
     drop(conn);
 
     let destination = build_destination(&catalog_url, &data_url, store.clone()).await;
@@ -318,7 +318,7 @@ async fn table_insert_update_delete() {
     checkpoint_lake(&catalog_url, &data_url);
 
     let conn = open_lake_conn(&catalog_url, &data_url);
-    assert_eq!(query_user_rows(&conn, &users_table_name), vec![(1, "user_10".to_string(), 10)]);
+    assert_eq!(query_user_rows(&conn, &users_table_name), vec![(1, "user_10".to_owned(), 10)]);
     drop(conn);
 
     let destination = build_destination(&catalog_url, &data_url, store.clone()).await;
@@ -436,10 +436,10 @@ async fn cdc_streaming_with_truncate() {
     let conn = open_lake_conn(&catalog_url, &data_url);
     assert_eq!(
         query_user_rows(&conn, &users_table_name),
-        vec![(3, "user_3".to_string(), 3), (4, "user_4".to_string(), 4),]
+        vec![(3, "user_3".to_owned(), 3), (4, "user_4".to_owned(), 4),]
     );
     assert_eq!(
         query_order_rows(&conn, &orders_table_name),
-        vec![(3, "description_3".to_string()), (4, "description_4".to_string()),]
+        vec![(3, "description_3".to_owned()), (4, "description_4".to_owned()),]
     );
 }
