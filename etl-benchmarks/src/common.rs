@@ -428,7 +428,7 @@ impl Destination for NullDestination {
 }
 
 /// Benchmark destination variants.
-#[expect(clippy::large_enum_variant)]
+#[cfg_attr(feature = "bigquery", expect(clippy::large_enum_variant))]
 #[derive(Clone)]
 pub enum BenchDestination {
     /// Null destination variant.
@@ -440,6 +440,7 @@ pub enum BenchDestination {
 
 impl BenchDestination {
     /// Creates a benchmark destination from CLI arguments.
+    #[cfg_attr(not(feature = "bigquery"), expect(clippy::unused_async))]
     pub async fn new(
         destination_args: &DestinationArgs,
         pipeline_id: u64,

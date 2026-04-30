@@ -1,15 +1,11 @@
 use std::{
     path::PathBuf,
     process::{Command, Stdio},
-    sync::{
-        Arc,
-        atomic::{AtomicI64, AtomicU64, Ordering},
-    },
     time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, bail};
-use clap::{ArgAction, Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 use etl::{
     pipeline::Pipeline, state::table::TableReplicationPhaseType,
     test_utils::notifying_store::NotifyingStore,
@@ -17,16 +13,14 @@ use etl::{
 use etl_config::shared::TableSyncCopyConfig;
 use etl_postgres::types::TableId;
 use serde::Serialize;
-use sqlx::PgPool;
 use tokio::task::JoinSet;
 use tracing::info;
 
 use crate::common::{
     BenchDestination, DestinationArgs, DestinationStatsSnapshot, DestinationType, LogTarget,
     PgConnectionArgs, PipelineTuningArgs, bytes_to_mib, cleanup_replication_slots, duration_millis,
-    format_decimal, format_duration_ms, format_integer, mib_per_second, per_second, pg_pool,
-    pipeline_config, quote_identifier, quote_qualified_table_name, run_etl_migrations,
-    split_table_name, write_report,
+    format_decimal, format_duration_ms, format_integer, mib_per_second, per_second,
+    pipeline_config, run_etl_migrations, write_report,
 };
 
 /// Command-line arguments for the table-streaming benchmark.
@@ -64,36 +58,12 @@ pub struct RunArgs {
     /// Publication name.
     #[arg(long, default_value = "bench_streaming_pub")]
     publication_name: String,
-    /// Source table to stream.
-    #[arg(long, default_value = "etl_streaming_benchmark")]
-    table_name: String,
     /// Source table IDs to stream.
     #[arg(long, value_delimiter = ',')]
     table_ids: Vec<u32>,
-    /// Streaming workload to run.
-    #[arg(long, value_enum, default_value = "synthetic")]
-    workload: StreamingWorkload,
-    /// Create the source table before running.
-    #[arg(long, default_value_t = true, action = ArgAction::Set)]
-    create_table: bool,
-    /// Truncate the source table before running.
-    #[arg(long, default_value_t = true, action = ArgAction::Set)]
-    reset_table: bool,
-    /// Recreate the benchmark publication for the source table.
-    #[arg(long, default_value_t = true, action = ArgAction::Set)]
-    create_publication: bool,
-    /// Number of insert events to produce in count mode.
-    #[arg(long, default_value_t = 1_000_000)]
-    event_count: u64,
-    /// Run producers for a fixed duration instead of a fixed event count.
+    /// Run the TPC-C workload for this many seconds.
     #[arg(long)]
     duration_seconds: Option<u64>,
-    /// Rows inserted per producer transaction.
-    #[arg(long, default_value_t = 5_000)]
-    insert_batch_size: u64,
-    /// Number of concurrent insert producers.
-    #[arg(long, default_value_t = 1)]
-    producer_concurrency: u16,
     /// Number of TPC-C warehouses used by the workload.
     #[arg(long, default_value_t = 1)]
     tpcc_warehouses: u16,
@@ -112,50 +82,25 @@ pub struct RunArgs {
     report_path: Option<PathBuf>,
 }
 
-/// Streaming workload mode.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, ValueEnum)]
-#[serde(rename_all = "snake_case")]
-enum StreamingWorkload {
-    /// Run the TPC-C transaction workload against prepared TPC-C tables.
-    Tpcc,
-    /// Insert rows into a single synthetic benchmark table.
-    Synthetic,
-}
-
-/// Source used for the produced events field.
-#[derive(Clone, Copy, Debug, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum ProducedEventsSource {
-    /// Events are counted by the source-side synthetic producer.
-    SourceProducer,
-    /// Events are inferred from destination-observed row-level CDC events.
-    DestinationObserved,
-}
-
 /// Machine-readable table-streaming benchmark report.
 #[derive(Debug, Serialize)]
 struct TableStreamingReport {
     benchmark: &'static str,
-    workload: StreamingWorkload,
+    workload: &'static str,
     destination: DestinationType,
     pipeline_id: u64,
     publication_name: String,
-    table_name: String,
-    table_id: Option<u32>,
     table_ids: Vec<u32>,
     table_count: usize,
-    requested_event_count: u64,
-    duration_seconds: Option<u64>,
+    duration_seconds: u64,
     produced_events: u64,
-    produced_events_source: ProducedEventsSource,
+    produced_events_source: &'static str,
     throughput_events: u64,
     observed_cdc_events: u64,
     estimated_cdc_payload_bytes: u64,
     estimated_cdc_payload_mib: f64,
     estimated_total_event_bytes: u64,
     estimated_total_event_mib: f64,
-    insert_batch_size: u64,
-    producer_concurrency: u16,
     tpcc_warehouses: u16,
     tpcc_threads: u16,
     drain_quiet_ms: u64,
@@ -198,25 +143,7 @@ async fn run(args: RunArgs) -> Result<()> {
 
     let total_started = Instant::now();
     run_etl_migrations(&args.pg).await?;
-    let pool = pg_pool(&args.pg).await?;
-    let table_name = quote_qualified_table_name(&args.table_name)?;
-
-    if args.workload == StreamingWorkload::Synthetic && args.create_table {
-        create_streaming_table(&pool, &args.table_name, &table_name).await?;
-    }
-
-    if args.workload == StreamingWorkload::Synthetic && args.reset_table {
-        truncate_table(&pool, &table_name).await?;
-    }
-
-    if args.workload == StreamingWorkload::Synthetic && args.create_publication {
-        create_publication(&pool, &args.publication_name, &table_name).await?;
-    }
-
-    let table_ids = match args.workload {
-        StreamingWorkload::Tpcc => args.table_ids.clone(),
-        StreamingWorkload::Synthetic => vec![get_table_id(&pool, &args.table_name).await?],
-    };
+    let table_ids = args.table_ids.clone();
     let store = NotifyingStore::new();
     let destination =
         BenchDestination::new(&args.destination, args.pipeline_id, store.clone()).await?;
@@ -246,35 +173,16 @@ async fn run(args: RunArgs) -> Result<()> {
 
     let end_to_end_started = Instant::now();
     let producer_started = Instant::now();
-    let produced_events = match args.workload {
-        StreamingWorkload::Tpcc => run_tpcc_workload(&args).await?,
-        StreamingWorkload::Synthetic => {
-            let start_id = next_insert_id(&pool, &table_name).await?;
-            if args.duration_seconds.is_none() {
-                destination.set_cdc_target(args.event_count);
-            }
-            produce_inserts(&pool, &table_name, start_id, &args).await?
-        }
-    };
+    run_tpcc_workload(&args).await?;
     let producer_duration = producer_started.elapsed();
 
     let drain_started = Instant::now();
-    match args.workload {
-        StreamingWorkload::Tpcc => {
-            wait_for_cdc_quiescence(
-                &destination,
-                Duration::from_millis(args.drain_quiet_ms),
-                Duration::from_millis(args.drain_poll_ms),
-            )
-            .await;
-        }
-        StreamingWorkload::Synthetic => {
-            if args.duration_seconds.is_some() {
-                destination.set_cdc_target(produced_events);
-            }
-            destination.wait_for_cdc_target().await;
-        }
-    }
+    wait_for_cdc_quiescence(
+        &destination,
+        Duration::from_millis(args.drain_quiet_ms),
+        Duration::from_millis(args.drain_poll_ms),
+    )
+    .await;
     let drain_duration = drain_started.elapsed();
     let end_to_end_duration = end_to_end_started.elapsed();
 
@@ -284,53 +192,33 @@ async fn run(args: RunArgs) -> Result<()> {
     let end_to_end_with_shutdown_duration = end_to_end_started.elapsed();
 
     cleanup_replication_slots(&args.pg, args.pipeline_id, &table_ids).await?;
-    pool.close().await;
 
     let destination_stats = destination.stats();
-    if args.workload == StreamingWorkload::Synthetic
-        && destination_stats.cdc_data_events < produced_events
-    {
-        bail!(
-            "CDC validation failed: produced {produced_events}, observed {}",
-            destination_stats.cdc_data_events
-        );
-    }
-    if args.workload == StreamingWorkload::Tpcc && destination_stats.cdc_data_events == 0 {
+    if destination_stats.cdc_data_events == 0 {
         bail!("TPC-C streaming workload completed without observed CDC row events");
     }
 
-    let produced_events_source = match args.workload {
-        StreamingWorkload::Tpcc => ProducedEventsSource::DestinationObserved,
-        StreamingWorkload::Synthetic => ProducedEventsSource::SourceProducer,
-    };
-    let produced_events = match args.workload {
-        StreamingWorkload::Tpcc => destination_stats.cdc_data_events,
-        StreamingWorkload::Synthetic => produced_events,
-    };
+    let produced_events = destination_stats.cdc_data_events;
     let throughput_events = produced_events;
+    let duration_seconds = args.duration_seconds.context("TPC-C duration was not configured")?;
 
     let report = TableStreamingReport {
         benchmark: "table_streaming",
-        workload: args.workload,
+        workload: "tpcc",
         destination: args.destination.destination,
         pipeline_id: args.pipeline_id,
         publication_name: args.publication_name,
-        table_name: args.table_name,
-        table_id: table_ids.first().copied(),
         table_count: table_ids.len(),
         table_ids,
-        requested_event_count: args.event_count,
-        duration_seconds: args.duration_seconds,
+        duration_seconds,
         produced_events,
-        produced_events_source,
+        produced_events_source: "destination_observed",
         throughput_events,
         observed_cdc_events: destination_stats.cdc_data_events,
         estimated_cdc_payload_bytes: destination_stats.cdc_data_event_bytes,
         estimated_cdc_payload_mib: bytes_to_mib(destination_stats.cdc_data_event_bytes),
         estimated_total_event_bytes: destination_stats.total_event_bytes,
         estimated_total_event_mib: bytes_to_mib(destination_stats.total_event_bytes),
-        insert_batch_size: args.insert_batch_size,
-        producer_concurrency: args.producer_concurrency,
         tpcc_warehouses: args.tpcc_warehouses,
         tpcc_threads: args.tpcc_threads,
         drain_quiet_ms: args.drain_quiet_ms,
@@ -381,34 +269,12 @@ fn print_summary(report: &TableStreamingReport) {
     println!();
     println!("Table streaming benchmark");
     println!("  Destination   {}", destination_label(report.destination));
-    println!("  Workload      {}", workload_label(report.workload));
+    println!("  Workload      {}", report.workload);
     println!("  Publication   {}", report.publication_name);
-    match report.workload {
-        StreamingWorkload::Tpcc => {
-            println!(
-                "  Source tables  {} TPC-C tables",
-                format_integer(report.table_count as u128)
-            );
-        }
-        StreamingWorkload::Synthetic => {
-            let table_id =
-                report.table_id.map_or_else(|| "unknown".to_owned(), |id| id.to_string());
-            println!("  Source table   {} ({table_id})", report.table_name);
-        }
-    }
+    println!("  Source tables  {} TPC-C tables", format_integer(report.table_count as u128));
     println!();
     println!("  CDC");
-    match report.produced_events_source {
-        ProducedEventsSource::SourceProducer => {
-            println!(
-                "    Produced       {} events",
-                format_integer(u128::from(report.produced_events))
-            );
-        }
-        ProducedEventsSource::DestinationObserved => {
-            println!("    Produced       inferred from observed CDC");
-        }
-    }
+    println!("    Produced       inferred from observed CDC");
     println!(
         "    Observed       {} events",
         format_integer(u128::from(report.observed_cdc_events))
@@ -457,26 +323,7 @@ fn destination_label(destination: DestinationType) -> &'static str {
     }
 }
 
-fn workload_label(workload: StreamingWorkload) -> &'static str {
-    match workload {
-        StreamingWorkload::Tpcc => "tpcc",
-        StreamingWorkload::Synthetic => "synthetic",
-    }
-}
-
 fn validate_args(args: &RunArgs) -> Result<()> {
-    if args.insert_batch_size == 0 {
-        bail!("--insert-batch-size must be greater than 0");
-    }
-
-    if args.insert_batch_size > i64::MAX as u64 {
-        bail!("--insert-batch-size must fit in a bigint source ID range");
-    }
-
-    if args.producer_concurrency == 0 {
-        bail!("--producer-concurrency must be greater than 0");
-    }
-
     if args.tpcc_warehouses == 0 {
         bail!("--tpcc-warehouses must be greater than 0");
     }
@@ -493,34 +340,18 @@ fn validate_args(args: &RunArgs) -> Result<()> {
         bail!("--drain-poll-ms must be greater than 0");
     }
 
-    if args.workload == StreamingWorkload::Synthetic
-        && args.duration_seconds.is_none()
-        && args.event_count == 0
-    {
-        bail!("--event-count must be greater than 0 in count mode");
-    }
-
-    if args.workload == StreamingWorkload::Synthetic
-        && args.duration_seconds.is_none()
-        && args.event_count > i64::MAX as u64
-    {
-        bail!("--event-count must fit in a bigint source ID range");
-    }
-
     if let Some(duration_seconds) = args.duration_seconds
         && duration_seconds == 0
     {
         bail!("--duration-seconds must be greater than 0");
     }
 
-    if args.workload == StreamingWorkload::Tpcc {
-        if args.duration_seconds.is_none() {
-            bail!("--duration-seconds is required for --workload tpcc");
-        }
+    if args.duration_seconds.is_none() {
+        bail!("--duration-seconds is required");
+    }
 
-        if args.table_ids.is_empty() {
-            bail!("--table-ids is required for --workload tpcc");
-        }
+    if args.table_ids.is_empty() {
+        bail!("--table-ids is required");
     }
 
     Ok(())
@@ -629,204 +460,4 @@ async fn wait_for_cdc_quiescence(
             quiet_started = Instant::now();
         }
     }
-}
-
-async fn create_streaming_table(
-    pool: &PgPool,
-    raw_table_name: &str,
-    table_name: &str,
-) -> Result<()> {
-    let (schema, _) = split_table_name(raw_table_name)?;
-    let schema_name = quote_identifier(&schema)?;
-    sqlx::query(&format!("create schema if not exists {schema_name}"))
-        .execute(pool)
-        .await
-        .context("failed to create benchmark schema")?;
-
-    sqlx::query(&format!(
-        "create table if not exists {table_name} (id bigint primary key, payload text not null, \
-         produced_at timestamptz not null default clock_timestamp())"
-    ))
-    .execute(pool)
-    .await
-    .context("failed to create streaming benchmark table")?;
-
-    Ok(())
-}
-
-async fn truncate_table(pool: &PgPool, table_name: &str) -> Result<()> {
-    sqlx::query(&format!("truncate table {table_name}"))
-        .execute(pool)
-        .await
-        .context("failed to truncate streaming benchmark table")?;
-
-    Ok(())
-}
-
-async fn create_publication(pool: &PgPool, publication_name: &str, table_name: &str) -> Result<()> {
-    let publication_name = quote_identifier(publication_name)?;
-    sqlx::query(&format!("drop publication if exists {publication_name}"))
-        .execute(pool)
-        .await
-        .context("failed to drop streaming benchmark publication")?;
-    sqlx::query(&format!("create publication {publication_name} for table {table_name}"))
-        .execute(pool)
-        .await
-        .context("failed to create streaming benchmark publication")?;
-
-    Ok(())
-}
-
-async fn get_table_id(pool: &PgPool, raw_table_name: &str) -> Result<u32> {
-    let (schema, table) = split_table_name(raw_table_name)?;
-    let oid: i64 = sqlx::query_scalar(
-        "select c.oid::bigint from pg_class c join pg_namespace n on n.oid = c.relnamespace where \
-         n.nspname = $1 and c.relname = $2 and c.relkind = 'r'",
-    )
-    .bind(schema)
-    .bind(table)
-    .fetch_optional(pool)
-    .await?
-    .context("streaming benchmark table was not found")?;
-
-    u32::try_from(oid).context("table OID does not fit into u32")
-}
-
-async fn next_insert_id(pool: &PgPool, table_name: &str) -> Result<i64> {
-    let sql = format!("select coalesce(max(id), 0) + 1 from {table_name}");
-    let id: i64 = sqlx::query_scalar(&sql).fetch_one(pool).await?;
-    Ok(id)
-}
-
-async fn produce_inserts(
-    pool: &PgPool,
-    table_name: &str,
-    start_id: i64,
-    args: &RunArgs,
-) -> Result<u64> {
-    match args.duration_seconds {
-        Some(duration_seconds) => {
-            produce_for_duration(
-                pool,
-                table_name,
-                start_id,
-                Duration::from_secs(duration_seconds),
-                args.insert_batch_size,
-                args.producer_concurrency,
-            )
-            .await
-        }
-        None => {
-            produce_event_count(
-                pool,
-                table_name,
-                start_id,
-                args.event_count,
-                args.insert_batch_size,
-                args.producer_concurrency,
-            )
-            .await
-        }
-    }
-}
-
-async fn produce_event_count(
-    pool: &PgPool,
-    table_name: &str,
-    start_id: i64,
-    event_count: u64,
-    insert_batch_size: u64,
-    producer_concurrency: u16,
-) -> Result<u64> {
-    let next_id = Arc::new(AtomicI64::new(start_id));
-    let end_id = start_id
-        .checked_add(i64::try_from(event_count)?)
-        .and_then(|value| value.checked_sub(1))
-        .context("event count is too large for bigint source IDs")?;
-    let mut tasks = JoinSet::new();
-
-    for _ in 0..producer_concurrency {
-        let pool = pool.clone();
-        let table_name = table_name.to_owned();
-        let next_id = Arc::clone(&next_id);
-        tasks.spawn(async move {
-            let mut produced = 0_u64;
-            loop {
-                let start = next_id.fetch_add(insert_batch_size as i64, Ordering::Relaxed);
-                if start > end_id {
-                    break;
-                }
-
-                let end = end_id.min(start + insert_batch_size as i64 - 1);
-                insert_range(&pool, &table_name, start, end).await?;
-                produced += u64::try_from(end - start + 1)?;
-            }
-
-            Result::<u64>::Ok(produced)
-        });
-    }
-
-    collect_producer_tasks(tasks).await
-}
-
-async fn produce_for_duration(
-    pool: &PgPool,
-    table_name: &str,
-    start_id: i64,
-    duration: Duration,
-    insert_batch_size: u64,
-    producer_concurrency: u16,
-) -> Result<u64> {
-    let next_id = Arc::new(AtomicI64::new(start_id));
-    let produced = Arc::new(AtomicU64::new(0));
-    let deadline = Instant::now() + duration;
-    let mut tasks = JoinSet::new();
-
-    for _ in 0..producer_concurrency {
-        let pool = pool.clone();
-        let table_name = table_name.to_owned();
-        let next_id = Arc::clone(&next_id);
-        let produced = Arc::clone(&produced);
-        tasks.spawn(async move {
-            loop {
-                if Instant::now() >= deadline {
-                    break;
-                }
-
-                let start = next_id.fetch_add(insert_batch_size as i64, Ordering::Relaxed);
-                let end = start + insert_batch_size as i64 - 1;
-                insert_range(&pool, &table_name, start, end).await?;
-                produced.fetch_add(insert_batch_size, Ordering::Relaxed);
-            }
-
-            Result::<u64>::Ok(0)
-        });
-    }
-
-    collect_producer_tasks(tasks).await?;
-    Ok(produced.load(Ordering::Relaxed))
-}
-
-async fn collect_producer_tasks(mut tasks: JoinSet<Result<u64>>) -> Result<u64> {
-    let mut produced = 0_u64;
-    while let Some(result) = tasks.join_next().await {
-        produced += result.context("producer task panicked")??;
-    }
-
-    Ok(produced)
-}
-
-async fn insert_range(pool: &PgPool, table_name: &str, start: i64, end: i64) -> Result<()> {
-    let sql = format!(
-        "insert into {table_name} (id, payload) select gs, md5(gs::text) from \
-         generate_series($1::bigint, $2::bigint) as gs"
-    );
-    sqlx::query(&sql)
-        .bind(start)
-        .bind(end)
-        .execute(pool)
-        .await
-        .with_context(|| format!("failed to insert streaming rows {start}..={end}"))?;
-
-    Ok(())
 }

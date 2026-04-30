@@ -15,9 +15,7 @@ Use the direct benchmark binaries only when developing the benchmark code itself
 ## What Is Measured
 
 - `table_copy`: initial table-copy throughput for selected TPC-C tables.
-- `table_streaming`: CDC throughput for a TPC-C transaction workload. A
-  synthetic insert-only workload remains available for fast benchmark
-  development with `--streaming-workload synthetic`.
+- `table_streaming`: CDC throughput for a TPC-C transaction workload.
 
 Both benchmarks support:
 
@@ -139,8 +137,8 @@ for replicated tables.
 
 TPC-C streaming is controlled by:
 
-- `--streaming-workload tpcc`: the default. It runs `go-tpc tpcc run` against
-  the prepared TPC-C tables after the ETL pipeline is ready.
+- `go-tpc tpcc run` runs against the prepared TPC-C tables after the ETL
+  pipeline is ready.
 - `--streaming-duration-seconds`: duration for the TPC-C workload. The default
   is 60 seconds.
 - `--streaming-tpcc-threads`: optional `go-tpc tpcc run` concurrency. Empty
@@ -148,23 +146,9 @@ TPC-C streaming is controlled by:
 - `--streaming-drain-quiet-ms`: quiet period with no new CDC events before the
   stream is considered drained. The default is 2 seconds.
 
-Synthetic streaming is controlled separately and is mainly for quick local
-development:
-
-- `--streaming-workload synthetic`: inserts into `etl_streaming_benchmark`.
-- `--streaming-events`: exact number of source rows to insert in count mode.
-- `--streaming-duration-seconds`: insert for a fixed duration instead of a fixed
-  row count.
-- `--streaming-insert-batch-size`: rows inserted per producer transaction.
-- `--streaming-producer-concurrency`: number of concurrent insert producers.
-
-In TPC-C streaming mode, the workload itself determines the event mix via
-`go-tpc`'s NewOrder, Payment, OrderStatus, Delivery, and StockLevel
-transactions. The report infers the processed event count from destination
-observations after the stream drains. In synthetic count mode, the benchmark
-arms the destination counter for `--streaming-events`, inserts that many rows
-into the source table, then waits until ETL observes the same number of CDC data
-events.
+The workload itself determines the event mix via `go-tpc`'s NewOrder, Payment,
+OrderStatus, Delivery, and StockLevel transactions. The report infers the
+processed event count from destination observations after the stream drains.
 
 ## Copy-Only And Streaming-Only
 
@@ -186,19 +170,6 @@ cargo xtask benchmark \
   --skip-prepare \
   --streaming-duration-seconds 300 \
   --output-dir target/bench-results-streaming
-```
-
-Use the synthetic workload when you want the old insert-only fixed-count smoke
-benchmark:
-
-```bash
-cargo xtask benchmark \
-  --skip-table-copy \
-  --skip-prepare \
-  --streaming-workload synthetic \
-  --streaming-events 1000000 \
-  --streaming-insert-batch-size 5000 \
-  --streaming-producer-concurrency 16
 ```
 
 ## BigQuery Runs
@@ -233,7 +204,6 @@ With the GitHub CLI:
 gh workflow run benchmark.yml \
   -f benchmark_runner=blacksmith-16vcpu-ubuntu-2404 \
   -f warehouses=10 \
-  -f streaming_workload=tpcc \
   -f streaming_duration_seconds=300 \
   -f max_table_sync_workers=8 \
   -f max_copy_connections_per_table=4 \
@@ -247,14 +217,9 @@ Important workflow inputs:
   `blacksmith-16vcpu-ubuntu-2404`, or `blacksmith-32vcpu-ubuntu-2404`.
 - `warehouses`: number of TPC-C warehouses to prepare.
 - `tpcc_threads`: optional `go-tpc` prepare threads. Empty means xtask derives it.
-- `streaming_workload`: `tpcc` by default, or `synthetic` for insert-only smoke
-  runs.
 - `streaming_duration_seconds`: TPC-C workload duration. Defaults to 60.
 - `streaming_tpcc_threads`: optional `go-tpc tpcc run` threads. Empty means
   xtask derives it.
-- `streaming_events`: synthetic fixed CDC insert count.
-- `streaming_insert_batch_size`: synthetic rows per producer transaction.
-- `streaming_producer_concurrency`: optional synthetic producer concurrency.
 - `streaming_drain_quiet_ms`: CDC quiet period before TPC-C drain completes.
 - `max_table_sync_workers`: table-copy worker parallelism.
 - `max_copy_connections_per_table`: per-table copy connection parallelism.
@@ -390,11 +355,7 @@ cargo run -p etl-benchmarks --release --bin table_streaming -- --log-target term
   --username postgres \
   --password postgres \
   --publication-name bench_streaming_pub \
-  --workload tpcc \
   --table-ids <customer_oid>,<district_oid>,<item_oid>,<new_order_oid>,<order_line_oid>,<orders_oid>,<stock_oid>,<warehouse_oid> \
-  --create-table=false \
-  --reset-table=false \
-  --create-publication=false \
   --duration-seconds 60 \
   --tpcc-warehouses 1 \
   --tpcc-threads 8 \

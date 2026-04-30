@@ -20,30 +20,10 @@ on:
         description: Optional go-tpc prepare threads. Empty derives from warehouses and runner CPUs.
         required: false
         default: ""
-      streaming_workload:
-        description: Workload used for table streaming.
-        required: true
-        type: choice
-        options:
-          - tpcc
-          - synthetic
-        default: tpcc
-      streaming_events:
-        description: Number of synthetic table-streaming insert events in count mode.
-        required: true
-        default: "10000"
       streaming_duration_seconds:
-        description: Duration for TPC-C streaming, or synthetic duration mode.
+        description: Duration for TPC-C streaming.
         required: false
         default: "60"
-      streaming_insert_batch_size:
-        description: Rows inserted per synthetic streaming producer transaction.
-        required: true
-        default: "5000"
-      streaming_producer_concurrency:
-        description: Optional synthetic streaming producer concurrency. Empty derives from warehouses and runner CPUs.
-        required: false
-        default: ""
       streaming_tpcc_threads:
         description: Optional go-tpc run threads for table streaming. Empty derives from warehouses and runner CPUs.
         required: false
@@ -185,9 +165,6 @@ jobs:
             --username "$POSTGRES_USER"
             --password "$POSTGRES_PASSWORD"
             --warehouses "${{ inputs.warehouses }}"
-            --streaming-workload "${{ inputs.streaming_workload }}"
-            --streaming-events "${{ inputs.streaming_events }}"
-            --streaming-insert-batch-size "${{ inputs.streaming_insert_batch_size }}"
             --streaming-drain-quiet-ms "${{ inputs.streaming_drain_quiet_ms }}"
             --max-table-sync-workers "${{ inputs.max_table_sync_workers }}"
             --max-copy-connections-per-table "${{ inputs.max_copy_connections_per_table }}"
@@ -202,10 +179,6 @@ jobs:
 
           if [[ -n "${{ inputs.streaming_duration_seconds }}" ]]; then
             args+=(--streaming-duration-seconds "${{ inputs.streaming_duration_seconds }}")
-          fi
-
-          if [[ -n "${{ inputs.streaming_producer_concurrency }}" ]]; then
-            args+=(--streaming-producer-concurrency "${{ inputs.streaming_producer_concurrency }}")
           fi
 
           if [[ -n "${{ inputs.streaming_tpcc_threads }}" ]]; then

@@ -1,6 +1,6 @@
 use std::{
     fs,
-    io::{self, Write},
+    io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
     time::{SystemTime, UNIX_EPOCH},
@@ -19,13 +19,11 @@ const DEFAULT_TPCC_TABLES: &str =
     "customer,district,item,new_order,order_line,orders,stock,warehouse";
 const DEFAULT_PUBLICATION_NAME: &str = "bench_pub";
 const DEFAULT_STREAMING_PUBLICATION_NAME: &str = "bench_streaming_pub";
-const DEFAULT_STREAMING_TABLE_NAME: &str = "etl_streaming_benchmark";
 const DEFAULT_STREAMING_DURATION_SECONDS: u64 = 60;
 const DEFAULT_TPCC_THREADS_PER_WAREHOUSE: usize = 8;
 const DEFAULT_TPCC_THREADS_PER_CPU: usize = 4;
 const DEFAULT_TPCC_MIN_THREADS: usize = 8;
 const DEFAULT_TPCC_MAX_THREADS: usize = 128;
-const DEFAULT_STREAMING_MAX_PRODUCERS: usize = 64;
 
 #[derive(Args)]
 pub(crate) struct BenchmarkArgs {
@@ -90,26 +88,9 @@ pub(crate) struct BenchmarkArgs {
     /// Table-streaming benchmark publication name.
     #[arg(long, default_value = DEFAULT_STREAMING_PUBLICATION_NAME)]
     streaming_publication_name: String,
-    /// Streaming benchmark table name.
-    #[arg(long, default_value = DEFAULT_STREAMING_TABLE_NAME)]
-    streaming_table_name: String,
-    /// Streaming workload to benchmark.
-    #[arg(long, value_enum, default_value = "tpcc")]
-    streaming_workload: StreamingWorkload,
-    /// Number of insert events for table-streaming count mode.
-    #[arg(long, default_value_t = 10_000)]
-    streaming_events: u64,
-    /// Run table-streaming producers for this many seconds instead of a fixed
-    /// event count.
+    /// Run the TPC-C streaming workload for this many seconds.
     #[arg(long)]
     streaming_duration_seconds: Option<u64>,
-    /// Rows inserted per streaming producer transaction.
-    #[arg(long, default_value_t = 5_000)]
-    streaming_insert_batch_size: u64,
-    /// Streaming producer concurrency. Defaults to a warehouse and CPU based
-    /// value.
-    #[arg(long)]
-    streaming_producer_concurrency: Option<u16>,
     /// TPC-C thread concurrency used by table-streaming.
     #[arg(long)]
     streaming_tpcc_threads: Option<u16>,
@@ -151,12 +132,6 @@ enum Destination {
     BigQuery,
 }
 
-#[derive(ValueEnum, Clone, Copy, Debug, Eq, PartialEq)]
-enum StreamingWorkload {
-    Tpcc,
-    Synthetic,
-}
-
 impl BenchmarkArgs {
     pub(crate) fn run(self) -> Result<()> {
         self.validate()?;
@@ -171,9 +146,6 @@ impl BenchmarkArgs {
 
         let tpcc_threads =
             self.tpcc_threads.unwrap_or_else(|| recommended_threads(self.warehouses));
-        let streaming_producer_concurrency = self
-            .streaming_producer_concurrency
-            .unwrap_or_else(|| recommended_streaming_producers(self.warehouses));
         let streaming_tpcc_threads =
             self.streaming_tpcc_threads.unwrap_or_else(|| recommended_threads(self.warehouses));
         let pipeline_id_base = benchmark_pipeline_id_base()?;
@@ -181,35 +153,51 @@ impl BenchmarkArgs {
         let table_streaming_pipeline_id =
             pipeline_id_base.checked_add(1).context("benchmark pipeline id overflow")?;
 
-        eprintln!("benchmark configuration:");
-        eprintln!("  database: {}@{}:{}", self.database, self.host, self.port);
-        eprintln!("  warehouses: {}", self.warehouses);
-        eprintln!("  tpcc threads: {tpcc_threads}");
-        eprintln!("  streaming workload: {}", self.streaming_workload.as_arg());
-        if self.streaming_workload == StreamingWorkload::Tpcc {
-            eprintln!("  streaming tpcc threads: {streaming_tpcc_threads}");
-        }
-        eprintln!("  pipeline id base: {pipeline_id_base}");
-        eprintln!("  destination: {}", self.destination.as_arg());
-        eprintln!(
-            "  memory backpressure: {}",
-            if self.memory_backpressure_enabled() { "enabled" } else { "disabled" }
-        );
-        eprintln!("  output dir: {}", self.output_dir.display());
+        print_configuration(&[
+            ("Database", format!("{}@{}:{}", self.database, self.host, self.port)),
+            ("Warehouses", self.warehouses.to_string()),
+            ("TPC-C prepare threads", tpcc_threads.to_string()),
+            ("Streaming workload", "tpcc".to_owned()),
+            ("Streaming TPC-C threads", streaming_tpcc_threads.to_string()),
+            ("Pipeline id base", pipeline_id_base.to_string()),
+            ("Destination", self.destination.as_arg().to_owned()),
+            (
+                "Memory backpressure",
+                if self.memory_backpressure_enabled() { "enabled" } else { "disabled" }.to_owned(),
+            ),
+            ("Output dir", self.output_dir.display().to_string()),
+        ]);
 
+        print_phase("Benchmark database", "ensuring it exists");
         self.ensure_database()?;
+        print_done("Benchmark database", "ready");
 
         if needs_tpcc_tables && !self.skip_prepare {
+            print_phase("TPC-C data", "preparing or reusing tables");
             self.prepare_tpcc(tpcc_threads)?;
+            print_done("TPC-C data", "ready");
         } else if needs_tpcc_tables {
+            print_phase("TPC-C data", "checking existing tables");
             self.ensure_tpcc_tables_exist()?;
+            print_done("TPC-C data", "existing tables are ready");
+        } else {
+            print_skip("TPC-C data", "selected benchmarks do not need it");
         }
 
         if !self.skip_table_copy {
+            print_phase("Table copy", "preparing publication and row counts");
             let selected_tables = self.validated_tpcc_tables()?;
             let table_ids = self.fetch_table_ids(&selected_tables)?;
             let expected_row_count = self.fetch_expected_row_count(&selected_tables)?;
             self.create_publication(&self.publication_name, &selected_tables)?;
+            print_phase(
+                "Table copy",
+                &format!(
+                    "copying {} rows from {} TPC-C tables",
+                    format_integer(expected_row_count),
+                    selected_tables.len()
+                ),
+            );
 
             self.run_table_copy(
                 &table_ids,
@@ -217,15 +205,21 @@ impl BenchmarkArgs {
                 table_copy_pipeline_id,
                 self.output_dir.join("table_copy.json"),
             )?;
+            print_done("Table copy", "finished");
+        } else {
+            print_skip("Table copy", "disabled by flag");
         }
 
         if !self.skip_table_streaming {
+            print_phase("Table streaming", "preparing benchmark");
             self.run_table_streaming(
-                streaming_producer_concurrency,
                 streaming_tpcc_threads,
                 table_streaming_pipeline_id,
                 self.output_dir.join("table_streaming.json"),
             )?;
+            print_done("Table streaming", "finished");
+        } else {
+            print_skip("Table streaming", "disabled by flag");
         }
 
         Ok(())
@@ -248,11 +242,10 @@ impl BenchmarkArgs {
             bail!("--streaming-drain-poll-ms must be greater than 0");
         }
 
-        if self.streaming_workload == StreamingWorkload::Synthetic
-            && self.streaming_duration_seconds.is_none()
-            && self.streaming_events == 0
+        if let Some(duration_seconds) = self.streaming_duration_seconds
+            && duration_seconds == 0
         {
-            bail!("--streaming-events must be greater than 0 for synthetic count mode");
+            bail!("--streaming-duration-seconds must be greater than 0");
         }
 
         if matches!(self.destination, Destination::BigQuery) {
@@ -302,13 +295,13 @@ impl BenchmarkArgs {
         }
 
         if self.tpcc_tables_exist()? {
-            eprintln!("TPC-C tables already exist; skipping preparation.");
+            print_skip("TPC-C data", "tables already exist");
             return Ok(());
         }
 
-        eprintln!(
-            "preparing TPC-C data with {} warehouses and {} threads.",
-            self.warehouses, threads
+        print_phase(
+            "TPC-C data",
+            &format!("loading {} warehouses with {threads} threads", self.warehouses),
         );
 
         let status = Command::new("go-tpc")
@@ -461,7 +454,6 @@ impl BenchmarkArgs {
 
     fn run_table_streaming(
         &self,
-        producer_concurrency: u16,
         tpcc_threads: u16,
         pipeline_id: u64,
         report_path: PathBuf,
@@ -477,16 +469,6 @@ impl BenchmarkArgs {
             pipeline_id.to_string(),
             "--publication-name".to_owned(),
             self.streaming_publication_name.clone(),
-            "--workload".to_owned(),
-            self.streaming_workload.as_arg().to_owned(),
-            "--table-name".to_owned(),
-            self.streaming_table_name.clone(),
-            "--event-count".to_owned(),
-            self.streaming_events.to_string(),
-            "--insert-batch-size".to_owned(),
-            self.streaming_insert_batch_size.to_string(),
-            "--producer-concurrency".to_owned(),
-            producer_concurrency.to_string(),
             "--tpcc-warehouses".to_owned(),
             self.warehouses.to_string(),
             "--tpcc-threads".to_owned(),
@@ -497,29 +479,24 @@ impl BenchmarkArgs {
             self.streaming_drain_poll_ms.to_string(),
         ]);
 
-        match self.streaming_workload {
-            StreamingWorkload::Tpcc => {
-                let selected_tables = self.validated_tpcc_tables()?;
-                let table_ids = self.fetch_table_ids(&selected_tables)?;
-                self.create_publication(&self.streaming_publication_name, &selected_tables)?;
-                args.extend([
-                    "--table-ids".to_owned(),
-                    table_ids,
-                    "--create-table=false".to_owned(),
-                    "--reset-table=false".to_owned(),
-                    "--create-publication=false".to_owned(),
-                    "--duration-seconds".to_owned(),
-                    self.streaming_duration_seconds
-                        .unwrap_or(DEFAULT_STREAMING_DURATION_SECONDS)
-                        .to_string(),
-                ]);
-            }
-            StreamingWorkload::Synthetic => {
-                if let Some(duration_seconds) = self.streaming_duration_seconds {
-                    args.extend(["--duration-seconds".to_owned(), duration_seconds.to_string()]);
-                }
-            }
-        }
+        let selected_tables = self.validated_tpcc_tables()?;
+        let table_ids = self.fetch_table_ids(&selected_tables)?;
+        self.create_publication(&self.streaming_publication_name, &selected_tables)?;
+        let duration_seconds =
+            self.streaming_duration_seconds.unwrap_or(DEFAULT_STREAMING_DURATION_SECONDS);
+        print_phase(
+            "Table streaming",
+            &format!(
+                "generating TPC-C transactions for {duration_seconds}s across {} tables",
+                selected_tables.len()
+            ),
+        );
+        args.extend([
+            "--table-ids".to_owned(),
+            table_ids,
+            "--duration-seconds".to_owned(),
+            duration_seconds.to_string(),
+        ]);
 
         run_benchmark_binary("table_streaming", self.destination, &args, &report_path)
     }
@@ -622,7 +599,7 @@ impl BenchmarkArgs {
     }
 
     fn runs_tpcc_streaming(&self) -> bool {
-        !self.skip_table_streaming && self.streaming_workload == StreamingWorkload::Tpcc
+        !self.skip_table_streaming
     }
 
     fn needs_tpcc_tables(&self) -> bool {
@@ -639,15 +616,6 @@ impl Destination {
     }
 }
 
-impl StreamingWorkload {
-    fn as_arg(self) -> &'static str {
-        match self {
-            Self::Tpcc => "tpcc",
-            Self::Synthetic => "synthetic",
-        }
-    }
-}
-
 fn recommended_threads(warehouses: u16) -> u16 {
     let warehouse_threads =
         usize::from(warehouses).saturating_mul(DEFAULT_TPCC_THREADS_PER_WAREHOUSE);
@@ -656,12 +624,6 @@ fn recommended_threads(warehouses: u16) -> u16 {
         .unwrap_or(DEFAULT_TPCC_MIN_THREADS);
     warehouse_threads.max(cpu_threads).clamp(DEFAULT_TPCC_MIN_THREADS, DEFAULT_TPCC_MAX_THREADS)
         as u16
-}
-
-fn recommended_streaming_producers(warehouses: u16) -> u16 {
-    let cpu_producers =
-        std::thread::available_parallelism().map(std::num::NonZero::get).unwrap_or(1);
-    usize::from(warehouses).max(cpu_producers).clamp(1, DEFAULT_STREAMING_MAX_PRODUCERS) as u16
 }
 
 fn benchmark_pipeline_id_base() -> Result<u64> {
@@ -690,6 +652,98 @@ fn check_command(command: &str) -> Result<()> {
     bail!("required command '{command}' was not found")
 }
 
+fn print_configuration(rows: &[(&str, String)]) {
+    print_stderr_table("Benchmark configuration", "Setting", "Value", rows);
+    eprintln!();
+}
+
+fn print_phase(name: &str, message: &str) {
+    let color = stderr_color_enabled();
+    eprintln!(
+        "{} {} {}",
+        paint(color, "36;1", "[run]"),
+        paint(color, "1", name),
+        paint(color, "2", message)
+    );
+}
+
+fn print_done(name: &str, message: &str) {
+    let color = stderr_color_enabled();
+    eprintln!("{} {} {}", paint(color, "32;1", "[ok] "), paint(color, "1", name), message);
+}
+
+fn print_skip(name: &str, message: &str) {
+    let color = stderr_color_enabled();
+    eprintln!("{} {} {}", paint(color, "33;1", "[skip]"), paint(color, "1", name), message);
+}
+
+fn print_stderr_table(title: &str, left_header: &str, right_header: &str, rows: &[(&str, String)]) {
+    let color = stderr_color_enabled();
+    eprintln!("{}", paint(color, "36;1", title));
+    for line in table_lines(left_header, right_header, rows) {
+        eprintln!("{line}");
+    }
+}
+
+fn print_stdout_table(title: &str, left_header: &str, right_header: &str, rows: &[(&str, String)]) {
+    let color = stdout_color_enabled();
+    println!();
+    println!("{}", paint(color, "36;1", title));
+    for line in table_lines(left_header, right_header, rows) {
+        println!("{line}");
+    }
+    println!();
+}
+
+fn table_lines(left_header: &str, right_header: &str, rows: &[(&str, String)]) -> Vec<String> {
+    let left_width = rows
+        .iter()
+        .map(|(label, _)| label.len())
+        .chain(std::iter::once(left_header.len()))
+        .max()
+        .unwrap_or(left_header.len());
+    let right_width = rows
+        .iter()
+        .map(|(_, value)| value.len())
+        .chain(std::iter::once(right_header.len()))
+        .max()
+        .unwrap_or(right_header.len());
+    let border = format!(
+        "+-{:-<left_width$}-+-{:-<right_width$}-+",
+        "",
+        "",
+        left_width = left_width,
+        right_width = right_width
+    );
+
+    let mut lines = Vec::with_capacity(rows.len() + 4);
+    lines.push(border.clone());
+    lines.push(format!("| {left_header:<left_width$} | {right_header:<right_width$} |"));
+    lines.push(border.clone());
+    for (label, value) in rows {
+        lines.push(format!("| {label:<left_width$} | {value:<right_width$} |"));
+    }
+    lines.push(border);
+    lines
+}
+
+fn stdout_color_enabled() -> bool {
+    io::stdout().is_terminal() && color_allowed()
+}
+
+fn stderr_color_enabled() -> bool {
+    io::stderr().is_terminal() && color_allowed()
+}
+
+fn color_allowed() -> bool {
+    std::env::var_os("NO_COLOR").is_none()
+        && std::env::var("TERM").map_or(true, |term| term != "dumb")
+}
+
+fn paint(enabled: bool, code: &str, text: &str) -> String {
+    if enabled { format!("\x1b[{code}m{text}\x1b[0m") } else { text.to_owned() }
+}
+
 fn run_benchmark_binary(
     binary_name: &str,
     destination: Destination,
@@ -703,23 +757,33 @@ fn run_benchmark_binary(
     }
     command.args(["--bin", binary_name, "--"]).args(binary_args);
 
-    eprintln!("running cargo run -p etl-benchmarks --release --bin {binary_name}.");
+    print_phase(
+        "Runner",
+        &format!("{binary_name} benchmark running; detailed replicator logs are hidden"),
+    );
     let output =
         command.output().with_context(|| format!("failed to run benchmark {binary_name}"))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    eprint!("{stderr}");
-    io::stderr().flush().context("failed to flush benchmark stderr")?;
-    print!("{stdout}");
-    io::stdout().flush().context("failed to flush benchmark stdout")?;
 
     if !output.status.success() {
+        if !stdout.trim().is_empty() {
+            eprintln!("{binary_name} stdout:");
+            eprint!("{stdout}");
+        }
+        if !stderr.trim().is_empty() {
+            eprintln!("{binary_name} stderr:");
+            eprint!("{stderr}");
+        }
+        io::stderr().flush().context("failed to flush benchmark failure output")?;
         bail!("benchmark {binary_name} failed");
     }
 
-    read_report(report_path)
+    let report = read_report(report_path)
         .with_context(|| format!("benchmark {binary_name} did not write a valid report"))?;
+    print_benchmark_report(binary_name, &report);
+    print_done("Report", &format!("wrote {}", report_path.display()));
     Ok(())
 }
 
@@ -728,6 +792,92 @@ fn read_report(path: &Path) -> Result<Value> {
         .with_context(|| format!("failed to read benchmark report {}", path.display()))?;
     serde_json::from_str(&json)
         .with_context(|| format!("failed to parse benchmark report {}", path.display()))
+}
+
+fn print_benchmark_report(binary_name: &str, report: &Value) {
+    match binary_name {
+        "table_copy" => {
+            print_stdout_table(
+                "Table copy results",
+                "Metric",
+                "Value",
+                &report_rows(
+                    report,
+                    &[
+                        ("Rows copied", "copied_rows"),
+                        ("Rows/s", "rows_per_second"),
+                        ("Decoded MiB", "estimated_copied_mib"),
+                        ("Decoded MiB/s", "estimated_mib_per_second"),
+                        ("Copy wait ms", "copy_wait_ms"),
+                        ("Total ms", "total_ms"),
+                    ],
+                ),
+            );
+        }
+        "table_streaming" => {
+            print_stdout_table(
+                "Table streaming results",
+                "Metric",
+                "Value",
+                &report_rows(
+                    report,
+                    &[
+                        ("Workload", "workload"),
+                        ("Produced events", "produced_events"),
+                        ("Observed CDC events", "observed_cdc_events"),
+                        ("Events/s", "end_to_end_with_shutdown_events_per_second"),
+                        ("Decoded MiB/s", "end_to_end_with_shutdown_estimated_mib_per_second"),
+                        ("Total ms", "total_ms"),
+                    ],
+                ),
+            );
+        }
+        _ => {}
+    }
+}
+
+fn report_rows(
+    report: &Value,
+    metrics: &[(&'static str, &'static str)],
+) -> Vec<(&'static str, String)> {
+    metrics
+        .iter()
+        .filter_map(|(label, key)| {
+            report.get(*key).map(|value| (*label, format_report_value(value)))
+        })
+        .collect()
+}
+
+fn format_report_value(value: &Value) -> String {
+    match value {
+        Value::Null => "null".to_owned(),
+        Value::Bool(value) => value.to_string(),
+        Value::Number(value) => match value.as_f64() {
+            Some(value) if value.fract() == 0.0 && value >= 0.0 => format_integer(value as u64),
+            Some(value) => format!("{value:.2}"),
+            None => value.to_string(),
+        },
+        Value::String(value) => value.clone(),
+        value => value.to_string(),
+    }
+}
+
+fn format_integer(value: u64) -> String {
+    let value = value.to_string();
+    let mut formatted = String::with_capacity(value.len() + value.len() / 3);
+    let first_group_len = value.len() % 3;
+
+    for (idx, ch) in value.chars().enumerate() {
+        if idx > 0
+            && (idx == first_group_len
+                || (idx > first_group_len && (idx - first_group_len).is_multiple_of(3)))
+        {
+            formatted.push(',');
+        }
+        formatted.push(ch);
+    }
+
+    formatted
 }
 
 fn quote_identifier(identifier: &str) -> Result<String> {
