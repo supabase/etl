@@ -8,7 +8,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, ValueEnum};
-use serde_json::Value;
+use serde_json::{Map, Number, Value};
 
 const DEFAULT_DB_HOST: &str = "localhost";
 const DEFAULT_DB_PORT: u16 = 5430;
@@ -99,6 +99,13 @@ pub(crate) struct BenchmarkArgs {
     /// default.
     #[arg(long, default_value_t = false)]
     enable_memory_backpressure: bool,
+    /// Number of measured samples to run for each selected benchmark.
+    #[arg(long, default_value_t = 1)]
+    samples: u16,
+    /// Number of warmup samples to run before measured samples. Warmups are
+    /// discarded from the aggregate report.
+    #[arg(long, default_value_t = 0)]
+    warmup_samples: u16,
     /// Directory where JSON benchmark reports are written.
     #[arg(long, default_value = "target/bench-results")]
     output_dir: PathBuf,
@@ -126,18 +133,14 @@ impl BenchmarkArgs {
         let tpcc_threads =
             self.tpcc_threads.unwrap_or_else(|| recommended_threads(self.warehouses));
         let pipeline_id_base = benchmark_pipeline_id_base()?;
-        let table_copy_pipeline_id = pipeline_id_base;
-        let table_streaming_pipeline_id =
-            pipeline_id_base.checked_add(1).context("benchmark pipeline id overflow")?;
-        let table_copy_publication_name = format!("bench_pub_{table_copy_pipeline_id}");
-        let table_streaming_publication_name =
-            format!("bench_streaming_pub_{table_streaming_pipeline_id}");
 
         print_configuration(&[
             ("Database", format!("{}@{}:{}", self.database, self.host, self.port)),
             ("Warehouses", self.warehouses.to_string()),
             ("TPC-C threads", tpcc_threads.to_string()),
             ("Streaming workload", "tpcc".to_owned()),
+            ("Measured samples", self.samples.to_string()),
+            ("Warmup samples", self.warmup_samples.to_string()),
             ("Pipeline id base", pipeline_id_base.to_string()),
             ("Destination", self.destination.as_arg().to_owned()),
             ("Memory backpressure", memory_backpressure_label(self.enable_memory_backpressure)),
@@ -169,7 +172,6 @@ impl BenchmarkArgs {
             let selected_tables = self.validated_tpcc_tables()?;
             let table_ids = self.fetch_table_ids(&selected_tables)?;
             let expected_row_count = self.fetch_expected_row_count(&selected_tables)?;
-            self.create_publication(&table_copy_publication_name, &selected_tables)?;
             print_phase(
                 "Table copy",
                 &format!(
@@ -179,11 +181,11 @@ impl BenchmarkArgs {
                 ),
             );
 
-            table_copy_report = Some(self.run_table_copy(
-                &table_copy_publication_name,
+            table_copy_report = Some(self.run_table_copy_samples(
+                &selected_tables,
                 &table_ids,
                 expected_row_count,
-                table_copy_pipeline_id,
+                pipeline_id_base,
                 self.output_dir.join("table_copy.json"),
             )?);
             print_done("Table copy", "finished");
@@ -193,10 +195,9 @@ impl BenchmarkArgs {
 
         if !self.skip_table_streaming {
             print_phase("Table streaming", "preparing benchmark");
-            table_streaming_report = Some(self.run_table_streaming(
-                &table_streaming_publication_name,
+            table_streaming_report = Some(self.run_table_streaming_samples(
                 tpcc_threads,
-                table_streaming_pipeline_id,
+                pipeline_id_base,
                 self.output_dir.join("table_streaming.json"),
             )?);
             print_done("Table streaming", "finished");
@@ -216,6 +217,10 @@ impl BenchmarkArgs {
 
         if self.skip_table_copy && self.skip_table_streaming {
             bail!("at least one benchmark must run");
+        }
+
+        if self.samples == 0 {
+            bail!("--samples must be greater than 0");
         }
 
         if self.streaming_drain_quiet_ms == 0 {
@@ -415,6 +420,62 @@ impl BenchmarkArgs {
         .context("failed to create benchmark publication")
     }
 
+    fn drop_publication(&self, publication_name: &str) -> Result<()> {
+        let publication_name = quote_identifier(publication_name)?;
+        self.psql_status(&self.database, &format!("drop publication if exists {publication_name}"))
+            .context("failed to drop benchmark publication")
+    }
+
+    fn run_table_copy_samples(
+        &self,
+        selected_tables: &[String],
+        table_ids: &str,
+        expected_row_count: u64,
+        pipeline_id_base: u64,
+        report_path: PathBuf,
+    ) -> Result<Value> {
+        let mut measured_reports = Vec::with_capacity(usize::from(self.samples));
+        let total_samples = self.total_sample_count();
+        for sample_idx in 0..total_samples {
+            let pipeline_id = sample_pipeline_id(pipeline_id_base, 0, sample_idx)?;
+            let publication_name = format!("bench_pub_{pipeline_id}");
+            let sample_report_path =
+                self.sample_report_path("table_copy", sample_idx.saturating_add(1));
+            let sample_label = self.sample_label(sample_idx);
+
+            print_phase("Table copy", &format!("{sample_label} creating publication"));
+            self.create_publication(&publication_name, selected_tables)?;
+            print_phase("Table copy", &format!("{sample_label} running"));
+            let report = self.run_table_copy(
+                &publication_name,
+                table_ids,
+                expected_row_count,
+                pipeline_id,
+                sample_report_path.clone(),
+            )?;
+            self.drop_publication(&publication_name)?;
+            remove_sample_report(&sample_report_path)?;
+            print_sample_result("table_copy", &sample_label, &report);
+
+            if self.is_warmup_sample(sample_idx) {
+                print_skip("Table copy", &format!("{sample_label} discarded as warmup"));
+            } else {
+                measured_reports.push(report);
+            }
+        }
+
+        let aggregate = aggregate_reports(
+            "table_copy",
+            usize::from(self.samples),
+            usize::from(self.warmup_samples),
+            &measured_reports,
+        )?;
+        write_json_report(&aggregate, &report_path)?;
+        print_benchmark_report("table_copy", &aggregate);
+        print_done("Report", &format!("wrote {}", report_path.display()));
+        Ok(aggregate)
+    }
+
     fn run_table_copy(
         &self,
         publication_name: &str,
@@ -443,11 +504,59 @@ impl BenchmarkArgs {
         run_benchmark_binary("table_copy", self.destination, &args, &report_path)
     }
 
+    fn run_table_streaming_samples(
+        &self,
+        tpcc_threads: u16,
+        pipeline_id_base: u64,
+        report_path: PathBuf,
+    ) -> Result<Value> {
+        let selected_tables = self.validated_tpcc_tables()?;
+        let mut measured_reports = Vec::with_capacity(usize::from(self.samples));
+        let total_samples = self.total_sample_count();
+        for sample_idx in 0..total_samples {
+            let pipeline_id = sample_pipeline_id(pipeline_id_base, 1, sample_idx)?;
+            let publication_name = format!("bench_streaming_pub_{pipeline_id}");
+            let sample_report_path =
+                self.sample_report_path("table_streaming", sample_idx.saturating_add(1));
+            let sample_label = self.sample_label(sample_idx);
+
+            print_phase("Table streaming", &format!("{sample_label} preparing"));
+            let report = self.run_table_streaming(
+                &publication_name,
+                tpcc_threads,
+                pipeline_id,
+                &selected_tables,
+                sample_report_path.clone(),
+            )?;
+            self.drop_publication(&publication_name)?;
+            remove_sample_report(&sample_report_path)?;
+            print_sample_result("table_streaming", &sample_label, &report);
+
+            if self.is_warmup_sample(sample_idx) {
+                print_skip("Table streaming", &format!("{sample_label} discarded as warmup"));
+            } else {
+                measured_reports.push(report);
+            }
+        }
+
+        let aggregate = aggregate_reports(
+            "table_streaming",
+            usize::from(self.samples),
+            usize::from(self.warmup_samples),
+            &measured_reports,
+        )?;
+        write_json_report(&aggregate, &report_path)?;
+        print_benchmark_report("table_streaming", &aggregate);
+        print_done("Report", &format!("wrote {}", report_path.display()));
+        Ok(aggregate)
+    }
+
     fn run_table_streaming(
         &self,
         publication_name: &str,
         tpcc_threads: u16,
         pipeline_id: u64,
+        selected_tables: &[String],
         report_path: PathBuf,
     ) -> Result<Value> {
         let mut args = vec!["--log-target".to_owned(), "terminal".to_owned(), "run".to_owned()];
@@ -469,9 +578,8 @@ impl BenchmarkArgs {
             self.streaming_drain_quiet_ms.to_string(),
         ]);
 
-        let selected_tables = self.validated_tpcc_tables()?;
-        let table_ids = self.fetch_table_ids(&selected_tables)?;
-        self.create_publication(publication_name, &selected_tables)?;
+        let table_ids = self.fetch_table_ids(selected_tables)?;
+        self.create_publication(publication_name, selected_tables)?;
         let duration_seconds =
             self.streaming_duration_seconds.unwrap_or(DEFAULT_STREAMING_DURATION_SECONDS);
         print_phase(
@@ -489,6 +597,27 @@ impl BenchmarkArgs {
         ]);
 
         run_benchmark_binary("table_streaming", self.destination, &args, &report_path)
+    }
+
+    fn total_sample_count(&self) -> usize {
+        usize::from(self.samples) + usize::from(self.warmup_samples)
+    }
+
+    fn is_warmup_sample(&self, sample_idx: usize) -> bool {
+        sample_idx < usize::from(self.warmup_samples)
+    }
+
+    fn sample_label(&self, sample_idx: usize) -> String {
+        let warmups = usize::from(self.warmup_samples);
+        if sample_idx < warmups {
+            format!("warmup {}/{}", sample_idx + 1, warmups)
+        } else {
+            format!("sample {}/{}", sample_idx + 1 - warmups, self.samples)
+        }
+    }
+
+    fn sample_report_path(&self, benchmark: &str, sample_number: usize) -> PathBuf {
+        self.output_dir.join(format!(".{benchmark}_sample_{sample_number}.json"))
     }
 
     fn push_common_benchmark_args(&self, args: &mut Vec<String>) {
@@ -641,6 +770,206 @@ fn check_command(command: &str) -> Result<()> {
     bail!("required command '{command}' was not found")
 }
 
+fn sample_pipeline_id(base: u64, benchmark_offset: u64, sample_idx: usize) -> Result<u64> {
+    let sample_offset = u64::try_from(sample_idx)
+        .context("benchmark sample index does not fit in pipeline id")?
+        .checked_mul(2)
+        .context("benchmark sample pipeline id overflow")?;
+    base.checked_add(sample_offset)
+        .and_then(|id| id.checked_add(benchmark_offset))
+        .context("benchmark pipeline id overflow")
+}
+
+fn remove_sample_report(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("failed to remove {}", path.display())),
+    }
+}
+
+fn write_json_report(report: &Value, path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create report directory {}", parent.display()))?;
+    }
+
+    let json = serde_json::to_string_pretty(report)?;
+    fs::write(path, format!("{json}\n"))
+        .with_context(|| format!("failed to write benchmark report to {}", path.display()))
+}
+
+fn aggregate_reports(
+    benchmark: &str,
+    sample_count: usize,
+    warmup_sample_count: usize,
+    reports: &[Value],
+) -> Result<Value> {
+    if reports.is_empty() {
+        bail!("cannot aggregate benchmark reports without measured samples");
+    }
+
+    let primary_metric = primary_metric_key(benchmark);
+    let base_report = primary_metric
+        .and_then(|key| median_report_by_metric(reports, key))
+        .unwrap_or(&reports[reports.len() / 2]);
+    let mut aggregate = aggregate_value(base_report, reports);
+    let Some(object) = aggregate.as_object_mut() else {
+        bail!("benchmark report is not a JSON object");
+    };
+
+    object.insert("sample_count".to_owned(), Value::Number(Number::from(sample_count as u64)));
+    object.insert(
+        "warmup_sample_count".to_owned(),
+        Value::Number(Number::from(warmup_sample_count as u64)),
+    );
+    object.insert("aggregation".to_owned(), Value::String("median".to_owned()));
+    object.insert("sample_summary".to_owned(), sample_summary(reports));
+    Ok(aggregate)
+}
+
+fn aggregate_value(base: &Value, reports: &[Value]) -> Value {
+    match base {
+        Value::Object(base_object) => {
+            let mut object = Map::new();
+            for (key, value) in base_object {
+                let values = reports
+                    .iter()
+                    .filter_map(|report| report.as_object()?.get(key))
+                    .collect::<Vec<_>>();
+                if values.len() == reports.len() {
+                    object.insert(key.clone(), aggregate_field(value, &values));
+                } else {
+                    object.insert(key.clone(), value.clone());
+                }
+            }
+            Value::Object(object)
+        }
+        value => value.clone(),
+    }
+}
+
+fn aggregate_field(base: &Value, values: &[&Value]) -> Value {
+    if let Some(numbers) = numeric_values(values) {
+        return json_number(median(numbers));
+    }
+
+    if matches!(base, Value::Object(_)) && values.iter().all(|value| value.is_object()) {
+        let owned_values = values.iter().map(|value| (*value).clone()).collect::<Vec<_>>();
+        return aggregate_value(base, &owned_values);
+    }
+
+    base.clone()
+}
+
+fn sample_summary(reports: &[Value]) -> Value {
+    let mut summary = Map::new();
+    let Some(base_object) = reports.first().and_then(Value::as_object) else {
+        return Value::Object(summary);
+    };
+
+    for key in base_object.keys() {
+        let values =
+            reports.iter().filter_map(|report| report.as_object()?.get(key)).collect::<Vec<_>>();
+        let Some(numbers) = numeric_values(&values) else {
+            continue;
+        };
+        if numbers.is_empty() {
+            continue;
+        }
+
+        let min = numbers.iter().copied().fold(f64::INFINITY, f64::min);
+        let max = numbers.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let median = median(numbers);
+        let spread_pct = if min > 0.0 { ((max - min) / min) * 100.0 } else { 0.0 };
+        summary.insert(
+            key.clone(),
+            Value::Object(Map::from_iter([
+                ("min".to_owned(), json_number(min)),
+                ("median".to_owned(), json_number(median)),
+                ("max".to_owned(), json_number(max)),
+                ("spread_pct".to_owned(), json_number(spread_pct)),
+            ])),
+        );
+    }
+
+    Value::Object(summary)
+}
+
+fn numeric_values(values: &[&Value]) -> Option<Vec<f64>> {
+    values.iter().map(|value| value.as_f64()).collect()
+}
+
+fn median(mut values: Vec<f64>) -> f64 {
+    values.sort_by(f64::total_cmp);
+    let mid = values.len() / 2;
+    if values.len().is_multiple_of(2) { (values[mid - 1] + values[mid]) / 2.0 } else { values[mid] }
+}
+
+fn median_report_by_metric<'a>(reports: &'a [Value], key: &str) -> Option<&'a Value> {
+    let mut indexed_values = reports
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, report)| Some((idx, report.get(key)?.as_f64()?)))
+        .collect::<Vec<_>>();
+    if indexed_values.len() != reports.len() {
+        return None;
+    }
+
+    indexed_values.sort_by(|(_, left), (_, right)| left.total_cmp(right));
+    Some(&reports[indexed_values[indexed_values.len() / 2].0])
+}
+
+fn json_number(value: f64) -> Value {
+    if value.is_finite() && value.fract() == 0.0 && value >= 0.0 && value <= u64::MAX as f64 {
+        Value::Number(Number::from(value as u64))
+    } else {
+        Value::Number(Number::from_f64(value).unwrap_or_else(|| Number::from(0)))
+    }
+}
+
+fn primary_metric_key(benchmark: &str) -> Option<&'static str> {
+    match benchmark {
+        "table_copy" => Some("rows_per_second"),
+        "table_streaming" => Some("end_to_end_with_shutdown_events_per_second"),
+        _ => None,
+    }
+}
+
+fn print_sample_result(benchmark: &str, sample_label: &str, report: &Value) {
+    match benchmark {
+        "table_copy" => {
+            let throughput = report_number(report, "rows_per_second").map_or_else(
+                || "-".to_owned(),
+                |value| format!("{} rows/s", format_decimal(value, 2)),
+            );
+            let total = report_number(report, "total_ms")
+                .map_or_else(|| "-".to_owned(), format_milliseconds);
+            print_done("Table copy", &format!("{sample_label} {throughput}, total {total}"));
+        }
+        "table_streaming" => {
+            let throughput = report_number(report, "end_to_end_with_shutdown_events_per_second")
+                .map_or_else(
+                    || "-".to_owned(),
+                    |value| format!("{} events/s", format_decimal(value, 2)),
+                );
+            let produced = report_number(report, "produced_events").map_or_else(
+                || "-".to_owned(),
+                |value| format!("{} events", format_integer(value as u64)),
+            );
+            let total = report_number(report, "total_ms")
+                .map_or_else(|| "-".to_owned(), format_milliseconds);
+            print_done(
+                "Table streaming",
+                &format!("{sample_label} {throughput}, {produced}, total {total}"),
+            );
+        }
+        _ => {}
+    }
+}
+
 fn print_configuration(rows: &[(&str, String)]) {
     print_stderr_table("Benchmark configuration", "Setting", "Value", rows);
     eprintln!();
@@ -771,8 +1100,6 @@ fn run_benchmark_binary(
 
     let report = read_report(report_path)
         .with_context(|| format!("benchmark {binary_name} did not write a valid report"))?;
-    print_benchmark_report(binary_name, &report);
-    print_done("Report", &format!("wrote {}", report_path.display()));
     Ok(report)
 }
 
@@ -996,4 +1323,64 @@ fn quote_identifier(identifier: &str) -> Result<String> {
 
 fn quote_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use crate::commands::benchmark::aggregate_reports;
+
+    #[test]
+    fn aggregate_reports_uses_medians_and_records_spread() {
+        let reports = vec![
+            json!({
+                "benchmark": "table_streaming",
+                "destination": "null",
+                "end_to_end_with_shutdown_events_per_second": 100.0,
+                "end_to_end_with_shutdown_estimated_mib_per_second": 10.0,
+                "total_ms": 1_000,
+                "destination_stats": {
+                    "inserts": 10,
+                    "updates": 20
+                }
+            }),
+            json!({
+                "benchmark": "table_streaming",
+                "destination": "null",
+                "end_to_end_with_shutdown_events_per_second": 80.0,
+                "end_to_end_with_shutdown_estimated_mib_per_second": 8.0,
+                "total_ms": 1_200,
+                "destination_stats": {
+                    "inserts": 8,
+                    "updates": 16
+                }
+            }),
+            json!({
+                "benchmark": "table_streaming",
+                "destination": "null",
+                "end_to_end_with_shutdown_events_per_second": 120.0,
+                "end_to_end_with_shutdown_estimated_mib_per_second": 12.0,
+                "total_ms": 900,
+                "destination_stats": {
+                    "inserts": 12,
+                    "updates": 24
+                }
+            }),
+        ];
+
+        let aggregate = aggregate_reports("table_streaming", 3, 1, &reports).unwrap();
+
+        assert_eq!(aggregate["aggregation"], "median");
+        assert_eq!(aggregate["sample_count"], 3);
+        assert_eq!(aggregate["warmup_sample_count"], 1);
+        assert_eq!(aggregate["end_to_end_with_shutdown_events_per_second"], 100);
+        assert_eq!(aggregate["end_to_end_with_shutdown_estimated_mib_per_second"], 10);
+        assert_eq!(aggregate["total_ms"], 1000);
+        assert_eq!(aggregate["destination_stats"]["inserts"], 10);
+        assert_eq!(
+            aggregate["sample_summary"]["end_to_end_with_shutdown_events_per_second"]["spread_pct"],
+            50
+        );
+    }
 }

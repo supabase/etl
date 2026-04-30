@@ -88,6 +88,8 @@ env:
   POSTGRES_DB: bench
   POSTGRES_PORT: 5430
   POSTGRES_HOST: localhost
+  BENCHMARK_SAMPLES: 3
+  BENCHMARK_WARMUP_SAMPLES: 1
 
 permissions:
   actions: read
@@ -190,6 +192,8 @@ jobs:
             echo "| Cgroup memory limit | ${cgroup_memory_limit} |"
             echo "| Warehouses | ${WAREHOUSES_INPUT} |"
             echo "| TPC-C threads | ${tpcc_threads} |"
+            echo "| Measured samples | ${BENCHMARK_SAMPLES} |"
+            echo "| Warmup samples | ${BENCHMARK_WARMUP_SAMPLES} |"
             echo "| Memory budget ratio | ${MEMORY_BUDGET_RATIO_INPUT} |"
             echo "| Memory backpressure | ${ENABLE_MEMORY_BACKPRESSURE_INPUT} |"
             echo "| Destination | ${DESTINATION_INPUT} |"
@@ -230,6 +234,8 @@ jobs:
             --batch-max-fill-ms "$BATCH_MAX_FILL_MS_INPUT"
             --memory-budget-ratio "$MEMORY_BUDGET_RATIO_INPUT"
             --destination "$DESTINATION_INPUT"
+            --samples "$BENCHMARK_SAMPLES"
+            --warmup-samples "$BENCHMARK_WARMUP_SAMPLES"
             --output-dir target/bench-results
           )
 
@@ -293,6 +299,23 @@ jobs:
                   return "-"
               return f"{float(ms) / 1000:,.2f} s"
 
+          def pct(value):
+              if value is None:
+                  return "-"
+              return f"{float(value):,.2f}%"
+
+          def samples(report):
+              sample_count = report.get("sample_count")
+              warmup_count = report.get("warmup_sample_count", 0)
+              if sample_count is None:
+                  return "1"
+              if warmup_count:
+                  return f"{sample_count} + {warmup_count} warmup"
+              return str(sample_count)
+
+          def spread(report, key):
+              return pct((report.get("sample_summary") or {}).get(key, {}).get("spread_pct"))
+
           def table(headers, rows):
               print("| " + " | ".join(headers) + " |")
               print("| " + " | ".join("---" for _ in headers) + " |")
@@ -313,6 +336,7 @@ jobs:
                   f"{number(table_copy.get('rows_per_second'))} rows/s",
                   f"{number(table_copy.get('estimated_mib_per_second'))} MiB/s",
                   seconds(table_copy.get("total_ms")),
+                  spread(table_copy, "rows_per_second"),
               ])
           if table_streaming:
               summary.append([
@@ -320,10 +344,11 @@ jobs:
                   f"{number(table_streaming.get('end_to_end_with_shutdown_events_per_second'))} events/s",
                   f"{number(table_streaming.get('end_to_end_with_shutdown_estimated_mib_per_second'))} MiB/s",
                   seconds(table_streaming.get("total_ms")),
+                  spread(table_streaming, "end_to_end_with_shutdown_events_per_second"),
               ])
 
           if summary:
-              table(["Benchmark", "Throughput", "Data rate", "Total"], summary)
+              table(["Benchmark", "Median throughput", "Data rate", "Total", "Sample spread"], summary)
               print()
           else:
               print("No benchmark JSON reports were written.")
@@ -334,10 +359,13 @@ jobs:
               table(
                   ["Metric", "Value"],
                   [
+                      ["Samples", samples(table_copy)],
                       ["Rows copied", number(table_copy.get("copied_rows"))],
                       ["Rows/s", number(table_copy.get("rows_per_second"))],
+                      ["Rows/s spread", spread(table_copy, "rows_per_second")],
                       ["Decoded MiB", number(table_copy.get("estimated_copied_mib"))],
                       ["Decoded MiB/s", number(table_copy.get("estimated_mib_per_second"))],
+                      ["Decoded MiB/s spread", spread(table_copy, "estimated_mib_per_second")],
                       ["Copy wait", seconds(table_copy.get("copy_wait_ms"))],
                       ["Total", seconds(table_copy.get("total_ms"))],
                   ],
@@ -350,11 +378,14 @@ jobs:
               table(
                   ["Metric", "Value"],
                   [
+                      ["Samples", samples(table_streaming)],
                       ["Workload", table_streaming.get("workload", "-")],
                       ["Produced events", number(table_streaming.get("produced_events"))],
                       ["Observed CDC events", number(table_streaming.get("observed_cdc_events"))],
                       ["Events/s", number(table_streaming.get("end_to_end_with_shutdown_events_per_second"))],
+                      ["Events/s spread", spread(table_streaming, "end_to_end_with_shutdown_events_per_second")],
                       ["Decoded MiB/s", number(table_streaming.get("end_to_end_with_shutdown_estimated_mib_per_second"))],
+                      ["Decoded MiB/s spread", spread(table_streaming, "end_to_end_with_shutdown_estimated_mib_per_second")],
                       ["Inserts", number(stats.get("inserts"))],
                       ["Updates", number(stats.get("updates"))],
                       ["Deletes", number(stats.get("deletes"))],

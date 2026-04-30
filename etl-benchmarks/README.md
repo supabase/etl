@@ -111,6 +111,8 @@ cargo xtask benchmark \
   --force-prepare \
   --warehouses 10 \
   --streaming-duration-seconds 300 \
+  --samples 3 \
+  --warmup-samples 1 \
   --batch-max-fill-ms 1000 \
   --max-table-sync-workers 8 \
   --max-copy-connections-per-table 4 \
@@ -119,6 +121,13 @@ cargo xtask benchmark \
 
 Use `--force-prepare` when changing the warehouse count for an existing local
 benchmark database. Without it, `xtask` reuses the existing TPC-C tables.
+
+`--samples` repeats each selected benchmark and writes the median result to
+`table_copy.json` and `table_streaming.json`. `--warmup-samples` runs extra
+samples before the measured samples and discards them. Use at least three
+samples for CI or other noisy hosts; the JSON reports include
+`sample_summary` with min, median, max, and spread for each numeric top-level
+metric.
 
 `--tpcc-threads` is optional and applies to both `go-tpc tpcc prepare` and
 `go-tpc tpcc run`. When omitted, `xtask` derives it as:
@@ -250,20 +259,21 @@ For BigQuery workflow runs, set the repository secret
 `bq_project_id`, and an existing `bq_dataset_id`.
 
 The workflow starts only source Postgres, installs pinned `go-tpc`, runs
-`cargo xtask benchmark`, compares the new reports against the most recent
-successful `benchmark-results` artifact on the same ref, and uploads
+`cargo xtask benchmark` with three measured samples plus one warmup sample,
+compares the median reports against the most recent successful
+`benchmark-results` artifact on the same ref, and uploads
 `target/bench-results/*.json`. The GitHub step summary contains the benchmark
-environment, formatted benchmark results, and the comparison diff against the
-previous successful run when one is available.
+environment, formatted median results with sample spread, and the comparison
+diff against the previous successful run when one is available.
 
 If no previous successful run exists, the comparison writes a "no previous
 benchmark artifact" summary and passes. If a comparable previous run exists, the
-comparison fails the workflow when exact copy count metrics change or when
-throughput and timing metrics regress beyond their per-metric thresholds.
-TPC-C streaming event counts are informational because the transaction workload
-is duration-based and naturally varies between runs. If benchmark configuration
-differs, the comparison still prints the diff table but skips the regression
-gate for that benchmark.
+comparison fails the workflow when median throughput and timing metrics regress
+beyond their per-metric thresholds. Row counts and TPC-C streaming event counts
+are informational because the transaction workload is duration-based and
+naturally varies between runs. If benchmark configuration differs, the
+comparison still prints the diff table but skips the regression gate for that
+benchmark.
 
 The comparison is also available locally when you have two result directories:
 

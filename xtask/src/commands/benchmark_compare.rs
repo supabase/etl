@@ -88,6 +88,9 @@ const CONFIG_KEYS: &[&str] = &[
     "memory_backpressure_enabled",
     "max_table_sync_workers",
     "max_copy_connections_per_table",
+    "sample_count",
+    "warmup_sample_count",
+    "aggregation",
 ];
 
 type Reports = BTreeMap<String, Value>;
