@@ -54,7 +54,7 @@ on:
         required: true
         type: choice
         options:
-          - null
+          - "null"
           - bigquery
         default: "null"
       bq_project_id:
