@@ -158,7 +158,7 @@ where
     }
 
     async fn shutdown(&self) -> EtlResult<()> {
-        self.tasks.drain().await?;
+        self.tasks.shutdown().await?;
         self.shutdown_maintenance_worker().await?;
         self.shutdown_metrics_sampler().await?;
 
@@ -1173,12 +1173,15 @@ where
             let _ = maintenance_worker.shutdown_tx.send(());
             let handle = maintenance_worker.handle.lock().take();
             if let Some(handle) = handle {
-                handle.await.map_err(|_| {
-                    etl_error!(
+                handle.abort();
+                if let Err(err) = handle.await
+                    && !err.is_cancelled()
+                {
+                    return Err(etl_error!(
                         ErrorKind::ApplyWorkerPanic,
                         "DuckLake maintenance worker task panicked"
-                    )
-                })?;
+                    ));
+                }
             }
         }
 
@@ -1191,12 +1194,15 @@ where
             let _ = metrics_sampler.shutdown_tx.send(());
             let handle = metrics_sampler.handle.lock().take();
             if let Some(handle) = handle {
-                handle.await.map_err(|_| {
-                    etl_error!(
+                handle.abort();
+                if let Err(err) = handle.await
+                    && !err.is_cancelled()
+                {
+                    return Err(etl_error!(
                         ErrorKind::ApplyWorkerPanic,
-                        "DuckLake metrics sampler task panicked"
-                    )
-                })?;
+                        "DuckLake maintenance worker task panicked"
+                    ));
+                }
             }
         }
 

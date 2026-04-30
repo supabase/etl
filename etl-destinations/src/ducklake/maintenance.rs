@@ -256,13 +256,24 @@ impl CatalogMaintenanceConfig {
 }
 
 /// Periodic catalog-maintenance state tracked by the background worker.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct CatalogMaintenanceState {
     last_expire_snapshots_completed_at: Option<Instant>,
     last_cleanup_old_files_completed_at: Option<Instant>,
 }
 
 impl CatalogMaintenanceState {
+    /// Builds catalog-maintenance state seeded to "just ran now".
+    ///
+    /// Fresh destinations should not immediately run snapshot expiration or
+    /// old-file cleanup on startup before the configured cadence elapses.
+    fn new(now: Instant) -> Self {
+        Self {
+            last_expire_snapshots_completed_at: Some(now),
+            last_cleanup_old_files_completed_at: Some(now),
+        }
+    }
+
     /// Returns whether snapshot expiration is due now.
     fn expire_snapshots_due(&self, now: Instant, interval: Duration) -> bool {
         match self.last_expire_snapshots_completed_at {
@@ -769,11 +780,15 @@ async fn run_ducklake_maintenance_worker(
     mut shutdown_rx: watch::Receiver<()>,
 ) {
     let blocking_slots = pool.blocking_slots();
-    let mut flush_interval = tokio::time::interval(MAINTENANCE_FLUSH_POLL_INTERVAL);
+    let started_at = Instant::now();
+    let mut flush_interval = tokio::time::interval_at(
+        started_at + MAINTENANCE_FLUSH_POLL_INTERVAL,
+        MAINTENANCE_FLUSH_POLL_INTERVAL,
+    );
     flush_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     let mut table_states: HashMap<DuckLakeTableName, TableMaintenanceState> = HashMap::new();
-    let mut catalog_maintenance_state = CatalogMaintenanceState::default();
+    let mut catalog_maintenance_state = CatalogMaintenanceState::new(started_at);
 
     loop {
         tokio::select! {
@@ -1884,13 +1899,10 @@ mod tests {
     #[test]
     fn catalog_maintenance_state_tracks_independent_due_intervals() {
         let now = Instant::now();
-        let mut state = CatalogMaintenanceState::default();
+        let state = CatalogMaintenanceState::new(now);
 
-        assert!(state.expire_snapshots_due(now, MAINTENANCE_EXPIRE_SNAPSHOTS_INTERVAL));
-        assert!(state.cleanup_old_files_due(now, MAINTENANCE_CLEANUP_OLD_FILES_INTERVAL));
-
-        state.complete_expire_snapshots(now);
-        state.complete_cleanup_old_files(now);
+        assert!(!state.expire_snapshots_due(now, MAINTENANCE_EXPIRE_SNAPSHOTS_INTERVAL));
+        assert!(!state.cleanup_old_files_due(now, MAINTENANCE_CLEANUP_OLD_FILES_INTERVAL));
 
         assert!(!state.expire_snapshots_due(
             now + MAINTENANCE_EXPIRE_SNAPSHOTS_INTERVAL - Duration::from_secs(1),
