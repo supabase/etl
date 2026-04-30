@@ -284,7 +284,7 @@ impl BenchmarkArgs {
             &format!("loading {} warehouses with {threads} threads", self.warehouses),
         );
 
-        let status = Command::new("go-tpc")
+        let output = Command::new("go-tpc")
             .args(["tpcc", "--warehouses", &self.warehouses.to_string(), "prepare"])
             .args(["-d", "postgres"])
             .args(["-U", &self.username])
@@ -295,10 +295,20 @@ impl BenchmarkArgs {
             .args(["--conn-params", "sslmode=disable"])
             .args(["-T", &threads.to_string()])
             .arg("--no-check")
-            .status()
+            .output()
             .context("failed to run go-tpc")?;
 
-        if !status.success() {
+        if !output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if !stdout.trim().is_empty() {
+                eprintln!("go-tpc prepare stdout:");
+                eprint!("{stdout}");
+            }
+            if !stderr.trim().is_empty() {
+                eprintln!("go-tpc prepare stderr:");
+                eprint!("{stderr}");
+            }
             bail!("go-tpc prepare failed");
         }
 

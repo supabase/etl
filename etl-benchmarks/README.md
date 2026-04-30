@@ -252,9 +252,9 @@ For BigQuery workflow runs, set the repository secret
 The workflow starts only source Postgres, installs pinned `go-tpc`, runs
 `cargo xtask benchmark`, compares the new reports against the most recent
 successful `benchmark-results` artifact on the same ref, and uploads
-`target/bench-results/*.json` plus `target/bench-results/*.md`. It also writes a
-benchmark environment note with the selected runner, CPU count, host memory,
-cgroup memory limit, memory budget ratio, and memory backpressure setting.
+`target/bench-results/*.json`. The GitHub step summary contains the benchmark
+environment, formatted benchmark results, and the comparison diff against the
+previous successful run when one is available.
 
 If no previous successful run exists, the comparison writes a "no previous
 benchmark artifact" summary and passes. If a comparable previous run exists, the

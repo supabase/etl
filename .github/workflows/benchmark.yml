@@ -164,6 +164,11 @@ jobs:
           mkdir -p target/bench-results
 
           tpcc_threads="${TPCC_THREADS_INPUT:-derived}"
+          host_memory="$(awk '/MemTotal/ { printf "%.2f GiB", $2 / 1024 / 1024 }' /proc/meminfo || true)"
+          if [[ -z "${host_memory}" ]]; then
+            host_memory="unavailable"
+          fi
+
           cgroup_memory_limit="unavailable"
           if [[ -r /sys/fs/cgroup/memory.max ]]; then
             cgroup_memory_limit="$(cat /sys/fs/cgroup/memory.max)"
@@ -178,16 +183,14 @@ jobs:
             echo "| --- | --- |"
             echo "| Runner | ${BENCHMARK_RUNNER_INPUT} |"
             echo "| CPUs | $(nproc) |"
-            echo "| Host memory | $(awk '/MemTotal/ { printf \"%.2f GiB\", $2 / 1024 / 1024 }' /proc/meminfo) |"
+            echo "| Host memory | ${host_memory} |"
             echo "| Cgroup memory limit | ${cgroup_memory_limit} |"
             echo "| Warehouses | ${WAREHOUSES_INPUT} |"
             echo "| TPC-C threads | ${tpcc_threads} |"
             echo "| Memory budget ratio | ${MEMORY_BUDGET_RATIO_INPUT} |"
             echo "| Memory backpressure | ${ENABLE_MEMORY_BACKPRESSURE_INPUT} |"
             echo "| Destination | ${DESTINATION_INPUT} |"
-          } > target/bench-results/benchmark-environment.md
-
-          cat target/bench-results/benchmark-environment.md >> "$GITHUB_STEP_SUMMARY"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Run benchmarks
         env:
@@ -259,6 +262,105 @@ jobs:
 
           cargo xtask "${args[@]}"
 
+      - name: Summarize benchmark results
+        run: |
+          set -euo pipefail
+
+          python3 <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+
+          results_dir = Path("target/bench-results")
+
+          def load(name):
+              path = results_dir / name
+              if not path.exists():
+                  return None
+              return json.loads(path.read_text())
+
+          def number(value, digits=2):
+              if value is None:
+                  return "-"
+              if isinstance(value, int) or float(value).is_integer():
+                  return f"{int(value):,}"
+              return f"{float(value):,.{digits}f}"
+
+          def seconds(ms):
+              if ms is None:
+                  return "-"
+              return f"{float(ms) / 1000:,.2f} s"
+
+          def table(headers, rows):
+              print("| " + " | ".join(headers) + " |")
+              print("| " + " | ".join("---" for _ in headers) + " |")
+              for row in rows:
+                  print("| " + " | ".join(str(cell) for cell in row) + " |")
+
+          table_copy = load("table_copy.json")
+          table_streaming = load("table_streaming.json")
+
+          print()
+          print("## Benchmark results")
+          print()
+
+          summary = []
+          if table_copy:
+              summary.append([
+                  "Table copy",
+                  f"{number(table_copy.get('rows_per_second'))} rows/s",
+                  f"{number(table_copy.get('estimated_mib_per_second'))} MiB/s",
+                  seconds(table_copy.get("total_ms")),
+              ])
+          if table_streaming:
+              summary.append([
+                  "Table streaming",
+                  f"{number(table_streaming.get('end_to_end_with_shutdown_events_per_second'))} events/s",
+                  f"{number(table_streaming.get('end_to_end_with_shutdown_estimated_mib_per_second'))} MiB/s",
+                  seconds(table_streaming.get("total_ms")),
+              ])
+
+          if summary:
+              table(["Benchmark", "Throughput", "Data rate", "Total"], summary)
+              print()
+          else:
+              print("No benchmark JSON reports were written.")
+              raise SystemExit(0)
+
+          if table_copy:
+              print("### Table copy")
+              table(
+                  ["Metric", "Value"],
+                  [
+                      ["Rows copied", number(table_copy.get("copied_rows"))],
+                      ["Rows/s", number(table_copy.get("rows_per_second"))],
+                      ["Decoded MiB", number(table_copy.get("estimated_copied_mib"))],
+                      ["Decoded MiB/s", number(table_copy.get("estimated_mib_per_second"))],
+                      ["Copy wait", seconds(table_copy.get("copy_wait_ms"))],
+                      ["Total", seconds(table_copy.get("total_ms"))],
+                  ],
+              )
+              print()
+
+          if table_streaming:
+              print("### Table streaming")
+              stats = table_streaming.get("destination_stats", {})
+              table(
+                  ["Metric", "Value"],
+                  [
+                      ["Workload", table_streaming.get("workload", "-")],
+                      ["Produced events", number(table_streaming.get("produced_events"))],
+                      ["Observed CDC events", number(table_streaming.get("observed_cdc_events"))],
+                      ["Events/s", number(table_streaming.get("end_to_end_with_shutdown_events_per_second"))],
+                      ["Decoded MiB/s", number(table_streaming.get("end_to_end_with_shutdown_estimated_mib_per_second"))],
+                      ["Inserts", number(stats.get("inserts"))],
+                      ["Updates", number(stats.get("updates"))],
+                      ["Deletes", number(stats.get("deletes"))],
+                      ["Total", seconds(table_streaming.get("total_ms"))],
+                  ],
+              )
+              print()
+          PY
+
       - name: Compare benchmark results
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -274,10 +376,9 @@ jobs:
           exit "$status"
 
       - name: Upload benchmark results
+        if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: benchmark-results
-          path: |
-            target/bench-results/*.json
-            target/bench-results/*.md
+          path: target/bench-results/*.json
           if-no-files-found: error
