@@ -39,7 +39,7 @@ Local runs need:
 Install the pinned `go-tpc` version used by CI:
 
 ```bash
-go install github.com/pingcap/go-tpc@v1.0.12
+go install github.com/pingcap/go-tpc/cmd/go-tpc@v1.0.12
 ```
 
 Make sure `$(go env GOPATH)/bin` is on `PATH`.

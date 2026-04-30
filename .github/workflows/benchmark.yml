@@ -130,7 +130,7 @@ jobs:
             sudo apt-get update
             sudo apt-get install -y "${missing_packages[@]}"
           fi
-          go install github.com/pingcap/go-tpc@v1.0.12
+          go install github.com/pingcap/go-tpc/cmd/go-tpc@v1.0.12
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
       - name: Start Postgres
