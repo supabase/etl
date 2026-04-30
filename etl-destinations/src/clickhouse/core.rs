@@ -604,8 +604,19 @@ where
                     }
                     Event::Update(update) => {
                         let UpdatedTableRow::Full(table_row) = update.updated_table_row else {
-                            warn!("skipping partial update row for ClickHouse");
-                            continue;
+                            return Err(etl_error!(
+                                ErrorKind::InvalidState,
+                                "ClickHouse update requires a full new row image",
+                                format!(
+                                    "Table '{}' emitted a partial update row: some column values \
+                                     could not be reconstructed. Writing it would record NULL for \
+                                     the missing columns and misrepresent the source. Configuring \
+                                     the source so that all column values are available in the \
+                                     new- or old-row image (e.g. REPLICA IDENTITY FULL) prevents \
+                                     this.",
+                                    update.replicated_table_schema.name()
+                                )
+                            ));
                         };
                         let table_id = update.replicated_table_schema.id();
                         let entry = pending
