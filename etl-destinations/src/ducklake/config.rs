@@ -28,6 +28,13 @@ pub(super) const TARGET_FILE_SIZE_OPTION_NAME: &str = "target_file_size";
 pub(super) const MAINTENANCE_TARGET_FILE_SIZE: &str = "10MB";
 pub(super) const EXPIRE_SNAPSHOTS_OLDER_THAN: &str = "7 days";
 pub(super) const DUCKDB_MEMORY_CACHE_LIMIT: &str = "150MB";
+const PARQUET_COMPRESSION_OPTION_NAME: &str = "parquet_compression";
+const PARQUET_COMPRESSION_OPTION_VALUE: &str = "zstd";
+const PARQUET_ROW_GROUP_SIZE_BYTES_OPTION_NAME: &str = "parquet_row_group_size_bytes";
+const PARQUET_ROW_GROUP_SIZE_BYTES_OPTION_VALUE: &str = "10MB";
+const PARQUET_VERSION_OPTION_NAME: &str = "parquet_version";
+const PARQUET_VERSION_OPTION_VALUE: u8 = 2;
+const PRESERVE_INSERTION_ORDER_OPTION_NAME: &str = "preserve_insertion_order";
 
 /// Resolves the configured DuckDB memory limit or falls back to the default.
 fn resolve_duckdb_memory_cache_limit(duckdb_memory_cache_limit: Option<&str>) -> &str {
@@ -39,6 +46,25 @@ fn configure_memory_limit_sql(duckdb_memory_cache_limit: Option<&str>) -> String
     format!(
         "SET memory_limit = {};",
         quote_literal(resolve_duckdb_memory_cache_limit(duckdb_memory_cache_limit)),
+    )
+}
+
+/// Builds the SQL that configures DuckDB's session-level write ordering.
+fn configure_writer_session_sql() -> String {
+    format!("SET {PRESERVE_INSERTION_ORDER_OPTION_NAME} = false;")
+}
+
+/// Builds the SQL that configures DuckLake's global Parquet writer settings.
+fn configure_parquet_settings_sql() -> String {
+    format!(
+        "CALL {LAKE_CATALOG}.set_option({}, {}); CALL {LAKE_CATALOG}.set_option({}, {}); CALL \
+         {LAKE_CATALOG}.set_option({}, {});",
+        quote_literal(PARQUET_COMPRESSION_OPTION_NAME),
+        quote_literal(PARQUET_COMPRESSION_OPTION_VALUE),
+        quote_literal(PARQUET_ROW_GROUP_SIZE_BYTES_OPTION_NAME),
+        quote_literal(PARQUET_ROW_GROUP_SIZE_BYTES_OPTION_VALUE),
+        quote_literal(PARQUET_VERSION_OPTION_NAME),
+        PARQUET_VERSION_OPTION_VALUE,
     )
 }
 
@@ -629,6 +655,10 @@ fn build_setup_plan_with_strategy(
         label: "Limit memory cache",
         sql: configure_memory_limit_sql(duckdb_memory_cache_limit),
     }];
+    steps.push(DuckLakeSetupStep {
+        label: "configure_writer_session",
+        sql: configure_writer_session_sql(),
+    });
     let mut secret_options = BTreeMap::from([
         ("KEY_ID", quote_literal(s3.map(|s| s.access_key_id.as_str()).unwrap_or_default())),
         ("REGION", quote_literal(s3.map(|s| s.region.as_str()).unwrap_or_default())),
@@ -707,6 +737,10 @@ fn build_setup_plan_with_strategy(
             quote_literal(data_path),
             super::ATTACH_DATA_INLINING_ROW_LIMIT
         ),
+    });
+    steps.push(DuckLakeSetupStep {
+        label: "configure_parquet",
+        sql: configure_parquet_settings_sql(),
     });
 
     Ok(DuckLakeSetupPlan { steps })
@@ -999,7 +1033,21 @@ mod tests {
         assert!(!sql.contains("postgres"));
         assert!(!sql.contains("httpfs"));
         assert!(!sql.contains("json"));
-        assert!(!sql.contains("parquet"));
+        assert!(sql.contains(&format!(
+            "CALL {LAKE_CATALOG}.set_option({}, {});",
+            quote_literal(PARQUET_COMPRESSION_OPTION_NAME),
+            quote_literal(PARQUET_COMPRESSION_OPTION_VALUE),
+        )));
+        assert!(sql.contains(&format!(
+            "CALL {LAKE_CATALOG}.set_option({}, {});",
+            quote_literal(PARQUET_ROW_GROUP_SIZE_BYTES_OPTION_NAME),
+            quote_literal(PARQUET_ROW_GROUP_SIZE_BYTES_OPTION_VALUE),
+        )));
+        assert!(sql.contains(&format!(
+            "CALL {LAKE_CATALOG}.set_option({}, {});",
+            quote_literal(PARQUET_VERSION_OPTION_NAME),
+            PARQUET_VERSION_OPTION_VALUE,
+        )));
         assert!(sql.contains(&quote_literal(&format!("ducklake:{}", catalog_url.as_str()))));
         assert!(sql.contains(&format!("DATA_PATH {}", quote_literal(data_url.as_str()))));
         assert!(sql.contains(&format!(
@@ -1032,7 +1080,21 @@ mod tests {
         assert!(!sql.contains("postgres"));
         assert!(!sql.contains("httpfs"));
         assert!(!sql.contains("json"));
-        assert!(!sql.contains("parquet"));
+        assert!(sql.contains(&format!(
+            "CALL {LAKE_CATALOG}.set_option({}, {});",
+            quote_literal(PARQUET_COMPRESSION_OPTION_NAME),
+            quote_literal(PARQUET_COMPRESSION_OPTION_VALUE),
+        )));
+        assert!(sql.contains(&format!(
+            "CALL {LAKE_CATALOG}.set_option({}, {});",
+            quote_literal(PARQUET_ROW_GROUP_SIZE_BYTES_OPTION_NAME),
+            quote_literal(PARQUET_ROW_GROUP_SIZE_BYTES_OPTION_VALUE),
+        )));
+        assert!(sql.contains(&format!(
+            "CALL {LAKE_CATALOG}.set_option({}, {});",
+            quote_literal(PARQUET_VERSION_OPTION_NAME),
+            PARQUET_VERSION_OPTION_VALUE,
+        )));
     }
 
     #[test]
@@ -1056,7 +1118,21 @@ mod tests {
         assert!(sql.contains("LOAD postgres"));
         assert!(!sql.contains("httpfs"));
         assert!(!sql.contains("json"));
-        assert!(!sql.contains("parquet"));
+        assert!(sql.contains(&format!(
+            "CALL {LAKE_CATALOG}.set_option({}, {});",
+            quote_literal(PARQUET_COMPRESSION_OPTION_NAME),
+            quote_literal(PARQUET_COMPRESSION_OPTION_VALUE),
+        )));
+        assert!(sql.contains(&format!(
+            "CALL {LAKE_CATALOG}.set_option({}, {});",
+            quote_literal(PARQUET_ROW_GROUP_SIZE_BYTES_OPTION_NAME),
+            quote_literal(PARQUET_ROW_GROUP_SIZE_BYTES_OPTION_VALUE),
+        )));
+        assert!(sql.contains(&format!(
+            "CALL {LAKE_CATALOG}.set_option({}, {});",
+            quote_literal(PARQUET_VERSION_OPTION_NAME),
+            PARQUET_VERSION_OPTION_VALUE,
+        )));
         assert!(!sql.contains("ducklake:postgres://"));
         assert!(sql.contains("ducklake:postgres:"));
         assert!(sql.contains(&format!("DATA_PATH {}", quote_literal(data_url.as_str()))));
@@ -1089,7 +1165,21 @@ mod tests {
         assert!(sql.contains(POSTGRES_SCANNER_EXTENSION_FILE));
         assert!(sql.contains(HTTPFS_EXTENSION_FILE));
         assert!(!sql.contains("json"));
-        assert!(!sql.contains("parquet"));
+        assert!(sql.contains(&format!(
+            "CALL {LAKE_CATALOG}.set_option({}, {});",
+            quote_literal(PARQUET_COMPRESSION_OPTION_NAME),
+            quote_literal(PARQUET_COMPRESSION_OPTION_VALUE),
+        )));
+        assert!(sql.contains(&format!(
+            "CALL {LAKE_CATALOG}.set_option({}, {});",
+            quote_literal(PARQUET_ROW_GROUP_SIZE_BYTES_OPTION_NAME),
+            quote_literal(PARQUET_ROW_GROUP_SIZE_BYTES_OPTION_VALUE),
+        )));
+        assert!(sql.contains(&format!(
+            "CALL {LAKE_CATALOG}.set_option({}, {});",
+            quote_literal(PARQUET_VERSION_OPTION_NAME),
+            PARQUET_VERSION_OPTION_VALUE,
+        )));
         assert!(!sql.contains("ducklake:postgres://"));
         assert!(sql.contains(&format!("DATA_PATH {}", quote_literal(data_url.as_str()))));
         assert!(sql.contains(&format!(
@@ -1124,21 +1214,24 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(plan.steps().len(), 4);
+        assert_eq!(plan.steps().len(), 6);
         assert_eq!(plan.steps()[0].label, "Limit memory cache");
-        assert_eq!(plan.steps()[1].label, "load_extensions");
-        assert_eq!(plan.steps()[2].label, "configure_object_store");
-        assert_eq!(plan.steps()[3].label, "attach_catalog");
+        assert_eq!(plan.steps()[1].label, "configure_writer_session");
+        assert_eq!(plan.steps()[2].label, "load_extensions");
+        assert_eq!(plan.steps()[3].label, "configure_object_store");
+        assert_eq!(plan.steps()[4].label, "attach_catalog");
+        assert_eq!(plan.steps()[5].label, "configure_parquet");
         assert_eq!(
             plan.steps()[0].sql,
             format!("SET memory_limit = {};", quote_literal(DUCKDB_MEMORY_CACHE_LIMIT))
         );
-        assert!(plan.steps()[1].sql.contains(HTTPFS_EXTENSION_FILE));
-        assert!(!plan.steps()[1].sql.contains("json"));
-        assert!(!plan.steps()[1].sql.contains("parquet"));
-        assert!(plan.steps()[2].sql.contains("CREATE OR REPLACE SECRET"));
-        assert!(plan.steps()[3].sql.contains("ATTACH"));
-        assert!(plan.steps()[3].sql.contains("METADATA_SCHEMA 'ducklake'"));
+        assert_eq!(plan.steps()[1].sql, configure_writer_session_sql());
+        assert!(plan.steps()[2].sql.contains(HTTPFS_EXTENSION_FILE));
+        assert!(!plan.steps()[2].sql.contains("json"));
+        assert!(plan.steps()[3].sql.contains("CREATE OR REPLACE SECRET"));
+        assert!(plan.steps()[4].sql.contains("ATTACH"));
+        assert!(plan.steps()[4].sql.contains("METADATA_SCHEMA 'ducklake'"));
+        assert_eq!(plan.steps()[5].sql, configure_parquet_settings_sql());
     }
 
     #[test]
