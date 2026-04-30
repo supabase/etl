@@ -30,7 +30,7 @@ echo "📊 Configuration:"
 echo "   Database: ${DB_NAME}@${DB_HOST}:${DB_PORT}"
 echo "   User: ${DB_USER}"
 echo "   Warehouses: ${WAREHOUSES}"
-echo "   Threads: ${THREADS}"ma
+echo "   Threads: ${THREADS}"
 
 # Wait for Postgres to be ready
 echo "⏳ Waiting for Postgres to be ready..."
@@ -60,7 +60,7 @@ TPCC_EXISTS=$(PGPASSWORD="${DB_PASSWORD}" psql -h "${DB_HOST}" -U "${DB_USER}" -
     and tablename in ('customer', 'district', 'item', 'new_order', 'order_line', 'orders', 'stock', 'warehouse');
 " 2>/dev/null || echo "0")
 
-if [[ "${TPCC_EXISTS}" -eq 9 ]]; then
+if [[ "${TPCC_EXISTS}" -eq 8 ]]; then
   echo "✅ TPC-C tables already exist, skipping data generation"
   echo "💡 To regenerate data, drop the tables first or use a different database"
 else

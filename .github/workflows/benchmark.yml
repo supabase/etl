@@ -1,0 +1,209 @@
+name: Benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      benchmark_runner:
+        description: Blacksmith runner size for the benchmark job.
+        required: true
+        type: choice
+        options:
+          - blacksmith-8vcpu-ubuntu-2404
+          - blacksmith-16vcpu-ubuntu-2404
+          - blacksmith-32vcpu-ubuntu-2404
+        default: blacksmith-16vcpu-ubuntu-2404
+      warehouses:
+        description: Number of TPC-C warehouses to prepare.
+        required: true
+        default: "10"
+      tpcc_threads:
+        description: Optional go-tpc prepare threads. Empty derives from warehouses and runner CPUs.
+        required: false
+        default: ""
+      streaming_events:
+        description: Number of table-streaming insert events in count mode.
+        required: true
+        default: "1000000"
+      streaming_duration_seconds:
+        description: Optional duration mode for table-streaming. Empty uses streaming_events.
+        required: false
+        default: ""
+      streaming_insert_batch_size:
+        description: Rows inserted per streaming producer transaction.
+        required: true
+        default: "5000"
+      streaming_producer_concurrency:
+        description: Optional streaming producer concurrency. Empty derives from warehouses and runner CPUs.
+        required: false
+        default: ""
+      max_table_sync_workers:
+        description: Maximum table sync workers.
+        required: true
+        default: "8"
+      max_copy_connections_per_table:
+        description: Maximum copy connections per table.
+        required: true
+        default: "4"
+      batch_max_fill_ms:
+        description: Maximum stream batch fill time in milliseconds.
+        required: true
+        default: "1000"
+      destination:
+        description: Destination to benchmark.
+        required: true
+        type: choice
+        options:
+          - null
+          - big-query
+        default: "null"
+      bq_project_id:
+        description: BigQuery project ID when destination is big-query.
+        required: false
+        default: ""
+      bq_dataset_id:
+        description: BigQuery dataset ID when destination is big-query.
+        required: false
+        default: ""
+      force_prepare:
+        description: Drop and regenerate existing TPC-C tables.
+        required: true
+        type: boolean
+        default: false
+      skip_table_copy:
+        description: Skip the table-copy benchmark.
+        required: true
+        type: boolean
+        default: false
+      skip_table_streaming:
+        description: Skip the table-streaming benchmark.
+        required: true
+        type: boolean
+        default: false
+
+env:
+  CARGO_TERM_COLOR: always
+  POSTGRES_USER: postgres
+  POSTGRES_PASSWORD: postgres
+  POSTGRES_DB: bench
+  POSTGRES_PORT: 5430
+  POSTGRES_HOST: localhost
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  benchmark:
+    name: Benchmark
+    runs-on: ${{ inputs.benchmark_runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@150fca883cd4034361b621bd4e6a9d34e5143606 # v1.15.4
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: benchmark
+
+      - name: Install system tools
+        run: |
+          set -euo pipefail
+          missing_packages=()
+          if ! command -v go >/dev/null 2>&1; then
+            missing_packages+=(golang-go)
+          fi
+          if ! command -v psql >/dev/null 2>&1; then
+            missing_packages+=(postgresql-client)
+          fi
+          if (( ${#missing_packages[@]} > 0 )); then
+            sudo apt-get update
+            sudo apt-get install -y "${missing_packages[@]}"
+          fi
+          go install github.com/pingcap/go-tpc@latest
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Start Postgres
+        run: |
+          POSTGRES_IMAGE=postgres:18 \
+          POSTGRES_VERSION=18 \
+            cargo xtask postgres start --shards 1 --base-port "$POSTGRES_PORT" --source-only
+
+      - name: Prepare BigQuery key
+        if: inputs.destination == 'big-query'
+        env:
+          BQ_SA_KEY_JSON: ${{ secrets.BENCHMARK_BQ_SA_KEY_JSON }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${BQ_SA_KEY_JSON}" ]]; then
+            echo "BENCHMARK_BQ_SA_KEY_JSON secret is required for BigQuery benchmarks." >&2
+            exit 1
+          fi
+          printf '%s' "${BQ_SA_KEY_JSON}" > "$RUNNER_TEMP/bigquery-key.json"
+
+      - name: Run benchmarks
+        env:
+          BQ_SA_KEY_FILE: ${{ runner.temp }}/bigquery-key.json
+        run: |
+          set -euo pipefail
+
+          args=(
+            benchmark
+            --host "$POSTGRES_HOST"
+            --port "$POSTGRES_PORT"
+            --database "$POSTGRES_DB"
+            --username "$POSTGRES_USER"
+            --password "$POSTGRES_PASSWORD"
+            --warehouses "${{ inputs.warehouses }}"
+            --streaming-events "${{ inputs.streaming_events }}"
+            --streaming-insert-batch-size "${{ inputs.streaming_insert_batch_size }}"
+            --max-table-sync-workers "${{ inputs.max_table_sync_workers }}"
+            --max-copy-connections-per-table "${{ inputs.max_copy_connections_per_table }}"
+            --batch-max-fill-ms "${{ inputs.batch_max_fill_ms }}"
+            --destination "${{ inputs.destination }}"
+            --output-dir target/bench-results
+          )
+
+          if [[ -n "${{ inputs.tpcc_threads }}" ]]; then
+            args+=(--tpcc-threads "${{ inputs.tpcc_threads }}")
+          fi
+
+          if [[ -n "${{ inputs.streaming_duration_seconds }}" ]]; then
+            args+=(--streaming-duration-seconds "${{ inputs.streaming_duration_seconds }}")
+          fi
+
+          if [[ -n "${{ inputs.streaming_producer_concurrency }}" ]]; then
+            args+=(--streaming-producer-concurrency "${{ inputs.streaming_producer_concurrency }}")
+          fi
+
+          if [[ "${{ inputs.force_prepare }}" == "true" ]]; then
+            args+=(--force-prepare)
+          fi
+
+          if [[ "${{ inputs.skip_table_copy }}" == "true" ]]; then
+            args+=(--skip-table-copy)
+          fi
+
+          if [[ "${{ inputs.skip_table_streaming }}" == "true" ]]; then
+            args+=(--skip-table-streaming)
+          fi
+
+          if [[ "${{ inputs.destination }}" == "big-query" ]]; then
+            args+=(--bq-project-id "${{ inputs.bq_project_id }}")
+            args+=(--bq-dataset-id "${{ inputs.bq_dataset_id }}")
+            args+=(--bq-sa-key-file "$BQ_SA_KEY_FILE")
+          fi
+
+          cargo xtask "${args[@]}"
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: benchmark-results
+          path: target/bench-results/*.json
+          if-no-files-found: error

@@ -1,210 +1,118 @@
-# `etl` - Benchmarks
+# `etl` Benchmarks
 
-Performance benchmarks for the ETL system to measure and track replication performance across different scenarios and configurations.
+Performance benchmarks for ETL replication pipelines.
 
-## Available Benchmarks
+## Benchmarks
 
-- **table_copies**: Measures performance of initial table copying operations
+- `table_copy`: measures initial table copy throughput for selected TPC-C tables.
+- `table_streaming`: measures CDC insert streaming throughput against a simple benchmark table.
 
-## Prerequisites
-
-Before running benchmarks, ensure you have:
-
-- A Postgres database set up
-- A publication created with the tables you want to benchmark
-- For BigQuery benchmarks: GCP project, dataset, and service account key file
-
-## How Benchmarks Work
-
-Benchmarks automatically handle setup and cleanup:
-
-1. **Setup**: Each benchmark creates the necessary replication slots when the pipeline starts
-2. **Execution**: The benchmark runs the table copy operation and measures performance
-3. **Cleanup**: After completion, all replication slots are automatically dropped to ensure a clean state for the next run
-
-No manual cleanup is required between benchmark runs.
-
-## Quick Start
-
-### Run Basic Benchmark (Null Destination)
-
-Test with fastest performance using a null destination that discards data:
-
-> **Note:** Replication slots are automatically cleaned up after each benchmark run. No manual preparation step is needed.
+Both benchmarks print a machine-readable `BENCHMARK_RESULT {...}` JSON line. The preferred entrypoint is the workspace task runner:
 
 ```bash
-cargo bench --bench table_copies -- --log-target terminal run \
-  --host localhost --port 5430 --database bench \
-  --username postgres --password mypass \
-  --publication-name bench_pub \
-  --table-ids 1,2,3 \
-  --destination null
+cargo xtask benchmark
 ```
 
-### Run BigQuery Benchmark
+## Local Smoke Run
 
-Test with real BigQuery destination:
+Start a local Postgres cluster, prepare a tiny TPC-C dataset, run table copy, then run CDC streaming:
 
 ```bash
-cargo bench --bench table_copies --features bigquery -- --log-target terminal run \
-  --host localhost --port 5430 --database bench \
-  --username postgres --password mypass \
-  --publication-name bench_pub \
-  --table-ids 1,2,3 \
+cargo xtask postgres start --shards 1 --base-port 5430
+
+cargo xtask benchmark \
+  --warehouses 1 \
+  --streaming-events 1000 \
+  --streaming-insert-batch-size 100 \
+  --max-table-sync-workers 2 \
+  --max-copy-connections-per-table 1
+```
+
+The command writes JSON reports to `target/bench-results/`.
+
+Reports include both human-readable summaries and pretty JSON artifacts. The
+headline values are:
+
+- rows/events processed and rows/events per second
+- estimated payload bytes, MiB, and MiB per second
+- copy, producer, catch-up drain, destination-drain, and total timings
+- destination batch counts and max event batch size
+- CDC event mix: inserts, updates, deletes, relations, and transaction events
+
+Byte values are estimates based on ETL's decoded in-memory row/event size hints.
+They are useful for comparing benchmark runs in this repo, but they are not raw
+WAL bytes or network bytes.
+
+## Larger Run
+
+```bash
+cargo xtask benchmark \
+  --warehouses 100 \
+  --streaming-events 1000000 \
+  --streaming-insert-batch-size 5000 \
+  --max-table-sync-workers 8 \
+  --max-copy-connections-per-table 4
+```
+
+`--tpcc-threads` is optional. When omitted, `xtask` derives an aggressive `go-tpc`
+loader concurrency from both warehouse count and available CPU parallelism:
+`max(warehouses * 8, available_cpus * 4)`, clamped to `8..128`. Override it
+explicitly if a benchmark host can sustain more database write concurrency.
+
+## Duration-Based Streaming
+
+To run the streaming producer for a fixed duration and then wait for ETL to drain all produced events:
+
+```bash
+cargo xtask benchmark \
+  --warehouses 10 \
+  --streaming-duration-seconds 300 \
+  --streaming-insert-batch-size 5000
+```
+
+## BigQuery Destination
+
+```bash
+cargo xtask benchmark \
   --destination big-query \
   --bq-project-id my-gcp-project \
   --bq-dataset-id my_dataset \
   --bq-sa-key-file /path/to/service-account-key.json
 ```
 
-## Command Reference
+## Direct Benchmark Binaries
 
-### Common Parameters
-
-| Parameter            | Description                              | Default     |
-| -------------------- | ---------------------------------------- | ----------- |
-| `--host`             | Postgres host                            | `localhost` |
-| `--port`             | Postgres port                            | `5430`      |
-| `--database`         | Database name                            | `bench`     |
-| `--username`         | Postgres username                        | `postgres`  |
-| `--password`         | Postgres password                        | (optional)  |
-| `--publication-name` | Publication to replicate from            | `bench_pub` |
-| `--table-ids`        | Comma-separated table IDs to replicate   | (required)  |
-| `--destination`      | Destination type (`null` or `big-query`) | `null`      |
-
-### Performance Tuning Parameters
-
-| Parameter                          | Description                                          | Default   |
-| ---------------------------------- | ---------------------------------------------------- | --------- |
-| `--batch-max-size`                 | Maximum batch size                                   | `1000000` |
-| `--batch-max-fill-ms`              | Maximum batch fill time (ms)                         | `10000`   |
-| `--max-table-sync-workers`         | Max concurrent table sync workers                    | `8`       |
-| `--max-copy-connections-per-table` | Number of parallel connections per table for copying | `1`       |
-
-### BigQuery Parameters
-
-| Parameter                     | Description                        | Required for BigQuery |
-| ----------------------------- | ---------------------------------- | --------------------- |
-| `--bq-project-id`             | GCP project ID                     | Yes                   |
-| `--bq-dataset-id`             | BigQuery dataset ID                | Yes                   |
-| `--bq-sa-key-file`            | Service account key file path      | Yes                   |
-| `--bq-max-staleness-mins`     | Max staleness in minutes           | No                    |
-| `--bq-max-concurrent-streams` | Max concurrent BigQuery streams    | No                    |
-
-### Logging Options
-
-| Parameter               | Description                         |
-| ----------------------- | ----------------------------------- |
-| `--log-target terminal` | Colorized terminal output (default) |
-| `--log-target file`     | Write logs to `logs/` directory     |
-
-Set `RUST_LOG` environment variable to control log levels (default: `info`):
+The `xtask` command prepares data and publications for you. Direct invocation is useful while developing benchmark internals:
 
 ```bash
-RUST_LOG=debug cargo bench --bench table_copies -- run ...
-```
-
-## Using the Benchmark Script
-
-The `benchmark.sh` script provides a convenient wrapper around the benchmark with additional features. It accepts environment variables for configuration:
-
-### Database Configuration
-
-| Environment Variable | Description       | Default     |
-| -------------------- | ----------------- | ----------- |
-| `POSTGRES_HOST`      | Postgres host     | `localhost` |
-| `POSTGRES_PORT`      | Postgres port     | `5430`      |
-| `POSTGRES_DB`        | Database name     | `bench`     |
-| `POSTGRES_USER`      | Postgres username | `postgres`  |
-| `POSTGRES_PASSWORD`  | Postgres password | `postgres`  |
-
-### Benchmark Configuration
-
-| Environment Variable              | Description                                                       | Default                                        |
-| --------------------------------- | ----------------------------------------------------------------- | ---------------------------------------------- |
-| `HYPERFINE_RUNS`                  | Number of benchmark runs                                          | `1`                                            |
-| `PUBLICATION_NAME`                | Publication name                                                  | `bench_pub`                                    |
-| `BATCH_MAX_SIZE`                  | Maximum batch size                                                | `1000000`                                      |
-| `BATCH_MAX_FILL_MS`               | Maximum batch fill time (ms)                                      | `10000`                                        |
-| `MAX_TABLE_SYNC_WORKERS`          | Max concurrent table sync workers                                 | `8`                                            |
-| `MAX_COPY_CONNECTIONS_PER_TABLE`  | Number of parallel connections per table for copying              | `1`                                            |
-| `TPCC_TABLES`                     | Comma-separated list of TPC-C tables to benchmark                 | `customer,district,item,new_order,...` (all 8) |
-| `DESTINATION`                     | Destination type (`null` or `big-query`)                          | `null`                                         |
-| `LOG_TARGET`                      | Where to send logs (`terminal` or `file`)                         | `terminal`                                     |
-| `DRY_RUN`                         | Show commands without executing (`true` or `false`)               | `false`                                        |
-| `PREPARE_TPCC`                    | Automatically run prepare_tpcc.sh if tables don't exist           | `true`                                         |
-
-### BigQuery Configuration (when DESTINATION=big-query)
-
-| Environment Variable       | Description                     | Required |
-| -------------------------- | ------------------------------- | -------- |
-| `BQ_PROJECT_ID`            | GCP project ID                  | Yes      |
-| `BQ_DATASET_ID`            | BigQuery dataset ID             | Yes      |
-| `BQ_SA_KEY_FILE`           | Service account key file path   | Yes      |
-| `BQ_MAX_STALENESS_MINS`    | Max staleness in minutes        | No       |
-| `BQ_MAX_CONCURRENT_STREAMS`| Max concurrent BigQuery streams | No       |
-
-### Script Examples
-
-```bash
-# Run with default settings
-./etl-benchmarks/scripts/benchmark.sh
-
-# Test with 8 parallel connections per table
-MAX_COPY_CONNECTIONS_PER_TABLE=8 ./etl-benchmarks/scripts/benchmark.sh
-
-# Benchmark only specific tables
-TPCC_TABLES=stock,order_line ./etl-benchmarks/scripts/benchmark.sh
-
-# Run multiple iterations
-HYPERFINE_RUNS=5 ./etl-benchmarks/scripts/benchmark.sh
-
-# Dry run to see what would be executed
-DRY_RUN=true ./etl-benchmarks/scripts/benchmark.sh
-```
-
-## Complete Examples
-
-### Production-like Testing with File Logging
-
-```bash
-cargo bench --bench table_copies -- --log-target file run \
+cargo bench --bench table_copy -- --log-target terminal run \
   --host localhost --port 5430 --database bench \
-  --username postgres --password mypass \
+  --username postgres --password postgres \
   --publication-name bench_pub \
   --table-ids 1,2,3 \
   --destination null
-```
 
-### Parallel Table Copy Test
-
-Test parallel copy performance with multiple connections per table:
-
-```bash
-cargo bench --bench table_copies -- --log-target terminal run \
+cargo bench --bench table_streaming -- --log-target terminal run \
   --host localhost --port 5430 --database bench \
-  --username postgres --password mypass \
-  --publication-name bench_pub \
-  --table-ids 1,2,3 \
-  --max-copy-connections-per-table 4 \
+  --username postgres --password postgres \
+  --publication-name bench_streaming_pub \
+  --table-name etl_streaming_benchmark \
+  --event-count 1000000 \
   --destination null
 ```
 
-### High-throughput BigQuery Test
+## GitHub Actions
 
-```bash
-cargo bench --bench table_copies --features bigquery -- --log-target terminal run \
-  --host localhost --port 5430 --database bench \
-  --username postgres --password mypass \
-  --publication-name bench_pub \
-  --table-ids 1,2,3,4,5 \
-  --destination big-query \
-  --bq-project-id my-gcp-project \
-  --bq-dataset-id my_dataset \
-  --bq-sa-key-file /path/to/service-account-key.json \
-  --batch-max-size 50000 \
-  --max-table-sync-workers 16 \
-  --max-copy-connections-per-table 8
-```
+The `Benchmark` workflow can be launched with `workflow_dispatch`. It defaults
+to `blacksmith-16vcpu-ubuntu-2404`, 10 TPC-C warehouses, 1,000,000 streaming
+events, 1,000 ms batch fill, 8 table-sync workers, and 4 copy connections per
+table. The runner can be changed at dispatch time to the 8, 16, or 32 vCPU
+Blacksmith Ubuntu 24.04 runner.
 
-The benchmark will measure the time it takes to complete the initial table copy phase for all specified tables.
+The workflow starts only source Postgres, not the full local development stack,
+then uploads `target/bench-results/*.json` as the `benchmark-results` artifact.
+It exposes inputs for TPC-C warehouses, optional TPC-C prepare threads, streaming
+event count or duration, producer concurrency, batch size, copy parallelism, and
+destination.
+
+For BigQuery runs, configure the repository secret `BENCHMARK_BQ_SA_KEY_JSON` and pass the BigQuery project and dataset inputs.
