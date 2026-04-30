@@ -26,7 +26,7 @@ use crate::{
         images::ImagesDbError,
         pipelines::{
             MAX_PIPELINES_PER_TENANT, PipelinesDbError, delete_pipeline_api_and_source_state,
-            delete_pipeline_replication_slots, read_pipeline_components,
+            delete_pipeline_api_state, delete_pipeline_replication_slots, read_pipeline_components,
             read_pipeline_for_deletion,
         },
         replicators::ReplicatorsDbError,
@@ -763,21 +763,41 @@ pub async fn delete_pipeline(
     .await?
     .ok_or(PipelineError::SourceNotFound(pipeline.source_id))?;
 
-    let source_pool =
-        connect_to_source_database_from_api(&source.config.into_connection_config(tls_config))
-            .await?;
-    let mut api_txn = pool.begin().await?;
-    let mut source_txn = source_pool.begin().await?;
-    delete_pipeline_api_and_source_state(
-        api_txn.deref_mut(),
-        source_txn.deref_mut(),
-        tenant_id,
-        &pipeline,
+    let source_pool = match connect_to_source_database_from_api(
+        &source.config.into_connection_config(tls_config),
     )
-    .await?;
-    api_txn.commit().await?;
-    source_txn.commit().await?;
-    delete_pipeline_replication_slots(&source_pool, pipeline.id).await?;
+    .await
+    {
+        Ok(source_pool) => Some(source_pool),
+        Err(error) => {
+            tracing::warn!(
+                tenant_id = %tenant_id,
+                pipeline_id = pipeline.id,
+                source_id = pipeline.source_id,
+                error = %error,
+                "failed to connect to source database during pipeline deletion, skipping source cleanup",
+            );
+
+            None
+        }
+    };
+    let mut api_txn = pool.begin().await?;
+    if let Some(source_pool) = source_pool {
+        let mut source_txn = source_pool.begin().await?;
+        delete_pipeline_api_and_source_state(
+            api_txn.deref_mut(),
+            source_txn.deref_mut(),
+            tenant_id,
+            &pipeline,
+        )
+        .await?;
+        api_txn.commit().await?;
+        source_txn.commit().await?;
+        delete_pipeline_replication_slots(&source_pool, pipeline.id).await?;
+    } else {
+        delete_pipeline_api_state(api_txn.deref_mut(), tenant_id, &pipeline).await?;
+        api_txn.commit().await?;
+    }
 
     Ok(HttpResponse::Ok().finish())
 }
