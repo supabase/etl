@@ -22,10 +22,9 @@ use crate::{
     error::{ErrorKind, EtlResult},
     etl_error,
     metrics::{
-        ACTION_LABEL, DESTINATION_LABEL, ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
-        ETL_EVENTS_PROCESSED_TOTAL, ETL_PARALLEL_TABLE_COPY_ROWS_IMBALANCE,
-        ETL_PARALLEL_TABLE_COPY_TIME_IMBALANCE, ETL_TABLE_COPY_ROWS, PARTITIONING_LABEL,
-        WORKER_TYPE_LABEL,
+        ACTION_LABEL, ETL_BATCH_ITEMS_SEND_DURATION_SECONDS, ETL_EVENTS_PROCESSED_TOTAL,
+        ETL_PARALLEL_TABLE_COPY_ROWS_IMBALANCE, ETL_PARALLEL_TABLE_COPY_TIME_IMBALANCE,
+        ETL_TABLE_COPY_ROWS, PARTITIONING_LABEL, WORKER_TYPE_LABEL,
     },
     replication::{
         TableCopyStream,
@@ -154,7 +153,6 @@ where
                     ETL_EVENTS_PROCESSED_TOTAL,
                     WORKER_TYPE_LABEL => "table_sync",
                     ACTION_LABEL => "table_copy",
-                    DESTINATION_LABEL => D::name(),
                 )
                 .increment(batch_size);
 
@@ -163,7 +161,6 @@ where
                     ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
                     WORKER_TYPE_LABEL => "table_sync",
                     ACTION_LABEL => "table_copy",
-                    DESTINATION_LABEL => D::name(),
                     PARTITIONING_LABEL => partitioning,
                 )
                 .record(send_duration_seconds);
@@ -297,7 +294,6 @@ async fn serial_table_copy<D: Destination + Clone + Send + 'static>(
 
     histogram!(
         ETL_TABLE_COPY_ROWS,
-        DESTINATION_LABEL => D::name(),
         PARTITIONING_LABEL => "false",
     )
     .record(total_rows as f64);
@@ -477,17 +473,9 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
         calculate_skew_metrics(&partition_row_counts.iter().map(|&r| r as f64).collect::<Vec<_>>());
 
     // Record imbalance metrics.
-    histogram!(
-        ETL_PARALLEL_TABLE_COPY_TIME_IMBALANCE,
-        DESTINATION_LABEL => D::name(),
-    )
-    .record(time_lif);
+    histogram!(ETL_PARALLEL_TABLE_COPY_TIME_IMBALANCE).record(time_lif);
 
-    histogram!(
-        ETL_PARALLEL_TABLE_COPY_ROWS_IMBALANCE,
-        DESTINATION_LABEL => D::name(),
-    )
-    .record(rows_lif);
+    histogram!(ETL_PARALLEL_TABLE_COPY_ROWS_IMBALANCE).record(rows_lif);
 
     info!(
         table_id = table_id.0,
@@ -623,7 +611,6 @@ where
 
     histogram!(
         ETL_TABLE_COPY_ROWS,
-        DESTINATION_LABEL => D::name(),
         PARTITIONING_LABEL => "true",
     )
     .record(total_rows as f64);
