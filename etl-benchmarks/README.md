@@ -68,6 +68,19 @@ smoke runs do not park behind local memory heuristics. Pass
 `--enable-memory-backpressure` when you explicitly want to include that behavior
 in a benchmark run.
 
+The stream batch memory budget is separate from backpressure and remains active
+by default. `--memory-budget-ratio` defaults to `0.2`, which means the ideal
+stream batch byte budget is computed as:
+
+```text
+detected_memory_limit * 0.2 / active_streams
+```
+
+The detector uses the cgroup memory limit when the benchmark is running inside a
+limited container, and host memory otherwise. If memory backpressure is enabled,
+it activates at 85% used memory and resumes at 75%, with memory refreshed every
+100ms.
+
 ## Quick Smoke Run
 
 Use this while iterating on benchmark code. It prepares one TPC-C warehouse,
@@ -107,18 +120,18 @@ cargo xtask benchmark \
 Use `--force-prepare` when changing the warehouse count for an existing local
 benchmark database. Without it, `xtask` reuses the existing TPC-C tables.
 
-`--tpcc-threads` is optional. When omitted, `xtask` derives the `go-tpc`
-prepare concurrency as:
+`--tpcc-threads` is optional and applies to both `go-tpc tpcc prepare` and
+`go-tpc tpcc run`. When omitted, `xtask` derives it as:
 
 ```text
-max(warehouses * 8, available_cpus * 4), clamped to 8..128
+max(warehouses * 8, available_cpus * 2), clamped to 8..64
 ```
 
 Override it only when the benchmark host and Postgres instance can sustain more
-loader concurrency:
+workload concurrency:
 
 ```bash
-cargo xtask benchmark --warehouses 20 --tpcc-threads 128
+cargo xtask benchmark --warehouses 20 --tpcc-threads 64
 ```
 
 ## Controlling Row Counts
@@ -128,7 +141,8 @@ Table-copy row count is controlled by TPC-C warehouse count:
 - `--warehouses`: controls the TPC-C dataset size loaded into Postgres.
 - `--force-prepare`: drops and regenerates the TPC-C tables. Use this when
   changing `--warehouses` on an existing benchmark database.
-- `--tpcc-threads`: controls `go-tpc` load concurrency, not dataset size.
+- `--tpcc-threads`: controls `go-tpc` load and streaming concurrency, not dataset
+  size.
 - `--tpcc-tables`: controls which prepared TPC-C tables are copied.
 
 The default TPC-C table set intentionally excludes `history` because `go-tpc`
@@ -141,8 +155,6 @@ TPC-C streaming is controlled by:
   pipeline is ready.
 - `--streaming-duration-seconds`: duration for the TPC-C workload. The default
   is 60 seconds.
-- `--streaming-tpcc-threads`: optional `go-tpc tpcc run` concurrency. Empty
-  means xtask derives it with the same warehouse and CPU formula as prepare.
 - `--streaming-drain-quiet-ms`: quiet period with no new CDC events before the
   stream is considered drained. The default is 2 seconds.
 
@@ -208,6 +220,7 @@ gh workflow run benchmark.yml \
   -f max_table_sync_workers=8 \
   -f max_copy_connections_per_table=4 \
   -f batch_max_fill_ms=1000 \
+  -f memory_budget_ratio=0.2 \
   -f destination=null
 ```
 
@@ -216,14 +229,15 @@ Important workflow inputs:
 - `benchmark_runner`: `blacksmith-8vcpu-ubuntu-2404`,
   `blacksmith-16vcpu-ubuntu-2404`, or `blacksmith-32vcpu-ubuntu-2404`.
 - `warehouses`: number of TPC-C warehouses to prepare.
-- `tpcc_threads`: optional `go-tpc` prepare threads. Empty means xtask derives it.
-- `streaming_duration_seconds`: TPC-C workload duration. Defaults to 60.
-- `streaming_tpcc_threads`: optional `go-tpc tpcc run` threads. Empty means
+- `tpcc_threads`: optional `go-tpc` prepare and streaming threads. Empty means
   xtask derives it.
+- `streaming_duration_seconds`: TPC-C workload duration. Defaults to 60.
 - `streaming_drain_quiet_ms`: CDC quiet period before TPC-C drain completes.
 - `max_table_sync_workers`: table-copy worker parallelism.
 - `max_copy_connections_per_table`: per-table copy connection parallelism.
 - `batch_max_fill_ms`: stream batch fill timeout.
+- `memory_budget_ratio`: ratio of detected memory reserved for stream batch
+  bytes. Defaults to `0.2`.
 - `enable_memory_backpressure`: opt into ETL memory backpressure. Defaults to
   `false` for benchmark runs.
 - `destination`: `null` or `bigquery`.
@@ -238,7 +252,9 @@ For BigQuery workflow runs, set the repository secret
 The workflow starts only source Postgres, installs pinned `go-tpc`, runs
 `cargo xtask benchmark`, compares the new reports against the most recent
 successful `benchmark-results` artifact on the same ref, and uploads
-`target/bench-results/*.json` plus `target/bench-results/*.md`.
+`target/bench-results/*.json` plus `target/bench-results/*.md`. It also writes a
+benchmark environment note with the selected runner, CPU count, host memory,
+cgroup memory limit, memory budget ratio, and memory backpressure setting.
 
 If no previous successful run exists, the comparison writes a "no previous
 benchmark artifact" summary and passes. If a comparable previous run exists, the

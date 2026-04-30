@@ -17,13 +17,13 @@ const DEFAULT_DB_USER: &str = "postgres";
 const DEFAULT_DB_PASSWORD: &str = "postgres";
 const DEFAULT_TPCC_TABLES: &str =
     "customer,district,item,new_order,order_line,orders,stock,warehouse";
-const DEFAULT_PUBLICATION_NAME: &str = "bench_pub";
-const DEFAULT_STREAMING_PUBLICATION_NAME: &str = "bench_streaming_pub";
 const DEFAULT_STREAMING_DURATION_SECONDS: u64 = 60;
 const DEFAULT_TPCC_THREADS_PER_WAREHOUSE: usize = 8;
-const DEFAULT_TPCC_THREADS_PER_CPU: usize = 4;
+const DEFAULT_TPCC_THREADS_PER_CPU: usize = 2;
 const DEFAULT_TPCC_MIN_THREADS: usize = 8;
-const DEFAULT_TPCC_MAX_THREADS: usize = 128;
+const DEFAULT_TPCC_MAX_THREADS: usize = 64;
+const MEMORY_BACKPRESSURE_ACTIVATE_THRESHOLD: f32 = 0.85;
+const MEMORY_BACKPRESSURE_RESUME_THRESHOLD: f32 = 0.75;
 
 #[derive(Args)]
 pub(crate) struct BenchmarkArgs {
@@ -76,31 +76,13 @@ pub(crate) struct BenchmarkArgs {
     /// BigQuery service account key file.
     #[arg(long, env = "BQ_SA_KEY_FILE")]
     bq_sa_key_file: Option<PathBuf>,
-    /// BigQuery maximum staleness in minutes.
-    #[arg(long, env = "BQ_MAX_STALENESS_MINS")]
-    bq_max_staleness_mins: Option<u16>,
-    /// BigQuery connection pool size.
-    #[arg(long, env = "BQ_CONNECTION_POOL_SIZE", default_value_t = 32)]
-    bq_connection_pool_size: usize,
-    /// Table-copy benchmark publication name.
-    #[arg(long, default_value = DEFAULT_PUBLICATION_NAME)]
-    publication_name: String,
-    /// Table-streaming benchmark publication name.
-    #[arg(long, default_value = DEFAULT_STREAMING_PUBLICATION_NAME)]
-    streaming_publication_name: String,
     /// Run the TPC-C streaming workload for this many seconds.
     #[arg(long)]
     streaming_duration_seconds: Option<u64>,
-    /// TPC-C thread concurrency used by table-streaming.
-    #[arg(long)]
-    streaming_tpcc_threads: Option<u16>,
     /// Quiet period with no CDC events before TPC-C streaming is considered
     /// drained.
     #[arg(long, default_value_t = 2_000)]
     streaming_drain_quiet_ms: u64,
-    /// Poll interval used while waiting for TPC-C CDC events to drain.
-    #[arg(long, default_value_t = 250)]
-    streaming_drain_poll_ms: u64,
     /// Maximum batch fill time in milliseconds.
     #[arg(long, default_value_t = 1_000)]
     batch_max_fill_ms: u64,
@@ -117,9 +99,6 @@ pub(crate) struct BenchmarkArgs {
     /// default.
     #[arg(long, default_value_t = false)]
     enable_memory_backpressure: bool,
-    /// Disable ETL memory backpressure.
-    #[arg(long, default_value_t = false)]
-    disable_memory_backpressure: bool,
     /// Directory where JSON benchmark reports are written.
     #[arg(long, default_value = "target/bench-results")]
     output_dir: PathBuf,
@@ -146,25 +125,23 @@ impl BenchmarkArgs {
 
         let tpcc_threads =
             self.tpcc_threads.unwrap_or_else(|| recommended_threads(self.warehouses));
-        let streaming_tpcc_threads =
-            self.streaming_tpcc_threads.unwrap_or_else(|| recommended_threads(self.warehouses));
         let pipeline_id_base = benchmark_pipeline_id_base()?;
         let table_copy_pipeline_id = pipeline_id_base;
         let table_streaming_pipeline_id =
             pipeline_id_base.checked_add(1).context("benchmark pipeline id overflow")?;
+        let table_copy_publication_name = format!("bench_pub_{table_copy_pipeline_id}");
+        let table_streaming_publication_name =
+            format!("bench_streaming_pub_{table_streaming_pipeline_id}");
 
         print_configuration(&[
             ("Database", format!("{}@{}:{}", self.database, self.host, self.port)),
             ("Warehouses", self.warehouses.to_string()),
-            ("TPC-C prepare threads", tpcc_threads.to_string()),
+            ("TPC-C threads", tpcc_threads.to_string()),
             ("Streaming workload", "tpcc".to_owned()),
-            ("Streaming TPC-C threads", streaming_tpcc_threads.to_string()),
             ("Pipeline id base", pipeline_id_base.to_string()),
             ("Destination", self.destination.as_arg().to_owned()),
-            (
-                "Memory backpressure",
-                if self.memory_backpressure_enabled() { "enabled" } else { "disabled" }.to_owned(),
-            ),
+            ("Memory backpressure", memory_backpressure_label(self.enable_memory_backpressure)),
+            ("Memory budget ratio", format_decimal(f64::from(self.memory_budget_ratio), 2)),
             ("Output dir", self.output_dir.display().to_string()),
         ]);
 
@@ -184,12 +161,15 @@ impl BenchmarkArgs {
             print_skip("TPC-C data", "selected benchmarks do not need it");
         }
 
+        let mut table_copy_report = None;
+        let mut table_streaming_report = None;
+
         if !self.skip_table_copy {
             print_phase("Table copy", "preparing publication and row counts");
             let selected_tables = self.validated_tpcc_tables()?;
             let table_ids = self.fetch_table_ids(&selected_tables)?;
             let expected_row_count = self.fetch_expected_row_count(&selected_tables)?;
-            self.create_publication(&self.publication_name, &selected_tables)?;
+            self.create_publication(&table_copy_publication_name, &selected_tables)?;
             print_phase(
                 "Table copy",
                 &format!(
@@ -199,12 +179,13 @@ impl BenchmarkArgs {
                 ),
             );
 
-            self.run_table_copy(
+            table_copy_report = Some(self.run_table_copy(
+                &table_copy_publication_name,
                 &table_ids,
                 expected_row_count,
                 table_copy_pipeline_id,
                 self.output_dir.join("table_copy.json"),
-            )?;
+            )?);
             print_done("Table copy", "finished");
         } else {
             print_skip("Table copy", "disabled by flag");
@@ -212,15 +193,18 @@ impl BenchmarkArgs {
 
         if !self.skip_table_streaming {
             print_phase("Table streaming", "preparing benchmark");
-            self.run_table_streaming(
-                streaming_tpcc_threads,
+            table_streaming_report = Some(self.run_table_streaming(
+                &table_streaming_publication_name,
+                tpcc_threads,
                 table_streaming_pipeline_id,
                 self.output_dir.join("table_streaming.json"),
-            )?;
+            )?);
             print_done("Table streaming", "finished");
         } else {
             print_skip("Table streaming", "disabled by flag");
         }
+
+        print_combined_summary(table_copy_report.as_ref(), table_streaming_report.as_ref());
 
         Ok(())
     }
@@ -236,10 +220,6 @@ impl BenchmarkArgs {
 
         if self.streaming_drain_quiet_ms == 0 {
             bail!("--streaming-drain-quiet-ms must be greater than 0");
-        }
-
-        if self.streaming_drain_poll_ms == 0 {
-            bail!("--streaming-drain-poll-ms must be greater than 0");
         }
 
         if let Some(duration_seconds) = self.streaming_duration_seconds
@@ -427,11 +407,12 @@ impl BenchmarkArgs {
 
     fn run_table_copy(
         &self,
+        publication_name: &str,
         table_ids: &str,
         expected_row_count: u64,
         pipeline_id: u64,
         report_path: PathBuf,
-    ) -> Result<()> {
+    ) -> Result<Value> {
         let mut args = vec!["--log-target".to_owned(), "terminal".to_owned(), "run".to_owned()];
         self.push_common_benchmark_args(&mut args);
         self.push_tuning_args(&mut args);
@@ -442,7 +423,7 @@ impl BenchmarkArgs {
             "--pipeline-id".to_owned(),
             pipeline_id.to_string(),
             "--publication-name".to_owned(),
-            self.publication_name.clone(),
+            publication_name.to_owned(),
             "--table-ids".to_owned(),
             table_ids.to_owned(),
             "--expected-row-count".to_owned(),
@@ -454,10 +435,11 @@ impl BenchmarkArgs {
 
     fn run_table_streaming(
         &self,
+        publication_name: &str,
         tpcc_threads: u16,
         pipeline_id: u64,
         report_path: PathBuf,
-    ) -> Result<()> {
+    ) -> Result<Value> {
         let mut args = vec!["--log-target".to_owned(), "terminal".to_owned(), "run".to_owned()];
         self.push_common_benchmark_args(&mut args);
         self.push_tuning_args(&mut args);
@@ -468,20 +450,18 @@ impl BenchmarkArgs {
             "--pipeline-id".to_owned(),
             pipeline_id.to_string(),
             "--publication-name".to_owned(),
-            self.streaming_publication_name.clone(),
+            publication_name.to_owned(),
             "--tpcc-warehouses".to_owned(),
             self.warehouses.to_string(),
             "--tpcc-threads".to_owned(),
             tpcc_threads.to_string(),
             "--drain-quiet-ms".to_owned(),
             self.streaming_drain_quiet_ms.to_string(),
-            "--drain-poll-ms".to_owned(),
-            self.streaming_drain_poll_ms.to_string(),
         ]);
 
         let selected_tables = self.validated_tpcc_tables()?;
         let table_ids = self.fetch_table_ids(&selected_tables)?;
-        self.create_publication(&self.streaming_publication_name, &selected_tables)?;
+        self.create_publication(publication_name, &selected_tables)?;
         let duration_seconds =
             self.streaming_duration_seconds.unwrap_or(DEFAULT_STREAMING_DURATION_SECONDS);
         print_phase(
@@ -528,7 +508,7 @@ impl BenchmarkArgs {
             self.max_copy_connections_per_table.to_string(),
         ]);
 
-        if !self.memory_backpressure_enabled() {
+        if !self.enable_memory_backpressure {
             args.push("--disable-memory-backpressure".to_owned());
         }
     }
@@ -551,15 +531,6 @@ impl BenchmarkArgs {
         if let Some(sa_key_file) = &self.bq_sa_key_file {
             args.extend(["--bq-sa-key-file".to_owned(), sa_key_file.display().to_string()]);
         }
-
-        if let Some(max_staleness_mins) = self.bq_max_staleness_mins {
-            args.extend(["--bq-max-staleness-mins".to_owned(), max_staleness_mins.to_string()]);
-        }
-
-        args.extend([
-            "--bq-connection-pool-size".to_owned(),
-            self.bq_connection_pool_size.to_string(),
-        ]);
     }
 
     fn psql_query(&self, database: &str, sql: &str) -> Result<String> {
@@ -594,10 +565,6 @@ impl BenchmarkArgs {
         command.output().context("failed to run psql")
     }
 
-    fn memory_backpressure_enabled(&self) -> bool {
-        self.enable_memory_backpressure && !self.disable_memory_backpressure
-    }
-
     fn runs_tpcc_streaming(&self) -> bool {
         !self.skip_table_streaming
     }
@@ -624,6 +591,18 @@ fn recommended_threads(warehouses: u16) -> u16 {
         .unwrap_or(DEFAULT_TPCC_MIN_THREADS);
     warehouse_threads.max(cpu_threads).clamp(DEFAULT_TPCC_MIN_THREADS, DEFAULT_TPCC_MAX_THREADS)
         as u16
+}
+
+fn memory_backpressure_label(enabled: bool) -> String {
+    if enabled {
+        format!(
+            "enabled (activate {:.0}%, resume {:.0}%)",
+            MEMORY_BACKPRESSURE_ACTIVATE_THRESHOLD * 100.0,
+            MEMORY_BACKPRESSURE_RESUME_THRESHOLD * 100.0
+        )
+    } else {
+        "disabled".to_owned()
+    }
 }
 
 fn benchmark_pipeline_id_base() -> Result<u64> {
@@ -749,7 +728,7 @@ fn run_benchmark_binary(
     destination: Destination,
     binary_args: &[String],
     report_path: &Path,
-) -> Result<()> {
+) -> Result<Value> {
     let mut command = Command::new("cargo");
     command.args(["run", "--quiet", "-p", "etl-benchmarks", "--release"]);
     if matches!(destination, Destination::BigQuery) {
@@ -784,7 +763,7 @@ fn run_benchmark_binary(
         .with_context(|| format!("benchmark {binary_name} did not write a valid report"))?;
     print_benchmark_report(binary_name, &report);
     print_done("Report", &format!("wrote {}", report_path.display()));
-    Ok(())
+    Ok(report)
 }
 
 fn read_report(path: &Path) -> Result<Value> {
@@ -848,6 +827,96 @@ fn report_rows(
         .collect()
 }
 
+fn print_combined_summary(table_copy: Option<&Value>, table_streaming: Option<&Value>) {
+    let mut rows = Vec::new();
+    if let Some(report) = table_copy {
+        rows.push([
+            "Table copy".to_owned(),
+            report_number(report, "rows_per_second").map_or_else(
+                || "-".to_owned(),
+                |value| format!("{} rows/s", format_decimal(value, 2)),
+            ),
+            report_number(report, "estimated_mib_per_second").map_or_else(
+                || "-".to_owned(),
+                |value| format!("{} MiB/s", format_decimal(value, 2)),
+            ),
+            report_number(report, "total_ms").map_or_else(|| "-".to_owned(), format_milliseconds),
+        ]);
+    }
+    if let Some(report) = table_streaming {
+        rows.push([
+            "Table streaming".to_owned(),
+            report_number(report, "end_to_end_with_shutdown_events_per_second").map_or_else(
+                || "-".to_owned(),
+                |value| format!("{} events/s", format_decimal(value, 2)),
+            ),
+            report_number(report, "end_to_end_with_shutdown_estimated_mib_per_second").map_or_else(
+                || "-".to_owned(),
+                |value| format!("{} MiB/s", format_decimal(value, 2)),
+            ),
+            report_number(report, "total_ms").map_or_else(|| "-".to_owned(), format_milliseconds),
+        ]);
+    }
+
+    if rows.is_empty() {
+        return;
+    }
+
+    print_summary_table(&rows);
+}
+
+fn print_summary_table(rows: &[[String; 4]]) {
+    let headers = ["Benchmark", "Throughput", "Data rate", "Total"];
+    let mut widths = headers.map(str::len);
+    for row in rows {
+        for (idx, value) in row.iter().enumerate() {
+            widths[idx] = widths[idx].max(value.len());
+        }
+    }
+
+    let border = format!(
+        "+-{:-<w0$}-+-{:-<w1$}-+-{:-<w2$}-+-{:-<w3$}-+",
+        "",
+        "",
+        "",
+        "",
+        w0 = widths[0],
+        w1 = widths[1],
+        w2 = widths[2],
+        w3 = widths[3]
+    );
+    println!();
+    println!("{}", paint(stdout_color_enabled(), "36;1", "Benchmark summary"));
+    println!("{border}");
+    println!(
+        "| {:<w0$} | {:<w1$} | {:<w2$} | {:<w3$} |",
+        headers[0],
+        headers[1],
+        headers[2],
+        headers[3],
+        w0 = widths[0],
+        w1 = widths[1],
+        w2 = widths[2],
+        w3 = widths[3]
+    );
+    println!("{border}");
+    for row in rows {
+        println!(
+            "| {:<w0$} | {:<w1$} | {:<w2$} | {:<w3$} |",
+            row[0],
+            row[1],
+            row[2],
+            row[3],
+            w0 = widths[0],
+            w1 = widths[1],
+            w2 = widths[2],
+            w3 = widths[3]
+        );
+    }
+    println!("{border}");
+    println!();
+}
+
 fn format_report_value(value: &Value) -> String {
     match value {
         Value::Null => "null".to_owned(),
@@ -860,6 +929,33 @@ fn format_report_value(value: &Value) -> String {
         Value::String(value) => value.clone(),
         value => value.to_string(),
     }
+}
+
+fn report_number(report: &Value, key: &str) -> Option<f64> {
+    report.get(key)?.as_f64()
+}
+
+fn format_milliseconds(value: f64) -> String {
+    if value >= 1_000.0 {
+        format!("{} s", format_decimal(value / 1_000.0, 2))
+    } else {
+        format!("{} ms", format_decimal(value, 0))
+    }
+}
+
+fn format_decimal(value: f64, digits: usize) -> String {
+    let raw = format!("{value:.digits$}");
+    let Some((integer, fraction)) = raw.split_once('.') else {
+        return format_integer_str(&raw);
+    };
+    format!("{}.{}", format_integer_str(integer), fraction)
+}
+
+fn format_integer_str(value: &str) -> String {
+    let Some(unsigned) = value.strip_prefix('-') else {
+        return format_integer(value.parse::<u64>().unwrap_or(0));
+    };
+    format!("-{}", format_integer(unsigned.parse::<u64>().unwrap_or(0)))
 }
 
 fn format_integer(value: u64) -> String {

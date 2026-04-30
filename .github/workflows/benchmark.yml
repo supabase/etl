@@ -17,17 +17,13 @@ on:
         required: true
         default: "10"
       tpcc_threads:
-        description: Optional go-tpc prepare threads. Empty derives from warehouses and runner CPUs.
+        description: Optional go-tpc prepare and streaming threads. Empty derives from warehouses and runner CPUs.
         required: false
         default: ""
       streaming_duration_seconds:
         description: Duration for TPC-C streaming.
         required: false
         default: "60"
-      streaming_tpcc_threads:
-        description: Optional go-tpc run threads for table streaming. Empty derives from warehouses and runner CPUs.
-        required: false
-        default: ""
       streaming_drain_quiet_ms:
         description: Quiet period with no CDC events before TPC-C streaming is considered drained.
         required: true
@@ -44,6 +40,10 @@ on:
         description: Maximum stream batch fill time in milliseconds.
         required: true
         default: "1000"
+      memory_budget_ratio:
+        description: Ratio of detected memory reserved for stream batch bytes.
+        required: true
+        default: "0.2"
       enable_memory_backpressure:
         description: Enable ETL memory backpressure during the benchmark.
         required: true
@@ -151,6 +151,39 @@ jobs:
           fi
           printf '%s' "${BQ_SA_KEY_JSON}" > "$RUNNER_TEMP/bigquery-key.json"
 
+      - name: Record benchmark environment
+        env:
+          TPCC_THREADS_INPUT: ${{ inputs.tpcc_threads }}
+        run: |
+          set -euo pipefail
+          mkdir -p target/bench-results
+
+          tpcc_threads="${TPCC_THREADS_INPUT:-derived}"
+          cgroup_memory_limit="unavailable"
+          if [[ -r /sys/fs/cgroup/memory.max ]]; then
+            cgroup_memory_limit="$(cat /sys/fs/cgroup/memory.max)"
+          elif [[ -r /sys/fs/cgroup/memory/memory.limit_in_bytes ]]; then
+            cgroup_memory_limit="$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes)"
+          fi
+
+          {
+            echo "## Benchmark environment"
+            echo
+            echo "| Setting | Value |"
+            echo "| --- | --- |"
+            echo "| Runner | ${{ inputs.benchmark_runner }} |"
+            echo "| CPUs | $(nproc) |"
+            echo "| Host memory | $(awk '/MemTotal/ { printf \"%.2f GiB\", $2 / 1024 / 1024 }' /proc/meminfo) |"
+            echo "| Cgroup memory limit | ${cgroup_memory_limit} |"
+            echo "| Warehouses | ${{ inputs.warehouses }} |"
+            echo "| TPC-C threads | ${tpcc_threads} |"
+            echo "| Memory budget ratio | ${{ inputs.memory_budget_ratio }} |"
+            echo "| Memory backpressure | ${{ inputs.enable_memory_backpressure }} |"
+            echo "| Destination | ${{ inputs.destination }} |"
+          } > target/bench-results/benchmark-environment.md
+
+          cat target/bench-results/benchmark-environment.md >> "$GITHUB_STEP_SUMMARY"
+
       - name: Run benchmarks
         env:
           BQ_SA_KEY_FILE: ${{ runner.temp }}/bigquery-key.json
@@ -169,6 +202,7 @@ jobs:
             --max-table-sync-workers "${{ inputs.max_table_sync_workers }}"
             --max-copy-connections-per-table "${{ inputs.max_copy_connections_per_table }}"
             --batch-max-fill-ms "${{ inputs.batch_max_fill_ms }}"
+            --memory-budget-ratio "${{ inputs.memory_budget_ratio }}"
             --destination "${{ inputs.destination }}"
             --output-dir target/bench-results
           )
@@ -179,10 +213,6 @@ jobs:
 
           if [[ -n "${{ inputs.streaming_duration_seconds }}" ]]; then
             args+=(--streaming-duration-seconds "${{ inputs.streaming_duration_seconds }}")
-          fi
-
-          if [[ -n "${{ inputs.streaming_tpcc_threads }}" ]]; then
-            args+=(--streaming-tpcc-threads "${{ inputs.streaming_tpcc_threads }}")
           fi
 
           if [[ "${{ inputs.enable_memory_backpressure }}" == "true" ]]; then
