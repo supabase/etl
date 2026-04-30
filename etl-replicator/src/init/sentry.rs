@@ -8,6 +8,8 @@ use tracing::debug;
 use crate::{
     APP_VERSION_ENV_NAME,
     error::{ReplicatorError, ReplicatorResult},
+    init,
+    sentry::set_destination_tag,
 };
 
 /// Initializes Sentry error tracking for the replicator service.
@@ -39,6 +41,7 @@ pub(crate) fn init(config: &ReplicatorConfig) -> ReplicatorResult<Option<ClientI
             scope.set_tag("version", version);
         }
     });
+    set_destination_tag(init::destination_name(&config.destination));
 
     Ok(Some(guard))
 }

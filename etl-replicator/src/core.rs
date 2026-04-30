@@ -31,7 +31,6 @@ use crate::{
     error_notification::ErrorNotificationClient,
     error_reporting::ErrorReportingStateStore,
     metrics,
-    sentry::set_destination_tag,
 };
 
 /// Starts the replicator service with the provided configuration.
@@ -63,10 +62,6 @@ pub(crate) async fn start_replicator_with_config(
             max_staleness_mins,
             connection_pool_size,
         } => {
-            init_destination_scope_and_metrics::<
-                BigQueryDestination<ErrorReportingStateStore<PostgresStore>>,
-            >(&replicator_config)?;
-
             let destination = BigQueryDestination::new_with_key(
                 project_id.clone(),
                 dataset_id.clone(),
@@ -93,10 +88,6 @@ pub(crate) async fn start_replicator_with_config(
                     s3_region,
                 },
         } => {
-            init_destination_scope_and_metrics::<
-                IcebergDestination<ErrorReportingStateStore<PostgresStore>>,
-            >(&replicator_config)?;
-
             let env = Environment::load().map_err(ReplicatorError::config)?;
             let client = IcebergClient::new_with_supabase_catalog(
                 project_ref,
@@ -129,10 +120,6 @@ pub(crate) async fn start_replicator_with_config(
                     s3_endpoint,
                 },
         } => {
-            init_destination_scope_and_metrics::<
-                IcebergDestination<ErrorReportingStateStore<PostgresStore>>,
-            >(&replicator_config)?;
-
             let client = IcebergClient::new_with_rest_catalog(
                 catalog_uri.clone(),
                 warehouse_name.clone(),
@@ -168,10 +155,6 @@ pub(crate) async fn start_replicator_with_config(
             maintenance_target_file_size,
             expire_snapshots_older_than,
         } => {
-            init_destination_scope_and_metrics::<
-                DuckLakeDestination<ErrorReportingStateStore<PostgresStore>>,
-            >(&replicator_config)?;
-
             let s3_config = match (s3_access_key_id, s3_secret_access_key) {
                 (Some(access_key_id), Some(secret_access_key)) => Some(DucklakeS3Config {
                     access_key_id: access_key_id.expose_secret().to_owned(),
@@ -209,14 +192,6 @@ pub(crate) async fn start_replicator_with_config(
     }
 
     Ok(())
-}
-
-/// Initializes destination-scoped observability.
-fn init_destination_scope_and_metrics<D: Destination>(
-    replicator_config: &ReplicatorConfig,
-) -> ReplicatorResult<()> {
-    set_destination_tag(D::name());
-    crate::init::init_metrics::<D>(replicator_config)
 }
 
 fn create_props(

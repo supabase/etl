@@ -103,6 +103,9 @@ fn try_main() -> ReplicatorResult<()> {
     // We prepare the notification client used to send errors.
     let notification_client = init::init_error_notification(&replicator_config);
 
+    // We initialize the Prometheus recorder.
+    init::init_metrics(&replicator_config)?;
+
     debug!("starting tokio runtime");
 
     // Phase 2: start Tokio only once synchronous bootstrap has succeeded.
