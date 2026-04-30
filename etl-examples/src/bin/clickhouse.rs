@@ -25,13 +25,13 @@ Usage:
         --db-name postgres \
         --db-username postgres \
         --db-password password \
-        --ch-url http://localhost:8123 \
-        --ch-user default \
-        --ch-database default \
+        --clickhouse-url http://localhost:8123 \
+        --clickhouse-user default \
+        --clickhouse-database default \
         --publication my_pub
 
 For HTTPS connections, provide an `https://` URL — TLS is handled automatically
-using webpki root certificates. Use `--ch-password` if your ClickHouse instance
+using webpki root certificates. Use `--clickhouse-password` if your ClickHouse instance
 requires authentication.
 
 */
@@ -75,7 +75,7 @@ struct AppArgs {
     db_args: DbArgs,
     /// ClickHouse destination parameters
     #[clap(flatten)]
-    ch_args: ChArgs,
+    clickhouse_args: ClickHouseArgs,
     /// Postgres publication name (must be created beforehand with CREATE
     /// PUBLICATION)
     #[arg(long)]
@@ -104,19 +104,19 @@ struct DbArgs {
 
 /// ClickHouse destination configuration.
 #[derive(Debug, Args)]
-struct ChArgs {
+struct ClickHouseArgs {
     /// ClickHouse HTTP(S) endpoint (e.g. http://localhost:8123 or https://host:8443)
     #[arg(long)]
-    ch_url: String,
+    clickhouse_url: String,
     /// ClickHouse user name
     #[arg(long)]
-    ch_user: String,
+    clickhouse_user: String,
     /// ClickHouse user password (optional)
     #[arg(long)]
-    ch_password: Option<String>,
+    clickhouse_password: Option<String>,
     /// ClickHouse target database
     #[arg(long)]
-    ch_database: String,
+    clickhouse_database: String,
     /// Maximum time to wait for a batch to fill in milliseconds (lower values =
     /// lower latency, less throughput)
     #[arg(long, default_value = "5000")]
@@ -164,7 +164,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
     set_log_level();
     init_tracing();
 
-    // Install required crypto provider for TLS (used when ch_url is https://)
+    // Install required crypto provider for TLS (used when clickhouse_url is https://)
     install_crypto_provider();
 
     let args = AppArgs::parse();
@@ -193,12 +193,12 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         publication_name: args.publication,
         pg_connection: pg_connection_config,
         batch: BatchConfig {
-            max_fill_ms: args.ch_args.max_batch_fill_duration_ms,
+            max_fill_ms: args.clickhouse_args.max_batch_fill_duration_ms,
             memory_budget_ratio: BatchConfig::DEFAULT_MEMORY_BUDGET_RATIO,
         },
         table_error_retry_delay_ms: 10000,
         table_error_retry_max_attempts: 5,
-        max_table_sync_workers: args.ch_args.max_table_sync_workers,
+        max_table_sync_workers: args.clickhouse_args.max_table_sync_workers,
         memory_refresh_interval_ms: 100,
         memory_backpressure: Some(MemoryBackpressureConfig::default()),
         table_sync_copy: TableSyncCopyConfig::default(),
@@ -218,16 +218,16 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         };
         let budget =
             (total_memory as f64 * f64::from(BatchConfig::DEFAULT_MEMORY_BUDGET_RATIO)) as u64;
-        (budget / u64::from(args.ch_args.max_table_sync_workers)).max(1)
+        (budget / u64::from(args.clickhouse_args.max_table_sync_workers)).max(1)
     };
 
     // Initialize the ClickHouse destination.
     // Tables are created automatically as append-only MergeTree tables.
     let clickhouse_destination = ClickHouseDestination::new(
-        Url::parse(&args.ch_args.ch_url)?,
-        args.ch_args.ch_user,
-        args.ch_args.ch_password,
-        args.ch_args.ch_database,
+        Url::parse(&args.clickhouse_args.clickhouse_url)?,
+        args.clickhouse_args.clickhouse_user,
+        args.clickhouse_args.clickhouse_password,
+        args.clickhouse_args.clickhouse_database,
         ClickHouseInserterConfig { max_bytes_per_insert },
         store.clone(),
     )?;

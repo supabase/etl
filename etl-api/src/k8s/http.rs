@@ -22,9 +22,9 @@ use crate::{
 /// Secret name suffix for the BigQuery service account key.
 const BQ_SECRET_NAME_SUFFIX: &str = "bq-service-account-key";
 /// Secret name suffix for the ClickHouse password.
-const CLICKHOUSE_SECRET_NAME_SUFFIX: &str = "ch-password";
+const CLICKHOUSE_SECRET_NAME_SUFFIX: &str = "clickhouse-password";
 /// Name of the password in the ClickHouse secret and its reference.
-const CLICKHOUSE_PASSWORD_NAME: &str = "ch-password";
+const CLICKHOUSE_PASSWORD_NAME: &str = "clickhouse-password";
 /// Name of the service account key in the BigQuery secret and its reference.
 const BQ_SERVICE_ACCOUNT_KEY_NAME: &str = "service-account-key";
 /// Secret name suffix for iceberg secrets (includes catalog token,
@@ -345,13 +345,13 @@ impl K8sClient for HttpK8sClient {
         debug!("patching clickhouse secret");
 
         if let Some(password) = password {
-            let encoded_ch_password = BASE64_STANDARD.encode(password);
+            let encoded_clickhouse_password = BASE64_STANDARD.encode(password);
             let clickhouse_secret_name = create_clickhouse_secret_name(prefix);
             let replicator_app_name = create_replicator_app_name(prefix);
             let clickhouse_secret_json = create_clickhouse_password_secret_json(
                 &clickhouse_secret_name,
                 &replicator_app_name,
-                &encoded_ch_password,
+                &encoded_clickhouse_password,
             );
             let secret: Secret = serde_json::from_value(clickhouse_secret_json)?;
 
@@ -442,9 +442,11 @@ impl K8sClient for HttpK8sClient {
     async fn delete_clickhouse_secret(&self, prefix: &str) -> Result<(), K8sError> {
         debug!("deleting clickhouse secret");
 
-        let ch_secret_name = create_clickhouse_secret_name(prefix);
+        let clickhouse_secret_name = create_clickhouse_secret_name(prefix);
         let dp = DeleteParams::default();
-        Self::handle_delete_with_404_ignore(self.secrets_api.delete(&ch_secret_name, &dp).await)?;
+        Self::handle_delete_with_404_ignore(
+            self.secrets_api.delete(&clickhouse_secret_name, &dp).await,
+        )?;
 
         Ok(())
     }
@@ -712,7 +714,7 @@ fn create_postgres_secret_json(
 fn create_clickhouse_password_secret_json(
     secret_name: &str,
     replicator_app_name: &str,
-    encoded_ch_password: &str,
+    encoded_clickhouse_password: &str,
 ) -> serde_json::Value {
     json!({
       "apiVersion": "v1",
@@ -727,7 +729,7 @@ fn create_clickhouse_password_secret_json(
       },
       "type": "Opaque",
       "data": {
-        CLICKHOUSE_PASSWORD_NAME: encoded_ch_password,
+        CLICKHOUSE_PASSWORD_NAME: encoded_clickhouse_password,
       }
     })
 }
@@ -1107,7 +1109,7 @@ fn create_bq_secret_env_var_json(bq_secret_name: &str) -> serde_json::Value {
 
 fn create_clickhouse_secret_env_var_json(clickhouse_secret_name: &str) -> serde_json::Value {
     json!({
-      "name": "APP_DESTINATION__CLICK_HOUSE__PASSWORD",
+      "name": "APP_DESTINATION__CLICKHOUSE__PASSWORD",
       "valueFrom": {
         "secretKeyRef": {
           "name": clickhouse_secret_name,
@@ -1669,7 +1671,7 @@ mod tests {
         ));
         assert!(container_environment_has_var(
             &container_environment,
-            "APP_DESTINATION__CLICK_HOUSE__PASSWORD",
+            "APP_DESTINATION__CLICKHOUSE__PASSWORD",
         ));
     }
 
@@ -1692,7 +1694,7 @@ mod tests {
         ));
         assert!(!container_environment_has_var(
             &container_environment,
-            "APP_DESTINATION__CLICK_HOUSE__PASSWORD",
+            "APP_DESTINATION__CLICKHOUSE__PASSWORD",
         ));
     }
 

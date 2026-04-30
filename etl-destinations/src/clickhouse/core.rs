@@ -100,7 +100,7 @@ fn expected_clickhouse_column_names(schema: &ReplicatedTableSchema) -> Vec<Strin
 /// destination has otherwise drifted from `ReplicatedTableSchema`, we surface
 /// a `CorruptedTableSchema` error rather than emit misaligned RowBinary bytes.
 fn nullable_flags_from_clickhouse_columns(
-    ch_table_name: &str,
+    clickhouse_table_name: &str,
     expected_column_names: &[String],
     actual_columns: &[ClickHouseTableColumn],
 ) -> EtlResult<Arc<[bool]>> {
@@ -110,7 +110,7 @@ fn nullable_flags_from_clickhouse_columns(
             "ClickHouse table schema does not match replicated schema",
             format!(
                 "table '{}' has {} columns, but {} were expected",
-                ch_table_name,
+                clickhouse_table_name,
                 actual_columns.len(),
                 expected_column_names.len()
             )
@@ -127,7 +127,7 @@ fn nullable_flags_from_clickhouse_columns(
                 "ClickHouse table schema does not match replicated schema",
                 format!(
                     "table '{}' column {} is named '{}', but '{}' was expected",
-                    ch_table_name,
+                    clickhouse_table_name,
                     index + 1,
                     actual_column.name,
                     expected_name
@@ -224,21 +224,21 @@ where
     async fn create_table_with_metadata(
         &self,
         table_id: TableId,
-        ch_table_name: &str,
+        clickhouse_table_name: &str,
         schema: &ReplicatedTableSchema,
         snapshot_id: etl::types::SnapshotId,
         replication_mask: etl::types::ReplicationMask,
     ) -> EtlResult<()> {
         let metadata = DestinationTableMetadata::new_applying(
-            ch_table_name.to_string(),
+            clickhouse_table_name.to_string(),
             snapshot_id,
             replication_mask,
         );
         self.store.store_destination_table_metadata(table_id, metadata.clone()).await?;
 
         let column_schemas: Vec<_> = schema.column_schemas().cloned().collect();
-        let ddl = build_create_table_sql(ch_table_name, &column_schemas);
-        self.client.execute_ddl(DdlKind::CreateTable, ch_table_name, &ddl).await?;
+        let ddl = build_create_table_sql(clickhouse_table_name, &column_schemas);
+        self.client.execute_ddl(DdlKind::CreateTable, clickhouse_table_name, &ddl).await?;
 
         self.store.store_destination_table_metadata(table_id, metadata.to_applied()).await?;
 
@@ -246,7 +246,7 @@ where
     }
 
     /// Ensures the ClickHouse table for the given schema exists, returning
-    /// `(ch_table_name, nullable_flags)`.
+    /// `(clickhouse_table_name, nullable_flags)`.
     ///
     /// On first encounter, executes `CREATE TABLE IF NOT EXISTS` and stores
     /// destination metadata with `Applied` status. Subsequent calls return
@@ -255,10 +255,10 @@ where
         &self,
         schema: &ReplicatedTableSchema,
     ) -> EtlResult<(String, Arc<[bool]>)> {
-        let ch_table_name = try_stringify_table_name(schema.name())?;
+        let clickhouse_table_name = try_stringify_table_name(schema.name())?;
 
-        if let Some(flags) = self.table_cache.read().get(&ch_table_name).cloned() {
-            return Ok((ch_table_name, flags));
+        if let Some(flags) = self.table_cache.read().get(&clickhouse_table_name).cloned() {
+            return Ok((clickhouse_table_name, flags));
         }
 
         let table_id = schema.id();
@@ -266,7 +266,7 @@ where
             None => {
                 self.create_table_with_metadata(
                     table_id,
-                    &ch_table_name,
+                    &clickhouse_table_name,
                     schema,
                     schema.inner().snapshot_id,
                     schema.replication_mask().clone(),
@@ -275,8 +275,13 @@ where
             }
             Some(metadata) => {
                 if metadata.is_applying() {
-                    self.recover_applying_metadata(table_id, &ch_table_name, schema, metadata)
-                        .await?;
+                    self.recover_applying_metadata(
+                        table_id,
+                        &clickhouse_table_name,
+                        schema,
+                        metadata,
+                    )
+                    .await?;
                 }
                 // Otherwise the metadata is already `Applied`: this branch
                 // runs after `handle_relation_event` invalidated the cache,
@@ -289,10 +294,10 @@ where
         // `ALTER TABLE ADD COLUMN`: ClickHouse scalar columns are forced to
         // `Nullable(T)` even when the Postgres column is `NOT NULL`, so RowBinary must
         // include the nullable marker byte ClickHouse expects.
-        let actual_columns = self.client.table_columns(&ch_table_name).await?;
+        let actual_columns = self.client.table_columns(&clickhouse_table_name).await?;
         let expected_column_names = expected_clickhouse_column_names(schema);
         let nullable_flags = nullable_flags_from_clickhouse_columns(
-            &ch_table_name,
+            &clickhouse_table_name,
             &expected_column_names,
             &actual_columns,
         )?;
@@ -302,11 +307,13 @@ where
         let flags = {
             let mut guard = self.table_cache.write();
             Arc::clone(
-                guard.entry(ch_table_name.clone()).or_insert_with(|| Arc::clone(&nullable_flags)),
+                guard
+                    .entry(clickhouse_table_name.clone())
+                    .or_insert_with(|| Arc::clone(&nullable_flags)),
             )
         };
 
-        Ok((ch_table_name, flags))
+        Ok((clickhouse_table_name, flags))
     }
 
     /// Re-runs an interrupted DDL idempotently and transitions metadata to
@@ -316,7 +323,7 @@ where
     async fn recover_applying_metadata(
         &self,
         table_id: TableId,
-        ch_table_name: &str,
+        clickhouse_table_name: &str,
         schema: &ReplicatedTableSchema,
         metadata: DestinationTableMetadata,
     ) -> EtlResult<()> {
@@ -342,12 +349,12 @@ where
                     metadata.replication_mask.clone(),
                 );
                 let diff = old_schema.diff(schema);
-                self.apply_schema_diff(ch_table_name, &diff, &old_schema).await?;
+                self.apply_schema_diff(clickhouse_table_name, &diff, &old_schema).await?;
             }
             None => {
                 let column_schemas: Vec<_> = schema.column_schemas().cloned().collect();
-                let ddl = build_create_table_sql(ch_table_name, &column_schemas);
-                self.client.execute_ddl(DdlKind::CreateTable, ch_table_name, &ddl).await?;
+                let ddl = build_create_table_sql(clickhouse_table_name, &column_schemas);
+                self.client.execute_ddl(DdlKind::CreateTable, clickhouse_table_name, &ddl).await?;
             }
         }
 
@@ -356,8 +363,8 @@ where
     }
 
     async fn truncate_table_inner(&self, schema: &ReplicatedTableSchema) -> EtlResult<()> {
-        let (ch_table_name, _) = self.ensure_table_exists(schema).await?;
-        self.client.truncate_table(&ch_table_name).await
+        let (clickhouse_table_name, _) = self.ensure_table_exists(schema).await?;
+        self.client.truncate_table(&clickhouse_table_name).await
     }
 
     async fn write_table_rows_inner(
@@ -365,7 +372,7 @@ where
         schema: &ReplicatedTableSchema,
         table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
-        let (ch_table_name, nullable_flags) = self.ensure_table_exists(schema).await?;
+        let (clickhouse_table_name, nullable_flags) = self.ensure_table_exists(schema).await?;
 
         let rows: Vec<Vec<ClickHouseValue>> = table_rows
             .into_iter()
@@ -382,7 +389,7 @@ where
 
         self.client
             .insert_rows(
-                &ch_table_name,
+                &clickhouse_table_name,
                 rows,
                 &nullable_flags,
                 self.inserter_config.max_bytes_per_insert,
@@ -449,11 +456,11 @@ where
             current_replication_mask.clone(),
         );
 
-        let ch_table_name = &metadata.destination_table_id;
+        let clickhouse_table_name = &metadata.destination_table_id;
 
         // Mark as Applying before DDL changes.
         let updated_metadata = DestinationTableMetadata::new_applied(
-            ch_table_name.clone(),
+            clickhouse_table_name.clone(),
             current_snapshot_id,
             current_replication_mask,
         )
@@ -466,7 +473,9 @@ where
 
         // Compute and apply the diff.
         let diff = current_schema.diff(new_schema);
-        if let Err(err) = self.apply_schema_diff(ch_table_name, &diff, &current_schema).await {
+        if let Err(err) =
+            self.apply_schema_diff(clickhouse_table_name, &diff, &current_schema).await
+        {
             warn!(
                 "schema change failed for table {}: {}. Manual intervention may be required.",
                 table_id, err
@@ -482,7 +491,7 @@ where
         // Invalidate cached nullable flags so the next write recomputes them.
         {
             let mut guard = self.table_cache.write();
-            guard.remove(ch_table_name);
+            guard.remove(clickhouse_table_name);
         }
 
         info!(
@@ -515,7 +524,7 @@ where
     /// status tracks this for diagnostic purposes.
     async fn apply_schema_diff(
         &self,
-        ch_table_name: &str,
+        clickhouse_table_name: &str,
         diff: &SchemaDiff,
         current_schema: &ReplicatedTableSchema,
     ) -> EtlResult<()> {
@@ -530,16 +539,18 @@ where
             current_schema.column_schemas().last().map(|c| c.name.clone()).unwrap_or_default();
 
         for column in &diff.columns_to_add {
-            self.client.add_column(ch_table_name, column, &last_user_column).await?;
+            self.client.add_column(clickhouse_table_name, column, &last_user_column).await?;
             last_user_column = column.name.clone();
         }
 
         for rename in &diff.columns_to_rename {
-            self.client.rename_column(ch_table_name, &rename.old_name, &rename.new_name).await?;
+            self.client
+                .rename_column(clickhouse_table_name, &rename.old_name, &rename.new_name)
+                .await?;
         }
 
         for column in &diff.columns_to_remove {
-            self.client.drop_column(ch_table_name, &column.name).await?;
+            self.client.drop_column(clickhouse_table_name, &column.name).await?;
         }
 
         Ok(())
@@ -668,12 +679,12 @@ where
         let mut prepared: Vec<(String, Arc<[bool]>, Vec<PendingRow>)> =
             Vec::with_capacity(pending.len());
         for (_, (schema, rows)) in pending {
-            let (ch_table_name, nullable_flags) = self.ensure_table_exists(&schema).await?;
-            prepared.push((ch_table_name, nullable_flags, rows));
+            let (clickhouse_table_name, nullable_flags) = self.ensure_table_exists(&schema).await?;
+            prepared.push((clickhouse_table_name, nullable_flags, rows));
         }
 
         let mut join_set: JoinSet<EtlResult<()>> = JoinSet::new();
-        for (ch_table_name, nullable_flags, rows) in prepared {
+        for (clickhouse_table_name, nullable_flags, rows) in prepared {
             let client = self.client.clone();
             let max_bytes = self.inserter_config.max_bytes_per_insert;
 
@@ -690,7 +701,13 @@ where
                     .collect();
 
                 client
-                    .insert_rows(&ch_table_name, rows, &nullable_flags, max_bytes, "streaming")
+                    .insert_rows(
+                        &clickhouse_table_name,
+                        rows,
+                        &nullable_flags,
+                        max_bytes,
+                        "streaming",
+                    )
                     .await
             });
         }

@@ -9,7 +9,7 @@ use url::Url;
 
 use crate::clickhouse::{
     encoding::{ClickHouseValue, encode_to_row_binary},
-    metrics::{ETL_CH_DDL_DURATION_SECONDS, ETL_CH_INSERT_DURATION_SECONDS},
+    metrics::{ETL_CLICKHOUSE_DDL_DURATION_SECONDS, ETL_CLICKHOUSE_INSERT_DURATION_SECONDS},
     schema::{clickhouse_column_type, quote_identifier},
 };
 
@@ -74,8 +74,8 @@ fn build_insert_rows_sql(table_name: &str) -> String {
 }
 
 /// Kind of DDL being executed; surfaces as a `kind` label on the
-/// `etl_ch_ddl_duration_seconds` histogram so per-operation latencies can be
-/// distinguished (one-shot CREATE vs. online ALTER, etc.).
+/// `etl_clickhouse_ddl_duration_seconds` histogram so per-operation latencies
+/// can be distinguished (one-shot CREATE vs. online ALTER, etc.).
 #[derive(Copy, Clone)]
 pub(crate) enum DdlKind {
     CreateTable,
@@ -141,8 +141,8 @@ impl ClickHouseClient {
     }
 
     /// Executes a DDL statement (e.g. `CREATE TABLE IF NOT EXISTS …`) and
-    /// records its duration in the `etl_ch_ddl_duration_seconds` histogram
-    /// labelled with the DDL `kind` and `table_name`.
+    /// records its duration in the `etl_clickhouse_ddl_duration_seconds`
+    /// histogram labelled with the DDL `kind` and `table_name`.
     pub(crate) async fn execute_ddl(
         &self,
         kind: DdlKind,
@@ -158,7 +158,7 @@ impl ClickHouseClient {
             )
         });
         metrics::histogram!(
-            ETL_CH_DDL_DURATION_SECONDS,
+            ETL_CLICKHOUSE_DDL_DURATION_SECONDS,
             "kind" => kind.as_label(),
             "table" => table_name.to_string(),
         )
@@ -251,8 +251,8 @@ impl ClickHouseClient {
     /// initial copies.
     ///
     /// The `source` label (`"copy"` or `"streaming"`) is attached to the
-    /// `etl_ch_insert_duration_seconds` histogram recorded after each committed
-    /// INSERT statement.
+    /// `etl_clickhouse_insert_duration_seconds` histogram recorded after each
+    /// committed INSERT statement.
     pub(crate) async fn insert_rows(
         &self,
         table_name: &str,
@@ -289,7 +289,7 @@ impl ClickHouseClient {
                 )
             })?;
             metrics::histogram!(
-                ETL_CH_INSERT_DURATION_SECONDS,
+                ETL_CLICKHOUSE_INSERT_DURATION_SECONDS,
                 "table" => table_name.to_string(),
                 "source" => source
             )

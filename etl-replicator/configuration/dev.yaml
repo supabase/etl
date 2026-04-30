@@ -2,7 +2,7 @@ application:
   host: "[::]"
   port: 8080
 destination:
-  click_house:
+  clickhouse:
     url: http://clickhouse.etl-data-plane.svc.cluster.local:8123
     user: default
     password: password

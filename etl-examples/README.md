@@ -116,9 +116,9 @@ cargo run -p etl-examples --bin clickhouse -- \
         --db-name postgres \
         --db-username postgres \
         --db-password password \
-        --ch-url http://localhost:8123 \
-        --ch-user default \
-        --ch-database default \
+        --clickhouse-url http://localhost:8123 \
+        --clickhouse-user default \
+        --clickhouse-database default \
         --publication my_pub
 ```
 
@@ -132,7 +132,7 @@ Table names are derived from the Postgres schema and table name using double-und
 escaping (e.g. `public.orders` → `public_orders`, `my_schema.t` → `my__schema_t`).
 
 For HTTPS connections, provide an `https://` URL — TLS is handled automatically using
-webpki root certificates. Use `--ch-password` if your ClickHouse instance requires
+webpki root certificates. Use `--clickhouse-password` if your ClickHouse instance requires
 authentication.
 
 ### Example configuration

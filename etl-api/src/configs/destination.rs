@@ -44,6 +44,7 @@ pub enum FullApiDestinationConfig {
         #[serde(skip_serializing_if = "Option::is_none")]
         connection_pool_size: Option<usize>,
     },
+    #[serde(rename = "clickhouse")]
     ClickHouse {
         /// ClickHouse HTTP(S) endpoint URL.
         #[schema(value_type = String, example = "http://test:8123")]
@@ -1124,7 +1125,7 @@ mod tests {
     fn full_api_destination_config_deserializes_clickhouse_url() {
         let json = r#"
         {
-            "click_house": {
+            "clickhouse": {
                 "url": "  https://example.com:8443  ",
                 "user": "etl",
                 "database": "analytics"
@@ -1148,7 +1149,7 @@ mod tests {
     fn full_api_destination_config_rejects_non_http_clickhouse_url() {
         let json = r#"
         {
-            "click_house": {
+            "clickhouse": {
                 "url": "ftp://example.com/data",
                 "user": "etl",
                 "database": "analytics"

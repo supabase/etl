@@ -109,12 +109,12 @@ const TS_2024_01_15_12_00_US: i64 = 1_705_320_000_000_000;
 /// Waits until ClickHouse returns at least `expected_rows` from
 /// `UPDATE_FLOW_SELECT`.
 async fn wait_for_update_flow_rows(
-    ch_db: &ClickHouseTestDatabase,
+    clickhouse_db: &ClickHouseTestDatabase,
     expected_rows: usize,
 ) -> Vec<UpdateFlowRow> {
     let mut rows: Vec<UpdateFlowRow> = Vec::with_capacity(expected_rows);
     for _ in 0..50 {
-        rows = ch_db.query(UPDATE_FLOW_SELECT).await;
+        rows = clickhouse_db.query(UPDATE_FLOW_SELECT).await;
         if rows.len() >= expected_rows {
             return rows;
         }
@@ -131,12 +131,12 @@ async fn wait_for_update_flow_rows(
 /// Waits until ClickHouse returns at least `expected_rows` from
 /// `DELETE_FLOW_SELECT`.
 async fn wait_for_delete_flow_rows(
-    ch_db: &ClickHouseTestDatabase,
+    clickhouse_db: &ClickHouseTestDatabase,
     expected_rows: usize,
 ) -> Vec<UpdateFlowRow> {
     let mut rows: Vec<UpdateFlowRow> = Vec::with_capacity(expected_rows);
     for _ in 0..50 {
-        rows = ch_db.query(DELETE_FLOW_SELECT).await;
+        rows = clickhouse_db.query(DELETE_FLOW_SELECT).await;
         if rows.len() >= expected_rows {
             return rows;
         }
@@ -153,12 +153,12 @@ async fn wait_for_delete_flow_rows(
 /// Waits until ClickHouse returns at least `expected_rows` from
 /// `RESTART_FLOW_SELECT`.
 async fn wait_for_restart_flow_rows(
-    ch_db: &ClickHouseTestDatabase,
+    clickhouse_db: &ClickHouseTestDatabase,
     expected_rows: usize,
 ) -> Vec<UpdateFlowRow> {
     let mut rows: Vec<UpdateFlowRow> = Vec::with_capacity(expected_rows);
     for _ in 0..50 {
-        rows = ch_db.query(RESTART_FLOW_SELECT).await;
+        rows = clickhouse_db.query(RESTART_FLOW_SELECT).await;
         if rows.len() >= expected_rows {
             return rows;
         }
@@ -174,9 +174,9 @@ async fn wait_for_restart_flow_rows(
 
 /// Waits until ClickHouse returns exactly zero rows from
 /// `TRUNCATE_FLOW_SELECT`.
-async fn wait_for_truncate_flow_empty(ch_db: &ClickHouseTestDatabase) {
+async fn wait_for_truncate_flow_empty(clickhouse_db: &ClickHouseTestDatabase) {
     for _ in 0..50 {
-        let rows: Vec<UpdateFlowRow> = ch_db.query(TRUNCATE_FLOW_SELECT).await;
+        let rows: Vec<UpdateFlowRow> = clickhouse_db.query(TRUNCATE_FLOW_SELECT).await;
         if rows.is_empty() {
             return;
         }
@@ -189,12 +189,12 @@ async fn wait_for_truncate_flow_empty(ch_db: &ClickHouseTestDatabase) {
 /// Waits until ClickHouse returns at least `expected_rows` from
 /// `TRUNCATE_FLOW_SELECT`.
 async fn wait_for_truncate_flow_rows(
-    ch_db: &ClickHouseTestDatabase,
+    clickhouse_db: &ClickHouseTestDatabase,
     expected_rows: usize,
 ) -> Vec<UpdateFlowRow> {
     let mut rows: Vec<UpdateFlowRow> = Vec::with_capacity(expected_rows);
     for _ in 0..50 {
-        rows = ch_db.query(TRUNCATE_FLOW_SELECT).await;
+        rows = clickhouse_db.query(TRUNCATE_FLOW_SELECT).await;
         if rows.len() >= expected_rows {
             return rows;
         }
@@ -356,10 +356,10 @@ async fn all_types_table_copy() {
         .expect("Failed to insert row 2");
 
     // --- WHEN: pipeline copies data to ClickHouse ---
-    let ch_db = setup_clickhouse_database().await;
+    let clickhouse_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let destination = ch_db.build_destination(store.clone());
+    let destination = clickhouse_db.build_destination(store.clone());
 
     let table_ready =
         store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
@@ -377,7 +377,7 @@ async fn all_types_table_copy() {
     pipeline.shutdown_and_wait().await.unwrap();
 
     // --- THEN: every column round-trips correctly ---
-    let rows: Vec<AllTypesRow> = ch_db.query(ALL_TYPES_SELECT).await;
+    let rows: Vec<AllTypesRow> = clickhouse_db.query(ALL_TYPES_SELECT).await;
 
     assert_eq!(rows.len(), 2, "expected 2 rows in ClickHouse");
 
@@ -486,10 +486,10 @@ async fn updates_are_streamed_to_clickhouse() {
         .expect("Failed to insert initial update_flow row");
 
     // --- WHEN: pipeline copies data, then an UPDATE is streamed ---
-    let ch_db = setup_clickhouse_database().await;
+    let clickhouse_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let destination = ch_db.build_destination(store.clone());
+    let destination = clickhouse_db.build_destination(store.clone());
 
     let table_ready =
         store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
@@ -513,7 +513,7 @@ async fn updates_are_streamed_to_clickhouse() {
         .await
         .expect("Failed to update update_flow row");
 
-    let rows = wait_for_update_flow_rows(&ch_db, 2).await;
+    let rows = wait_for_update_flow_rows(&clickhouse_db, 2).await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -641,10 +641,10 @@ async fn boundary_values_table_copy() {
         .expect("Failed to insert row 4 (multi-byte UTF-8)");
 
     // --- WHEN: pipeline copies data to ClickHouse ---
-    let ch_db = setup_clickhouse_database().await;
+    let clickhouse_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let destination = ch_db.build_destination(store.clone());
+    let destination = clickhouse_db.build_destination(store.clone());
 
     let table_ready =
         store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
@@ -662,7 +662,7 @@ async fn boundary_values_table_copy() {
     pipeline.shutdown_and_wait().await.unwrap();
 
     // --- THEN: ClickHouse data matches Postgres exactly ---
-    let rows: Vec<BoundaryValuesRow> = ch_db.query(BOUNDARY_VALUES_SELECT).await;
+    let rows: Vec<BoundaryValuesRow> = clickhouse_db.query(BOUNDARY_VALUES_SELECT).await;
     assert_eq!(rows.len(), 4, "expected 4 rows in ClickHouse");
 
     // Row 1: NULL scalars stay NULL, empty arrays stay empty.
@@ -775,10 +775,10 @@ async fn deletes_are_streamed_to_clickhouse() {
 
     // --- WHEN: pipeline copies data, then a DELETE is streamed ---
 
-    let ch_db = setup_clickhouse_database().await;
+    let clickhouse_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let destination = ch_db.build_destination(store.clone());
+    let destination = clickhouse_db.build_destination(store.clone());
 
     let table_ready =
         store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
@@ -799,7 +799,7 @@ async fn deletes_are_streamed_to_clickhouse() {
         .await
         .expect("Failed to delete delete_flow row");
 
-    let rows = wait_for_delete_flow_rows(&ch_db, 3).await;
+    let rows = wait_for_delete_flow_rows(&clickhouse_db, 3).await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -878,10 +878,10 @@ async fn pipeline_restart_resumes_streaming() {
         .await
         .expect("Failed to insert initial restart_flow row");
 
-    let ch_db = setup_clickhouse_database().await;
+    let clickhouse_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let destination = ch_db.build_destination(store.clone());
+    let destination = clickhouse_db.build_destination(store.clone());
 
     let table_ready =
         store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
@@ -899,13 +899,13 @@ async fn pipeline_restart_resumes_streaming() {
     pipeline.shutdown_and_wait().await.unwrap();
 
     // Verify first run produced exactly one row.
-    let rows: Vec<UpdateFlowRow> = ch_db.query(RESTART_FLOW_SELECT).await;
+    let rows: Vec<UpdateFlowRow> = clickhouse_db.query(RESTART_FLOW_SELECT).await;
     assert_eq!(rows.len(), 1, "first run should copy exactly one row");
     assert_eq!(rows[0].id, 1);
     assert_eq!(rows[0].value, "before_restart");
 
     // --- WHEN: rebuild destination and pipeline, then stream a new insert ---
-    let destination = ch_db.build_destination(store.clone());
+    let destination = clickhouse_db.build_destination(store.clone());
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -925,7 +925,7 @@ async fn pipeline_restart_resumes_streaming() {
         .await
         .expect("Failed to insert post-restart row");
 
-    let rows = wait_for_restart_flow_rows(&ch_db, 2).await;
+    let rows = wait_for_restart_flow_rows(&clickhouse_db, 2).await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -997,10 +997,10 @@ async fn truncate_clears_table_and_accepts_new_inserts() {
         .await
         .expect("Failed to insert truncate_flow rows");
 
-    let ch_db = setup_clickhouse_database().await;
+    let clickhouse_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let destination = ch_db.build_destination(store.clone());
+    let destination = clickhouse_db.build_destination(store.clone());
 
     let table_ready =
         store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
@@ -1017,7 +1017,7 @@ async fn truncate_clears_table_and_accepts_new_inserts() {
     table_ready.notified().await;
 
     // Verify both rows arrived from table copy.
-    let rows: Vec<UpdateFlowRow> = ch_db.query(TRUNCATE_FLOW_SELECT).await;
+    let rows: Vec<UpdateFlowRow> = clickhouse_db.query(TRUNCATE_FLOW_SELECT).await;
     assert_eq!(rows.len(), 2, "table copy should produce two rows");
 
     // --- WHEN: truncate, then insert a new row ---
@@ -1026,7 +1026,7 @@ async fn truncate_clears_table_and_accepts_new_inserts() {
         .await
         .expect("Failed to truncate table in Postgres");
 
-    wait_for_truncate_flow_empty(&ch_db).await;
+    wait_for_truncate_flow_empty(&clickhouse_db).await;
 
     database
         .run_sql(&format!(
@@ -1036,7 +1036,7 @@ async fn truncate_clears_table_and_accepts_new_inserts() {
         .await
         .expect("Failed to insert post-truncate row");
 
-    let rows = wait_for_truncate_flow_rows(&ch_db, 1).await;
+    let rows = wait_for_truncate_flow_rows(&clickhouse_db, 1).await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -1104,10 +1104,10 @@ async fn intermediate_flush_preserves_all_rows() {
         .await
         .expect("Failed to insert flush_split rows");
 
-    let ch_db = setup_clickhouse_database().await;
+    let clickhouse_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let destination = ch_db.build_destination_with_config(
+    let destination = clickhouse_db.build_destination_with_config(
         store.clone(),
         ClickHouseInserterConfig {
             // 1 byte -- forces a new INSERT after every row.
@@ -1132,7 +1132,7 @@ async fn intermediate_flush_preserves_all_rows() {
     pipeline.shutdown_and_wait().await.unwrap();
 
     // --- THEN: all rows arrive despite being split across many INSERTs ---
-    let rows: Vec<UpdateFlowRow> = ch_db.query(FLUSH_SPLIT_SELECT).await;
+    let rows: Vec<UpdateFlowRow> = clickhouse_db.query(FLUSH_SPLIT_SELECT).await;
     assert_eq!(rows.len(), row_count, "all rows must survive intermediate flush splits");
 
     for (i, r) in rows.iter().enumerate() {
@@ -1207,10 +1207,10 @@ async fn multiple_tables_receive_independent_writes() {
         .await
         .expect("Failed to insert into multi_b");
 
-    let ch_db = setup_clickhouse_database().await;
+    let clickhouse_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let destination = ch_db.build_destination(store.clone());
+    let destination = clickhouse_db.build_destination(store.clone());
 
     let table_a_ready =
         store.notify_on_table_state_type(table_a_id, TableReplicationPhaseType::Ready).await;
@@ -1260,8 +1260,8 @@ async fn multiple_tables_receive_independent_writes() {
     let mut rows_a: Vec<UpdateFlowRow> = Vec::with_capacity(2);
     let mut rows_b: Vec<UpdateFlowRow> = Vec::with_capacity(2);
     for _ in 0..50 {
-        rows_a = ch_db.query(select_a).await;
-        rows_b = ch_db.query(select_b).await;
+        rows_a = clickhouse_db.query(select_a).await;
+        rows_b = clickhouse_db.query(select_b).await;
         if rows_a.len() >= 2 && rows_b.len() >= 2 {
             break;
         }
@@ -1358,10 +1358,10 @@ async fn sequential_transactions_preserve_commit_order() {
         .await
         .expect("Failed to insert initial tx_order row");
 
-    let ch_db = setup_clickhouse_database().await;
+    let clickhouse_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let destination = ch_db.build_destination(store.clone());
+    let destination = clickhouse_db.build_destination(store.clone());
 
     let table_ready =
         store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
@@ -1399,7 +1399,7 @@ async fn sequential_transactions_preserve_commit_order() {
     // Poll until all three rows arrive.
     let mut rows: Vec<UpdateFlowRow> = Vec::with_capacity(3);
     for _ in 0..50 {
-        rows = ch_db.query(TX_ORDER_SELECT).await;
+        rows = clickhouse_db.query(TX_ORDER_SELECT).await;
         if rows.len() >= 3 {
             break;
         }
@@ -1567,10 +1567,10 @@ async fn delete_with_default_replica_identity() {
         .await
         .expect("Failed to insert rows");
 
-    let ch_db = setup_clickhouse_database().await;
+    let clickhouse_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let destination = ch_db.build_destination(store.clone());
+    let destination = clickhouse_db.build_destination(store.clone());
 
     let table_ready =
         store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
@@ -1615,7 +1615,7 @@ async fn delete_with_default_replica_identity() {
     // Poll for 4 rows: 2 copied INSERTs + DELETE tombstone + new INSERT.
     let mut rows: Vec<DefaultIdentityDeleteRow> = Vec::new();
     for _ in 0..50 {
-        rows = ch_db.query(DEFAULT_IDENTITY_DELETE_SELECT).await;
+        rows = clickhouse_db.query(DEFAULT_IDENTITY_DELETE_SELECT).await;
         if rows.len() >= 4 {
             break;
         }
@@ -1743,10 +1743,10 @@ async fn exclusive_large_batch_table_copy() {
             .expect("Failed to insert large_batch rows");
     }
 
-    let ch_db = setup_clickhouse_database().await;
+    let clickhouse_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let destination = ch_db.build_destination(store.clone());
+    let destination = clickhouse_db.build_destination(store.clone());
 
     let table_ready =
         store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
@@ -1765,7 +1765,7 @@ async fn exclusive_large_batch_table_copy() {
     pipeline.shutdown_and_wait().await.unwrap();
 
     // --- THEN: all rows arrive, spot-check a sample ---
-    let rows: Vec<UpdateFlowRow> = ch_db.query(LARGE_BATCH_SELECT).await;
+    let rows: Vec<UpdateFlowRow> = clickhouse_db.query(LARGE_BATCH_SELECT).await;
     assert_eq!(rows.len(), row_count, "all 1024 rows must arrive");
 
     // Spot-check: first, last, powers of two, and a few interior points.
@@ -1854,7 +1854,7 @@ async fn schema_change_add_column() {
     init_test_tracing();
     install_crypto_provider();
 
-    let ch_table_name = "test_schema__add__col";
+    let clickhouse_table_name = "test_schema__add__col";
 
     // --- GIVEN: table with one row, copied to ClickHouse ---
     let database = spawn_source_database().await;
@@ -1883,10 +1883,10 @@ async fn schema_change_add_column() {
         .await
         .expect("Failed to insert Alice");
 
-    let ch_db = setup_clickhouse_database().await;
+    let clickhouse_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let destination = ch_db.build_destination(store.clone());
+    let destination = clickhouse_db.build_destination(store.clone());
 
     let table_ready =
         store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
@@ -1903,7 +1903,7 @@ async fn schema_change_add_column() {
     table_ready.notified().await;
 
     // Verify initial state.
-    let initial_columns = ch_db.column_names(ch_table_name).await;
+    let initial_columns = clickhouse_db.column_names(clickhouse_table_name).await;
     assert_eq!(initial_columns, vec!["id", "name", "age"]);
 
     let initial_metadata = store
@@ -1947,7 +1947,7 @@ async fn schema_change_add_column() {
     for _ in 0..50 {
         // The SELECT will fail if the email column doesn't exist yet, so
         // catch errors and retry.
-        if let Ok(r) = ch_db.db_client().query(select).fetch_all::<AddColumnRow>().await
+        if let Ok(r) = clickhouse_db.db_client().query(select).fetch_all::<AddColumnRow>().await
             && r.len() >= 2
         {
             rows = r;
@@ -1964,10 +1964,10 @@ async fn schema_change_add_column() {
     pipeline.shutdown_and_wait().await.unwrap();
 
     // --- THEN: ClickHouse has the new columns, both rows present ---
-    let final_columns = ch_db.column_names(ch_table_name).await;
+    let final_columns = clickhouse_db.column_names(clickhouse_table_name).await;
     assert_eq!(final_columns, vec!["id", "name", "age", "email", "score"]);
 
-    let final_column_types = ch_db.column_types(ch_table_name).await;
+    let final_column_types = clickhouse_db.column_types(clickhouse_table_name).await;
     assert_eq!(
         final_column_types,
         vec![
@@ -2053,7 +2053,7 @@ async fn schema_change_add_drop_rename() {
     init_test_tracing();
     install_crypto_provider();
 
-    let ch_table_name = "test_schema__multi";
+    let clickhouse_table_name = "test_schema__multi";
 
     // --- GIVEN: table with one row, copied to ClickHouse ---
     let database = spawn_source_database().await;
@@ -2082,10 +2082,10 @@ async fn schema_change_add_drop_rename() {
         .await
         .expect("Failed to insert Alice");
 
-    let ch_db = setup_clickhouse_database().await;
+    let clickhouse_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let destination = ch_db.build_destination(store.clone());
+    let destination = clickhouse_db.build_destination(store.clone());
 
     let table_ready =
         store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
@@ -2102,7 +2102,7 @@ async fn schema_change_add_drop_rename() {
     table_ready.notified().await;
 
     // Verify initial schema.
-    let initial_columns = ch_db.column_names(ch_table_name).await;
+    let initial_columns = clickhouse_db.column_names(clickhouse_table_name).await;
     assert_eq!(initial_columns, vec!["id", "name", "age", "status"]);
 
     let initial_metadata = store
@@ -2151,7 +2151,8 @@ async fn schema_change_add_drop_rename() {
     );
     let mut rows: Vec<CombinedSchemaChangeRow> = Vec::new();
     for _ in 0..50 {
-        if let Ok(r) = ch_db.db_client().query(select).fetch_all::<CombinedSchemaChangeRow>().await
+        if let Ok(r) =
+            clickhouse_db.db_client().query(select).fetch_all::<CombinedSchemaChangeRow>().await
             && r.len() >= 2
         {
             rows = r;
@@ -2168,7 +2169,7 @@ async fn schema_change_add_drop_rename() {
     pipeline.shutdown_and_wait().await.unwrap();
 
     // --- THEN: ClickHouse schema reflects all changes ---
-    let final_columns = ch_db.column_names(ch_table_name).await;
+    let final_columns = clickhouse_db.column_names(clickhouse_table_name).await;
     assert_eq!(final_columns, vec!["id", "full_name", "status", "email"]);
 
     assert_eq!(rows.len(), 2, "expected Alice + Bob");

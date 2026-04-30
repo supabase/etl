@@ -48,6 +48,7 @@ pub enum DestinationConfig {
         #[serde(default = "default_connection_pool_size")]
         connection_pool_size: usize,
     },
+    #[serde(rename = "clickhouse")]
     ClickHouse {
         /// ClickHouse HTTP(S) endpoint URL.
         url: Url,
@@ -243,6 +244,7 @@ pub enum DestinationConfigWithoutSecrets {
         #[serde(default = "default_connection_pool_size")]
         connection_pool_size: usize,
     },
+    #[serde(rename = "clickhouse")]
     ClickHouse {
         /// ClickHouse HTTP(S) endpoint URL.
         url: Url,
