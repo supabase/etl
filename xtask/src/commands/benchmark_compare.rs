@@ -20,29 +20,75 @@ const GITHUB_ACCEPT: &str = "application/vnd.github+json";
 const GITHUB_USER_AGENT: &str = "supabase-etl-benchmark-compare";
 
 const TABLE_COPY_METRICS: &[Metric] = &[
-    Metric { key: "copied_rows", label: "Rows copied" },
-    Metric { key: "estimated_copied_mib", label: "Estimated MiB" },
-    Metric { key: "rows_per_second", label: "Rows/s" },
-    Metric { key: "estimated_mib_per_second", label: "Estimated MiB/s" },
-    Metric { key: "copy_wait_ms", label: "Copy wait ms" },
-    Metric { key: "total_ms", label: "Total ms" },
+    Metric { key: "copied_rows", label: "Rows copied", policy: RegressionPolicy::Exact },
+    Metric {
+        key: "estimated_copied_mib",
+        label: "Estimated MiB",
+        policy: RegressionPolicy::Informational,
+    },
+    Metric {
+        key: "rows_per_second",
+        label: "Rows/s",
+        policy: RegressionPolicy::HigherIsBetter { max_drop_pct: 15.0 },
+    },
+    Metric {
+        key: "estimated_mib_per_second",
+        label: "Estimated MiB/s",
+        policy: RegressionPolicy::HigherIsBetter { max_drop_pct: 15.0 },
+    },
+    Metric {
+        key: "copy_wait_ms",
+        label: "Copy wait ms",
+        policy: RegressionPolicy::LowerIsBetter { max_increase_pct: 20.0 },
+    },
+    Metric {
+        key: "total_ms",
+        label: "Total ms",
+        policy: RegressionPolicy::LowerIsBetter { max_increase_pct: 20.0 },
+    },
 ];
 const TABLE_STREAMING_METRICS: &[Metric] = &[
-    Metric { key: "produced_events", label: "Produced events" },
-    Metric { key: "observed_cdc_events", label: "Observed CDC events" },
-    Metric { key: "producer_events_per_second", label: "Producer events/s" },
-    Metric { key: "end_to_end_events_per_second", label: "Dispatch events/s" },
+    Metric { key: "produced_events", label: "Produced events", policy: RegressionPolicy::Exact },
+    Metric {
+        key: "observed_cdc_events",
+        label: "Observed CDC events",
+        policy: RegressionPolicy::Exact,
+    },
+    Metric {
+        key: "producer_events_per_second",
+        label: "Producer events/s",
+        policy: RegressionPolicy::HigherIsBetter { max_drop_pct: 30.0 },
+    },
+    Metric {
+        key: "end_to_end_events_per_second",
+        label: "Dispatch events/s",
+        policy: RegressionPolicy::HigherIsBetter { max_drop_pct: 15.0 },
+    },
     Metric {
         key: "end_to_end_with_shutdown_events_per_second",
         label: "Destination-drained events/s",
+        policy: RegressionPolicy::HigherIsBetter { max_drop_pct: 15.0 },
     },
-    Metric { key: "end_to_end_estimated_mib_per_second", label: "Dispatch MiB/s" },
+    Metric {
+        key: "end_to_end_estimated_mib_per_second",
+        label: "Dispatch MiB/s",
+        policy: RegressionPolicy::HigherIsBetter { max_drop_pct: 15.0 },
+    },
     Metric {
         key: "end_to_end_with_shutdown_estimated_mib_per_second",
         label: "Destination-drained MiB/s",
+        policy: RegressionPolicy::HigherIsBetter { max_drop_pct: 15.0 },
     },
-    Metric { key: "drain_events_per_second", label: "Catch-up drain events/s" },
-    Metric { key: "total_ms", label: "Total ms" },
+    Metric {
+        key: "drain_events_per_second",
+        label: "Catch-up drain events/s",
+        policy: RegressionPolicy::HigherIsBetter { max_drop_pct: 25.0 },
+    },
+    Metric {
+        key: "total_ms",
+        label: "Total ms",
+        policy: RegressionPolicy::LowerIsBetter { max_increase_pct: 20.0 },
+    },
 ];
 const CONFIG_KEYS: &[&str] = &[
     "destination",
@@ -86,6 +132,15 @@ pub(crate) struct BenchmarkCompareArgs {
 struct Metric {
     key: &'static str,
     label: &'static str,
+    policy: RegressionPolicy,
+}
+
+#[derive(Clone, Copy)]
+enum RegressionPolicy {
+    Exact,
+    HigherIsBetter { max_drop_pct: f64 },
+    LowerIsBetter { max_increase_pct: f64 },
+    Informational,
 }
 
 #[derive(Deserialize)]
@@ -118,6 +173,11 @@ struct PreviousSource {
     run: Option<WorkflowRun>,
 }
 
+struct Comparison {
+    markdown: String,
+    failures: Vec<String>,
+}
+
 struct GitHubContext {
     token: String,
     repo: String,
@@ -142,11 +202,11 @@ impl BenchmarkCompareArgs {
         })?;
         let output =
             self.output.clone().unwrap_or_else(|| self.current_dir.join("benchmark-comparison.md"));
-        let markdown = match self.previous_source().await? {
+        let comparison = match self.previous_source().await? {
             Some(previous) => {
-                render_comparison(&previous.reports, &current_reports, previous.run.as_ref())
+                compare_reports(&previous.reports, &current_reports, previous.run.as_ref())
             }
-            None => render_missing_previous(&self),
+            None => Comparison { markdown: render_missing_previous(&self), failures: Vec::new() },
         };
 
         if let Some(parent) = output.parent()
@@ -155,9 +215,17 @@ impl BenchmarkCompareArgs {
             fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
-        fs::write(&output, format!("{markdown}\n"))
+        fs::write(&output, format!("{}\n", comparison.markdown))
             .with_context(|| format!("failed to write {}", output.display()))?;
-        println!("{markdown}");
+        println!("{}", comparison.markdown);
+        if !comparison.failures.is_empty() {
+            bail!(
+                "benchmark comparison failed with {} regression(s): {}",
+                comparison.failures.len(),
+                comparison.failures.join("; ")
+            );
+        }
+
         Ok(())
     }
 
@@ -370,12 +438,13 @@ fn render_missing_previous(args: &BenchmarkCompareArgs) -> String {
     )
 }
 
-fn render_comparison(
+fn compare_reports(
     previous_reports: &Reports,
     current_reports: &Reports,
     previous_run: Option<&WorkflowRun>,
-) -> String {
+) -> Comparison {
     let mut lines = vec!["## Benchmark Comparison".to_owned(), String::new()];
+    let mut failures = Vec::new();
     if let Some(previous_run) = previous_run {
         lines.push(format!(
             "Compared with previous successful run [#{}]({}).",
@@ -393,7 +462,7 @@ fn render_comparison(
         .collect::<Vec<_>>();
     if common_benchmarks.is_empty() {
         lines.push("No benchmark reports had matching names between the two runs.".to_owned());
-        return lines.join("\n");
+        return Comparison { markdown: lines.join("\n"), failures };
     }
 
     for benchmark in common_benchmarks {
@@ -426,6 +495,28 @@ fn render_comparison(
                 format_delta(previous_value, current_value)
             ));
         }
+
+        let benchmark_failures = if changes.is_empty() {
+            regression_failures(&benchmark, previous, current)
+        } else {
+            Vec::new()
+        };
+        lines.push(String::new());
+        if changes.is_empty() {
+            if benchmark_failures.is_empty() {
+                lines.push("Regression gate: passed.".to_owned());
+            } else {
+                lines.push("Regression gate: failed.".to_owned());
+                for failure in &benchmark_failures {
+                    lines.push(format!("- {failure}"));
+                }
+                failures.extend(benchmark_failures);
+            }
+        } else {
+            lines.push(
+                "Regression gate: skipped because benchmark configuration differs.".to_owned(),
+            );
+        }
         lines.push(String::new());
     }
 
@@ -446,7 +537,7 @@ fn render_comparison(
         lines.push(format!("Current-only reports: {}.", current_only.join(", ")));
     }
 
-    lines.join("\n")
+    Comparison { markdown: lines.join("\n"), failures }
 }
 
 fn metrics_for(benchmark: &str) -> &'static [Metric] {
@@ -467,6 +558,74 @@ fn config_changes(previous: &Value, current: &Value) -> Vec<String> {
                 .then(|| format!("`{key}` {} -> {}", format_value(previous), format_value(current)))
         })
         .collect()
+}
+
+fn regression_failures(benchmark: &str, previous: &Value, current: &Value) -> Vec<String> {
+    metrics_for(benchmark)
+        .iter()
+        .filter_map(|metric| {
+            let previous = previous.get(metric.key)?;
+            let current = current.get(metric.key)?;
+            regression_failure(benchmark, metric, previous, current)
+        })
+        .collect()
+}
+
+fn regression_failure(
+    benchmark: &str,
+    metric: &Metric,
+    previous: &Value,
+    current: &Value,
+) -> Option<String> {
+    match metric.policy {
+        RegressionPolicy::Exact => (previous != current).then(|| {
+            format!(
+                "{benchmark} {} changed from {} to {}",
+                metric.label,
+                format_value(previous),
+                format_value(current)
+            )
+        }),
+        RegressionPolicy::HigherIsBetter { max_drop_pct } => {
+            let previous = numeric_value(previous)?;
+            let current = numeric_value(current)?;
+            if previous <= 0.0 {
+                return None;
+            }
+
+            let drop_pct = ((previous - current) / previous) * 100.0;
+            (drop_pct > max_drop_pct).then(|| {
+                format!(
+                    "{benchmark} {} dropped by {:.2}% from {} to {} (allowed {:.2}%)",
+                    metric.label,
+                    drop_pct,
+                    format_number(previous),
+                    format_number(current),
+                    max_drop_pct
+                )
+            })
+        }
+        RegressionPolicy::LowerIsBetter { max_increase_pct } => {
+            let previous = numeric_value(previous)?;
+            let current = numeric_value(current)?;
+            if previous <= 0.0 {
+                return None;
+            }
+
+            let increase_pct = ((current - previous) / previous) * 100.0;
+            (increase_pct > max_increase_pct).then(|| {
+                format!(
+                    "{benchmark} {} increased by {:.2}% from {} to {} (allowed {:.2}%)",
+                    metric.label,
+                    increase_pct,
+                    format_number(previous),
+                    format_number(current),
+                    max_increase_pct
+                )
+            })
+        }
+        RegressionPolicy::Informational => None,
+    }
 }
 
 fn format_delta(previous: &Value, current: &Value) -> String {

@@ -245,6 +245,13 @@ The workflow starts only source Postgres, installs pinned `go-tpc`, runs
 successful `benchmark-results` artifact on the same ref, and uploads
 `target/bench-results/*.json` plus `target/bench-results/*.md`.
 
+If no previous successful run exists, the comparison writes a "no previous
+benchmark artifact" summary and passes. If a comparable previous run exists, the
+comparison fails the workflow when exact count metrics change or when throughput
+and timing metrics regress beyond their per-metric thresholds. If benchmark
+configuration differs, the comparison still prints the diff table but skips the
+regression gate for that benchmark.
+
 The comparison is also available locally when you have two result directories:
 
 ```bash

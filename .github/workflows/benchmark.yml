@@ -206,15 +206,18 @@ jobs:
           cargo xtask "${args[@]}"
 
       - name: Compare benchmark results
-        continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          set +e
           cargo xtask benchmark-compare \
             --current-dir target/bench-results \
             --output target/bench-results/benchmark-comparison.md
+          status=$?
+          set -e
           cat target/bench-results/benchmark-comparison.md >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
 
       - name: Upload benchmark results
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
