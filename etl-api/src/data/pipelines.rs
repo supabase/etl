@@ -228,6 +228,16 @@ pub async fn delete_pipeline_api_and_source_state(
     tenant_id: &str,
     pipeline: &PipelineDeletion,
 ) -> Result<(), PipelinesDbError> {
+    delete_pipeline_api_state(api_connection, tenant_id, pipeline).await?;
+
+    delete_pipeline_source_state(source_connection, pipeline.id).await
+}
+
+pub async fn delete_pipeline_api_state(
+    api_connection: &mut PgConnection,
+    tenant_id: &str,
+    pipeline: &PipelineDeletion,
+) -> Result<(), PipelinesDbError> {
     // Delete the pipeline from the main database (this does NOT cascade delete the
     // replicator due to missing constraint).
     delete_pipeline(&mut *api_connection, tenant_id, pipeline.id).await?;
@@ -236,7 +246,7 @@ pub async fn delete_pipeline_api_and_source_state(
     data::replicators::delete_replicator(&mut *api_connection, tenant_id, pipeline.replicator_id)
         .await?;
 
-    delete_pipeline_source_state(source_connection, pipeline.id).await
+    Ok(())
 }
 
 pub async fn delete_pipeline_source_state(

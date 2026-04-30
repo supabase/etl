@@ -680,6 +680,21 @@ async fn deleting_a_pipeline_succeeds() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn deleting_a_pipeline_succeeds_when_source_database_is_unreachable() {
+    init_test_tracing();
+    let (app, tenant_id, pipeline_id, _source_db_pool, source_db_config) =
+        setup_pipeline_with_source_db().await;
+    app.k8s_state.set_pod_status(PodStatus::Stopped).await;
+    drop_pg_database(&source_db_config).await;
+
+    let response = app.delete_pipeline(&tenant_id, pipeline_id).await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = app.read_pipeline(&tenant_id, pipeline_id).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn deleting_an_active_pipeline_fails() {
     init_test_tracing();
     let (app, tenant_id, pipeline_id, _, source_db_config) = setup_pipeline_with_source_db().await;
