@@ -10,7 +10,7 @@ pub(crate) const CDC_LSN_COLUMN_NAME: &str = "cdc_lsn";
 /// The returned string does not include `Nullable(...)` wrapping — callers are
 /// responsible for applying that when the column is nullable. Arrays always use
 /// `Array(Nullable(T))` since Postgres array elements are nullable.
-pub fn postgres_column_type_to_clickhouse_sql(typ: &Type) -> &'static str {
+fn postgres_column_type_to_clickhouse_sql(typ: &Type) -> &'static str {
     match typ {
         &Type::BOOL => "Boolean",
         &Type::CHAR | &Type::BPCHAR | &Type::VARCHAR | &Type::NAME | &Type::TEXT => "String",
@@ -69,7 +69,7 @@ pub(crate) fn quote_identifier(identifier: &str) -> String {
 ///
 /// When `force_nullable` is true (ALTER TABLE ADD), all scalar columns become
 /// Nullable since ClickHouse cannot backfill existing rows.
-pub fn clickhouse_column_type(col: &ColumnSchema, force_nullable: bool) -> String {
+pub(super) fn clickhouse_column_type(col: &ColumnSchema, force_nullable: bool) -> String {
     if is_array_type(&col.typ) {
         let elem = postgres_array_element_clickhouse_sql(&col.typ);
         format!("Array(Nullable({elem}))")
@@ -83,7 +83,7 @@ pub fn clickhouse_column_type(col: &ColumnSchema, force_nullable: bool) -> Strin
 ///
 /// Appends `cdc_operation String` and `cdc_lsn UInt64` as trailing non-nullable
 /// columns. Uses `MergeTree()` with `ORDER BY tuple()`.
-pub fn build_create_table_sql(table_name: &str, column_schemas: &[ColumnSchema]) -> String {
+pub(super) fn build_create_table_sql(table_name: &str, column_schemas: &[ColumnSchema]) -> String {
     let mut cols = Vec::with_capacity(column_schemas.len() + 2);
 
     for col in column_schemas {
