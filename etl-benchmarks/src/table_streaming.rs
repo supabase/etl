@@ -350,12 +350,20 @@ fn validate_args(args: &RunArgs) -> Result<()> {
         bail!("--insert-batch-size must be greater than 0");
     }
 
+    if args.insert_batch_size > i64::MAX as u64 {
+        bail!("--insert-batch-size must fit in a bigint source ID range");
+    }
+
     if args.producer_concurrency == 0 {
         bail!("--producer-concurrency must be greater than 0");
     }
 
     if args.duration_seconds.is_none() && args.event_count == 0 {
         bail!("--event-count must be greater than 0 in count mode");
+    }
+
+    if args.duration_seconds.is_none() && args.event_count > i64::MAX as u64 {
+        bail!("--event-count must fit in a bigint source ID range");
     }
 
     if let Some(duration_seconds) = args.duration_seconds

@@ -530,7 +530,7 @@ fn benchmark_pipeline_id_base() -> Result<u64> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .context("system clock is before Unix epoch")?
-        .as_millis()
+        .as_micros()
         .try_into()
         .context("current timestamp does not fit in a pipeline id")
 }

@@ -37,6 +37,9 @@ use tracing::info;
 /// Prefix used for machine-readable benchmark result lines.
 pub const BENCHMARK_RESULT_PREFIX: &str = "BENCHMARK_RESULT ";
 
+/// Default batch fill time for benchmark runs.
+pub const BENCHMARK_DEFAULT_BATCH_MAX_FILL_MS: u64 = 1_000;
+
 /// Ensures crypto provider is only initialized once.
 #[cfg(feature = "bigquery")]
 static INIT_CRYPTO: Once = Once::new();
@@ -100,7 +103,7 @@ pub struct PgConnectionArgs {
 #[derive(Args, Debug, Clone)]
 pub struct PipelineTuningArgs {
     /// Maximum batch fill time in milliseconds.
-    #[arg(long, default_value_t = BatchConfig::DEFAULT_MAX_FILL_MS)]
+    #[arg(long, default_value_t = BENCHMARK_DEFAULT_BATCH_MAX_FILL_MS)]
     pub batch_max_fill_ms: u64,
     /// Ratio of process memory reserved for stream batch bytes.
     #[arg(long, default_value_t = BatchConfig::DEFAULT_MEMORY_BUDGET_RATIO)]
@@ -294,7 +297,9 @@ impl<D> CountingDestination<D> {
     }
 
     fn count_events(stats: &DestinationStats, counts: &EventBatchCounts) {
-        stats.event_batches.fetch_add(1, Ordering::Relaxed);
+        if counts.total_events > 0 {
+            stats.event_batches.fetch_add(1, Ordering::Relaxed);
+        }
         stats.total_events.fetch_add(counts.total_events, Ordering::Relaxed);
         stats.total_event_bytes.fetch_add(counts.total_event_bytes, Ordering::Relaxed);
         stats.cdc_data_events.fetch_add(counts.data_events, Ordering::Release);
@@ -341,7 +346,9 @@ where
 
         self.stats.table_rows.fetch_add(row_count, Ordering::Relaxed);
         self.stats.table_row_bytes.fetch_add(row_bytes, Ordering::Relaxed);
-        self.stats.table_row_batches.fetch_add(1, Ordering::Relaxed);
+        if row_count > 0 {
+            self.stats.table_row_batches.fetch_add(1, Ordering::Relaxed);
+        }
 
         Ok(())
     }

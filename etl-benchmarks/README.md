@@ -2,117 +2,303 @@
 
 Performance benchmarks for ETL replication pipelines.
 
-## Benchmarks
-
-- `table_copy`: measures initial table copy throughput for selected TPC-C tables.
-- `table_streaming`: measures CDC insert streaming throughput against a simple benchmark table.
-
-Both benchmarks print a machine-readable `BENCHMARK_RESULT {...}` JSON line. The preferred entrypoint is the workspace task runner:
+The preferred entrypoint is:
 
 ```bash
 cargo xtask benchmark
 ```
 
-## Local Smoke Run
+`xtask` prepares the source Postgres database, loads TPC-C data when needed,
+creates the publications, runs the benchmark binaries, and writes JSON reports.
+Use the direct benchmark binaries only when developing the benchmark code itself.
 
-Start a local Postgres cluster, prepare a tiny TPC-C dataset, run table copy, then run CDC streaming:
+## What Is Measured
+
+- `table_copy`: initial table-copy throughput for selected TPC-C tables.
+- `table_streaming`: CDC insert streaming throughput for a single benchmark table.
+
+Both benchmarks support:
+
+- `null`: acknowledges and discards writes. Use this to measure source extraction,
+  decoding, batching, and pipeline overhead without destination write cost.
+- `big-query`: writes to BigQuery. Use this for end-to-end destination throughput.
+
+Both benchmarks print a human-readable summary and a machine-readable
+`BENCHMARK_RESULT {...}` JSON line. `xtask` also writes pretty JSON files to the
+output directory.
+
+## Prerequisites
+
+Local runs need:
+
+- Rust from the repository `rust-toolchain.toml`.
+- Docker, for `cargo xtask postgres start`.
+- `go-tpc`, for preparing TPC-C data.
+
+Install the pinned `go-tpc` version used by CI:
 
 ```bash
-cargo xtask postgres start --shards 1 --base-port 5430
+go install github.com/pingcap/go-tpc@v1.0.12
+```
 
+Make sure `$(go env GOPATH)/bin` is on `PATH`.
+
+## Local Source Database
+
+The local benchmark source database defaults to:
+
+- host: `localhost`
+- port: `5430`
+- database: `bench`
+- user: `postgres`
+- password: `postgres`
+
+Start the local source Postgres instance:
+
+```bash
+cargo xtask postgres start --shards 1 --base-port 5430 --source-only
+```
+
+`xtask benchmark` creates the `bench` database if it does not exist. TPC-C data
+is generated into that database by `go-tpc`.
+
+## Quick Smoke Run
+
+Use this while iterating on benchmark code. It prepares one TPC-C warehouse,
+runs table copy, inserts 1,000 CDC rows, waits until ETL observes those rows,
+and writes reports under `target/bench-results-smoke/`.
+
+```bash
 cargo xtask benchmark \
   --warehouses 1 \
   --streaming-events 1000 \
   --streaming-insert-batch-size 100 \
+  --streaming-producer-concurrency 4 \
+  --batch-max-fill-ms 100 \
   --max-table-sync-workers 2 \
-  --max-copy-connections-per-table 1
+  --max-copy-connections-per-table 1 \
+  --output-dir target/bench-results-smoke
 ```
 
-The command writes JSON reports to `target/bench-results/`.
+If the TPC-C tables already exist, preparation is skipped. Add
+`--force-prepare` to drop and regenerate them.
 
-Reports include both human-readable summaries and pretty JSON artifacts. The
-headline values are:
+## Larger Local Run
 
-- rows/events processed and rows/events per second
-- estimated payload bytes, MiB, and MiB per second
-- copy, producer, catch-up drain, destination-drain, and total timings
-- destination batch counts and max event batch size
-- CDC event mix: inserts, updates, deletes, relations, and transaction events
-
-Byte values are estimates based on ETL's decoded in-memory row/event size hints.
-They are useful for comparing benchmark runs in this repo, but they are not raw
-WAL bytes or network bytes.
-
-## Larger Run
+This is closer to the default CI-sized run, but still practical on a strong
+developer machine:
 
 ```bash
 cargo xtask benchmark \
-  --warehouses 100 \
+  --force-prepare \
+  --warehouses 10 \
   --streaming-events 1000000 \
   --streaming-insert-batch-size 5000 \
+  --batch-max-fill-ms 1000 \
   --max-table-sync-workers 8 \
-  --max-copy-connections-per-table 4
+  --max-copy-connections-per-table 4 \
+  --output-dir target/bench-results-local
 ```
 
-`--tpcc-threads` is optional. When omitted, `xtask` derives an aggressive `go-tpc`
-loader concurrency from both warehouse count and available CPU parallelism:
-`max(warehouses * 8, available_cpus * 4)`, clamped to `8..128`. Override it
-explicitly if a benchmark host can sustain more database write concurrency.
+Use `--force-prepare` when changing the warehouse count for an existing local
+benchmark database. Without it, `xtask` reuses the existing TPC-C tables.
 
-## Duration-Based Streaming
+`--tpcc-threads` is optional. When omitted, `xtask` derives the `go-tpc` loader
+concurrency as:
 
-To run the streaming producer for a fixed duration and then wait for ETL to drain all produced events:
+```text
+max(warehouses * 8, available_cpus * 4), clamped to 8..128
+```
+
+Override it only when the benchmark host and Postgres instance can sustain more
+loader concurrency:
+
+```bash
+cargo xtask benchmark --warehouses 20 --tpcc-threads 128
+```
+
+## Copy-Only And Streaming-Only
+
+Run only the table-copy benchmark:
 
 ```bash
 cargo xtask benchmark \
+  --skip-table-streaming \
+  --force-prepare \
   --warehouses 10 \
+  --output-dir target/bench-results-copy
+```
+
+Run only the table-streaming benchmark:
+
+```bash
+cargo xtask benchmark \
+  --skip-table-copy \
+  --skip-prepare \
+  --streaming-events 1000000 \
+  --streaming-insert-batch-size 5000 \
+  --streaming-producer-concurrency 16 \
+  --output-dir target/bench-results-streaming
+```
+
+Use `--streaming-duration-seconds` instead of `--streaming-events` to run the
+producer for a fixed duration and then wait for ETL to drain all produced events:
+
+```bash
+cargo xtask benchmark \
+  --skip-table-copy \
+  --skip-prepare \
   --streaming-duration-seconds 300 \
   --streaming-insert-batch-size 5000
 ```
 
-## BigQuery Destination
+## BigQuery Runs
+
+For BigQuery, provide destination configuration and service account credentials:
 
 ```bash
 cargo xtask benchmark \
   --destination big-query \
   --bq-project-id my-gcp-project \
   --bq-dataset-id my_dataset \
-  --bq-sa-key-file /path/to/service-account-key.json
+  --bq-sa-key-file /path/to/service-account-key.json \
+  --warehouses 10 \
+  --streaming-events 1000000
 ```
 
-## Direct Benchmark Binaries
-
-The `xtask` command prepares data and publications for you. Direct invocation is useful while developing benchmark internals:
-
-```bash
-cargo bench --bench table_copy -- --log-target terminal run \
-  --host localhost --port 5430 --database bench \
-  --username postgres --password postgres \
-  --publication-name bench_pub \
-  --table-ids 1,2,3 \
-  --destination null
-
-cargo bench --bench table_streaming -- --log-target terminal run \
-  --host localhost --port 5430 --database bench \
-  --username postgres --password postgres \
-  --publication-name bench_streaming_pub \
-  --table-name etl_streaming_benchmark \
-  --event-count 1000000 \
-  --destination null
-```
+The `null` destination is useful for measuring how fast ETL can produce data.
+BigQuery runs are the comparable end-to-end destination benchmark.
 
 ## GitHub Actions
 
-The `Benchmark` workflow can be launched with `workflow_dispatch`. It defaults
-to `blacksmith-16vcpu-ubuntu-2404`, 10 TPC-C warehouses, 1,000,000 streaming
-events, 1,000 ms batch fill, 8 table-sync workers, and 4 copy connections per
-table. The runner can be changed at dispatch time to the 8, 16, or 32 vCPU
-Blacksmith Ubuntu 24.04 runner.
+The `Benchmark` workflow is manual and runs through `workflow_dispatch`.
 
-The workflow starts only source Postgres, not the full local development stack,
-then uploads `target/bench-results/*.json` as the `benchmark-results` artifact.
-It exposes inputs for TPC-C warehouses, optional TPC-C prepare threads, streaming
-event count or duration, producer concurrency, batch size, copy parallelism, and
-destination.
+From the GitHub UI, open **Actions**, select **Benchmark**, choose **Run
+workflow**, then set the inputs.
 
-For BigQuery runs, configure the repository secret `BENCHMARK_BQ_SA_KEY_JSON` and pass the BigQuery project and dataset inputs.
+With the GitHub CLI:
+
+```bash
+gh workflow run benchmark.yml \
+  -f benchmark_runner=blacksmith-16vcpu-ubuntu-2404 \
+  -f warehouses=10 \
+  -f streaming_events=1000000 \
+  -f streaming_insert_batch_size=5000 \
+  -f max_table_sync_workers=8 \
+  -f max_copy_connections_per_table=4 \
+  -f batch_max_fill_ms=1000 \
+  -f destination=null
+```
+
+Important workflow inputs:
+
+- `benchmark_runner`: `blacksmith-8vcpu-ubuntu-2404`,
+  `blacksmith-16vcpu-ubuntu-2404`, or `blacksmith-32vcpu-ubuntu-2404`.
+- `warehouses`: number of TPC-C warehouses to prepare.
+- `tpcc_threads`: optional `go-tpc` prepare threads. Empty means xtask derives it.
+- `streaming_events`: fixed CDC insert count.
+- `streaming_duration_seconds`: optional duration mode. Empty uses
+  `streaming_events`.
+- `streaming_insert_batch_size`: rows per producer transaction.
+- `streaming_producer_concurrency`: optional producer concurrency. Empty means
+  xtask derives it.
+- `max_table_sync_workers`: table-copy worker parallelism.
+- `max_copy_connections_per_table`: per-table copy connection parallelism.
+- `batch_max_fill_ms`: stream batch fill timeout.
+- `destination`: `null` or `big-query`.
+- `force_prepare`: drop and regenerate TPC-C tables before running.
+- `skip_table_copy`: skip table copy.
+- `skip_table_streaming`: skip table streaming.
+
+For BigQuery workflow runs, set the repository secret
+`BENCHMARK_BQ_SA_KEY_JSON`, then pass `destination=big-query`,
+`bq_project_id`, and `bq_dataset_id`.
+
+The workflow starts only source Postgres, installs pinned `go-tpc`, runs
+`cargo xtask benchmark`, and uploads `target/bench-results/*.json` as the
+`benchmark-results` artifact.
+
+## Reading The Output
+
+Example table-copy summary:
+
+```text
+Table copy benchmark
+  destination: null
+  copied: 568405 rows across 8 table(s), 305.18 MiB estimated
+  throughput: 87738.47 rows/s, 47.11 estimated MiB/s
+  timing: start=38ms, copy_wait=6478ms, shutdown=4ms, total=6724ms
+  batches: 41 table-row batch(es)
+```
+
+Example table-streaming summary:
+
+```text
+Table streaming benchmark
+  destination: null
+  CDC events: produced=1000, observed=1000, estimated payload=0.28 MiB
+  event mix: inserts=1000, updates=0, deletes=0, relations=1, tx=20, total=1021
+  producer: 25903.41 events/s over 38ms
+  dispatch: 8326.44 events/s, 2.35 estimated MiB/s over 120ms
+  destination-drained: 8275.61 events/s, 2.34 estimated MiB/s over 120ms
+  catch-up drain: 12270.84 events/s, 3.46 estimated MiB/s over 81ms
+```
+
+The main fields to compare across runs are:
+
+- rows or CDC events processed
+- rows/events per second
+- estimated MiB per second
+- copy wait, producer, catch-up drain, destination-drain, shutdown, and total
+  timings
+- destination batch counts and max event batch size
+- CDC event mix: inserts, updates, deletes, relations, and transaction events
+
+Byte values are estimates based on ETL's decoded in-memory row/event size hints.
+They are useful for comparing benchmark runs in this repository, but they are
+not raw WAL bytes, network bytes, or destination billing bytes.
+
+## Direct Benchmark Binaries
+
+Prefer `cargo xtask benchmark`. Direct invocation expects that the database,
+tables, publications, and table IDs already exist.
+
+To find TPC-C table IDs for a direct `table_copy` run:
+
+```bash
+psql "postgres://postgres:postgres@localhost:5430/bench" \
+  -c "select oid, relname from pg_class where relname in ('customer','district','item','new_order','order_line','orders','stock','warehouse') order by relname;"
+```
+
+Then run:
+
+```bash
+cargo bench -p etl-benchmarks --bench table_copy -- --log-target terminal run \
+  --host localhost \
+  --port 5430 \
+  --database bench \
+  --username postgres \
+  --password postgres \
+  --publication-name bench_pub \
+  --table-ids <customer_oid>,<district_oid> \
+  --destination null
+```
+
+Replace the placeholder OIDs with values returned by the `psql` query.
+
+Direct streaming benchmark:
+
+```bash
+cargo bench -p etl-benchmarks --bench table_streaming -- --log-target terminal run \
+  --host localhost \
+  --port 5430 \
+  --database bench \
+  --username postgres \
+  --password postgres \
+  --publication-name bench_streaming_pub \
+  --table-name etl_streaming_benchmark \
+  --event-count 1000000 \
+  --insert-batch-size 5000 \
+  --producer-concurrency 16 \
+  --destination null
+```
