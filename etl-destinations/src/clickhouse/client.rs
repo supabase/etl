@@ -29,20 +29,31 @@ pub(crate) struct ClickHouseTableColumn {
     pub(crate) type_name: String,
 }
 
+/// Returns the placement clause for an `ADD COLUMN` statement.
+///
+/// `None` means the destination table has no user columns to anchor on, so
+/// the new column goes at the front via `FIRST` (which still places it
+/// before the trailing CDC columns).
+fn add_column_placement_clause(after_column: Option<&str>) -> String {
+    match after_column {
+        Some(anchor) => format!("AFTER {}", quote_identifier(anchor)),
+        None => "FIRST".to_owned(),
+    }
+}
+
 /// Builds the SQL used to add a column to a ClickHouse table.
 fn build_add_column_sql(
     table_name: &str,
     column: &etl::types::ColumnSchema,
-    after_column: &str,
+    after_column: Option<&str>,
 ) -> String {
     let col_type = clickhouse_column_type(column, true);
     let table_name = quote_identifier(table_name);
     let column_name = quote_identifier(&column.name);
-    let after_column = quote_identifier(after_column);
+    let placement = add_column_placement_clause(after_column);
 
     format!(
-        "ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS {column_name} {col_type} AFTER \
-         {after_column}"
+        "ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS {column_name} {col_type} {placement}"
     )
 }
 
@@ -193,15 +204,16 @@ impl ClickHouseClient {
     /// New columns are always Nullable since ClickHouse cannot backfill
     /// existing rows with a NOT NULL default.
     ///
-    /// `after_column` controls placement: the new column is inserted AFTER
-    /// the named column. This is critical because RowBinary encoding is
-    /// positional -- new user columns must appear before the CDC columns
-    /// (`cdc_operation`, `cdc_lsn`), not appended after them.
+    /// `after_column` controls placement: `Some(name)` inserts the new column
+    /// immediately AFTER `name`, `None` inserts it FIRST (used when the table
+    /// has no user columns yet). Either way the new column lands before the
+    /// trailing CDC columns (`cdc_operation`, `cdc_lsn`), which is required
+    /// because RowBinary encoding is positional.
     pub(crate) async fn add_column(
         &self,
         table_name: &str,
         column: &etl::types::ColumnSchema,
-        after_column: &str,
+        after_column: Option<&str>,
     ) -> EtlResult<()> {
         let sql = build_add_column_sql(table_name, column, after_column);
         self.execute_ddl(DdlKind::AddColumn, table_name, &sql).await
@@ -320,12 +332,24 @@ mod tests {
     #[test]
     fn add_column_sql_quotes_identifiers() {
         let column = column_schema("new\"column");
-        let sql = build_add_column_sql("table\"name", &column, "old\"column");
+        let sql = build_add_column_sql("table\"name", &column, Some("old\"column"));
 
         assert_eq!(
             sql,
             "ALTER TABLE \"table\"\"name\" ADD COLUMN IF NOT EXISTS \"new\"\"column\" \
              Nullable(Int32) AFTER \"old\"\"column\""
+        );
+    }
+
+    #[test]
+    fn add_column_sql_uses_first_when_anchor_is_none() {
+        let column = column_schema("only_col");
+        let sql = build_add_column_sql("test_table", &column, None);
+
+        assert_eq!(
+            sql,
+            "ALTER TABLE \"test_table\" ADD COLUMN IF NOT EXISTS \"only_col\" Nullable(Int32) \
+             FIRST"
         );
     }
 

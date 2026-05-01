@@ -549,15 +549,19 @@ where
             return Ok(());
         }
 
-        // Track the last user column name for AFTER placement. New columns are
-        // inserted after this column, and each added column becomes the new
-        // anchor for the next.
-        let mut last_user_column: String =
-            current_schema.column_schemas().last().map(|c| c.name.clone()).unwrap_or_default();
+        // Track the last user column name for AFTER placement. New columns
+        // are inserted after this column, and each added column becomes the
+        // new anchor for the next. `None` (no user columns in the current
+        // schema) falls through to `FIRST` placement inside `add_column`,
+        // which still keeps the new column before the trailing CDC columns.
+        let mut last_user_column: Option<String> =
+            current_schema.column_schemas().last().map(|c| c.name.clone());
 
         for column in &diff.columns_to_add {
-            self.client.add_column(clickhouse_table_name, column, &last_user_column).await?;
-            last_user_column = column.name.clone();
+            self.client
+                .add_column(clickhouse_table_name, column, last_user_column.as_deref())
+                .await?;
+            last_user_column = Some(column.name.clone());
         }
 
         for rename in &diff.columns_to_rename {
