@@ -478,10 +478,9 @@ impl Encrypt<EncryptedStoredDestinationConfig> for StoredDestinationConfig {
                 })
             }
             Self::ClickHouse { url, user, password, database } => {
-                let encrypted_password = match password {
-                    Some(p) => Some(encrypt_text(p.expose_secret().to_owned(), encryption_key)?),
-                    None => None,
-                };
+                let encrypted_password = password
+                    .map(|p| encrypt_text(p.expose_secret().to_owned(), encryption_key))
+                    .transpose()?;
 
                 Ok(EncryptedStoredDestinationConfig::ClickHouse {
                     url,
