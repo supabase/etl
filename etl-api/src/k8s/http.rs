@@ -1,10 +1,15 @@
+use std::collections::BTreeMap;
+
 use async_trait::async_trait;
 use base64::{Engine, prelude::BASE64_STANDARD};
 use chrono::Utc;
 use etl_config::Environment;
-use k8s_openapi::api::{
-    apps::v1::StatefulSet,
-    core::v1::{ConfigMap, Pod, Secret},
+use k8s_openapi::{
+    api::{
+        apps::v1::StatefulSet,
+        core::v1::{ConfigMap, Pod, Secret},
+    },
+    apimachinery::pkg::apis::meta::v1::ObjectMeta,
 };
 use kube::{
     Client,
@@ -345,15 +350,13 @@ impl K8sClient for HttpK8sClient {
         debug!("patching clickhouse secret");
 
         if let Some(password) = password {
-            let encoded_clickhouse_password = BASE64_STANDARD.encode(password);
             let clickhouse_secret_name = create_clickhouse_secret_name(prefix);
             let replicator_app_name = create_replicator_app_name(prefix);
-            let clickhouse_secret_json = create_clickhouse_password_secret_json(
+            let secret = create_clickhouse_password_secret(
                 &clickhouse_secret_name,
                 &replicator_app_name,
-                &encoded_clickhouse_password,
+                password,
             );
-            let secret: Secret = serde_json::from_value(clickhouse_secret_json)?;
 
             // We are forcing the update since we are the field manager that should own the
             // fields. If there is an override (likely during an incident or
@@ -711,27 +714,28 @@ fn create_postgres_secret_json(
     })
 }
 
-fn create_clickhouse_password_secret_json(
+fn create_clickhouse_password_secret(
     secret_name: &str,
     replicator_app_name: &str,
-    encoded_clickhouse_password: &str,
-) -> serde_json::Value {
-    json!({
-      "apiVersion": "v1",
-      "kind": "Secret",
-      "metadata": {
-        "name": secret_name,
-        "namespace": DATA_PLANE_NAMESPACE,
-        "labels": {
-          "etl.supabase.com/app-name": replicator_app_name,
-          "etl.supabase.com/app-type": REPLICATOR_APP_LABEL,
-        }
-      },
-      "type": "Opaque",
-      "data": {
-        CLICKHOUSE_PASSWORD_NAME: encoded_clickhouse_password,
-      }
-    })
+    clickhouse_password: &str,
+) -> Secret {
+    Secret {
+        metadata: ObjectMeta {
+            name: Some(secret_name.to_owned()),
+            namespace: Some(DATA_PLANE_NAMESPACE.to_owned()),
+            labels: Some(BTreeMap::from([
+                ("etl.supabase.com/app-name".to_owned(), replicator_app_name.to_owned()),
+                ("etl.supabase.com/app-type".to_owned(), REPLICATOR_APP_LABEL.to_owned()),
+            ])),
+            ..ObjectMeta::default()
+        },
+        type_: Some("Opaque".to_owned()),
+        string_data: Some(BTreeMap::from([(
+            CLICKHOUSE_PASSWORD_NAME.to_owned(),
+            clickhouse_password.to_owned(),
+        )])),
+        ..Secret::default()
+    }
 }
 
 fn create_bq_service_account_key_secret_json(
