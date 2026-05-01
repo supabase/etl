@@ -2054,6 +2054,7 @@ mod tests {
         let manager = DuckLakeConnectionManager {
             setup_plan: Arc::new(crate::ducklake::config::DuckLakeSetupPlan::default()),
             disable_extension_autoload: cfg!(target_os = "linux"),
+            interrupt_registry: Arc::new(crate::ducklake::client::DuckLakeInterruptRegistry::default()),
             open_count: Arc::clone(&open_count),
         };
         let pool = Arc::new(
@@ -2110,6 +2111,7 @@ mod tests {
             DuckLakeConnectionManager {
                 setup_plan: Arc::new(crate::ducklake::config::DuckLakeSetupPlan::default()),
                 disable_extension_autoload: cfg!(target_os = "linux"),
+                interrupt_registry: Arc::new(crate::ducklake::client::DuckLakeInterruptRegistry::default()),
                 open_count: Arc::clone(&open_count),
             },
             Arc::new(RwLock::new(())),
@@ -2140,6 +2142,7 @@ mod tests {
                 DuckLakeConnectionManager {
                     setup_plan: Arc::new(crate::ducklake::config::DuckLakeSetupPlan::default()),
                     disable_extension_autoload: cfg!(target_os = "linux"),
+                    interrupt_registry: Arc::new(crate::ducklake::client::DuckLakeInterruptRegistry::default()),
                     open_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                 },
                 1,

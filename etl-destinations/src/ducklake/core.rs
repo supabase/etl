@@ -1,13 +1,12 @@
 #[cfg(feature = "test-utils")]
 use std::sync::atomic::AtomicUsize;
-#[cfg(test)]
-use std::time::Duration;
 use std::{
     collections::{HashMap, HashSet},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    time::Duration,
 };
 
 use etl::{
@@ -32,7 +31,7 @@ use sqlx::{PgPool, postgres::PgPoolOptions};
 #[cfg(feature = "test-utils")]
 use tokio::sync::oneshot;
 use tokio::{
-    sync::{OwnedRwLockReadGuard, OwnedSemaphorePermit, RwLock, Semaphore},
+    sync::{OwnedRwLockReadGuard, OwnedSemaphorePermit, RwLock, Semaphore, TryAcquireError},
     task::JoinSet,
 };
 use tracing::{debug, info};
@@ -51,8 +50,8 @@ use crate::{
             retain_truncates_after_sequence_key,
         },
         client::{
-            DuckDbBlockingOperationKind, DuckLakeConnectionManager, build_warm_ducklake_pool,
-            format_query_error_detail, run_duckdb_blocking,
+            DuckDbBlockingOperationKind, DuckLakeConnectionManager, DuckLakeInterruptRegistry,
+            build_warm_ducklake_pool, format_query_error_detail, run_duckdb_blocking,
         },
         config::{
             MAINTENANCE_TARGET_FILE_SIZE, build_setup_plan, current_duckdb_extension_strategy,
@@ -121,7 +120,6 @@ pub(super) fn is_create_table_conflict(error: &duckdb::Error, table_name: &str) 
 /// deferred to coordinated maintenance.
 #[derive(Clone)]
 pub struct DuckLakeDestination<S> {
-    #[cfg(feature = "test-utils")]
     manager: Arc<DuckLakeConnectionManager>,
     pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
     blocking_slots: Arc<Semaphore>,
@@ -158,6 +156,11 @@ where
     }
 
     async fn shutdown(&self) -> EtlResult<()> {
+        let interrupted_connections = self.manager.interrupt_all_connections();
+        info!(
+            interrupted_connections,
+            "ducklake shutdown requested, interrupted active duckdb connections"
+        );
         self.tasks.shutdown().await?;
         self.shutdown_maintenance_worker().await?;
         self.shutdown_metrics_sampler().await?;
@@ -455,6 +458,7 @@ where
         let manager = Arc::new(DuckLakeConnectionManager {
             setup_plan: Arc::clone(&setup_plan),
             disable_extension_autoload,
+            interrupt_registry: Arc::new(DuckLakeInterruptRegistry::default()),
             #[cfg(feature = "test-utils")]
             open_count: Arc::new(AtomicUsize::new(0)),
         });
@@ -535,8 +539,7 @@ where
         let inline_flush_requested = Arc::new(AtomicBool::new(false));
         let inline_flush_requests = Arc::new(PendingInlineFlushRequests::default());
         let mut destination = Self {
-            #[cfg(feature = "test-utils")]
-            manager,
+            manager: Arc::clone(&manager),
             pool: Arc::clone(&pool),
             blocking_slots: Arc::clone(&blocking_slots),
             checkpoint_gate: Arc::clone(&checkpoint_gate),
@@ -560,6 +563,7 @@ where
                 DuckLakeConnectionManager {
                     setup_plan: Arc::clone(&setup_plan),
                     disable_extension_autoload,
+                    interrupt_registry: manager.interrupt_registry(),
                     #[cfg(feature = "test-utils")]
                     open_count: Arc::new(AtomicUsize::new(0)),
                 },
@@ -876,7 +880,16 @@ where
 
                     join_set.spawn(async move {
                         let _table_write_permit = table_write_permit;
+                        let checkpoint_wait_started = tokio::time::Instant::now();
                         let _checkpoint_guard = checkpoint_gate.read_owned().await;
+                        let checkpoint_wait = checkpoint_wait_started.elapsed();
+                        if checkpoint_wait > Duration::from_secs(1) {
+                            info!(
+                                table = %destination_table_name,
+                                checkpoint_wait_ms = checkpoint_wait.as_millis() as u64,
+                                "ducklake waited for checkpoint gate before streaming write"
+                            );
+                        }
                         let last_sequence_key =
                             read_table_streaming_progress_sequence_key_blocking(
                                 Arc::clone(&pool),
@@ -893,6 +906,13 @@ where
                             );
                             return Ok::<(), etl::error::EtlError>(());
                         }
+                        let is_first_streaming_batch = last_sequence_key.is_none();
+                        info!(
+                            table = %destination_table_name,
+                            pending_mutation_count = pending_mutations.len(),
+                            is_first_streaming_batch,
+                            "ducklake applying streaming mutations"
+                        );
 
                         let maintenance_notification =
                             maintenance_worker.as_ref().as_ref().map(|_| {
@@ -907,6 +927,11 @@ where
                         )?;
                         apply_table_batches_with_retry(pool, blocking_slots, prepared_batches)
                             .await?;
+                        info!(
+                            table = %destination_table_name,
+                            is_first_streaming_batch,
+                            "ducklake applied streaming mutations"
+                        );
                         if let (Some(worker), Some(notification)) =
                             (maintenance_worker.as_ref(), maintenance_notification)
                         {
@@ -1011,6 +1036,12 @@ where
             }
         }
 
+        info!(
+            table_id = %table_id,
+            table = %table_name,
+            "ducklake destination table cache miss, ensuring table exists"
+        );
+
         let _table_creation_permit =
             Arc::clone(&self.table_creation_slots).acquire_owned().await.map_err(|_| {
                 etl_error!(ErrorKind::InvalidState, "DuckLake table creation semaphore closed")
@@ -1050,12 +1081,16 @@ where
             Arc::clone(&self.blocking_slots),
             DuckDbBlockingOperationKind::Foreground,
             move |conn| -> EtlResult<()> {
+                debug!(
+                    table = %table_name_clone,
+                    "ducklake create table begin"
+                );
                 match conn.execute_batch(&qualified_ddl) {
                     Ok(()) => {
-                        created_tables.lock().insert(table_name_clone);
+                        created_tables.lock().insert(table_name_clone.clone());
                     }
                     Err(e) if is_create_table_conflict(&e, &table_name_clone) => {
-                        created_tables.lock().insert(table_name_clone);
+                        created_tables.lock().insert(table_name_clone.clone());
                     }
                     Err(e) => {
                         return Err(etl_error!(
@@ -1066,6 +1101,10 @@ where
                         ));
                     }
                 }
+                debug!(
+                    table = %table_name_clone,
+                    "ducklake create table finished"
+                );
                 Ok(())
             },
         )
@@ -1117,10 +1156,26 @@ where
     /// Serializes table-local truncate and CDC mutation writes.
     async fn acquire_table_write_slot(&self, table_name: &str) -> EtlResult<OwnedSemaphorePermit> {
         let table_slot = table_write_slot(&self.table_write_slots, table_name);
-
-        table_slot.acquire_owned().await.map_err(|_| {
-            etl_error!(ErrorKind::InvalidState, "DuckLake table write semaphore closed")
-        })
+        match Arc::clone(&table_slot).try_acquire_owned() {
+            Ok(permit) => Ok(permit),
+            Err(TryAcquireError::NoPermits) => {
+                info!(
+                    table = %table_name,
+                    "ducklake waiting for table write slot"
+                );
+                let permit = table_slot.acquire_owned().await.map_err(|_| {
+                    etl_error!(ErrorKind::InvalidState, "DuckLake table write semaphore closed")
+                })?;
+                info!(
+                    table = %table_name,
+                    "ducklake acquired table write slot after wait"
+                );
+                Ok(permit)
+            }
+            Err(TryAcquireError::Closed) => {
+                Err(etl_error!(ErrorKind::InvalidState, "DuckLake table write semaphore closed"))
+            }
+        }
     }
 
     /// Acquires shared mutation access so exclusive background maintenance
