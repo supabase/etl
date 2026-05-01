@@ -64,7 +64,7 @@ use crate::{
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
     metrics::{
-        ACTION_LABEL, COMMAND_TAG_LABEL, DESTINATION_LABEL, ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
+        ACTION_LABEL, COMMAND_TAG_LABEL, ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
         ETL_DDL_SCHEMA_CHANGE_COLUMNS, ETL_DDL_SCHEMA_CHANGES_TOTAL, ETL_EVENTS_PROCESSED_TOTAL,
         ETL_REPLICATION_MESSAGES_TOTAL, ETL_SCHEMA_CLEANUP_ERRORS_TOTAL,
         ETL_SCHEMA_CLEANUP_PRUNED_VERSIONS_TOTAL, ETL_SCHEMA_CLEANUP_TABLES_TOTAL,
@@ -1715,7 +1715,6 @@ where
                 ETL_EVENTS_PROCESSED_TOTAL,
                 WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
                 ACTION_LABEL => "table_streaming",
-                DESTINATION_LABEL => D::name(),
             )
             .increment(metadata.metrics.items_count as u64);
 
@@ -1723,7 +1722,6 @@ where
                 ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
                 WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
                 ACTION_LABEL => "table_streaming",
-                DESTINATION_LABEL => D::name(),
             )
             .record(metadata.metrics.dispatched_at.elapsed().as_secs_f64());
 

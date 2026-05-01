@@ -588,6 +588,39 @@ async fn destination_and_pipeline_can_be_deleted() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn destination_and_pipeline_can_be_deleted_when_source_database_is_unreachable() {
+    init_test_tracing();
+
+    let app = spawn_test_app().await;
+    let fixture = create_destination_pipeline_deletion_fixture(&app).await;
+    app.k8s_state.set_pod_status(PodStatus::Stopped).await;
+    drop_pg_database(&fixture.source_db_config).await;
+
+    let response = app
+        .delete_destination_pipeline(
+            &fixture.tenant_id,
+            fixture.destination_id,
+            fixture.pipeline_id,
+        )
+        .await;
+
+    let status = response.status();
+    assert!(status.is_success());
+    let response: DeleteDestinationPipelineResponse =
+        response.json().await.expect("failed to deserialize response");
+    assert_eq!(response.destination_id, fixture.destination_id);
+    assert_eq!(response.pipeline_id, fixture.pipeline_id);
+    assert!(response.destination_deleted);
+
+    let destination_response =
+        app.read_destination(&fixture.tenant_id, fixture.destination_id).await;
+    assert_eq!(destination_response.status(), StatusCode::NOT_FOUND);
+
+    let pipeline_response = app.read_pipeline(&fixture.tenant_id, fixture.pipeline_id).await;
+    assert_eq!(pipeline_response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn active_destination_and_pipeline_cannot_be_deleted() {
     init_test_tracing();
 

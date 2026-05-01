@@ -42,9 +42,6 @@ pub const WORKER_TYPE_LABEL: &str = "worker_type";
 /// Label key for the action performed by the worker ("table_copy" or
 /// "table_streaming").
 pub const ACTION_LABEL: &str = "action";
-/// Label key used to tag metrics by destination implementation (e.g.,
-/// "big_query").
-pub const DESTINATION_LABEL: &str = "destination";
 /// Label to tag the table copy metric if it was using partitioning.
 pub const PARTITIONING_LABEL: &str = "partitioning";
 /// Label key for event type (copy, insert, update, delete).
@@ -100,29 +97,26 @@ pub(crate) fn register_metrics() {
         describe_histogram!(
             ETL_TABLE_COPY_ROWS,
             Unit::Count,
-            "Number of rows copied per table copy partition, labeled by destination and \
-             partitioning."
+            "Number of rows copied per table copy partition, labeled by partitioning."
         );
 
         describe_histogram!(
             ETL_PARALLEL_TABLE_COPY_TIME_IMBALANCE,
-            "Load imbalance factor for parallel table copy duration (max_time / avg_time), \
-             labeled by destination. Value of 1.0 indicates perfect balance, higher values \
-             indicate more imbalance."
+            "Load imbalance factor for parallel table copy duration (max_time / avg_time). Value \
+             of 1.0 indicates perfect balance, higher values indicate more imbalance."
         );
 
         describe_histogram!(
             ETL_PARALLEL_TABLE_COPY_ROWS_IMBALANCE,
             "Load imbalance factor for parallel table copy row distribution (max_rows / \
-             avg_rows), labeled by destination. Value of 1.0 indicates perfect balance, higher \
-             values indicate more imbalance."
+             avg_rows). Value of 1.0 indicates perfect balance, higher values indicate more \
+             imbalance."
         );
 
         describe_counter!(
             ETL_EVENTS_PROCESSED_TOTAL,
             Unit::Count,
-            "Total number of events successfully processed, labeled by worker_type, action, and \
-             destination."
+            "Total number of events successfully processed, labeled by worker_type and action."
         );
 
         describe_counter!(

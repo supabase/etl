@@ -86,8 +86,8 @@ pub fn init_metrics_handle() -> Result<PrometheusHandle, BuildError> {
 /// global metrics recorder and starts an HTTP server that listens on
 /// `[::]:9000/metrics`, making metrics available for Prometheus scraping.
 ///
-/// When provided, `project_ref` and `pipeline_id` are attached as global
-/// labels to all exported metrics for the current process.
+/// When provided, `project_ref`, `pipeline_id`, and `destination` are attached
+/// as global labels to all exported metrics for the current process.
 ///
 /// # Use Case
 ///
@@ -95,7 +95,11 @@ pub fn init_metrics_handle() -> Result<PrometheusHandle, BuildError> {
 /// - Expose metrics from a standalone service (e.g., etl-replicator).
 /// - Automatically start a dedicated metrics endpoint without custom routing.
 /// - Let Prometheus scrape metrics directly from a fixed port.
-pub fn init_metrics(project_ref: Option<&str>, pipeline_id: Option<u64>) -> Result<(), BuildError> {
+pub fn init_metrics(
+    project_ref: Option<&str>,
+    pipeline_id: Option<u64>,
+    destination: Option<&str>,
+) -> Result<(), BuildError> {
     let mut builder = PrometheusBuilder::new().with_http_listener(std::net::SocketAddr::new(
         std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
         9000,
@@ -107,6 +111,10 @@ pub fn init_metrics(project_ref: Option<&str>, pipeline_id: Option<u64>) -> Resu
 
     if let Some(pipeline_id) = pipeline_id {
         builder = builder.add_global_label("pipeline_id", pipeline_id.to_string());
+    }
+
+    if let Some(destination) = destination {
+        builder = builder.add_global_label("destination", destination);
     }
 
     builder.install()?;

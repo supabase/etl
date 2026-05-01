@@ -26,8 +26,9 @@ use crate::{
         images::ImagesDbError,
         pipelines::{
             MAX_PIPELINES_PER_TENANT, PipelinesDbError, count_pipelines_for_tenant,
-            delete_pipeline_api_and_source_state, delete_pipeline_replication_slots, read_pipeline,
-            read_pipeline_for_deletion, read_pipelines_for_destination_for_deletion,
+            delete_pipeline_api_and_source_state, delete_pipeline_api_state,
+            delete_pipeline_replication_slots, read_pipeline, read_pipeline_for_deletion,
+            read_pipelines_for_destination_for_deletion,
         },
         sources::SourcesDbError,
     },
@@ -427,18 +428,43 @@ pub async fn delete_destination_and_pipeline(
     )
     .await?
     .ok_or(DestinationPipelineError::SourceNotFound(pipeline.source_id))?;
-    let source_pool =
-        connect_to_source_database_from_api(&source.config.into_connection_config(tls_config))
-            .await?;
-    let mut api_txn = pool.begin().await?;
-    let mut source_txn = source_pool.begin().await?;
-    delete_pipeline_api_and_source_state(
-        api_txn.deref_mut(),
-        source_txn.deref_mut(),
-        tenant_id,
-        &pipeline,
+    let source_pool = match connect_to_source_database_from_api(
+        &source.config.into_connection_config(tls_config),
     )
-    .await?;
+    .await
+    {
+        Ok(source_pool) => Some(source_pool),
+        Err(error) => {
+            tracing::warn!(
+                tenant_id = %tenant_id,
+                destination_id,
+                pipeline_id = pipeline.id,
+                source_id = pipeline.source_id,
+                error = %error,
+                "failed to connect to source database during destination pipeline deletion, skipping source cleanup",
+            );
+
+            None
+        }
+    };
+    let mut api_txn = pool.begin().await?;
+    let mut source_txn = if let Some(source_pool) = source_pool.as_ref() {
+        Some(source_pool.begin().await?)
+    } else {
+        None
+    };
+    if let Some(source_txn) = source_txn.as_mut() {
+        delete_pipeline_api_and_source_state(
+            api_txn.deref_mut(),
+            source_txn.deref_mut(),
+            tenant_id,
+            &pipeline,
+        )
+        .await?;
+    } else {
+        delete_pipeline_api_state(api_txn.deref_mut(), tenant_id, &pipeline).await?;
+    }
+
     let remaining_pipelines =
         read_pipelines_for_destination_for_deletion(api_txn.deref_mut(), tenant_id, destination_id)
             .await?;
@@ -454,8 +480,12 @@ pub async fn delete_destination_and_pipeline(
     // and the API commit failed afterwards, the API database could still
     // reference pipeline state that no longer exists in the source database.
     api_txn.commit().await?;
-    source_txn.commit().await?;
-    delete_pipeline_replication_slots(&source_pool, pipeline.id).await?;
+    if let Some(source_txn) = source_txn {
+        source_txn.commit().await?;
+    }
+    if let Some(source_pool) = source_pool.as_ref() {
+        delete_pipeline_replication_slots(source_pool, pipeline.id).await?;
+    }
 
     Ok(Json(DeleteDestinationPipelineResponse {
         destination_id,

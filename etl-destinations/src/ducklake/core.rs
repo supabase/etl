@@ -1489,17 +1489,21 @@ mod tests {
             .keep();
         let duckdb_path = duckdb_dir.join("verify.duckdb");
 
-        if current_vendored_extension_dir().is_some() {
-            return Connection::open_with_flags(
+        let conn = if current_vendored_extension_dir().is_some() {
+            Connection::open_with_flags(
                 &duckdb_path,
                 Config::default()
                     .enable_autoload_extension(false)
                     .expect("failed to disable DuckDB extension autoload"),
             )
-            .expect("failed to open verification DuckDB");
-        }
+            .expect("failed to open verification DuckDB")
+        } else {
+            Connection::open(&duckdb_path).expect("failed to open verification DuckDB")
+        };
 
-        Connection::open(&duckdb_path).expect("failed to open verification DuckDB")
+        conn.execute_batch("SET preserve_insertion_order = false;")
+            .expect("failed to configure verification DuckDB session");
+        conn
     }
 
     fn ducklake_load_sql() -> String {

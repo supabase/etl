@@ -32,7 +32,6 @@ use crate::{
     error_notification::ErrorNotificationClient,
     error_reporting::ErrorReportingStateStore,
     metrics,
-    sentry::set_destination_tag,
 };
 
 /// Starts the replicator service with the provided configuration.
@@ -64,8 +63,6 @@ pub(crate) async fn start_replicator_with_config(
             max_staleness_mins,
             connection_pool_size,
         } => {
-            set_destination_scope::<BigQueryDestination<ErrorReportingStateStore<PostgresStore>>>();
-
             let destination = BigQueryDestination::new_with_key(
                 project_id.clone(),
                 dataset_id.clone(),
@@ -92,8 +89,6 @@ pub(crate) async fn start_replicator_with_config(
                     s3_region,
                 },
         } => {
-            set_destination_scope::<IcebergDestination<ErrorReportingStateStore<PostgresStore>>>();
-
             let env = Environment::load().map_err(ReplicatorError::config)?;
             let client = IcebergClient::new_with_supabase_catalog(
                 project_ref,
@@ -126,8 +121,6 @@ pub(crate) async fn start_replicator_with_config(
                     s3_endpoint,
                 },
         } => {
-            set_destination_scope::<IcebergDestination<ErrorReportingStateStore<PostgresStore>>>();
-
             let client = IcebergClient::new_with_rest_catalog(
                 catalog_uri.clone(),
                 warehouse_name.clone(),
@@ -163,8 +156,6 @@ pub(crate) async fn start_replicator_with_config(
             maintenance_target_file_size,
             expire_snapshots_older_than,
         } => {
-            set_destination_scope::<DuckLakeDestination<PostgresStore>>();
-
             let s3_config = match (s3_access_key_id, s3_secret_access_key) {
                 (Some(access_key_id), Some(secret_access_key)) => Some(DucklakeS3Config {
                     access_key_id: access_key_id.expose_secret().to_owned(),
@@ -215,11 +206,6 @@ pub(crate) async fn start_replicator_with_config(
     }
 
     Ok(())
-}
-
-/// Sets the destination tag on the current error-reporting scope.
-fn set_destination_scope<D: Destination>() {
-    set_destination_tag(D::name());
 }
 
 fn create_props(
