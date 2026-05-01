@@ -722,12 +722,10 @@ impl Decrypt<StoredDestinationConfig> for EncryptedStoredDestinationConfig {
                 }
             },
             EncryptedStoredDestinationConfig::ClickHouse { url, user, password, database } => {
-                let password = match password {
-                    Some(p) => {
-                        Some(SerializableSecretString::from(decrypt_text(p, encryption_key)?))
-                    }
-                    None => None,
-                };
+                let password = password
+                    .map(|p| decrypt_text(p, encryption_key))
+                    .transpose()?
+                    .map(SerializableSecretString::from);
 
                 Ok(StoredDestinationConfig::ClickHouse { url, user, password, database })
             }
