@@ -147,6 +147,7 @@ fn nullable_flags_from_clickhouse_columns(
 /// The upstream `BatchConfig::max_fill_ms` controls when `write_events` is
 /// called; this limit prevents unbounded memory use for very large batches
 /// (e.g. initial copy).
+#[derive(Copy, Clone)]
 pub struct ClickHouseInserterConfig {
     /// Start a new INSERT after this many uncompressed bytes. Fixed cap
     /// because incoming and outgoing buffers can both be near-full at once;
@@ -180,7 +181,7 @@ pub struct ClickHouseDestination<S> {
     client: ClickHouseClient,
     /// Per-INSERT byte budget; gates intermediate flushes within a single
     /// `write_table_rows` / `write_events` call.
-    inserter_config: Arc<ClickHouseInserterConfig>,
+    inserter_config: ClickHouseInserterConfig,
     /// Schema/state store used to persist destination table metadata
     /// (Applying / Applied) and to look up replicated schemas.
     store: Arc<S>,
@@ -213,7 +214,7 @@ where
         register_metrics();
         Ok(Self {
             client: ClickHouseClient::new(url, user, password, database),
-            inserter_config: Arc::new(inserter_config),
+            inserter_config,
             store: Arc::new(store),
             table_cache: Arc::new(RwLock::new(HashMap::new())),
         })
