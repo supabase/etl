@@ -638,7 +638,7 @@ where
                     }
                     Event::Delete(delete) => {
                         let Some(old_table_row) = delete.old_table_row else {
-                            info!("delete event has no row data, skipping");
+                            debug!("delete event has no row data, skipping");
                             continue;
                         };
                         let old_row = match old_table_row {
