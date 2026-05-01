@@ -149,18 +149,8 @@ fn init_tracing() {
         .init();
 }
 
-/// Set default log level if RUST_LOG environment variable is not set.
-fn set_log_level() {
-    if std::env::var("RUST_LOG").is_err() {
-        unsafe {
-            std::env::set_var("RUST_LOG", "info");
-        }
-    }
-}
-
 /// Main implementation containing all pipeline setup and execution logic.
 async fn main_impl() -> Result<(), Box<dyn Error>> {
-    set_log_level();
     init_tracing();
 
     // Install required crypto provider for TLS (used when clickhouse_url is https://)
