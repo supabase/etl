@@ -83,10 +83,15 @@ pub(super) fn clickhouse_column_type(col: &ColumnSchema, force_nullable: bool) -
 ///
 /// Appends `cdc_operation String` and `cdc_lsn UInt64` as trailing non-nullable
 /// columns. Uses `MergeTree()` with `ORDER BY tuple()`.
-pub(super) fn build_create_table_sql(table_name: &str, column_schemas: &[ColumnSchema]) -> String {
-    let mut cols = Vec::with_capacity(column_schemas.len() + 2);
+pub(super) fn build_create_table_sql<'a, I>(table_name: &str, column_schemas: I) -> String
+where
+    I: IntoIterator<Item = &'a ColumnSchema>,
+    I::IntoIter: ExactSizeIterator,
+{
+    let iter = column_schemas.into_iter();
+    let mut cols = Vec::with_capacity(iter.len() + 2);
 
-    for col in column_schemas {
+    for col in iter {
         let col_type = clickhouse_column_type(col, false);
         cols.push(format!("  {} {}", quote_identifier(&col.name), col_type));
     }

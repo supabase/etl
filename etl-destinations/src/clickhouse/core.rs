@@ -250,8 +250,7 @@ where
         );
         self.store.store_destination_table_metadata(table_id, metadata.clone()).await?;
 
-        let column_schemas: Vec<_> = schema.column_schemas().cloned().collect();
-        let ddl = build_create_table_sql(clickhouse_table_name, &column_schemas);
+        let ddl = build_create_table_sql(clickhouse_table_name, schema.column_schemas());
         self.client.execute_ddl(DdlKind::CreateTable, clickhouse_table_name, &ddl).await?;
 
         self.store.store_destination_table_metadata(table_id, metadata.to_applied()).await?;
@@ -367,8 +366,7 @@ where
                 self.apply_schema_diff(clickhouse_table_name, &diff, &old_schema).await?;
             }
             None => {
-                let column_schemas: Vec<_> = schema.column_schemas().cloned().collect();
-                let ddl = build_create_table_sql(clickhouse_table_name, &column_schemas);
+                let ddl = build_create_table_sql(clickhouse_table_name, schema.column_schemas());
                 self.client.execute_ddl(DdlKind::CreateTable, clickhouse_table_name, &ddl).await?;
             }
         }
