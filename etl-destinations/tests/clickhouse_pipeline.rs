@@ -713,18 +713,17 @@ async fn boundary_values_table_copy() {
     );
 }
 
-/// Days from 1970-01-01 to 1900-01-01 (ClickHouse `Date32` minimum).
+/// Signed day offset from the Unix epoch to ClickHouse `Date32`'s minimum
+/// representable date, `1900-01-01`.
 ///
 /// Python: `(date(1900, 1, 1) - date(1970, 1, 1)).days` = -25567.
-const DATE_1900_01_01_DAYS: i32 = -25567;
+const DATE32_MIN_DAYS_FROM_UNIX_EPOCH: i32 = -25567;
 
-/// Days from 1970-01-01 to 1969-12-31 (just before the Unix epoch).
-const DATE_1969_12_31_DAYS: i32 = -1;
-
-/// Days from 1970-01-01 to 2299-12-31 (ClickHouse `Date32` maximum).
+/// Signed day offset from the Unix epoch to ClickHouse `Date32`'s maximum
+/// representable date, `2299-12-31`.
 ///
 /// Python: `(date(2299, 12, 31) - date(1970, 1, 1)).days` = 120529.
-const DATE_2299_12_31_DAYS: i32 = 120529;
+const DATE32_MAX_DAYS_FROM_UNIX_EPOCH: i32 = 120529;
 
 const DATE_BOUNDARIES_SELECT: &str = concat!(
     "SELECT id, date_col, cdc_operation ",
@@ -811,20 +810,17 @@ async fn pre_1970_and_far_future_dates_round_trip() {
     assert_eq!(rows.len(), 5, "expected 5 rows in ClickHouse");
 
     assert_eq!(
-        rows[0].date_col, DATE_1900_01_01_DAYS,
+        rows[0].date_col, DATE32_MIN_DAYS_FROM_UNIX_EPOCH,
         "1900-01-01 must encode as the Date32 minimum offset, not be clamped"
     );
-    assert_eq!(
-        rows[1].date_col, DATE_1969_12_31_DAYS,
-        "1969-12-31 must encode as -1 (one day before the Unix epoch)"
-    );
+    assert_eq!(rows[1].date_col, -1, "1969-12-31 must encode as one day before the Unix epoch");
     assert_eq!(rows[2].date_col, 0, "1970-01-01 must encode as 0 (the Unix epoch)");
     assert_eq!(
         rows[3].date_col, DATE_2024_01_15_DAYS,
         "2024-01-15 must encode as 19737 (typical post-epoch value)"
     );
     assert_eq!(
-        rows[4].date_col, DATE_2299_12_31_DAYS,
+        rows[4].date_col, DATE32_MAX_DAYS_FROM_UNIX_EPOCH,
         "2299-12-31 must encode as the Date32 maximum offset, not be clamped"
     );
 }
