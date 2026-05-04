@@ -10,7 +10,12 @@ use serde::{
     ser::{SerializeMap, SerializeSeq, Serializer},
 };
 
-use crate::snowflake::Error;
+use crate::snowflake::{Error, Result};
+
+/// Snowflake Streaming API limit for the rows attribute.
+///
+/// https://docs.snowflake.com/en/user-guide/snowpipe-streaming/snowpipe-streaming-high-performance-rest-api
+const MAX_BATCH_BYTES: usize = 4 * 1024 * 1024;
 
 /// Single-buffer batch accumulator for Snowflake Streaming NDJSON.
 ///
@@ -34,11 +39,7 @@ impl RowBatch {
     /// Serialize one row as a JSON line.
     ///
     /// Errors on non-finite floats or NaN numerics.
-    pub fn push_row(
-        &mut self,
-        cols: &[ColumnSchema],
-        row: &TableRow,
-    ) -> std::result::Result<(), Error> {
+    pub fn push_row(&mut self, cols: &[ColumnSchema], row: &TableRow) -> Result<()> {
         let serializable = RowSerializer { cols, cells: row.values() };
         serde_json::to_writer((&mut self.data).writer(), &serializable)
             .map_err(|e| Error::Encoding(e.to_string()))?;
@@ -67,6 +68,24 @@ impl RowBatch {
     /// Raw NDJSON bytes, ready for zstd compression.
     pub fn as_bytes(&self) -> &[u8] {
         &self.data
+    }
+
+    /// Validate size, compress with zstd, and consume the batch.
+    ///
+    /// TODO: The size check is currently on uncompressed NDJSON. The Snowflake
+    /// docs specify a 4 MB "rows attribute" limit but don't clarify compressed
+    /// vs uncompressed. If the limit is on compressed size, this check is
+    /// overly conservative. Verify and move the check post-compression.
+    pub fn into_compressed(self) -> Result<Vec<u8>> {
+        if self.data.len() > MAX_BATCH_BYTES {
+            return Err(Error::Encoding(format!(
+                "batch exceeds {} byte limit ({} bytes)",
+                MAX_BATCH_BYTES,
+                self.data.len()
+            )));
+        }
+        zstd::encode_all(&self.data[..], 3)
+            .map_err(|e| Error::Encoding(format!("zstd compression failed: {e}")))
     }
 }
 
