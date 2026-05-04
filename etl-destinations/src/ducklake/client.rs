@@ -4,7 +4,7 @@ use std::{
     borrow::Cow,
     error, fmt,
     sync::{
-        Arc, LazyLock,
+        Arc, LazyLock, Mutex, Weak,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
@@ -156,6 +156,38 @@ impl DuckDbQueryWatchdog {
     }
 }
 
+/// Shared registry of interrupt handles for live DuckLake connections.
+#[derive(Default)]
+pub(super) struct DuckLakeInterruptRegistry {
+    handles: Mutex<Vec<Weak<duckdb::InterruptHandle>>>,
+}
+
+impl DuckLakeInterruptRegistry {
+    /// Registers one live DuckLake connection interrupt handle.
+    fn register(&self, handle: &Arc<duckdb::InterruptHandle>) {
+        self.handles
+            .lock()
+            .expect("ducklake interrupt registry mutex should not be poisoned")
+            .push(Arc::downgrade(handle));
+    }
+
+    /// Interrupts all currently live registered DuckLake connections.
+    pub(super) fn interrupt_all(&self) -> usize {
+        let mut interrupted = 0;
+        let mut handles =
+            self.handles.lock().expect("ducklake interrupt registry mutex should not be poisoned");
+        handles.retain(|handle| {
+            let Some(handle) = handle.upgrade() else {
+                return false;
+            };
+            handle.interrupt();
+            interrupted += 1;
+            true
+        });
+        interrupted
+    }
+}
+
 /// Custom r2d2 connection manager that opens an in-memory DuckDB connection and
 /// attaches the DuckLake catalog on every `connect()` call.
 ///
@@ -169,6 +201,8 @@ pub(super) struct DuckLakeConnectionManager {
     /// Disables DuckDB extension autoload/autoinstall when vendored local
     /// extensions are required.
     pub(super) disable_extension_autoload: bool,
+    /// Shared registry of interrupt handles for live connections.
+    pub(super) interrupt_registry: Arc<DuckLakeInterruptRegistry>,
     /// Counts successfully initialized DuckDB connections for tests.
     #[cfg(feature = "test-utils")]
     pub(super) open_count: Arc<AtomicUsize>,
@@ -316,6 +350,16 @@ impl Drop for LazyDuckLakePool {
 }
 
 impl DuckLakeConnectionManager {
+    /// Returns the shared interrupt registry for this manager and its clones.
+    pub(super) fn interrupt_registry(&self) -> Arc<DuckLakeInterruptRegistry> {
+        Arc::clone(&self.interrupt_registry)
+    }
+
+    /// Interrupts all currently live managed DuckLake connections.
+    pub(super) fn interrupt_all_connections(&self) -> usize {
+        self.interrupt_registry.interrupt_all()
+    }
+
     /// Opens one fully initialized DuckDB connection and attaches the lake
     /// catalog.
     pub(super) fn open_duckdb_connection(
@@ -332,6 +376,7 @@ impl DuckLakeConnectionManager {
         } else {
             duckdb::Connection::open_in_memory().map_err(DuckLakeConnectionError::validation)?
         };
+        self.interrupt_registry.register(&conn.interrupt_handle());
         for step in self.setup_plan.steps() {
             let phase_started = Instant::now();
             info!(
@@ -410,6 +455,7 @@ pub(super) async fn build_warm_ducklake_pool(
         let pool = r2d2::Pool::builder()
             .max_size(pool_size)
             .min_idle(Some(pool_size))
+            .connection_timeout(Duration::from_mins(4))
             .test_on_check_out(true)
             // Callers log the returned pool initialization failure once, so
             // suppress r2d2's internal per-attempt logging here.
@@ -602,7 +648,7 @@ where
 mod tests {
     use std::sync::Arc;
 
-    use tokio::sync::Semaphore;
+    use tokio::sync::{Semaphore, oneshot};
 
     use super::*;
 
@@ -610,6 +656,7 @@ mod tests {
         DuckLakeConnectionManager {
             setup_plan: Arc::new(DuckLakeSetupPlan::default()),
             disable_extension_autoload: cfg!(target_os = "linux"),
+            interrupt_registry: Arc::new(DuckLakeInterruptRegistry::default()),
             #[cfg(feature = "test-utils")]
             open_count: Arc::new(AtomicUsize::new(0)),
         }
@@ -762,5 +809,63 @@ mod tests {
             "watchdog should remain timed out when the interrupt handle is published after the \
              deadline"
         );
+    }
+
+    #[tokio::test]
+    async fn interrupt_all_connections_cancels_running_query() {
+        let manager = make_blocking_test_manager();
+        let pool = Arc::new(
+            build_warm_ducklake_pool(manager.clone(), 1, "test")
+                .await
+                .expect("failed to build blocking test pool"),
+        );
+        let blocking_slots = Arc::new(Semaphore::new(1));
+        let (query_started_tx, query_started_rx) = oneshot::channel();
+
+        let query_task = tokio::spawn({
+            let pool = Arc::clone(&pool);
+            let blocking_slots = Arc::clone(&blocking_slots);
+            async move {
+                run_duckdb_blocking_with_timeout(
+                    pool,
+                    blocking_slots,
+                    DuckDbBlockingOperationKind::Foreground,
+                    Duration::from_secs(30),
+                    move |conn| -> EtlResult<()> {
+                        let _ = query_started_tx.send(());
+                        conn.query_row(
+                            "SELECT COUNT(*) FROM range(10000000) t1, range(1000000) t2;",
+                            [],
+                            |row| row.get::<_, i64>(0),
+                        )
+                        .map_err(|source| {
+                            etl_error!(
+                                ErrorKind::DestinationQueryFailed,
+                                "DuckLake interrupt test query failed",
+                                source: source
+                            )
+                        })?;
+                        Ok(())
+                    },
+                )
+                .await
+            }
+        });
+
+        query_started_rx.await.expect("query should start before interrupt");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            manager.interrupt_all_connections() >= 1,
+            "expected at least one registered connection to be interrupted"
+        );
+
+        let error = tokio::time::timeout(Duration::from_secs(5), query_task)
+            .await
+            .expect("interrupted query should finish promptly")
+            .expect("interrupt test task should not panic")
+            .expect_err("interrupted query should fail");
+
+        assert_eq!(error.kind(), ErrorKind::DestinationQueryFailed);
+        assert_eq!(error.description(), Some("DuckLake interrupt test query failed"));
     }
 }
