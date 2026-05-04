@@ -1,5 +1,6 @@
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
+use url::Url;
 
 const fn default_connection_pool_size() -> usize {
     DestinationConfig::DEFAULT_CONNECTION_POOL_SIZE
@@ -46,6 +47,17 @@ pub enum DestinationConfig {
         /// consumes more resources.
         #[serde(default = "default_connection_pool_size")]
         connection_pool_size: usize,
+    },
+    #[serde(rename = "clickhouse")]
+    ClickHouse {
+        /// ClickHouse HTTP(S) endpoint URL.
+        url: Url,
+        /// ClickHouse user name
+        user: String,
+        /// ClickHouse password (omit for passwordless access)
+        password: Option<SecretString>,
+        /// ClickHouse target database
+        database: String,
     },
     Iceberg {
         #[serde(flatten)]
@@ -232,6 +244,15 @@ pub enum DestinationConfigWithoutSecrets {
         #[serde(default = "default_connection_pool_size")]
         connection_pool_size: usize,
     },
+    #[serde(rename = "clickhouse")]
+    ClickHouse {
+        /// ClickHouse HTTP(S) endpoint URL.
+        url: Url,
+        /// ClickHouse user name
+        user: String,
+        /// ClickHouse target database
+        database: String,
+    },
     Iceberg {
         #[serde(flatten)]
         config: IcebergConfigWithoutSecrets,
@@ -278,6 +299,9 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
                 max_staleness_mins,
                 connection_pool_size,
             },
+            DestinationConfig::ClickHouse { url, user, database, .. } => {
+                DestinationConfigWithoutSecrets::ClickHouse { url, user, database }
+            }
             DestinationConfig::Iceberg { config } => {
                 DestinationConfigWithoutSecrets::Iceberg { config: config.into() }
             }

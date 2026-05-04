@@ -4,6 +4,7 @@ use etl_config::{
 };
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
+use url::Url;
 use utoipa::ToSchema;
 
 use crate::configs::{
@@ -42,6 +43,23 @@ pub enum FullApiDestinationConfig {
         #[schema(example = 8)]
         #[serde(skip_serializing_if = "Option::is_none")]
         connection_pool_size: Option<usize>,
+    },
+    #[serde(rename = "clickhouse")]
+    ClickHouse {
+        /// ClickHouse HTTP(S) endpoint URL.
+        #[schema(value_type = String, example = "http://test:8123")]
+        #[serde(deserialize_with = "crate::utils::trim_http_url")]
+        url: Url,
+        /// ClickHouse user name
+        #[schema(example = "foo")]
+        #[serde(deserialize_with = "crate::utils::trim_string")]
+        user: String,
+        /// ClickHouse password (omit for passwordless access)
+        password: Option<SerializableSecretString>,
+        /// ClickHouse target database
+        #[schema(example = "my_db")]
+        #[serde(deserialize_with = "crate::utils::trim_string")]
+        database: String,
     },
     Iceberg {
         #[serde(flatten)]
@@ -142,6 +160,9 @@ impl From<StoredDestinationConfig> for FullApiDestinationConfig {
                 max_staleness_mins,
                 connection_pool_size: Some(connection_pool_size),
             },
+            StoredDestinationConfig::ClickHouse { url, user, password, database } => {
+                Self::ClickHouse { url, user, password, database }
+            }
             StoredDestinationConfig::Iceberg { config } => match config {
                 StoredIcebergConfig::Supabase {
                     project_ref,
@@ -222,6 +243,12 @@ pub enum StoredDestinationConfig {
         max_staleness_mins: Option<u16>,
         connection_pool_size: usize,
     },
+    ClickHouse {
+        url: Url,
+        user: String,
+        password: Option<SerializableSecretString>,
+        database: String,
+    },
     Iceberg {
         config: StoredIcebergConfig,
     },
@@ -257,6 +284,12 @@ impl StoredDestinationConfig {
                 service_account_key: service_account_key.into(),
                 max_staleness_mins,
                 connection_pool_size,
+            },
+            Self::ClickHouse { url, user, password, database } => DestinationConfig::ClickHouse {
+                url,
+                user,
+                password: password.map(Into::into),
+                database,
             },
             Self::Iceberg { config } => match config {
                 StoredIcebergConfig::Supabase {
@@ -346,6 +379,9 @@ impl From<FullApiDestinationConfig> for StoredDestinationConfig {
                 connection_pool_size: connection_pool_size
                     .unwrap_or(DestinationConfig::DEFAULT_CONNECTION_POOL_SIZE),
             },
+            FullApiDestinationConfig::ClickHouse { url, user, password, database } => {
+                Self::ClickHouse { url, user, password, database }
+            }
             FullApiDestinationConfig::Iceberg { config } => match config {
                 FullApiIcebergConfig::Supabase {
                     project_ref,
@@ -439,6 +475,18 @@ impl Encrypt<EncryptedStoredDestinationConfig> for StoredDestinationConfig {
                     service_account_key: encrypted_service_account_key,
                     max_staleness_mins,
                     connection_pool_size,
+                })
+            }
+            Self::ClickHouse { url, user, password, database } => {
+                let encrypted_password = password
+                    .map(|p| encrypt_text(p.expose_secret().to_owned(), encryption_key))
+                    .transpose()?;
+
+                Ok(EncryptedStoredDestinationConfig::ClickHouse {
+                    url,
+                    user,
+                    password: encrypted_password,
+                    database,
                 })
             }
             Self::Iceberg { config } => match config {
@@ -549,6 +597,12 @@ pub enum EncryptedStoredDestinationConfig {
         max_staleness_mins: Option<u16>,
         #[serde(default = "default_connection_pool_size")]
         connection_pool_size: usize,
+    },
+    ClickHouse {
+        url: Url,
+        user: String,
+        password: Option<EncryptedValue>,
+        database: String,
     },
     Iceberg {
         #[serde(flatten)]
@@ -667,6 +721,14 @@ impl Decrypt<StoredDestinationConfig> for EncryptedStoredDestinationConfig {
                     })
                 }
             },
+            EncryptedStoredDestinationConfig::ClickHouse { url, user, password, database } => {
+                let password = password
+                    .map(|p| decrypt_text(p, encryption_key))
+                    .transpose()?
+                    .map(SerializableSecretString::from);
+
+                Ok(StoredDestinationConfig::ClickHouse { url, user, password, database })
+            }
             Self::Ducklake {
                 catalog_url,
                 data_path,
@@ -974,6 +1036,126 @@ mod tests {
             }
             _ => panic!("Config types don't match"),
         }
+    }
+
+    #[test]
+    fn stored_destination_config_encryption_decryption_clickhouse() {
+        let config = StoredDestinationConfig::ClickHouse {
+            url: Url::parse("https://example.com:8443").unwrap(),
+            user: "etl".to_owned(),
+            password: Some(SerializableSecretString::from("secret".to_owned())),
+            database: "analytics".to_owned(),
+        };
+
+        let key = EncryptionKey { id: 1, key: generate_random_key::<32>().unwrap() };
+
+        let encrypted = config.clone().encrypt(&key).unwrap();
+        let decrypted = encrypted.decrypt(&key).unwrap();
+
+        match (config, decrypted) {
+            (
+                StoredDestinationConfig::ClickHouse {
+                    url: u1,
+                    user: user1,
+                    password: p1,
+                    database: d1,
+                },
+                StoredDestinationConfig::ClickHouse {
+                    url: u2,
+                    user: user2,
+                    password: p2,
+                    database: d2,
+                },
+            ) => {
+                assert_eq!(u1, u2);
+                assert_eq!(user1, user2);
+                assert_eq!(d1, d2);
+                assert_eq!(
+                    p1.as_ref().map(|value| value.expose_secret()),
+                    p2.as_ref().map(|value| value.expose_secret())
+                );
+            }
+            _ => panic!("Config types don't match"),
+        }
+    }
+
+    #[test]
+    fn full_api_destination_config_conversion_clickhouse() {
+        let full_config = FullApiDestinationConfig::ClickHouse {
+            url: Url::parse("https://example.com:8443").unwrap(),
+            user: "etl".to_owned(),
+            password: Some(SerializableSecretString::from("secret".to_owned())),
+            database: "analytics".to_owned(),
+        };
+
+        let stored: StoredDestinationConfig = full_config.clone().into();
+        let back_to_full: FullApiDestinationConfig = stored.into();
+
+        match (full_config, back_to_full) {
+            (
+                FullApiDestinationConfig::ClickHouse {
+                    url: u1,
+                    user: user1,
+                    password: p1,
+                    database: d1,
+                },
+                FullApiDestinationConfig::ClickHouse {
+                    url: u2,
+                    user: user2,
+                    password: p2,
+                    database: d2,
+                },
+            ) => {
+                assert_eq!(u1, u2);
+                assert_eq!(user1, user2);
+                assert_eq!(d1, d2);
+                assert_eq!(
+                    p1.as_ref().map(|value| value.expose_secret()),
+                    p2.as_ref().map(|value| value.expose_secret())
+                );
+            }
+            _ => panic!("Config types don't match"),
+        }
+    }
+
+    #[test]
+    fn full_api_destination_config_deserializes_clickhouse_url() {
+        let json = r#"
+        {
+            "clickhouse": {
+                "url": "  https://example.com:8443  ",
+                "user": "etl",
+                "database": "analytics"
+            }
+        }
+        "#;
+
+        let deserialized: FullApiDestinationConfig = serde_json::from_str(json).unwrap();
+        match deserialized {
+            FullApiDestinationConfig::ClickHouse { url, user, password, database } => {
+                assert_eq!(url.as_str(), "https://example.com:8443/");
+                assert_eq!(user, "etl");
+                assert!(password.is_none());
+                assert_eq!(database, "analytics");
+            }
+            _ => panic!("Deserialization failed or variant mismatch"),
+        }
+    }
+
+    #[test]
+    fn full_api_destination_config_rejects_non_http_clickhouse_url() {
+        let json = r#"
+        {
+            "clickhouse": {
+                "url": "ftp://example.com/data",
+                "user": "etl",
+                "database": "analytics"
+            }
+        }
+        "#;
+
+        let error = serde_json::from_str::<FullApiDestinationConfig>(json).unwrap_err();
+        assert!(error.to_string().contains("url must use http or https scheme"));
     }
 
     #[test]

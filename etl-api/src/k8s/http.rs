@@ -1,10 +1,15 @@
+use std::collections::BTreeMap;
+
 use async_trait::async_trait;
 use base64::{Engine, prelude::BASE64_STANDARD};
 use chrono::Utc;
 use etl_config::Environment;
-use k8s_openapi::api::{
-    apps::v1::StatefulSet,
-    core::v1::{ConfigMap, Pod, Secret},
+use k8s_openapi::{
+    api::{
+        apps::v1::StatefulSet,
+        core::v1::{ConfigMap, Pod, Secret},
+    },
+    apimachinery::pkg::apis::meta::v1::ObjectMeta,
 };
 use kube::{
     Client,
@@ -21,6 +26,10 @@ use crate::{
 
 /// Secret name suffix for the BigQuery service account key.
 const BQ_SECRET_NAME_SUFFIX: &str = "bq-service-account-key";
+/// Secret name suffix for the ClickHouse password.
+const CLICKHOUSE_SECRET_NAME_SUFFIX: &str = "clickhouse-password";
+/// Name of the password in the ClickHouse secret and its reference.
+const CLICKHOUSE_PASSWORD_NAME: &str = "clickhouse-password";
 /// Name of the service account key in the BigQuery secret and its reference.
 const BQ_SERVICE_ACCOUNT_KEY_NAME: &str = "service-account-key";
 /// Secret name suffix for iceberg secrets (includes catalog token,
@@ -333,6 +342,33 @@ impl K8sClient for HttpK8sClient {
         Ok(())
     }
 
+    async fn create_or_update_clickhouse_secret(
+        &self,
+        prefix: &str,
+        password: Option<&str>,
+    ) -> Result<(), K8sError> {
+        debug!("patching clickhouse secret");
+
+        if let Some(password) = password {
+            let clickhouse_secret_name = create_clickhouse_secret_name(prefix);
+            let replicator_app_name = create_replicator_app_name(prefix);
+            let secret = create_clickhouse_password_secret(
+                &clickhouse_secret_name,
+                &replicator_app_name,
+                password,
+            );
+
+            // We are forcing the update since we are the field manager that should own the
+            // fields. If there is an override (likely during an incident or
+            // SREs intervention), we want to override their changes. The API
+            // database is the source of truth for credentials.
+            let pp = PatchParams::apply(&clickhouse_secret_name).force();
+            self.secrets_api.patch(&clickhouse_secret_name, &pp, &Patch::Apply(secret)).await?;
+        }
+
+        Ok(())
+    }
+
     async fn create_or_update_iceberg_secret(
         &self,
         prefix: &str,
@@ -401,6 +437,18 @@ impl K8sClient for HttpK8sClient {
         let dp = DeleteParams::default();
         Self::handle_delete_with_404_ignore(
             self.secrets_api.delete(&postgres_secret_name, &dp).await,
+        )?;
+
+        Ok(())
+    }
+
+    async fn delete_clickhouse_secret(&self, prefix: &str) -> Result<(), K8sError> {
+        debug!("deleting clickhouse secret");
+
+        let clickhouse_secret_name = create_clickhouse_secret_name(prefix);
+        let dp = DeleteParams::default();
+        Self::handle_delete_with_404_ignore(
+            self.secrets_api.delete(&clickhouse_secret_name, &dp).await,
         )?;
 
         Ok(())
@@ -611,6 +659,10 @@ fn create_iceberg_secret_name(prefix: &str) -> String {
     format!("{prefix}-{ICEBERG_SECRET_NAME_SUFFIX}")
 }
 
+fn create_clickhouse_secret_name(prefix: &str) -> String {
+    format!("{prefix}-{CLICKHOUSE_SECRET_NAME_SUFFIX}")
+}
+
 fn create_ducklake_secret_name(prefix: &str) -> String {
     format!("{prefix}-{DUCKLAKE_SECRET_NAME_SUFFIX}")
 }
@@ -660,6 +712,30 @@ fn create_postgres_secret_json(
         "password": encoded_postgres_password,
       }
     })
+}
+
+fn create_clickhouse_password_secret(
+    secret_name: &str,
+    replicator_app_name: &str,
+    clickhouse_password: &str,
+) -> Secret {
+    Secret {
+        metadata: ObjectMeta {
+            name: Some(secret_name.to_owned()),
+            namespace: Some(DATA_PLANE_NAMESPACE.to_owned()),
+            labels: Some(BTreeMap::from([
+                ("etl.supabase.com/app-name".to_owned(), replicator_app_name.to_owned()),
+                ("etl.supabase.com/app-type".to_owned(), REPLICATOR_APP_LABEL.to_owned()),
+            ])),
+            ..ObjectMeta::default()
+        },
+        type_: Some("Opaque".to_owned()),
+        string_data: Some(BTreeMap::from([(
+            CLICKHOUSE_PASSWORD_NAME.to_owned(),
+            clickhouse_password.to_owned(),
+        )])),
+        ..Secret::default()
+    }
 }
 
 fn create_bq_service_account_key_secret_json(
@@ -841,6 +917,19 @@ fn create_container_environment_json(
             let bq_secret_env_var_json = create_bq_secret_env_var_json(&bq_secret_name);
             container_environment.push(bq_secret_env_var_json);
         }
+        DestinationType::ClickHouse { password_secret_required } => {
+            let postgres_secret_name = create_postgres_secret_name(prefix);
+            let postgres_secret_env_var_json =
+                create_postgres_secret_env_var_json(&postgres_secret_name);
+            container_environment.push(postgres_secret_env_var_json);
+
+            if password_secret_required {
+                let clickhouse_secret_name = create_clickhouse_secret_name(prefix);
+                let clickhouse_secret_env_var_json =
+                    create_clickhouse_secret_env_var_json(&clickhouse_secret_name);
+                container_environment.push(clickhouse_secret_env_var_json);
+            }
+        }
         DestinationType::Iceberg => {
             let postgres_secret_name = create_postgres_secret_name(prefix);
             let postgres_secret_env_var_json =
@@ -1017,6 +1106,18 @@ fn create_bq_secret_env_var_json(bq_secret_name: &str) -> serde_json::Value {
         "secretKeyRef": {
           "name": bq_secret_name,
           "key": BQ_SERVICE_ACCOUNT_KEY_NAME
+        }
+      }
+    })
+}
+
+fn create_clickhouse_secret_env_var_json(clickhouse_secret_name: &str) -> serde_json::Value {
+    json!({
+      "name": "APP_DESTINATION__CLICKHOUSE__PASSWORD",
+      "valueFrom": {
+        "secretKeyRef": {
+          "name": clickhouse_secret_name,
+          "key": CLICKHOUSE_PASSWORD_NAME
         }
       }
     })
@@ -1205,6 +1306,15 @@ mod tests {
 
     fn create_k8s_object_prefix(tenant_id: &str, replicator_id: i64) -> String {
         format!("{tenant_id}-{replicator_id}")
+    }
+
+    fn container_environment_has_var(
+        container_environment: &[serde_json::Value],
+        name: &str,
+    ) -> bool {
+        container_environment
+            .iter()
+            .any(|entry| entry.get("name").and_then(serde_json::Value::as_str) == Some(name))
     }
 
     #[test]
@@ -1544,6 +1654,52 @@ mod tests {
             LogLevel::Info,
         );
         assert_json_snapshot!(container_environment);
+    }
+
+    #[test]
+    fn clickhouse_with_password_references_password_secret() {
+        let prefix = create_k8s_object_prefix(TENANT_ID, 42);
+        let replicator_image = "ramsup/etl-replicator:2a41356af735f891de37d71c0e1a62864fe4630e";
+
+        let container_environment = create_container_environment_json(
+            &prefix,
+            &Environment::Dev,
+            replicator_image,
+            DestinationType::ClickHouse { password_secret_required: true },
+            LogLevel::Info,
+        );
+
+        assert!(container_environment_has_var(
+            &container_environment,
+            "APP_PIPELINE__PG_CONNECTION__PASSWORD",
+        ));
+        assert!(container_environment_has_var(
+            &container_environment,
+            "APP_DESTINATION__CLICKHOUSE__PASSWORD",
+        ));
+    }
+
+    #[test]
+    fn passwordless_clickhouse_does_not_reference_missing_password_secret() {
+        let prefix = create_k8s_object_prefix(TENANT_ID, 42);
+        let replicator_image = "ramsup/etl-replicator:2a41356af735f891de37d71c0e1a62864fe4630e";
+
+        let container_environment = create_container_environment_json(
+            &prefix,
+            &Environment::Dev,
+            replicator_image,
+            DestinationType::ClickHouse { password_secret_required: false },
+            LogLevel::Info,
+        );
+
+        assert!(container_environment_has_var(
+            &container_environment,
+            "APP_PIPELINE__PG_CONNECTION__PASSWORD",
+        ));
+        assert!(!container_environment_has_var(
+            &container_environment,
+            "APP_DESTINATION__CLICKHOUSE__PASSWORD",
+        ));
     }
 
     #[test]

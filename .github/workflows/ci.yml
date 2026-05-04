@@ -177,6 +177,9 @@ jobs:
       NUM_LOCAL_DATABASES: 4
       TESTS_DATABASE_USERNAME: postgres
       TESTS_DATABASE_PASSWORD: postgres
+      TESTS_CLICKHOUSE_URL: http://localhost:8123
+      TESTS_CLICKHOUSE_USER: etl
+      TESTS_CLICKHOUSE_PASSWORD: etl
       ETL_DUCKDB_EXTENSION_ROOT: ${{ github.workspace }}/vendor/duckdb/extensions
     steps:
       - name: Checkout

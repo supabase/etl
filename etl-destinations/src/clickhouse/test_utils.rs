@@ -1,0 +1,232 @@
+//! Test utilities for ClickHouse destinations.
+
+use clickhouse::Client;
+use etl::store::{schema::SchemaStore, state::StateStore};
+use tokio::runtime::Handle;
+use url::Url;
+use uuid::Uuid;
+
+use crate::clickhouse::{ClickHouseDestination, ClickHouseInserterConfig};
+
+/// ClickHouse HTTP URL (e.g. `http://localhost:8123`).
+pub const CLICKHOUSE_URL_ENV: &str = "TESTS_CLICKHOUSE_URL";
+/// ClickHouse user name (required).
+pub const CLICKHOUSE_USER_ENV: &str = "TESTS_CLICKHOUSE_USER";
+/// ClickHouse password (optional -- omit or leave empty for passwordless
+/// access).
+pub const CLICKHOUSE_PASSWORD_ENV: &str = "TESTS_CLICKHOUSE_PASSWORD";
+
+/// Returns the ClickHouse HTTP URL from the environment.
+///
+/// # Panics
+///
+/// Panics if [`CLICKHOUSE_URL_ENV`] is not set or is not a valid URL.
+pub fn get_clickhouse_url() -> Url {
+    let value = std::env::var(CLICKHOUSE_URL_ENV)
+        .unwrap_or_else(|_| panic!("{CLICKHOUSE_URL_ENV} must be set"));
+    Url::parse(&value)
+        .unwrap_or_else(|error| panic!("{CLICKHOUSE_URL_ENV} must be a valid URL: {error}"))
+}
+
+/// Returns the ClickHouse user name from the environment.
+///
+/// # Panics
+///
+/// Panics if [`CLICKHOUSE_USER_ENV`] is not set.
+pub fn get_clickhouse_user() -> String {
+    std::env::var(CLICKHOUSE_USER_ENV)
+        .unwrap_or_else(|_| panic!("{CLICKHOUSE_USER_ENV} must be set"))
+}
+
+/// Returns the ClickHouse password from the environment, or `None` if unset.
+pub fn get_clickhouse_password() -> Option<String> {
+    std::env::var(CLICKHOUSE_PASSWORD_ENV).ok().filter(|s| !s.is_empty())
+}
+
+/// Generates a unique database name for test isolation.
+pub fn random_database_name() -> String {
+    format!("etl_tests_{}", Uuid::new_v4().simple())
+}
+
+/// ClickHouse connection for testing.
+///
+/// Wraps a [`Client`] and automatically drops the test database on [`Drop`].
+pub struct ClickHouseTestDatabase {
+    /// Root client (no database selected) used for CREATE/DROP DATABASE.
+    root_client: Client,
+    /// Client scoped to the test database for queries.
+    db_client: Client,
+    url: Url,
+    user: String,
+    password: Option<String>,
+    database: String,
+}
+
+impl ClickHouseTestDatabase {
+    fn new(url: Url, user: String, password: Option<String>, database: String) -> Self {
+        let build_client = |db: Option<&str>| {
+            let mut c = Client::default().with_url(url.as_str()).with_user(&user);
+            if let Some(db) = db {
+                c = c.with_database(db);
+            }
+            if let Some(pw) = &password {
+                c = c.with_password(pw);
+            }
+            c
+        };
+
+        Self {
+            root_client: build_client(None),
+            db_client: build_client(Some(&database)),
+            url,
+            user,
+            password,
+            database,
+        }
+    }
+
+    /// Creates the test database in ClickHouse, retrying on transient errors.
+    pub async fn create_database(&self) {
+        let query = format!("CREATE DATABASE IF NOT EXISTS `{}`", self.database);
+        for attempt in 1..=5 {
+            match self.root_client.query(&query).execute().await {
+                Ok(()) => return,
+                Err(e) if attempt < 5 => {
+                    eprintln!(
+                        "warning: create_database attempt {attempt}/5 failed: {e}, retrying..."
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(200 * attempt)).await;
+                }
+                Err(e) => panic!("Failed to create test ClickHouse database after 5 attempts: {e}"),
+            }
+        }
+    }
+
+    /// Drops the test database from ClickHouse.
+    pub async fn drop_database(&self) {
+        self.root_client
+            .query(&format!("DROP DATABASE IF EXISTS `{}`", self.database))
+            .execute()
+            .await
+            .expect("Failed to drop test ClickHouse database");
+    }
+
+    /// Builds a [`ClickHouseDestination`] scoped to this test database with
+    /// default inserter config (100 MiB per INSERT -- large enough that tests
+    /// never hit an intermediate flush).
+    pub fn build_destination<S>(&self, store: S) -> ClickHouseDestination<S>
+    where
+        S: StateStore + SchemaStore + Send + Sync,
+    {
+        self.build_destination_with_config(
+            store,
+            ClickHouseInserterConfig { max_bytes_per_insert: 100 * 1024 * 1024 },
+        )
+    }
+
+    /// Builds a [`ClickHouseDestination`] scoped to this test database with
+    /// a caller-supplied [`ClickHouseInserterConfig`].
+    pub fn build_destination_with_config<S>(
+        &self,
+        store: S,
+        config: ClickHouseInserterConfig,
+    ) -> ClickHouseDestination<S>
+    where
+        S: StateStore + SchemaStore + Send + Sync,
+    {
+        ClickHouseDestination::new(
+            self.url.clone(),
+            &self.user,
+            self.password.clone(),
+            &self.database,
+            config,
+            store,
+        )
+        .expect("Failed to create ClickHouseDestination for test")
+    }
+
+    /// Fetches all rows from a ClickHouse table using the given SQL query.
+    ///
+    /// `T` must be an owned row type (i.e. `Value<'a> = Self`) and implement
+    /// [`serde::de::DeserializeOwned`]. The caller is responsible for writing a
+    /// SELECT whose columns match `T`'s fields in the correct order.
+    pub async fn query<T>(&self, sql: &str) -> Vec<T>
+    where
+        T: for<'a> clickhouse::Row<Value<'a> = T> + serde::de::DeserializeOwned + 'static,
+    {
+        self.db_client.query(sql).fetch_all::<T>().await.expect("ClickHouse query failed")
+    }
+
+    /// Returns the underlying ClickHouse client for fallible queries.
+    pub fn db_client(&self) -> &Client {
+        &self.db_client
+    }
+
+    /// Returns the column names of a ClickHouse table in position order,
+    /// excluding the CDC columns (`cdc_operation`, `cdc_lsn`).
+    pub async fn column_names(&self, table_name: &str) -> Vec<String> {
+        self.column_types(table_name).await.into_iter().map(|(name, _)| name).collect()
+    }
+
+    /// Returns the column names and ClickHouse type strings in position order,
+    /// excluding the CDC columns (`cdc_operation`, `cdc_lsn`).
+    pub async fn column_types(&self, table_name: &str) -> Vec<(String, String)> {
+        #[derive(clickhouse::Row, serde::Deserialize)]
+        struct Col {
+            name: String,
+            type_name: String,
+        }
+        self.db_client
+            .query(
+                "SELECT name, type AS type_name FROM system.columns WHERE database = ? AND table \
+                 = ? AND name NOT IN ('cdc_operation', 'cdc_lsn') ORDER BY position",
+            )
+            .bind(&self.database)
+            .bind(table_name)
+            .fetch_all::<Col>()
+            .await
+            .expect("failed to query system.columns")
+            .into_iter()
+            .map(|c| (c.name, c.type_name))
+            .collect()
+    }
+}
+
+impl Drop for ClickHouseTestDatabase {
+    fn drop(&mut self) {
+        let root_client = self.root_client.clone();
+        let database = self.database.clone();
+
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            tokio::task::block_in_place(move || {
+                Handle::current().block_on(async move {
+                    if let Err(error) = root_client
+                        .query(&format!("DROP DATABASE IF EXISTS `{database}`"))
+                        .execute()
+                        .await
+                    {
+                        eprintln!("warning: failed to drop test ClickHouse database: {error}");
+                    }
+                });
+            });
+        }));
+    }
+}
+
+/// Creates a fresh, isolated ClickHouse database for a single test.
+///
+/// Reads connection parameters from environment variables:
+/// - [`CLICKHOUSE_URL_ENV`] — required
+/// - [`CLICKHOUSE_USER_ENV`] — required
+/// - [`CLICKHOUSE_PASSWORD_ENV`] — optional
+///
+/// The database is dropped automatically when the returned handle is dropped.
+pub async fn setup_clickhouse_database() -> ClickHouseTestDatabase {
+    let url = get_clickhouse_url();
+    let user = get_clickhouse_user();
+    let password = get_clickhouse_password();
+    let database = random_database_name();
+    let db = ClickHouseTestDatabase::new(url, user, password, database);
+    db.create_database().await;
+    db
+}

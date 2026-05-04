@@ -1,0 +1,242 @@
+use etl::types::{ColumnSchema, Type, is_array_type};
+
+/// Name of the CDC operation metadata column appended to ClickHouse tables.
+pub(crate) const CDC_OPERATION_COLUMN_NAME: &str = "cdc_operation";
+/// Name of the CDC LSN metadata column appended to ClickHouse tables.
+pub(crate) const CDC_LSN_COLUMN_NAME: &str = "cdc_lsn";
+
+/// Returns the base ClickHouse type string for a Postgres scalar type.
+///
+/// The returned string does not include `Nullable(...)` wrapping — callers are
+/// responsible for applying that when the column is nullable. Arrays always use
+/// `Array(Nullable(T))` since Postgres array elements are nullable.
+fn postgres_column_type_to_clickhouse_sql(typ: &Type) -> &'static str {
+    match typ {
+        &Type::BOOL => "Boolean",
+        &Type::CHAR | &Type::BPCHAR | &Type::VARCHAR | &Type::NAME | &Type::TEXT => "String",
+        &Type::INT2 => "Int16",
+        &Type::INT4 => "Int32",
+        &Type::INT8 => "Int64",
+        &Type::FLOAT4 => "Float32",
+        &Type::FLOAT8 => "Float64",
+        &Type::NUMERIC => "String",
+        &Type::DATE => "Date32",
+        &Type::TIME => "String",
+        &Type::TIMESTAMP => "DateTime64(6)",
+        &Type::TIMESTAMPTZ => "DateTime64(6, 'UTC')",
+        &Type::UUID => "UUID",
+        &Type::JSON | &Type::JSONB => "String",
+        &Type::BYTEA => "String",
+        &Type::OID => "UInt32",
+        _ => "String",
+    }
+}
+
+/// Returns the ClickHouse array element type for a Postgres array type.
+fn postgres_array_element_clickhouse_sql(typ: &Type) -> &'static str {
+    match typ {
+        &Type::BOOL_ARRAY => "Boolean",
+        &Type::CHAR_ARRAY
+        | &Type::BPCHAR_ARRAY
+        | &Type::VARCHAR_ARRAY
+        | &Type::NAME_ARRAY
+        | &Type::TEXT_ARRAY => "String",
+        &Type::INT2_ARRAY => "Int16",
+        &Type::INT4_ARRAY => "Int32",
+        &Type::INT8_ARRAY => "Int64",
+        &Type::FLOAT4_ARRAY => "Float32",
+        &Type::FLOAT8_ARRAY => "Float64",
+        &Type::NUMERIC_ARRAY => "String",
+        &Type::DATE_ARRAY => "Date32",
+        &Type::TIME_ARRAY => "String",
+        &Type::TIMESTAMP_ARRAY => "DateTime64(6)",
+        &Type::TIMESTAMPTZ_ARRAY => "DateTime64(6, 'UTC')",
+        &Type::UUID_ARRAY => "UUID",
+        &Type::JSON_ARRAY | &Type::JSONB_ARRAY => "String",
+        &Type::BYTEA_ARRAY => "String",
+        &Type::OID_ARRAY => "UInt32",
+        _ => "String",
+    }
+}
+
+/// Quotes a ClickHouse identifier, escaping embedded double quotes.
+pub(crate) fn quote_identifier(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
+}
+
+/// Returns the full ClickHouse type string for a column, with Nullable
+/// wrapping.
+///
+/// When `force_nullable` is true (ALTER TABLE ADD), all scalar columns become
+/// Nullable since ClickHouse cannot backfill existing rows.
+pub(super) fn clickhouse_column_type(col: &ColumnSchema, force_nullable: bool) -> String {
+    if is_array_type(&col.typ) {
+        let elem = postgres_array_element_clickhouse_sql(&col.typ);
+        format!("Array(Nullable({elem}))")
+    } else {
+        let base = postgres_column_type_to_clickhouse_sql(&col.typ);
+        if col.nullable || force_nullable { format!("Nullable({base})") } else { base.to_owned() }
+    }
+}
+
+/// Generates a `CREATE TABLE IF NOT EXISTS` DDL for the given columns.
+///
+/// Appends `cdc_operation String` and `cdc_lsn UInt64` as trailing non-nullable
+/// columns. Uses `MergeTree()` with `ORDER BY tuple()`.
+pub(super) fn build_create_table_sql<'a, I>(table_name: &str, column_schemas: I) -> String
+where
+    I: IntoIterator<Item = &'a ColumnSchema>,
+    I::IntoIter: ExactSizeIterator,
+{
+    let iter = column_schemas.into_iter();
+    let mut cols = Vec::with_capacity(iter.len() + 2);
+
+    for col in iter {
+        let col_type = clickhouse_column_type(col, false);
+        cols.push(format!("  {} {}", quote_identifier(&col.name), col_type));
+    }
+
+    // CDC columns — always non-nullable
+    cols.push(format!("  {} String", quote_identifier(CDC_OPERATION_COLUMN_NAME)));
+    cols.push(format!("  {} UInt64", quote_identifier(CDC_LSN_COLUMN_NAME)));
+
+    let col_defs = cols.join(",\n");
+    let quoted_table_name = quote_identifier(table_name);
+    format!(
+        "CREATE TABLE IF NOT EXISTS {quoted_table_name} (\n{col_defs}\n) ENGINE = \
+         MergeTree()\nORDER BY tuple()"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quote_identifier_escapes_embedded_quotes() {
+        assert_eq!(quote_identifier("plain"), "\"plain\"");
+        assert_eq!(quote_identifier("has\"quote"), "\"has\"\"quote\"");
+    }
+
+    #[test]
+    fn build_create_table_sql_quotes_identifiers() {
+        let schemas = vec![ColumnSchema {
+            name: "id\"value".to_owned(),
+            typ: Type::INT4,
+            modifier: -1,
+            ordinal_position: 1,
+            primary_key_ordinal_position: Some(1),
+            nullable: false,
+        }];
+        // Pre-encoded table name with embedded quotes to verify the SQL
+        // builder quotes/escapes the identifier itself.
+        let sql = build_create_table_sql("sche\"ma_ta\"ble", &schemas);
+
+        assert!(
+            sql.contains("CREATE TABLE IF NOT EXISTS \"sche\"\"ma_ta\"\"ble\""),
+            "schema-derived table name should be quoted and escaped: {sql}"
+        );
+        assert!(
+            sql.contains("\"id\"\"value\" Int32"),
+            "column name should be quoted and escaped: {sql}"
+        );
+    }
+
+    #[test]
+    fn scalar_type_mapping() {
+        assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::BOOL), "Boolean");
+        assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::CHAR), "String");
+        assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::BPCHAR), "String");
+        assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::VARCHAR), "String");
+        assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::NAME), "String");
+        assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::TEXT), "String");
+        assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::INT2), "Int16");
+        assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::INT4), "Int32");
+        assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::INT8), "Int64");
+        assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::FLOAT4), "Float32");
+        assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::FLOAT8), "Float64");
+        assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::NUMERIC), "String");
+        assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::DATE), "Date32");
+        assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::TIME), "String");
+        assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::TIMESTAMP), "DateTime64(6)");
+        assert_eq!(
+            postgres_column_type_to_clickhouse_sql(&Type::TIMESTAMPTZ),
+            "DateTime64(6, 'UTC')"
+        );
+        assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::UUID), "UUID");
+        assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::JSON), "String");
+        assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::JSONB), "String");
+        assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::BYTEA), "String");
+        assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::OID), "UInt32");
+    }
+
+    #[test]
+    fn array_type_mapping() {
+        assert_eq!(postgres_array_element_clickhouse_sql(&Type::BOOL_ARRAY), "Boolean");
+        assert_eq!(postgres_array_element_clickhouse_sql(&Type::TEXT_ARRAY), "String");
+        assert_eq!(postgres_array_element_clickhouse_sql(&Type::INT4_ARRAY), "Int32");
+        assert_eq!(postgres_array_element_clickhouse_sql(&Type::INT8_ARRAY), "Int64");
+        assert_eq!(postgres_array_element_clickhouse_sql(&Type::FLOAT8_ARRAY), "Float64");
+        assert_eq!(postgres_array_element_clickhouse_sql(&Type::UUID_ARRAY), "UUID");
+        assert_eq!(postgres_array_element_clickhouse_sql(&Type::JSONB_ARRAY), "String");
+    }
+
+    #[test]
+    fn build_create_table_sql_nullable() {
+        let schemas = vec![
+            ColumnSchema {
+                name: "id".to_owned(),
+                typ: Type::INT4,
+                modifier: -1,
+                ordinal_position: 1,
+                primary_key_ordinal_position: Some(1),
+                nullable: false,
+            },
+            ColumnSchema {
+                name: "name".to_owned(),
+                typ: Type::TEXT,
+                modifier: -1,
+                ordinal_position: 2,
+                primary_key_ordinal_position: None,
+                nullable: true,
+            },
+        ];
+        let sql = build_create_table_sql("public_users", &schemas);
+        assert!(sql.contains("\"id\" Int32"), "id should be non-nullable Int32");
+        assert!(sql.contains("\"name\" Nullable(String)"), "name should be Nullable(String)");
+    }
+
+    #[test]
+    fn build_create_table_sql_cdc_columns() {
+        let schemas = vec![ColumnSchema {
+            name: "id".to_owned(),
+            typ: Type::INT4,
+            modifier: -1,
+            ordinal_position: 1,
+            primary_key_ordinal_position: Some(1),
+            nullable: false,
+        }];
+        let sql = build_create_table_sql("public_t", &schemas);
+        assert!(sql.contains("\"cdc_operation\" String"), "cdc_operation should be non-nullable");
+        assert!(sql.contains("\"cdc_lsn\" UInt64"), "cdc_lsn should be non-nullable UInt64");
+        assert!(sql.contains("ENGINE = MergeTree()"));
+        assert!(sql.contains("ORDER BY tuple()"));
+    }
+
+    #[test]
+    fn build_create_table_sql_array_columns() {
+        let schemas = vec![ColumnSchema {
+            name: "tags".to_owned(),
+            typ: Type::TEXT_ARRAY,
+            modifier: -1,
+            ordinal_position: 1,
+            primary_key_ordinal_position: None,
+            nullable: false,
+        }];
+        let sql = build_create_table_sql("public_t", &schemas);
+        assert!(
+            sql.contains("\"tags\" Array(Nullable(String))"),
+            "array columns should always be Array(Nullable(T))"
+        );
+    }
+}

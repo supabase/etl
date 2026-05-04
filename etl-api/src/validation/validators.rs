@@ -4,14 +4,16 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 use etl::store::both::memory::MemoryStore;
-use etl_config::parse_ducklake_url;
+use etl_config::{SerializableSecretString, parse_ducklake_url};
 use etl_destinations::{
     bigquery::BigQueryClient,
+    clickhouse::ClickHouseClient,
     ducklake::{DuckLakeDestination, S3Config as DucklakeS3Config},
     iceberg::{IcebergClient, S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_SECRET_ACCESS_KEY},
 };
 use secrecy::ExposeSecret;
 use sqlx::FromRow;
+use url::Url;
 
 use super::{ValidationContext, ValidationError, ValidationFailure, Validator};
 use crate::configs::{
@@ -630,6 +632,51 @@ impl Validator for BigQueryValidator {
     }
 }
 
+/// Validates Clickhouse destination connectivity and dataset accessibility.
+#[derive(Debug)]
+struct ClickHouseValidator {
+    url: Url,
+    user: String,
+    password: Option<SerializableSecretString>,
+    database: String,
+}
+
+impl ClickHouseValidator {
+    fn new(
+        url: Url,
+        user: String,
+        password: Option<SerializableSecretString>,
+        database: String,
+    ) -> Self {
+        Self { url, user, password, database }
+    }
+}
+
+#[async_trait]
+impl Validator for ClickHouseValidator {
+    async fn validate(
+        &self,
+        _ctx: &ValidationContext,
+    ) -> Result<Vec<ValidationFailure>, ValidationError> {
+        let client = ClickHouseClient::new(
+            self.url.clone(),
+            self.user.clone(),
+            self.password.as_ref().map(|password| password.expose_secret().to_owned()),
+            self.database.clone(),
+        );
+        match client.validate_connectivity().await {
+            Ok(_) => Ok(Vec::new()),
+            Err(_) => Ok(vec![ValidationFailure::critical(
+                "ClickHouse Connection Failed",
+                "Unable to create clickhouse client.\n\nPlease verify:\n(1) The url is valid and \
+                 accessible\n(2) The username is correct\n(3) You set the right password\n(4) You \
+                 set the right database name
+                    ",
+            )]),
+        }
+    }
+}
+
 /// Validates Iceberg destination connectivity.
 #[derive(Debug)]
 struct IcebergValidator {
@@ -874,6 +921,15 @@ impl Validator for DestinationValidator {
                     project_id.clone(),
                     dataset_id.clone(),
                     service_account_key.expose_secret().to_owned(),
+                );
+                validator.validate(ctx).await
+            }
+            FullApiDestinationConfig::ClickHouse { url, user, password, database } => {
+                let validator = ClickHouseValidator::new(
+                    url.clone(),
+                    user.clone(),
+                    password.clone(),
+                    database.clone(),
                 );
                 validator.validate(ctx).await
             }

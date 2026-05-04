@@ -14,7 +14,7 @@ use clap::{Args, ValueEnum};
 const SHARED_PG_FILTER: &str =
     "\
     test(exclusive_) | binary_id(etl::main) | (binary_id(etl-destinations::main) & \
-     test(/^(bigquery_pipeline|ducklake_destination|ducklake_pipeline|iceberg_destination)::/)) | \
+     test(/^(bigquery_pipeline|clickhouse_pipeline|ducklake_destination|ducklake_pipeline|iceberg_destination)::/)) | \
      (binary_id(etl-destinations) & test(/ducklake::core::tests::postgres_backed::/))";
 
 use super::shared::{DEFAULT_BASE_PORT, DEFAULT_PG_SHARD_COUNT};

@@ -16,6 +16,7 @@ use etl_config::{
 };
 use etl_destinations::{
     bigquery::BigQueryDestination,
+    clickhouse::{ClickHouseDestination, ClickHouseInserterConfig},
     ducklake::{DuckLakeDestination, S3Config as DucklakeS3Config},
     iceberg::{
         DestinationNamespace, IcebergClient, IcebergDestination, S3_ACCESS_KEY_ID, S3_ENDPOINT,
@@ -185,6 +186,19 @@ pub(crate) async fn start_replicator_with_config(
                 state_store.clone(),
             )
             .await?;
+
+            let pipeline = Pipeline::new(replicator_config.pipeline, state_store, destination);
+            start_pipeline(pipeline).await?;
+        }
+        DestinationConfig::ClickHouse { url, user, password, database } => {
+            let destination = ClickHouseDestination::new(
+                url.clone(),
+                user,
+                password.as_ref().map(|p| p.expose_secret().to_owned()),
+                database,
+                ClickHouseInserterConfig::default(),
+                state_store.clone(),
+            )?;
 
             let pipeline = Pipeline::new(replicator_config.pipeline, state_store, destination);
             start_pipeline(pipeline).await?;

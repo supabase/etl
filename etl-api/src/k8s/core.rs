@@ -50,6 +50,13 @@ pub enum Secrets {
         /// Google Cloud service account key JSON for BigQuery authentication.
         big_query_service_account_key: String,
     },
+    /// Credentials for ClickHouse destinations.
+    ClickHouse {
+        /// PostgreSQL source database password.
+        postgres_password: String,
+        /// Clickhouse password
+        password: Option<String>,
+    },
     /// Credentials for Iceberg destinations.
     Iceberg {
         /// PostgreSQL source database password.
@@ -234,6 +241,10 @@ fn build_secrets_from_configs(
             s3_access_key_id: s3_access_key_id.expose_secret().to_owned(),
             s3_secret_access_key: s3_secret_access_key.expose_secret().to_owned(),
         },
+        StoredDestinationConfig::ClickHouse { password, .. } => Secrets::ClickHouse {
+            postgres_password,
+            password: password.as_ref().map(|p| p.expose_secret().to_owned()),
+        },
         StoredDestinationConfig::Ducklake { s3_access_key_id, s3_secret_access_key, .. } => {
             Secrets::Ducklake {
                 postgres_password,
@@ -313,6 +324,14 @@ async fn create_or_update_dynamic_replicator_secrets(
                     &s3_secret_access_key,
                 )
                 .await?;
+        }
+        Secrets::ClickHouse { postgres_password, password } => {
+            k8s_client.create_or_update_postgres_secret(prefix, &postgres_password).await?;
+            if let Some(password) = password.as_deref() {
+                k8s_client.create_or_update_clickhouse_secret(prefix, Some(password)).await?;
+            } else {
+                k8s_client.delete_clickhouse_secret(prefix).await?;
+            }
         }
         Secrets::Ducklake { postgres_password, s3_access_key_id, s3_secret_access_key } => {
             k8s_client.create_or_update_postgres_secret(prefix, &postgres_password).await?;
@@ -405,14 +424,12 @@ async fn delete_dynamic_replicator_secrets(
 ) -> Result<(), K8sCoreError> {
     k8s_client.delete_postgres_secret(prefix).await?;
 
-    // Although it won't happen that there are both bq and iceberg secrets at the
-    // same time we delete them both here because the state in the db might not
-    // be the same as that running in the k8s cluster. E.g. if a pipeline is
-    // updated from bq to iceberg or vice-versa then there's a risk of wrong
-    // secret type being attempted for deletion which might leave the actual
-    // secret behind. So for simplicty we just delete both kinds of secrets. The
-    // one which doesn't exist will be safely ignored.
+    // Delete all destination-specific secret types unconditionally. Only one will
+    // exist at a time, but if a pipeline's destination was changed (e.g. BigQuery →
+    // ClickHouse) the old secret type might still be present. Deleting a
+    // non-existent secret is a safe no-op.
     k8s_client.delete_bigquery_secret(prefix).await?;
+    k8s_client.delete_clickhouse_secret(prefix).await?;
     k8s_client.delete_iceberg_secret(prefix).await?;
     k8s_client.delete_ducklake_secret(prefix).await?;
 
@@ -473,6 +490,25 @@ mod tests {
         }
     }
 
+    fn source_config_with_password() -> StoredSourceConfig {
+        StoredSourceConfig {
+            host: "localhost".to_owned(),
+            port: 5432,
+            name: "postgres".to_owned(),
+            username: "postgres".to_owned(),
+            password: Some(SerializableSecretString::from("password".to_owned())),
+        }
+    }
+
+    fn clickhouse_destination_config(password: Option<&str>) -> StoredDestinationConfig {
+        StoredDestinationConfig::ClickHouse {
+            url: "http://localhost:8123".parse().unwrap(),
+            user: "default".to_owned(),
+            password: password.map(ToOwned::to_owned).map(SerializableSecretString::from),
+            database: "default".to_owned(),
+        }
+    }
+
     #[async_trait]
     impl K8sClient for RecordingK8sClient {
         async fn create_or_update_postgres_secret(
@@ -502,6 +538,18 @@ mod tests {
             Ok(())
         }
 
+        async fn create_or_update_clickhouse_secret(
+            &self,
+            prefix: &str,
+            password: Option<&str>,
+        ) -> Result<(), K8sError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("clickhouse:{prefix}:{}", password.unwrap_or("<none>")));
+            Ok(())
+        }
+
         async fn create_or_update_ducklake_secret(
             &self,
             prefix: &str,
@@ -524,6 +572,11 @@ mod tests {
         }
 
         async fn delete_iceberg_secret(&self, _prefix: &str) -> Result<(), K8sError> {
+            Ok(())
+        }
+
+        async fn delete_clickhouse_secret(&self, prefix: &str) -> Result<(), K8sError> {
+            self.calls.lock().unwrap().push(format!("delete-clickhouse:{prefix}"));
             Ok(())
         }
 
@@ -580,6 +633,44 @@ mod tests {
             .expect("failed to inspect pipeline status");
 
         assert!(is_active);
+    }
+
+    #[tokio::test]
+    async fn clickhouse_with_password_creates_password_secret() {
+        let source_config = source_config_with_password();
+        let destination_config = clickhouse_destination_config(Some("clickhouse-password"));
+
+        let secrets = build_secrets_from_configs(&source_config, &destination_config);
+        let client = RecordingK8sClient::default();
+
+        create_or_update_dynamic_replicator_secrets(&client, "tenant-42", secrets).await.unwrap();
+
+        assert_eq!(
+            client.calls(),
+            vec![
+                "postgres:tenant-42:password".to_owned(),
+                "clickhouse:tenant-42:clickhouse-password".to_owned(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn passwordless_clickhouse_deletes_any_stale_password_secret() {
+        let source_config = source_config_with_password();
+        let destination_config = clickhouse_destination_config(None);
+
+        let secrets = build_secrets_from_configs(&source_config, &destination_config);
+        let client = RecordingK8sClient::default();
+
+        create_or_update_dynamic_replicator_secrets(&client, "tenant-42", secrets).await.unwrap();
+
+        assert_eq!(
+            client.calls(),
+            vec![
+                "postgres:tenant-42:password".to_owned(),
+                "delete-clickhouse:tenant-42".to_owned(),
+            ]
+        );
     }
 
     #[tokio::test]

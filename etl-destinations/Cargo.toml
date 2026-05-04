@@ -49,6 +49,16 @@ iceberg = [
     "dep:serde",
     "dep:serde_json",
 ]
+clickhouse = [
+    "dep:clickhouse",
+    "dep:metrics",
+    "dep:tracing",
+    "dep:tokio",
+    "dep:serde",
+    "dep:futures",
+    "dep:parking_lot",
+    "dep:url",
+]
 egress = ["etl/egress"]
 # We assume that `test-utils` is always used in conjunction with `bigquery` or `iceberg` thus we only
 # put here the extra dependencies needed.
@@ -59,8 +69,10 @@ test-utils = ["dep:uuid"]
 arrow = { workspace = true, optional = true }
 async-trait = { workspace = true, optional = true }
 chrono = { workspace = true }
+clickhouse = { workspace = true, optional = true, features = ["inserter", "lz4", "rustls-tls"] }
 duckdb = { workspace = true, optional = true, features = ["bundled", "json", "parquet", "r2d2"] }
 etl = { workspace = true }
+futures = { workspace = true, optional = true }
 gcp-bigquery-client = { workspace = true, optional = true, features = ["rust-tls", "aws-lc-rs"] }
 iceberg = { workspace = true, optional = true }
 iceberg-catalog-rest = { workspace = true, optional = true }
@@ -94,7 +106,7 @@ etl-telemetry = { workspace = true }
 futures = { workspace = true }
 rand = { workspace = true, features = ["thread_rng"] }
 rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
-serde = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full"] }

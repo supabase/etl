@@ -66,10 +66,10 @@ The fastest way to get started is using the setup script:
 ```
 
 This script will:
-1. Start PostgreSQL via Docker Compose
-2. Run etl-api migrations
-3. Seed the default replicator image
-4. Configure the Kubernetes environment (OrbStack)
+1. Start PostgreSQL, ClickHouse, and the local Iceberg dependencies via Docker Compose.
+2. Run etl-api migrations.
+3. Seed the default replicator image.
+4. Configure the Kubernetes environment (OrbStack).
 
 ## Database Setup
 
@@ -100,11 +100,18 @@ POSTGRES_DATA_VOLUME=/path/to/data ./scripts/init.sh
 | `POSTGRES_DB` | `postgres` | Database name |
 | `POSTGRES_PORT` | `5430` | Database port |
 | `POSTGRES_HOST` | `localhost` | Database host |
+| `CLICKHOUSE_HTTP_PORT` | `8123` | ClickHouse HTTP port |
+| `CLICKHOUSE_NATIVE_PORT` | `9000` | ClickHouse native TCP port |
+| `CLICKHOUSE_USER` | `etl` | ClickHouse user for the local Docker Compose setup |
+| `CLICKHOUSE_PASSWORD` | `etl` | ClickHouse password for the local Docker Compose setup |
 | `SKIP_DOCKER` | (empty) | Skip Docker Compose if set |
-| `POSTGRES_DATA_VOLUME` | (empty) | Path for persistent storage |
+| `POSTGRES_DATA_VOLUME` | (empty) | Path for PostgreSQL persistent storage |
+| `CLICKHOUSE_DATA_VOLUME` | (empty) | Path for ClickHouse persistent storage |
 | `REPLICATOR_IMAGE` | `ramsup/etl-replicator:latest` | Default replicator image |
 
 PostgreSQL 18+ containers store data under `/var/lib/postgresql/<major>/data`, so the Docker Compose setup mounts the parent `/var/lib/postgresql` directory to keep upgrades compatible.
+
+The same Docker Compose stack also starts ClickHouse on `http://localhost:8123` by default, which is enough for local destination development and ClickHouse integration tests.
 
 ### Manual Setup
 
@@ -369,6 +376,18 @@ Iceberg destination tests use local MinIO and Lakekeeper instances. The followin
 
 **Note:** Iceberg tests are only run when the `iceberg` and `test-utils` features are enabled. These use hardcoded local URLs and do not require environment variables.
 
+#### ClickHouse Test Variables
+
+ClickHouse destination tests require a reachable ClickHouse HTTP endpoint:
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `TESTS_CLICKHOUSE_URL` | **Yes** | ClickHouse HTTP URL (for example, `http://localhost:8123`) |
+| `TESTS_CLICKHOUSE_USER` | **Yes** | ClickHouse user name (for the local Docker Compose setup, use `etl`) |
+| `TESTS_CLICKHOUSE_PASSWORD` | No | ClickHouse password; for the local Docker Compose setup, use `etl` |
+
+**Note:** ClickHouse tests are only run when the `clickhouse` and `test-utils` features are enabled. Each test creates a unique database in ClickHouse and drops it automatically when the test finishes. The Docker Compose setup started by `./scripts/init.sh` is sufficient for these tests.
+
 #### Test Output and Logging
 
 | Variable | Description |
@@ -407,6 +426,11 @@ export TESTS_DATABASE_PASSWORD=postgres
 export TESTS_BIGQUERY_PROJECT_ID=your-gcp-project-id
 export TESTS_BIGQUERY_SA_KEY_PATH=/path/to/service-account-key.json
 
+# ClickHouse test configuration (optional - only needed for ClickHouse tests)
+export TESTS_CLICKHOUSE_URL=http://localhost:8123
+export TESTS_CLICKHOUSE_USER=etl
+export TESTS_CLICKHOUSE_PASSWORD=etl
+
 # Enable test output (optional)
 export ENABLE_TRACING=1
 export RUST_LOG=info
@@ -431,6 +455,11 @@ TESTS_DATABASE_PASSWORD=postgres
 # BigQuery (optional - only for BigQuery tests)
 TESTS_BIGQUERY_PROJECT_ID=your-gcp-project-id
 TESTS_BIGQUERY_SA_KEY_PATH=/path/to/service-account-key.json
+
+# ClickHouse (optional - only for ClickHouse tests)
+TESTS_CLICKHOUSE_URL=http://localhost:8123
+TESTS_CLICKHOUSE_USER=etl
+TESTS_CLICKHOUSE_PASSWORD=etl
 
 # Test output (optional)
 ENABLE_TRACING=1
@@ -462,6 +491,9 @@ TESTS_DATABASE_HOST=localhost TESTS_DATABASE_PORT=5430 TESTS_DATABASE_USERNAME=p
 
 # Run tests with tracing output for debugging
 TESTS_DATABASE_HOST=localhost TESTS_DATABASE_PORT=5430 TESTS_DATABASE_USERNAME=postgres TESTS_DATABASE_PASSWORD=postgres ENABLE_TRACING=1 RUST_LOG=info cargo test -p etl-api --test tenants tenant_can_be_created -- --nocapture
+
+# Run the ClickHouse destination integration test against the local Docker Compose service
+TESTS_DATABASE_HOST=localhost TESTS_DATABASE_PORT=5430 TESTS_DATABASE_USERNAME=postgres TESTS_DATABASE_PASSWORD=postgres TESTS_CLICKHOUSE_URL=http://localhost:8123 TESTS_CLICKHOUSE_USER=etl TESTS_CLICKHOUSE_PASSWORD=etl cargo test -p etl-destinations --features clickhouse,test-utils clickhouse_pipeline -- --nocapture
 ```
 
 **Packages requiring `--features test-utils`:**

@@ -92,6 +92,14 @@ impl K8sClient for MockK8sClient {
         Ok(())
     }
 
+    async fn create_or_update_clickhouse_secret(
+        &self,
+        _prefix: &str,
+        _password: Option<&str>,
+    ) -> Result<(), K8sError> {
+        Ok(())
+    }
+
     async fn create_or_update_iceberg_secret(
         &self,
         _prefix: &str,
@@ -113,6 +121,10 @@ impl K8sClient for MockK8sClient {
     }
 
     async fn delete_postgres_secret(&self, _prefix: &str) -> Result<(), K8sError> {
+        Ok(())
+    }
+
+    async fn delete_clickhouse_secret(&self, _prefix: &str) -> Result<(), K8sError> {
         Ok(())
     }
 

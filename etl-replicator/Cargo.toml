@@ -16,7 +16,7 @@ egress = ["etl/egress", "etl-destinations/egress"]
 configcat = { workspace = true }
 etl = { workspace = true }
 etl-config = { workspace = true, features = ["supabase"] }
-etl-destinations = { workspace = true, features = ["bigquery", "iceberg", "ducklake"] }
+etl-destinations = { workspace = true, features = ["bigquery", "clickhouse", "ducklake", "iceberg"] }
 etl-telemetry = { workspace = true }
 metrics = { workspace = true }
 reqwest = { workspace = true, features = ["rustls-tls", "json"] }
@@ -25,7 +25,7 @@ secrecy = { workspace = true }
 sentry = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-sqlx = { workspace = true, features = ["runtime-tokio-rustls", "postgres"] }
+sqlx = { workspace = true, features = ["runtime-tokio-rustls", "postgres", "migrate"] }
 
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
 tracing = { workspace = true, default-features = true }

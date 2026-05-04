@@ -45,6 +45,12 @@ pub enum DestinationType {
     BigQuery,
     /// Apache Iceberg destination.
     Iceberg,
+    /// ClickHouse destination.
+    ClickHouse {
+        /// Whether the StatefulSet must reference the ClickHouse password
+        /// secret.
+        password_secret_required: bool,
+    },
     /// DuckLake destination.
     Ducklake,
 }
@@ -55,6 +61,9 @@ impl From<&StoredDestinationConfig> for DestinationType {
         match value {
             StoredDestinationConfig::BigQuery { .. } => DestinationType::BigQuery,
             StoredDestinationConfig::Iceberg { .. } => DestinationType::Iceberg,
+            StoredDestinationConfig::ClickHouse { password, .. } => {
+                DestinationType::ClickHouse { password_secret_required: password.is_some() }
+            }
             StoredDestinationConfig::Ducklake { .. } => DestinationType::Ducklake,
         }
     }
@@ -140,6 +149,13 @@ pub trait K8sClient: Send + Sync {
         bq_service_account_key: &str,
     ) -> Result<(), K8sError>;
 
+    /// Creates or updates the ClickHouse password secret for a replicator.
+    async fn create_or_update_clickhouse_secret(
+        &self,
+        prefix: &str,
+        password: Option<&str>,
+    ) -> Result<(), K8sError>;
+
     /// Creates or updates the Iceberg credentials secret for a replicator.
     ///
     /// The secret contains the catalog token, S3 access key ID, and S3 secret
@@ -167,6 +183,11 @@ pub trait K8sClient: Send + Sync {
     ///
     /// Does nothing if the secret does not exist.
     async fn delete_postgres_secret(&self, prefix: &str) -> Result<(), K8sError>;
+
+    /// Deletes the ClickHouse credentials for a replicator.
+    ///
+    /// Does nothing if the secret does not exist.
+    async fn delete_clickhouse_secret(&self, prefix: &str) -> Result<(), K8sError>;
 
     /// Deletes the BigQuery service account secret for a replicator.
     ///

@@ -1,0 +1,2313 @@
+use std::{sync::Once, time::Duration};
+
+use etl::{
+    state::table::TableReplicationPhaseType,
+    store::state::StateStore,
+    test_utils::{
+        database::{spawn_source_database, test_table_name},
+        notifying_store::NotifyingStore,
+        pipeline::create_pipeline,
+    },
+    types::PipelineId,
+};
+use etl_destinations::clickhouse::{
+    ClickHouseInserterConfig,
+    client::ClickHouseClient,
+    test_utils::{
+        ClickHouseTestDatabase, get_clickhouse_password, get_clickhouse_url, get_clickhouse_user,
+        setup_clickhouse_database,
+    },
+};
+use etl_postgres::tokio::test_utils::TableModification;
+use etl_telemetry::tracing::init_test_tracing;
+use rand::random;
+use tokio::time::sleep;
+use url::Url;
+
+use crate::support::clickhouse::{AllTypesRow, BoundaryValuesRow, DateBoundariesRow};
+
+/// Ensures the rustls crypto provider is only installed once across all tests.
+static INIT_CRYPTO: Once = Once::new();
+
+fn install_crypto_provider() {
+    INIT_CRYPTO.call_once(|| {
+        rustls::crypto::aws_lc_rs::default_provider()
+            .install_default()
+            .expect("failed to install default crypto provider");
+    });
+}
+
+/// SELECT query that fetches all verified columns from the ClickHouse table.
+///
+/// `uuid_col` is projected via `toString()` because the ClickHouse UUID
+/// RowBinary wire format does not directly map to a Rust `String`; `toString()`
+/// gives us the canonical `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` string form.
+///
+/// All other columns are read with their native ClickHouse types:
+/// - `Date`          -> u16  (days since 1970-01-01)
+/// - `DateTime64(6)` -> i64  (microseconds since epoch)
+/// - `Array(Nullable(T))` -> `Vec<Option<T>>`
+const ALL_TYPES_SELECT: &str = concat!(
+    "SELECT ",
+    "id, smallint_col, integer_col, bigint_col, real_col, double_col, ",
+    "numeric_col, boolean_col, text_col, varchar_col, ",
+    "date_col, timestamp_col, timestamptz_col, time_col, interval_col, ",
+    "jsonb_col, json_col, integer_array_col, text_array_col, ",
+    "bytea_col, inet_col, cidr_col, macaddr_col, ",
+    "toString(uuid_col) AS uuid_col, ",
+    "cdc_operation ",
+    "FROM \"test_all__types__encoding\" ",
+    "ORDER BY id",
+);
+
+/// A row read back from the ClickHouse `update_flow` test table.
+#[derive(clickhouse::Row, serde::Deserialize, Debug)]
+struct UpdateFlowRow {
+    id: i64,
+    value: String,
+    cdc_operation: String,
+    cdc_lsn: u64,
+}
+
+/// SELECT query used to verify the `update_flow` streaming test.
+const UPDATE_FLOW_SELECT: &str = concat!(
+    "SELECT id, value, cdc_operation, cdc_lsn ",
+    "FROM \"test_update__flow\" ",
+    "ORDER BY id, cdc_lsn",
+);
+
+/// SELECT query used to verify the `delete_flow` streaming test.
+const DELETE_FLOW_SELECT: &str = concat!(
+    "SELECT id, value, cdc_operation, cdc_lsn ",
+    "FROM \"test_delete__flow\" ",
+    "ORDER BY id, cdc_lsn",
+);
+
+/// SELECT query used to verify the `restart_flow` test.
+const RESTART_FLOW_SELECT: &str = concat!(
+    "SELECT id, value, cdc_operation, cdc_lsn ",
+    "FROM \"test_restart__flow\" ",
+    "ORDER BY id, cdc_lsn",
+);
+
+/// SELECT query used to verify the `truncate_flow` test.
+const TRUNCATE_FLOW_SELECT: &str = concat!(
+    "SELECT id, value, cdc_operation, cdc_lsn ",
+    "FROM \"test_truncate__flow\" ",
+    "ORDER BY id, cdc_lsn",
+);
+
+/// Days from 1970-01-01 to 2024-01-15 (used to verify the `date_col`
+/// round-trip).
+///
+/// Python: `(date(2024, 1, 15) - date(1970, 1, 1)).days` = 19737
+const DATE_2024_01_15_DAYS: i32 = 19737;
+
+/// Microseconds from epoch for `2024-01-15 12:00:00 UTC`.
+const TS_2024_01_15_12_00_US: i64 = 1_705_320_000_000_000;
+
+/// Waits until ClickHouse returns at least `expected_rows` from
+/// `UPDATE_FLOW_SELECT`.
+async fn wait_for_update_flow_rows(
+    clickhouse_db: &ClickHouseTestDatabase,
+    expected_rows: usize,
+) -> Vec<UpdateFlowRow> {
+    let mut rows: Vec<UpdateFlowRow> = Vec::with_capacity(expected_rows);
+    for _ in 0..50 {
+        rows = clickhouse_db.query(UPDATE_FLOW_SELECT).await;
+        if rows.len() >= expected_rows {
+            return rows;
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+
+    panic!(
+        "timed out waiting for clickhouse update_flow rows: got {} of {}",
+        rows.len(),
+        expected_rows,
+    );
+}
+
+/// Waits until ClickHouse returns at least `expected_rows` from
+/// `DELETE_FLOW_SELECT`.
+async fn wait_for_delete_flow_rows(
+    clickhouse_db: &ClickHouseTestDatabase,
+    expected_rows: usize,
+) -> Vec<UpdateFlowRow> {
+    let mut rows: Vec<UpdateFlowRow> = Vec::with_capacity(expected_rows);
+    for _ in 0..50 {
+        rows = clickhouse_db.query(DELETE_FLOW_SELECT).await;
+        if rows.len() >= expected_rows {
+            return rows;
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+
+    panic!(
+        "timed out waiting for clickhouse delete_flow rows: got {} of {}",
+        rows.len(),
+        expected_rows,
+    );
+}
+
+/// Waits until ClickHouse returns at least `expected_rows` from
+/// `RESTART_FLOW_SELECT`.
+async fn wait_for_restart_flow_rows(
+    clickhouse_db: &ClickHouseTestDatabase,
+    expected_rows: usize,
+) -> Vec<UpdateFlowRow> {
+    let mut rows: Vec<UpdateFlowRow> = Vec::with_capacity(expected_rows);
+    for _ in 0..50 {
+        rows = clickhouse_db.query(RESTART_FLOW_SELECT).await;
+        if rows.len() >= expected_rows {
+            return rows;
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+
+    panic!(
+        "timed out waiting for clickhouse restart_flow rows: got {} of {}",
+        rows.len(),
+        expected_rows,
+    );
+}
+
+/// Waits until ClickHouse returns exactly zero rows from
+/// `TRUNCATE_FLOW_SELECT`.
+async fn wait_for_truncate_flow_empty(clickhouse_db: &ClickHouseTestDatabase) {
+    for _ in 0..50 {
+        let rows: Vec<UpdateFlowRow> = clickhouse_db.query(TRUNCATE_FLOW_SELECT).await;
+        if rows.is_empty() {
+            return;
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+
+    panic!("timed out waiting for clickhouse truncate_flow table to become empty");
+}
+
+/// Waits until ClickHouse returns at least `expected_rows` from
+/// `TRUNCATE_FLOW_SELECT`.
+async fn wait_for_truncate_flow_rows(
+    clickhouse_db: &ClickHouseTestDatabase,
+    expected_rows: usize,
+) -> Vec<UpdateFlowRow> {
+    let mut rows: Vec<UpdateFlowRow> = Vec::with_capacity(expected_rows);
+    for _ in 0..50 {
+        rows = clickhouse_db.query(TRUNCATE_FLOW_SELECT).await;
+        if rows.len() >= expected_rows {
+            return rows;
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+
+    panic!(
+        "timed out waiting for clickhouse truncate_flow rows: got {} of {}",
+        rows.len(),
+        expected_rows,
+    );
+}
+
+/// Tests that all Postgres column types (including nullable arrays) round-trip
+/// correctly through the ClickHouse RowBinary encoding.
+///
+/// # GIVEN
+///
+/// A Postgres table covering every supported column type -- scalars (integers,
+/// floats, numeric, boolean, text, varchar, date, timestamp, timestamptz, time,
+/// interval, jsonb, json, bytea, inet, cidr, macaddr, uuid) and nullable array
+/// columns (`integer[]`, `text[]`). Two rows are inserted before the pipeline
+/// starts:
+///
+/// 1. Positive/typical values with **empty** arrays.
+/// 2. Boundary values (min-ints, negative floats) with **non-empty** arrays.
+///
+/// # WHEN
+///
+/// The pipeline runs initial table copy from Postgres to ClickHouse.
+///
+/// # THEN
+///
+/// Every column round-trips correctly:
+/// - Scalars match their inserted values exactly (floats within epsilon).
+/// - Empty arrays remain empty; non-empty arrays preserve elements.
+/// - Both rows have `cdc_operation = "INSERT"`.
+///
+/// # Regression
+///
+/// Row 2's non-empty arrays specifically catch the nullable-array encoding bug
+/// where `nullable_flags[i] = true` for array columns caused
+/// `rb_encode_nullable` to prepend an extra null-indicator byte. ClickHouse
+/// read that byte as `varint(0)` (empty array) and then parsed the actual
+/// element bytes as subsequent column data, failing with "Cannot read all data"
+/// at row 2.
+#[tokio::test(flavor = "multi_thread")]
+async fn all_types_table_copy() {
+    init_test_tracing();
+    install_crypto_provider();
+
+    // --- GIVEN: Postgres source with all supported column types ---
+    let database = spawn_source_database().await;
+    let table_name = test_table_name("all_types_encoding");
+
+    let table_id = database
+        .create_table(
+            table_name.clone(),
+            true, // add serial primary key
+            &[
+                // Scalar types
+                ("smallint_col", "smallint not null"),
+                ("integer_col", "integer not null"),
+                ("bigint_col", "bigint not null"),
+                ("real_col", "real not null"),
+                ("double_col", "double precision not null"),
+                ("numeric_col", "numeric(10,2) not null"),
+                ("boolean_col", "boolean not null"),
+                ("text_col", "text not null"),
+                ("varchar_col", "varchar(100) not null"),
+                ("date_col", "date not null"),
+                ("timestamp_col", "timestamp not null"),
+                ("timestamptz_col", "timestamptz not null"),
+                ("time_col", "time not null"),
+                ("interval_col", "interval not null"),
+                ("jsonb_col", "jsonb not null"),
+                ("json_col", "json not null"),
+                // Nullable array columns (key for the regression test).
+                // These are intentionally nullable so that nullable_flags[i] would
+                // have been set to `true` before the fix, triggering the bug.
+                ("integer_array_col", "integer[]"),
+                ("text_array_col", "text[]"),
+                // Other types
+                ("bytea_col", "bytea not null"),
+                ("inet_col", "inet not null"),
+                ("cidr_col", "cidr not null"),
+                ("macaddr_col", "macaddr not null"),
+                ("uuid_col", "uuid not null"),
+            ],
+        )
+        .await
+        .expect("Failed to create test table");
+
+    let publication_name = "test_pub_clickhouse";
+    database
+        .create_publication(publication_name, std::slice::from_ref(&table_name))
+        .await
+        .expect("Failed to create publication");
+
+    // Row 1: empty arrays.  With the old encoding bug, this accidentally
+    //        produced valid RowBinary because `0x00` (null-indicator) ==
+    //        varint(0) == empty array.
+    database
+        .run_sql(&format!(
+            r#"INSERT INTO {table} (
+                smallint_col, integer_col, bigint_col,
+                real_col, double_col, numeric_col, boolean_col,
+                text_col, varchar_col,
+                date_col, timestamp_col, timestamptz_col,
+                time_col, interval_col, jsonb_col, json_col,
+                integer_array_col, text_array_col,
+                bytea_col, inet_col, cidr_col, macaddr_col, uuid_col
+            ) VALUES (
+                42, 1000, 9999999,
+                1.5, 2.5, 12345.67, true,
+                'hello text', 'hello varchar',
+                '2024-01-15', '2024-01-15 12:00:00', '2024-01-15 12:00:00+00',
+                '14:30:00', '1 day',
+                '{{"key":"value"}}', '{{"simple":42}}',
+                ARRAY[]::integer[], ARRAY[]::text[],
+                '\xdeadbeef',
+                '192.168.1.1', '192.168.0.0/16', 'aa:bb:cc:dd:ee:ff',
+                'f47ac10b-58cc-4372-a567-0e02b2c3d479'
+            )"#,
+            table = table_name.as_quoted_identifier(),
+        ))
+        .await
+        .expect("Failed to insert row 1");
+
+    // Row 2: NON-EMPTY arrays.  With the old encoding bug, this row caused
+    //        ClickHouse to fail with "Cannot read all data" because the extra
+    //        null-indicator byte caused the entire RowBinary stream to be
+    //        mis-aligned after the array column.
+    database
+        .run_sql(&format!(
+            r#"INSERT INTO {table} (
+                smallint_col, integer_col, bigint_col,
+                real_col, double_col, numeric_col, boolean_col,
+                text_col, varchar_col,
+                date_col, timestamp_col, timestamptz_col,
+                time_col, interval_col, jsonb_col, json_col,
+                integer_array_col, text_array_col,
+                bytea_col, inet_col, cidr_col, macaddr_col, uuid_col
+            ) VALUES (
+                -32768, -2147483648, -9223372036854775808,
+                -1.5, -2.5, -99999.99, false,
+                'world text', 'world varchar',
+                '2024-01-15', '2024-01-15 12:00:00', '2024-01-15 12:00:00+00',
+                '00:00:01', '30 days 23 hours',
+                '{{"arr":[1,2,3]}}', '{{"n":0}}',
+                ARRAY[1, 2, 3]::integer[], ARRAY['alpha', 'beta']::text[],
+                '\xcafebabe',
+                '10.0.0.1', '10.0.0.0/8', 'ff:ee:dd:cc:bb:aa',
+                'a1b2c3d4-e5f6-7890-abcd-ef1234567890'
+            )"#,
+            table = table_name.as_quoted_identifier(),
+        ))
+        .await
+        .expect("Failed to insert row 2");
+
+    // --- WHEN: pipeline copies data to ClickHouse ---
+    let clickhouse_db = setup_clickhouse_database().await;
+    let store = NotifyingStore::new();
+    let pipeline_id: PipelineId = random();
+    let destination = clickhouse_db.build_destination(store.clone());
+
+    let table_ready =
+        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
+
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name.to_owned(),
+        store.clone(),
+        destination,
+    );
+
+    pipeline.start().await.unwrap();
+    table_ready.notified().await;
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // --- THEN: every column round-trips correctly ---
+    let rows: Vec<AllTypesRow> = clickhouse_db.query(ALL_TYPES_SELECT).await;
+
+    assert_eq!(rows.len(), 2, "expected 2 rows in ClickHouse");
+
+    // Row 1: positive/typical values, empty arrays.
+    let r1 = &rows[0];
+    assert_eq!(r1.id, 1);
+    assert_eq!(r1.smallint_col, 42);
+    assert_eq!(r1.integer_col, 1000);
+    assert_eq!(r1.bigint_col, 9_999_999);
+    assert!((r1.real_col - 1.5_f32).abs() < 1e-3, "real_col mismatch");
+    assert!((r1.double_col - 2.5_f64).abs() < 1e-6, "double_col mismatch");
+    assert_eq!(r1.numeric_col, "12345.67");
+    assert!(r1.boolean_col);
+    assert_eq!(r1.text_col, "hello text");
+    assert_eq!(r1.varchar_col, "hello varchar");
+    assert_eq!(r1.date_col, DATE_2024_01_15_DAYS, "date round-trip failed");
+    assert_eq!(r1.timestamp_col, TS_2024_01_15_12_00_US, "timestamp round-trip failed");
+    assert_eq!(r1.timestamptz_col, TS_2024_01_15_12_00_US, "timestamptz round-trip failed");
+    assert_eq!(r1.time_col, "14:30:00");
+    assert_eq!(r1.bytea_col, "deadbeef");
+    assert_eq!(r1.inet_col, "192.168.1.1");
+    assert_eq!(r1.cidr_col, "192.168.0.0/16");
+    assert_eq!(r1.macaddr_col, "aa:bb:cc:dd:ee:ff");
+    assert_eq!(r1.uuid_col.to_lowercase(), "f47ac10b-58cc-4372-a567-0e02b2c3d479");
+    assert_eq!(r1.cdc_operation, "INSERT");
+    // Empty arrays -- the regression case that accidentally worked before the fix.
+    assert_eq!(
+        r1.integer_array_col,
+        Vec::<Option<i32>>::new(),
+        "row 1 integer_array_col should be empty"
+    );
+    assert_eq!(
+        r1.text_array_col,
+        Vec::<Option<String>>::new(),
+        "row 1 text_array_col should be empty"
+    );
+
+    // Row 2: boundary values, non-empty arrays (the regression case).
+    let r2 = &rows[1];
+    assert_eq!(r2.id, 2);
+    assert_eq!(r2.smallint_col, -32768);
+    assert_eq!(r2.integer_col, -2_147_483_648);
+    assert_eq!(r2.bigint_col, i64::MIN);
+    assert!(!r2.boolean_col);
+    assert_eq!(r2.numeric_col, "-99999.99");
+    assert_eq!(r2.bytea_col, "cafebabe");
+    assert_eq!(r2.uuid_col.to_lowercase(), "a1b2c3d4-e5f6-7890-abcd-ef1234567890");
+    assert_eq!(r2.cdc_operation, "INSERT");
+    // Non-empty arrays -- the regression case that triggered the bug before the
+    // fix.
+    assert_eq!(
+        r2.integer_array_col,
+        vec![Some(1), Some(2), Some(3)],
+        "row 2 integer_array_col mismatch -- nullable-array encoding bug likely present"
+    );
+    assert_eq!(
+        r2.text_array_col,
+        vec![Some("alpha".to_owned()), Some("beta".to_owned())],
+        "row 2 text_array_col mismatch -- nullable-array encoding bug likely present"
+    );
+}
+
+/// Tests that UPDATE events are streamed to ClickHouse after initial table
+/// copy.
+///
+/// # GIVEN
+///
+/// A Postgres table with a single row (`id=1, value='before'`).
+///
+/// # WHEN
+///
+/// The pipeline copies the row, then an `UPDATE ... SET value = 'after'` is
+/// issued against Postgres.
+///
+/// # THEN
+///
+/// ClickHouse contains two rows (append-only CDC):
+/// - The original `INSERT` from table copy with `cdc_lsn = 0`.
+/// - The streamed `UPDATE` with the new value and a positive LSN.
+#[tokio::test(flavor = "multi_thread")]
+async fn updates_are_streamed_to_clickhouse() {
+    init_test_tracing();
+    install_crypto_provider();
+
+    // --- GIVEN: Postgres source with one row ---
+    let database = spawn_source_database().await;
+    let table_name = test_table_name("update_flow");
+
+    let table_id = database
+        .create_table(table_name.clone(), true, &[("value", "text not null")])
+        .await
+        .expect("Failed to create update_flow test table");
+
+    let publication_name = "test_pub_clickhouse_updates";
+    database
+        .create_publication(publication_name, std::slice::from_ref(&table_name))
+        .await
+        .expect("Failed to create update_flow publication");
+
+    database
+        .run_sql(&format!(
+            "INSERT INTO {} (value) VALUES ('before')",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .expect("Failed to insert initial update_flow row");
+
+    // --- WHEN: pipeline copies data, then an UPDATE is streamed ---
+    let clickhouse_db = setup_clickhouse_database().await;
+    let store = NotifyingStore::new();
+    let pipeline_id: PipelineId = random();
+    let destination = clickhouse_db.build_destination(store.clone());
+
+    let table_ready =
+        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
+
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name.to_owned(),
+        store,
+        destination,
+    );
+
+    pipeline.start().await.unwrap();
+    table_ready.notified().await;
+
+    database
+        .run_sql(&format!(
+            "UPDATE {} SET value = 'after' WHERE id = 1",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .expect("Failed to update update_flow row");
+
+    let rows = wait_for_update_flow_rows(&clickhouse_db, 2).await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // --- THEN: one INSERT from table copy, one UPDATE from streaming ---
+    assert_eq!(rows.len(), 2, "expected copied row plus streamed update");
+
+    let insert_row = &rows[0];
+    assert_eq!(insert_row.id, 1);
+    assert_eq!(insert_row.value, "before");
+    assert_eq!(insert_row.cdc_operation, "INSERT");
+    assert_eq!(insert_row.cdc_lsn, 0);
+
+    let update_row = &rows[1];
+    assert_eq!(update_row.id, 1);
+    assert_eq!(update_row.value, "after");
+    assert_eq!(update_row.cdc_operation, "UPDATE");
+    assert!(update_row.cdc_lsn > insert_row.cdc_lsn, "streamed update should have a positive LSN");
+}
+
+const BOUNDARY_VALUES_SELECT: &str = concat!(
+    "SELECT id, nullable_text, nullable_int, ",
+    "int_array_col, text_array_col, ",
+    "cdc_operation ",
+    "FROM \"test_boundary__values\" ",
+    "ORDER BY id",
+);
+
+/// Tests that edge-case values survive the Postgres -> ClickHouse pipeline
+/// without data loss or corruption.
+///
+/// # GIVEN
+///
+/// A Postgres table with nullable scalar columns and nullable array columns,
+/// populated with four rows that exercise encoding boundary conditions:
+///
+/// 1. **All NULLs** -- nullable scalars are NULL, arrays are empty.
+/// 2. **NULL elements inside arrays** -- `{1, NULL, 3}`, `{'a', NULL, 'c'}`.
+/// 3. **Empty strings** -- a present-but-empty text value next to a NULL
+///    integer, plus single-element arrays (varint length = 1).
+/// 4. **Multi-byte UTF-8** -- emoji and CJK characters, verifying that the
+///    RowBinary varint encodes byte length (not character count) correctly.
+///
+/// # WHEN
+///
+/// The pipeline runs initial table copy from Postgres to ClickHouse.
+///
+/// # THEN
+///
+/// Every row in ClickHouse exactly matches what was inserted into Postgres:
+/// - SQL NULLs remain NULL (not empty string, not zero).
+/// - Empty strings remain empty strings (not NULL).
+/// - Array elements preserve their position, including interior NULLs.
+/// - Multi-byte text round-trips byte-for-byte.
+#[tokio::test(flavor = "multi_thread")]
+async fn boundary_values_table_copy() {
+    init_test_tracing();
+    install_crypto_provider();
+
+    // --- GIVEN: Postgres source with boundary-value rows ---
+
+    let database = spawn_source_database().await;
+    let table_name = test_table_name("boundary_values");
+
+    let table_id = database
+        .create_table(
+            table_name.clone(),
+            true,
+            &[
+                ("nullable_text", "text"),      // nullable
+                ("nullable_int", "integer"),    // nullable
+                ("int_array_col", "integer[]"), // Array(Nullable(Int32))
+                ("text_array_col", "text[]"),   // Array(Nullable(String))
+            ],
+        )
+        .await
+        .expect("Failed to create boundary_values table");
+
+    let publication_name = "test_pub_ch_boundary";
+    database
+        .create_publication(publication_name, std::slice::from_ref(&table_name))
+        .await
+        .expect("Failed to create publication");
+
+    // Row 1: all nullable columns are NULL, arrays are empty.
+    database
+        .run_sql(&format!(
+            "INSERT INTO {} (nullable_text, nullable_int, int_array_col, text_array_col) VALUES \
+             (NULL, NULL, ARRAY[]::integer[], ARRAY[]::text[])",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .expect("Failed to insert row 1 (all NULLs)");
+
+    // Row 2: arrays with interior NULL elements -- the element at index 1 is NULL
+    // while surrounding elements are present.
+    database
+        .run_sql(&format!(
+            "INSERT INTO {} (nullable_text, nullable_int, int_array_col, text_array_col) VALUES \
+             ('present', 42, ARRAY[1, NULL, 3]::integer[], ARRAY['a', NULL, 'c']::text[])",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .expect("Failed to insert row 2 (NULL array elements)");
+
+    // Row 3: empty string (not NULL) for text, NULL for integer, and
+    // single-element arrays (varint length byte = 0x01).
+    database
+        .run_sql(&format!(
+            "INSERT INTO {} (nullable_text, nullable_int, int_array_col, text_array_col) VALUES \
+             ('', NULL, ARRAY[99]::integer[], ARRAY['only']::text[])",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .expect("Failed to insert row 3 (empty string + single-element arrays)");
+
+    // Row 4: multi-byte UTF-8 -- emoji (4 bytes per char) and CJK (3 bytes per
+    // char). The RowBinary varint encodes byte length, not character count.
+    database
+        .run_sql(&format!(
+            "INSERT INTO {} (nullable_text, nullable_int, int_array_col, text_array_col) VALUES \
+             ('hello 🌍🚀', 0, ARRAY[1, 2], ARRAY['日本語', '中文'])",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .expect("Failed to insert row 4 (multi-byte UTF-8)");
+
+    // --- WHEN: pipeline copies data to ClickHouse ---
+    let clickhouse_db = setup_clickhouse_database().await;
+    let store = NotifyingStore::new();
+    let pipeline_id: PipelineId = random();
+    let destination = clickhouse_db.build_destination(store.clone());
+
+    let table_ready =
+        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
+
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name.to_owned(),
+        store.clone(),
+        destination,
+    );
+
+    pipeline.start().await.unwrap();
+    table_ready.notified().await;
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // --- THEN: ClickHouse data matches Postgres exactly ---
+    let rows: Vec<BoundaryValuesRow> = clickhouse_db.query(BOUNDARY_VALUES_SELECT).await;
+    assert_eq!(rows.len(), 4, "expected 4 rows in ClickHouse");
+
+    // Row 1: NULL scalars stay NULL, empty arrays stay empty.
+    let r = &rows[0];
+    assert_eq!(r.nullable_text, None, "NULL text must not become empty string");
+    assert_eq!(r.nullable_int, None, "NULL int must not become zero");
+    assert!(r.int_array_col.is_empty());
+    assert!(r.text_array_col.is_empty());
+
+    // Row 2: interior NULLs preserved in position.
+    let r = &rows[1];
+    assert_eq!(r.nullable_text.as_deref(), Some("present"));
+    assert_eq!(r.nullable_int, Some(42));
+    assert_eq!(
+        r.int_array_col,
+        vec![Some(1), None, Some(3)],
+        "interior NULL in integer array must be preserved"
+    );
+    assert_eq!(
+        r.text_array_col,
+        vec![Some("a".to_owned()), None, Some("c".to_owned())],
+        "interior NULL in text array must be preserved"
+    );
+
+    // Row 3: empty string is distinct from NULL.
+    let r = &rows[2];
+    assert_eq!(
+        r.nullable_text.as_deref(),
+        Some(""),
+        "empty string must round-trip as empty string, not NULL"
+    );
+    assert_eq!(r.nullable_int, None);
+    assert_eq!(r.int_array_col, vec![Some(99)], "single-element array");
+    assert_eq!(r.text_array_col, vec![Some("only".to_owned())], "single-element array");
+
+    // Row 4: multi-byte UTF-8 preserved byte-for-byte.
+    let r = &rows[3];
+    assert_eq!(
+        r.nullable_text.as_deref(),
+        Some("hello 🌍🚀"),
+        "multi-byte UTF-8 must round-trip exactly"
+    );
+    assert_eq!(r.nullable_int, Some(0), "zero must not become NULL");
+    assert_eq!(
+        r.text_array_col,
+        vec![Some("日本語".to_owned()), Some("中文".to_owned())],
+        "multi-byte UTF-8 in arrays must round-trip exactly"
+    );
+}
+
+/// Signed day offset from the Unix epoch to ClickHouse `Date32`'s minimum
+/// representable date, `1900-01-01`.
+///
+/// Python: `(date(1900, 1, 1) - date(1970, 1, 1)).days` = -25567.
+const DATE32_MIN_DAYS_FROM_UNIX_EPOCH: i32 = -25567;
+
+/// Signed day offset from the Unix epoch to ClickHouse `Date32`'s maximum
+/// representable date, `2299-12-31`.
+///
+/// Python: `(date(2299, 12, 31) - date(1970, 1, 1)).days` = 120529.
+const DATE32_MAX_DAYS_FROM_UNIX_EPOCH: i32 = 120529;
+
+const DATE_BOUNDARIES_SELECT: &str = concat!(
+    "SELECT id, date_col, cdc_operation ",
+    "FROM \"test_date__boundaries\" ",
+    "ORDER BY id",
+);
+
+/// Tests that Postgres `date` values outside the Unix epoch (pre-1970 and
+/// far-future) round-trip through ClickHouse `Date32` as signed day offsets,
+/// rather than being silently clamped as the previous `Date` (UInt16) mapping
+/// would have done.
+///
+/// # GIVEN
+///
+/// A Postgres table with a single non-null `date` column populated with the
+/// `Date32` boundary values: `1900-01-01` (minimum), `1969-12-31` (just before
+/// epoch), `1970-01-01` (epoch), `2024-01-15` (typical), and `2299-12-31`
+/// (maximum).
+///
+/// # WHEN
+///
+/// The pipeline copies the rows to ClickHouse.
+///
+/// # THEN
+///
+/// Each `date_col` lands in ClickHouse as the matching signed day offset:
+/// negative for pre-1970 dates, zero at the epoch, and a large positive value
+/// for the far-future date. No value is clamped.
+#[tokio::test(flavor = "multi_thread")]
+async fn pre_1970_and_far_future_dates_round_trip() {
+    init_test_tracing();
+    install_crypto_provider();
+
+    // --- GIVEN: Postgres source with date boundary rows ---
+
+    let database = spawn_source_database().await;
+    let table_name = test_table_name("date_boundaries");
+
+    let table_id = database
+        .create_table(table_name.clone(), true, &[("date_col", "date not null")])
+        .await
+        .expect("Failed to create date_boundaries table");
+
+    let publication_name = "test_pub_ch_date_boundaries";
+    database
+        .create_publication(publication_name, std::slice::from_ref(&table_name))
+        .await
+        .expect("Failed to create publication");
+
+    for date_literal in ["1900-01-01", "1969-12-31", "1970-01-01", "2024-01-15", "2299-12-31"] {
+        database
+            .run_sql(&format!(
+                "INSERT INTO {} (date_col) VALUES (DATE '{}')",
+                table_name.as_quoted_identifier(),
+                date_literal,
+            ))
+            .await
+            .unwrap_or_else(|_| panic!("Failed to insert {date_literal}"));
+    }
+
+    // --- WHEN: pipeline copies data to ClickHouse ---
+    let clickhouse_db = setup_clickhouse_database().await;
+    let store = NotifyingStore::new();
+    let pipeline_id: PipelineId = random();
+    let destination = clickhouse_db.build_destination(store.clone());
+
+    let table_ready =
+        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
+
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name.to_owned(),
+        store.clone(),
+        destination,
+    );
+
+    pipeline.start().await.unwrap();
+    table_ready.notified().await;
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // --- THEN: each date encodes as the expected signed day offset ---
+    let rows: Vec<DateBoundariesRow> = clickhouse_db.query(DATE_BOUNDARIES_SELECT).await;
+    assert_eq!(rows.len(), 5, "expected 5 rows in ClickHouse");
+
+    assert_eq!(
+        rows[0].date_col, DATE32_MIN_DAYS_FROM_UNIX_EPOCH,
+        "1900-01-01 must encode as the Date32 minimum offset, not be clamped"
+    );
+    assert_eq!(rows[1].date_col, -1, "1969-12-31 must encode as one day before the Unix epoch");
+    assert_eq!(rows[2].date_col, 0, "1970-01-01 must encode as 0 (the Unix epoch)");
+    assert_eq!(
+        rows[3].date_col, DATE_2024_01_15_DAYS,
+        "2024-01-15 must encode as 19737 (typical post-epoch value)"
+    );
+    assert_eq!(
+        rows[4].date_col, DATE32_MAX_DAYS_FROM_UNIX_EPOCH,
+        "2299-12-31 must encode as the Date32 maximum offset, not be clamped"
+    );
+}
+
+/// Tests that DELETE events are streamed to ClickHouse after initial table
+/// copy.
+///
+/// # GIVEN
+///
+/// A Postgres table with `REPLICA IDENTITY FULL` (so Postgres sends all column
+/// values in DELETE events, not just the primary key), populated with two rows:
+///
+/// 1. `id=1, value='keep_me'` -- will remain untouched.
+/// 2. `id=2, value='delete_me'` -- will be deleted after table copy.
+///
+/// # WHEN
+///
+/// The pipeline copies both rows, then a `DELETE ... WHERE id = 2` is issued
+/// against Postgres.
+///
+/// # THEN
+///
+/// ClickHouse contains three rows (append-only CDC):
+/// - Two `INSERT` rows from the initial table copy (`cdc_lsn = 0`).
+/// - One `DELETE` row for `id=2` with the old row data preserved and a positive
+///   LSN.
+/// - The `id=1` row has no corresponding `DELETE`.
+#[tokio::test(flavor = "multi_thread")]
+async fn deletes_are_streamed_to_clickhouse() {
+    init_test_tracing();
+    install_crypto_provider();
+
+    // --- GIVEN: Postgres source with two rows, REPLICA IDENTITY FULL ---
+
+    let database = spawn_source_database().await;
+    let table_name = test_table_name("delete_flow");
+
+    let table_id = database
+        .create_table(table_name.clone(), true, &[("value", "text not null")])
+        .await
+        .expect("Failed to create delete_flow test table");
+
+    database
+        .run_sql(&format!(
+            "ALTER TABLE {} REPLICA IDENTITY FULL",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .expect("Failed to set replica identity full");
+
+    let publication_name = "test_pub_clickhouse_deletes";
+    database
+        .create_publication(publication_name, std::slice::from_ref(&table_name))
+        .await
+        .expect("Failed to create delete_flow publication");
+
+    database
+        .run_sql(&format!(
+            "INSERT INTO {} (value) VALUES ('keep_me'), ('delete_me')",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .expect("Failed to insert delete_flow rows");
+
+    // --- WHEN: pipeline copies data, then a DELETE is streamed ---
+
+    let clickhouse_db = setup_clickhouse_database().await;
+    let store = NotifyingStore::new();
+    let pipeline_id: PipelineId = random();
+    let destination = clickhouse_db.build_destination(store.clone());
+
+    let table_ready =
+        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
+
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name.to_owned(),
+        store,
+        destination,
+    );
+
+    pipeline.start().await.unwrap();
+    table_ready.notified().await;
+
+    database
+        .run_sql(&format!("DELETE FROM {} WHERE id = 2", table_name.as_quoted_identifier(),))
+        .await
+        .expect("Failed to delete delete_flow row");
+
+    let rows = wait_for_delete_flow_rows(&clickhouse_db, 3).await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // --- THEN: two INSERTs from table copy, one DELETE from streaming ---
+
+    assert_eq!(rows.len(), 3, "expected 2 copied rows plus 1 streamed delete");
+
+    // Row 1: copied, untouched.
+    let r = &rows[0];
+    assert_eq!(r.id, 1);
+    assert_eq!(r.value, "keep_me");
+    assert_eq!(r.cdc_operation, "INSERT");
+    assert_eq!(r.cdc_lsn, 0);
+
+    // Row 2: copied, then deleted.
+    let r = &rows[1];
+    assert_eq!(r.id, 2);
+    assert_eq!(r.value, "delete_me");
+    assert_eq!(r.cdc_operation, "INSERT");
+    assert_eq!(r.cdc_lsn, 0);
+
+    // Row 3: the streamed DELETE for id=2, preserving old row data.
+    let r = &rows[2];
+    assert_eq!(r.id, 2, "delete must target the correct row");
+    assert_eq!(r.value, "delete_me", "old row data must be preserved in DELETE");
+    assert_eq!(r.cdc_operation, "DELETE");
+    assert!(r.cdc_lsn > 0, "streamed delete should have a positive LSN");
+}
+
+/// Tests that a pipeline restart resumes CDC streaming without re-running
+/// the initial table copy.
+///
+/// # GIVEN
+///
+/// A Postgres table with one row (`id=1, value='before_restart'`), copied
+/// to ClickHouse by a first pipeline run that then shuts down cleanly.
+///
+/// # WHEN
+///
+/// A new `ClickHouseDestination` and `Pipeline` are built with the same
+/// store and pipeline_id (simulating process restart), the pipeline is
+/// started, and a second row (`id=2, value='after_restart'`) is inserted
+/// into Postgres.
+///
+/// # THEN
+///
+/// ClickHouse contains exactly two rows:
+/// - `id=1` from the initial table copy (`cdc_lsn = 0`).
+/// - `id=2` from CDC streaming in the second run (`cdc_lsn > 0`).
+/// No duplicate `id=1` row exists -- table copy must not re-run.
+#[tokio::test(flavor = "multi_thread")]
+async fn pipeline_restart_resumes_streaming() {
+    init_test_tracing();
+    install_crypto_provider();
+
+    // --- GIVEN: first pipeline run copies one row ---
+    let database = spawn_source_database().await;
+    let table_name = test_table_name("restart_flow");
+
+    let table_id = database
+        .create_table(table_name.clone(), true, &[("value", "text not null")])
+        .await
+        .expect("Failed to create restart_flow test table");
+
+    let publication_name = "test_pub_clickhouse_restart";
+    database
+        .create_publication(publication_name, std::slice::from_ref(&table_name))
+        .await
+        .expect("Failed to create restart_flow publication");
+
+    database
+        .run_sql(&format!(
+            "INSERT INTO {} (value) VALUES ('before_restart')",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .expect("Failed to insert initial restart_flow row");
+
+    let clickhouse_db = setup_clickhouse_database().await;
+    let store = NotifyingStore::new();
+    let pipeline_id: PipelineId = random();
+    let destination = clickhouse_db.build_destination(store.clone());
+
+    let table_ready =
+        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
+
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name.to_owned(),
+        store.clone(),
+        destination,
+    );
+
+    pipeline.start().await.unwrap();
+    table_ready.notified().await;
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // Verify first run produced exactly one row.
+    let rows: Vec<UpdateFlowRow> = clickhouse_db.query(RESTART_FLOW_SELECT).await;
+    assert_eq!(rows.len(), 1, "first run should copy exactly one row");
+    assert_eq!(rows[0].id, 1);
+    assert_eq!(rows[0].value, "before_restart");
+
+    // --- WHEN: rebuild destination and pipeline, then stream a new insert ---
+    let destination = clickhouse_db.build_destination(store.clone());
+
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name.to_owned(),
+        store,
+        destination,
+    );
+
+    pipeline.start().await.unwrap();
+
+    database
+        .run_sql(&format!(
+            "INSERT INTO {} (value) VALUES ('after_restart')",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .expect("Failed to insert post-restart row");
+
+    let rows = wait_for_restart_flow_rows(&clickhouse_db, 2).await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // --- THEN: exactly two rows, no duplicate from re-running table copy ---
+    assert_eq!(
+        rows.len(),
+        2,
+        "expected original copied row plus one streamed insert, no duplicates"
+    );
+
+    let r = &rows[0];
+    assert_eq!(r.id, 1);
+    assert_eq!(r.value, "before_restart");
+    assert_eq!(r.cdc_operation, "INSERT");
+    assert_eq!(r.cdc_lsn, 0, "first row should be from table copy");
+
+    let r = &rows[1];
+    assert_eq!(r.id, 2);
+    assert_eq!(r.value, "after_restart");
+    assert_eq!(r.cdc_operation, "INSERT");
+    assert!(r.cdc_lsn > 0, "second row should be from CDC streaming after restart");
+}
+
+/// Tests that TRUNCATE clears the ClickHouse table and that subsequent inserts
+/// produce a clean slate with only post-truncate data.
+///
+/// # GIVEN
+///
+/// A Postgres table with two rows (`id=1, value='alpha'` and `id=2,
+/// value='beta'`), copied to ClickHouse by the initial table copy.
+///
+/// # WHEN
+///
+/// 1. Postgres issues `TRUNCATE` on the table.
+/// 2. After the table becomes empty in ClickHouse, a new row (`id=3,
+///    value='gamma'`) is inserted into Postgres.
+///
+/// # THEN
+///
+/// After truncate, ClickHouse contains zero rows.
+/// After the post-truncate insert, ClickHouse contains exactly one row:
+/// - `id=3, value='gamma', cdc_operation='INSERT', cdc_lsn > 0`.
+/// No pre-truncate rows survive.
+#[tokio::test(flavor = "multi_thread")]
+async fn truncate_clears_table_and_accepts_new_inserts() {
+    init_test_tracing();
+    install_crypto_provider();
+
+    // --- GIVEN: two rows copied to ClickHouse ---
+    let database = spawn_source_database().await;
+    let table_name = test_table_name("truncate_flow");
+
+    let table_id = database
+        .create_table(table_name.clone(), true, &[("value", "text not null")])
+        .await
+        .expect("Failed to create truncate_flow test table");
+
+    let publication_name = "test_pub_clickhouse_truncate";
+    database
+        .create_publication(publication_name, std::slice::from_ref(&table_name))
+        .await
+        .expect("Failed to create truncate_flow publication");
+
+    database
+        .run_sql(&format!(
+            "INSERT INTO {} (value) VALUES ('alpha'), ('beta')",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .expect("Failed to insert truncate_flow rows");
+
+    let clickhouse_db = setup_clickhouse_database().await;
+    let store = NotifyingStore::new();
+    let pipeline_id: PipelineId = random();
+    let destination = clickhouse_db.build_destination(store.clone());
+
+    let table_ready =
+        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
+
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name.to_owned(),
+        store,
+        destination,
+    );
+
+    pipeline.start().await.unwrap();
+    table_ready.notified().await;
+
+    // Verify both rows arrived from table copy.
+    let rows: Vec<UpdateFlowRow> = clickhouse_db.query(TRUNCATE_FLOW_SELECT).await;
+    assert_eq!(rows.len(), 2, "table copy should produce two rows");
+
+    // --- WHEN: truncate, then insert a new row ---
+    database
+        .truncate_table(table_name.clone())
+        .await
+        .expect("Failed to truncate table in Postgres");
+
+    wait_for_truncate_flow_empty(&clickhouse_db).await;
+
+    database
+        .run_sql(&format!(
+            "INSERT INTO {} (value) VALUES ('gamma')",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .expect("Failed to insert post-truncate row");
+
+    let rows = wait_for_truncate_flow_rows(&clickhouse_db, 1).await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // --- THEN: only the post-truncate row exists ---
+    assert_eq!(rows.len(), 1, "only post-truncate row should exist");
+
+    let r = &rows[0];
+    assert_eq!(r.id, 3, "post-truncate row should have id=3 (serial continues)");
+    assert_eq!(r.value, "gamma");
+    assert_eq!(r.cdc_operation, "INSERT");
+    assert!(r.cdc_lsn > 0, "post-truncate insert should come from CDC streaming");
+}
+
+/// SELECT query used to verify the `flush_split` test.
+const FLUSH_SPLIT_SELECT: &str = concat!(
+    "SELECT id, value, cdc_operation, cdc_lsn ",
+    "FROM \"test_flush__split\" ",
+    "ORDER BY id, cdc_lsn",
+);
+
+/// Tests that the intermediate INSERT flush (`max_bytes_per_insert`) does not
+/// lose rows when a batch is split across multiple INSERT statements.
+///
+/// # GIVEN
+///
+/// A Postgres table with 10 rows, and a ClickHouse destination configured with
+/// `max_bytes_per_insert = 1` (forcing a new INSERT after every single row).
+///
+/// # WHEN
+///
+/// The pipeline runs initial table copy from Postgres to ClickHouse.
+///
+/// # THEN
+///
+/// All 10 rows arrive in ClickHouse despite being split across many INSERT
+/// statements. No rows are lost at flush boundaries.
+#[tokio::test(flavor = "multi_thread")]
+async fn intermediate_flush_preserves_all_rows() {
+    init_test_tracing();
+    install_crypto_provider();
+
+    // --- GIVEN: 10 rows and a tiny max_bytes_per_insert ---
+    let database = spawn_source_database().await;
+    let table_name = test_table_name("flush_split");
+
+    let table_id = database
+        .create_table(table_name.clone(), true, &[("value", "text not null")])
+        .await
+        .expect("Failed to create flush_split test table");
+
+    let publication_name = "test_pub_clickhouse_flush";
+    database
+        .create_publication(publication_name, std::slice::from_ref(&table_name))
+        .await
+        .expect("Failed to create flush_split publication");
+
+    let row_count = 10;
+    let values: Vec<String> = (1..=row_count).map(|i| format!("('row_{i}')")).collect();
+    database
+        .run_sql(&format!(
+            "INSERT INTO {} (value) VALUES {}",
+            table_name.as_quoted_identifier(),
+            values.join(", "),
+        ))
+        .await
+        .expect("Failed to insert flush_split rows");
+
+    let clickhouse_db = setup_clickhouse_database().await;
+    let store = NotifyingStore::new();
+    let pipeline_id: PipelineId = random();
+    let destination = clickhouse_db.build_destination_with_config(
+        store.clone(),
+        ClickHouseInserterConfig {
+            // 1 byte -- forces a new INSERT after every row.
+            max_bytes_per_insert: 1,
+        },
+    );
+
+    let table_ready =
+        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
+
+    // --- WHEN: pipeline copies data with aggressive flush splitting ---
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name.to_owned(),
+        store,
+        destination,
+    );
+
+    pipeline.start().await.unwrap();
+    table_ready.notified().await;
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // --- THEN: all rows arrive despite being split across many INSERTs ---
+    let rows: Vec<UpdateFlowRow> = clickhouse_db.query(FLUSH_SPLIT_SELECT).await;
+    assert_eq!(rows.len(), row_count, "all rows must survive intermediate flush splits");
+
+    for (i, r) in rows.iter().enumerate() {
+        let expected_id = (i + 1) as i64;
+        let expected_value = format!("row_{}", i + 1);
+        assert_eq!(r.id, expected_id, "row {} id mismatch", i + 1);
+        assert_eq!(r.value, expected_value, "row {} value mismatch", i + 1);
+        assert_eq!(r.cdc_operation, "INSERT");
+        assert_eq!(r.cdc_lsn, 0, "all rows should be from table copy");
+    }
+}
+
+/// Tests that CDC events for multiple tables in the same publication are
+/// written correctly to separate ClickHouse tables.
+///
+/// # GIVEN
+///
+/// Two Postgres tables in the same publication, each with one pre-existing
+/// row:
+/// - `multi_a` with `(id=1, value='init_a')`
+/// - `multi_b` with `(id=1, value='init_b')`
+///
+/// # WHEN
+///
+/// The pipeline copies both tables, then one new row is inserted into each
+/// Postgres table (`'streamed_a'` and `'streamed_b'`).
+///
+/// # THEN
+///
+/// Each ClickHouse table contains exactly two rows:
+/// - One from table copy (`cdc_lsn = 0`)
+/// - One from CDC streaming (`cdc_lsn > 0`)
+#[tokio::test(flavor = "multi_thread")]
+async fn multiple_tables_receive_independent_writes() {
+    init_test_tracing();
+    install_crypto_provider();
+
+    // --- GIVEN: two tables in one publication, each with one row ---
+    let database = spawn_source_database().await;
+    let table_a = test_table_name("multi_a");
+    let table_b = test_table_name("multi_b");
+
+    let table_a_id = database
+        .create_table(table_a.clone(), true, &[("value", "text not null")])
+        .await
+        .expect("Failed to create multi_a table");
+
+    let table_b_id = database
+        .create_table(table_b.clone(), true, &[("value", "text not null")])
+        .await
+        .expect("Failed to create multi_b table");
+
+    let publication_name = "test_pub_clickhouse_multi";
+    database
+        .create_publication(publication_name, &[table_a.clone(), table_b.clone()])
+        .await
+        .expect("Failed to create multi-table publication");
+
+    database
+        .run_sql(&format!(
+            "INSERT INTO {} (value) VALUES ('init_a')",
+            table_a.as_quoted_identifier(),
+        ))
+        .await
+        .expect("Failed to insert into multi_a");
+
+    database
+        .run_sql(&format!(
+            "INSERT INTO {} (value) VALUES ('init_b')",
+            table_b.as_quoted_identifier(),
+        ))
+        .await
+        .expect("Failed to insert into multi_b");
+
+    let clickhouse_db = setup_clickhouse_database().await;
+    let store = NotifyingStore::new();
+    let pipeline_id: PipelineId = random();
+    let destination = clickhouse_db.build_destination(store.clone());
+
+    let table_a_ready =
+        store.notify_on_table_state_type(table_a_id, TableReplicationPhaseType::Ready).await;
+    let table_b_ready =
+        store.notify_on_table_state_type(table_b_id, TableReplicationPhaseType::Ready).await;
+
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name.to_owned(),
+        store,
+        destination,
+    );
+
+    pipeline.start().await.unwrap();
+    tokio::join!(table_a_ready.notified(), table_b_ready.notified());
+
+    // --- WHEN: insert one row into each table ---
+    database
+        .run_sql(&format!(
+            "INSERT INTO {} (value) VALUES ('streamed_a')",
+            table_a.as_quoted_identifier(),
+        ))
+        .await
+        .expect("Failed to insert streamed row into multi_a");
+
+    database
+        .run_sql(&format!(
+            "INSERT INTO {} (value) VALUES ('streamed_b')",
+            table_b.as_quoted_identifier(),
+        ))
+        .await
+        .expect("Failed to insert streamed row into multi_b");
+
+    let select_a = concat!(
+        "SELECT id, value, cdc_operation, cdc_lsn ",
+        "FROM \"test_multi__a\" ",
+        "ORDER BY id, cdc_lsn",
+    );
+    let select_b = concat!(
+        "SELECT id, value, cdc_operation, cdc_lsn ",
+        "FROM \"test_multi__b\" ",
+        "ORDER BY id, cdc_lsn",
+    );
+
+    // Poll until both tables have 2 rows.
+    let mut rows_a: Vec<UpdateFlowRow> = Vec::with_capacity(2);
+    let mut rows_b: Vec<UpdateFlowRow> = Vec::with_capacity(2);
+    for _ in 0..50 {
+        rows_a = clickhouse_db.query(select_a).await;
+        rows_b = clickhouse_db.query(select_b).await;
+        if rows_a.len() >= 2 && rows_b.len() >= 2 {
+            break;
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        rows_a.len() >= 2 && rows_b.len() >= 2,
+        "timed out: multi_a has {} rows, multi_b has {} rows",
+        rows_a.len(),
+        rows_b.len()
+    );
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // --- THEN: each table has one copied row and one streamed row ---
+    assert_eq!(rows_a.len(), 2, "multi_a should have 2 rows");
+    assert_eq!(rows_b.len(), 2, "multi_b should have 2 rows");
+
+    assert_eq!(rows_a[0].id, 1);
+    assert_eq!(rows_a[0].value, "init_a");
+    assert_eq!(rows_a[0].cdc_operation, "INSERT");
+    assert_eq!(rows_a[0].cdc_lsn, 0);
+
+    assert_eq!(rows_a[1].id, 2);
+    assert_eq!(rows_a[1].value, "streamed_a");
+    assert_eq!(rows_a[1].cdc_operation, "INSERT");
+    assert!(rows_a[1].cdc_lsn > 0);
+
+    assert_eq!(rows_b[0].id, 1);
+    assert_eq!(rows_b[0].value, "init_b");
+    assert_eq!(rows_b[0].cdc_operation, "INSERT");
+    assert_eq!(rows_b[0].cdc_lsn, 0);
+
+    assert_eq!(rows_b[1].id, 2);
+    assert_eq!(rows_b[1].value, "streamed_b");
+    assert_eq!(rows_b[1].cdc_operation, "INSERT");
+    assert!(rows_b[1].cdc_lsn > 0);
+}
+
+/// SELECT query used to verify the `tx_order` test.
+const TX_ORDER_SELECT: &str = concat!(
+    "SELECT id, value, cdc_operation, cdc_lsn ",
+    "FROM \"test_tx__order\" ",
+    "ORDER BY id, cdc_lsn",
+);
+
+/// Tests that updates from separately committed transactions arrive in
+/// ClickHouse with LSNs reflecting Postgres commit order.
+///
+/// # GIVEN
+///
+/// A Postgres table with one row (`id=1, value='original'`), copied to
+/// ClickHouse. Two database connections to the same source.
+///
+/// # WHEN
+///
+/// Transaction A (on connection 1) updates the row to `'update_a'` and
+/// commits. Then transaction B (on connection 2) updates the row to
+/// `'update_b'` and commits.
+///
+/// # THEN
+///
+/// ClickHouse contains three rows (append-only CDC) with strictly
+/// increasing `cdc_lsn`:
+/// - `value='original'`,  `cdc_operation='INSERT'`, `cdc_lsn=0`
+/// - `value='update_a'`,  `cdc_operation='UPDATE'`, `cdc_lsn > 0`
+/// - `value='update_b'`,  `cdc_operation='UPDATE'`, `cdc_lsn > update_a's lsn`
+#[tokio::test(flavor = "multi_thread")]
+async fn sequential_transactions_preserve_commit_order() {
+    init_test_tracing();
+    install_crypto_provider();
+
+    // --- GIVEN: one row, two database connections ---
+    let mut database_1 = spawn_source_database().await;
+    let mut database_2 = database_1.duplicate().await;
+    let table_name = test_table_name("tx_order");
+
+    let table_id = database_1
+        .create_table(table_name.clone(), true, &[("value", "text not null")])
+        .await
+        .expect("Failed to create tx_order test table");
+
+    let publication_name = "test_pub_clickhouse_tx_order";
+    database_1
+        .create_publication(publication_name, std::slice::from_ref(&table_name))
+        .await
+        .expect("Failed to create tx_order publication");
+
+    database_1
+        .run_sql(&format!(
+            "INSERT INTO {} (value) VALUES ('original')",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .expect("Failed to insert initial tx_order row");
+
+    let clickhouse_db = setup_clickhouse_database().await;
+    let store = NotifyingStore::new();
+    let pipeline_id: PipelineId = random();
+    let destination = clickhouse_db.build_destination(store.clone());
+
+    let table_ready =
+        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
+
+    let mut pipeline = create_pipeline(
+        &database_1.config,
+        pipeline_id,
+        publication_name.to_owned(),
+        store,
+        destination,
+    );
+
+    pipeline.start().await.unwrap();
+    table_ready.notified().await;
+
+    // --- WHEN: two transactions commit sequentially on separate connections ---
+    let tx_a = database_1.begin_transaction().await;
+    tx_a.run_sql(&format!(
+        "UPDATE {} SET value = 'update_a' WHERE id = 1",
+        table_name.as_quoted_identifier(),
+    ))
+    .await
+    .expect("Failed to execute update_a");
+    tx_a.commit_transaction().await;
+
+    let tx_b = database_2.begin_transaction().await;
+    tx_b.run_sql(&format!(
+        "UPDATE {} SET value = 'update_b' WHERE id = 1",
+        table_name.as_quoted_identifier(),
+    ))
+    .await
+    .expect("Failed to execute update_b");
+    tx_b.commit_transaction().await;
+
+    // Poll until all three rows arrive.
+    let mut rows: Vec<UpdateFlowRow> = Vec::with_capacity(3);
+    for _ in 0..50 {
+        rows = clickhouse_db.query(TX_ORDER_SELECT).await;
+        if rows.len() >= 3 {
+            break;
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+    assert!(rows.len() >= 3, "timed out waiting for tx_order rows: got {} of 3", rows.len());
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // --- THEN: three rows with strictly increasing LSNs ---
+    assert_eq!(rows.len(), 3, "expected INSERT + two UPDATEs");
+
+    let r = &rows[0];
+    assert_eq!(r.value, "original");
+    assert_eq!(r.cdc_operation, "INSERT");
+    assert_eq!(r.cdc_lsn, 0);
+
+    let r = &rows[1];
+    assert_eq!(r.value, "update_a");
+    assert_eq!(r.cdc_operation, "UPDATE");
+    assert!(r.cdc_lsn > 0);
+
+    let r = &rows[2];
+    assert_eq!(r.value, "update_b");
+    assert_eq!(r.cdc_operation, "UPDATE");
+    assert!(r.cdc_lsn > rows[1].cdc_lsn, "update_b must have a higher LSN than update_a");
+}
+
+/// Row struct for the wide default-identity delete test.
+#[derive(clickhouse::Row, serde::Deserialize, Debug)]
+struct DefaultIdentityDeleteRow {
+    id: i64,
+    smallint_col: i16,
+    integer_col: i32,
+    bigint_col: i64,
+    real_col: f32,
+    double_col: f64,
+    numeric_col: String,
+    boolean_col: bool,
+    text_col: String,
+    varchar_col: String,
+    date_col: i32,
+    timestamp_col: i64,
+    timestamptz_col: i64,
+    time_col: String,
+    jsonb_col: String,
+    bytea_col: String,
+    uuid_col: String,
+    nullable_text: Option<String>,
+    nullable_int: Option<i32>,
+    int_array_col: Vec<Option<i32>>,
+    text_array_col: Vec<Option<String>>,
+    cdc_operation: String,
+    cdc_lsn: u64,
+}
+
+const DEFAULT_IDENTITY_DELETE_SELECT: &str = concat!(
+    "SELECT id, ",
+    "smallint_col, integer_col, bigint_col, real_col, double_col, ",
+    "numeric_col, boolean_col, text_col, varchar_col, ",
+    "date_col, timestamp_col, timestamptz_col, time_col, ",
+    "jsonb_col, bytea_col, toString(uuid_col) AS uuid_col, ",
+    "nullable_text, nullable_int, ",
+    "int_array_col, text_array_col, ",
+    "cdc_operation, cdc_lsn ",
+    "FROM \"test_default__identity__delete\" ",
+    "ORDER BY id, cdc_lsn",
+);
+
+/// Tests that a DELETE under default replica identity (PK only) produces a
+/// tombstone row with the correct PK and zero-value defaults for every
+/// supported column type.
+///
+/// # GIVEN
+///
+/// A wide Postgres table with **default replica identity** (not FULL) covering:
+/// - Non-nullable scalars: smallint, integer, bigint, real, double, numeric,
+///   boolean, text, varchar, date, timestamp, timestamptz, time, jsonb, bytea,
+///   uuid
+/// - Nullable scalars: text, integer
+/// - Nullable arrays: integer[], text[]
+/// Two rows inserted and copied to ClickHouse.
+///
+/// # WHEN
+///
+/// Row `id=2` is deleted in Postgres, and a new row (`id=3`) is inserted.
+///
+/// # THEN
+///
+/// The DELETE tombstone has:
+/// - Correct PK (`id=2`)
+/// - Non-nullable scalars filled with type-appropriate zero values
+/// - Nullable scalars filled with NULL
+/// - Arrays filled with empty arrays
+#[tokio::test(flavor = "multi_thread")]
+async fn delete_with_default_replica_identity() {
+    init_test_tracing();
+    install_crypto_provider();
+
+    // --- GIVEN: wide table with all types, default replica identity ---
+    let database = spawn_source_database().await;
+    let table_name = test_table_name("default_identity_delete");
+
+    let table_id = database
+        .create_table(
+            table_name.clone(),
+            true,
+            &[
+                ("smallint_col", "smallint not null"),
+                ("integer_col", "integer not null"),
+                ("bigint_col", "bigint not null"),
+                ("real_col", "real not null"),
+                ("double_col", "double precision not null"),
+                ("numeric_col", "numeric(10,2) not null"),
+                ("boolean_col", "boolean not null"),
+                ("text_col", "text not null"),
+                ("varchar_col", "varchar(100) not null"),
+                ("date_col", "date not null"),
+                ("timestamp_col", "timestamp not null"),
+                ("timestamptz_col", "timestamptz not null"),
+                ("time_col", "time not null"),
+                ("jsonb_col", "jsonb not null"),
+                ("bytea_col", "bytea not null"),
+                ("uuid_col", "uuid not null"),
+                ("nullable_text", "text"),
+                ("nullable_int", "integer"),
+                ("int_array_col", "integer[]"),
+                ("text_array_col", "text[]"),
+            ],
+        )
+        .await
+        .expect("Failed to create test table");
+
+    // Deliberately NOT setting REPLICA IDENTITY FULL -- default (PK only).
+
+    let publication_name = "test_pub_ch_default_ident";
+    database
+        .create_publication(publication_name, std::slice::from_ref(&table_name))
+        .await
+        .expect("Failed to create publication");
+
+    database
+        .run_sql(&format!(
+            r#"INSERT INTO {table} (
+                smallint_col, integer_col, bigint_col, real_col, double_col,
+                numeric_col, boolean_col, text_col, varchar_col,
+                date_col, timestamp_col, timestamptz_col, time_col,
+                jsonb_col, bytea_col, uuid_col,
+                nullable_text, nullable_int, int_array_col, text_array_col
+            ) VALUES
+            (1, 10, 100, 1.5, 2.5, 123.45, true,
+             'keep', 'keeper', '2024-01-15', '2024-01-15 12:00:00',
+             '2024-01-15 12:00:00+00', '14:30:00',
+             '{{"key":"value"}}', '\xdeadbeef',
+             'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+             'present', 42, ARRAY[1,2,3]::integer[], ARRAY['a','b']::text[]),
+            (2, 20, 200, 3.5, 4.5, 678.90, false,
+             'delete_me', 'doomed', '2024-06-01', '2024-06-01 08:00:00',
+             '2024-06-01 08:00:00+00', '09:00:00',
+             '{{"x":1}}', '\xcafebabe',
+             'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
+             'also_present', 99, ARRAY[4,5]::integer[], ARRAY['c']::text[])"#,
+            table = table_name.as_quoted_identifier(),
+        ))
+        .await
+        .expect("Failed to insert rows");
+
+    let clickhouse_db = setup_clickhouse_database().await;
+    let store = NotifyingStore::new();
+    let pipeline_id: PipelineId = random();
+    let destination = clickhouse_db.build_destination(store.clone());
+
+    let table_ready =
+        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
+
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name.to_owned(),
+        store,
+        destination,
+    );
+
+    pipeline.start().await.unwrap();
+    table_ready.notified().await;
+
+    // --- WHEN: delete id=2, insert id=3 ---
+    database
+        .run_sql(&format!("DELETE FROM {} WHERE id = 2", table_name.as_quoted_identifier()))
+        .await
+        .expect("Failed to delete row");
+
+    database
+        .run_sql(&format!(
+            r#"INSERT INTO {table} (
+                smallint_col, integer_col, bigint_col, real_col, double_col,
+                numeric_col, boolean_col, text_col, varchar_col,
+                date_col, timestamp_col, timestamptz_col, time_col,
+                jsonb_col, bytea_col, uuid_col,
+                int_array_col, text_array_col
+            ) VALUES (
+                3, 30, 300, 5.5, 6.5, 111.11, true,
+                'after', 'survivor', '2025-01-01', '2025-01-01 00:00:00',
+                '2025-01-01 00:00:00+00', '00:00:00',
+                '{{"new":true}}', '\x00',
+                'b2c3d4e5-f6a7-8901-bcde-f12345678901',
+                ARRAY[7]::integer[], ARRAY['d']::text[])"#,
+            table = table_name.as_quoted_identifier(),
+        ))
+        .await
+        .expect("Failed to insert post-delete row");
+
+    // Poll for 4 rows: 2 copied INSERTs + DELETE tombstone + new INSERT.
+    let mut rows: Vec<DefaultIdentityDeleteRow> = Vec::new();
+    for _ in 0..50 {
+        rows = clickhouse_db.query(DEFAULT_IDENTITY_DELETE_SELECT).await;
+        if rows.len() >= 4 {
+            break;
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        rows.len() >= 4,
+        "timed out waiting for default_identity_delete rows: got {} of 4",
+        rows.len()
+    );
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // --- THEN: DELETE tombstone has zero-value defaults for all types ---
+    assert_eq!(rows.len(), 4, "expected 2 copied INSERTs + DELETE + new INSERT");
+
+    // Row 1: copied, untouched -- spot check.
+    let r = &rows[0];
+    assert_eq!(r.id, 1);
+    assert_eq!(r.text_col, "keep");
+    assert_eq!(r.integer_col, 10);
+    assert!(r.boolean_col);
+    assert_eq!(r.nullable_text, Some("present".to_owned()));
+    assert_eq!(r.int_array_col, vec![Some(1), Some(2), Some(3)]);
+    assert_eq!(r.cdc_operation, "INSERT");
+
+    // Row 2: copied, will be deleted.
+    let r = &rows[1];
+    assert_eq!(r.id, 2);
+    assert_eq!(r.text_col, "delete_me");
+    assert_eq!(r.cdc_operation, "INSERT");
+
+    // Row 3: DELETE tombstone -- every non-PK column type verified.
+    let r = &rows[2];
+    assert_eq!(r.id, 2, "DELETE must target the correct row");
+    assert_eq!(r.cdc_operation, "DELETE");
+    assert!(r.cdc_lsn > 0);
+    // Non-nullable scalars -> zero values.
+    assert_eq!(r.smallint_col, 0, "smallint -> 0");
+    assert_eq!(r.integer_col, 0, "integer -> 0");
+    assert_eq!(r.bigint_col, 0, "bigint -> 0");
+    assert!(r.real_col.abs() < 1e-6, "real -> 0.0");
+    assert!(r.double_col.abs() < 1e-9, "double -> 0.0");
+    assert_eq!(r.numeric_col, "", "numeric -> empty string");
+    assert!(!r.boolean_col, "boolean -> false");
+    assert_eq!(r.text_col, "", "text -> empty string");
+    assert_eq!(r.varchar_col, "", "varchar -> empty string");
+    assert_eq!(r.date_col, 0, "date -> 1970-01-01 (day 0)");
+    assert_eq!(r.timestamp_col, 0, "timestamp -> unix epoch");
+    assert_eq!(r.timestamptz_col, 0, "timestamptz -> unix epoch");
+    assert_eq!(r.time_col, "", "time -> empty string (String-mapped)");
+    assert_eq!(r.jsonb_col, "", "jsonb -> empty string (String-mapped)");
+    assert_eq!(r.bytea_col, "", "bytea -> empty string");
+    assert_eq!(r.uuid_col, "00000000-0000-0000-0000-000000000000", "uuid -> nil UUID");
+    // Nullable scalars -> NULL.
+    assert_eq!(r.nullable_text, None, "nullable text -> NULL");
+    assert_eq!(r.nullable_int, None, "nullable int -> NULL");
+    // Arrays -> empty.
+    assert!(r.int_array_col.is_empty(), "int array -> empty");
+    assert!(r.text_array_col.is_empty(), "text array -> empty");
+
+    // Row 4: post-delete INSERT proves pipeline continued.
+    let r = &rows[3];
+    assert_eq!(r.id, 3);
+    assert_eq!(r.text_col, "after");
+    assert_eq!(r.cdc_operation, "INSERT");
+    assert!(r.cdc_lsn > 0);
+}
+
+/// SELECT query used to verify the `large_batch` test.
+const LARGE_BATCH_SELECT: &str = concat!(
+    "SELECT id, value, cdc_operation, cdc_lsn ",
+    "FROM \"test_large__batch\" ",
+    "ORDER BY id, cdc_lsn",
+);
+
+/// Tests that a large table copy (1024 rows) completes without data loss or
+/// corruption.
+///
+/// # GIVEN
+///
+/// A Postgres table with 1024 rows, each with a unique value derived from its
+/// row number.
+///
+/// # WHEN
+///
+/// The pipeline runs initial table copy from Postgres to ClickHouse.
+///
+/// # THEN
+///
+/// All 1024 rows arrive in ClickHouse. A sample of rows at known positions
+/// (first, last, powers of two, and a few interior points) are spot-checked
+/// for correct id and value.
+#[tokio::test(flavor = "multi_thread")]
+async fn exclusive_large_batch_table_copy() {
+    init_test_tracing();
+    install_crypto_provider();
+
+    // --- GIVEN: 1024 rows with unique values ---
+    let database = spawn_source_database().await;
+    let table_name = test_table_name("large_batch");
+
+    let table_id = database
+        .create_table(table_name.clone(), true, &[("value", "text not null")])
+        .await
+        .expect("Failed to create large_batch test table");
+
+    let publication_name = "test_pub_clickhouse_large_batch";
+    database
+        .create_publication(publication_name, std::slice::from_ref(&table_name))
+        .await
+        .expect("Failed to create large_batch publication");
+
+    let row_count: usize = 1024;
+    let values: Vec<String> = (1..=row_count).map(|i| format!("('val_{i:04}')")).collect();
+    // Insert in chunks to avoid exceeding Postgres query size limits.
+    for chunk in values.chunks(256) {
+        database
+            .run_sql(&format!(
+                "INSERT INTO {} (value) VALUES {}",
+                table_name.as_quoted_identifier(),
+                chunk.join(", "),
+            ))
+            .await
+            .expect("Failed to insert large_batch rows");
+    }
+
+    let clickhouse_db = setup_clickhouse_database().await;
+    let store = NotifyingStore::new();
+    let pipeline_id: PipelineId = random();
+    let destination = clickhouse_db.build_destination(store.clone());
+
+    let table_ready =
+        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
+
+    // --- WHEN: pipeline copies all rows ---
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name.to_owned(),
+        store,
+        destination,
+    );
+
+    pipeline.start().await.unwrap();
+    table_ready.notified().await;
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // --- THEN: all rows arrive, spot-check a sample ---
+    let rows: Vec<UpdateFlowRow> = clickhouse_db.query(LARGE_BATCH_SELECT).await;
+    assert_eq!(rows.len(), row_count, "all 1024 rows must arrive");
+
+    // Spot-check: first, last, powers of two, and a few interior points.
+    let sample_ids: &[usize] = &[1, 2, 4, 8, 16, 32, 64, 100, 128, 256, 500, 512, 750, 1000, 1024];
+    for &id in sample_ids {
+        let r = &rows[id - 1];
+        assert_eq!(r.id, id as i64, "row {id} id mismatch");
+        assert_eq!(r.value, format!("val_{id:04}"), "row {id} value mismatch");
+        assert_eq!(r.cdc_operation, "INSERT");
+        assert_eq!(r.cdc_lsn, 0);
+    }
+}
+
+/// # GIVEN
+/// A ClickHouseClient pointed at the running test ClickHouse instance.
+///
+/// # WHEN
+/// `validate_connectivity()` is called.
+///
+/// # THEN
+/// It returns Ok(()).
+#[tokio::test(flavor = "multi_thread")]
+async fn validate_connectivity_succeeds_against_running_clickhouse() {
+    let client = ClickHouseClient::new(
+        get_clickhouse_url(),
+        get_clickhouse_user(),
+        get_clickhouse_password(),
+        "default",
+    );
+    assert!(client.validate_connectivity().await.is_ok());
+}
+
+/// # GIVEN
+/// A ClickHouseClient pointed at a URL where nothing is listening.
+///
+/// # WHEN
+/// `validate_connectivity()` is called.
+///
+/// # THEN
+/// It returns Err.
+#[tokio::test(flavor = "multi_thread")]
+async fn validate_connectivity_fails_against_unreachable_clickhouse() {
+    let client = ClickHouseClient::new(
+        Url::parse("http://localhost:1").unwrap(),
+        "nobody",
+        None::<String>,
+        "default",
+    );
+    assert!(client.validate_connectivity().await.is_err());
+}
+
+/// Row struct for the ADD COLUMN test after schema change.
+/// Columns: id, name, age, email, score.
+#[derive(clickhouse::Row, serde::Deserialize, Debug)]
+struct AddColumnRow {
+    id: i64,
+    name: String,
+    age: i32,
+    email: Option<String>,
+    score: Option<i32>,
+    cdc_operation: String,
+}
+
+/// Tests that ALTER TABLE ADD COLUMN in Postgres propagates to ClickHouse
+/// and subsequent inserts include the new column.
+///
+/// # GIVEN
+///
+/// A Postgres table with columns (id serial PK, name text not null, age integer
+/// not null) and one row ('Alice', 25), copied to ClickHouse.
+///
+/// # WHEN
+///
+/// A nullable `email text` column and a `score integer NOT NULL DEFAULT 0`
+/// column are added in Postgres, and a row ('Bob', 30, 'bob@example.com', 7)
+/// is inserted with the new schema.
+///
+/// # THEN
+///
+/// The ClickHouse table has `email` and `score` columns. Alice's row has NULL
+/// for both added columns because ClickHouse does not backfill historical CDC
+/// rows. Bob's row has 'bob@example.com' and 7. The destination metadata
+/// snapshot_id has increased.
+#[tokio::test(flavor = "multi_thread")]
+async fn schema_change_add_column() {
+    init_test_tracing();
+    install_crypto_provider();
+
+    let clickhouse_table_name = "test_schema__add__col";
+
+    // --- GIVEN: table with one row, copied to ClickHouse ---
+    let database = spawn_source_database().await;
+    let table_name = test_table_name("schema_add_col");
+
+    let table_id = database
+        .create_table(
+            table_name.clone(),
+            true,
+            &[("name", "text not null"), ("age", "integer not null")],
+        )
+        .await
+        .expect("Failed to create table");
+
+    let publication_name = "test_pub_ch_schema_add";
+    database
+        .create_publication(publication_name, std::slice::from_ref(&table_name))
+        .await
+        .expect("Failed to create publication");
+
+    database
+        .run_sql(&format!(
+            "INSERT INTO {} (name, age) VALUES ('Alice', 25)",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .expect("Failed to insert Alice");
+
+    let clickhouse_db = setup_clickhouse_database().await;
+    let store = NotifyingStore::new();
+    let pipeline_id: PipelineId = random();
+    let destination = clickhouse_db.build_destination(store.clone());
+
+    let table_ready =
+        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
+
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name.to_owned(),
+        store.clone(),
+        destination,
+    );
+
+    pipeline.start().await.unwrap();
+    table_ready.notified().await;
+
+    // Verify initial state.
+    let initial_columns = clickhouse_db.column_names(clickhouse_table_name).await;
+    assert_eq!(initial_columns, vec!["id", "name", "age"]);
+
+    let initial_metadata = store
+        .get_applied_destination_table_metadata(table_id)
+        .await
+        .unwrap()
+        .expect("metadata should exist after table creation");
+    let initial_snapshot_id = initial_metadata.snapshot_id;
+
+    // --- WHEN: add column, then insert with new schema ---
+    database
+        .alter_table(
+            table_name.clone(),
+            &[
+                TableModification::AddColumn { name: "email", data_type: "text" },
+                TableModification::AddColumn {
+                    name: "score",
+                    data_type: "integer not null default 0",
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+    database
+        .run_sql(&format!(
+            "INSERT INTO {} (name, age, email, score) VALUES ('Bob', 30, 'bob@example.com', 7)",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .expect("Failed to insert Bob");
+
+    // Poll until Bob's row arrives (2 rows total = Alice from copy + Bob from
+    // streaming).
+    let select = concat!(
+        "SELECT id, name, age, email, score, cdc_operation ",
+        "FROM \"test_schema__add__col\" ",
+        "ORDER BY id",
+    );
+    let mut rows: Vec<AddColumnRow> = Vec::new();
+    for _ in 0..50 {
+        // The SELECT will fail if the email column doesn't exist yet, so
+        // catch errors and retry.
+        if let Ok(r) = clickhouse_db.db_client().query(select).fetch_all::<AddColumnRow>().await
+            && r.len() >= 2
+        {
+            rows = r;
+            break;
+        }
+        sleep(Duration::from_millis(200)).await;
+    }
+    assert!(
+        rows.len() >= 2,
+        "timed out waiting for schema_change_add_column rows: got {} of 2",
+        rows.len()
+    );
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // --- THEN: ClickHouse has the new columns, both rows present ---
+    let final_columns = clickhouse_db.column_names(clickhouse_table_name).await;
+    assert_eq!(final_columns, vec!["id", "name", "age", "email", "score"]);
+
+    let final_column_types = clickhouse_db.column_types(clickhouse_table_name).await;
+    assert_eq!(
+        final_column_types,
+        vec![
+            ("id".to_owned(), "Int64".to_owned()),
+            ("name".to_owned(), "String".to_owned()),
+            ("age".to_owned(), "Int32".to_owned()),
+            ("email".to_owned(), "Nullable(String)".to_owned()),
+            ("score".to_owned(), "Nullable(Int32)".to_owned()),
+        ]
+    );
+
+    assert_eq!(rows.len(), 2, "expected Alice + Bob");
+
+    // Alice: pre-change row, added columns should be NULL.
+    assert_eq!(rows[0].id, 1);
+    assert_eq!(rows[0].name, "Alice");
+    assert_eq!(rows[0].age, 25);
+    assert_eq!(rows[0].email, None, "Alice's email should be NULL (column added after her row)");
+    assert_eq!(rows[0].score, None, "Alice's score should be NULL (column added after her row)");
+    assert_eq!(rows[0].cdc_operation, "INSERT");
+
+    // Bob: post-change row, added columns present.
+    assert_eq!(rows[1].id, 2);
+    assert_eq!(rows[1].name, "Bob");
+    assert_eq!(rows[1].age, 30);
+    assert_eq!(rows[1].email, Some("bob@example.com".to_owned()));
+    assert_eq!(rows[1].score, Some(7));
+    assert_eq!(rows[1].cdc_operation, "INSERT");
+
+    // Metadata snapshot_id should have advanced.
+    let final_metadata = store
+        .get_applied_destination_table_metadata(table_id)
+        .await
+        .unwrap()
+        .expect("metadata should exist after schema change");
+    assert!(
+        final_metadata.snapshot_id > initial_snapshot_id,
+        "snapshot_id should increase after schema change"
+    );
+}
+
+/// Row struct for the combined schema change test after all changes.
+/// Columns: id, full_name (renamed), status (kept), email (added).
+/// age is dropped.
+#[derive(clickhouse::Row, serde::Deserialize, Debug)]
+struct CombinedSchemaChangeRow {
+    id: i64,
+    full_name: String,
+    status: Option<String>,
+    email: Option<String>,
+    cdc_operation: String,
+}
+
+/// Tests that multiple schema changes (ADD, DROP, RENAME) in Postgres all
+/// propagate to ClickHouse correctly.
+///
+/// # GIVEN
+///
+/// A Postgres table with columns (id serial PK, name text not null, age integer
+/// not null, status text) and one row ('Alice', 25, 'active'), copied to
+/// ClickHouse.
+///
+/// # WHEN
+///
+/// Three schema changes are applied:
+/// 1. RENAME COLUMN name TO full_name
+/// 2. DROP COLUMN age
+/// 3. ADD COLUMN email text
+/// A new row ('Bob', 'pending', 'bob@example.com') is inserted with the updated
+/// schema.
+///
+/// # THEN
+///
+/// The ClickHouse table has columns: id, full_name, status, email.
+/// - 'age' is dropped.
+/// - 'name' is renamed to 'full_name'.
+/// - 'email' is added.
+/// Alice's row has 'Alice' under 'full_name', 'active' for status, NULL for
+/// email. Bob's row has the new values.
+/// The destination metadata snapshot_id has increased.
+#[tokio::test(flavor = "multi_thread")]
+async fn schema_change_add_drop_rename() {
+    init_test_tracing();
+    install_crypto_provider();
+
+    let clickhouse_table_name = "test_schema__multi";
+
+    // --- GIVEN: table with one row, copied to ClickHouse ---
+    let database = spawn_source_database().await;
+    let table_name = test_table_name("schema_multi");
+
+    let table_id = database
+        .create_table(
+            table_name.clone(),
+            true,
+            &[("name", "text not null"), ("age", "integer not null"), ("status", "text")],
+        )
+        .await
+        .expect("Failed to create table");
+
+    let publication_name = "test_pub_ch_schema_multi";
+    database
+        .create_publication(publication_name, std::slice::from_ref(&table_name))
+        .await
+        .expect("Failed to create publication");
+
+    database
+        .run_sql(&format!(
+            "INSERT INTO {} (name, age, status) VALUES ('Alice', 25, 'active')",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .expect("Failed to insert Alice");
+
+    let clickhouse_db = setup_clickhouse_database().await;
+    let store = NotifyingStore::new();
+    let pipeline_id: PipelineId = random();
+    let destination = clickhouse_db.build_destination(store.clone());
+
+    let table_ready =
+        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
+
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name.to_owned(),
+        store.clone(),
+        destination,
+    );
+
+    pipeline.start().await.unwrap();
+    table_ready.notified().await;
+
+    // Verify initial schema.
+    let initial_columns = clickhouse_db.column_names(clickhouse_table_name).await;
+    assert_eq!(initial_columns, vec!["id", "name", "age", "status"]);
+
+    let initial_metadata = store
+        .get_applied_destination_table_metadata(table_id)
+        .await
+        .unwrap()
+        .expect("metadata should exist after table creation");
+    let initial_snapshot_id = initial_metadata.snapshot_id;
+
+    // --- WHEN: rename + drop + add, then insert with new schema ---
+    database
+        .alter_table(
+            table_name.clone(),
+            &[TableModification::RenameColumn { old_name: "name", new_name: "full_name" }],
+        )
+        .await
+        .unwrap();
+
+    database
+        .alter_table(table_name.clone(), &[TableModification::DropColumn { name: "age" }])
+        .await
+        .unwrap();
+
+    database
+        .alter_table(
+            table_name.clone(),
+            &[TableModification::AddColumn { name: "email", data_type: "text" }],
+        )
+        .await
+        .unwrap();
+
+    database
+        .run_sql(&format!(
+            "INSERT INTO {} (full_name, status, email) VALUES ('Bob', 'pending', \
+             'bob@example.com')",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .expect("Failed to insert Bob");
+
+    // Poll until Bob's row arrives.
+    let select = concat!(
+        "SELECT id, full_name, status, email, cdc_operation ",
+        "FROM \"test_schema__multi\" ",
+        "ORDER BY id",
+    );
+    let mut rows: Vec<CombinedSchemaChangeRow> = Vec::new();
+    for _ in 0..50 {
+        if let Ok(r) =
+            clickhouse_db.db_client().query(select).fetch_all::<CombinedSchemaChangeRow>().await
+            && r.len() >= 2
+        {
+            rows = r;
+            break;
+        }
+        sleep(Duration::from_millis(200)).await;
+    }
+    assert!(
+        rows.len() >= 2,
+        "timed out waiting for schema_change_add_drop_rename rows: got {} of 2",
+        rows.len()
+    );
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // --- THEN: ClickHouse schema reflects all changes ---
+    let final_columns = clickhouse_db.column_names(clickhouse_table_name).await;
+    assert_eq!(final_columns, vec!["id", "full_name", "status", "email"]);
+
+    assert_eq!(rows.len(), 2, "expected Alice + Bob");
+
+    // Alice: pre-change row.
+    assert_eq!(rows[0].id, 1);
+    assert_eq!(rows[0].full_name, "Alice", "renamed column should preserve data");
+    assert_eq!(rows[0].status, Some("active".to_owned()));
+    assert_eq!(rows[0].email, None, "Alice's email should be NULL (added after her row)");
+    assert_eq!(rows[0].cdc_operation, "INSERT");
+
+    // Bob: post-change row.
+    assert_eq!(rows[1].id, 2);
+    assert_eq!(rows[1].full_name, "Bob");
+    assert_eq!(rows[1].status, Some("pending".to_owned()));
+    assert_eq!(rows[1].email, Some("bob@example.com".to_owned()));
+    assert_eq!(rows[1].cdc_operation, "INSERT");
+
+    // Metadata snapshot_id should have advanced.
+    let final_metadata = store
+        .get_applied_destination_table_metadata(table_id)
+        .await
+        .unwrap()
+        .expect("metadata should exist after schema change");
+    assert!(
+        final_metadata.snapshot_id > initial_snapshot_id,
+        "snapshot_id should increase after schema change"
+    );
+}
