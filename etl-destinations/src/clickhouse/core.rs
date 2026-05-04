@@ -251,7 +251,7 @@ where
         self.store.store_destination_table_metadata(table_id, metadata.clone()).await?;
 
         let ddl = build_create_table_sql(clickhouse_table_name, schema.column_schemas());
-        self.client.execute_ddl(DdlKind::CreateTable, clickhouse_table_name, &ddl).await?;
+        self.client.execute_ddl(DdlKind::CreateTable, &ddl).await?;
 
         self.store.store_destination_table_metadata(table_id, metadata.to_applied()).await?;
 
@@ -367,7 +367,7 @@ where
             }
             None => {
                 let ddl = build_create_table_sql(clickhouse_table_name, schema.column_schemas());
-                self.client.execute_ddl(DdlKind::CreateTable, clickhouse_table_name, &ddl).await?;
+                self.client.execute_ddl(DdlKind::CreateTable, &ddl).await?;
             }
         }
 

@@ -154,12 +154,7 @@ impl ClickHouseClient {
     /// Executes a DDL statement (e.g. `CREATE TABLE IF NOT EXISTS …`) and
     /// records its duration in the `etl_clickhouse_ddl_duration_seconds`
     /// histogram labelled with the DDL `kind` and `table_name`.
-    pub(crate) async fn execute_ddl(
-        &self,
-        kind: DdlKind,
-        table_name: &str,
-        sql: &str,
-    ) -> EtlResult<()> {
+    pub(crate) async fn execute_ddl(&self, kind: DdlKind, sql: &str) -> EtlResult<()> {
         let ddl_start = Instant::now();
         let result = self.inner.query(sql).execute().await.map_err(|e| {
             etl_error!(
@@ -171,7 +166,6 @@ impl ClickHouseClient {
         metrics::histogram!(
             ETL_CLICKHOUSE_DDL_DURATION_SECONDS,
             "kind" => kind.as_label(),
-            "table" => table_name.to_owned(),
         )
         .record(ddl_start.elapsed().as_secs_f64());
         result
@@ -216,13 +210,13 @@ impl ClickHouseClient {
         after_column: Option<&str>,
     ) -> EtlResult<()> {
         let sql = build_add_column_sql(table_name, column, after_column);
-        self.execute_ddl(DdlKind::AddColumn, table_name, &sql).await
+        self.execute_ddl(DdlKind::AddColumn, &sql).await
     }
 
     /// Drops a column from an existing ClickHouse table (idempotent).
     pub(crate) async fn drop_column(&self, table_name: &str, column_name: &str) -> EtlResult<()> {
         let sql = build_drop_column_sql(table_name, column_name);
-        self.execute_ddl(DdlKind::DropColumn, table_name, &sql).await
+        self.execute_ddl(DdlKind::DropColumn, &sql).await
     }
 
     /// Renames a column in an existing ClickHouse table (idempotent).
@@ -237,7 +231,7 @@ impl ClickHouseClient {
         new_name: &str,
     ) -> EtlResult<()> {
         let sql = build_rename_column_sql(table_name, old_name, new_name);
-        self.execute_ddl(DdlKind::RenameColumn, table_name, &sql).await
+        self.execute_ddl(DdlKind::RenameColumn, &sql).await
     }
 
     /// Executes `TRUNCATE TABLE IF EXISTS` for the supplied table.
@@ -302,8 +296,7 @@ impl ClickHouseClient {
             })?;
             metrics::histogram!(
                 ETL_CLICKHOUSE_INSERT_DURATION_SECONDS,
-                "table" => table_name.to_owned(),
-                "source" => source
+                "source" => source,
             )
             .record(insert_start.elapsed().as_secs_f64());
         }
