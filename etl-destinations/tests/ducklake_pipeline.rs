@@ -237,6 +237,99 @@ async fn table_copy_and_streaming_with_restart() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn table_copy_and_streaming_without_restart() {
+    init_test_tracing();
+
+    let mut database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
+    let lake = create_test_lake("table_copy_and_streaming_without_restart").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
+
+    let users_table_name = table_name_to_ducklake_table_name(&database_schema.users_schema().name)
+        .expect("failed to build DuckLake users table name");
+    let orders_table_name =
+        table_name_to_ducklake_table_name(&database_schema.orders_schema().name)
+            .expect("failed to build DuckLake orders table name");
+
+    insert_mock_data(
+        &mut database,
+        &database_schema.users_schema().name,
+        &database_schema.orders_schema().name,
+        1..=2,
+        false,
+    )
+    .await;
+
+    let store = NotifyingStore::new();
+    let pipeline_id: PipelineId = random();
+
+    let destination = build_destination(&catalog_url, &data_url, store.clone()).await;
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    let users_ready = store
+        .notify_on_table_state_type(
+            database_schema.users_schema().id,
+            TableReplicationPhaseType::Ready,
+        )
+        .await;
+    let orders_ready = store
+        .notify_on_table_state_type(
+            database_schema.orders_schema().id,
+            TableReplicationPhaseType::Ready,
+        )
+        .await;
+
+    pipeline.start().await.unwrap();
+
+    users_ready.notified().await;
+    orders_ready.notified().await;
+
+    let event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 4)]).await;
+
+    insert_mock_data(
+        &mut database,
+        &database_schema.users_schema().name,
+        &database_schema.orders_schema().name,
+        3..=4,
+        false,
+    )
+    .await;
+
+    event_notify.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+    drop(destination);
+    checkpoint_lake(&catalog_url, &data_url);
+
+    let conn = open_lake_conn(&catalog_url, &data_url);
+    assert_eq!(
+        query_user_rows(&conn, &users_table_name),
+        vec![
+            (1, "user_1".to_owned(), 1),
+            (2, "user_2".to_owned(), 2),
+            (3, "user_3".to_owned(), 3),
+            (4, "user_4".to_owned(), 4),
+        ]
+    );
+    assert_eq!(
+        query_order_rows(&conn, &orders_table_name),
+        vec![
+            (1, "description_1".to_owned()),
+            (2, "description_2".to_owned()),
+            (3, "description_3".to_owned()),
+            (4, "description_4".to_owned()),
+        ]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn table_insert_update_delete() {
     init_test_tracing();
 
