@@ -1553,7 +1553,7 @@ struct DefaultIdentityDeleteRow {
     boolean_col: bool,
     text_col: String,
     varchar_col: String,
-    date_col: u16,
+    date_col: i32,
     timestamp_col: i64,
     timestamptz_col: i64,
     time_col: String,
