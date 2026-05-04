@@ -40,7 +40,7 @@ use crate::ducklake::{
 /// Dedicated pool size for background DuckLake maintenance work.
 const MAINTENANCE_POOL_SIZE: u32 = 1;
 /// Poll interval for checking per-table inline flush thresholds.
-const MAINTENANCE_FLUSH_POLL_INTERVAL: Duration = Duration::from_secs(30);
+const MAINTENANCE_FLUSH_POLL_INTERVAL: Duration = Duration::from_mins(2);
 /// Fixed cadence for expiring old DuckLake snapshots.
 const MAINTENANCE_EXPIRE_SNAPSHOTS_INTERVAL: Duration = Duration::from_secs(5 * 60 * 60);
 /// Fixed cadence for cleaning up old DuckLake files.
@@ -2054,7 +2054,9 @@ mod tests {
         let manager = DuckLakeConnectionManager {
             setup_plan: Arc::new(crate::ducklake::config::DuckLakeSetupPlan::default()),
             disable_extension_autoload: cfg!(target_os = "linux"),
-            interrupt_registry: Arc::new(crate::ducklake::client::DuckLakeInterruptRegistry::default()),
+            interrupt_registry: Arc::new(
+                crate::ducklake::client::DuckLakeInterruptRegistry::default(),
+            ),
             open_count: Arc::clone(&open_count),
         };
         let pool = Arc::new(
@@ -2111,7 +2113,9 @@ mod tests {
             DuckLakeConnectionManager {
                 setup_plan: Arc::new(crate::ducklake::config::DuckLakeSetupPlan::default()),
                 disable_extension_autoload: cfg!(target_os = "linux"),
-                interrupt_registry: Arc::new(crate::ducklake::client::DuckLakeInterruptRegistry::default()),
+                interrupt_registry: Arc::new(
+                    crate::ducklake::client::DuckLakeInterruptRegistry::default(),
+                ),
                 open_count: Arc::clone(&open_count),
             },
             Arc::new(RwLock::new(())),
@@ -2142,7 +2146,9 @@ mod tests {
                 DuckLakeConnectionManager {
                     setup_plan: Arc::new(crate::ducklake::config::DuckLakeSetupPlan::default()),
                     disable_extension_autoload: cfg!(target_os = "linux"),
-                    interrupt_registry: Arc::new(crate::ducklake::client::DuckLakeInterruptRegistry::default()),
+                    interrupt_registry: Arc::new(
+                        crate::ducklake::client::DuckLakeInterruptRegistry::default(),
+                    ),
                     open_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                 },
                 1,
