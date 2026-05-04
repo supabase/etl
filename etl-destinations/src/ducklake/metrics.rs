@@ -33,7 +33,7 @@ static REGISTER_METRICS: Once = Once::new();
 /// storage.
 pub(super) const SMALL_FILE_SIZE_BYTES: i64 = 5_000_000; // 5MB
 /// Frequency of background DuckLake metrics sampling.
-const METRICS_POLL_INTERVAL: Duration = Duration::from_secs(30);
+const METRICS_POLL_INTERVAL: Duration = Duration::from_mins(2);
 
 pub(crate) const ETL_DUCKLAKE_POOL_SIZE: &str = "etl_ducklake_pool_size";
 pub(crate) const ETL_DUCKLAKE_BLOCKING_SLOT_WAIT_SECONDS: &str =

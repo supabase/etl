@@ -28,6 +28,8 @@ pub(super) const TARGET_FILE_SIZE_OPTION_NAME: &str = "target_file_size";
 pub(super) const MAINTENANCE_TARGET_FILE_SIZE: &str = "10MB";
 pub(super) const EXPIRE_SNAPSHOTS_OLDER_THAN: &str = "7 days";
 pub(super) const DUCKDB_MEMORY_CACHE_LIMIT: &str = "150MB";
+/// Debug thread limit applied to every DuckLake DuckDB connection.
+const DUCKDB_THREADS_LIMIT: u32 = 1;
 const PARQUET_COMPRESSION_OPTION_NAME: &str = "parquet_compression";
 const PARQUET_COMPRESSION_OPTION_VALUE: &str = "zstd";
 const PARQUET_ROW_GROUP_SIZE_BYTES_OPTION_NAME: &str = "parquet_row_group_size_bytes";
@@ -47,6 +49,11 @@ fn configure_memory_limit_sql(duckdb_memory_cache_limit: Option<&str>) -> String
         "SET memory_limit = {};",
         quote_literal(resolve_duckdb_memory_cache_limit(duckdb_memory_cache_limit)),
     )
+}
+
+/// Builds the SQL that caps DuckDB worker threads per connection.
+fn configure_threads_sql() -> String {
+    format!("SET threads = {DUCKDB_THREADS_LIMIT};")
 }
 
 /// Builds the SQL that configures DuckDB's session-level write ordering.
@@ -655,6 +662,7 @@ fn build_setup_plan_with_strategy(
         label: "Limit memory cache",
         sql: configure_memory_limit_sql(duckdb_memory_cache_limit),
     }];
+    steps.push(DuckLakeSetupStep { label: "limit_threads", sql: configure_threads_sql() });
     steps.push(DuckLakeSetupStep {
         label: "configure_writer_session",
         sql: configure_writer_session_sql(),
@@ -1214,24 +1222,26 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(plan.steps().len(), 6);
+        assert_eq!(plan.steps().len(), 7);
         assert_eq!(plan.steps()[0].label, "Limit memory cache");
-        assert_eq!(plan.steps()[1].label, "configure_writer_session");
-        assert_eq!(plan.steps()[2].label, "load_extensions");
-        assert_eq!(plan.steps()[3].label, "configure_object_store");
-        assert_eq!(plan.steps()[4].label, "attach_catalog");
-        assert_eq!(plan.steps()[5].label, "configure_parquet");
+        assert_eq!(plan.steps()[1].label, "limit_threads");
+        assert_eq!(plan.steps()[2].label, "configure_writer_session");
+        assert_eq!(plan.steps()[3].label, "load_extensions");
+        assert_eq!(plan.steps()[4].label, "configure_object_store");
+        assert_eq!(plan.steps()[5].label, "attach_catalog");
+        assert_eq!(plan.steps()[6].label, "configure_parquet");
         assert_eq!(
             plan.steps()[0].sql,
             format!("SET memory_limit = {};", quote_literal(DUCKDB_MEMORY_CACHE_LIMIT))
         );
-        assert_eq!(plan.steps()[1].sql, configure_writer_session_sql());
-        assert!(plan.steps()[2].sql.contains(HTTPFS_EXTENSION_FILE));
-        assert!(!plan.steps()[2].sql.contains("json"));
-        assert!(plan.steps()[3].sql.contains("CREATE OR REPLACE SECRET"));
-        assert!(plan.steps()[4].sql.contains("ATTACH"));
-        assert!(plan.steps()[4].sql.contains("METADATA_SCHEMA 'ducklake'"));
-        assert_eq!(plan.steps()[5].sql, configure_parquet_settings_sql());
+        assert_eq!(plan.steps()[1].sql, configure_threads_sql());
+        assert_eq!(plan.steps()[2].sql, configure_writer_session_sql());
+        assert!(plan.steps()[3].sql.contains(HTTPFS_EXTENSION_FILE));
+        assert!(!plan.steps()[3].sql.contains("json"));
+        assert!(plan.steps()[4].sql.contains("CREATE OR REPLACE SECRET"));
+        assert!(plan.steps()[5].sql.contains("ATTACH"));
+        assert!(plan.steps()[5].sql.contains("METADATA_SCHEMA 'ducklake'"));
+        assert_eq!(plan.steps()[6].sql, configure_parquet_settings_sql());
     }
 
     #[test]
