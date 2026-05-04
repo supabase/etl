@@ -4,13 +4,14 @@ use metrics::{Unit, describe_histogram};
 
 static REGISTER_METRICS: Once = Once::new();
 
-/// Duration of `CREATE TABLE IF NOT EXISTS` DDL operations sent to ClickHouse.
-/// Labels: `table`.
+/// Duration of DDL operations sent to ClickHouse.
+/// Labels: `kind` (`create_table`, `add_column`, `drop_column`,
+/// `rename_column`).
 pub(super) const ETL_CLICKHOUSE_DDL_DURATION_SECONDS: &str = "etl_clickhouse_ddl_duration_seconds";
 
 /// Duration of a single RowBinary INSERT statement from first write to server
-/// acknowledgement. Labels: `table`, `source` (`copy` = initial table sync,
-/// `streaming` = CDC events).
+/// acknowledgement. Labels: `source` (`copy` = initial table sync, `streaming`
+/// = CDC events).
 pub(super) const ETL_CLICKHOUSE_INSERT_DURATION_SECONDS: &str =
     "etl_clickhouse_insert_duration_seconds";
 
@@ -22,15 +23,14 @@ pub(super) fn register_metrics() {
         describe_histogram!(
             ETL_CLICKHOUSE_DDL_DURATION_SECONDS,
             Unit::Seconds,
-            "Duration of CREATE TABLE IF NOT EXISTS DDL operations sent to ClickHouse, labeled by \
-             table"
+            "Duration of DDL operations sent to ClickHouse, labeled by kind"
         );
 
         describe_histogram!(
             ETL_CLICKHOUSE_INSERT_DURATION_SECONDS,
             Unit::Seconds,
             "Duration of RowBinary INSERT statements from first write to server acknowledgement, \
-             labeled by table and source"
+             labeled by source"
         );
     });
 }
