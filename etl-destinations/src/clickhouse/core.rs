@@ -390,15 +390,18 @@ where
         let rows: Vec<Vec<ClickHouseValue>> = table_rows
             .into_iter()
             .map(|table_row| {
-                let mut values: Vec<ClickHouseValue> =
-                    table_row.into_values().into_iter().map(cell_to_clickhouse_value).collect();
+                let mut values: Vec<ClickHouseValue> = table_row
+                    .into_values()
+                    .into_iter()
+                    .map(cell_to_clickhouse_value)
+                    .collect::<EtlResult<_>>()?;
                 // CDC columns: initial-copy rows are tagged as INSERT with LSN 0
                 // (sentinel meaning "this row pre-dates the streaming cursor").
                 values.push(ClickHouseValue::String(CdcOperation::Insert.to_string()));
                 values.push(cdc_lsn_to_clickhouse_value(PgLsn::from(0)));
-                values
+                Ok(values)
             })
-            .collect();
+            .collect::<EtlResult<_>>()?;
 
         self.client
             .insert_rows(
@@ -722,13 +725,15 @@ where
                 let rows: Vec<Vec<ClickHouseValue>> = rows
                     .into_iter()
                     .map(|PendingRow { operation, lsn, cells }| {
-                        let mut values: Vec<ClickHouseValue> =
-                            cells.into_iter().map(cell_to_clickhouse_value).collect();
+                        let mut values: Vec<ClickHouseValue> = cells
+                            .into_iter()
+                            .map(cell_to_clickhouse_value)
+                            .collect::<EtlResult<_>>()?;
                         values.push(ClickHouseValue::String(operation.to_string()));
                         values.push(cdc_lsn_to_clickhouse_value(lsn));
-                        values
+                        Ok(values)
                     })
-                    .collect();
+                    .collect::<EtlResult<_>>()?;
 
                 client
                     .insert_rows(

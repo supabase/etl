@@ -29,8 +29,10 @@ pub(crate) enum ClickHouseValue {
     Float64(f64),
     /// TEXT, NUMERIC (string), TIME (string), JSON, BYTEA (hex-encoded)
     String(String),
-    /// Days since Unix epoch (ClickHouse `Date` on wire = UInt16 LE)
-    Date(u16),
+    /// Days from Unix epoch (ClickHouse `Date32` on wire = Int32 LE). The
+    /// signed offset lets us represent pre-1970 dates that ClickHouse `Date`
+    /// (UInt16) would have silently clamped to 1970-01-01.
+    Date32(i32),
     /// Microseconds since Unix epoch (ClickHouse `DateTime64(6)` on wire =
     /// Int64 LE)
     DateTime64(i64),
@@ -41,8 +43,12 @@ pub(crate) enum ClickHouseValue {
 }
 
 /// Converts a [`Cell`] to a [`ClickHouseValue`], consuming it (no clone).
-pub(crate) fn cell_to_clickhouse_value(cell: Cell) -> ClickHouseValue {
-    match cell {
+///
+/// Returns [`ErrorKind::ConversionError`] when a value cannot be represented
+/// in ClickHouse without loss, e.g. a Postgres `date` outside ClickHouse
+/// `Date32`'s `1900-01-01..=2299-12-31` range.
+pub(crate) fn cell_to_clickhouse_value(cell: Cell) -> EtlResult<ClickHouseValue> {
+    Ok(match cell {
         Cell::Null => ClickHouseValue::Null,
         Cell::Bool(b) => ClickHouseValue::Bool(b),
         Cell::I16(v) => ClickHouseValue::Int16(v),
@@ -52,7 +58,7 @@ pub(crate) fn cell_to_clickhouse_value(cell: Cell) -> ClickHouseValue {
         Cell::F32(v) => ClickHouseValue::Float32(v),
         Cell::F64(v) => ClickHouseValue::Float64(v),
         Cell::Numeric(n) => ClickHouseValue::String(n.to_string()),
-        Cell::Date(d) => ClickHouseValue::Date(date_to_days(d)),
+        Cell::Date(d) => ClickHouseValue::Date32(date_to_date32_days(d)?),
         Cell::Time(t) => ClickHouseValue::String(t.to_string()),
         Cell::Timestamp(dt) => ClickHouseValue::DateTime64(dt.and_utc().timestamp_micros()),
         Cell::TimestampTz(dt) => ClickHouseValue::DateTime64(dt.timestamp_micros()),
@@ -61,17 +67,17 @@ pub(crate) fn cell_to_clickhouse_value(cell: Cell) -> ClickHouseValue {
         Cell::Bytes(b) => ClickHouseValue::String(bytes_to_hex(&b)),
         Cell::String(s) => ClickHouseValue::String(s),
         Cell::Array(array_cell) => {
-            ClickHouseValue::Array(array_cell_to_clickhouse_values(array_cell))
+            ClickHouseValue::Array(array_cell_to_clickhouse_values(array_cell)?)
         }
-    }
+    })
 }
 
 /// Converts an [`ArrayCell`] to a flat `Vec<ClickHouseValue>`, mapping each
 /// `Some(x)` to the matching scalar variant and each `None` to
 /// [`ClickHouseValue::Null`]. Per-element conversions mirror
 /// [`cell_to_clickhouse_value`].
-fn array_cell_to_clickhouse_values(array_cell: ArrayCell) -> Vec<ClickHouseValue> {
-    match array_cell {
+fn array_cell_to_clickhouse_values(array_cell: ArrayCell) -> EtlResult<Vec<ClickHouseValue>> {
+    Ok(match array_cell {
         ArrayCell::Bool(v) => map_array(v, ClickHouseValue::Bool),
         ArrayCell::String(v) => map_array(v, ClickHouseValue::String),
         ArrayCell::I16(v) => map_array(v, ClickHouseValue::Int16),
@@ -81,7 +87,9 @@ fn array_cell_to_clickhouse_values(array_cell: ArrayCell) -> Vec<ClickHouseValue
         ArrayCell::F32(v) => map_array(v, ClickHouseValue::Float32),
         ArrayCell::F64(v) => map_array(v, ClickHouseValue::Float64),
         ArrayCell::Numeric(v) => map_array(v, |n| ClickHouseValue::String(n.to_string())),
-        ArrayCell::Date(v) => map_array(v, |d| ClickHouseValue::Date(date_to_days(d))),
+        ArrayCell::Date(v) => {
+            try_map_array(v, |d| Ok(ClickHouseValue::Date32(date_to_date32_days(d)?)))?
+        }
         ArrayCell::Time(v) => map_array(v, |t| ClickHouseValue::String(t.to_string())),
         ArrayCell::Timestamp(v) => {
             map_array(v, |dt| ClickHouseValue::DateTime64(dt.and_utc().timestamp_micros()))
@@ -92,7 +100,7 @@ fn array_cell_to_clickhouse_values(array_cell: ArrayCell) -> Vec<ClickHouseValue
         ArrayCell::Uuid(v) => map_array(v, |u| ClickHouseValue::Uuid(*u.as_bytes())),
         ArrayCell::Json(v) => map_array(v, |j| ClickHouseValue::String(j.to_string())),
         ArrayCell::Bytes(v) => map_array(v, |b| ClickHouseValue::String(bytes_to_hex(&b))),
-    }
+    })
 }
 
 /// Maps a `Vec<Option<T>>` to `Vec<ClickHouseValue>`, applying `f` to each
@@ -109,12 +117,48 @@ where
         .collect()
 }
 
-fn date_to_days(d: NaiveDate) -> u16 {
-    d.signed_duration_since(unix_epoch()).num_days().clamp(0, i64::from(u16::MAX)) as u16
+/// Fallible variant of [`map_array`] for element converters that can fail.
+fn try_map_array<T, F>(v: Vec<Option<T>>, mut f: F) -> EtlResult<Vec<ClickHouseValue>>
+where
+    F: FnMut(T) -> EtlResult<ClickHouseValue>,
+{
+    v.into_iter()
+        .map(|o| match o {
+            Some(t) => f(t),
+            None => Ok(ClickHouseValue::Null),
+        })
+        .collect()
+}
+
+/// Converts a [`NaiveDate`] to a ClickHouse `Date32` day offset (signed days
+/// from 1970-01-01).
+///
+/// Returns [`ErrorKind::ConversionError`] when the date falls outside
+/// ClickHouse `Date32`'s `1900-01-01..=2299-12-31` range. Silent clamping
+/// would corrupt historical or far-future values, so we fail the batch
+/// instead.
+fn date_to_date32_days(d: NaiveDate) -> EtlResult<i32> {
+    if d < date32_min() || d > date32_max() {
+        return Err(etl_error!(
+            ErrorKind::ConversionError,
+            "date out of ClickHouse Date32 range",
+            format!("{d} is outside the supported range {}..={}", date32_min(), date32_max())
+        ));
+    }
+    // The bounds check above guarantees the day count fits in i32.
+    Ok(d.signed_duration_since(unix_epoch()).num_days() as i32)
 }
 
 fn unix_epoch() -> NaiveDate {
     NaiveDate::from_ymd_opt(1970, 1, 1).expect("valid date")
+}
+
+fn date32_min() -> NaiveDate {
+    NaiveDate::from_ymd_opt(1900, 1, 1).expect("valid date")
+}
+
+fn date32_max() -> NaiveDate {
+    NaiveDate::from_ymd_opt(2299, 12, 31).expect("valid date")
 }
 
 /// Lowercase hex-encodes `bytes` into a fresh `String`.
@@ -178,7 +222,7 @@ pub(crate) fn rb_encode_value(val: ClickHouseValue, buf: &mut Vec<u8>) -> EtlRes
             rb_varint(s.len(), buf);
             buf.extend_from_slice(s.as_bytes());
         }
-        ClickHouseValue::Date(days) => buf.extend_from_slice(&days.to_le_bytes()),
+        ClickHouseValue::Date32(days) => buf.extend_from_slice(&days.to_le_bytes()),
         ClickHouseValue::DateTime64(micros) => buf.extend_from_slice(&micros.to_le_bytes()),
         ClickHouseValue::Uuid(bytes) => {
             // ClickHouse RowBinary UUID = high u64 (LE) then low u64 (LE). Our
@@ -238,23 +282,29 @@ mod tests {
 
     #[test]
     fn cell_to_clickhouse_value_null() {
-        assert!(matches!(cell_to_clickhouse_value(Cell::Null), ClickHouseValue::Null));
+        assert!(matches!(cell_to_clickhouse_value(Cell::Null).unwrap(), ClickHouseValue::Null));
     }
 
     #[test]
     fn cell_to_clickhouse_value_bool() {
-        assert!(matches!(cell_to_clickhouse_value(Cell::Bool(true)), ClickHouseValue::Bool(true)));
+        assert!(matches!(
+            cell_to_clickhouse_value(Cell::Bool(true)).unwrap(),
+            ClickHouseValue::Bool(true)
+        ));
     }
 
     #[test]
     fn cell_to_clickhouse_value_i32() {
-        assert!(matches!(cell_to_clickhouse_value(Cell::I32(42)), ClickHouseValue::Int32(42)));
+        assert!(matches!(
+            cell_to_clickhouse_value(Cell::I32(42)).unwrap(),
+            ClickHouseValue::Int32(42)
+        ));
     }
 
     #[test]
     fn cell_to_clickhouse_value_string() {
         if let ClickHouseValue::String(s) =
-            cell_to_clickhouse_value(Cell::String("hello".to_owned()))
+            cell_to_clickhouse_value(Cell::String("hello".to_owned())).unwrap()
         {
             assert_eq!(s, "hello");
         } else {
@@ -265,17 +315,40 @@ mod tests {
     #[test]
     fn cell_to_clickhouse_value_date() {
         let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
-        assert!(matches!(cell_to_clickhouse_value(Cell::Date(epoch)), ClickHouseValue::Date(0)));
+        assert!(matches!(
+            cell_to_clickhouse_value(Cell::Date(epoch)).unwrap(),
+            ClickHouseValue::Date32(0)
+        ));
 
         let day1 = NaiveDate::from_ymd_opt(1970, 1, 2).unwrap();
-        assert!(matches!(cell_to_clickhouse_value(Cell::Date(day1)), ClickHouseValue::Date(1)));
+        assert!(matches!(
+            cell_to_clickhouse_value(Cell::Date(day1)).unwrap(),
+            ClickHouseValue::Date32(1)
+        ));
+
+        // Pre-1970 dates round-trip through Date32 as a negative offset rather
+        // than being silently clamped to the epoch.
+        let pre_epoch = NaiveDate::from_ymd_opt(1969, 12, 31).unwrap();
+        assert!(matches!(
+            cell_to_clickhouse_value(Cell::Date(pre_epoch)).unwrap(),
+            ClickHouseValue::Date32(-1)
+        ));
+    }
+
+    #[test]
+    fn cell_to_clickhouse_value_date_out_of_range_errors() {
+        let too_old = NaiveDate::from_ymd_opt(1899, 12, 31).unwrap();
+        assert!(cell_to_clickhouse_value(Cell::Date(too_old)).is_err());
+
+        let too_new = NaiveDate::from_ymd_opt(2300, 1, 1).unwrap();
+        assert!(cell_to_clickhouse_value(Cell::Date(too_new)).is_err());
     }
 
     #[test]
     fn cell_to_clickhouse_value_timestamp() {
         let epoch = chrono::DateTime::from_timestamp(0, 0).unwrap().naive_utc();
         assert!(matches!(
-            cell_to_clickhouse_value(Cell::Timestamp(epoch)),
+            cell_to_clickhouse_value(Cell::Timestamp(epoch)).unwrap(),
             ClickHouseValue::DateTime64(0)
         ));
     }
@@ -284,7 +357,7 @@ mod tests {
     fn cell_to_clickhouse_value_uuid() {
         let u = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
         let expected_bytes = *u.as_bytes();
-        if let ClickHouseValue::Uuid(bytes) = cell_to_clickhouse_value(Cell::Uuid(u)) {
+        if let ClickHouseValue::Uuid(bytes) = cell_to_clickhouse_value(Cell::Uuid(u)).unwrap() {
             assert_eq!(bytes, expected_bytes);
         } else {
             panic!("expected Uuid variant");
@@ -294,7 +367,7 @@ mod tests {
     #[test]
     fn cell_to_clickhouse_value_bytes_hex() {
         let bytes = vec![0xde, 0xad, 0xbe, 0xef];
-        if let ClickHouseValue::String(s) = cell_to_clickhouse_value(Cell::Bytes(bytes)) {
+        if let ClickHouseValue::String(s) = cell_to_clickhouse_value(Cell::Bytes(bytes)).unwrap() {
             assert_eq!(s, "deadbeef");
         } else {
             panic!("expected String variant");
@@ -322,8 +395,12 @@ mod tests {
         assert_eq!(buf, [2, b'h', b'i']); // varint(2) + bytes
 
         buf.clear();
-        rb_encode_value(ClickHouseValue::Date(1), &mut buf).unwrap();
-        assert_eq!(buf, 1u16.to_le_bytes());
+        rb_encode_value(ClickHouseValue::Date32(1), &mut buf).unwrap();
+        assert_eq!(buf, 1i32.to_le_bytes());
+
+        buf.clear();
+        rb_encode_value(ClickHouseValue::Date32(-1), &mut buf).unwrap();
+        assert_eq!(buf, (-1i32).to_le_bytes());
     }
 
     #[test]

@@ -20,7 +20,7 @@ fn postgres_column_type_to_clickhouse_sql(typ: &Type) -> &'static str {
         &Type::FLOAT4 => "Float32",
         &Type::FLOAT8 => "Float64",
         &Type::NUMERIC => "String",
-        &Type::DATE => "Date",
+        &Type::DATE => "Date32",
         &Type::TIME => "String",
         &Type::TIMESTAMP => "DateTime64(6)",
         &Type::TIMESTAMPTZ => "DateTime64(6, 'UTC')",
@@ -47,7 +47,7 @@ fn postgres_array_element_clickhouse_sql(typ: &Type) -> &'static str {
         &Type::FLOAT4_ARRAY => "Float32",
         &Type::FLOAT8_ARRAY => "Float64",
         &Type::NUMERIC_ARRAY => "String",
-        &Type::DATE_ARRAY => "Date",
+        &Type::DATE_ARRAY => "Date32",
         &Type::TIME_ARRAY => "String",
         &Type::TIMESTAMP_ARRAY => "DateTime64(6)",
         &Type::TIMESTAMPTZ_ARRAY => "DateTime64(6, 'UTC')",
@@ -156,7 +156,7 @@ mod tests {
         assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::FLOAT4), "Float32");
         assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::FLOAT8), "Float64");
         assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::NUMERIC), "String");
-        assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::DATE), "Date");
+        assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::DATE), "Date32");
         assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::TIME), "String");
         assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::TIMESTAMP), "DateTime64(6)");
         assert_eq!(
