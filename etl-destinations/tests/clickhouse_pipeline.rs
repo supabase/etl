@@ -24,7 +24,7 @@ use rand::random;
 use tokio::time::sleep;
 use url::Url;
 
-use crate::support::clickhouse::{AllTypesRow, BoundaryValuesRow};
+use crate::support::clickhouse::{AllTypesRow, BoundaryValuesRow, DateBoundariesRow};
 
 /// Ensures the rustls crypto provider is only installed once across all tests.
 static INIT_CRYPTO: Once = Once::new();
@@ -101,7 +101,7 @@ const TRUNCATE_FLOW_SELECT: &str = concat!(
 /// round-trip).
 ///
 /// Python: `(date(2024, 1, 15) - date(1970, 1, 1)).days` = 19737
-const DATE_2024_01_15_DAYS: u16 = 19737;
+const DATE_2024_01_15_DAYS: i32 = 19737;
 
 /// Microseconds from epoch for `2024-01-15 12:00:00 UTC`.
 const TS_2024_01_15_12_00_US: i64 = 1_705_320_000_000_000;
@@ -710,6 +710,122 @@ async fn boundary_values_table_copy() {
         r.text_array_col,
         vec![Some("日本語".to_owned()), Some("中文".to_owned())],
         "multi-byte UTF-8 in arrays must round-trip exactly"
+    );
+}
+
+/// Days from 1970-01-01 to 1900-01-01 (ClickHouse `Date32` minimum).
+///
+/// Python: `(date(1900, 1, 1) - date(1970, 1, 1)).days` = -25567.
+const DATE_1900_01_01_DAYS: i32 = -25567;
+
+/// Days from 1970-01-01 to 1969-12-31 (just before the Unix epoch).
+const DATE_1969_12_31_DAYS: i32 = -1;
+
+/// Days from 1970-01-01 to 2299-12-31 (ClickHouse `Date32` maximum).
+///
+/// Python: `(date(2299, 12, 31) - date(1970, 1, 1)).days` = 120529.
+const DATE_2299_12_31_DAYS: i32 = 120529;
+
+const DATE_BOUNDARIES_SELECT: &str = concat!(
+    "SELECT id, date_col, cdc_operation ",
+    "FROM \"test_date__boundaries\" ",
+    "ORDER BY id",
+);
+
+/// Tests that Postgres `date` values outside the Unix epoch (pre-1970 and
+/// far-future) round-trip through ClickHouse `Date32` as signed day offsets,
+/// rather than being silently clamped as the previous `Date` (UInt16) mapping
+/// would have done.
+///
+/// # GIVEN
+///
+/// A Postgres table with a single non-null `date` column populated with the
+/// `Date32` boundary values: `1900-01-01` (minimum), `1969-12-31` (just before
+/// epoch), `1970-01-01` (epoch), `2024-01-15` (typical), and `2299-12-31`
+/// (maximum).
+///
+/// # WHEN
+///
+/// The pipeline copies the rows to ClickHouse.
+///
+/// # THEN
+///
+/// Each `date_col` lands in ClickHouse as the matching signed day offset:
+/// negative for pre-1970 dates, zero at the epoch, and a large positive value
+/// for the far-future date. No value is clamped.
+#[tokio::test(flavor = "multi_thread")]
+async fn pre_1970_and_far_future_dates_round_trip() {
+    init_test_tracing();
+    install_crypto_provider();
+
+    // --- GIVEN: Postgres source with date boundary rows ---
+
+    let database = spawn_source_database().await;
+    let table_name = test_table_name("date_boundaries");
+
+    let table_id = database
+        .create_table(table_name.clone(), true, &[("date_col", "date not null")])
+        .await
+        .expect("Failed to create date_boundaries table");
+
+    let publication_name = "test_pub_ch_date_boundaries";
+    database
+        .create_publication(publication_name, std::slice::from_ref(&table_name))
+        .await
+        .expect("Failed to create publication");
+
+    for date_literal in ["1900-01-01", "1969-12-31", "1970-01-01", "2024-01-15", "2299-12-31"] {
+        database
+            .run_sql(&format!(
+                "INSERT INTO {} (date_col) VALUES (DATE '{}')",
+                table_name.as_quoted_identifier(),
+                date_literal,
+            ))
+            .await
+            .unwrap_or_else(|_| panic!("Failed to insert {date_literal}"));
+    }
+
+    // --- WHEN: pipeline copies data to ClickHouse ---
+    let clickhouse_db = setup_clickhouse_database().await;
+    let store = NotifyingStore::new();
+    let pipeline_id: PipelineId = random();
+    let destination = clickhouse_db.build_destination(store.clone());
+
+    let table_ready =
+        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
+
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name.to_owned(),
+        store.clone(),
+        destination,
+    );
+
+    pipeline.start().await.unwrap();
+    table_ready.notified().await;
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // --- THEN: each date encodes as the expected signed day offset ---
+    let rows: Vec<DateBoundariesRow> = clickhouse_db.query(DATE_BOUNDARIES_SELECT).await;
+    assert_eq!(rows.len(), 5, "expected 5 rows in ClickHouse");
+
+    assert_eq!(
+        rows[0].date_col, DATE_1900_01_01_DAYS,
+        "1900-01-01 must encode as the Date32 minimum offset, not be clamped"
+    );
+    assert_eq!(
+        rows[1].date_col, DATE_1969_12_31_DAYS,
+        "1969-12-31 must encode as -1 (one day before the Unix epoch)"
+    );
+    assert_eq!(rows[2].date_col, 0, "1970-01-01 must encode as 0 (the Unix epoch)");
+    assert_eq!(
+        rows[3].date_col, DATE_2024_01_15_DAYS,
+        "2024-01-15 must encode as 19737 (typical post-epoch value)"
+    );
+    assert_eq!(
+        rows[4].date_col, DATE_2299_12_31_DAYS,
+        "2299-12-31 must encode as the Date32 maximum offset, not be clamped"
     );
 }
 

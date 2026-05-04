@@ -3,7 +3,7 @@
 /// A row read back from the ClickHouse `all_types_encoding` test table.
 ///
 /// Column-to-type mapping:
-/// - `Date`          -> `u16`  (days since 1970-01-01 in RowBinary)
+/// - `Date32`        -> `i32`  (signed days from 1970-01-01 in RowBinary)
 /// - `DateTime64(6)` -> `i64`  (microseconds since epoch in RowBinary)
 /// - `UUID`          -> `String` (via `toString()` in the SELECT query)
 /// - `Array(Nullable(T))` -> `Vec<Option<T>>`
@@ -21,7 +21,7 @@ pub struct AllTypesRow {
     pub boolean_col: bool,
     pub text_col: String,
     pub varchar_col: String,
-    pub date_col: u16,        // Date -> days since epoch
+    pub date_col: i32,        // Date32 -> signed days from 1970-01-01
     pub timestamp_col: i64,   // DateTime64(6) -> microseconds
     pub timestamptz_col: i64, // DateTime64(6,'UTC') -> microseconds
     pub time_col: String,
@@ -49,5 +49,16 @@ pub struct BoundaryValuesRow {
     pub nullable_int: Option<i32>,
     pub int_array_col: Vec<Option<i32>>,
     pub text_array_col: Vec<Option<String>>,
+    pub cdc_operation: String,
+}
+
+/// A row read back from a ClickHouse table with a single `Date32` column,
+/// used to verify Postgres `date` round-tripping for values outside the Unix
+/// epoch (pre-1970 and far-future). The `date_col` is the signed day offset
+/// from 1970-01-01.
+#[derive(clickhouse::Row, serde::Deserialize, Debug)]
+pub struct DateBoundariesRow {
+    pub id: i64,
+    pub date_col: i32,
     pub cdc_operation: String,
 }
