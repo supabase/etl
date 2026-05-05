@@ -7,7 +7,7 @@ mod error;
 mod metrics;
 mod schema;
 mod sql_client;
-mod streaming_client;
+mod streaming;
 
 #[cfg(feature = "test-utils")]
 pub mod test_utils;
@@ -15,11 +15,12 @@ pub mod test_utils;
 pub use core::{DefaultSnowflakeDestination, SnowflakeDestination};
 
 pub use auth::{AuthManager, HttpExchanger, TokenExchanger, TokenProvider};
-pub use channel::{ChannelHandle, ChannelStatus, OffsetToken};
+pub use channel::ChannelHandle;
 pub use config::Config;
-pub use encoding::{CdcOperation, RowBatch};
+pub use encoding::{CdcMeta, CdcOperation, RowBatch};
 pub use error::{Error, Result};
 pub use sql_client::SqlClient;
-pub use streaming_client::{
-    ChannelStatusResponse, InsertRowsResponse, OpenChannelResponse, RestStreamClient, StreamClient,
+pub use streaming::{
+    ChannelStatusResponse, InsertRowsResponse, OffsetToken, OpenChannelResponse, RestStreamClient,
+    StreamClient,
 };
