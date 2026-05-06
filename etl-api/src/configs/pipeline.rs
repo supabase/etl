@@ -92,7 +92,7 @@ pub struct DuckLakeMaintenanceConfig {
     #[schema(example = 1000)]
     #[serde(default = "default_ducklake_maintenance_cpu_request_millicores")]
     pub cpu_request_millicores: u32,
-    #[schema(example = 2048)]
+    #[schema(example = 1024)]
     #[serde(default = "default_ducklake_maintenance_memory_request_mib")]
     pub memory_request_mib: u32,
     #[schema(example = 1800)]
@@ -349,7 +349,7 @@ fn default_ducklake_maintenance_cpu_request_millicores() -> u32 {
 }
 
 fn default_ducklake_maintenance_memory_request_mib() -> u32 {
-    2048
+    1024
 }
 
 fn default_ducklake_maintenance_active_deadline_seconds() -> i64 {

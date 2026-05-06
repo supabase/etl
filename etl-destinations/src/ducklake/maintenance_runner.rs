@@ -260,7 +260,7 @@ async fn open_maintenance_executor(
         &config.data_path,
         config.s3.as_ref(),
         config.metadata_schema.as_deref(),
-        config.duckdb_memory_cache_limit.as_deref(),
+        None,
     )?);
     let manager = DuckLakeConnectionManager {
         setup_plan,
