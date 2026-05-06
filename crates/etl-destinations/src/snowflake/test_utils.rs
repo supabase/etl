@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crate::snowflake::Config;
+use crate::snowflake::{Config, Result, auth::TokenProvider, sql_client::SqlClient};
 
 /// Snowflake account identifier (e.g. `org-account`).
 const SNOWFLAKE_ACCOUNT_ENV: &str = "TESTS_SNOWFLAKE_ACCOUNT";
@@ -46,4 +46,13 @@ pub fn load_test_private_key_path() -> PathBuf {
         std::env::var(SNOWFLAKE_PRIVATE_KEY_PATH_ENV)
             .unwrap_or_else(|_| panic!("{SNOWFLAKE_PRIVATE_KEY_PATH_ENV} must be set")),
     )
+}
+
+/// Execute a SELECT query and return result rows. Requires an active warehouse.
+pub async fn query_rows<T: TokenProvider>(
+    client: &SqlClient<T>,
+    sql: &str,
+) -> Result<Vec<Vec<serde_json::Value>>> {
+    let resp = client.execute_statement(sql).await?;
+    Ok(resp.data.unwrap_or_default())
 }
