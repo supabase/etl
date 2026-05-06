@@ -5,7 +5,7 @@ use etl::types::PipelineId;
 use crate::snowflake::{
     Error, Result,
     encoding::RowBatch,
-    streaming_client::{OffsetToken, StreamClient},
+    streaming::{OffsetToken, StreamClient},
 };
 
 /// Manages the state and lifecycle of a single Snowpipe Streaming channel.

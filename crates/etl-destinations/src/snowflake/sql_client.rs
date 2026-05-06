@@ -50,13 +50,13 @@ struct StatementRequest<'a> {
 /// Snowflake SQL REST API response body.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct StatementResponse {
+pub(crate) struct StatementResponse {
     #[serde(default)]
-    statement_handle: Option<String>,
+    pub(crate) statement_handle: Option<String>,
     #[serde(default)]
-    message: Option<String>,
+    pub(crate) message: Option<String>,
     #[serde(default)]
-    data: Option<Vec<Vec<serde_json::Value>>>,
+    pub(crate) data: Option<Vec<Vec<serde_json::Value>>>,
 }
 
 impl<T: TokenProvider> SqlClient<T> {
@@ -155,7 +155,7 @@ impl<T: TokenProvider> SqlClient<T> {
     /// - HTTP 401: invalidate cached token, retry once.
     /// - HTTP 408/429/5xx: retriable via backoff.
     /// - Other 4xx: non-retriable `Error::HttpStatus`.
-    async fn execute_statement(&self, sql: &str) -> Result<StatementResponse> {
+    pub(crate) async fn execute_statement(&self, sql: &str) -> Result<StatementResponse> {
         let url = format!("{}/api/v2/statements", self.config.account_url);
 
         let body = StatementRequest {
