@@ -31,10 +31,13 @@ use sqlx::{PgPool, postgres::PgPoolOptions};
 #[cfg(feature = "test-utils")]
 use tokio::sync::oneshot;
 use tokio::{
-    sync::{OwnedRwLockReadGuard, OwnedSemaphorePermit, RwLock, Semaphore, TryAcquireError},
+    sync::{
+        OwnedRwLockReadGuard, OwnedRwLockWriteGuard, OwnedSemaphorePermit, RwLock, Semaphore,
+        TryAcquireError,
+    },
     task::JoinSet,
 };
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use url::Url;
 
 use crate::{
@@ -58,6 +61,10 @@ use crate::{
             maintenance_target_file_size_sql, resolve_expire_snapshots_older_than,
             validate_expire_snapshots_older_than_sql,
         },
+        external_maintenance::{
+            ExternalMaintenanceOperations, external_maintenance_configured,
+            run_external_maintenance_watcher,
+        },
         inline_size::DuckLakePendingInlineSizeSampler,
         maintenance::{
             DuckLakeMaintenanceWorker, PendingInlineFlushRequests, TableMaintenanceNotification,
@@ -65,8 +72,9 @@ use crate::{
             table_write_slot,
         },
         metrics::{
-            DuckLakeMetricsSampler, ETL_DUCKLAKE_POOL_SIZE, register_metrics,
-            resolve_ducklake_metadata_schema_blocking, spawn_ducklake_metrics_sampler,
+            DuckLakeMetricsSampler, ETL_DUCKLAKE_POOL_SIZE, query_table_storage_metrics,
+            register_metrics, resolve_ducklake_metadata_schema_blocking,
+            spawn_ducklake_metrics_sampler,
         },
         schema::build_create_table_sql_ducklake,
     },
@@ -129,6 +137,8 @@ pub struct DuckLakeDestination<S> {
     tasks: TaskSet,
     maintenance_worker: Arc<Option<DuckLakeMaintenanceWorker>>,
     metrics_sampler: Arc<Option<DuckLakeMetricsSampler>>,
+    metadata_schema: Arc<str>,
+    metadata_pg_pool: PgPool,
     table_creation_slots: Arc<Semaphore>,
     table_write_slots: Arc<Mutex<HashMap<DuckLakeTableName, Arc<Semaphore>>>>,
     store: S,
@@ -145,6 +155,12 @@ pub struct DuckLakeDestination<S> {
     /// Tracks which tables need a requested inline flush before ingestion
     /// resumes.
     inline_flush_requests: Arc<PendingInlineFlushRequests>,
+}
+
+/// Held by an external DuckLake maintenance coordinator while foreground and
+/// in-process maintenance mutations must be quiesced.
+pub struct DuckLakeExternalMaintenancePause {
+    _guard: OwnedRwLockWriteGuard<()>,
 }
 
 impl<S> Destination for DuckLakeDestination<S>
@@ -529,9 +545,10 @@ where
                 .await?
             }
         };
+        let metadata_schema = Arc::<str>::from(metadata_schema);
         let metadata_pg_pool = build_ducklake_metadata_pg_pool(&catalog_url)?;
         let pending_inline_size_sampler = Some(DuckLakePendingInlineSizeSampler::new(
-            metadata_schema.clone(),
+            metadata_schema.to_string(),
             metadata_pg_pool.clone(),
         ));
         let created_tables = Arc::default();
@@ -546,6 +563,8 @@ where
             tasks: TaskSet::new(),
             maintenance_worker: Arc::new(None),
             metrics_sampler: Arc::new(None),
+            metadata_schema: Arc::clone(&metadata_schema),
+            metadata_pg_pool: metadata_pg_pool.clone(),
             table_creation_slots: Arc::new(Semaphore::new(1)),
             table_write_slots: Arc::default(),
             store,
@@ -573,13 +592,14 @@ where
                 Arc::clone(&inline_flush_requests),
                 pending_inline_size_sampler,
                 Arc::clone(&expire_snapshots_older_than),
+                external_maintenance_configured(),
             )?
             .into(),
         );
         destination.metrics_sampler = Arc::new(
             spawn_ducklake_metrics_sampler(
-                metadata_schema,
-                metadata_pg_pool,
+                metadata_schema.to_string(),
+                metadata_pg_pool.clone(),
                 Arc::clone(&created_tables),
                 destination
                     .maintenance_worker
@@ -597,6 +617,21 @@ where
             )?
             .into(),
         );
+        if external_maintenance_configured() {
+            let watcher_destination = destination.clone();
+            destination
+                .tasks
+                .spawn(async move {
+                    if let Err(error) = run_external_maintenance_watcher(watcher_destination).await
+                    {
+                        warn!(
+                            error = %error,
+                            "ducklake external maintenance watcher exited"
+                        );
+                    }
+                })
+                .await;
+        }
 
         Ok(destination)
     }
@@ -1182,6 +1217,77 @@ where
     /// cannot start in the middle of a foreground write sequence.
     async fn acquire_mutation_guard(&self) -> OwnedRwLockReadGuard<()> {
         Arc::clone(&self.checkpoint_gate).read_owned().await
+    }
+
+    /// Acquires exclusive DuckLake mutation access for an external maintenance
+    /// run. While this guard is held, new foreground writes and in-process
+    /// background maintenance operations wait before mutating the catalog.
+    pub async fn acquire_external_maintenance_pause(&self) -> DuckLakeExternalMaintenancePause {
+        DuckLakeExternalMaintenancePause {
+            _guard: Arc::clone(&self.checkpoint_gate).write_owned().await,
+        }
+    }
+
+    /// Samples catalog state and returns which externally coordinated
+    /// maintenance operations should be requested now.
+    pub(super) async fn sample_external_maintenance_operations(
+        &self,
+        inline_flush_min_inlined_bytes: u64,
+        rewrite_data_files_min_active_data_files: i64,
+    ) -> EtlResult<ExternalMaintenanceOperations> {
+        let table_names = self.list_active_ducklake_tables().await?;
+        let inline_sampler = DuckLakePendingInlineSizeSampler::new(
+            self.metadata_schema.to_string(),
+            self.metadata_pg_pool.clone(),
+        );
+        let mut operations = ExternalMaintenanceOperations::default();
+
+        for table_name in table_names {
+            if table_name.starts_with("__etl_") {
+                continue;
+            }
+
+            if !operations.inline_flush {
+                let sizes = inline_sampler.sample_table(&table_name).await?;
+                operations.inline_flush = sizes.inlined_bytes >= inline_flush_min_inlined_bytes;
+            }
+
+            if !operations.rewrite_data_files {
+                let metrics = query_table_storage_metrics(
+                    &self.metadata_pg_pool,
+                    self.metadata_schema.as_ref(),
+                    &table_name,
+                )
+                .await?;
+                operations.rewrite_data_files =
+                    metrics.active_data_files > rewrite_data_files_min_active_data_files;
+            }
+
+            if operations.inline_flush && operations.rewrite_data_files {
+                break;
+            }
+        }
+
+        Ok(operations)
+    }
+
+    /// Lists active DuckLake table names from the metadata catalog.
+    async fn list_active_ducklake_tables(&self) -> EtlResult<Vec<String>> {
+        let sql = format!(
+            "SELECT table_name FROM {}.{} WHERE end_snapshot IS NULL ORDER BY table_name",
+            quote_identifier(self.metadata_schema.as_ref()),
+            quote_identifier("ducklake_table")
+        );
+        let rows: Vec<(String,)> =
+            sqlx::query_as(&sql).fetch_all(&self.metadata_pg_pool).await.map_err(|source| {
+                etl_error!(
+                    ErrorKind::DestinationQueryFailed,
+                    "DuckLake table list query failed",
+                    format!("metadata_schema={}", self.metadata_schema.as_ref()),
+                    source: source
+                )
+            })?;
+        Ok(rows.into_iter().map(|(table_name,)| table_name).collect())
     }
 
     /// Runs requested inline flushes before foreground ingestion begins when

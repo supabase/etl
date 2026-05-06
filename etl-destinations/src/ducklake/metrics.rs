@@ -62,6 +62,10 @@ pub(crate) const ETL_DUCKLAKE_MAINTENANCE_DURATION_SECONDS: &str =
     "etl_ducklake_maintenance_duration_seconds";
 pub(crate) const ETL_DUCKLAKE_MAINTENANCE_SKIPPED_TOTAL: &str =
     "etl_ducklake_maintenance_skipped_total";
+pub(crate) const ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_PAUSE_DURATION_SECONDS: &str =
+    "etl_ducklake_external_maintenance_pause_duration_seconds";
+pub(crate) const ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_TRIGGERED_TOTAL: &str =
+    "etl_ducklake_external_maintenance_triggered_total";
 pub(crate) const ETL_DUCKLAKE_TABLE_ACTIVE_DATA_FILES: &str =
     "etl_ducklake_table_active_data_files";
 pub(crate) const ETL_DUCKLAKE_TABLE_ACTIVE_DATA_BYTES: &str =
@@ -258,6 +262,18 @@ pub(crate) fn register_metrics() {
             Unit::Count,
             "DuckLake background maintenance operations skipped because execution was deferred, \
              labeled by task, operation, and reason."
+        );
+        describe_histogram!(
+            ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_PAUSE_DURATION_SECONDS,
+            Unit::Seconds,
+            "Duration that DuckLake foreground ingestion was paused for an external maintenance \
+             run, labeled by outcome."
+        );
+        describe_counter!(
+            ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_TRIGGERED_TOTAL,
+            Unit::Count,
+            "External DuckLake maintenance operations requested by the replicator after catalog \
+             sampling, labeled by operation and reason."
         );
 
         describe_histogram!(

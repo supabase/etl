@@ -1955,6 +1955,8 @@ dependencies = [
  "gcp-bigquery-client",
  "iceberg",
  "iceberg-catalog-rest",
+ "k8s-openapi",
+ "kube",
  "metrics",
  "parking_lot",
  "parquet",
@@ -1986,6 +1988,7 @@ dependencies = [
  "etl-config",
  "etl-destinations",
  "etl-telemetry",
+ "k8s-openapi",
  "rustls",
  "tokio",
  "tracing",
@@ -2012,11 +2015,13 @@ dependencies = [
 name = "etl-replicator"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "configcat",
  "etl",
  "etl-config",
  "etl-destinations",
  "etl-telemetry",
+ "k8s-openapi",
  "metrics",
  "reqwest",
  "rustls",
@@ -2029,6 +2034,7 @@ dependencies = [
  "tikv-jemallocator",
  "tokio",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

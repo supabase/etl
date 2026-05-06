@@ -8,8 +8,7 @@ use thiserror::Error;
 use crate::{
     configs::{
         destination::{StoredDestinationConfig, StoredIcebergConfig},
-        log::LogLevel,
-        pipeline::{ReplicatorResourcesConfig, StoredPipelineConfig},
+        pipeline::StoredPipelineConfig,
         source::StoredSourceConfig,
     },
     data::{
@@ -19,7 +18,10 @@ use crate::{
         replicators::Replicator,
         sources::Source,
     },
-    k8s::{DestinationType, K8sClient, K8sError, PodStatus, ReplicatorConfigMapFile},
+    k8s::{
+        DestinationType, DuckLakeMaintenanceResourceConfig, K8sClient, K8sError, PodStatus,
+        ReplicatorConfigMapFile, ReplicatorStatefulSetConfig,
+    },
 };
 
 /// Errors raised while preparing or applying Kubernetes pipeline resources.
@@ -112,6 +114,7 @@ pub async fn create_or_update_pipeline_resources_in_k8s(
 
     let log_level = pipeline.config.log_level.clone().unwrap_or_default();
     let replicator_resources = pipeline.config.replicator_resources.clone();
+    let ducklake_maintenance = pipeline.config.ducklake_maintenance.clone();
     let replicator_config = build_replicator_config_without_secrets(
         // We are safe to perform this conversion, since the i64 -> u64 conversion performs wrap
         // around, and we won't have two different values map to the same u64, since the domain
@@ -126,14 +129,30 @@ pub async fn create_or_update_pipeline_resources_in_k8s(
 
     create_or_update_dynamic_replicator_secrets(k8s_client, &prefix, secrets).await?;
     create_or_update_replicator_config(k8s_client, &prefix, replicator_config, environment).await?;
-    create_or_update_replicator_stateful_set(
+    let replicator_image = image.name;
+
+    create_or_update_ducklake_maintenance(
         k8s_client,
         &prefix,
-        image.name,
-        environment,
-        replicator_resources.as_ref(),
+        tenant_id,
+        pipeline.id,
+        replicator.id,
+        &replicator_image,
         destination_type,
-        log_level,
+        ducklake_maintenance.clone(),
+    )
+    .await?;
+    create_or_update_replicator_stateful_set(
+        k8s_client,
+        ReplicatorStatefulSetConfig {
+            prefix,
+            replicator_image,
+            environment,
+            replicator_resources,
+            destination_type,
+            ducklake_maintenance: ducklake_maintenance.filter(|policy| policy.enabled),
+            log_level,
+        },
     )
     .await?;
 
@@ -152,6 +171,7 @@ pub async fn delete_pipeline_resources_in_k8s(
 ) -> Result<(), K8sCoreError> {
     let prefix = create_k8s_object_prefix(tenant_id, replicator.id);
 
+    k8s_client.delete_ducklake_maintenance(&prefix).await?;
     delete_dynamic_replicator_secrets(k8s_client, &prefix).await?;
     delete_replicator_config(k8s_client, &prefix).await?;
     delete_replicator_stateful_set(k8s_client, &prefix).await?;
@@ -390,21 +410,45 @@ async fn create_or_update_replicator_config(
 /// requirements.
 async fn create_or_update_replicator_stateful_set(
     k8s_client: &dyn K8sClient,
-    prefix: &str,
-    replicator_image: String,
-    environment: Environment,
-    replicator_resources: Option<&ReplicatorResourcesConfig>,
-    destination_type: DestinationType,
-    log_level: LogLevel,
+    config: ReplicatorStatefulSetConfig,
 ) -> Result<(), K8sCoreError> {
+    k8s_client.create_or_update_replicator_stateful_set(config).await?;
+
+    Ok(())
+}
+
+/// Creates, updates, or deletes the experimental DuckLake maintenance CR.
+#[allow(clippy::too_many_arguments)]
+async fn create_or_update_ducklake_maintenance(
+    k8s_client: &dyn K8sClient,
+    prefix: &str,
+    tenant_id: &str,
+    pipeline_id: i64,
+    replicator_id: i64,
+    replicator_image: &str,
+    destination_type: DestinationType,
+    ducklake_maintenance: Option<crate::configs::pipeline::DuckLakeMaintenanceConfig>,
+) -> Result<(), K8sCoreError> {
+    let Some(policy) = ducklake_maintenance.filter(|policy| policy.enabled) else {
+        k8s_client.delete_ducklake_maintenance(prefix).await?;
+        return Ok(());
+    };
+
+    if !matches!(destination_type, DestinationType::Ducklake) {
+        k8s_client.delete_ducklake_maintenance(prefix).await?;
+        return Ok(());
+    }
+
     k8s_client
-        .create_or_update_replicator_stateful_set(
+        .create_or_update_ducklake_maintenance(
             prefix,
-            &replicator_image,
-            environment,
-            replicator_resources,
-            destination_type,
-            log_level,
+            DuckLakeMaintenanceResourceConfig {
+                tenant_id: tenant_id.to_owned(),
+                pipeline_id,
+                replicator_id,
+                image: replicator_image.to_owned(),
+                policy,
+            },
         )
         .await?;
 
@@ -466,10 +510,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        configs::{
-            destination::StoredDestinationConfig, log::LogLevel, source::StoredSourceConfig,
-        },
-        k8s::{DestinationType, K8sClient, K8sError, PodStatus, ReplicatorConfigMapFile},
+        configs::{destination::StoredDestinationConfig, source::StoredSourceConfig},
+        k8s::{K8sClient, K8sError, PodStatus, ReplicatorConfigMapFile},
     };
 
     #[derive(Debug, Clone)]
@@ -603,17 +645,26 @@ mod tests {
 
         async fn create_or_update_replicator_stateful_set(
             &self,
-            _prefix: &str,
-            _replicator_image: &str,
-            _environment: Environment,
-            _replicator_resources: Option<&ReplicatorResourcesConfig>,
-            _destination_type: DestinationType,
-            _log_level: LogLevel,
+            _config: ReplicatorStatefulSetConfig,
         ) -> Result<(), K8sError> {
             Ok(())
         }
 
         async fn delete_replicator_stateful_set(&self, _prefix: &str) -> Result<(), K8sError> {
+            Ok(())
+        }
+
+        async fn create_or_update_ducklake_maintenance(
+            &self,
+            prefix: &str,
+            _config: DuckLakeMaintenanceResourceConfig,
+        ) -> Result<(), K8sError> {
+            self.calls.lock().unwrap().push(format!("ducklake-maintenance:{prefix}"));
+            Ok(())
+        }
+
+        async fn delete_ducklake_maintenance(&self, prefix: &str) -> Result<(), K8sError> {
+            self.calls.lock().unwrap().push(format!("delete-ducklake-maintenance:{prefix}"));
             Ok(())
         }
 

@@ -241,6 +241,7 @@ pub mod pipelines {
             table_sync_copy: Some(TableSyncCopyConfig::IncludeAllTables),
             invalidated_slot_behavior: None,
             replicator_resources: None,
+            ducklake_maintenance: None,
             log_level: Some(LogLevel::Info),
         }
     }
@@ -259,6 +260,7 @@ pub mod pipelines {
             table_sync_copy: Some(TableSyncCopyConfig::IncludeAllTables),
             invalidated_slot_behavior: None,
             replicator_resources: None,
+            ducklake_maintenance: None,
             log_level: Some(LogLevel::Info),
         }
     }

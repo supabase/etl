@@ -4,7 +4,9 @@ use k8s_openapi::api::core::v1::ConfigMap;
 use thiserror::Error;
 
 use crate::configs::{
-    destination::StoredDestinationConfig, log::LogLevel, pipeline::ReplicatorResourcesConfig,
+    destination::StoredDestinationConfig,
+    log::LogLevel,
+    pipeline::{DuckLakeMaintenanceConfig, ReplicatorResourcesConfig},
 };
 
 /// Errors from Kubernetes operations.
@@ -33,6 +35,40 @@ pub struct ReplicatorConfigMapFile {
     pub filename: String,
     /// The file content to store.
     pub content: String,
+}
+
+/// DuckLake maintenance CR materialization input.
+#[derive(Debug, Clone)]
+pub struct DuckLakeMaintenanceResourceConfig {
+    /// Tenant/project identifier.
+    pub tenant_id: String,
+    /// Pipeline id.
+    pub pipeline_id: i64,
+    /// Replicator id.
+    pub replicator_id: i64,
+    /// Image containing the maintenance binary.
+    pub image: String,
+    /// User-authored maintenance policy.
+    pub policy: DuckLakeMaintenanceConfig,
+}
+
+/// Replicator StatefulSet materialization input.
+#[derive(Debug, Clone)]
+pub struct ReplicatorStatefulSetConfig {
+    /// Existing Kubernetes resource prefix.
+    pub prefix: String,
+    /// Image for the replicator container.
+    pub replicator_image: String,
+    /// Deployment environment.
+    pub environment: Environment,
+    /// Optional resource overrides.
+    pub replicator_resources: Option<ReplicatorResourcesConfig>,
+    /// Destination type used to select destination-specific env/secrets.
+    pub destination_type: DestinationType,
+    /// Opt-in DuckLake maintenance policy.
+    pub ducklake_maintenance: Option<DuckLakeMaintenanceConfig>,
+    /// Replicator log level.
+    pub log_level: LogLevel,
 }
 
 /// The type of destination storage system for replication.
@@ -230,18 +266,23 @@ pub trait K8sClient: Send + Sync {
     /// the pods.
     async fn create_or_update_replicator_stateful_set(
         &self,
-        prefix: &str,
-        replicator_image: &str,
-        environment: Environment,
-        replicator_resources: Option<&ReplicatorResourcesConfig>,
-        destination_type: DestinationType,
-        log_level: LogLevel,
+        config: ReplicatorStatefulSetConfig,
     ) -> Result<(), K8sError>;
 
     /// Deletes the replicator [`StatefulSet`].
     ///
     /// Does nothing if the stateful set does not exist.
     async fn delete_replicator_stateful_set(&self, prefix: &str) -> Result<(), K8sError>;
+
+    /// Creates or updates the experimental DuckLake maintenance CR.
+    async fn create_or_update_ducklake_maintenance(
+        &self,
+        prefix: &str,
+        config: DuckLakeMaintenanceResourceConfig,
+    ) -> Result<(), K8sError>;
+
+    /// Deletes the experimental DuckLake maintenance CR.
+    async fn delete_ducklake_maintenance(&self, prefix: &str) -> Result<(), K8sError>;
 
     /// Retrieves the current status of a replicator pod.
     ///

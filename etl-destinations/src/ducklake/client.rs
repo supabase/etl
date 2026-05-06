@@ -41,7 +41,7 @@ static POSTGRES_PASSWORD_REGEX: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 /// Timeout applied to each foreground DuckLake blocking operation.
-pub(super) const FOREGROUND_QUERY_TIMEOUT: Duration = Duration::from_secs(2 * 60);
+pub(super) const FOREGROUND_QUERY_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// Timeout applied to each maintenance DuckLake blocking operation.
 pub(super) const MAINTENANCE_QUERY_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
@@ -454,7 +454,7 @@ pub(super) async fn build_warm_ducklake_pool(
         let started = Instant::now();
         let pool = r2d2::Pool::builder()
             .max_size(pool_size)
-            .min_idle(Some(pool_size))
+            .min_idle(Some(0))
             .connection_timeout(Duration::from_mins(4))
             .test_on_check_out(true)
             // Callers log the returned pool initialization failure once, so

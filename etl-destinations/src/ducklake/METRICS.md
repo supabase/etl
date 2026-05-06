@@ -10,6 +10,8 @@ The metrics fall into four groups:
 - maintenance execution metrics: operation-level duration and skip metrics
   emitted by the background maintenance worker with the primary reason and
   outcome for each maintenance attempt.
+- external maintenance pause metrics: duration samples for time foreground
+  ingestion was actually quiesced by the Kubernetes external maintenance plane.
 - table-health samples: histograms recorded by a background sampler every
   30 seconds from the PostgreSQL DuckLake metadata catalog. They describe the
   current shape of tables known to the current destination instance.
@@ -83,6 +85,8 @@ How to read them:
 
 - `etl_ducklake_maintenance_duration_seconds`
 - `etl_ducklake_maintenance_skipped_total`
+- `etl_ducklake_external_maintenance_pause_duration_seconds`
+- `etl_ducklake_external_maintenance_triggered_total`
 
 `etl_ducklake_maintenance_duration_seconds` is emitted once per background
 maintenance operation that actually runs. Use the histogram `_count` as the
@@ -125,6 +129,27 @@ How to read it:
 - rising histogram `_count` for `outcome="failed"` points to maintenance
   execution issues, while many `outcome="noop"` samples usually mean
   maintenance is polling more often than work is actually accumulating.
+
+`etl_ducklake_external_maintenance_pause_duration_seconds` is emitted by the
+replicator when a Kubernetes-driven external maintenance pause ends. It measures
+only the time after the destination has drained foreground mutations and reported
+`Quiesced`; time spent queued by the controller is intentionally excluded.
+
+It carries one label:
+
+- `outcome`: `cleared`, `expired`, `replaced`, or `resource_deleted`
+
+`etl_ducklake_external_maintenance_triggered_total` counts external maintenance
+operation requests emitted by the replicator after it samples DuckLake catalog
+state. The watcher reuses an existing pending request when it already covers the
+sampled operations, so this counter is not incremented on every poll while a CR
+waits in the controller queue.
+
+It carries these labels:
+
+- `operation`: `flush_inlined_data` or `rewrite_data_files`
+- `reason`: `pending_inlined_data_bytes_threshold` or
+  `active_data_files_threshold`
 
 ### Table-health sampling metrics
 

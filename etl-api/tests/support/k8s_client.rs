@@ -10,13 +10,13 @@ use std::{
 
 use async_trait::async_trait;
 use etl_api::{
-    configs::{log::LogLevel, pipeline::ReplicatorResourcesConfig},
+    configs::pipeline::ReplicatorResourcesConfig,
     k8s::{
-        DestinationType, K8sClient, K8sError, PodStatus, ReplicatorConfigMapFile,
+        DuckLakeMaintenanceResourceConfig, K8sClient, K8sError, PodStatus, ReplicatorConfigMapFile,
+        ReplicatorStatefulSetConfig,
         http::{TRUSTED_ROOT_CERT_CONFIG_MAP_NAME, TRUSTED_ROOT_CERT_KEY_NAME},
     },
 };
-use etl_config::Environment;
 use k8s_openapi::api::core::v1::ConfigMap;
 use tokio::sync::RwLock;
 
@@ -173,19 +173,26 @@ impl K8sClient for MockK8sClient {
 
     async fn create_or_update_replicator_stateful_set(
         &self,
-        _prefix: &str,
-        _replicator_image: &str,
-        _environment: Environment,
-        replicator_resources: Option<&ReplicatorResourcesConfig>,
-        _destination_type: DestinationType,
-        _log_level: LogLevel,
+        config: ReplicatorStatefulSetConfig,
     ) -> Result<(), K8sError> {
-        self.set_last_replicator_resources(replicator_resources).await;
+        self.set_last_replicator_resources(config.replicator_resources.as_ref()).await;
         self.record_create_call();
         Ok(())
     }
 
     async fn delete_replicator_stateful_set(&self, _prefix: &str) -> Result<(), K8sError> {
+        Ok(())
+    }
+
+    async fn create_or_update_ducklake_maintenance(
+        &self,
+        _prefix: &str,
+        _config: DuckLakeMaintenanceResourceConfig,
+    ) -> Result<(), K8sError> {
+        Ok(())
+    }
+
+    async fn delete_ducklake_maintenance(&self, _prefix: &str) -> Result<(), K8sError> {
         Ok(())
     }
 

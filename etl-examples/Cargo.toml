@@ -23,6 +23,7 @@ etl = { workspace = true }
 etl-config = { workspace = true }
 etl-destinations = { workspace = true, features = ["bigquery", "clickhouse", "ducklake"] }
 etl-telemetry = { workspace = true }
+k8s-openapi = { workspace = true, features = ["latest"] }
 rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
 tokio = { workspace = true, features = ["macros", "signal"] }
 tracing = { workspace = true, default-features = true }

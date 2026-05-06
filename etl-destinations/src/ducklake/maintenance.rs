@@ -742,6 +742,7 @@ pub(super) fn spawn_ducklake_maintenance_worker(
     pending_inline_flush_requests: Arc<PendingInlineFlushRequests>,
     pending_inline_size_sampler: Option<DuckLakePendingInlineSizeSampler>,
     expire_snapshots_older_than: Arc<str>,
+    external_maintenance_configured: bool,
 ) -> EtlResult<DuckLakeMaintenanceWorker> {
     let mut pool = LazyDuckLakePool::new(manager, MAINTENANCE_POOL_SIZE, "maintenance");
     pool.warm_in_background();
@@ -755,6 +756,7 @@ pub(super) fn spawn_ducklake_maintenance_worker(
         pending_inline_flush_requests,
         pending_inline_size_sampler,
         CatalogMaintenanceConfig::new(expire_snapshots_older_than),
+        external_maintenance_configured,
         notification_rx,
         shutdown_rx,
     ));
@@ -776,6 +778,7 @@ async fn run_ducklake_maintenance_worker(
     pending_inline_flush_requests: Arc<PendingInlineFlushRequests>,
     pending_inline_size_sampler: Option<DuckLakePendingInlineSizeSampler>,
     catalog_maintenance_config: CatalogMaintenanceConfig,
+    external_maintenance_configured: bool,
     mut notification_rx: mpsc::Receiver<TableMaintenanceNotification>,
     mut shutdown_rx: watch::Receiver<()>,
 ) {
@@ -825,7 +828,9 @@ async fn run_ducklake_maintenance_worker(
                     }
 
                     // If it needs to be flushed
-                    if let Some(reason) = table_state.flush_reason() {
+                    if let Some(reason) = table_state.flush_reason()
+                        && !external_maintenance_configured
+                    {
                         pending_inline_flush_requests.request(table_name.clone(), reason);
                         inline_flush_requested.store(true, AtomicOrdering::Release);
                     }
@@ -1319,6 +1324,52 @@ fn count_ducklake_maintenance_rows(
     Ok(count)
 }
 
+/// Sums the first integer column returned by one DuckLake maintenance call.
+fn count_ducklake_maintenance_files(
+    conn: &duckdb::Connection,
+    sql: &str,
+    description: &'static str,
+) -> EtlResult<u64> {
+    let mut statement = conn.prepare(sql).map_err(|source| {
+        etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            description,
+            format_query_error_detail(sql, &source),
+            source: source
+        )
+    })?;
+    let mut rows = statement.query([]).map_err(|source| {
+        etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            description,
+            format_query_error_detail(sql, &source),
+            source: source
+        )
+    })?;
+    let mut files_created = 0u64;
+
+    while let Some(row) = rows.next().map_err(|source| {
+        etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            description,
+            format_query_error_detail(sql, &source),
+            source: source
+        )
+    })? {
+        let row_files_created = row.get::<_, i64>(0).map_err(|source| {
+            etl_error!(
+                ErrorKind::DestinationQueryFailed,
+                description,
+                format_query_error_detail(sql, &source),
+                source: source
+            )
+        })?;
+        files_created = files_created.saturating_add(row_files_created.max(0) as u64);
+    }
+
+    Ok(files_created)
+}
+
 /// Runs DuckLake catalog maintenance and records per-operation outcomes.
 fn run_catalog_maintenance_blocking(
     conn: &duckdb::Connection,
@@ -1446,8 +1497,7 @@ pub(super) fn flush_table_inlined_data(
 /// Rewrites one table's delete-heavy files and returns created file count.
 fn rewrite_table_data_files(conn: &duckdb::Connection, table_name: &str) -> EtlResult<u64> {
     let sql = format!(
-        r#"SELECT COALESCE(SUM(files_created), 0)
-         FROM ducklake_rewrite_data_files({}, {});"#,
+        r#"CALL ducklake_rewrite_data_files({}, {});"#,
         quote_literal(LAKE_CATALOG),
         quote_literal(table_name),
     );
@@ -1465,16 +1515,7 @@ fn rewrite_table_data_files(conn: &duckdb::Connection, table_name: &str) -> EtlR
         ));
     }
 
-    let files_created: i64 = conn.query_row(&sql, [], |row| row.get(0)).map_err(|error| {
-        etl_error!(
-            ErrorKind::DestinationQueryFailed,
-            "DuckLake rewrite data files failed",
-            format_query_error_detail(&sql, &error),
-            source: error
-        )
-    })?;
-
-    Ok(files_created.max(0) as u64)
+    count_ducklake_maintenance_files(conn, &sql, "DuckLake rewrite data files failed")
 }
 
 #[cfg(test)]
@@ -2124,6 +2165,7 @@ mod tests {
             Arc::new(PendingInlineFlushRequests::default()),
             None,
             Arc::<str>::from("7 days"),
+            false,
         )
         .expect("failed to spawn maintenance worker");
 

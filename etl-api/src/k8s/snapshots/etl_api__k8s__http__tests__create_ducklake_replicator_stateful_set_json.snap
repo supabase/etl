@@ -1,6 +1,5 @@
 ---
 source: etl-api/src/k8s/http.rs
-assertion_line: 1786
 expression: stateful_set_json
 ---
 {
@@ -111,6 +110,7 @@ expression: stateful_set_json
         ],
         "initContainers": [],
         "nodeSelector": {},
+        "serviceAccountName": "etl-replicator",
         "terminationGracePeriodSeconds": 300,
         "tolerations": [
           {
