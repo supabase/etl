@@ -871,6 +871,7 @@ async fn replication_mask_loads_correctly_from_string_bytea() {
     let database = spawn_source_database().await;
     let pipeline_id = 1;
     let table_id = TableId::new(12345);
+    let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
 
     let pool = connect_to_source_database(&database.config, 1, 1, None)
         .await
@@ -895,8 +896,7 @@ async fn replication_mask_loads_correctly_from_string_bytea() {
     .await
     .unwrap();
 
-    // Load metadata using the store
-    let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
+    // Load metadata using the store.
     store.load_destination_tables_metadata().await.unwrap();
 
     // Verify the loaded replication mask matches what was inserted
@@ -920,6 +920,7 @@ async fn replication_mask_various_patterns() {
 
     let database = spawn_source_database().await;
     let pipeline_id = 1;
+    let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
 
     let pool = connect_to_source_database(&database.config, 1, 1, None)
         .await
@@ -963,8 +964,7 @@ async fn replication_mask_various_patterns() {
         .unwrap();
     }
 
-    // Load all metadata using the store
-    let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
+    // Load all metadata using the store.
     store.load_destination_tables_metadata().await.unwrap();
 
     // Verify each test case
