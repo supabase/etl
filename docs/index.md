@@ -140,6 +140,10 @@ Built-in destination modules live in `etl-destinations`: BigQuery is stable,
 DuckLake is in progress, and Iceberg is deprecated for now. The shared pipeline,
 config, store, and event types should come from `etl`.
 
+`Pipeline::start()` installs ETL's source-side schema helpers before
+replication begins. If you use `PostgresStore` as the runtime store,
+`PostgresStore::new()` separately prepares the Postgres-backed state tables.
+
 ## Documentation
 
 | Section | What you'll find |

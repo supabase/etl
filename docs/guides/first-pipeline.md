@@ -168,6 +168,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
 ```
 
 **Note:** Update the `password` field to match your Postgres credentials.
+`Pipeline::start()` installs the ETL source-side schema helpers before
+replication begins, even when the tutorial keeps runtime state in `MemoryStore`.
 
 ## Step 4: Run the Pipeline
 

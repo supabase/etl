@@ -1,5 +1,6 @@
 #![cfg(feature = "test-utils")]
 
+mod migrations;
 mod pipeline;
 mod pipeline_replica_identity;
 #[cfg(feature = "failpoints")]

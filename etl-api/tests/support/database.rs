@@ -6,9 +6,12 @@ use etl_api::{
 };
 use etl_config::{
     SerializableSecretString,
-    shared::{IntoConnectOptions, PgConnectionConfig, TcpKeepaliveConfig, TlsConfig},
+    shared::{
+        ETL_MIGRATION_OPTIONS, IntoConnectOptions, PgConnectionConfig, TcpKeepaliveConfig,
+        TlsConfig,
+    },
 };
-use etl_postgres::{replication::connect_to_source_database, sqlx::test_utils::create_pg_database};
+use etl_postgres::sqlx::test_utils::create_pg_database;
 use pg_escape::{quote_identifier, quote_literal};
 use secrecy::ExposeSecret;
 use sqlx::{Connection, Executor, PgConnection, PgPool};
@@ -159,35 +162,38 @@ pub async fn drop_trusted_source_database(database: TrustedSourceDatabase) {
 
 /// Runs ETL migrations on the source database.
 ///
-/// Sets up the `etl` schema and runs Postgres state store migrations to create
-/// the tables ETL uses to persist the replication state needed for ETL
-/// operations.
+/// Sets up the `etl` schema, runs Postgres state store migrations, and runs
+/// source-side migrations used by ETL replication.
 ///
 /// # Panics
 /// Panics if database connection fails, schema creation fails, or migrations
 /// fail.
 pub async fn run_etl_migrations_on_source_database(source_db_config: &PgConnectionConfig) {
-    // We create a pool just for the migrations.
-    let source_pool = connect_to_source_database(source_db_config, 1, 1, None)
-        .await
-        .expect("failed to connect to source database");
+    let options = source_db_config.with_db(Some(&ETL_MIGRATION_OPTIONS));
+    let mut connection =
+        PgConnection::connect_with(&options).await.expect("failed to connect to source database");
 
     // Create the `etl` schema first.
     sqlx::query("create schema if not exists etl")
-        .execute(&source_pool)
+        .execute(&mut connection)
         .await
         .expect("failed to create etl schema");
 
     // Set the `etl` schema as search path (this is done to have the migrations
     // metadata table created by sqlx within the `etl` schema).
     sqlx::query("set search_path = 'etl';")
-        .execute(&source_pool)
+        .execute(&mut connection)
         .await
         .expect("failed to set search path");
 
-    // Run etl migrations to create the state store tables.
-    sqlx::migrate!("../etl/migrations")
-        .run(&source_pool)
+    let mut store_migrator = sqlx::migrate!("../etl/migrations/postgres_store");
+    store_migrator.set_ignore_missing(true);
+    store_migrator
+        .run_direct(&mut connection)
         .await
-        .expect("failed to run etl migrations");
+        .expect("failed to run ETL Postgres store migrations");
+
+    let mut source_migrator = sqlx::migrate!("../etl/migrations/source");
+    source_migrator.set_ignore_missing(true);
+    source_migrator.run_direct(&mut connection).await.expect("failed to run ETL source migrations");
 }

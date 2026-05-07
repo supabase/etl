@@ -645,10 +645,9 @@ pub async fn run_etl_migrations(args: &PgConnectionArgs) -> Result<()> {
         .await
         .context("failed to set migration search path")?;
 
-    sqlx::migrate!("../etl/migrations")
-        .run_direct(&mut connection)
-        .await
-        .context("failed to run ETL migrations")?;
+    let mut migrator = sqlx::migrate!("../etl/migrations/source");
+    migrator.set_ignore_missing(true);
+    migrator.run_direct(&mut connection).await.context("failed to run ETL migrations")?;
 
     Ok(())
 }

@@ -18,6 +18,7 @@ use crate::{
     error::{ErrorKind, EtlResult},
     etl_error,
     metrics::register_metrics,
+    migrations,
     replication::{SharedTableCache, client::PgReplicationClient},
     state::table::TableReplicationPhase,
     store::{cleanup::CleanupStore, schema::SchemaStore, state::StateStore},
@@ -131,6 +132,10 @@ where
             pipeline_id = %self.config.id,
             "starting pipeline"
         );
+
+        // Source migrations install schema helper functions and DDL event
+        // triggers used by all stores.
+        migrations::run_source_migrations(&self.config.pg_connection).await?;
 
         // We always start memory monitoring for running workers to keep total memory
         // snapshots available.

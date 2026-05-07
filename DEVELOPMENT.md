@@ -11,7 +11,7 @@ This guide covers setting up your development environment, running migrations, a
   - [Manual Setup](#manual-setup)
 - [Database Migrations](#database-migrations)
   - [ETL API Migrations](#etl-api-migrations)
-  - [ETL Replicator Migrations](#etl-replicator-migrations)
+  - [ETL Source And Store Migrations](#etl-source-and-store-migrations)
 - [Running the Services](#running-the-services)
 - [Kubernetes Setup](#kubernetes-setup)
 - [Common Development Tasks](#common-development-tasks)
@@ -117,14 +117,14 @@ The same Docker Compose stack also starts ClickHouse on `http://localhost:8123` 
 
 If you prefer manual setup or have an existing PostgreSQL instance:
 
-**Important:** The etl-api migrations and Postgres state store migrations can run on **separate databases**. You might have:
+**Important:** The etl-api migrations and ETL source/store migrations can run on **separate databases**. You might have:
 - The etl-api using its own dedicated Postgres instance for the control plane
-- The etl-replicator state store on the same database you're replicating from (source database)
+- The ETL source helpers and Postgres store tables on the database you're replicating from (source database)
 - Or both on the same database (for simpler local development setups)
 
 #### Single Database Setup
 
-If using one database for both the API and etl state:
+If using one database for both the API and ETL source/store objects:
 
 ```bash
 export DATABASE_URL=postgres://USER:PASSWORD@HOST:PORT/DB
@@ -149,7 +149,7 @@ export DATABASE_URL=postgres://USER:PASSWORD@SOURCE_HOST:PORT/SOURCE_DB
 
 This separation allows you to:
 - Scale the control plane independently from replication workloads
-- Keep the etl state close to the source data
+- Keep ETL source/store objects close to the source data
 - Isolate concerns between infrastructure management and data replication
 
 ## Database Migrations
@@ -191,11 +191,22 @@ cd etl-api
 cargo sqlx prepare
 ```
 
-### Postgres State Store Migrations
+### ETL Source And Store Migrations
 
-Located in `etl/migrations/`, these create the Postgres state store schema (`etl` schema) that ETL uses to persist replication state, versioned table schemas, and destination table metadata required to run and resume replication.
+Located under `etl/migrations/`, these prepare the source database:
 
-**Running Postgres state store migrations:**
+- `etl/migrations/source/`: ETL source helpers required by every pipeline, such as schema snapshot functions and the DDL event trigger. `Pipeline::start()` runs these automatically.
+- `etl/migrations/postgres_store/`: Postgres-backed state store tables used to persist replication state, versioned table schemas, and destination metadata. `PostgresStore::new()` runs these automatically.
+
+Both migration sets write to `etl._sqlx_migrations`. When running them
+separately, always use SQLx's `--ignore-missing` flag so each migrator validates
+its own versions while ignoring versions owned by the other set.
+
+Do not edit an already-applied migration file, including comments or
+whitespace. SQLx stores a checksum of the full migration contents, so even
+comment-only changes will break existing databases with a checksum mismatch.
+
+**Running ETL migrations manually:**
 
 ```bash
 # From project root
@@ -203,10 +214,16 @@ Located in `etl/migrations/`, these create the Postgres state store schema (`etl
 
 # Or manually with SQLx CLI (requires setting search_path)
 psql $DATABASE_URL -c "create schema if not exists etl;"
-sqlx migrate run --source etl/migrations --database-url "${DATABASE_URL}?options=-csearch_path%3Detl"
+sqlx migrate run --source etl/migrations/postgres_store --database-url "${DATABASE_URL}?options=-csearch_path%3Detl" --ignore-missing
+sqlx migrate run --source etl/migrations/source --database-url "${DATABASE_URL}?options=-csearch_path%3Detl" --ignore-missing
 ```
 
-**Important:** Migrations are run automatically when the Postgres-backed state store ETL uses for replication is initialized (see `etl/src/store/both/postgres.rs`). However, if you integrate the `etl` crate directly into your own application and want to prepare the source database ahead of time, you can also run these migrations manually. This design decision ensures:
+**Important:** Migrations are run automatically at the appropriate runtime
+boundary: source migrations when a pipeline starts, and Postgres store
+migrations when the Postgres-backed state store is initialized. However, if you
+integrate the `etl` crate directly into your own application and want to prepare
+the source database ahead of time, you can also run these migrations manually.
+This design decision ensures:
 - The standalone replicator binary works out-of-the-box
 - Library users have explicit control over when migrations run
 - CI/CD pipelines can pre-apply migrations independently
@@ -221,7 +238,14 @@ sqlx migrate run --source etl/migrations --database-url "${DATABASE_URL}?options
 
 ```bash
 cd etl
-sqlx migrate add <migration_name>
+sqlx migrate add --source migrations/postgres_store <migration_name>
+```
+
+**Creating a new ETL source migration:**
+
+```bash
+cd etl
+sqlx migrate add --source migrations/source <migration_name>
 ```
 
 ## Running the Services

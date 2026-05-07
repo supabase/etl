@@ -40,7 +40,7 @@ use etl::{
         PipelineConfig, TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
     },
     pipeline::Pipeline,
-    store::MemoryStore,
+    store::PostgresStore,
 };
 use etl_destinations::bigquery::BigQueryDestination;
 use tokio::signal;
@@ -178,14 +178,15 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         keepalive: TcpKeepaliveConfig::default(),
     };
 
-    // Create in-memory store for tracking table replication states and table
-    // schemas In production, you might want to use a persistent store like
-    // PostgresStore
-    let store = MemoryStore::new();
+    // Create a persistent store for tracking table replication states and
+    // schemas. This runs the Postgres store migrations; Pipeline::start()
+    // runs the source migrations required by replication.
+    let pipeline_id = 1;
+    let store = PostgresStore::new(pipeline_id, pg_connection_config.clone()).await?;
 
     // Create pipeline configuration with batching and retry settings
     let pipeline_config = PipelineConfig {
-        id: 1, // Using a simple ID for the example
+        id: pipeline_id, // Using a simple ID for the example
         publication_name: args.publication,
         pg_connection: pg_connection_config,
         batch: BatchConfig {
