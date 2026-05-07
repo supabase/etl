@@ -203,8 +203,9 @@ separately, always use SQLx's `--ignore-missing` flag so each migrator validates
 its own versions while ignoring versions owned by the other set.
 
 Do not edit an already-applied migration file, including comments or
-whitespace. SQLx stores a checksum of the full migration contents, so even
-comment-only changes will break existing databases with a checksum mismatch.
+whitespace. SQLx stores a SHA-384 checksum of the full migration contents, so
+even comment-only changes will break existing databases with a checksum
+mismatch.
 
 **Running ETL migrations manually:**
 
@@ -217,6 +218,20 @@ psql $DATABASE_URL -c "create schema if not exists etl;"
 sqlx migrate run --source etl/migrations/postgres_store --database-url "${DATABASE_URL}?options=-csearch_path%3Detl" --ignore-missing
 sqlx migrate run --source etl/migrations/source --database-url "${DATABASE_URL}?options=-csearch_path%3Detl" --ignore-missing
 ```
+
+**Reverting ETL migrations manually:**
+
+```bash
+# Revert source migrations.
+sqlx migrate revert --source etl/migrations/source --database-url "${DATABASE_URL}?options=-csearch_path%3Detl" --ignore-missing
+
+# Revert Postgres store migrations.
+sqlx migrate revert --source etl/migrations/postgres_store --database-url "${DATABASE_URL}?options=-csearch_path%3Detl" --ignore-missing
+```
+
+Use `--target-version 0` to revert every migration in one migration set. Revert
+source and Postgres store migrations separately because ordering is scoped to
+the selected migration folder.
 
 **Important:** Migrations are run automatically at the appropriate runtime
 boundary: source migrations when a pipeline starts, and Postgres store
@@ -238,14 +253,14 @@ This design decision ensures:
 
 ```bash
 cd etl
-sqlx migrate add --source migrations/postgres_store <migration_name>
+sqlx migrate add -r --source migrations/postgres_store <migration_name>
 ```
 
 **Creating a new ETL source migration:**
 
 ```bash
 cd etl
-sqlx migrate add --source migrations/source <migration_name>
+sqlx migrate add -r --source migrations/source <migration_name>
 ```
 
 ## Running the Services
