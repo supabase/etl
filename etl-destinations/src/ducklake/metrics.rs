@@ -671,12 +671,12 @@ pub(super) fn resolve_ducklake_metadata_schema_blocking(
            LIMIT 1;"#,
         quote_literal(&metadata_catalog),
     );
-    conn.query_row(&sql, [], |row| row.get::<_, String>(0)).map_err(|e| {
+    conn.query_row(&sql, [], |row| row.get::<_, String>(0)).map_err(|err| {
         etl_error!(
             ErrorKind::DestinationQueryFailed,
             "DuckLake metadata schema query failed",
-            format_query_error_detail(&sql, &e),
-            source: e
+            format_query_error_detail(&sql),
+            source: err
         )
     })
 }

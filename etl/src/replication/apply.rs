@@ -2783,7 +2783,7 @@ mod apply_worker {
                     info!(
                         worker_type = %WorkerType::Apply,
                         table_id = table_id.0,
-                        final_phase_type = %final_phase.as_type(),
+                        table_replication_phase_type = %final_phase.as_type(),
                         "apply worker unblocked: table sync worker errored, skipping table",
                     );
 
@@ -2793,7 +2793,7 @@ mod apply_worker {
                 info!(
                     worker_type = %WorkerType::Apply,
                     table_id = table_id.0,
-                    final_phase_type = %final_phase.as_type(),
+                    table_replication_phase_type = %final_phase.as_type(),
                     "apply worker unblocked: table sync worker reached sync_done",
                 );
 
@@ -2835,7 +2835,7 @@ mod apply_worker {
             debug!(
                 worker_type = %WorkerType::Apply,
                 table_id = table_id.0,
-                phase_type = %phase.as_type(),
+                table_replication_phase_type = %phase.as_type(),
                 %current_lsn,
                 "checking table with active worker after commit",
             );
@@ -2905,7 +2905,7 @@ mod apply_worker {
                     debug!(
                         worker_type = %WorkerType::Apply,
                         table_id = table_id.0,
-                        phase_type = %phase.as_type(),
+                        table_replication_phase_type = %phase.as_type(),
                         "no action needed for current phase after commit",
                     );
                 }
@@ -3003,7 +3003,7 @@ mod apply_worker {
             debug!(
                 worker_type = %WorkerType::Apply,
                 table_id = table_id.0,
-                phase_type = %phase.as_type(),
+                table_replication_phase_type = %phase.as_type(),
                 %current_lsn,
                 "checking table with active worker after batch flush",
             );
@@ -3148,7 +3148,7 @@ mod apply_worker {
             debug!(
                 worker_type = %WorkerType::Apply,
                 table_id = table_id.0,
-                phase_type = %phase.as_type(),
+                table_replication_phase_type = %phase.as_type(),
                 %current_lsn,
                 "checking table with active worker when idle",
             );
@@ -3233,7 +3233,7 @@ mod apply_worker {
                     debug!(
                         worker_type = %WorkerType::Apply,
                         table_id = table_id.0,
-                        phase_type = %phase.as_type(),
+                        table_replication_phase_type = %phase.as_type(),
                         "no action needed for current phase when idle",
                     );
                 }

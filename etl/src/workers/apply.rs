@@ -52,9 +52,9 @@ impl ApplyWorkerHandle {
 
         handle.await.map_err(|err| {
             if err.is_cancelled() {
-                etl_error!(ErrorKind::ApplyWorkerCancelled, "Apply worker was cancelled", err)
+                etl_error!(ErrorKind::ApplyWorkerCancelled, "Apply worker was cancelled", source: err)
             } else {
-                etl_error!(ErrorKind::ApplyWorkerPanic, "Apply worker panicked", err)
+                etl_error!(ErrorKind::ApplyWorkerPanic, "Apply worker panicked", source: err)
             }
         })??;
 

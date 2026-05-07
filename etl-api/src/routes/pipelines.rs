@@ -165,6 +165,7 @@ impl PipelineError {
             | PipelineError::PipelinesDb(PipelinesDbError::Database(_))
             | PipelineError::ReplicatorsDb(ReplicatorsDbError::Database(_))
             | PipelineError::ImagesDb(ImagesDbError::Database(_))
+            | PipelineError::TableLookup(_)
             | PipelineError::Database(_) => "internal server error".to_owned(),
             // Do not expose validation error details as they may contain credential info.
             PipelineError::Validation(ValidationError::BigQuery(_)) => {

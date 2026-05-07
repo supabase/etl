@@ -51,9 +51,8 @@ impl PublicationError {
         match self {
             // Do not expose internal database details in error messages
             PublicationError::SourcesDb(SourcesDbError::Database(_))
-            | PublicationError::PublicationsDb(PublicationsDbError::Database(_)) => {
-                "internal server error".to_owned()
-            }
+            | PublicationError::PublicationsDb(PublicationsDbError::Database(_))
+            | PublicationError::Database(_) => "internal server error".to_owned(),
             // Every other message is ok, as they do not divulge sensitive information
             e => e.to_string(),
         }

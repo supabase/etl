@@ -377,7 +377,7 @@ impl TableReplicationPhase {
             etl_error!(
                 ErrorKind::SerializationError,
                 "Table replication phase serialization failed",
-                format!("Failed to serialize table replication phase to JSON: {err}")
+                source: err
             )
         })?;
 

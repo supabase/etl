@@ -629,7 +629,7 @@ where
                         etl_error!(
                             ErrorKind::DestinationQueryFailed,
                             "DuckLake TRUNCATE TABLE failed",
-                            format_query_error_detail(&truncate_table_sql, &e),
+                            format_query_error_detail(&truncate_table_sql),
                             source: e
                         )
                     })?;
@@ -1096,7 +1096,7 @@ where
                         return Err(etl_error!(
                             ErrorKind::DestinationQueryFailed,
                             "DuckLake CREATE TABLE failed",
-                            format_query_error_detail(&qualified_ddl, &e),
+                            format_query_error_detail(&qualified_ddl),
                             source: e
                         ));
                     }

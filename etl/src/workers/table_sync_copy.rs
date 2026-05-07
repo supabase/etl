@@ -382,7 +382,7 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
             etl_error!(
                 ErrorKind::InvalidState,
                 "Could not acquire semaphore while copying a table in parallel",
-                err.to_string()
+                source: err
             )
         })?;
 
@@ -459,7 +459,7 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
                 return Err(etl_error!(
                     ErrorKind::TableSyncWorkerPanic,
                     "One or more parallel copy partition tasks panicked, aborting all",
-                    join_err.to_string()
+                    source: join_err
                 ));
             }
         }

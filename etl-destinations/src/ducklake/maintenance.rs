@@ -1291,7 +1291,7 @@ fn count_ducklake_maintenance_rows(
         etl_error!(
             ErrorKind::DestinationQueryFailed,
             description,
-            format_query_error_detail(sql, &source),
+            format_query_error_detail(sql),
             source: source
         )
     })?;
@@ -1299,7 +1299,7 @@ fn count_ducklake_maintenance_rows(
         etl_error!(
             ErrorKind::DestinationQueryFailed,
             description,
-            format_query_error_detail(sql, &source),
+            format_query_error_detail(sql),
             source: source
         )
     })?;
@@ -1309,7 +1309,7 @@ fn count_ducklake_maintenance_rows(
         etl_error!(
             ErrorKind::DestinationQueryFailed,
             description,
-            format_query_error_detail(sql, &source),
+            format_query_error_detail(sql),
             source: source
         )
     })? {
@@ -1411,7 +1411,7 @@ pub(super) fn flush_table_inlined_data(
         etl_error!(
             ErrorKind::DestinationQueryFailed,
             "DuckLake inlined data flush failed",
-            format_query_error_detail(&sql, &e),
+            format_query_error_detail(&sql),
             source: e
         )
     })?;
@@ -1460,7 +1460,7 @@ fn rewrite_table_data_files(conn: &duckdb::Connection, table_name: &str) -> EtlR
         return Err(etl_error!(
             ErrorKind::DestinationQueryFailed,
             "DuckLake rewrite data files failed",
-            format_query_error_detail(&sql, &source),
+            format_query_error_detail(&sql),
             source: source
         ));
     }
@@ -1469,7 +1469,7 @@ fn rewrite_table_data_files(conn: &duckdb::Connection, table_name: &str) -> EtlR
         etl_error!(
             ErrorKind::DestinationQueryFailed,
             "DuckLake rewrite data files failed",
-            format_query_error_detail(&sql, &error),
+            format_query_error_detail(&sql),
             source: error
         )
     })?;

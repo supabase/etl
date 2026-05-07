@@ -90,7 +90,11 @@ where
                 | TableReplicationPhaseType::Ready
                 | TableReplicationPhaseType::Errored
         ) {
-            warn!(table_id = table_id.0, %phase_type, "initial table sync not required");
+            warn!(
+                table_id = table_id.0,
+                table_replication_phase_type = %phase_type,
+                "initial table sync not required"
+            );
 
             return Ok(TableSyncResult::NotRequired);
         }
@@ -103,7 +107,11 @@ where
                 | TableReplicationPhaseType::DataSync
                 | TableReplicationPhaseType::FinishedCopy
         ) {
-            warn!(table_id = table_id.0, %phase_type, "invalid replication phase for table sync");
+            warn!(
+                table_id = table_id.0,
+                table_replication_phase_type = %phase_type,
+                "invalid replication phase for table sync"
+            );
 
             bail!(
                 ErrorKind::InvalidState,

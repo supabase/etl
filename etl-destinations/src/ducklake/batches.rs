@@ -84,33 +84,6 @@ fn format_optional_lsn(lsn: Option<PgLsn>) -> String {
     lsn.map_or_else(|| "none".to_owned(), |lsn| lsn.to_string())
 }
 
-/// Returns a DuckDB error category without formatting value-bearing details.
-fn duckdb_error_kind(error: &duckdb::Error) -> &'static str {
-    match error {
-        duckdb::Error::DuckDBFailure(_, _) => "duckdb_failure",
-        duckdb::Error::FromSqlConversionFailure(_, _, _) => "from_sql_conversion_failure",
-        duckdb::Error::IntegralValueOutOfRange(_, _) => "integral_value_out_of_range",
-        duckdb::Error::Utf8Error(_) => "utf8_error",
-        duckdb::Error::NulError(_) => "nul_error",
-        duckdb::Error::InvalidParameterName(_) => "invalid_parameter_name",
-        duckdb::Error::InvalidPath(_) => "invalid_path",
-        duckdb::Error::ExecuteReturnedResults => "execute_returned_results",
-        duckdb::Error::QueryReturnedNoRows => "query_returned_no_rows",
-        duckdb::Error::QueryReturnedMoreThanOneRow => "query_returned_more_than_one_row",
-        duckdb::Error::InvalidColumnIndex(_) => "invalid_column_index",
-        duckdb::Error::InvalidColumnName(_) => "invalid_column_name",
-        duckdb::Error::InvalidColumnType(_, _, _) => "invalid_column_type",
-        duckdb::Error::ArrowTypeToDuckdbType(_, _) => "arrow_type_to_duckdb_type",
-        duckdb::Error::StatementChangedRows(_) => "statement_changed_rows",
-        duckdb::Error::ToSqlConversionFailure(_) => "to_sql_conversion_failure",
-        duckdb::Error::InvalidQuery => "invalid_query",
-        duckdb::Error::MultipleStatement => "multiple_statement",
-        duckdb::Error::InvalidParameterCount(_, _) => "invalid_parameter_count",
-        duckdb::Error::InvalidParameterIndex(_) => "invalid_parameter_index",
-        duckdb::Error::AppendError => "append_error",
-        _ => "unknown",
-    }
-}
 /// ETL-managed per-table streaming replay progress for steady-state CDC
 /// retries.
 const STREAMING_PROGRESS_TABLE: &str = "__etl_streaming_progress";
@@ -358,7 +331,7 @@ pub(super) async fn ensure_applied_batches_table_exists(
                     return Err(etl_error!(
                         ErrorKind::DestinationQueryFailed,
                         "DuckLake CREATE TABLE failed",
-                        format_query_error_detail(&ddl, &error),
+                        format_query_error_detail(&ddl),
                         source: error
                     ));
                 }
@@ -369,12 +342,12 @@ pub(super) async fn ensure_applied_batches_table_exists(
                 APPLIED_BATCHES_TABLE_DATA_INLINING_ROW_LIMIT,
                 quote_literal(APPLIED_BATCHES_TABLE),
             );
-            conn.execute_batch(&set_option_sql).map_err(|error| {
+            conn.execute_batch(&set_option_sql).map_err(|err| {
                 etl_error!(
                     ErrorKind::DestinationQueryFailed,
                     "DuckLake set_option failed",
-                    format_query_error_detail(&set_option_sql, &error),
-                    source: error
+                    format_query_error_detail(&set_option_sql),
+                    source: err
                 )
             })?;
 
@@ -422,13 +395,13 @@ pub(super) async fn ensure_streaming_progress_table_exists(
         move |conn| -> EtlResult<()> {
             match conn.execute_batch(&ddl) {
                 Ok(()) => {}
-                Err(error) if is_create_table_conflict(&error, &table_name) => {}
-                Err(error) => {
+                Err(err) if is_create_table_conflict(&err, &table_name) => {}
+                Err(err) => {
                     return Err(etl_error!(
                         ErrorKind::DestinationQueryFailed,
                         "DuckLake CREATE TABLE failed",
-                        format_query_error_detail(&ddl, &error),
-                        source: error
+                        format_query_error_detail(&ddl),
+                        source: err
                     ));
                 }
             }
@@ -442,7 +415,7 @@ pub(super) async fn ensure_streaming_progress_table_exists(
                 etl_error!(
                     ErrorKind::DestinationQueryFailed,
                     "DuckLake set_option failed",
-                    format_query_error_detail(&set_option_sql, &error),
+                    format_query_error_detail(&set_option_sql),
                     source: error
                 )
             })?;
@@ -699,12 +672,12 @@ pub(super) fn clear_applied_batch_markers_for_kind(
         quote_literal(table_name),
         quote_literal(batch_kind.as_str())
     );
-    conn.execute_batch(&sql).map_err(|error| {
+    conn.execute_batch(&sql).map_err(|err| {
         etl_error!(
             ErrorKind::DestinationQueryFailed,
             "DuckLake batch marker delete failed",
-            format_query_error_detail(&sql, &error),
-            source: error
+            format_query_error_detail(&sql),
+            source: err
         )
     })?;
     Ok(())
@@ -720,12 +693,12 @@ pub(super) fn clear_table_streaming_progress(
          WHERE table_name = {};"#,
         quote_literal(table_name),
     );
-    conn.execute_batch(&sql).map_err(|error| {
+    conn.execute_batch(&sql).map_err(|err| {
         etl_error!(
             ErrorKind::DestinationQueryFailed,
             "DuckLake streaming progress delete failed",
-            format_query_error_detail(&sql, &error),
-            source: error
+            format_query_error_detail(&sql),
+            source: err
         )
     })?;
     Ok(())
@@ -770,49 +743,49 @@ fn read_table_streaming_progress(
          WHERE table_name = {} LIMIT 1;"#,
         quote_literal(table_name),
     );
-    let mut statement = conn.prepare(&sql).map_err(|error| {
+    let mut statement = conn.prepare(&sql).map_err(|err| {
         etl_error!(
             ErrorKind::DestinationQueryFailed,
             "DuckLake streaming progress query prepare failed",
-            format_query_error_detail(&sql, &error),
-            source: error
+            format_query_error_detail(&sql),
+            source: err
         )
     })?;
-    let mut rows = statement.query([]).map_err(|error| {
+    let mut rows = statement.query([]).map_err(|err| {
         etl_error!(
             ErrorKind::DestinationQueryFailed,
             "DuckLake streaming progress query failed",
-            format_query_error_detail(&sql, &error),
-            source: error
+            format_query_error_detail(&sql),
+            source: err
         )
     })?;
 
-    let Some(row) = rows.next().map_err(|error| {
+    let Some(row) = rows.next().map_err(|err| {
         etl_error!(
             ErrorKind::DestinationQueryFailed,
             "DuckLake streaming progress row fetch failed",
-            format_query_error_detail(&sql, &error),
-            source: error
+            format_query_error_detail(&sql),
+            source: err
         )
     })?
     else {
         return Ok(None);
     };
 
-    let last_commit_lsn: u64 = row.get(0).map_err(|error| {
+    let last_commit_lsn: u64 = row.get(0).map_err(|err| {
         etl_error!(
             ErrorKind::DestinationQueryFailed,
             "DuckLake streaming progress commit lsn read failed",
-            format_query_error_detail(&sql, &error),
-            source: error
+            format_query_error_detail(&sql),
+            source: err
         )
     })?;
-    let last_tx_ordinal: u64 = row.get(1).map_err(|error| {
+    let last_tx_ordinal: u64 = row.get(1).map_err(|err| {
         etl_error!(
             ErrorKind::DestinationQueryFailed,
             "DuckLake streaming progress tx ordinal read failed",
-            format_query_error_detail(&sql, &error),
-            source: error
+            format_query_error_detail(&sql),
+            source: err
         )
     })?;
 
@@ -1492,29 +1465,29 @@ fn applied_batch_marker_exists(
         quote_literal(&batch.table_name),
         quote_literal(&batch.batch_id)
     );
-    let mut statement = conn.prepare(&sql).map_err(|error| {
+    let mut statement = conn.prepare(&sql).map_err(|err| {
         etl_error!(
             ErrorKind::DestinationQueryFailed,
             "DuckLake marker query prepare failed",
-            format_query_error_detail(&sql, &error),
-            source: error
+            format_query_error_detail(&sql),
+            source: err
         )
     })?;
-    let mut rows = statement.query([]).map_err(|error| {
+    let mut rows = statement.query([]).map_err(|err| {
         etl_error!(
             ErrorKind::DestinationQueryFailed,
             "DuckLake marker query failed",
-            format_query_error_detail(&sql, &error),
-            source: error
+            format_query_error_detail(&sql),
+            source: err
         )
     })?;
 
-    rows.next().map(|row| row.is_some()).map_err(|error| {
+    rows.next().map(|row| row.is_some()).map_err(|err| {
         etl_error!(
             ErrorKind::DestinationQueryFailed,
             "DuckLake marker query row fetch failed",
-            format_query_error_detail(&sql, &error),
-            source: error
+            format_query_error_detail(&sql),
+            source: err
         )
     })
 }
@@ -1533,12 +1506,12 @@ fn insert_applied_batch_marker(
         optional_lsn_to_sql_literal(batch.first_start_lsn),
         optional_lsn_to_sql_literal(batch.last_commit_lsn),
     );
-    conn.execute_batch(&sql).map_err(|error| {
+    conn.execute_batch(&sql).map_err(|err| {
         etl_error!(
             ErrorKind::DestinationQueryFailed,
             "DuckLake batch marker insert failed",
-            format_query_error_detail(&sql, &error),
-            source: error
+            format_query_error_detail(&sql),
+            source: err
         )
     })?;
     Ok(())
@@ -1568,12 +1541,12 @@ fn update_table_streaming_progress(
         u64::from(last_sequence_key.commit_lsn),
         last_sequence_key.tx_ordinal,
     );
-    conn.execute_batch(&sql).map_err(|error| {
+    conn.execute_batch(&sql).map_err(|err| {
         etl_error!(
             ErrorKind::DestinationQueryFailed,
             "DuckLake streaming progress update failed",
-            format_query_error_detail(&sql, &error),
-            source: error
+            format_query_error_detail(&sql),
+            source: err
         )
     })?;
     Ok(())
@@ -1611,17 +1584,13 @@ impl ReusableStagingTable {
             table_name = &self.table_name,
             staging = &self.staging_name,
         );
-        conn.execute_batch(&sql).map_err(|error| {
-            tracing::error!(
-                table = %self.table_name,
-                error_kind = duckdb_error_kind(&error),
-                "error INSERT INTO"
-            );
+        conn.execute_batch(&sql).map_err(|err| {
+            tracing::error!(error = %err, "error INSERT INTO");
             etl_error!(
                 ErrorKind::DestinationQueryFailed,
                 "DuckLake INSERT SELECT failed",
-                "DuckLake failed to insert staged rows into the destination table; row values \
-                 withheld"
+                format_query_error_detail(&sql),
+                source: err
             )
         })?;
         Ok(())
@@ -1695,30 +1664,22 @@ impl ReusableStagingTable {
                 })?;
                 for values in all_values {
                     appender.append_row(duckdb::appender_params_from_iter(values)).map_err(
-                        |error| {
-                            tracing::error!(
-                                table = %self.table_name,
-                                error_kind = duckdb_error_kind(&error),
-                                "error append row",
-                            );
+                        |err| {
+                            tracing::error!(error = %err, "error append row");
                             etl_error!(
                                 ErrorKind::DestinationQueryFailed,
                                 "DuckLake staging append_row failed",
-                                "DuckLake failed to append a row into staging; row values withheld"
+                                source: err
                             )
                         },
                     )?;
                 }
-                appender.flush().map_err(|error| {
-                    tracing::error!(
-                        table = %self.table_name,
-                        error_kind = duckdb_error_kind(&error),
-                        "error flush",
-                    );
+                appender.flush().map_err(|err| {
+                    tracing::error!(error = %err, "error flush");
                     etl_error!(
                         ErrorKind::DestinationQueryFailed,
                         "DuckLake staging appender flush failed",
-                        "DuckLake failed to flush staged rows; row values withheld"
+                        source: err
                     )
                 })?;
             }
@@ -1816,13 +1777,14 @@ fn apply_table_batch(
 
             Ok(())
         }
-        Err(error) => {
+        Err(err) => {
             let rollback = conn.execute_batch("ROLLBACK");
             reusable_staging_table.cleanup(conn);
-            if let Err(rollback) = rollback {
-                tracing::error!(rollback = %rollback, "error rollback");
+            if let Err(err) = rollback {
+                tracing::error!(error = %err, "error rollback");
             }
-            Err(error)
+
+            Err(err)
         }
     }
 }
@@ -1835,7 +1797,7 @@ fn apply_truncate_batch_action(conn: &duckdb::Connection, table_name: &str) -> E
         etl_error!(
             ErrorKind::DestinationQueryFailed,
             "DuckLake TRUNCATE TABLE failed",
-            format_query_error_detail(&sql, &error),
+            format_query_error_detail(&sql),
             source: error
         )
     })?;
@@ -1917,16 +1879,12 @@ fn apply_delete_mutation(
         let sql_query =
             format!(r#"DELETE FROM {LAKE_CATALOG}."{table_name}" WHERE {where_clause};"#);
         conn.execute_batch(&sql_query).map_err(|error| {
-            tracing::error!(
-                table = %table_name,
-                predicate_count = chunk.len(),
-                error_kind = duckdb_error_kind(&error),
-                "error DELETE FROM"
-            );
+            tracing::error!(error = %error, "error DELETE FROM");
             etl_error!(
                 ErrorKind::DestinationQueryFailed,
                 "DuckLake DELETE failed",
-                "DuckLake failed to delete rows; predicate values withheld"
+                format_query_error_detail(&sql_query),
+                source: error
             )
         })?;
     }
@@ -1948,17 +1906,13 @@ fn apply_update_mutation(
     let set_clause = assignments.join(", ");
     let sql_query =
         format!(r#"UPDATE {LAKE_CATALOG}."{table_name}" SET {set_clause} WHERE {predicate};"#);
-    conn.execute_batch(&sql_query).map_err(|error| {
-        tracing::error!(
-            table = %table_name,
-            assignment_count = assignments.len(),
-            error_kind = duckdb_error_kind(&error),
-            "error UPDATE"
-        );
+    conn.execute_batch(&sql_query).map_err(|err| {
+        tracing::error!(error = %err, "error UPDATE");
         etl_error!(
             ErrorKind::DestinationQueryFailed,
             "DuckLake UPDATE failed",
-            "DuckLake failed to update rows; assignment and predicate values withheld"
+            format_query_error_detail(&sql_query),
+            source: err
         )
     })?;
 
@@ -2035,17 +1989,12 @@ fn insert_rows_into_staging_with_sql(
 ) -> EtlResult<()> {
     for chunk in row_literals.chunks(SQL_INSERT_BATCH_SIZE) {
         conn.execute_batch(&format!("INSERT INTO {staging:?} VALUES {};", chunk.join(", ")))
-            .map_err(|error| {
-                tracing::error!(
-                    staging = %staging,
-                    row_count = chunk.len(),
-                    error_kind = duckdb_error_kind(&error),
-                    "error insert_rows_into_staging_with_sql",
-                );
+            .map_err(|err| {
+                tracing::error!(error = %err, "error insert_rows_into_staging_with_sql");
                 etl_error!(
                     ErrorKind::DestinationQueryFailed,
                     "DuckLake staging row insert failed",
-                    "DuckLake failed to insert rows into staging; row values withheld"
+                    source: err
                 )
             })?;
     }

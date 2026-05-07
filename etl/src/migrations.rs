@@ -74,9 +74,11 @@ async fn run_migration_set(
 /// This function is public for applications that want to preflight or
 /// pre-apply the source-side setup.
 pub async fn run_source_migrations(source_config: &PgConnectionConfig) -> EtlResult<()> {
-    run_migration_set(source_config, source_migrator(), "source").await.map_err(|err| {
-        etl_error!(ErrorKind::SourceError, "Failed to run ETL source migrations", err)
-    })
+    run_migration_set(source_config, source_migrator(), "source")
+        .await
+        .map_err(|err| {
+            etl_error!(ErrorKind::SourceError, "Failed to run ETL source migrations", source: err)
+        })
 }
 
 /// Runs migrations required only by [`crate::store::PostgresStore`].
@@ -84,6 +86,12 @@ pub(crate) async fn run_postgres_store_migrations(
     source_config: &PgConnectionConfig,
 ) -> EtlResult<()> {
     run_migration_set(source_config, postgres_store_migrator(), "postgres_store").await.map_err(
-        |err| etl_error!(ErrorKind::SourceError, "Failed to run Postgres store migrations", err),
+        |err| {
+            etl_error!(
+                ErrorKind::SourceError,
+                "Failed to run Postgres store migrations",
+                source: err
+            )
+        },
     )
 }

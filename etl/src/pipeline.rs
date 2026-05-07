@@ -269,7 +269,7 @@ where
                 errors.push(etl_error!(
                     ErrorKind::InvalidState,
                     "Memory monitor task panicked",
-                    err.to_string()
+                    source: err
                 ));
             }
         }

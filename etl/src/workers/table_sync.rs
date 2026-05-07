@@ -224,7 +224,7 @@ impl TableSyncWorkerState {
             if phase_types.contains(&current_phase) {
                 info!(
                     table_id = inner.table_id.0,
-                    %current_phase,
+                    table_replication_phase_type = %current_phase,
                     "table replication phase reached",
                 );
 
@@ -233,8 +233,8 @@ impl TableSyncWorkerState {
 
             info!(
                 table_id = inner.table_id.0,
-                %current_phase,
-                phase_types = %format_phase_types(phase_types),
+                table_replication_phase_type = %current_phase,
+                table_replication_phase_types = %format_phase_types(phase_types),
                 "waiting for table replication phase",
             );
 
@@ -253,7 +253,7 @@ impl TableSyncWorkerState {
 
                 _ = shutdown_rx.changed() => {
                     info!(
-                        phase_types = %format_phase_types(phase_types),
+                        table_replication_phase_types = %format_phase_types(phase_types),
                         "shutdown signal received, cancelling wait for phase",
                     );
 
