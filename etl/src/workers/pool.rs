@@ -180,6 +180,10 @@ impl TableSyncWorkerPool {
                             debug!(%worker_id, "table sync worker completed after shutdown");
                         }
                         Ok(TableSyncWorkerResult::Errored) => {
+                            // The worker must persist the table error before returning this result.
+                            // Waiting on the pool happens after the apply worker completes, so
+                            // `wait_all` cannot be the first place that releases apply-side
+                            // waiters.
                             debug!(
                                 %worker_id,
                                 "table sync worker completed after persisting error state"

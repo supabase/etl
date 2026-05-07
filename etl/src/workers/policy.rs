@@ -92,6 +92,10 @@ pub(crate) fn build_error_handling_policy(error: &EtlError) -> ErrorHandlingPoli
             RetryDirective::Manual,
             Some("Check replication slot status and database configuration."),
         ),
+        ErrorKind::TableSyncWorkerPanic => ErrorHandlingPolicy::new(
+            RetryDirective::Manual,
+            Some("Inspect the table sync worker panic logs and manually retry the table."),
+        ),
 
         // Special handling for fault injection tests.
         #[cfg(feature = "failpoints")]

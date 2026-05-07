@@ -1,8 +1,9 @@
-use std::{ops::Deref, sync::Arc, time::Duration};
+use std::{any::Any, ops::Deref, panic::AssertUnwindSafe, sync::Arc, time::Duration};
 
 use chrono::{Duration as ChronoDuration, Utc};
 use etl_config::shared::PipelineConfig;
 use etl_postgres::{replication::slots::EtlReplicationSlot, types::TableId};
+use futures::FutureExt;
 use metrics::counter;
 use tokio::{
     sync::{Mutex, MutexGuard, Notify, Semaphore},
@@ -42,6 +43,19 @@ pub(crate) enum TableSyncWorkerResult {
     Shutdown,
     /// The worker stopped after persisting the table error state.
     Errored,
+}
+
+/// Builds an error from a panic caught inside the table sync worker.
+fn table_sync_worker_panic_error(payload: Box<dyn Any + Send>) -> EtlError {
+    let detail = if let Some(message) = payload.downcast_ref::<&'static str>() {
+        message.to_string()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "table sync worker panicked with non-string payload".to_owned()
+    };
+
+    etl_error!(ErrorKind::TableSyncWorkerPanic, "table sync worker panicked", detail)
 }
 
 /// Internal state of [`TableSyncWorkerState`].
@@ -545,12 +559,51 @@ where
             table_id = self.table_id.0,
         );
 
-        let fut =
-            self.guarded_run_table_sync_worker(state.clone()).instrument(table_sync_worker_span);
+        let fut = self.run_table_sync_worker_task(state.clone(), table_sync_worker_span);
 
         pool.spawn(table_id, state, fut).await;
 
         Ok(())
+    }
+
+    /// Runs the table sync worker task and converts panics to table errors.
+    async fn run_table_sync_worker_task(
+        self,
+        state: TableSyncWorkerState,
+        table_sync_worker_span: tracing::Span,
+    ) -> EtlResult<TableSyncWorkerResult> {
+        let table_id = self.table_id;
+        let config = Arc::clone(&self.config);
+        let store = self.store.clone();
+        let mut shutdown_rx = self.shutdown_rx.clone();
+
+        let result = AssertUnwindSafe(
+            self.guarded_run_table_sync_worker(state.clone()).instrument(table_sync_worker_span),
+        )
+        .catch_unwind()
+        .await;
+
+        match result {
+            Ok(result) => result,
+            Err(payload) => {
+                let err = table_sync_worker_panic_error(payload);
+                Self::handle_table_sync_worker_error(
+                    table_id,
+                    config.as_ref(),
+                    &state,
+                    &store,
+                    &mut shutdown_rx,
+                    err,
+                )
+                .await?
+                .ok_or_else(|| {
+                    etl_error!(
+                        ErrorKind::InvalidState,
+                        "table sync worker panic requested retry after unwinding"
+                    )
+                })
+            }
+        }
     }
 
     /// Runs the table sync worker with retry logic and error handling.
@@ -590,6 +643,7 @@ where
             };
 
             let result = worker.run_table_sync_worker(state.clone()).await;
+
             match result {
                 Ok(result) => {
                     let mut state_guard = state.lock().await;
