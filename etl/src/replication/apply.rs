@@ -2637,6 +2637,15 @@ where
 mod apply_worker {
     use super::*;
 
+    /// Why the apply worker is waiting for table-sync catchup.
+    #[derive(Debug)]
+    enum CatchupWaitReason {
+        /// The apply worker just moved the table-sync worker into catchup.
+        EnteredCatchup,
+        /// The apply worker found the table-sync worker already in catchup.
+        AlreadyInCatchup,
+    }
+
     /// Determines whether changes should be applied for a given table.
     ///
     /// If an active worker exists for the table, its state is checked while
@@ -2708,6 +2717,81 @@ mod apply_worker {
         Ok(None)
     }
 
+    /// Waits for a table-sync worker in catchup to hand the table back.
+    async fn wait_for_table_sync_worker_catchup<S, D>(
+        ctx: &ApplyWorkerContext<S, D>,
+        table_id: TableId,
+        worker_state: &TableSyncWorkerState,
+        catchup_lsn: PgLsn,
+        wait_reason: CatchupWaitReason,
+    ) -> Option<ExitIntent> {
+        // `Catchup` and `SyncDone` define the table ownership boundary, not the
+        // caller's current stream position. This matters after an apply-worker
+        // retry: the restarted apply stream may resume before the original
+        // catchup target, but the table-sync worker still owns this table until
+        // it stores `SyncDone` at the LSN it actually flushed, which is
+        // guaranteed to be >= the original catchup target. WAL replay before
+        // that boundary is skipped for this table by the normal
+        // `SyncDone.lsn <= remote_final_lsn` ownership check. Other ready
+        // tables may see normal at-least-once replay, but this table will not
+        // lose or double-apply catchup rows.
+        let catchup_state = match wait_reason {
+            CatchupWaitReason::EnteredCatchup => "entered",
+            CatchupWaitReason::AlreadyInCatchup => "already_in",
+        };
+
+        info!(
+            worker_type = %WorkerType::Apply,
+            table_id = table_id.0,
+            %catchup_lsn,
+            catchup_state,
+            "apply worker blocking until table sync worker reaches sync_done",
+        );
+
+        // We wait for both states since if the table sync worker errors, we don't want
+        // to stall forever.
+        let result = worker_state
+            .wait_for_phase_type(
+                &[TableReplicationPhaseType::SyncDone, TableReplicationPhaseType::Errored],
+                ctx.shutdown_rx.clone(),
+            )
+            .await;
+
+        match result {
+            ShutdownResult::Ok(result) => {
+                let final_phase = result.replication_phase();
+                if final_phase.as_type().is_errored() {
+                    info!(
+                        worker_type = %WorkerType::Apply,
+                        table_id = table_id.0,
+                        ?final_phase,
+                        "apply worker unblocked: table sync worker errored, skipping table",
+                    );
+
+                    return None;
+                }
+
+                info!(
+                    worker_type = %WorkerType::Apply,
+                    table_id = table_id.0,
+                    ?final_phase,
+                    "apply worker unblocked: table sync worker reached sync_done",
+                );
+
+                None
+            }
+            ShutdownResult::Shutdown(_) => {
+                info!(
+                    worker_type = %WorkerType::Apply,
+                    table_id = table_id.0,
+                    "apply worker unblocked: shutdown signal received while waiting for table sync worker",
+                );
+
+                Some(ExitIntent::Pause)
+            }
+        }
+    }
+
     /// Processes a single syncing table after commit.
     ///
     /// Handles SyncWait → Catchup transitions, waits for workers already in
@@ -2760,56 +2844,19 @@ mod apply_worker {
                         )
                         .await?;
 
-                    info!(
-                        worker_type = %WorkerType::Apply,
-                        table_id = table_id.0,
-                        %catchup_lsn,
-                        "table sync worker entered catchup phase, apply worker blocking until table sync worker reaches sync_done",
-                    );
-
                     // It's important to drop the state guard before waiting, otherwise we deadlock.
                     drop(worker_state_guard);
 
-                    let result = worker_state
-                        .wait_for_phase_type(
-                            &[
-                                TableReplicationPhaseType::SyncDone,
-                                TableReplicationPhaseType::Errored,
-                            ],
-                            ctx.shutdown_rx.clone(),
-                        )
-                        .await;
-
-                    match result {
-                        ShutdownResult::Ok(result) => {
-                            let final_phase = result.replication_phase();
-                            if final_phase.as_type().is_errored() {
-                                info!(
-                                    worker_type = %WorkerType::Apply,
-                                    table_id = table_id.0,
-                                    ?final_phase,
-                                    "apply worker unblocked: table sync worker errored, skipping table",
-                                );
-
-                                return Ok(None);
-                            }
-
-                            info!(
-                                worker_type = %WorkerType::Apply,
-                                table_id = table_id.0,
-                                ?final_phase,
-                                "apply worker unblocked: table sync worker reached sync_done",
-                            );
-                        }
-                        ShutdownResult::Shutdown(_) => {
-                            info!(
-                                worker_type = %WorkerType::Apply,
-                                table_id = table_id.0,
-                                "apply worker unblocked: shutdown signal received while waiting for table sync worker",
-                            );
-
-                            return Ok(Some(ExitIntent::Pause));
-                        }
+                    if let Some(exit_intent) = wait_for_table_sync_worker_catchup(
+                        ctx,
+                        table_id,
+                        &worker_state,
+                        catchup_lsn,
+                        CatchupWaitReason::EnteredCatchup,
+                    )
+                    .await
+                    {
+                        return Ok(Some(exit_intent));
                     }
                 }
                 TableReplicationPhase::SyncDone { lsn } => {
@@ -2821,55 +2868,18 @@ mod apply_worker {
                     );
                 }
                 TableReplicationPhase::Catchup { lsn: catchup_lsn } => {
-                    info!(
-                        worker_type = %WorkerType::Apply,
-                        table_id = table_id.0,
-                        %catchup_lsn,
-                        "table sync worker already in catchup phase, apply worker blocking until table sync worker reaches sync_done",
-                    );
-
                     drop(worker_state_guard);
 
-                    let result = worker_state
-                        .wait_for_phase_type(
-                            &[
-                                TableReplicationPhaseType::SyncDone,
-                                TableReplicationPhaseType::Errored,
-                            ],
-                            ctx.shutdown_rx.clone(),
-                        )
-                        .await;
-
-                    match result {
-                        ShutdownResult::Ok(result) => {
-                            let final_phase = result.replication_phase();
-                            if final_phase.as_type().is_errored() {
-                                info!(
-                                    worker_type = %WorkerType::Apply,
-                                    table_id = table_id.0,
-                                    ?final_phase,
-                                    "apply worker unblocked: table sync worker errored, skipping table",
-                                );
-
-                                return Ok(None);
-                            }
-
-                            info!(
-                                worker_type = %WorkerType::Apply,
-                                table_id = table_id.0,
-                                ?final_phase,
-                                "apply worker unblocked: table sync worker reached sync_done",
-                            );
-                        }
-                        ShutdownResult::Shutdown(_) => {
-                            info!(
-                                worker_type = %WorkerType::Apply,
-                                table_id = table_id.0,
-                                "apply worker unblocked: shutdown signal received while waiting for table sync worker",
-                            );
-
-                            return Ok(Some(ExitIntent::Pause));
-                        }
+                    if let Some(exit_intent) = wait_for_table_sync_worker_catchup(
+                        ctx,
+                        table_id,
+                        &worker_state,
+                        catchup_lsn,
+                        CatchupWaitReason::AlreadyInCatchup,
+                    )
+                    .await
+                    {
+                        return Ok(Some(exit_intent));
                     }
                 }
                 _ => {
@@ -3137,56 +3147,19 @@ mod apply_worker {
                         )
                         .await?;
 
-                    info!(
-                        worker_type = %WorkerType::Apply,
-                        table_id = table_id.0,
-                        %catchup_lsn,
-                        "table sync worker entered catchup phase, apply worker blocking until table sync worker reaches sync_done",
-                    );
-
                     // It's important to drop the state guard before waiting, otherwise we deadlock.
                     drop(worker_state_guard);
 
-                    let result = worker_state
-                        .wait_for_phase_type(
-                            &[
-                                TableReplicationPhaseType::SyncDone,
-                                TableReplicationPhaseType::Errored,
-                            ],
-                            ctx.shutdown_rx.clone(),
-                        )
-                        .await;
-
-                    match result {
-                        ShutdownResult::Ok(result) => {
-                            let final_phase = result.replication_phase();
-                            if final_phase.as_type().is_errored() {
-                                info!(
-                                    worker_type = %WorkerType::Apply,
-                                    table_id = table_id.0,
-                                    ?final_phase,
-                                    "apply worker unblocked: table sync worker errored, skipping table",
-                                );
-
-                                return Ok(None);
-                            }
-
-                            info!(
-                                worker_type = %WorkerType::Apply,
-                                table_id = table_id.0,
-                                ?final_phase,
-                                "apply worker unblocked: table sync worker reached sync_done",
-                            );
-                        }
-                        ShutdownResult::Shutdown(_) => {
-                            info!(
-                                worker_type = %WorkerType::Apply,
-                                table_id = table_id.0,
-                                "apply worker unblocked: shutdown signal received while waiting for table sync worker",
-                            );
-
-                            return Ok(Some(ExitIntent::Pause));
-                        }
+                    if let Some(exit_intent) = wait_for_table_sync_worker_catchup(
+                        ctx,
+                        table_id,
+                        &worker_state,
+                        catchup_lsn,
+                        CatchupWaitReason::EnteredCatchup,
+                    )
+                    .await
+                    {
+                        return Ok(Some(exit_intent));
                     }
                 }
                 TableReplicationPhase::SyncDone { lsn: sync_done_lsn } => {
@@ -3213,55 +3186,18 @@ mod apply_worker {
                     }
                 }
                 TableReplicationPhase::Catchup { lsn: catchup_lsn } => {
-                    info!(
-                        worker_type = %WorkerType::Apply,
-                        table_id = table_id.0,
-                        %catchup_lsn,
-                        "table sync worker already in catchup phase, apply worker blocking until table sync worker reaches sync_done",
-                    );
-
                     drop(worker_state_guard);
 
-                    let result = worker_state
-                        .wait_for_phase_type(
-                            &[
-                                TableReplicationPhaseType::SyncDone,
-                                TableReplicationPhaseType::Errored,
-                            ],
-                            ctx.shutdown_rx.clone(),
-                        )
-                        .await;
-
-                    match result {
-                        ShutdownResult::Ok(result) => {
-                            let final_phase = result.replication_phase();
-                            if final_phase.as_type().is_errored() {
-                                info!(
-                                    worker_type = %WorkerType::Apply,
-                                    table_id = table_id.0,
-                                    ?final_phase,
-                                    "apply worker unblocked: table sync worker errored, skipping table",
-                                );
-
-                                return Ok(None);
-                            }
-
-                            info!(
-                                worker_type = %WorkerType::Apply,
-                                table_id = table_id.0,
-                                ?final_phase,
-                                "apply worker unblocked: table sync worker reached sync_done",
-                            );
-                        }
-                        ShutdownResult::Shutdown(_) => {
-                            info!(
-                                worker_type = %WorkerType::Apply,
-                                table_id = table_id.0,
-                                "apply worker unblocked: shutdown signal received while waiting for table sync worker",
-                            );
-
-                            return Ok(Some(ExitIntent::Pause));
-                        }
+                    if let Some(exit_intent) = wait_for_table_sync_worker_catchup(
+                        ctx,
+                        table_id,
+                        &worker_state,
+                        catchup_lsn,
+                        CatchupWaitReason::AlreadyInCatchup,
+                    )
+                    .await
+                    {
+                        return Ok(Some(exit_intent));
                     }
                 }
                 _ => {
