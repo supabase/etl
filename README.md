@@ -133,8 +133,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let pipeline_id = 1;
-    // Prepares the Postgres-backed state store. Pipeline::start() prepares
-    // source-side replication helpers.
     let store = PostgresStore::new(pipeline_id, pg.clone()).await?;
     let destination = BigQueryDestination::new_with_key_path(
         "my-gcp-project".into(),
