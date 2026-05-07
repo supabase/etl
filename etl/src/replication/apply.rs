@@ -2727,14 +2727,24 @@ mod apply_worker {
     ) -> Option<ExitIntent> {
         // `Catchup` and `SyncDone` define the table ownership boundary, not the
         // caller's current stream position. This matters after an apply-worker
-        // retry: the restarted apply stream may resume before the original
-        // catchup target, but the table-sync worker still owns this table until
+        // retry. In this case, the restarted apply stream may resume before the original
+        // catchup target, but the table sync worker still owns this table until
         // it stores `SyncDone` at the LSN it actually flushed, which is
-        // guaranteed to be >= the original catchup target. WAL replay before
-        // that boundary is skipped for this table by the normal
-        // `SyncDone.lsn <= remote_final_lsn` ownership check. Other ready
-        // tables may see normal at-least-once replay, but this table will not
-        // lose or double-apply catchup rows.
+        // guaranteed to be >= the original catchup target given how the `Catchup` LSN is
+        // calculated.
+        //
+        // In case we replay the WAL while we were waiting for the `Catchup`, we now that Postgres
+        // will resume from a position that is <= than the position at which the `Catchup` was
+        // originally triggered (the position of reading the WAL, not the `Catchup` LSN), so there are
+        // two cases:
+        // 1. We restart from an LSN that is <: in this case, the system will just wait for the `SyncDone`
+        //    and will skip all entries of that table with the usual visibility rule for the handover.
+        // 2. We restart from an LSN that is =: in this case, the system will be in the same position
+        //    as before, so it acts as if there was never a restart.
+        //
+        // What is important is that resumption happens at any LSN <= the LSN where the `Catchup` was
+        // initially performed. If that's not the case, this will lead to data loss since we would skip
+        // new entries that the table sync worker might have never read.
         let catchup_state = match wait_reason {
             CatchupWaitReason::EnteredCatchup => "entered",
             CatchupWaitReason::AlreadyInCatchup => "already_in",
