@@ -140,10 +140,9 @@ impl DuckLakeMaintenanceConfig {
             return Err("ducklake maintenance delete threshold must be between 0 and 1".to_owned());
         }
         if self.min_active_data_files < 0 {
-            return Err(
-                "ducklake maintenance min active data files must be greater than or equal to 0"
-                    .to_owned(),
-            );
+            return Err("ducklake maintenance min active data files must be greater than or \
+                        equal to 0"
+                .to_owned());
         }
         if self.cpu_request_millicores == 0 {
             return Err("ducklake maintenance cpu request must be greater than 0".to_owned());

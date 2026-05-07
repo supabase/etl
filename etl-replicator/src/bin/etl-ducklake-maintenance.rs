@@ -70,10 +70,9 @@ async fn run(config: ReplicatorConfig) -> MaintenanceResult<()> {
         }),
         (None, None) => None,
         _ => {
-            return Err(
-                "ducklake s3 credentials must include both access key id and secret access key"
-                    .into(),
-            );
+            return Err("ducklake s3 credentials must include both access key id and secret \
+                        access key"
+                .into());
         }
     };
 
@@ -149,7 +148,8 @@ async fn run(config: ReplicatorConfig) -> MaintenanceResult<()> {
         "ducklake external maintenance job finished"
     );
     println!(
-        "{{\"applied\":{},\"inlineFlushRows\":{},\"mergeAdjacentFilesCreated\":{},\"rewriteDataFilesCreated\":{}}}",
+        "{{\"applied\":{},\"inlineFlushRows\":{},\"mergeAdjacentFilesCreated\":{},\"\
+         rewriteDataFilesCreated\":{}}}",
         outcome.applied(),
         outcome.inline_flush_rows,
         outcome.merge_adjacent_files_created,

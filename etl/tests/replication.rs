@@ -51,16 +51,14 @@ fn test_column(
 }
 
 fn column_schemas_from_ddl_message(message: &JsonValue) -> Vec<ColumnSchema> {
-    let primary_key_positions: std::collections::HashMap<i32, i32> =
-        message["identity"]["primary_key_attnums"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .enumerate()
-            .map(|(index, attnum)| {
-                (attnum.as_i64().unwrap() as i32, i32::try_from(index + 1).unwrap())
-            })
-            .collect();
+    let primary_key_positions: std::collections::HashMap<i32, i32> = message["identity"]
+        ["primary_key_attnums"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+        .map(|(index, attnum)| (attnum.as_i64().unwrap() as i32, i32::try_from(index + 1).unwrap()))
+        .collect();
 
     let mut columns = message["columns"]
         .as_array()
