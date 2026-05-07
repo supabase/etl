@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use etl::{
     config::{
         BatchConfig, ETL_MIGRATION_OPTIONS, IntoConnectOptions, InvalidatedSlotBehavior,
@@ -21,8 +23,6 @@ const DEFAULT_DATABASE_USERNAME: &str = "postgres";
 const DEFAULT_DATABASE_PASSWORD: &str = "postgres";
 
 const POSTGRES_STORE_BASE_VERSION: i64 = 20250827000000;
-const POSTGRES_STORE_SCHEMA_VERSION: i64 = 20260415090000;
-const SOURCE_SCHEMA_CHANGE_VERSION: i64 = 20260415100000;
 
 fn local_pg_connection_config() -> PgConnectionConfig {
     PgConnectionConfig {
@@ -105,6 +105,54 @@ fn postgres_store_migrator() -> Migrator {
     migrator
 }
 
+fn up_migration_versions(migrator: Migrator) -> Vec<i64> {
+    let mut versions = migrator
+        .iter()
+        .filter(|migration| migration.migration_type.is_up_migration())
+        .map(|migration| migration.version)
+        .collect::<Vec<_>>();
+    versions.sort_unstable();
+    versions
+}
+
+fn source_migration_versions() -> Vec<i64> {
+    up_migration_versions(source_migrator())
+}
+
+fn postgres_store_migration_versions() -> Vec<i64> {
+    up_migration_versions(postgres_store_migrator())
+}
+
+fn all_split_migration_versions() -> Vec<i64> {
+    let mut versions = postgres_store_migration_versions();
+    versions.extend(source_migration_versions());
+    versions.sort_unstable();
+    versions
+}
+
+fn assert_migration_set_is_reversible(migration_set: &str, migrator: Migrator) {
+    let mut up_versions = BTreeSet::new();
+    let mut down_versions = BTreeSet::new();
+
+    for migration in migrator.iter() {
+        if migration.migration_type.is_up_migration() {
+            up_versions.insert(migration.version);
+        } else if migration.migration_type.is_down_migration() {
+            down_versions.insert(migration.version);
+        } else {
+            panic!(
+                "{migration_set} migration {} is not reversible; use `sqlx migrate add -r`",
+                migration.version
+            );
+        }
+    }
+
+    assert_eq!(
+        up_versions, down_versions,
+        "{migration_set} migrations must have matching up and down files"
+    );
+}
+
 fn pipeline_config(pg_connection: PgConnectionConfig) -> PipelineConfig {
     PipelineConfig {
         id: 1,
@@ -125,6 +173,28 @@ fn pipeline_config(pg_connection: PgConnectionConfig) -> PipelineConfig {
     }
 }
 
+#[test]
+fn split_migration_sets_are_reversible() {
+    assert_migration_set_is_reversible("postgres_store", postgres_store_migrator());
+    assert_migration_set_is_reversible("source", source_migrator());
+}
+
+#[test]
+fn split_migration_versions_are_globally_unique() {
+    let mut seen = BTreeSet::new();
+
+    for (migration_set, version) in postgres_store_migration_versions()
+        .into_iter()
+        .map(|version| ("postgres_store", version))
+        .chain(source_migration_versions().into_iter().map(|version| ("source", version)))
+    {
+        assert!(
+            seen.insert(version),
+            "migration version {version} is duplicated in the {migration_set} migration set"
+        );
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn pipeline_start_runs_source_migrations_without_postgres_store_tables() {
     init_test_tracing();
@@ -142,7 +212,7 @@ async fn pipeline_start_runs_source_migrations_without_postgres_store_tables() {
 
     assert!(source_helper_exists(&database).await);
     assert!(!postgres_store_table_exists(&database).await);
-    assert_eq!(applied_migration_versions(&database).await, vec![SOURCE_SCHEMA_CHANGE_VERSION]);
+    assert_eq!(applied_migration_versions(&database).await, source_migration_versions());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -157,10 +227,7 @@ async fn postgres_store_startup_runs_only_postgres_store_migrations() {
 
     assert!(!source_helper_exists(&database).await);
     assert!(postgres_store_table_exists(&database).await);
-    assert_eq!(
-        applied_migration_versions(&database).await,
-        vec![POSTGRES_STORE_BASE_VERSION, POSTGRES_STORE_SCHEMA_VERSION]
-    );
+    assert_eq!(applied_migration_versions(&database).await, postgres_store_migration_versions());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -170,21 +237,14 @@ async fn source_then_postgres_store_migrations_can_share_sqlx_history() {
     let database = spawn_unmigrated_database().await;
 
     run_source_migrations(&database.config).await.unwrap();
-    assert_eq!(applied_migration_versions(&database).await, vec![SOURCE_SCHEMA_CHANGE_VERSION]);
+    assert_eq!(applied_migration_versions(&database).await, source_migration_versions());
 
     let _store = PostgresStore::new(1, database.config.clone()).await.unwrap();
     run_source_migrations(&database.config).await.unwrap();
 
     assert!(source_helper_exists(&database).await);
     assert!(postgres_store_table_exists(&database).await);
-    assert_eq!(
-        applied_migration_versions(&database).await,
-        vec![
-            POSTGRES_STORE_BASE_VERSION,
-            POSTGRES_STORE_SCHEMA_VERSION,
-            SOURCE_SCHEMA_CHANGE_VERSION,
-        ]
-    );
+    assert_eq!(applied_migration_versions(&database).await, all_split_migration_versions());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -199,14 +259,7 @@ async fn postgres_store_then_source_migrations_can_share_sqlx_history() {
 
     assert!(source_helper_exists(&database).await);
     assert!(postgres_store_table_exists(&database).await);
-    assert_eq!(
-        applied_migration_versions(&database).await,
-        vec![
-            POSTGRES_STORE_BASE_VERSION,
-            POSTGRES_STORE_SCHEMA_VERSION,
-            SOURCE_SCHEMA_CHANGE_VERSION,
-        ]
-    );
+    assert_eq!(applied_migration_versions(&database).await, all_split_migration_versions());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -554,14 +607,7 @@ async fn split_migrations_can_be_reverted_independently() {
 
     assert!(source_helper_exists(&database).await);
     assert!(postgres_store_table_exists(&database).await);
-    assert_eq!(
-        applied_migration_versions(&database).await,
-        vec![
-            POSTGRES_STORE_BASE_VERSION,
-            POSTGRES_STORE_SCHEMA_VERSION,
-            SOURCE_SCHEMA_CHANGE_VERSION,
-        ]
-    );
+    assert_eq!(applied_migration_versions(&database).await, all_split_migration_versions());
 
     let mut conn = migration_connection(&database.config).await;
     source_migrator().undo(&mut conn, 0).await.unwrap();
@@ -569,10 +615,7 @@ async fn split_migrations_can_be_reverted_independently() {
 
     assert!(!source_helper_exists(&database).await);
     assert!(postgres_store_table_exists(&database).await);
-    assert_eq!(
-        applied_migration_versions(&database).await,
-        vec![POSTGRES_STORE_BASE_VERSION, POSTGRES_STORE_SCHEMA_VERSION]
-    );
+    assert_eq!(applied_migration_versions(&database).await, postgres_store_migration_versions());
 
     let mut conn = migration_connection(&database.config).await;
     postgres_store_migrator().undo(&mut conn, 0).await.unwrap();
