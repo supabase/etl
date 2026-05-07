@@ -10,7 +10,10 @@ use tokio_postgres::types::PgLsn;
 use tracing::{info, warn};
 
 #[cfg(feature = "failpoints")]
-use crate::failpoints::{START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP, etl_fail_point};
+use crate::failpoints::{
+    START_TABLE_SYNC_AFTER_FINISHED_COPY_FP, START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP,
+    etl_fail_point,
+};
 use crate::{
     bail,
     concurrency::{BatchBudgetController, MemoryMonitor, ShutdownRx},
@@ -371,6 +374,9 @@ where
                 let mut inner = table_sync_worker_state.lock().await;
                 inner.set_and_store(TableReplicationPhase::FinishedCopy, &store).await?;
             }
+
+            #[cfg(feature = "failpoints")]
+            etl_fail_point(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP)?;
 
             slot.consistent_point
         }

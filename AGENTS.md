@@ -106,6 +106,9 @@
 - Prefer running `cargo nextest list` before using filters or crate-specific commands if there is any doubt.
 - When fixing a specific crate, run the narrowest relevant tests first, then broaden if needed.
 - Add or update tests when behavior changes, regressions are possible, or new logic is introduced.
+- Prefer existing test utilities and fixtures over custom test plumbing. Before adding bespoke
+  setup, waits, assertions, or database helpers, check nearby tests and `etl/src/test_utils/` for
+  an existing helper and reuse it when it fits.
 - Register `NotifyingStore::notify_on_*` and `TestDestinationWrapper::wait_for_*` handles before the producer can fire. These helpers only arm on updates that arrive *after* registration, so register the notifier first, then start the producer.
 - If your tests need `TESTS_DATABASE_HOST` to be set or a test instance of PostgreSQL you can use `cargo xtask postgres create` command to spawn a postgres instance
 

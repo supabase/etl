@@ -2,8 +2,12 @@
 
 use etl::{
     failpoints::{
-        FORCE_SCHEMA_CLEANUP_FP, SEND_STATUS_UPDATE_FP,
+        APPLY_LOOP_HANDLE_RELATION_MESSAGE_AFTER_SKIPPED_RELATION_FP,
+        APPLY_WORKER_PROCESS_SINGLE_SYNCING_TABLE_AFTER_COMMIT_AFTER_CATCHUP_STARTED_FP,
+        APPLY_WORKER_PROCESS_SINGLE_SYNCING_TABLE_WHEN_IDLE_AFTER_CATCHUP_STARTED_FP,
+        FORCE_SCHEMA_CLEANUP_FP, SEND_STATUS_UPDATE_FP, START_TABLE_SYNC_AFTER_FINISHED_COPY_FP,
         START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP, START_TABLE_SYNC_DURING_DATA_SYNC_FP,
+        TABLE_SYNC_WORKER_TRY_COMPLETE_CATCHUP_BEFORE_SYNC_DONE_FP,
     },
     state::table::{RetryPolicy, TableReplicationPhase, TableReplicationPhaseType},
     store::state::StateStore,
@@ -37,6 +41,7 @@ use rand::random;
 enum ExpectedReplicatedEvent<'a> {
     Relation(&'a [(&'static str, Type)]),
     Insert(&'a [(&'static str, Type)]),
+    Update(&'a [(&'static str, Type)]),
 }
 
 fn collect_table_events(events: &[Event], table_id: TableId) -> Vec<Event> {
@@ -54,6 +59,7 @@ fn assert_table_event_sequence(
         .map(|event| match event {
             ExpectedReplicatedEvent::Relation(_) => EventType::Relation,
             ExpectedReplicatedEvent::Insert(_) => EventType::Insert,
+            ExpectedReplicatedEvent::Update(_) => EventType::Update,
         })
         .collect::<Vec<_>>();
 
@@ -74,11 +80,20 @@ fn assert_table_event_sequence(
                     expected_columns,
                 );
             }
+            (Event::Update(update), ExpectedReplicatedEvent::Update(expected_columns)) => {
+                assert_replicated_schema_column_names_types(
+                    &update.replicated_table_schema,
+                    expected_columns,
+                );
+            }
             (unexpected_event, ExpectedReplicatedEvent::Relation(_)) => {
                 panic!("expected relation event, got {unexpected_event:?}");
             }
             (unexpected_event, ExpectedReplicatedEvent::Insert(_)) => {
                 panic!("expected insert event, got {unexpected_event:?}");
+            }
+            (unexpected_event, ExpectedReplicatedEvent::Update(_)) => {
+                panic!("expected update event, got {unexpected_event:?}");
             }
         }
     }
@@ -102,6 +117,112 @@ fn assert_restarted_schema_snapshot_pairs(
 ) {
     assert!(initial_snapshots.len() >= 2, "expected at least one non-initial schema snapshot");
     assert_eq!(restarted_snapshots, initial_snapshots);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn restarted_apply_worker_waits_for_active_catchup_before_post_ddl_relation() {
+    let _scenario = FailScenario::setup();
+    fail::cfg(SEND_STATUS_UPDATE_FP, "return(no_retry)").unwrap();
+    fail::cfg(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP, "1*pause").unwrap();
+    fail::cfg(
+        APPLY_WORKER_PROCESS_SINGLE_SYNCING_TABLE_AFTER_COMMIT_AFTER_CATCHUP_STARTED_FP,
+        "1*return(timed_retry)",
+    )
+    .unwrap();
+    fail::cfg(
+        APPLY_WORKER_PROCESS_SINGLE_SYNCING_TABLE_WHEN_IDLE_AFTER_CATCHUP_STARTED_FP,
+        "1*return(timed_retry)",
+    )
+    .unwrap();
+    fail::cfg(TABLE_SYNC_WORKER_TRY_COMPLETE_CATCHUP_BEFORE_SYNC_DONE_FP, "1*pause").unwrap();
+    fail::cfg(APPLY_LOOP_HANDLE_RELATION_MESSAGE_AFTER_SKIPPED_RELATION_FP, "pause").unwrap();
+
+    init_test_tracing();
+
+    let database = spawn_source_database().await;
+
+    let replicated_table_name = test_table_name("restart_handover_replicated");
+    let replicated_table_id = database
+        .create_table(replicated_table_name.clone(), true, &[("name", "text not null")])
+        .await
+        .unwrap();
+    database.insert_values(replicated_table_name.clone(), &["name"], &[&"before"]).await.unwrap();
+
+    let publication_name = format!("pub_{}", random::<u32>());
+    database
+        .create_publication(&publication_name, std::slice::from_ref(&replicated_table_name))
+        .await
+        .unwrap();
+
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name,
+        store.clone(),
+        destination.clone(),
+    );
+
+    let finished_copy = store
+        .notify_on_table_state_type(replicated_table_id, TableReplicationPhaseType::FinishedCopy)
+        .await;
+    let ddl_tx_processed = destination.wait_for_events_count(vec![(EventType::Commit, 1)]).await;
+    let events_received = destination
+        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Update, 1)])
+        .await;
+
+    pipeline.start().await.unwrap();
+
+    finished_copy.notified().await;
+
+    let ddl_table = replicated_table_name.as_quoted_identifier();
+    let client = database.client.as_ref().expect("database client should be initialized");
+    client
+        .batch_execute(&format!(
+            "begin; alter table {ddl_table} add column restart_note text; update {ddl_table} set \
+             restart_note = 'after-catchup'; commit;"
+        ))
+        .await
+        .unwrap();
+
+    ddl_tx_processed.notified().await;
+
+    fail::cfg(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP, "off").unwrap();
+
+    events_received.notified().await;
+
+    fail::cfg(
+        APPLY_WORKER_PROCESS_SINGLE_SYNCING_TABLE_AFTER_COMMIT_AFTER_CATCHUP_STARTED_FP,
+        "off",
+    )
+    .unwrap();
+    fail::cfg(APPLY_WORKER_PROCESS_SINGLE_SYNCING_TABLE_WHEN_IDLE_AFTER_CATCHUP_STARTED_FP, "off")
+        .unwrap();
+    fail::cfg(TABLE_SYNC_WORKER_TRY_COMPLETE_CATCHUP_BEFORE_SYNC_DONE_FP, "off").unwrap();
+    fail::cfg(APPLY_LOOP_HANDLE_RELATION_MESSAGE_AFTER_SKIPPED_RELATION_FP, "off").unwrap();
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let events = destination.get_events().await;
+    assert_table_event_sequence(
+        &events,
+        replicated_table_id,
+        &[
+            ExpectedReplicatedEvent::Relation(&[
+                ("id", Type::INT8),
+                ("name", Type::TEXT),
+                ("restart_note", Type::TEXT),
+            ]),
+            ExpectedReplicatedEvent::Update(&[
+                ("id", Type::INT8),
+                ("name", Type::TEXT),
+                ("restart_note", Type::TEXT),
+            ]),
+        ],
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
