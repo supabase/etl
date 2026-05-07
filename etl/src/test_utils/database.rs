@@ -20,12 +20,12 @@
 //! See `scripts/docker-compose.yaml` for the test database configuration.
 
 use etl_config::shared::{PgConnectionConfig, TcpKeepaliveConfig, TlsConfig};
-use etl_postgres::{
-    replication::connect_to_source_database, tokio::test_utils::PgDatabase, types::TableName,
-};
+use etl_postgres::{tokio::test_utils::PgDatabase, types::TableName};
 use pg_escape::quote_identifier;
 use tokio_postgres::Client;
 use uuid::Uuid;
+
+use crate::migrations;
 
 /// The schema name used for organizing test tables.
 ///
@@ -102,26 +102,7 @@ pub async fn spawn_source_database() -> PgDatabase<Client> {
         .await
         .expect("Failed to create test schema");
 
-    // We now connect via sqlx just to run the migrations, but we still use the
-    // original tokio postgres connection for the db object returned.
-    let pool =
-        connect_to_source_database(&config, 1, 1, None).await.expect("Failed to connect with sqlx");
-
-    // Create the `etl` schema first.
-    sqlx::query("create schema if not exists etl")
-        .execute(&pool)
-        .await
-        .expect("Failed to create 'etl' schema");
-
-    // Set the `etl` schema as search path (this is done to have the migrations
-    // metadata table created by sqlx within the `etl` schema).
-    sqlx::query("set search_path = 'etl';")
-        .execute(&pool)
-        .await
-        .expect("Failed to set search path to 'etl'");
-
-    // Run migrations to create the state store tables.
-    sqlx::migrate!("./migrations").run(&pool).await.expect("Failed to run migrations");
+    migrations::run_source_migrations(&config).await.expect("Failed to run source migrations");
 
     database
 }

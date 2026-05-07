@@ -155,6 +155,11 @@ ETL provides two built-in implementations:
 - `MemoryStore`: In-memory storage, not persistent across restarts
 - `PostgresStore`: Persistent storage backed by PostgreSQL
 
+`PostgresStore::new()` runs only the Postgres-backed state-store migrations.
+`Pipeline::start()` runs the source migrations required by ETL itself, including
+the schema helper functions and DDL event trigger, regardless of which store
+implementation you use.
+
 ## Thread Safety
 
 All trait implementations must be thread-safe. ETL calls these methods concurrently from:

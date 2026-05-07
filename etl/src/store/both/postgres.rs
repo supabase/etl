@@ -7,20 +7,16 @@ use std::{
 
 use etl_postgres::replication::{destination_metadata, schema, state};
 use metrics::gauge;
-use sqlx::{
-    Connection, Executor, PgConnection, PgPool,
-    postgres::{PgConnectOptions, PgPoolOptions},
-};
+use sqlx::{PgPool, postgres::PgPoolOptions};
 use tokio::sync::Mutex;
 use tracing::{debug, info};
 
 use crate::{
-    config::{
-        ETL_MIGRATION_OPTIONS, ETL_STATE_MANAGEMENT_OPTIONS, IntoConnectOptions, PgConnectionConfig,
-    },
+    config::{ETL_STATE_MANAGEMENT_OPTIONS, IntoConnectOptions, PgConnectionConfig},
     error::{ErrorKind, EtlResult},
     etl_error,
     metrics::{ETL_TABLES_TOTAL, PHASE_LABEL},
+    migrations,
     state::{
         destination_metadata::{
             AppliedDestinationTableMetadata, DestinationTableMetadata, DestinationTableSchemaStatus,
@@ -65,40 +61,6 @@ fn create_database_pool(config: &PgConnectionConfig) -> PgPool {
         .max_connections(MAX_POOL_CONNECTIONS)
         .idle_timeout(Some(IDLE_TIMEOUT))
         .connect_lazy_with(options)
-}
-
-/// Runs database migrations required by the Postgres-backed state store.
-///
-/// Creates a dedicated connection to the source database, ensures the `etl`
-/// schema exists, and applies all pending migrations inside that schema so
-/// the `_sqlx_migrations` metadata table stays out of `public`. ETL uses this
-/// state store to persist replication state needed to run and resume
-/// replication.
-async fn apply_migrations(connection_config: &PgConnectionConfig) -> Result<(), sqlx::Error> {
-    let options: PgConnectOptions = connection_config.with_db(Some(&ETL_MIGRATION_OPTIONS));
-
-    let mut conn = PgConnection::connect_with(&options).await?;
-
-    // Suppress routine DDL notices so startup logs stay focused on phase-level
-    // events.
-    conn.execute("set client_min_messages = warning;").await?;
-
-    // Create the `etl` schema if it doesn't exist.
-    conn.execute("create schema if not exists etl;").await?;
-
-    // Set the `search_path` to `etl` so that the `_sqlx_migrations`
-    // metadata table is created inside that schema instead of the public
-    // schema.
-    conn.execute("set search_path = 'etl';").await?;
-
-    debug!("applying postgres state store migrations");
-
-    let migrator = sqlx::migrate!("./migrations");
-    migrator.run_direct(&mut conn).await?;
-
-    debug!("postgres state store migrations successfully applied");
-
-    Ok(())
 }
 
 /// Emits table-related metrics which quantify the total number of tables in
@@ -201,17 +163,14 @@ pub struct PostgresStore {
 impl PostgresStore {
     /// Creates a new Postgres-backed store for the given pipeline.
     ///
-    /// Runs the required ETL migrations and then creates a lazily-connected
-    /// pool with automatic idle timeout. Connections are established on
-    /// first use and automatically closed after `IDLE_TIMEOUT` of
-    /// inactivity.
+    /// Runs the Postgres store migrations, then creates a lazily-connected pool
+    /// with automatic idle timeout. Connections are established on first use
+    /// and automatically closed after `IDLE_TIMEOUT` of inactivity.
     pub async fn new(
         pipeline_id: PipelineId,
         source_config: PgConnectionConfig,
     ) -> EtlResult<Self> {
-        apply_migrations(&source_config).await.map_err(|err| {
-            etl_error!(ErrorKind::SourceError, "Failed to run Postgres state store migrations", err)
-        })?;
+        migrations::run_postgres_store_migrations(&source_config).await?;
 
         let pool = create_database_pool(&source_config);
         let inner = Inner {

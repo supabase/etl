@@ -117,7 +117,7 @@
 //!         keepalive: TcpKeepaliveConfig::default(),
 //!     };
 //!
-//!     // Create memory-based store and destination for testing
+//!     // Create memory-based store and destination for testing.
 //!     let store = MemoryStore::new();
 //!     let destination = NoopDestination;
 //!
@@ -164,6 +164,7 @@ pub mod error;
 pub mod failpoints;
 mod macros;
 pub mod metrics;
+pub mod migrations;
 pub mod pipeline;
 pub mod replication;
 pub mod state;

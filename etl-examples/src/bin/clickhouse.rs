@@ -45,7 +45,7 @@ use etl::{
         PipelineConfig, TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
     },
     pipeline::Pipeline,
-    store::both::memory::MemoryStore,
+    store::PostgresStore,
 };
 use etl_destinations::clickhouse::{ClickHouseDestination, ClickHouseInserterConfig};
 use tokio::signal;
@@ -173,12 +173,14 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         keepalive: TcpKeepaliveConfig::default(),
     };
 
-    // Create in-memory store for tracking table replication states and schemas.
-    // In production, you might want to use a persistent store like PostgresStore.
-    let store = MemoryStore::new();
+    // Create a persistent store for tracking table replication states and
+    // schemas. This runs the Postgres store migrations; Pipeline::start()
+    // runs the source migrations required by replication.
+    let pipeline_id = 1;
+    let store = PostgresStore::new(pipeline_id, pg_connection_config.clone()).await?;
 
     let pipeline_config = PipelineConfig {
-        id: 1,
+        id: pipeline_id,
         publication_name: args.publication,
         pg_connection: pg_connection_config,
         batch: BatchConfig {
