@@ -922,7 +922,11 @@ where
     /// Runs one normal apply-loop iteration while the worker is still actively
     /// processing.
     ///
-    /// This keeps the priority order explicit:
+    /// Each active iteration first advances idle table-sync coordination before
+    /// it can read more WAL. This keeps restarted apply loops from streaming
+    /// while a table-sync worker is already in `Catchup`.
+    ///
+    /// After that preflight, this keeps the priority order explicit:
     /// 1. Shutdown requests.
     /// 2. PostgreSQL connection lifecycle updates.
     /// 3. Pending destination flush results.
@@ -951,6 +955,15 @@ where
         replication_client: &PgReplicationClient,
         connection_updates_rx: &mut watch::Receiver<PostgresConnectionUpdate>,
     ) -> EtlResult<Option<ApplyLoopResult>> {
+        self.maybe_process_syncing_tables_when_idle().await?;
+
+        // We try to finish the active iteration even before starting it, since we might
+        // be able to finish earlier, without having to process any signal from
+        // the following `select!`.
+        if let Some(result) = self.try_finish_active_iteration() {
+            return Ok(Some(result));
+        }
+
         tokio::select! {
             biased;
 
@@ -1010,13 +1023,7 @@ where
             }
         }
 
-        // We try to process syncing tables when the system is idle to make sure the
-        // system advances synchronization state even when no data is being
-        // actively transferred. This is especially important to have the tables
-        // converge to `Ready` or `SyncDone` even if there is no traffic on that
-        // specific slot. In that case, the process is driven by keep alive messages
-        // which will advance the `last_received_lsn` and properly use that for
-        // the syncing LSN to establish progress.
+        // Try to keep advancing syncing tables whenever the system becomes idle.
         self.maybe_process_syncing_tables_when_idle().await?;
 
         Ok(self.try_finish_active_iteration())
@@ -2542,6 +2549,12 @@ where
     /// Once an exit has already been requested we intentionally skip this class
     /// of work so draining stays focused on already-started flushes and
     /// shutdown barriers.
+    ///
+    /// Idle syncing is especially important to have the tables converge to
+    /// `Ready` or `SyncDone` even if there is no traffic on that specific
+    /// slot. In that case, the process is driven by keep alive messages
+    /// which will advance the `last_received_lsn` and properly use that for
+    /// the syncing LSN to establish progress.
     async fn maybe_process_syncing_tables_when_idle(&mut self) -> EtlResult<()> {
         if self.state.exit_intent.is_some() {
             return Ok(());
@@ -2624,6 +2637,15 @@ where
 mod apply_worker {
     use super::*;
 
+    /// Why the apply worker is waiting for table-sync catchup.
+    #[derive(Debug)]
+    enum CatchupWaitReason {
+        /// The apply worker just moved the table-sync worker into catchup.
+        EnteredCatchup,
+        /// The apply worker found the table-sync worker already in catchup.
+        AlreadyInCatchup,
+    }
+
     /// Determines whether changes should be applied for a given table.
     ///
     /// If an active worker exists for the table, its state is checked while
@@ -2667,8 +2689,9 @@ mod apply_worker {
 
     /// Processes syncing tables after commit.
     ///
-    /// Spawns new table sync workers and triggers catchup when encountering
-    /// SyncWait. Does NOT perform SyncDone → Ready transitions.
+    /// Spawns new table sync workers, triggers catchup when encountering
+    /// SyncWait, and waits for workers already in Catchup.
+    /// Does NOT perform SyncDone → Ready transitions.
     pub(super) async fn process_syncing_tables_after_commit_event<S, D>(
         ctx: &mut ApplyWorkerContext<S, D>,
         current_lsn: PgLsn,
@@ -2694,9 +2717,85 @@ mod apply_worker {
         Ok(None)
     }
 
+    /// Waits for a table-sync worker in catchup to hand the table back.
+    async fn wait_for_table_sync_worker_catchup<S, D>(
+        ctx: &ApplyWorkerContext<S, D>,
+        table_id: TableId,
+        worker_state: &TableSyncWorkerState,
+        catchup_lsn: PgLsn,
+        wait_reason: CatchupWaitReason,
+    ) -> Option<ExitIntent> {
+        // `Catchup` and `SyncDone` define the table ownership boundary, not the
+        // caller's current stream position. This matters after an apply-worker
+        // retry: the restarted apply stream may resume before the original
+        // catchup target, but the table-sync worker still owns this table until
+        // it stores `SyncDone` at the LSN it actually flushed, which is
+        // guaranteed to be >= the original catchup target. WAL replay before
+        // that boundary is skipped for this table by the normal
+        // `SyncDone.lsn <= remote_final_lsn` ownership check. Other ready
+        // tables may see normal at-least-once replay, but this table will not
+        // lose or double-apply catchup rows.
+        let catchup_state = match wait_reason {
+            CatchupWaitReason::EnteredCatchup => "entered",
+            CatchupWaitReason::AlreadyInCatchup => "already_in",
+        };
+
+        info!(
+            worker_type = %WorkerType::Apply,
+            table_id = table_id.0,
+            %catchup_lsn,
+            catchup_state,
+            "apply worker blocking until table sync worker reaches sync_done",
+        );
+
+        // We wait for both states since if the table sync worker errors, we don't want
+        // to stall forever.
+        let result = worker_state
+            .wait_for_phase_type(
+                &[TableReplicationPhaseType::SyncDone, TableReplicationPhaseType::Errored],
+                ctx.shutdown_rx.clone(),
+            )
+            .await;
+
+        match result {
+            ShutdownResult::Ok(result) => {
+                let final_phase = result.replication_phase();
+                if final_phase.as_type().is_errored() {
+                    info!(
+                        worker_type = %WorkerType::Apply,
+                        table_id = table_id.0,
+                        ?final_phase,
+                        "apply worker unblocked: table sync worker errored, skipping table",
+                    );
+
+                    return None;
+                }
+
+                info!(
+                    worker_type = %WorkerType::Apply,
+                    table_id = table_id.0,
+                    ?final_phase,
+                    "apply worker unblocked: table sync worker reached sync_done",
+                );
+
+                None
+            }
+            ShutdownResult::Shutdown(_) => {
+                info!(
+                    worker_type = %WorkerType::Apply,
+                    table_id = table_id.0,
+                    "apply worker unblocked: shutdown signal received while waiting for table sync worker",
+                );
+
+                Some(ExitIntent::Pause)
+            }
+        }
+    }
+
     /// Processes a single syncing table after commit.
     ///
-    /// Handles SyncWait → Catchup transitions and spawns new workers.
+    /// Handles SyncWait → Catchup transitions, waits for workers already in
+    /// Catchup, and spawns new workers.
     /// Does NOT handle SyncDone → Ready transitions.
     async fn process_single_syncing_table_after_commit<S, D>(
         ctx: &mut ApplyWorkerContext<S, D>,
@@ -2745,56 +2844,19 @@ mod apply_worker {
                         )
                         .await?;
 
-                    info!(
-                        worker_type = %WorkerType::Apply,
-                        table_id = table_id.0,
-                        %catchup_lsn,
-                        "table sync worker entered catchup phase, apply worker blocking until table sync worker reaches sync_done",
-                    );
-
                     // It's important to drop the state guard before waiting, otherwise we deadlock.
                     drop(worker_state_guard);
 
-                    let result = worker_state
-                        .wait_for_phase_type(
-                            &[
-                                TableReplicationPhaseType::SyncDone,
-                                TableReplicationPhaseType::Errored,
-                            ],
-                            ctx.shutdown_rx.clone(),
-                        )
-                        .await;
-
-                    match result {
-                        ShutdownResult::Ok(result) => {
-                            let final_phase = result.replication_phase();
-                            if final_phase.as_type().is_errored() {
-                                info!(
-                                    worker_type = %WorkerType::Apply,
-                                    table_id = table_id.0,
-                                    ?final_phase,
-                                    "apply worker unblocked: table sync worker errored, skipping table",
-                                );
-
-                                return Ok(None);
-                            }
-
-                            info!(
-                                worker_type = %WorkerType::Apply,
-                                table_id = table_id.0,
-                                ?final_phase,
-                                "apply worker unblocked: table sync worker reached sync_done",
-                            );
-                        }
-                        ShutdownResult::Shutdown(_) => {
-                            info!(
-                                worker_type = %WorkerType::Apply,
-                                table_id = table_id.0,
-                                "apply worker unblocked: shutdown signal received while waiting for table sync worker",
-                            );
-
-                            return Ok(Some(ExitIntent::Pause));
-                        }
+                    if let Some(exit_intent) = wait_for_table_sync_worker_catchup(
+                        ctx,
+                        table_id,
+                        &worker_state,
+                        catchup_lsn,
+                        CatchupWaitReason::EnteredCatchup,
+                    )
+                    .await
+                    {
+                        return Ok(Some(exit_intent));
                     }
                 }
                 TableReplicationPhase::SyncDone { lsn } => {
@@ -2804,6 +2866,21 @@ mod apply_worker {
                         sync_done_lsn = %lsn,
                         "table in sync_done state, will transition to ready after batch flush",
                     );
+                }
+                TableReplicationPhase::Catchup { lsn: catchup_lsn } => {
+                    drop(worker_state_guard);
+
+                    if let Some(exit_intent) = wait_for_table_sync_worker_catchup(
+                        ctx,
+                        table_id,
+                        &worker_state,
+                        catchup_lsn,
+                        CatchupWaitReason::AlreadyInCatchup,
+                    )
+                    .await
+                    {
+                        return Ok(Some(exit_intent));
+                    }
                 }
                 _ => {
                     debug!(
@@ -2986,9 +3063,9 @@ mod apply_worker {
 
     /// Processes syncing tables outside transaction.
     ///
-    /// Handles `SyncWait → Catchup` and `SyncDone → Ready` transitions, and
-    /// spawns workers. Only called when outside a transaction and the batch
-    /// is empty.
+    /// Handles `SyncWait → Catchup` and `SyncDone → Ready` transitions, waits
+    /// for workers already in Catchup, and spawns workers. Only called when
+    /// outside a transaction and the batch is empty.
     pub(super) async fn process_syncing_tables_when_idle<S, D>(
         ctx: &mut ApplyWorkerContext<S, D>,
         current_lsn: PgLsn,
@@ -3016,9 +3093,9 @@ mod apply_worker {
 
     /// Processes a single syncing table outside transaction.
     ///
-    /// Handles `SyncWait → Catchup` and `SyncDone → Ready` transitions, and
-    /// spawns workers. Only called when outside a transaction and the batch
-    /// is empty.
+    /// Handles `SyncWait → Catchup` and `SyncDone → Ready` transitions, waits
+    /// for workers already in Catchup, and spawns workers. Only called when
+    /// outside a transaction and the batch is empty.
     async fn process_single_syncing_table_when_idle<S, D>(
         ctx: &mut ApplyWorkerContext<S, D>,
         table_id: TableId,
@@ -3070,56 +3147,19 @@ mod apply_worker {
                         )
                         .await?;
 
-                    info!(
-                        worker_type = %WorkerType::Apply,
-                        table_id = table_id.0,
-                        %catchup_lsn,
-                        "table sync worker entered catchup phase, apply worker blocking until table sync worker reaches sync_done",
-                    );
-
                     // It's important to drop the state guard before waiting, otherwise we deadlock.
                     drop(worker_state_guard);
 
-                    let result = worker_state
-                        .wait_for_phase_type(
-                            &[
-                                TableReplicationPhaseType::SyncDone,
-                                TableReplicationPhaseType::Errored,
-                            ],
-                            ctx.shutdown_rx.clone(),
-                        )
-                        .await;
-
-                    match result {
-                        ShutdownResult::Ok(result) => {
-                            let final_phase = result.replication_phase();
-                            if final_phase.as_type().is_errored() {
-                                info!(
-                                    worker_type = %WorkerType::Apply,
-                                    table_id = table_id.0,
-                                    ?final_phase,
-                                    "apply worker unblocked: table sync worker errored, skipping table",
-                                );
-
-                                return Ok(None);
-                            }
-
-                            info!(
-                                worker_type = %WorkerType::Apply,
-                                table_id = table_id.0,
-                                ?final_phase,
-                                "apply worker unblocked: table sync worker reached sync_done",
-                            );
-                        }
-                        ShutdownResult::Shutdown(_) => {
-                            info!(
-                                worker_type = %WorkerType::Apply,
-                                table_id = table_id.0,
-                                "apply worker unblocked: shutdown signal received while waiting for table sync worker",
-                            );
-
-                            return Ok(Some(ExitIntent::Pause));
-                        }
+                    if let Some(exit_intent) = wait_for_table_sync_worker_catchup(
+                        ctx,
+                        table_id,
+                        &worker_state,
+                        catchup_lsn,
+                        CatchupWaitReason::EnteredCatchup,
+                    )
+                    .await
+                    {
+                        return Ok(Some(exit_intent));
                     }
                 }
                 TableReplicationPhase::SyncDone { lsn: sync_done_lsn } => {
@@ -3143,6 +3183,21 @@ mod apply_worker {
                             %current_lsn,
                             "table not yet ready, current lsn below sync done lsn",
                         );
+                    }
+                }
+                TableReplicationPhase::Catchup { lsn: catchup_lsn } => {
+                    drop(worker_state_guard);
+
+                    if let Some(exit_intent) = wait_for_table_sync_worker_catchup(
+                        ctx,
+                        table_id,
+                        &worker_state,
+                        catchup_lsn,
+                        CatchupWaitReason::AlreadyInCatchup,
+                    )
+                    .await
+                    {
+                        return Ok(Some(exit_intent));
                     }
                 }
                 _ => {

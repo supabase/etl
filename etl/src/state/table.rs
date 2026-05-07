@@ -255,10 +255,10 @@ pub enum TableReplicationPhase {
     FinishedCopy,
     /// Set by table-sync worker when waiting for the apply worker to pause.
     ///
-    /// On every transaction boundary the apply worker checks if any table-sync
-    /// worker is in the `SyncWait` state and pauses itself if it finds any. It
-    /// resumes only when the table sync worker has caught up with the
-    /// `Catchup`'s LSN.
+    /// The apply worker checks for `SyncWait` at transaction boundaries and
+    /// while idle before reading more WAL. When found, it moves the worker to
+    /// `Catchup` and waits for the table-sync worker to reach `SyncDone` or
+    /// `Errored`.
     ///
     /// This phase is stored in memory only and not persisted to the state
     /// store.
@@ -267,38 +267,40 @@ pub enum TableReplicationPhase {
         ///
         /// This LSN represents the consistent point from which the table sync
         /// worker will start streaming changes. The apply worker will
-        /// use `max(this lsn, current_lsn)` when setting the Catchup
+        /// use `max(this LSN, current_lsn)` when setting the Catchup
         /// LSN to ensure no data loss, following PostgreSQL's pattern.
         #[serde(with = "lsn_serde")]
         lsn: PgLsn,
     },
     /// Set by the apply worker when it is paused. The table-sync worker waits
     /// for the apply worker to set this state after setting the state to
-    /// `SyncWait`.
+    /// `SyncWait`. A restarted apply loop that finds an active worker already
+    /// in `Catchup` must wait for that worker before reading more WAL.
     ///
-    /// This phase is stored in memory only and not persisted to the state store
+    /// This phase is stored in memory only and not persisted to the state
+    /// store.
     Catchup {
-        /// The lsn to catch up before shutting down the table sync worker and
+        /// The LSN to catch up before shutting down the table sync worker and
         /// handing over streaming to the apply worker.
         #[serde(with = "lsn_serde")]
         lsn: PgLsn,
     },
 
     /// Set by the table-sync worker when catch-up phase is completed and
-    /// table-sync worker has caught up with the apply worker's lsn
+    /// table-sync worker has caught up with the apply worker's LSN
     /// position.
     ///
-    /// The apply worker is waiting on this phase to be reached before
-    /// continuing to process other tables or events in the apply loop.
+    /// The apply worker waits for this phase before continuing to process
+    /// events for the table.
     SyncDone {
-        /// The lsn up to which the table-sync worker has caught up.
+        /// The LSN up to which the table-sync worker has caught up.
         ///
         /// This LSN is guaranteed to be >= `Catchup.lsn`.
         #[serde(with = "lsn_serde")]
         lsn: PgLsn,
     },
     /// Set by apply worker when it has caught up with the table-sync worker's
-    /// catch up lsn position. Tables with this state have successfully run
+    /// catch-up LSN position. Tables with this state have successfully run
     /// their initial table copy and catch-up phases and any changes to them
     /// will now be applied by the apply worker only.
     Ready,
