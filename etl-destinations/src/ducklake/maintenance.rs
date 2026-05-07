@@ -647,7 +647,7 @@ fn suppress_known_ducklake_compaction_error(
         table = %table_name,
         operation = operation.as_str(),
         reason = reason.as_str(),
-        error = ?error,
+        error = %error,
         "ducklake targeted maintenance skipped after known duckdb internal error"
     );
     true
@@ -817,7 +817,7 @@ async fn run_ducklake_maintenance_worker(
                             Err(error) => {
                                 tracing::error!(
                                     table = %table_name,
-                                    error = ?error,
+                                    error = %error,
                                     "ducklake inline-size sampler query failed"
                                 );
                             }
@@ -843,7 +843,7 @@ async fn run_ducklake_maintenance_worker(
                             let pool = match pool.get_or_init_pool().await {
                                 Ok(pool) => pool,
                                 Err(error) => {
-                                    warn!(error = ?error, "ducklake maintenance pool initialization failed");
+                                    warn!(error = %error, "ducklake maintenance pool initialization failed");
                                     continue;
                                 }
                             };
@@ -865,7 +865,7 @@ async fn run_ducklake_maintenance_worker(
                                 Err(error) => {
                                     warn!(
                                         table = %table_name,
-                                        error = ?error,
+                                        error = %error,
                                         "ducklake targeted maintenance failed"
                                     );
                                 }
@@ -883,7 +883,7 @@ async fn run_ducklake_maintenance_worker(
                         let pool = match pool.get_or_init_pool().await {
                             Ok(pool) => pool,
                             Err(error) => {
-                                warn!(error = ?error, "ducklake maintenance pool initialization failed");
+                                warn!(error = %error, "ducklake maintenance pool initialization failed");
                                 continue;
                             }
                         };
@@ -905,7 +905,7 @@ async fn run_ducklake_maintenance_worker(
                             Err(error) => {
                                 warn!(
                                     table = %table_name,
-                                    error = ?error,
+                                    error = %error,
                                     "ducklake targeted maintenance failed"
                                 );
                             }
@@ -1047,7 +1047,7 @@ async fn maybe_run_catalog_maintenance(
     let pool = match pool.get_or_init_pool().await {
         Ok(pool) => pool,
         Err(error) => {
-            warn!(error = ?error, "ducklake maintenance pool initialization failed");
+            warn!(error = %error, "ducklake maintenance pool initialization failed");
             return;
         }
     };
@@ -1081,7 +1081,7 @@ async fn maybe_run_catalog_maintenance(
         Err(error) => {
             warn!(
                 expire_snapshots_older_than = %config.expire_snapshots_older_than,
-                error = ?error,
+                error = %error,
                 "ducklake catalog maintenance failed"
             );
         }

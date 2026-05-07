@@ -294,7 +294,7 @@ impl LazyDuckLakePool {
             if let Err(error) = &pool {
                 warn!(
                     purpose,
-                    error = ?error,
+                    error = %error,
                     "ducklake background pool warm-up failed"
                 );
             }

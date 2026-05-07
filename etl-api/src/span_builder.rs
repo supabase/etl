@@ -38,11 +38,7 @@ impl RootSpanBuilder for ApiRootSpanBuilder {
             let _enter = span.enter();
             debug!(
                 method = %request.method(),
-                uri = %request.uri(),
-                path = %request.path(),
-                query_string = %request.query_string(),
-                version = ?request.version(),
-                "HTTP request received"
+                "http request received",
             );
         }
 

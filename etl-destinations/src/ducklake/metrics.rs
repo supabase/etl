@@ -381,7 +381,7 @@ async fn run_ducklake_metrics_sampler(
                 if let Err(error) =
                     record_catalog_maintenance_metrics(&metadata_pg_pool, &metadata_schema).await
                 {
-                    warn!(error = ?error, "ducklake catalog maintenance metrics collection failed");
+                    warn!(error = %error, "ducklake catalog maintenance metrics collection failed");
                 }
 
                 let table_names = {
@@ -405,7 +405,7 @@ async fn run_ducklake_metrics_sampler(
                     {
                         warn!(
                             table = %table_name,
-                            error = ?error,
+                            error = %error,
                             "ducklake table storage metrics collection failed"
                         );
                     }

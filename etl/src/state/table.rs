@@ -418,7 +418,7 @@ impl fmt::Display for TableReplicationPhase {
             Self::Catchup { lsn } => write!(f, "catchup({lsn})"),
             Self::SyncDone { lsn } => write!(f, "sync_done({lsn})"),
             Self::Ready => write!(f, "ready"),
-            Self::Errored { reason, .. } => write!(f, "errored({reason})"),
+            Self::Errored { .. } => write!(f, "errored"),
         }
     }
 }

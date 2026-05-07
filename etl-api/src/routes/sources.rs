@@ -48,7 +48,7 @@ pub enum SourceError {
     #[error(transparent)]
     Validation(#[from] ValidationError),
 
-    #[error("{0}")]
+    #[error("Validation failed: {0}")]
     ValidationFailed(String),
 
     #[error(transparent)]

@@ -184,7 +184,7 @@ where
         info!(
             retry_attempt = *retry_attempts,
             max_attempts = config.table_error_retry_max_attempts,
-            sleep_duration = ?sleep_duration,
+            sleep_duration_ms = sleep_duration.as_millis(),
             "retrying apply worker after timed-retriable error",
         );
 

@@ -664,7 +664,7 @@ where
                     Err(error) => {
                         let err = conn.execute_batch("ROLLBACK");
                         if let Err(err) = err {
-                            tracing::error!(?err, "error rollback");
+                            tracing::error!(error = %err, "error rollback");
                         }
                         Err(error)
                     }
@@ -699,7 +699,7 @@ where
         if let Err(error) = self.maybe_run_requested_inline_flush().await {
             tracing::error!(
                 table = %table_name,
-                error = ?error,
+                error = %error,
                 "ducklake inline flush failed"
             );
         }
@@ -738,7 +738,7 @@ where
     async fn write_events_inner(&self, events: Vec<Event>) -> EtlResult<()> {
         if let Err(error) = self.maybe_run_requested_inline_flush().await {
             tracing::error!(
-                error = ?error,
+                error = %error,
                 "ducklake inline flush failed"
             );
         }

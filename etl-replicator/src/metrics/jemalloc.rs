@@ -10,7 +10,7 @@
 //! metadata. High `retained` is normal on 64-bit Linux (virtual address space
 //! only, no physical memory cost).
 
-use std::time::Duration;
+use std::{fmt::Display, time::Duration};
 
 use metrics::{Unit, describe_gauge, gauge};
 use tikv_jemalloc_ctl::{epoch, opt, raw, stats};
@@ -147,16 +147,21 @@ fn log_jemalloc_config() {
     let actual_narenas = tikv_jemalloc_ctl::arenas::narenas::read().ok();
 
     debug!(
-        background_thread = ?background_thread,
-        narenas_configured = ?opt_narenas,
-        narenas_actual = ?actual_narenas,
-        tcache = ?tcache,
-        tcache_max = ?tcache_max,
-        dirty_decay_ms = ?dirty_decay_ms,
-        muzzy_decay_ms = ?muzzy_decay_ms,
-        abort_conf = ?abort_conf,
+        background_thread = %display_optional_value(background_thread),
+        narenas_configured = %display_optional_value(opt_narenas),
+        narenas_actual = %display_optional_value(actual_narenas),
+        tcache = %display_optional_value(tcache),
+        tcache_max = %display_optional_value(tcache_max),
+        dirty_decay_ms = %display_optional_value(dirty_decay_ms),
+        muzzy_decay_ms = %display_optional_value(muzzy_decay_ms),
+        abort_conf = %display_optional_value(abort_conf),
         "jemalloc configuration"
     );
+}
+
+/// Formats optional values without using debug output.
+fn display_optional_value<T: Display>(value: Option<T>) -> String {
+    value.map_or_else(|| "unavailable".to_owned(), |value| value.to_string())
 }
 
 /// Registers jemalloc metric descriptions with the global metrics recorder.

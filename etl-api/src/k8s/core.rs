@@ -28,7 +28,7 @@ pub enum K8sCoreError {
     #[error("A K8s error occurred: {0}")]
     K8s(#[from] K8sError),
 
-    #[error("invalid destination config")]
+    #[error("Invalid destination config")]
     InvalidConfig(#[from] serde_json::Error),
 
     #[error("Could not load app environment")]

@@ -34,6 +34,11 @@ use crate::{
     },
 };
 
+/// Formats phase types without using debug output.
+fn format_phase_types(phase_types: &[TableReplicationPhaseType]) -> String {
+    phase_types.iter().map(TableReplicationPhaseType::as_static_str).collect::<Vec<_>>().join(",")
+}
+
 /// Result for a table sync worker task.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) enum TableSyncWorkerResult {
@@ -229,7 +234,7 @@ impl TableSyncWorkerState {
             info!(
                 table_id = inner.table_id.0,
                 %current_phase,
-                phase_types = ?phase_types,
+                phase_types = %format_phase_types(phase_types),
                 "waiting for table replication phase",
             );
 
@@ -247,7 +252,10 @@ impl TableSyncWorkerState {
                 biased;
 
                 _ = shutdown_rx.changed() => {
-                    info!(phase_types = ?phase_types, "shutdown signal received, cancelling wait for phase");
+                    info!(
+                        phase_types = %format_phase_types(phase_types),
+                        "shutdown signal received, cancelling wait for phase",
+                    );
 
                     return ShutdownResult::Shutdown(());
                 }
@@ -456,7 +464,7 @@ where
 
                     info!(
                         table_id = table_id.0,
-                        sleep_duration = ?sleep_duration,
+                        sleep_duration_ms = sleep_duration.as_millis(),
                         "retrying table sync worker",
                     );
 

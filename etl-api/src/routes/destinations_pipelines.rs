@@ -96,7 +96,7 @@ enum DestinationPipelineError {
     #[error("The pipeline with id {0} is active. Stop it before deleting it.")]
     ActivePipeline(i64),
 
-    #[error("{0}")]
+    #[error("Invalid pipeline request: {0}")]
     InvalidPipelineRequest(String),
 }
 
