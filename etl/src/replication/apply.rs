@@ -39,14 +39,7 @@ use tokio_postgres::types::PgLsn;
 use tracing::{debug, error, info, warn};
 
 #[cfg(feature = "failpoints")]
-use crate::failpoints::{
-    APPLY_LOOP_HANDLE_RELATION_MESSAGE_AFTER_SKIPPED_RELATION_FP,
-    APPLY_WORKER_PROCESS_SINGLE_SYNCING_TABLE_AFTER_COMMIT_AFTER_CATCHUP_STARTED_FP,
-    APPLY_WORKER_PROCESS_SINGLE_SYNCING_TABLE_WHEN_IDLE_AFTER_CATCHUP_STARTED_FP,
-    FORCE_SCHEMA_CLEANUP_FP, SEND_STATUS_UPDATE_FP,
-    TABLE_SYNC_WORKER_TRY_COMPLETE_CATCHUP_BEFORE_SYNC_DONE_FP, etl_fail_point,
-    etl_fail_point_active,
-};
+use crate::failpoints::{FORCE_SCHEMA_CLEANUP_FP, SEND_STATUS_UPDATE_FP, etl_fail_point_active};
 use crate::{
     bail,
     concurrency::{
@@ -2257,14 +2250,6 @@ where
         // Non-owning workers skip `RELATION` handling and rely on the owner to
         // refresh shared table state.
         if !self.should_apply_changes(table_id, remote_final_lsn).await? {
-            #[cfg(feature = "failpoints")]
-            if matches!(
-                self.shared_table_cache.get(&table_id).await,
-                Some(super::table_cache::SharedTableState::WaitingForRelation { .. })
-            ) {
-                etl_fail_point(APPLY_LOOP_HANDLE_RELATION_MESSAGE_AFTER_SKIPPED_RELATION_FP)?;
-            }
-
             return Ok(HandleMessageResult::no_event());
         }
 
@@ -2775,11 +2760,6 @@ mod apply_worker {
                         )
                         .await?;
 
-                    #[cfg(feature = "failpoints")]
-                    etl_fail_point(
-                        APPLY_WORKER_PROCESS_SINGLE_SYNCING_TABLE_AFTER_COMMIT_AFTER_CATCHUP_STARTED_FP,
-                    )?;
-
                     info!(
                         worker_type = %WorkerType::Apply,
                         table_id = table_id.0,
@@ -3157,11 +3137,6 @@ mod apply_worker {
                         )
                         .await?;
 
-                    #[cfg(feature = "failpoints")]
-                    etl_fail_point(
-                        APPLY_WORKER_PROCESS_SINGLE_SYNCING_TABLE_WHEN_IDLE_AFTER_CATCHUP_STARTED_FP,
-                    )?;
-
                     info!(
                         worker_type = %WorkerType::Apply,
                         table_id = table_id.0,
@@ -3521,20 +3496,6 @@ mod table_sync_worker {
                     %current_lsn,
                     "catchup target lsn reached, transitioning catchup -> sync_done",
                 );
-
-                #[cfg(feature = "failpoints")]
-                {
-                    drop(inner);
-                    etl_fail_point(TABLE_SYNC_WORKER_TRY_COMPLETE_CATCHUP_BEFORE_SYNC_DONE_FP)?;
-                    inner = ctx.table_sync_worker_state.lock().await;
-
-                    if !matches!(
-                        inner.replication_phase(),
-                        TableReplicationPhase::Catchup { lsn } if lsn == catchup_lsn
-                    ) {
-                        return Ok(None);
-                    }
-                }
 
                 inner
                     .set_and_store(
