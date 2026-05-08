@@ -322,8 +322,7 @@ pub trait IntoConnectOptions<Output> {
 impl IntoConnectOptions<SqlxConnectOptions> for PgConnectionConfig {
     /// Creates sqlx connection options without database name.
     fn without_db(&self, options: Option<&PgConnectionOptions>) -> SqlxConnectOptions {
-        let host =
-            self.hostaddr.map(|hostaddr| hostaddr.to_string()).unwrap_or_else(|| self.host.clone());
+        let host = self.hostaddr.map_or_else(|| self.host.clone(), |hostaddr| hostaddr.to_string());
         let ssl_mode = match (self.tls.enabled, self.hostaddr) {
             // sqlx 0.8.6 does not expose libpq's separate hostaddr field. When
             // dialing a numeric address, verify the CA but avoid hostname
