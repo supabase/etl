@@ -32,6 +32,7 @@ const DEFAULT_DATABASE_PASSWORD: &str = "postgres";
 pub fn get_test_db_config() -> PgConnectionConfig {
     PgConnectionConfig {
         host: std::env::var("TESTS_DATABASE_HOST").unwrap_or(DEFAULT_DATABASE_HOST.into()),
+        hostaddr: None,
         port: std::env::var("TESTS_DATABASE_PORT")
             .unwrap_or(DEFAULT_DATABASE_PORT.into())
             .parse()
@@ -76,6 +77,7 @@ pub async fn create_test_source_database(
 
     let source_config = FullApiSourceConfig {
         host: source_db_config.host.clone(),
+        hostaddr: source_db_config.hostaddr,
         port: source_db_config.port,
         name: source_db_config.name.clone(),
         username: source_db_config.username.clone(),

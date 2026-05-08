@@ -44,11 +44,6 @@ impl TableSchemaSnapshots {
         self.table_schemas.values().map(BTreeMap::len).sum()
     }
 
-    /// Returns the number of stored snapshots for a table.
-    pub(crate) fn table_len(&self, table_id: TableId) -> usize {
-        self.table_schemas.get(&table_id).map_or(0, BTreeMap::len)
-    }
-
     /// Returns all stored schema snapshots.
     pub(crate) fn all(&self) -> Vec<Arc<TableSchema>> {
         self.table_schemas.values().flat_map(|schemas| schemas.values().map(Arc::clone)).collect()

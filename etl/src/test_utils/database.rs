@@ -63,6 +63,7 @@ pub fn test_table_name(name: &str) -> TableName {
 fn local_pg_connection_config() -> PgConnectionConfig {
     PgConnectionConfig {
         host: std::env::var("TESTS_DATABASE_HOST").unwrap_or(DEFAULT_DATABASE_HOST.into()),
+        hostaddr: None,
         port: std::env::var("TESTS_DATABASE_PORT")
             .unwrap_or(DEFAULT_DATABASE_PORT.into())
             .parse()

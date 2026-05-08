@@ -151,6 +151,7 @@ pub mod sources {
     pub fn new_source_config() -> FullApiSourceConfig {
         FullApiSourceConfig {
             host: "localhost".to_owned(),
+            hostaddr: None,
             port: 5432,
             name: "postgres".to_owned(),
             username: "postgres".to_owned(),
@@ -167,6 +168,7 @@ pub mod sources {
     pub fn updated_source_config() -> FullApiSourceConfig {
         FullApiSourceConfig {
             host: "example.com".to_owned(),
+            hostaddr: None,
             port: 2345,
             name: "sergtsop".to_owned(),
             username: "sergtsop".to_owned(),
