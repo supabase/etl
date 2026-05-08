@@ -25,7 +25,7 @@ const ETL_SCHEMA_NAME: &str = "etl";
 
 /// Validates the connected source role profile for ETL.
 #[derive(Debug)]
-pub struct SourceValidator;
+pub(super) struct SourceValidator;
 
 #[derive(Debug, FromRow)]
 struct SourceRoleAudit {
@@ -194,12 +194,12 @@ impl Validator for SourceValidator {
 
 /// Validates that the required publication exists in the source database.
 #[derive(Debug)]
-pub struct PublicationExistsValidator {
+pub(super) struct PublicationExistsValidator {
     publication_name: String,
 }
 
 impl PublicationExistsValidator {
-    pub fn new(publication_name: String) -> Self {
+    pub(super) fn new(publication_name: String) -> Self {
         Self { publication_name }
     }
 }
@@ -236,12 +236,12 @@ impl Validator for PublicationExistsValidator {
 
 /// Validates that there are enough free replication slots for the pipeline.
 #[derive(Debug)]
-pub struct ReplicationSlotsValidator {
+pub(super) struct ReplicationSlotsValidator {
     max_table_sync_workers: u16,
 }
 
 impl ReplicationSlotsValidator {
-    pub fn new(max_table_sync_workers: u16) -> Self {
+    pub(super) fn new(max_table_sync_workers: u16) -> Self {
         Self { max_table_sync_workers }
     }
 }
@@ -292,7 +292,7 @@ impl Validator for ReplicationSlotsValidator {
 
 /// Validates that the WAL level is set to 'logical' for replication.
 #[derive(Debug)]
-pub struct WalLevelValidator;
+pub(super) struct WalLevelValidator;
 
 #[async_trait]
 impl Validator for WalLevelValidator {
@@ -323,7 +323,7 @@ impl Validator for WalLevelValidator {
 
 /// Validates that the database user has replication permissions.
 #[derive(Debug)]
-pub struct ReplicationPermissionsValidator;
+pub(super) struct ReplicationPermissionsValidator;
 
 #[async_trait]
 impl Validator for ReplicationPermissionsValidator {
@@ -356,12 +356,12 @@ impl Validator for ReplicationPermissionsValidator {
 
 /// Validates that a publication contains at least one table.
 #[derive(Debug)]
-pub struct PublicationHasTablesValidator {
+pub(super) struct PublicationHasTablesValidator {
     publication_name: String,
 }
 
 impl PublicationHasTablesValidator {
-    pub fn new(publication_name: String) -> Self {
+    pub(super) fn new(publication_name: String) -> Self {
         Self { publication_name }
     }
 }
@@ -414,12 +414,12 @@ impl Validator for PublicationHasTablesValidator {
 
 /// Validates that all tables in a publication have primary keys.
 #[derive(Debug)]
-pub struct PrimaryKeysValidator {
+pub(super) struct PrimaryKeysValidator {
     publication_name: String,
 }
 
 impl PrimaryKeysValidator {
-    pub fn new(publication_name: String) -> Self {
+    pub(super) fn new(publication_name: String) -> Self {
         Self { publication_name }
     }
 }
@@ -474,12 +474,12 @@ impl Validator for PrimaryKeysValidator {
 
 /// Validates that tables in a publication don't have generated columns.
 #[derive(Debug)]
-pub struct GeneratedColumnsValidator {
+pub(super) struct GeneratedColumnsValidator {
     publication_name: String,
 }
 
 impl GeneratedColumnsValidator {
-    pub fn new(publication_name: String) -> Self {
+    pub(super) fn new(publication_name: String) -> Self {
         Self { publication_name }
     }
 }
@@ -538,12 +538,12 @@ impl Validator for GeneratedColumnsValidator {
 
 /// Composite validator for pipeline prerequisites.
 #[derive(Debug)]
-pub struct PipelineValidator {
+pub(super) struct PipelineValidator {
     config: FullApiPipelineConfig,
 }
 
 impl PipelineValidator {
-    pub fn new(config: FullApiPipelineConfig) -> Self {
+    pub(super) fn new(config: FullApiPipelineConfig) -> Self {
         Self { config }
     }
 
@@ -894,12 +894,12 @@ impl Validator for IcebergValidator {
 
 /// Composite validator for destination prerequisites.
 #[derive(Debug)]
-pub struct DestinationValidator {
+pub(super) struct DestinationValidator {
     config: FullApiDestinationConfig,
 }
 
 impl DestinationValidator {
-    pub fn new(config: FullApiDestinationConfig) -> Self {
+    pub(super) fn new(config: FullApiDestinationConfig) -> Self {
         Self { config }
     }
 }

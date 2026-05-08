@@ -234,7 +234,7 @@ fn validate_pipeline_request(
     tag = "Destinations and Pipelines"
 )]
 #[post("/destinations-pipelines")]
-pub async fn create_destination_and_pipeline(
+pub(crate) async fn create_destination_and_pipeline(
     req: HttpRequest,
     pool: Data<PgPool>,
     destination_and_pipeline: Json<CreateDestinationPipelineRequest>,
@@ -310,7 +310,7 @@ pub async fn create_destination_and_pipeline(
     tag = "Destinations and Pipelines"
 )]
 #[post("/destinations-pipelines/{destination_id}/{pipeline_id}")]
-pub async fn update_destination_and_pipeline(
+pub(crate) async fn update_destination_and_pipeline(
     req: HttpRequest,
     pool: Data<PgPool>,
     destination_and_pipeline_ids: Path<(i64, i64)>,
@@ -392,7 +392,7 @@ pub async fn update_destination_and_pipeline(
     tag = "Destinations and Pipelines"
 )]
 #[delete("/destinations-pipelines/{destination_id}/{pipeline_id}")]
-pub async fn delete_destination_and_pipeline(
+pub(crate) async fn delete_destination_and_pipeline(
     req: HttpRequest,
     pool: Data<PgPool>,
     api_config: Data<ApiConfig>,

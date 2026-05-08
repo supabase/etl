@@ -93,7 +93,7 @@ impl ResponseError for TableError {
     )
 )]
 #[get("/sources/{source_id}/tables")]
-pub async fn read_table_names(
+pub(crate) async fn read_table_names(
     req: HttpRequest,
     pool: Data<PgPool>,
     api_config: Data<ApiConfig>,

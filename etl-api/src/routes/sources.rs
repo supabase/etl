@@ -195,7 +195,7 @@ pub struct ValidateSourceResponse {
     tag = "Sources"
 )]
 #[post("/sources")]
-pub async fn create_source(
+pub(crate) async fn create_source(
     req: HttpRequest,
     pool: Data<PgPool>,
     api_config: Data<ApiConfig>,
@@ -242,7 +242,7 @@ pub async fn create_source(
     tag = "Sources"
 )]
 #[post("/sources/validate")]
-pub async fn validate_source(
+pub(crate) async fn validate_source(
     req: HttpRequest,
     api_config: Data<ApiConfig>,
     trusted_root_certs_cache: Data<TrustedRootCertsCache>,
@@ -279,7 +279,7 @@ pub async fn validate_source(
     tag = "Sources"
 )]
 #[get("/sources/{source_id}")]
-pub async fn read_source(
+pub(crate) async fn read_source(
     req: HttpRequest,
     pool: Data<PgPool>,
     encryption_key: Data<EncryptionKey>,
@@ -318,7 +318,7 @@ pub async fn read_source(
     tag = "Sources"
 )]
 #[post("/sources/{source_id}")]
-pub async fn update_source(
+pub(crate) async fn update_source(
     req: HttpRequest,
     pool: Data<PgPool>,
     api_config: Data<ApiConfig>,
@@ -368,7 +368,7 @@ pub async fn update_source(
     tag = "Sources"
 )]
 #[delete("/sources/{source_id}")]
-pub async fn delete_source(
+pub(crate) async fn delete_source(
     req: HttpRequest,
     pool: Data<PgPool>,
     k8s_client: Data<dyn K8sClient>,
@@ -417,7 +417,7 @@ pub async fn delete_source(
     tag = "Sources"
 )]
 #[get("/sources")]
-pub async fn read_all_sources(
+pub(crate) async fn read_all_sources(
     req: HttpRequest,
     pool: Data<PgPool>,
     encryption_key: Data<EncryptionKey>,

@@ -40,7 +40,7 @@ use crate::support::{
     k8s_client::{MockK8sClient, MockK8sState},
 };
 
-pub struct TestApp {
+pub(crate) struct TestApp {
     pub address: String,
     pub api_client: reqwest::Client,
     pub api_key: String,
@@ -66,11 +66,11 @@ impl TestApp {
         self.api_client.delete(url).bearer_auth(self.api_key.clone())
     }
 
-    pub fn database_config(&self) -> &PgConnectionConfig {
+    pub(crate) fn database_config(&self) -> &PgConnectionConfig {
         &self.config.database
     }
 
-    pub async fn create_tenant(&self, tenant: &CreateTenantRequest) -> reqwest::Response {
+    pub(crate) async fn create_tenant(&self, tenant: &CreateTenantRequest) -> reqwest::Response {
         self.post_authenticated(format!("{}/v1/tenants", &self.address))
             .json(tenant)
             .send()
@@ -78,7 +78,7 @@ impl TestApp {
             .expect("Failed to execute request.")
     }
 
-    pub async fn create_tenant_source(
+    pub(crate) async fn create_tenant_source(
         &self,
         tenant_source: &CreateTenantSourceRequest,
     ) -> reqwest::Response {
@@ -89,7 +89,7 @@ impl TestApp {
             .expect("Failed to execute request.")
     }
 
-    pub async fn create_or_update_tenant(
+    pub(crate) async fn create_or_update_tenant(
         &self,
         tenant_id: &str,
         tenant: &CreateOrUpdateTenantRequest,
@@ -101,14 +101,14 @@ impl TestApp {
             .expect("Failed to execute request.")
     }
 
-    pub async fn read_tenant(&self, tenant_id: &str) -> reqwest::Response {
+    pub(crate) async fn read_tenant(&self, tenant_id: &str) -> reqwest::Response {
         self.get_authenticated(format!("{}/v1/tenants/{tenant_id}", &self.address))
             .send()
             .await
             .expect("failed to execute request")
     }
 
-    pub async fn update_tenant(
+    pub(crate) async fn update_tenant(
         &self,
         tenant_id: &str,
         tenant: &UpdateTenantRequest,
@@ -120,21 +120,21 @@ impl TestApp {
             .expect("Failed to execute request.")
     }
 
-    pub async fn delete_tenant(&self, tenant_id: &str) -> reqwest::Response {
+    pub(crate) async fn delete_tenant(&self, tenant_id: &str) -> reqwest::Response {
         self.delete_authenticated(format!("{}/v1/tenants/{tenant_id}", &self.address))
             .send()
             .await
             .expect("Failed to execute request.")
     }
 
-    pub async fn read_all_tenants(&self) -> reqwest::Response {
+    pub(crate) async fn read_all_tenants(&self) -> reqwest::Response {
         self.get_authenticated(format!("{}/v1/tenants", &self.address))
             .send()
             .await
             .expect("failed to execute request")
     }
 
-    pub async fn create_source(
+    pub(crate) async fn create_source(
         &self,
         tenant_id: &str,
         source: &CreateSourceRequest,
@@ -147,7 +147,7 @@ impl TestApp {
             .expect("Failed to execute request.")
     }
 
-    pub async fn read_source(&self, tenant_id: &str, source_id: i64) -> reqwest::Response {
+    pub(crate) async fn read_source(&self, tenant_id: &str, source_id: i64) -> reqwest::Response {
         self.get_authenticated(format!("{}/v1/sources/{source_id}", &self.address))
             .header("tenant_id", tenant_id)
             .send()
@@ -155,7 +155,7 @@ impl TestApp {
             .expect("failed to execute request")
     }
 
-    pub async fn update_source(
+    pub(crate) async fn update_source(
         &self,
         tenant_id: &str,
         source_id: i64,
@@ -169,7 +169,7 @@ impl TestApp {
             .expect("failed to execute request")
     }
 
-    pub async fn delete_source(&self, tenant_id: &str, source_id: i64) -> reqwest::Response {
+    pub(crate) async fn delete_source(&self, tenant_id: &str, source_id: i64) -> reqwest::Response {
         self.delete_authenticated(format!("{}/v1/sources/{source_id}", &self.address))
             .header("tenant_id", tenant_id)
             .send()
@@ -177,7 +177,7 @@ impl TestApp {
             .expect("Failed to execute request.")
     }
 
-    pub async fn read_all_sources(&self, tenant_id: &str) -> reqwest::Response {
+    pub(crate) async fn read_all_sources(&self, tenant_id: &str) -> reqwest::Response {
         self.get_authenticated(format!("{}/v1/sources", &self.address))
             .header("tenant_id", tenant_id)
             .send()
@@ -185,7 +185,7 @@ impl TestApp {
             .expect("failed to execute request")
     }
 
-    pub async fn validate_source(
+    pub(crate) async fn validate_source(
         &self,
         tenant_id: &str,
         source: &ValidateSourceRequest,
@@ -198,7 +198,7 @@ impl TestApp {
             .expect("Failed to execute request.")
     }
 
-    pub async fn create_destination(
+    pub(crate) async fn create_destination(
         &self,
         tenant_id: &str,
         destination: &CreateDestinationRequest,
@@ -211,7 +211,7 @@ impl TestApp {
             .expect("Failed to execute request.")
     }
 
-    pub async fn read_destination(
+    pub(crate) async fn read_destination(
         &self,
         tenant_id: &str,
         destination_id: i64,
@@ -223,7 +223,7 @@ impl TestApp {
             .expect("failed to execute request")
     }
 
-    pub async fn update_destination(
+    pub(crate) async fn update_destination(
         &self,
         tenant_id: &str,
         destination_id: i64,
@@ -237,7 +237,7 @@ impl TestApp {
             .expect("failed to execute request")
     }
 
-    pub async fn delete_destination(
+    pub(crate) async fn delete_destination(
         &self,
         tenant_id: &str,
         destination_id: i64,
@@ -249,7 +249,7 @@ impl TestApp {
             .expect("Failed to execute request.")
     }
 
-    pub async fn read_all_destinations(&self, tenant_id: &str) -> reqwest::Response {
+    pub(crate) async fn read_all_destinations(&self, tenant_id: &str) -> reqwest::Response {
         self.get_authenticated(format!("{}/v1/destinations", &self.address))
             .header("tenant_id", tenant_id)
             .send()
@@ -257,7 +257,7 @@ impl TestApp {
             .expect("failed to execute request")
     }
 
-    pub async fn create_pipeline(
+    pub(crate) async fn create_pipeline(
         &self,
         tenant_id: &str,
         pipeline: &CreatePipelineRequest,
@@ -270,7 +270,11 @@ impl TestApp {
             .expect("Failed to execute request.")
     }
 
-    pub async fn read_pipeline(&self, tenant_id: &str, pipeline_id: i64) -> reqwest::Response {
+    pub(crate) async fn read_pipeline(
+        &self,
+        tenant_id: &str,
+        pipeline_id: i64,
+    ) -> reqwest::Response {
         self.get_authenticated(format!("{}/v1/pipelines/{pipeline_id}", &self.address))
             .header("tenant_id", tenant_id)
             .send()
@@ -278,7 +282,7 @@ impl TestApp {
             .expect("failed to execute request")
     }
 
-    pub async fn update_pipeline(
+    pub(crate) async fn update_pipeline(
         &self,
         tenant_id: &str,
         pipeline_id: i64,
@@ -292,7 +296,11 @@ impl TestApp {
             .expect("failed to execute request")
     }
 
-    pub async fn delete_pipeline(&self, tenant_id: &str, pipeline_id: i64) -> reqwest::Response {
+    pub(crate) async fn delete_pipeline(
+        &self,
+        tenant_id: &str,
+        pipeline_id: i64,
+    ) -> reqwest::Response {
         self.delete_authenticated(format!("{}/v1/pipelines/{pipeline_id}", &self.address))
             .header("tenant_id", tenant_id)
             .send()
@@ -300,7 +308,11 @@ impl TestApp {
             .expect("Failed to execute request.")
     }
 
-    pub async fn start_pipeline(&self, tenant_id: &str, pipeline_id: i64) -> reqwest::Response {
+    pub(crate) async fn start_pipeline(
+        &self,
+        tenant_id: &str,
+        pipeline_id: i64,
+    ) -> reqwest::Response {
         self.post_authenticated(format!("{}/v1/pipelines/{pipeline_id}/start", &self.address))
             .header("tenant_id", tenant_id)
             .send()
@@ -308,7 +320,11 @@ impl TestApp {
             .expect("failed to execute request")
     }
 
-    pub async fn stop_pipeline(&self, tenant_id: &str, pipeline_id: i64) -> reqwest::Response {
+    pub(crate) async fn stop_pipeline(
+        &self,
+        tenant_id: &str,
+        pipeline_id: i64,
+    ) -> reqwest::Response {
         self.post_authenticated(format!("{}/v1/pipelines/{pipeline_id}/stop", &self.address))
             .header("tenant_id", tenant_id)
             .send()
@@ -316,7 +332,7 @@ impl TestApp {
             .expect("failed to execute request")
     }
 
-    pub async fn stop_all_pipelines(&self, tenant_id: &str) -> reqwest::Response {
+    pub(crate) async fn stop_all_pipelines(&self, tenant_id: &str) -> reqwest::Response {
         self.post_authenticated(format!("{}/v1/pipelines/stop", &self.address))
             .header("tenant_id", tenant_id)
             .send()
@@ -324,7 +340,7 @@ impl TestApp {
             .expect("failed to execute request")
     }
 
-    pub async fn read_all_pipelines(&self, tenant_id: &str) -> reqwest::Response {
+    pub(crate) async fn read_all_pipelines(&self, tenant_id: &str) -> reqwest::Response {
         self.get_authenticated(format!("{}/v1/pipelines", &self.address))
             .header("tenant_id", tenant_id)
             .send()
@@ -332,7 +348,7 @@ impl TestApp {
             .expect("failed to execute request")
     }
 
-    pub async fn create_destination_pipeline(
+    pub(crate) async fn create_destination_pipeline(
         &self,
         tenant_id: &str,
         destination_pipeline: &CreateDestinationPipelineRequest,
@@ -345,7 +361,7 @@ impl TestApp {
             .expect("Failed to execute request.")
     }
 
-    pub async fn update_destination_pipeline(
+    pub(crate) async fn update_destination_pipeline(
         &self,
         tenant_id: &str,
         destination_id: i64,
@@ -363,7 +379,7 @@ impl TestApp {
         .expect("Failed to execute request.")
     }
 
-    pub async fn delete_destination_pipeline(
+    pub(crate) async fn delete_destination_pipeline(
         &self,
         tenant_id: &str,
         destination_id: i64,
@@ -379,7 +395,7 @@ impl TestApp {
         .expect("Failed to execute request.")
     }
 
-    pub async fn create_image(&self, image: &CreateImageRequest) -> reqwest::Response {
+    pub(crate) async fn create_image(&self, image: &CreateImageRequest) -> reqwest::Response {
         self.post_authenticated(format!("{}/v1/images", &self.address))
             .json(image)
             .send()
@@ -387,14 +403,14 @@ impl TestApp {
             .expect("Failed to execute request.")
     }
 
-    pub async fn read_image(&self, image_id: i64) -> reqwest::Response {
+    pub(crate) async fn read_image(&self, image_id: i64) -> reqwest::Response {
         self.get_authenticated(format!("{}/v1/images/{image_id}", &self.address))
             .send()
             .await
             .expect("failed to execute request")
     }
 
-    pub async fn update_image(
+    pub(crate) async fn update_image(
         &self,
         image_id: i64,
         image: &UpdateImageRequest,
@@ -406,21 +422,21 @@ impl TestApp {
             .expect("failed to execute request")
     }
 
-    pub async fn delete_image(&self, image_id: i64) -> reqwest::Response {
+    pub(crate) async fn delete_image(&self, image_id: i64) -> reqwest::Response {
         self.delete_authenticated(format!("{}/v1/images/{image_id}", &self.address))
             .send()
             .await
             .expect("Failed to execute request.")
     }
 
-    pub async fn read_all_images(&self) -> reqwest::Response {
+    pub(crate) async fn read_all_images(&self) -> reqwest::Response {
         self.get_authenticated(format!("{}/v1/images", &self.address))
             .send()
             .await
             .expect("failed to execute request")
     }
 
-    pub async fn update_pipeline_version(
+    pub(crate) async fn update_pipeline_version(
         &self,
         tenant_id: &str,
         pipeline_id: i64,
@@ -434,7 +450,7 @@ impl TestApp {
             .expect("Failed to execute request.")
     }
 
-    pub async fn get_pipeline_replication_status(
+    pub(crate) async fn get_pipeline_replication_status(
         &self,
         tenant_id: &str,
         pipeline_id: i64,
@@ -449,7 +465,7 @@ impl TestApp {
         .expect("failed to execute request")
     }
 
-    pub async fn get_pipeline_version(
+    pub(crate) async fn get_pipeline_version(
         &self,
         tenant_id: &str,
         pipeline_id: i64,
@@ -461,7 +477,7 @@ impl TestApp {
             .expect("failed to execute request")
     }
 
-    pub async fn rollback_tables(
+    pub(crate) async fn rollback_tables(
         &self,
         tenant_id: &str,
         pipeline_id: i64,
@@ -506,18 +522,18 @@ fn generate_random_bytes<const N: usize>() -> [u8; N] {
     bytes
 }
 
-pub async fn spawn_test_app() -> TestApp {
+pub(crate) async fn spawn_test_app() -> TestApp {
     spawn_test_app_with_trusted_username(None).await
 }
 
-pub async fn spawn_test_app_with_trusted_username(
+pub(crate) async fn spawn_test_app_with_trusted_username(
     trusted_source_username: Option<String>,
 ) -> TestApp {
     let k8s_state = MockK8sState::default();
     spawn_test_app_with_k8s_state(trusted_source_username, k8s_state).await
 }
 
-pub async fn spawn_test_app_with_k8s_state(
+pub(crate) async fn spawn_test_app_with_k8s_state(
     trusted_source_username: Option<String>,
     k8s_state: MockK8sState,
 ) -> TestApp {

@@ -537,7 +537,7 @@ pub struct ValidatePipelineResponse {
     tag = "Pipelines"
 )]
 #[post("/pipelines")]
-pub async fn create_pipeline(
+pub(crate) async fn create_pipeline(
     req: HttpRequest,
     pool: Data<PgPool>,
     encryption_key: Data<EncryptionKey>,
@@ -606,7 +606,7 @@ pub async fn create_pipeline(
     tag = "Pipelines"
 )]
 #[get("/pipelines/{pipeline_id}")]
-pub async fn read_pipeline(
+pub(crate) async fn read_pipeline(
     req: HttpRequest,
     pool: Data<PgPool>,
     pipeline_id: Path<i64>,
@@ -653,7 +653,7 @@ pub async fn read_pipeline(
 // to avoid this route clashing with /pipelines/stop
 #[post("/pipelines/{pipeline_id:\\d+}")]
 #[allow(clippy::too_many_arguments)]
-pub async fn update_pipeline(
+pub(crate) async fn update_pipeline(
     req: HttpRequest,
     pool: Data<PgPool>,
     trusted_root_certs_cache: Data<TrustedRootCertsCache>,
@@ -735,7 +735,7 @@ pub async fn update_pipeline(
     tag = "Pipelines"
 )]
 #[delete("/pipelines/{pipeline_id}")]
-pub async fn delete_pipeline(
+pub(crate) async fn delete_pipeline(
     req: HttpRequest,
     pool: Data<PgPool>,
     api_config: Data<ApiConfig>,
@@ -816,7 +816,7 @@ pub async fn delete_pipeline(
     tag = "Pipelines"
 )]
 #[get("/pipelines")]
-pub async fn read_all_pipelines(
+pub(crate) async fn read_all_pipelines(
     req: HttpRequest,
     pool: Data<PgPool>,
 ) -> Result<impl Responder, PipelineError> {
@@ -856,7 +856,7 @@ pub async fn read_all_pipelines(
     tag = "Pipelines"
 )]
 #[post("/pipelines/{pipeline_id}/start")]
-pub async fn start_pipeline(
+pub(crate) async fn start_pipeline(
     req: HttpRequest,
     pool: Data<PgPool>,
     encryption_key: Data<EncryptionKey>,
@@ -907,7 +907,7 @@ pub async fn start_pipeline(
     tag = "Pipelines"
 )]
 #[post("/pipelines/{pipeline_id}/stop")]
-pub async fn stop_pipeline(
+pub(crate) async fn stop_pipeline(
     req: HttpRequest,
     pool: Data<PgPool>,
     k8s_client: Data<dyn K8sClient>,
@@ -942,7 +942,7 @@ pub async fn stop_pipeline(
     tag = "Pipelines"
 )]
 #[post("/pipelines/stop")]
-pub async fn stop_all_pipelines(
+pub(crate) async fn stop_all_pipelines(
     req: HttpRequest,
     pool: Data<PgPool>,
     k8s_client: Data<dyn K8sClient>,
@@ -975,7 +975,7 @@ pub async fn stop_all_pipelines(
     tag = "Pipelines"
 )]
 #[get("/pipelines/{pipeline_id}/version")]
-pub async fn get_pipeline_version(
+pub(crate) async fn get_pipeline_version(
     req: HttpRequest,
     pool: Data<PgPool>,
     pipeline_id: Path<i64>,
@@ -1029,7 +1029,7 @@ pub async fn get_pipeline_version(
     tag = "Pipelines"
 )]
 #[get("/pipelines/{pipeline_id}/status")]
-pub async fn get_pipeline_status(
+pub(crate) async fn get_pipeline_status(
     req: HttpRequest,
     pool: Data<PgPool>,
     k8s_client: Data<dyn K8sClient>,
@@ -1068,7 +1068,7 @@ pub async fn get_pipeline_status(
     tag = "Pipelines"
 )]
 #[get("/pipelines/{pipeline_id}/replication-status")]
-pub async fn get_pipeline_replication_status(
+pub(crate) async fn get_pipeline_replication_status(
     req: HttpRequest,
     pool: Data<PgPool>,
     api_config: Data<ApiConfig>,
@@ -1164,7 +1164,7 @@ pub async fn get_pipeline_replication_status(
     tag = "Pipelines"
 )]
 #[post("/pipelines/{pipeline_id}/rollback-tables")]
-pub async fn rollback_tables(
+pub(crate) async fn rollback_tables(
     req: HttpRequest,
     pool: Data<PgPool>,
     api_config: Data<ApiConfig>,
@@ -1314,7 +1314,7 @@ pub async fn rollback_tables(
 )]
 #[post("/pipelines/{pipeline_id}/version")]
 #[allow(clippy::too_many_arguments)]
-pub async fn update_pipeline_version(
+pub(crate) async fn update_pipeline_version(
     req: HttpRequest,
     pool: Data<PgPool>,
     encryption_key: Data<EncryptionKey>,
@@ -1409,7 +1409,7 @@ pub async fn update_pipeline_version(
     tag = "Pipelines"
 )]
 #[post("/pipelines/validate")]
-pub async fn validate_pipeline(
+pub(crate) async fn validate_pipeline(
     req: HttpRequest,
     pool: Data<PgPool>,
     api_config: Data<ApiConfig>,

@@ -153,12 +153,12 @@ pub(crate) struct CompletedAsyncResult<T, M> {
 
 impl<T, M> CompletedAsyncResult<T, M> {
     /// Returns the final result.
-    pub fn into_result(self) -> EtlResult<T> {
+    pub(crate) fn into_result(self) -> EtlResult<T> {
         self.result
     }
 
     /// Returns the metadata and final result.
-    pub fn into_parts(self) -> (Option<M>, EtlResult<T>) {
+    pub(crate) fn into_parts(self) -> (Option<M>, EtlResult<T>) {
         (self.metadata, self.result)
     }
 }
