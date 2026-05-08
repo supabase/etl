@@ -6,7 +6,7 @@ use tracing::{debug, warn};
 
 use crate::{
     retry::{RetryDecision, RetryPolicy, retry_with_backoff},
-    snowflake::{Config, Error, Result, auth::TokenProvider},
+    snowflake::{Config, Error, Result, auth::TokenProvider, schema::quote_identifier},
 };
 
 /// Retry policy for transient HTTP errors (408, 429, 5xx) during SQL API calls.
@@ -99,7 +99,11 @@ impl<T: TokenProvider> SqlClient<T> {
     pub async fn table_exists(&self, table_name: &str) -> Result<bool> {
         let db = quote_identifier(&self.config.database);
         let schema = quote_identifier(&self.config.schema);
-        let escaped = escape_like_pattern(table_name);
+        let escaped = table_name
+            .replace('\\', "\\\\")
+            .replace('\'', "''")
+            .replace('_', "\\_")
+            .replace('%', "\\%");
         let sql = format!("SHOW TABLES LIKE '{escaped}' IN SCHEMA {db}.{schema}");
         let resp = self.execute_statement(&sql).await?;
         Ok(resp.data.is_some_and(|rows| !rows.is_empty()))
@@ -314,16 +318,6 @@ impl<T: TokenProvider> SqlClient<T> {
     }
 }
 
-/// Double-quote a SQL identifier, escaping internal double-quotes.
-pub(crate) fn quote_identifier(name: &str) -> String {
-    format!("\"{}\"", name.replace('"', "\"\""))
-}
-
-/// Escape a value for use in a Snowflake `LIKE` pattern inside single quotes.
-fn escape_like_pattern(name: &str) -> String {
-    name.replace('\\', "\\\\").replace('\'', "''").replace('_', "\\_").replace('%', "\\%")
-}
-
 fn classify_for_retry(error: &Error) -> RetryDecision {
     match error {
         Error::HttpTransport(_) => RetryDecision::Retry,
@@ -339,28 +333,6 @@ fn classify_for_retry(error: &Error) -> RetryDecision {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn quote_identifier_cases() {
-        let cases =
-            [("my_table", r#""my_table""#), (r#"my"table"#, r#""my""table""#), ("", r#""""#)];
-        for (input, expected) in cases {
-            assert_eq!(quote_identifier(input), expected, "input: {input:?}");
-        }
-    }
-
-    #[test]
-    fn escape_like_pattern_cases() {
-        let cases = [
-            ("my_table", r"my\_table"),
-            ("100%done", r"100\%done"),
-            ("it's", "it''s"),
-            (r"a\b", r"a\\b"),
-        ];
-        for (input, expected) in cases {
-            assert_eq!(escape_like_pattern(input), expected, "input: {input:?}");
-        }
-    }
 
     #[test]
     fn classify_for_retry_cases() {
