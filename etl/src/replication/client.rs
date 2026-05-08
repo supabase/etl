@@ -1557,14 +1557,17 @@ impl PgReplicationClient {
                 let snapshot_id = row
                     .try_get(0)?
                     .ok_or_else(|| {
-                        etl_error!(ErrorKind::InvalidState, "pg_export_snapshot returned NULL")
+                        etl_error!(
+                            ErrorKind::InvalidState,
+                            "PostgreSQL pg_export_snapshot returned NULL"
+                        )
                     })?
                     .to_owned();
                 return Ok(snapshot_id);
             }
         }
 
-        Err(etl_error!(ErrorKind::InvalidState, "pg_export_snapshot returned no rows"))
+        Err(etl_error!(ErrorKind::InvalidState, "PostgreSQL pg_export_snapshot returned no rows"))
     }
 
     /// Computes balanced ctid partition ranges using relation-size-based

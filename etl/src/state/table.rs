@@ -40,7 +40,7 @@ impl TableReplicationError {
             reason: reason.clone(),
             solution: Some(solution.to_string()),
             retry_policy,
-            source_err: etl_error!(ErrorKind::Unknown, "table replication error", reason),
+            source_err: etl_error!(ErrorKind::Unknown, "Table replication error", reason),
         }
     }
 
@@ -56,7 +56,7 @@ impl TableReplicationError {
             reason: reason.clone(),
             solution: None,
             retry_policy,
-            source_err: etl_error!(ErrorKind::Unknown, "table replication error", reason),
+            source_err: etl_error!(ErrorKind::Unknown, "Table replication error", reason),
         }
     }
 
@@ -328,7 +328,7 @@ pub enum TableReplicationPhase {
 }
 
 fn default_source_err() -> EtlError {
-    etl_error!(ErrorKind::Unknown, "table replication error restored from state store")
+    etl_error!(ErrorKind::Unknown, "Table replication error restored from state store")
 }
 
 impl TableReplicationPhase {
@@ -377,7 +377,7 @@ impl TableReplicationPhase {
             etl_error!(
                 ErrorKind::SerializationError,
                 "Table replication phase serialization failed",
-                format!("Failed to serialize table replication phase to JSON: {err}")
+                source: err
             )
         })?;
 
@@ -418,7 +418,7 @@ impl fmt::Display for TableReplicationPhase {
             Self::Catchup { lsn } => write!(f, "catchup({lsn})"),
             Self::SyncDone { lsn } => write!(f, "sync_done({lsn})"),
             Self::Ready => write!(f, "ready"),
-            Self::Errored { reason, .. } => write!(f, "errored({reason})"),
+            Self::Errored { .. } => write!(f, "errored"),
         }
     }
 }
@@ -602,7 +602,7 @@ mod tests {
             reason: "Test error".to_owned(),
             solution: Some("Test solution".to_owned()),
             retry_policy: RetryPolicy::NoRetry,
-            source_err: etl_error!(ErrorKind::Unknown, "test"),
+            source_err: etl_error!(ErrorKind::Unknown, "Test"),
         };
         let json = serde_json::to_value(&errored).unwrap();
         assert_eq!(
@@ -677,7 +677,7 @@ mod tests {
                 reason: "broken".to_owned(),
                 solution: Some("fix it".to_owned()),
                 retry_policy: RetryPolicy::ManualRetry,
-                source_err: etl_error!(ErrorKind::Unknown, "test"),
+                source_err: etl_error!(ErrorKind::Unknown, "Test"),
             },
         ];
 

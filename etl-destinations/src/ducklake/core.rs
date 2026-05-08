@@ -430,7 +430,7 @@ where
             return Err(etl_error!(
                 ErrorKind::ConfigError,
                 "DuckLake pool size must be greater than zero",
-                "pool_size must be at least 1"
+                "Pool size must be at least 1"
             ));
         }
 
@@ -588,8 +588,8 @@ where
                     .ok_or_else(|| {
                         etl_error!(
                             ErrorKind::DestinationError,
-                            "Ducklake initialization failed",
-                            "maintenance worker should exist before metrics sampler"
+                            "DuckLake initialization failed",
+                            "Maintenance worker should exist before metrics sampler"
                         )
                     })?
                     .notification_tx
@@ -629,7 +629,7 @@ where
                         etl_error!(
                             ErrorKind::DestinationQueryFailed,
                             "DuckLake TRUNCATE TABLE failed",
-                            format_query_error_detail(&truncate_table_sql, &e),
+                            format_query_error_detail(&truncate_table_sql),
                             source: e
                         )
                     })?;
@@ -664,7 +664,7 @@ where
                     Err(error) => {
                         let err = conn.execute_batch("ROLLBACK");
                         if let Err(err) = err {
-                            tracing::error!(?err, "error rollback");
+                            tracing::error!(error = %err, "error rollback");
                         }
                         Err(error)
                     }
@@ -699,7 +699,7 @@ where
         if let Err(error) = self.maybe_run_requested_inline_flush().await {
             tracing::error!(
                 table = %table_name,
-                error = ?error,
+                error = %error,
                 "ducklake inline flush failed"
             );
         }
@@ -738,7 +738,7 @@ where
     async fn write_events_inner(&self, events: Vec<Event>) -> EtlResult<()> {
         if let Err(error) = self.maybe_run_requested_inline_flush().await {
             tracing::error!(
-                error = ?error,
+                error = %error,
                 "ducklake inline flush failed"
             );
         }
@@ -1096,7 +1096,7 @@ where
                         return Err(etl_error!(
                             ErrorKind::DestinationQueryFailed,
                             "DuckLake CREATE TABLE failed",
-                            format_query_error_detail(&qualified_ddl, &e),
+                            format_query_error_detail(&qualified_ddl),
                             source: e
                         ));
                     }

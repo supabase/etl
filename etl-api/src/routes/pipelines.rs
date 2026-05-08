@@ -84,7 +84,7 @@ pub enum PipelineError {
     #[error("The ETL table state has not been initialized first")]
     EtlStateNotInitialized,
 
-    #[error("invalid destination config")]
+    #[error("Invalid destination config")]
     InvalidConfig(#[from] serde_json::Error),
 
     #[error("A K8s error occurred: {0}")]
@@ -129,7 +129,7 @@ pub enum PipelineError {
     #[error(transparent)]
     Validation(#[from] ValidationError),
 
-    #[error("{0}")]
+    #[error("Invalid pipeline request: {0}")]
     InvalidPipelineRequest(String),
 }
 
@@ -165,10 +165,11 @@ impl PipelineError {
             | PipelineError::PipelinesDb(PipelinesDbError::Database(_))
             | PipelineError::ReplicatorsDb(ReplicatorsDbError::Database(_))
             | PipelineError::ImagesDb(ImagesDbError::Database(_))
+            | PipelineError::TableLookup(_)
             | PipelineError::Database(_)
             | PipelineError::Validation(
                 ValidationError::TrustedRootCerts(_) | ValidationError::Environment(_),
-            ) => "internal server error".to_owned(),
+            ) => "Internal server error".to_owned(),
             // Do not expose validation error details as they may contain credential info.
             PipelineError::Validation(ValidationError::BigQuery(_)) => {
                 "BigQuery validation failed".to_owned()
@@ -177,7 +178,7 @@ impl PipelineError {
                 "Iceberg validation failed".to_owned()
             }
             PipelineError::Validation(ValidationError::Database(_)) => {
-                "database validation failed".to_owned()
+                "Database validation failed".to_owned()
             }
             // Every other message is ok, as they do not divulge sensitive information.
             e => e.to_string(),

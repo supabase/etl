@@ -15,11 +15,11 @@ use tokio_postgres::types::{FromSql, PgLsn, ToSql, Type};
 pub enum SchemaError {
     /// Columns were received during replication that do not exist in the stored
     /// table schema.
-    #[error("received columns during replication that are not in the stored table schema: {0:?}")]
+    #[error("Received columns during replication that are not in the stored table schema: {0:?}")]
     UnknownReplicatedColumns(Vec<String>),
 
     /// A snapshot ID string could not be converted to the [`SnapshotId`] type.
-    #[error("invalid snapshot id '{0}'")]
+    #[error("Invalid snapshot id '{0}'")]
     InvalidSnapshotId(String),
 }
 

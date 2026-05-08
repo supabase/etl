@@ -33,7 +33,7 @@ enum TenantSourceError {
     #[error(transparent)]
     Validation(#[from] ValidationError),
 
-    #[error("{0}")]
+    #[error("Validation failed: {0}")]
     ValidationFailed(String),
 }
 
@@ -47,7 +47,7 @@ impl TenantSourceError {
                 | TenantSourceDbError::Tenants(_),
             )
             | TenantSourceError::Database(_)
-            | TenantSourceError::Validation(_) => "internal server error".to_owned(),
+            | TenantSourceError::Validation(_) => "Internal server error".to_owned(),
             // Every other message is ok, as they do not divulge sensitive information
             e => e.to_string(),
         }

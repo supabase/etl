@@ -604,9 +604,22 @@ fn record_skipped_catalog_maintenance(expire_snapshots_due: bool, cleanup_old_fi
 /// Returns whether this maintenance failure matches a known DuckLake compaction
 /// bug.
 fn is_known_ducklake_compaction_single_output_file_error(error: &EtlError) -> bool {
-    error.detail().is_some_and(|detail| {
-        detail.contains("INTERNAL Error: DuckLakeCompaction - expected a single output file")
-    })
+    const KNOWN_ERROR: &str = "INTERNAL Error: DuckLakeCompaction - expected a single output file";
+
+    if error.detail().is_some_and(|detail| detail.contains(KNOWN_ERROR)) {
+        return true;
+    }
+
+    let mut source = std::error::Error::source(error);
+    while let Some(error) = source {
+        if error.to_string().contains(KNOWN_ERROR) {
+            return true;
+        }
+
+        source = error.source();
+    }
+
+    false
 }
 
 /// Returns the failing maintenance operation and reason for one known
@@ -647,7 +660,7 @@ fn suppress_known_ducklake_compaction_error(
         table = %table_name,
         operation = operation.as_str(),
         reason = reason.as_str(),
-        error = ?error,
+        error = %error,
         "ducklake targeted maintenance skipped after known duckdb internal error"
     );
     true
@@ -817,7 +830,7 @@ async fn run_ducklake_maintenance_worker(
                             Err(error) => {
                                 tracing::error!(
                                     table = %table_name,
-                                    error = ?error,
+                                    error = %error,
                                     "ducklake inline-size sampler query failed"
                                 );
                             }
@@ -843,7 +856,7 @@ async fn run_ducklake_maintenance_worker(
                             let pool = match pool.get_or_init_pool().await {
                                 Ok(pool) => pool,
                                 Err(error) => {
-                                    warn!(error = ?error, "ducklake maintenance pool initialization failed");
+                                    warn!(error = %error, "ducklake maintenance pool initialization failed");
                                     continue;
                                 }
                             };
@@ -865,7 +878,7 @@ async fn run_ducklake_maintenance_worker(
                                 Err(error) => {
                                     warn!(
                                         table = %table_name,
-                                        error = ?error,
+                                        error = %error,
                                         "ducklake targeted maintenance failed"
                                     );
                                 }
@@ -883,7 +896,7 @@ async fn run_ducklake_maintenance_worker(
                         let pool = match pool.get_or_init_pool().await {
                             Ok(pool) => pool,
                             Err(error) => {
-                                warn!(error = ?error, "ducklake maintenance pool initialization failed");
+                                warn!(error = %error, "ducklake maintenance pool initialization failed");
                                 continue;
                             }
                         };
@@ -905,7 +918,7 @@ async fn run_ducklake_maintenance_worker(
                             Err(error) => {
                                 warn!(
                                     table = %table_name,
-                                    error = ?error,
+                                    error = %error,
                                     "ducklake targeted maintenance failed"
                                 );
                             }
@@ -1047,7 +1060,7 @@ async fn maybe_run_catalog_maintenance(
     let pool = match pool.get_or_init_pool().await {
         Ok(pool) => pool,
         Err(error) => {
-            warn!(error = ?error, "ducklake maintenance pool initialization failed");
+            warn!(error = %error, "ducklake maintenance pool initialization failed");
             return;
         }
     };
@@ -1081,7 +1094,7 @@ async fn maybe_run_catalog_maintenance(
         Err(error) => {
             warn!(
                 expire_snapshots_older_than = %config.expire_snapshots_older_than,
-                error = ?error,
+                error = %error,
                 "ducklake catalog maintenance failed"
             );
         }
@@ -1291,7 +1304,7 @@ fn count_ducklake_maintenance_rows(
         etl_error!(
             ErrorKind::DestinationQueryFailed,
             description,
-            format_query_error_detail(sql, &source),
+            format_query_error_detail(sql),
             source: source
         )
     })?;
@@ -1299,7 +1312,7 @@ fn count_ducklake_maintenance_rows(
         etl_error!(
             ErrorKind::DestinationQueryFailed,
             description,
-            format_query_error_detail(sql, &source),
+            format_query_error_detail(sql),
             source: source
         )
     })?;
@@ -1309,7 +1322,7 @@ fn count_ducklake_maintenance_rows(
         etl_error!(
             ErrorKind::DestinationQueryFailed,
             description,
-            format_query_error_detail(sql, &source),
+            format_query_error_detail(sql),
             source: source
         )
     })? {
@@ -1411,7 +1424,7 @@ pub(super) fn flush_table_inlined_data(
         etl_error!(
             ErrorKind::DestinationQueryFailed,
             "DuckLake inlined data flush failed",
-            format_query_error_detail(&sql, &e),
+            format_query_error_detail(&sql),
             source: e
         )
     })?;
@@ -1460,7 +1473,7 @@ fn rewrite_table_data_files(conn: &duckdb::Connection, table_name: &str) -> EtlR
         return Err(etl_error!(
             ErrorKind::DestinationQueryFailed,
             "DuckLake rewrite data files failed",
-            format_query_error_detail(&sql, &source),
+            format_query_error_detail(&sql),
             source: source
         ));
     }
@@ -1469,7 +1482,7 @@ fn rewrite_table_data_files(conn: &duckdb::Connection, table_name: &str) -> EtlR
         etl_error!(
             ErrorKind::DestinationQueryFailed,
             "DuckLake rewrite data files failed",
-            format_query_error_detail(&sql, &error),
+            format_query_error_detail(&sql),
             source: error
         )
     })?;

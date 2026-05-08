@@ -107,7 +107,7 @@ where
                 if changed.is_err() {
                     return Err(etl_error!(
                         ErrorKind::SourceConnectionFailed,
-                        "postgresql connection updates ended during table copy"
+                        "PostgreSQL connection updates ended during table copy"
                     ));
                 }
 
@@ -117,13 +117,13 @@ where
                     PostgresConnectionUpdate::Terminated => {
                         return Err(etl_error!(
                             ErrorKind::SourceConnectionFailed,
-                            "postgresql connection terminated during table copy"
+                            "PostgreSQL connection terminated during table copy"
                         ));
                     }
                     PostgresConnectionUpdate::Errored { error } => {
                         return Err(etl_error!(
                             ErrorKind::SourceConnectionFailed,
-                            "postgresql connection errored during table copy",
+                            "PostgreSQL connection errored during table copy",
                             error.to_string()
                         ));
                     }
@@ -382,7 +382,7 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
             etl_error!(
                 ErrorKind::InvalidState,
                 "Could not acquire semaphore while copying a table in parallel",
-                err.to_string()
+                source: err
             )
         })?;
 
@@ -459,7 +459,7 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
                 return Err(etl_error!(
                     ErrorKind::TableSyncWorkerPanic,
                     "One or more parallel copy partition tasks panicked, aborting all",
-                    join_err.to_string()
+                    source: join_err
                 ));
             }
         }

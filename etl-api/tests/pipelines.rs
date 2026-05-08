@@ -531,7 +531,10 @@ async fn invalid_replicator_resources_are_rejected() {
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body: ErrorMessage = response.json().await.expect("failed to deserialize response");
-    assert_eq!(body.error, "replicator cpu request must be greater than 0");
+    assert_eq!(
+        body.error,
+        "Invalid pipeline request: Replicator cpu request must be greater than 0"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

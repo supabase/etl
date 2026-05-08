@@ -8,7 +8,7 @@
 //! cycle.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fmt::{Display, Formatter},
     future::Future,
     pin::Pin,
@@ -224,6 +224,18 @@ impl ShutdownState {
     /// Returns `true` if a shutdown has been requested.
     pub(crate) fn is_requested(&self) -> bool {
         !matches!(self, Self::NoShutdown)
+    }
+}
+
+impl Display for ShutdownState {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoShutdown => write!(f, "no_shutdown"),
+            Self::DrainingForShutdown => write!(f, "draining_for_shutdown"),
+            Self::WaitingForPrimaryKeepAlive { acked_flush_lsn } => {
+                write!(f, "waiting_for_primary_keep_alive({acked_flush_lsn})")
+            }
+        }
     }
 }
 
@@ -1192,7 +1204,7 @@ where
         if changed.is_err() {
             return Err(etl_error!(
                 ErrorKind::SourceConnectionFailed,
-                "postgresql connection updates ended during the apply loop"
+                "PostgreSQL connection updates ended during the apply loop"
             ));
         }
 
@@ -1201,11 +1213,11 @@ where
             PostgresConnectionUpdate::Running => Ok(()),
             PostgresConnectionUpdate::Terminated => Err(etl_error!(
                 ErrorKind::SourceConnectionFailed,
-                "postgresql connection terminated during the apply loop"
+                "PostgreSQL connection terminated during the apply loop"
             )),
             PostgresConnectionUpdate::Errored { error } => Err(etl_error!(
                 ErrorKind::SourceConnectionFailed,
-                "postgresql connection errored during the apply loop",
+                "PostgreSQL connection errored during the apply loop",
                 error.to_string()
             )),
         }
@@ -1342,7 +1354,7 @@ where
         if self.state.shutdown_state.is_requested() {
             info!(
                 %worker_type,
-                shutdown_state = ?self.state.shutdown_state,
+                shutdown_state = %self.state.shutdown_state,
                 "shutdown signal received but already in shutdown state, continuing",
             );
 
@@ -2265,10 +2277,16 @@ where
         let replicated_columns = parse_replicated_column_names(message)?;
         let identity_columns = parse_replica_identity_column_names(message)?;
 
+        fn format_column_names(column_names: &HashSet<String>) -> String {
+            let mut column_names = column_names.iter().map(String::as_str).collect::<Vec<_>>();
+            column_names.sort_unstable();
+            column_names.join(",")
+        }
+
         info!(
             table_id = %table_id,
-            replicated_columns = ?replicated_columns,
-            identity_columns = ?identity_columns,
+            replicated_columns = %format_column_names(&replicated_columns),
+            identity_columns = %format_column_names(&identity_columns),
             "received relation message, building replication mask"
         );
 
@@ -2777,7 +2795,7 @@ mod apply_worker {
                     info!(
                         worker_type = %WorkerType::Apply,
                         table_id = table_id.0,
-                        ?final_phase,
+                        table_replication_phase_type = %final_phase.as_type(),
                         "apply worker unblocked: table sync worker errored, skipping table",
                     );
 
@@ -2787,7 +2805,7 @@ mod apply_worker {
                 info!(
                     worker_type = %WorkerType::Apply,
                     table_id = table_id.0,
-                    ?final_phase,
+                    table_replication_phase_type = %final_phase.as_type(),
                     "apply worker unblocked: table sync worker reached sync_done",
                 );
 
@@ -2829,7 +2847,7 @@ mod apply_worker {
             debug!(
                 worker_type = %WorkerType::Apply,
                 table_id = table_id.0,
-                ?phase,
+                table_replication_phase_type = %phase.as_type(),
                 %current_lsn,
                 "checking table with active worker after commit",
             );
@@ -2899,7 +2917,7 @@ mod apply_worker {
                     debug!(
                         worker_type = %WorkerType::Apply,
                         table_id = table_id.0,
-                        ?phase,
+                        table_replication_phase_type = %phase.as_type(),
                         "no action needed for current phase after commit",
                     );
                 }
@@ -2908,7 +2926,7 @@ mod apply_worker {
             debug!(
                 worker_type = %WorkerType::Apply,
                 table_id = table_id.0,
-                ?table_replication_phase,
+                table_replication_phase_type = %table_replication_phase.as_type(),
                 "checking table without active worker after commit",
             );
 
@@ -2923,7 +2941,12 @@ mod apply_worker {
                     );
                 }
                 _ => {
-                    debug!(worker_type = %WorkerType::Apply, table_id = table_id.0, ?table_replication_phase, "spawning new table sync worker");
+                    debug!(
+                        worker_type = %WorkerType::Apply,
+                        table_id = table_id.0,
+                        table_replication_phase_type = %table_replication_phase.as_type(),
+                        "spawning new table sync worker",
+                    );
                     // Start a new worker for this table.
                     let table_sync_worker = build_table_sync_worker(ctx, table_id);
                     if let Err(err) =
@@ -2992,7 +3015,7 @@ mod apply_worker {
             debug!(
                 worker_type = %WorkerType::Apply,
                 table_id = table_id.0,
-                ?phase,
+                table_replication_phase_type = %phase.as_type(),
                 %current_lsn,
                 "checking table with active worker after batch flush",
             );
@@ -3024,7 +3047,7 @@ mod apply_worker {
             debug!(
                 worker_type = %WorkerType::Apply,
                 table_id = table_id.0,
-                ?table_replication_phase,
+                table_replication_phase_type = %table_replication_phase.as_type(),
                 "checking table without active worker after batch flush",
             );
 
@@ -3053,7 +3076,12 @@ mod apply_worker {
                     }
                 }
                 _ => {
-                    debug!(worker_type = %WorkerType::Apply, table_id = table_id.0, ?table_replication_phase, "spawning new table sync worker");
+                    debug!(
+                        worker_type = %WorkerType::Apply,
+                        table_id = table_id.0,
+                        table_replication_phase_type = %table_replication_phase.as_type(),
+                        "spawning new table sync worker",
+                    );
 
                     // Start a new worker for this table.
                     let table_sync_worker = build_table_sync_worker(ctx, table_id);
@@ -3132,7 +3160,7 @@ mod apply_worker {
             debug!(
                 worker_type = %WorkerType::Apply,
                 table_id = table_id.0,
-                ?phase,
+                table_replication_phase_type = %phase.as_type(),
                 %current_lsn,
                 "checking table with active worker when idle",
             );
@@ -3217,7 +3245,7 @@ mod apply_worker {
                     debug!(
                         worker_type = %WorkerType::Apply,
                         table_id = table_id.0,
-                        ?phase,
+                        table_replication_phase_type = %phase.as_type(),
                         "no action needed for current phase when idle",
                     );
                 }
@@ -3226,7 +3254,7 @@ mod apply_worker {
             debug!(
                 worker_type = %WorkerType::Apply,
                 table_id = table_id.0,
-                ?table_replication_phase,
+                table_replication_phase_type = %table_replication_phase.as_type(),
                 "checking table without active worker when idle",
             );
 
@@ -3247,7 +3275,12 @@ mod apply_worker {
                     }
                 }
                 _ => {
-                    debug!(worker_type = %WorkerType::Apply, table_id = table_id.0, ?table_replication_phase, "spawning new table sync worker");
+                    debug!(
+                        worker_type = %WorkerType::Apply,
+                        table_id = table_id.0,
+                        table_replication_phase_type = %table_replication_phase.as_type(),
+                        "spawning new table sync worker",
+                    );
 
                     // Start a new worker for this table.
                     let table_sync_worker = build_table_sync_worker(ctx, table_id);
@@ -3282,7 +3315,7 @@ mod apply_worker {
         let state = ctx.pool.get_active_worker_state(table_id).await.ok_or_else(|| {
             etl_error!(
                 ErrorKind::InvalidState,
-                "table sync worker state missing while marking table errored",
+                "Table sync worker state missing while marking table errored",
                 format!("table_id={table_id}")
             )
         })?;

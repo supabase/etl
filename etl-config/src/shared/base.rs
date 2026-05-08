@@ -4,7 +4,7 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum ValidationError {
     /// A field value violates a constraint.
-    #[error("`{field}` {constraint}")]
+    #[error("Field `{field}` {constraint}")]
     InvalidFieldValue {
         /// The name of the field that failed validation.
         field: String,

@@ -137,7 +137,7 @@ impl fmt::Display for ValidationFailure {
 #[derive(Debug, Error)]
 pub enum ValidationError {
     /// Failed to execute a database query.
-    #[error("database query failed: {0}")]
+    #[error("Database query failed: {0}")]
     Database(#[from] sqlx::Error),
 
     /// Failed to load trusted root certs for source connections.
@@ -145,15 +145,15 @@ pub enum ValidationError {
     TrustedRootCerts(#[from] TrustedRootCertsError),
 
     /// Failed to load the application environment.
-    #[error("failed to load environment: {0}")]
+    #[error("Failed to load environment: {0}")]
     Environment(#[from] std::io::Error),
 
     /// Failed to connect to BigQuery.
-    #[error("bigquery connection failed: {0}")]
+    #[error("BigQuery connection failed: {0}")]
     BigQuery(String),
 
     /// Failed to connect to Iceberg catalog.
-    #[error("iceberg connection failed: {0}")]
+    #[error("Iceberg connection failed: {0}")]
     Iceberg(String),
 }
 

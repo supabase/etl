@@ -168,7 +168,7 @@ pub(crate) async fn start_replicator_with_config(
                 (None, None) => None,
                 _ => {
                     return Err(ReplicatorError::config(std::io::Error::other(
-                        "ducklake s3 credentials must include both access key id and secret \
+                        "DuckLake S3 credentials must include both access key id and secret \
                          access key",
                     )));
                 }

@@ -62,7 +62,7 @@ impl Validator for SourceValidator {
         if current_user != *expected_username {
             return Ok(vec![ValidationFailure::critical(
                 "Invalid source username",
-                format!("connected as '{current_user}' but expected '{expected_username}'"),
+                format!("Connected as '{current_user}' but expected '{expected_username}'"),
             )]);
         }
 
@@ -149,7 +149,7 @@ impl Validator for SourceValidator {
         let Some(audit) = audit else {
             return Ok(vec![ValidationFailure::critical(
                 "Invalid source role attributes",
-                "role not found",
+                "Role not found",
             )]);
         };
 

@@ -34,6 +34,11 @@ use crate::{
     },
 };
 
+/// Formats phase types without using debug output.
+fn format_phase_types(phase_types: &[TableReplicationPhaseType]) -> String {
+    phase_types.iter().map(TableReplicationPhaseType::as_static_str).collect::<Vec<_>>().join(",")
+}
+
 /// Result for a table sync worker task.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) enum TableSyncWorkerResult {
@@ -52,10 +57,10 @@ fn table_sync_worker_panic_error(payload: Box<dyn Any + Send>) -> EtlError {
     } else if let Some(message) = payload.downcast_ref::<String>() {
         message.clone()
     } else {
-        "table sync worker panicked with non-string payload".to_owned()
+        "Table sync worker panicked with non-string payload".to_owned()
     };
 
-    etl_error!(ErrorKind::TableSyncWorkerPanic, "table sync worker panicked", detail)
+    etl_error!(ErrorKind::TableSyncWorkerPanic, "Table sync worker panicked", detail)
 }
 
 /// Internal state of [`TableSyncWorkerState`].
@@ -209,17 +214,17 @@ impl TableSyncWorkerState {
     /// to state changes.
     pub(crate) async fn wait_for_phase_type(
         &self,
-        phase_types: &[TableReplicationPhaseType],
+        target_phase_types: &[TableReplicationPhaseType],
         mut shutdown_rx: ShutdownRx,
     ) -> ShutdownResult<MutexGuard<'_, TableSyncWorkerStateInner>, ()> {
         loop {
             let inner = self.inner.lock().await;
 
             let current_phase = inner.table_replication_phase.as_type();
-            if phase_types.contains(&current_phase) {
+            if target_phase_types.contains(&current_phase) {
                 info!(
                     table_id = inner.table_id.0,
-                    %current_phase,
+                    current_table_replication_phase_type = %current_phase,
                     "table replication phase reached",
                 );
 
@@ -228,8 +233,8 @@ impl TableSyncWorkerState {
 
             info!(
                 table_id = inner.table_id.0,
-                %current_phase,
-                phase_types = ?phase_types,
+                current_table_replication_phase_type = %current_phase,
+                target_table_replication_phase_types = %format_phase_types(target_phase_types),
                 "waiting for table replication phase",
             );
 
@@ -247,7 +252,10 @@ impl TableSyncWorkerState {
                 biased;
 
                 _ = shutdown_rx.changed() => {
-                    info!(phase_types = ?phase_types, "shutdown signal received, cancelling wait for phase");
+                    info!(
+                        target_table_replication_phase_types = %format_phase_types(target_phase_types),
+                        "shutdown signal received, cancelling wait for phase",
+                    );
 
                     return ShutdownResult::Shutdown(());
                 }
@@ -456,7 +464,7 @@ where
 
                     info!(
                         table_id = table_id.0,
-                        sleep_duration = ?sleep_duration,
+                        sleep_duration_ms = sleep_duration.as_millis(),
                         "retrying table sync worker",
                     );
 
@@ -599,7 +607,7 @@ where
                 .ok_or_else(|| {
                     etl_error!(
                         ErrorKind::InvalidState,
-                        "table sync worker panic requested retry after unwinding"
+                        "Table sync worker panic requested retry after unwinding"
                     )
                 })
             }
@@ -708,7 +716,7 @@ where
         .map_err(|err| {
             etl_error!(
                 ErrorKind::InvalidState,
-                "table sync worker semaphore closed while acquiring run permit",
+                "Table sync worker semaphore closed while acquiring run permit",
                 err
             )
         })?;

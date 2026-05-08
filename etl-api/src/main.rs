@@ -59,7 +59,7 @@ async fn async_main() -> anyhow::Result<()> {
         // Run the application server
         1 => {
             let config = load_config::<ApiConfig>()
-                .context("loading API configuration for server startup")?;
+                .context("Loading API configuration for server startup")?;
             log_pg_connection_config(&config.database);
             let application = Application::build(config.clone()).await?;
             application.run_until_stopped().await?;
@@ -70,20 +70,20 @@ async fn async_main() -> anyhow::Result<()> {
             match command.as_str() {
                 "migrate" => {
                     let config = load_config::<PgConnectionConfig>()
-                        .context("loading database configuration for migrations")?;
+                        .context("Loading database configuration for migrations")?;
                     log_pg_connection_config(&config);
                     Application::migrate_database(config).await?;
                     info!("database migrated successfully");
                 }
                 _ => {
                     error!(%command, "invalid command");
-                    return Err(anyhow!("invalid command: {command}"));
+                    return Err(anyhow!("Invalid command: {command}"));
                 }
             }
         }
         _ => {
             error!("invalid number of command line arguments");
-            return Err(anyhow!("invalid number of command line arguments"));
+            return Err(anyhow!("Invalid number of command line arguments"));
         }
     }
 

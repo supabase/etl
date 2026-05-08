@@ -451,15 +451,19 @@ fn bq_error_to_etl_error(err: BQError) -> EtlError {
         }
     };
 
-    let mut detail = err.to_string();
-    if let BQError::TonicStatusError(status) = &err {
+    let detail = if let BQError::TonicStatusError(status) = &err {
         let storage_error_codes = decode_storage_error_codes(status);
-        if !storage_error_codes.is_empty() {
-            detail.push_str(&format!(" [storage_error_codes={}]", storage_error_codes.join(",")));
-        }
-    }
+        (!storage_error_codes.is_empty())
+            .then(|| format!("storage_error_codes={}", storage_error_codes.join(",")))
+    } else {
+        None
+    };
 
-    etl_error!(kind, description, detail)
+    if let Some(detail) = detail {
+        etl_error!(kind, description, detail, source: err)
+    } else {
+        etl_error!(kind, description, source: err)
+    }
 }
 
 /// Decodes BigQuery Storage error codes from gRPC status details when present.

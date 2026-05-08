@@ -128,10 +128,12 @@ pub(crate) fn parse_table_row_from_postgres_copy_bytes<'a>(
                 match parse_cell_from_postgres_text(&column_schema.typ, &val_str) {
                     Ok(value) => value,
                     Err(e) => {
-                        // Log parsing error with context for debugging
+                        // Avoid logging source row values, which may contain customer data.
                         error!(
-                            "error parsing column `{}` of type `{}` from text `{val_str}`",
-                            column_schema.name, column_schema.typ
+                            column_name = %column_schema.name,
+                            column_type = %column_schema.typ,
+                            value_length = val_str.len(),
+                            "error parsing column from postgres text",
                         );
                         return Err(e);
                     }

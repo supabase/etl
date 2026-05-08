@@ -748,9 +748,9 @@ where
         }
 
         while let Some(result) = join_set.join_next().await {
-            result.map_err(|e| {
-                etl_error!(ErrorKind::ApplyWorkerPanic, "insert task failed", e.to_string())
-            })??;
+            result.map_err(
+                |err| etl_error!(ErrorKind::ApplyWorkerPanic, "Insert task failed", source: err),
+            )??;
         }
 
         Ok(())
