@@ -929,11 +929,12 @@ impl From<sqlx::Error> for EtlError {
     }
 }
 
-/// Converts [`etl_postgres::tokio::PgSourceError`] to [`EtlError`].
 impl From<etl_postgres::tokio::PgSourceError> for EtlError {
     fn from(err: etl_postgres::tokio::PgSourceError) -> EtlError {
         let kind = match &err {
             etl_postgres::tokio::PgSourceError::Database(_)
+            | etl_postgres::tokio::PgSourceError::DestinationTableSchemaStatus(_)
+            | etl_postgres::tokio::PgSourceError::TableReplicationState(_)
             | etl_postgres::tokio::PgSourceError::InvalidData(_) => ErrorKind::SourceQueryFailed,
             etl_postgres::tokio::PgSourceError::Tls(_)
             | etl_postgres::tokio::PgSourceError::Pem(_) => ErrorKind::SourceConnectionFailed,
@@ -950,8 +951,6 @@ impl From<etl_postgres::tokio::PgSourceError> for EtlError {
     }
 }
 
-/// Converts [`etl_postgres::slots::EtlReplicationSlotError`] to
-/// [`EtlError`] with appropriate error kind.
 impl From<etl_postgres::slots::EtlReplicationSlotError> for EtlError {
     fn from(err: etl_postgres::slots::EtlReplicationSlotError) -> EtlError {
         match err {

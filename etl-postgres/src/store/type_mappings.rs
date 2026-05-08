@@ -1,4 +1,4 @@
-use tokio_postgres::types::Type as PgType;
+use tokio_postgres::types::Type;
 
 macro_rules! define_type_mappings {
     (
@@ -6,23 +6,23 @@ macro_rules! define_type_mappings {
             $pg_type:ident => $string_name:literal
         ),* $(,)?
     ) => {
-        /// Converts a Postgres type name string to a [`PgType`].
+        /// Converts a Postgres type name string to a [`Type`].
         #[must_use]
-        pub fn string_to_postgres_type(type_str: &str) -> PgType {
+        pub fn string_to_postgres_type(type_str: &str) -> Type {
             match type_str {
                 $(
-                    $string_name => PgType::$pg_type,
+                    $string_name => Type::$pg_type,
                 )*
-                _ => PgType::TEXT,
+                _ => Type::TEXT,
             }
         }
 
-        /// Converts a Postgres [`PgType`] to its string representation.
+        /// Converts a Postgres [`Type`] to its string representation.
         #[must_use]
-        pub fn postgres_type_to_string(pg_type: &PgType) -> String {
+        pub fn postgres_type_to_string(pg_type: &Type) -> String {
             match *pg_type {
                 $(
-                    PgType::$pg_type => $string_name.to_string(),
+                    Type::$pg_type => $string_name.to_string(),
                 )*
                 _ => format!("UNKNOWN({})", pg_type.name()),
             }

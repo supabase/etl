@@ -1,4 +1,17 @@
+use thiserror::Error;
+
 use crate::types::TableId;
+
+/// Errors from parsing table replication state values.
+#[derive(Debug, Error)]
+pub enum TableReplicationStateTypeParseError {
+    /// The stored state value is not a known table replication state.
+    #[error("Unknown table replication state '{value}'")]
+    Unknown {
+        /// Unknown stored state value.
+        value: String,
+    },
+}
 
 /// Database enum type for table replication states.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -17,16 +30,31 @@ pub enum TableReplicationStateType {
     Errored,
 }
 
-impl TableReplicationStateType {
-    /// Returns the Postgres enum value for this state.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Init => "init",
-            Self::DataSync => "data_sync",
-            Self::FinishedCopy => "finished_copy",
-            Self::SyncDone => "sync_done",
-            Self::Ready => "ready",
-            Self::Errored => "errored",
+impl TryFrom<&str> for TableReplicationStateType {
+    type Error = TableReplicationStateTypeParseError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "init" => Ok(Self::Init),
+            "data_sync" => Ok(Self::DataSync),
+            "finished_copy" => Ok(Self::FinishedCopy),
+            "sync_done" => Ok(Self::SyncDone),
+            "ready" => Ok(Self::Ready),
+            "errored" => Ok(Self::Errored),
+            _ => Err(TableReplicationStateTypeParseError::Unknown { value: value.to_owned() }),
+        }
+    }
+}
+
+impl From<TableReplicationStateType> for &'static str {
+    fn from(value: TableReplicationStateType) -> Self {
+        match value {
+            TableReplicationStateType::Init => "init",
+            TableReplicationStateType::DataSync => "data_sync",
+            TableReplicationStateType::FinishedCopy => "finished_copy",
+            TableReplicationStateType::SyncDone => "sync_done",
+            TableReplicationStateType::Ready => "ready",
+            TableReplicationStateType::Errored => "errored",
         }
     }
 }

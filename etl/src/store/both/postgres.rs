@@ -4,11 +4,17 @@ use std::{
 };
 
 use etl_postgres::{
-    store::{
-        destination_table_metadata as pg_destination_table_metadata,
-        table_replication_state as pg_table_replication_state,
+    store::TableReplicationStateType,
+    tokio::{
+        PgSourceClient,
+        store::{
+            delete_destination_table_metadata, delete_obsolete_table_schema_versions,
+            delete_replication_state, delete_table_schemas, load_destination_tables_metadata,
+            load_table_schema_at_snapshot, load_table_schemas, rollback_replication_state,
+            store_destination_table_metadata, store_table_schema, table_replication_state_rows,
+            update_replication_state_raw,
+        },
     },
-    tokio::{PgSourceClient, store as pg_store},
 };
 use metrics::gauge;
 use tokio::sync::Mutex;
@@ -21,9 +27,7 @@ use crate::{
     metrics::{ETL_TABLES_TOTAL, PHASE_LABEL},
     migrations,
     state::{
-        destination_metadata::{
-            AppliedDestinationTableMetadata, DestinationTableMetadata, DestinationTableSchemaStatus,
-        },
+        destination_metadata::{AppliedDestinationTableMetadata, DestinationTableMetadata},
         table::TableReplicationPhase,
     },
     store::{
@@ -33,6 +37,10 @@ use crate::{
     },
     types::{PipelineId, ReplicationMask, SnapshotId, TableId, TableSchema},
 };
+
+// If this store starts using new source metadata tables or stops using existing
+// ones, update `etl-postgres/src/tokio/health.rs::ETL_TABLE_NAMES` so presence
+// checks stay aligned with store behavior.
 
 /// Maximum number of schema snapshots to keep cached per table.
 ///
@@ -75,6 +83,8 @@ fn emit_table_metrics(counts_by_phase: &HashMap<&'static str, u64>) {
 /// per-table locking algorithm would improve throughput.
 #[derive(Debug)]
 struct Inner {
+    /// Source database client used by the store.
+    source_client: PgSourceClient,
     /// Count of number of tables in each phase. Used for metrics.
     phase_counts: HashMap<&'static str, u64>,
     /// Cached table replication states indexed by table ID.
@@ -94,7 +104,7 @@ struct Inner {
 impl Inner {
     /// Initializes phase counts from an existing table states map.
     fn init_phase_counts(&mut self, table_states: &BTreeMap<TableId, TableReplicationPhase>) {
-        let mut phase_counts = HashMap::new();
+        let mut phase_counts = HashMap::with_capacity(table_states.len());
         for phase in table_states.values() {
             *phase_counts.entry(phase.as_type().as_static_str()).or_insert(0u64) += 1;
         }
@@ -141,8 +151,8 @@ impl Inner {
 /// consistency of the pipeline state across restarts.
 ///
 /// The store maintains both in-memory cache and persistent database storage,
-/// using a connection pool with automatic idle timeout to balance performance
-/// and resource usage.
+/// using a source database client shared with the in-memory cache under one
+/// store lock.
 ///
 /// # Concurrency Model
 ///
@@ -153,7 +163,6 @@ impl Inner {
 #[derive(Debug, Clone)]
 pub struct PostgresStore {
     pipeline_id: PipelineId,
-    source_client: Arc<Mutex<PgSourceClient>>,
     inner: Arc<Mutex<Inner>>,
 }
 
@@ -175,17 +184,14 @@ impl PostgresStore {
         )
         .await?;
         let inner = Inner {
+            source_client,
             phase_counts: HashMap::new(),
             table_states: Arc::new(BTreeMap::new()),
             table_schemas: Arc::new(TableSchemaSnapshots::default()),
             destination_tables_metadata: Arc::new(BTreeMap::new()),
         };
 
-        Ok(Self {
-            pipeline_id,
-            source_client: Arc::new(Mutex::new(source_client)),
-            inner: Arc::new(Mutex::new(inner)),
-        })
+        Ok(Self { pipeline_id, inner: Arc::new(Mutex::new(inner)) })
     }
 }
 
@@ -225,10 +231,9 @@ impl StateStore for PostgresStore {
         debug!("loading table replication states from postgres state store");
 
         let mut inner = self.inner.lock().await;
-        let mut source_client = self.source_client.lock().await;
-        let source_txn = source_client.begin().await?;
+        let source_txn = inner.source_client.begin().await?;
         let replication_state_rows =
-            pg_store::table_replication_state_rows(&source_txn, self.pipeline_id as i64).await?;
+            table_replication_state_rows(&source_txn, self.pipeline_id as i64).await?;
         source_txn.commit().await?;
 
         let mut table_states: BTreeMap<TableId, TableReplicationPhase> = BTreeMap::new();
@@ -260,11 +265,7 @@ impl StateStore for PostgresStore {
     ) -> EtlResult<()> {
         // Convert all states upfront to catch any conversion errors before starting the
         // transaction
-        let db_updates: Vec<(
-            TableId,
-            pg_table_replication_state::TableReplicationStateType,
-            serde_json::Value,
-        )> = updates
+        let db_updates: Vec<(TableId, TableReplicationStateType, serde_json::Value)> = updates
             .iter()
             .map(|(table_id, phase)| {
                 let (state_type, metadata) = phase.to_storage_format()?;
@@ -275,10 +276,9 @@ impl StateStore for PostgresStore {
         let mut inner = self.inner.lock().await;
 
         // Perform all database updates in a single transaction.
-        let mut source_client = self.source_client.lock().await;
-        let tx = source_client.begin().await?;
+        let tx = inner.source_client.begin().await?;
         for (table_id, state_type, metadata) in db_updates {
-            pg_store::update_replication_state_raw(
+            update_replication_state_raw(
                 &tx,
                 self.pipeline_id as i64,
                 table_id,
@@ -306,19 +306,17 @@ impl StateStore for PostgresStore {
         table_id: TableId,
     ) -> EtlResult<TableReplicationPhase> {
         let mut inner = self.inner.lock().await;
-        let mut source_client = self.source_client.lock().await;
-        let tx = source_client.begin().await?;
+        let tx = inner.source_client.begin().await?;
 
-        let restored_row =
-            pg_store::rollback_replication_state(&tx, self.pipeline_id as i64, table_id)
-                .await?
-                .ok_or_else(|| {
-                    etl_error!(
-                        ErrorKind::StateRollbackError,
-                        "Previous table state not found",
-                        "No previous state available to roll back to for this table"
-                    )
-                })?;
+        let restored_row = rollback_replication_state(&tx, self.pipeline_id as i64, table_id)
+            .await?
+            .ok_or_else(|| {
+                etl_error!(
+                    ErrorKind::StateRollbackError,
+                    "Previous table state not found",
+                    "No previous state available to roll back to for this table"
+                )
+            })?;
 
         let restored_phase = phase_from_metadata(restored_row.metadata)?;
         tx.commit().await?;
@@ -364,17 +362,15 @@ impl StateStore for PostgresStore {
         debug!("loading destination tables metadata from postgres state store");
 
         let mut inner = self.inner.lock().await;
-        let source_client = self.source_client.lock().await;
-        let rows =
-            pg_store::load_destination_tables_metadata(&source_client, self.pipeline_id as i64)
-                .await
-                .map_err(|err| {
-                    etl_error!(
-                        ErrorKind::SourceQueryFailed,
-                        "Destination tables metadata loading failed",
-                        source: err
-                    )
-                })?;
+        let rows = load_destination_tables_metadata(&inner.source_client, self.pipeline_id as i64)
+            .await
+            .map_err(|err| {
+                etl_error!(
+                    ErrorKind::SourceQueryFailed,
+                    "Destination tables metadata loading failed",
+                    source: err
+                )
+            })?;
 
         let mut metadata: BTreeMap<TableId, DestinationTableMetadata> = BTreeMap::new();
         for (table_id, row) in rows {
@@ -411,9 +407,8 @@ impl StateStore for PostgresStore {
         );
 
         let mut inner = self.inner.lock().await;
-        let source_client = self.source_client.lock().await;
-        pg_store::store_destination_table_metadata(
-            &source_client,
+        store_destination_table_metadata(
+            &inner.source_client,
             self.pipeline_id as i64,
             table_id,
             &metadata.destination_table_id,
@@ -463,9 +458,8 @@ impl SchemaStore for PostgresStore {
         );
 
         // Load the schema at the requested snapshot.
-        let source_client = self.source_client.lock().await;
-        let table_schema = pg_store::load_table_schema_at_snapshot(
-            &source_client,
+        let table_schema = load_table_schema_at_snapshot(
+            &inner.source_client,
             self.pipeline_id as i64,
             *table_id,
             snapshot_id,
@@ -509,8 +503,7 @@ impl SchemaStore for PostgresStore {
         debug!("loading table schemas from postgres state store");
 
         let mut inner = self.inner.lock().await;
-        let source_client = self.source_client.lock().await;
-        let table_schemas = pg_store::load_table_schemas(&source_client, self.pipeline_id as i64)
+        let table_schemas = load_table_schemas(&inner.source_client, self.pipeline_id as i64)
             .await
             .map_err(|err| {
                 etl_error!(
@@ -537,8 +530,7 @@ impl SchemaStore for PostgresStore {
         debug!(table_name = %table_schema.name, snapshot_id = %table_schema.snapshot_id, "storing table schema");
 
         let mut inner = self.inner.lock().await;
-        let mut source_client = self.source_client.lock().await;
-        pg_store::store_table_schema(&mut source_client, self.pipeline_id as i64, &table_schema)
+        store_table_schema(&mut inner.source_client, self.pipeline_id as i64, &table_schema)
             .await
             .map_err(|err| {
                 etl_error!(
@@ -561,9 +553,8 @@ impl SchemaStore for PostgresStore {
             .iter()
             .map(|(table_id, retention)| (*table_id, retention.to_lsn()))
             .collect::<HashMap<_, _>>();
-        let source_client = self.source_client.lock().await;
-        let deleted_count = pg_store::delete_obsolete_table_schema_versions(
-            &source_client,
+        let deleted_count = delete_obsolete_table_schema_versions(
+            &inner.source_client,
             self.pipeline_id as i64,
             &retention_lsns,
         )
@@ -595,27 +586,26 @@ impl CleanupStore for PostgresStore {
     /// Removes all state for a table from both database and cache.
     async fn cleanup_table_state(&self, table_id: TableId) -> EtlResult<()> {
         let mut inner = self.inner.lock().await;
-        let mut source_client = self.source_client.lock().await;
-        let tx = source_client.begin().await?;
+        let tx = inner.source_client.begin().await?;
         let pipeline_id = self.pipeline_id as i64;
 
-        pg_store::delete_destination_table_metadata(&tx, pipeline_id, table_id).await.map_err(
-            |err| {
-                etl_error!(
-                    ErrorKind::SourceQueryFailed,
-                    "Destination table metadata deletion failed",
-                    source: err
-                )
-            },
-        )?;
-
-        pg_store::delete_table_schemas(&tx, pipeline_id, table_id)
-        .await
-        .map_err(|err| {
-            etl_error!(ErrorKind::SourceQueryFailed, "Table schema deletion failed", source: err)
+        delete_destination_table_metadata(&tx, pipeline_id, table_id).await.map_err(|err| {
+            etl_error!(
+                ErrorKind::SourceQueryFailed,
+                "Destination table metadata deletion failed",
+                source: err
+            )
         })?;
 
-        pg_store::delete_replication_state(&tx, pipeline_id, table_id).await?;
+        delete_table_schemas(&tx, pipeline_id, table_id).await.map_err(|err| {
+            etl_error!(
+                ErrorKind::SourceQueryFailed,
+                "Table schema deletion failed",
+                source: err
+            )
+        })?;
+
+        delete_replication_state(&tx, pipeline_id, table_id).await?;
 
         tx.commit().await?;
 
@@ -625,35 +615,5 @@ impl CleanupStore for PostgresStore {
         emit_table_metrics(&inner.phase_counts);
 
         Ok(())
-    }
-}
-
-impl From<pg_destination_table_metadata::DestinationTableSchemaStatus>
-    for DestinationTableSchemaStatus
-{
-    fn from(value: pg_destination_table_metadata::DestinationTableSchemaStatus) -> Self {
-        match value {
-            pg_destination_table_metadata::DestinationTableSchemaStatus::Applying => {
-                DestinationTableSchemaStatus::Applying
-            }
-            pg_destination_table_metadata::DestinationTableSchemaStatus::Applied => {
-                DestinationTableSchemaStatus::Applied
-            }
-        }
-    }
-}
-
-impl From<DestinationTableSchemaStatus>
-    for pg_destination_table_metadata::DestinationTableSchemaStatus
-{
-    fn from(value: DestinationTableSchemaStatus) -> Self {
-        match value {
-            DestinationTableSchemaStatus::Applying => {
-                pg_destination_table_metadata::DestinationTableSchemaStatus::Applying
-            }
-            DestinationTableSchemaStatus::Applied => {
-                pg_destination_table_metadata::DestinationTableSchemaStatus::Applied
-            }
-        }
     }
 }

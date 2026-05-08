@@ -128,9 +128,7 @@ impl DestinationPipelineError {
             | DestinationPipelineError::ImagesDb(ImagesDbError::Database(_))
             | DestinationPipelineError::SourcesDb(SourcesDbError::Database(_))
             | DestinationPipelineError::PipelinesDb(
-                PipelinesDbError::Database(_)
-                | PipelinesDbError::Source(_)
-                | PipelinesDbError::ReplicationSlot(_),
+                PipelinesDbError::Database(_) | PipelinesDbError::Source(_),
             )
             | DestinationPipelineError::Source(_)
             | DestinationPipelineError::Database(_)

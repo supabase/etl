@@ -67,9 +67,7 @@ impl SourceError {
             // Do not expose internal database details in error messages
             SourceError::SourcesDb(SourcesDbError::Database(_))
             | SourceError::PipelinesDb(
-                PipelinesDbError::Database(_)
-                | PipelinesDbError::Source(_)
-                | PipelinesDbError::ReplicationSlot(_),
+                PipelinesDbError::Database(_) | PipelinesDbError::Source(_),
             )
             | SourceError::Validation(_)
             | SourceError::K8sCore(_) => "Internal server error".to_owned(),

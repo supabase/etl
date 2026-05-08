@@ -4,18 +4,7 @@ use crate::{
     types::TableId,
 };
 
-fn state_type_from_str(state: &str) -> Result<TableReplicationStateType, PgSourceError> {
-    match state {
-        "init" => Ok(TableReplicationStateType::Init),
-        "data_sync" => Ok(TableReplicationStateType::DataSync),
-        "finished_copy" => Ok(TableReplicationStateType::FinishedCopy),
-        "sync_done" => Ok(TableReplicationStateType::SyncDone),
-        "ready" => Ok(TableReplicationStateType::Ready),
-        "errored" => Ok(TableReplicationStateType::Errored),
-        _ => Err(PgSourceError::InvalidData(format!("Unknown table replication state '{state}'"))),
-    }
-}
-
+/// Builds a table replication state row from a database row.
 fn replication_state_row(
     row: tokio_postgres::Row,
 ) -> Result<TableReplicationStateRow, PgSourceError> {
@@ -24,7 +13,7 @@ fn replication_state_row(
         id: row.get("id"),
         pipeline_id: row.get("pipeline_id"),
         table_id: row.get("table_id"),
-        state: state_type_from_str(&state)?,
+        state: TableReplicationStateType::try_from(state.as_str())?,
         metadata: row.get("metadata"),
         prev: row.get("prev"),
         is_current: row.get("is_current"),
@@ -32,6 +21,9 @@ fn replication_state_row(
 }
 
 /// Reads current table replication states for a pipeline.
+///
+/// Retrieves the current replication state records for all tables in the
+/// pipeline.
 pub async fn table_replication_state_rows(
     txn: &PgSourceTransaction<'_>,
     pipeline_id: i64,
@@ -51,6 +43,9 @@ pub async fn table_replication_state_rows(
 }
 
 /// Updates replication state using raw database types.
+///
+/// Performs the database update with pre-serialized state data and proper
+/// history chaining.
 pub async fn update_replication_state_raw(
     txn: &PgSourceTransaction<'_>,
     pipeline_id: i64,
@@ -58,7 +53,9 @@ pub async fn update_replication_state_raw(
     state: TableReplicationStateType,
     metadata: serde_json::Value,
 ) -> Result<(), PgSourceError> {
-    let state = state.as_str();
+    let state: &'static str = state.into();
+    // Mark the old row as not current and insert the new one in a single CTE.
+    // The INSERT references mark_old to ensure the UPDATE completes first.
     txn.execute(
         r#"
         with mark_old as (
@@ -68,7 +65,7 @@ pub async fn update_replication_state_raw(
             returning id
         )
         insert into etl.replication_state (pipeline_id, table_id, state, metadata, prev, is_current)
-        values ($1, $2, $3::text::etl.table_state, $4, (select id from mark_old), true)
+        values ($1, $2, $3::etl.table_state, $4, (select id from mark_old), true)
         "#,
         &[&pipeline_id, &table_id, &state, &metadata],
     )
@@ -78,6 +75,9 @@ pub async fn update_replication_state_raw(
 }
 
 /// Rolls back one table to its previous replication state.
+///
+/// Restores the previous state by updating the current flags in the database,
+/// returning the restored state if successful.
 pub async fn rollback_replication_state(
     txn: &PgSourceTransaction<'_>,
     pipeline_id: i64,
@@ -102,13 +102,19 @@ pub async fn rollback_replication_state(
         return Ok(None);
     };
 
+    // Delete the row we are rolling back from to avoid buildup. Technically, we
+    // could keep the previous row for tracking purposes, but especially during
+    // timed retries, we might end up with unbounded database growth.
     txn.execute("delete from etl.replication_state where id = $1", &[&current_id]).await?;
+
+    // Set previous row to current.
     txn.execute(
         "update etl.replication_state set is_current = true, updated_at = now() where id = $1",
         &[&prev_id],
     )
     .await?;
 
+    // Fetch the restored row.
     let row = txn
         .query_one(
             r#"
@@ -124,24 +130,30 @@ pub async fn rollback_replication_state(
 }
 
 /// Resets one table to initial replication state.
+///
+/// Removes all existing state entries for the table, including history, and
+/// creates a new `Init` entry. Destination metadata and schemas are preserved
+/// for use on restart.
 pub async fn reset_replication_state(
     txn: &PgSourceTransaction<'_>,
     pipeline_id: i64,
     table_id: TableId,
 ) -> Result<TableReplicationStateRow, PgSourceError> {
+    // Delete all existing entries for this pipeline and table.
     txn.execute(
         "delete from etl.replication_state where pipeline_id = $1 and table_id = $2",
         &[&pipeline_id, &table_id],
     )
     .await?;
 
+    // Insert a new `Init` state entry and return it.
     let metadata = serde_json::json!({"type": "init"});
-    let state = TableReplicationStateType::Init.as_str();
+    let state: &'static str = TableReplicationStateType::Init.into();
     let row = txn
         .query_one(
             r#"
             insert into etl.replication_state (pipeline_id, table_id, state, metadata, prev, is_current)
-            values ($1, $2, $3::text::etl.table_state, $4, null, true)
+            values ($1, $2, $3::etl.table_state, $4, null, true)
             returning id, pipeline_id, table_id, state::text as state, metadata, prev, is_current
             "#,
             &[&pipeline_id, &table_id, &state, &metadata],
@@ -152,6 +164,8 @@ pub async fn reset_replication_state(
 }
 
 /// Deletes all replication state entries for a pipeline.
+///
+/// Removes current and historical replication state rows.
 pub async fn delete_replication_state_for_all_tables(
     txn: &PgSourceTransaction<'_>,
     pipeline_id: i64,
@@ -162,6 +176,8 @@ pub async fn delete_replication_state_for_all_tables(
 }
 
 /// Deletes replication state entries for one table.
+///
+/// Removes current and historical replication state rows for the table.
 pub async fn delete_replication_state(
     txn: &PgSourceTransaction<'_>,
     pipeline_id: i64,

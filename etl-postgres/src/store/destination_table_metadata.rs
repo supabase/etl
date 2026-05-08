@@ -1,4 +1,17 @@
+use thiserror::Error;
+
 use crate::types::{SnapshotId, TableId};
+
+/// Errors from parsing destination table schema status values.
+#[derive(Debug, Error)]
+pub enum DestinationTableSchemaStatusParseError {
+    /// The stored schema status value is not known.
+    #[error("Unknown destination schema status '{value}'")]
+    Unknown {
+        /// Unknown stored schema status value.
+        value: String,
+    },
+}
 
 /// Database enum type for destination table schema status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -9,12 +22,23 @@ pub enum DestinationTableSchemaStatus {
     Applied,
 }
 
-impl DestinationTableSchemaStatus {
-    /// Returns the Postgres enum value for this status.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Applying => "applying",
-            Self::Applied => "applied",
+impl TryFrom<&str> for DestinationTableSchemaStatus {
+    type Error = DestinationTableSchemaStatusParseError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "applying" => Ok(Self::Applying),
+            "applied" => Ok(Self::Applied),
+            _ => Err(DestinationTableSchemaStatusParseError::Unknown { value: value.to_owned() }),
+        }
+    }
+}
+
+impl From<DestinationTableSchemaStatus> for &'static str {
+    fn from(value: DestinationTableSchemaStatus) -> Self {
+        match value {
+            DestinationTableSchemaStatus::Applying => "applying",
+            DestinationTableSchemaStatus::Applied => "applied",
         }
     }
 }

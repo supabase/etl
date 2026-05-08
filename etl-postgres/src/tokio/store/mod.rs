@@ -15,3 +15,12 @@ pub use table_schema::{
     delete_table_schemas_for_all_tables, load_table_schema_at_snapshot, load_table_schemas,
     load_table_schemas_at_snapshot, store_table_schema,
 };
+
+use crate::{tokio::PgSourceError, types::SnapshotId};
+
+/// Parses a Postgres LSN string into a [`SnapshotId`].
+fn parse_snapshot_id(value: &str) -> Result<SnapshotId, PgSourceError> {
+    SnapshotId::from_pg_lsn_string(value).map_err(|err| {
+        PgSourceError::InvalidData(format!("Snapshot ID deserialization failed: {err}"))
+    })
+}

@@ -21,6 +21,9 @@ pub enum TableLookupError {
 }
 
 /// Reads source table names for table IDs.
+///
+/// Looks up schema and relation names in `pg_class` and `pg_namespace`, keyed
+/// by source table OID.
 pub async fn table_names_from_table_ids(
     txn: &PgSourceTransaction<'_>,
     table_ids: &[TableId],
@@ -29,11 +32,11 @@ pub async fn table_names_from_table_ids(
         return Ok(HashMap::new());
     }
 
-    let ids = table_ids.to_vec();
+    let ids: Vec<_> = table_ids.iter().map(|table_id| table_id.into_inner()).collect();
     let rows = txn
         .query(
             r#"
-            select c.oid as oid, n.nspname as schema_name, c.relname as table_name
+            select c.oid::int as oid, n.nspname as schema_name, c.relname as table_name
             from pg_class c
             join pg_namespace n on c.relnamespace = n.oid
             where c.oid = any($1::oid[])
@@ -44,10 +47,11 @@ pub async fn table_names_from_table_ids(
 
     let mut result = HashMap::with_capacity(rows.len());
     for row in rows {
-        let table_id = row.get("oid");
+        let oid: i32 = row.get("oid");
         let schema_name: String = row.get("schema_name");
         let table_name: String = row.get("table_name");
-        result.insert(table_id, TableName { schema: schema_name, name: table_name });
+        result
+            .insert(TableId::new(oid as u32), TableName { schema: schema_name, name: table_name });
     }
 
     Ok(result)

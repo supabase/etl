@@ -68,9 +68,7 @@ impl TenantError {
             TenantError::TenantsDb(TenantsDbError::Database(_))
             | TenantError::SourcesDb(SourcesDbError::Database(_))
             | TenantError::PipelinesDb(
-                PipelinesDbError::Database(_)
-                | PipelinesDbError::Source(_)
-                | PipelinesDbError::ReplicationSlot(_),
+                PipelinesDbError::Database(_) | PipelinesDbError::Source(_),
             )
             | TenantError::Source(_)
             | TenantError::Database(_)

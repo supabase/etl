@@ -10,16 +10,21 @@ use crate::data::tables::Table;
 
 #[derive(Debug, Error)]
 pub enum PublicationsDbError {
+    /// A source database operation failed.
     #[error("Error while interacting with Postgres for publications: {0}")]
     Database(#[from] PgSourceError),
 }
 
+/// Source publication metadata.
 #[derive(Serialize, ToSchema)]
 pub struct Publication {
+    /// Publication name.
     pub name: String,
+    /// Tables included in the publication.
     pub tables: Vec<Table>,
 }
 
+/// Creates a publication in the source database.
 pub async fn create_publication(
     publication: &Publication,
     source_client: &PgSourceClient,
@@ -30,6 +35,7 @@ pub async fn create_publication(
     Ok(())
 }
 
+/// Updates the table set for an existing source publication.
 pub async fn update_publication(
     publication: &Publication,
     source_client: &PgSourceClient,
@@ -40,6 +46,7 @@ pub async fn update_publication(
     Ok(())
 }
 
+/// Drops a publication from the source database if it exists.
 pub async fn drop_publication(
     publication_name: &str,
     source_client: &PgSourceClient,
@@ -50,6 +57,7 @@ pub async fn drop_publication(
     Ok(())
 }
 
+/// Reads one publication and its table list from the source database.
 pub async fn read_publication(
     publication_name: &str,
     source_client: &PgSourceClient,
@@ -68,7 +76,7 @@ pub async fn read_publication(
         )
         .await?;
 
-    let mut tables = vec![];
+    let mut tables = Vec::with_capacity(rows.len());
     let mut name: Option<String> = None;
     for row in rows {
         let pub_name: String = row.get("pubname");
@@ -88,6 +96,7 @@ pub async fn read_publication(
     Ok(name.map(|name| Publication { name, tables }))
 }
 
+/// Reads all publications and their table lists from the source database.
 pub async fn read_all_publications(
     source_client: &PgSourceClient,
 ) -> Result<Vec<Publication>, PublicationsDbError> {
@@ -107,8 +116,9 @@ pub async fn read_all_publications(
     Ok(publication_from_rows(rows))
 }
 
+/// Builds publications from joined publication rows.
 fn publication_from_rows(rows: Vec<tokio_postgres::Row>) -> Vec<Publication> {
-    let mut pub_name_to_tables: HashMap<String, Vec<Table>> = HashMap::new();
+    let mut pub_name_to_tables: HashMap<String, Vec<Table>> = HashMap::with_capacity(rows.len());
     for row in rows {
         let pub_name: String = row.get("pubname");
         let schema: Option<String> = row.get("schemaname");
@@ -123,8 +133,9 @@ fn publication_from_rows(rows: Vec<tokio_postgres::Row>) -> Vec<Publication> {
     pub_name_to_tables.into_iter().map(|(name, tables)| Publication { name, tables }).collect()
 }
 
+/// Builds a `CREATE PUBLICATION` statement.
 fn create_publication_query(publication: &Publication) -> String {
-    let mut query = String::new();
+    let mut query = String::with_capacity(publication_query_capacity(publication));
     query.push_str("create publication ");
     query.push_str(&quote_identifier(&publication.name));
     if !publication.tables.is_empty() {
@@ -132,12 +143,15 @@ fn create_publication_query(publication: &Publication) -> String {
     }
 
     push_qualified_tables(&mut query, &publication.tables);
+    // Ensure partitioned tables publish via ancestor/root schema for logical
+    // replication.
     query.push_str(" with (publish_via_partition_root = true)");
     query
 }
 
+/// Builds an `ALTER PUBLICATION ... SET TABLE` statement.
 fn update_publication_query(publication: &Publication) -> String {
-    let mut query = String::new();
+    let mut query = String::with_capacity(publication_query_capacity(publication));
     query.push_str("alter publication ");
     query.push_str(&quote_identifier(&publication.name));
     query.push_str(" set table only ");
@@ -145,10 +159,12 @@ fn update_publication_query(publication: &Publication) -> String {
     query
 }
 
+/// Builds a `DROP PUBLICATION IF EXISTS` statement.
 fn drop_publication_query(publication_name: &str) -> String {
     format!("drop publication if exists {}", quote_identifier(publication_name))
 }
 
+/// Appends a comma-separated list of quoted qualified table names.
 fn push_qualified_tables(query: &mut String, tables: &[Table]) {
     for (i, table) in tables.iter().enumerate() {
         query.push_str(&quote_identifier(&table.schema));
@@ -159,6 +175,16 @@ fn push_qualified_tables(query: &mut String, tables: &[Table]) {
             query.push(',');
         }
     }
+}
+
+/// Estimates the capacity needed for publication DDL.
+fn publication_query_capacity(publication: &Publication) -> usize {
+    let table_name_bytes = publication
+        .tables
+        .iter()
+        .map(|table| table.schema.len() + table.name.len() + 4)
+        .sum::<usize>();
+    publication.name.len() + table_name_bytes + 96
 }
 
 #[cfg(test)]

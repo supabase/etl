@@ -13,7 +13,7 @@ use tokio_postgres::{
 };
 use tracing::{error, info};
 
-use crate::tokio::MakeRustlsConnect;
+use crate::{store, tokio::MakeRustlsConnect};
 
 /// Source-side Postgres client errors.
 #[derive(Debug, Error)]
@@ -29,6 +29,14 @@ pub enum PgSourceError {
     /// A trusted root certificate failed PEM parsing.
     #[error("Invalid trusted root certificate: {0}")]
     Pem(#[from] rustls::pki_types::pem::Error),
+
+    /// A destination table schema status value was invalid.
+    #[error(transparent)]
+    DestinationTableSchemaStatus(#[from] store::DestinationTableSchemaStatusParseError),
+
+    /// A table replication state value was invalid.
+    #[error(transparent)]
+    TableReplicationState(#[from] store::TableReplicationStateTypeParseError),
 
     /// Source data could not be decoded into the expected type.
     #[error("Invalid source data: {0}")]
@@ -47,6 +55,7 @@ impl From<rustls::Error> for PgSourceError {
     }
 }
 
+/// Builds a rustls client configuration from source connection settings.
 fn tls_config(config: &PgConnectionConfig) -> Result<ClientConfig, PgSourceError> {
     let mut root_store = rustls::RootCertStore::empty();
     for cert in CertificateDer::pem_slice_iter(config.tls.trusted_root_certs.as_bytes()) {
@@ -56,6 +65,7 @@ fn tls_config(config: &PgConnectionConfig) -> Result<ClientConfig, PgSourceError
     Ok(ClientConfig::builder().with_root_certificates(root_store).with_no_client_auth())
 }
 
+/// Spawns the tokio-postgres connection driver task.
 fn spawn_connection<T>(connection: Connection<Socket, T::Stream>)
 where
     T: MakeTlsConnect<Socket>,

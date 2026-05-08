@@ -8,11 +8,15 @@ use actix_web::{
 };
 use etl::state::table::{RetryPolicy, TableReplicationPhase};
 use etl_postgres::{
-    lag::SlotLagMetrics as PgSlotLagMetrics,
+    lag::SlotLagMetrics,
     tokio::{
         PgSourceError,
-        db::{self as pg_db, TableLookupError},
-        health, lag as pg_lag, store as pg_store,
+        db::{TableLookupError, table_names_from_table_ids},
+        health,
+        lag::pipeline_lag_metrics,
+        store::{
+            reset_replication_state, rollback_replication_state, table_replication_state_rows,
+        },
     },
     types::TableId,
 };
@@ -171,9 +175,7 @@ impl PipelineError {
             PipelineError::SourcesDb(SourcesDbError::Database(_))
             | PipelineError::DestinationsDb(DestinationsDbError::Database(_))
             | PipelineError::PipelinesDb(
-                PipelinesDbError::Database(_)
-                | PipelinesDbError::Source(_)
-                | PipelinesDbError::ReplicationSlot(_),
+                PipelinesDbError::Database(_) | PipelinesDbError::Source(_),
             )
             | PipelineError::ReplicatorsDb(ReplicatorsDbError::Database(_))
             | PipelineError::ImagesDb(ImagesDbError::Database(_))
@@ -400,8 +402,8 @@ pub struct SlotLagMetricsResponse {
     pub flush_lag: Option<i64>,
 }
 
-impl From<PgSlotLagMetrics> for SlotLagMetricsResponse {
-    fn from(metrics: PgSlotLagMetrics) -> Self {
+impl From<SlotLagMetrics> for SlotLagMetricsResponse {
+    fn from(metrics: SlotLagMetrics) -> Self {
         Self {
             restart_lsn_bytes: metrics.restart_lsn_bytes,
             confirmed_flush_lsn_bytes: metrics.confirmed_flush_lsn_bytes,
@@ -1123,13 +1125,13 @@ pub(crate) async fn get_pipeline_replication_status(
     }
 
     // Fetch replication state for all tables in this pipeline
-    let state_rows = pg_store::table_replication_state_rows(&source_txn, pipeline_id).await?;
-    let mut lag_metrics = pg_lag::pipeline_lag_metrics(&source_txn, pipeline_id).await?;
+    let state_rows = table_replication_state_rows(&source_txn, pipeline_id).await?;
+    let mut lag_metrics = pipeline_lag_metrics(&source_txn, pipeline_id).await?;
     let apply_lag = lag_metrics.apply.map(Into::into);
 
     // Collect all table IDs and fetch their names in a single batch query
     let table_ids: Vec<TableId> = state_rows.iter().map(|row| row.table_id).collect();
-    let table_names = pg_db::table_names_from_table_ids(&source_txn, &table_ids).await?;
+    let table_names = table_names_from_table_ids(&source_txn, &table_ids).await?;
 
     // Convert database states to UI-friendly format
     let mut tables: Vec<TableReplicationStatus> = Vec::with_capacity(state_rows.len());
@@ -1218,7 +1220,7 @@ pub(crate) async fn rollback_tables(
     }
 
     // Get all table states for this pipeline
-    let state_rows = pg_store::table_replication_state_rows(&source_txn, pipeline_id).await?;
+    let state_rows = table_replication_state_rows(&source_txn, pipeline_id).await?;
 
     // Determine which tables to rollback based on target
     let target_table_ids: Vec<u32> = match &rollback_request.target {
@@ -1268,12 +1270,9 @@ pub(crate) async fn rollback_tables(
     for table_id in target_table_ids {
         let new_state_row = match rollback_type {
             RollbackType::Individual => {
-                let Some(new_state_row) = pg_store::rollback_replication_state(
-                    &source_txn,
-                    pipeline_id,
-                    TableId::new(table_id),
-                )
-                .await?
+                let Some(new_state_row) =
+                    rollback_replication_state(&source_txn, pipeline_id, TableId::new(table_id))
+                        .await?
                 else {
                     return Err(PipelineError::NotRollbackable(format!(
                         "No previous state to rollback to for table {table_id}",
@@ -1283,8 +1282,7 @@ pub(crate) async fn rollback_tables(
                 new_state_row
             }
             RollbackType::Full => {
-                pg_store::reset_replication_state(&source_txn, pipeline_id, TableId::new(table_id))
-                    .await?
+                reset_replication_state(&source_txn, pipeline_id, TableId::new(table_id)).await?
             }
         };
 

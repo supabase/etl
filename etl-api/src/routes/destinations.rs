@@ -64,9 +64,7 @@ impl DestinationError {
             // Do not expose internal database details in error messages.
             DestinationError::DestinationsDb(DestinationsDbError::Database(_))
             | DestinationError::PipelinesDb(
-                PipelinesDbError::Database(_)
-                | PipelinesDbError::Source(_)
-                | PipelinesDbError::ReplicationSlot(_),
+                PipelinesDbError::Database(_) | PipelinesDbError::Source(_),
             )
             | DestinationError::K8sCore(_) => "Internal server error".to_owned(),
             // Do not expose validation error details as they may contain credential info.

@@ -5,6 +5,9 @@ use crate::{
 };
 
 /// Reads pipeline lag metrics.
+///
+/// Returns aggregated lag metrics for the apply worker slot and each table sync
+/// slot associated with the pipeline.
 pub async fn pipeline_lag_metrics(
     txn: &PgSourceTransaction<'_>,
     pipeline_id: i64,
@@ -25,7 +28,7 @@ pub async fn pipeline_lag_metrics(
                 s.slot_name,
                 coalesce(pg_wal_lsn_diff(pg_current_wal_lsn(), s.restart_lsn), 0)::bigint as restart_lsn_bytes,
                 coalesce(pg_wal_lsn_diff(pg_current_wal_lsn(), s.confirmed_flush_lsn), 0)::bigint as confirmed_flush_lsn_bytes,
-                coalesce(s.safe_wal_size, 0)::bigint as safe_wal_size_bytes,
+                coalesce(s.safe_wal_size, 0) as safe_wal_size_bytes,
                 round(extract(epoch from r.write_lag) * 1000)::bigint as write_lag_ms,
                 round(extract(epoch from r.flush_lag) * 1000)::bigint as flush_lag_ms
             from pg_replication_slots as s

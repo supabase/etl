@@ -1,6 +1,8 @@
 use crate::tokio::{PgSourceError, PgSourceTransaction, health, store};
 
 /// Deletes all source-side metadata for a pipeline.
+///
+/// Deletion is skipped when the ETL metadata tables are not installed.
 pub async fn delete_pipeline_source_state(
     txn: &PgSourceTransaction<'_>,
     pipeline_id: i64,
@@ -15,6 +17,8 @@ pub async fn delete_pipeline_source_state(
 }
 
 /// Deletes all source-side metadata for multiple pipelines.
+///
+/// Returns the pipeline IDs whose cleanup completed successfully.
 pub async fn delete_pipelines_source_state(
     txn: &PgSourceTransaction<'_>,
     pipeline_ids: &[i64],
@@ -29,6 +33,9 @@ pub async fn delete_pipelines_source_state(
 }
 
 /// Uninstalls current-user-owned ETL source objects.
+///
+/// Drops the event trigger and `etl` schema only when the current user owns
+/// them, leaving objects owned by other roles untouched.
 pub async fn uninstall_source_installation(
     txn: &PgSourceTransaction<'_>,
 ) -> Result<(), PgSourceError> {

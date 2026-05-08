@@ -14,6 +14,32 @@ pub enum DestinationTableSchemaStatus {
     Applied,
 }
 
+impl From<etl_postgres::store::DestinationTableSchemaStatus> for DestinationTableSchemaStatus {
+    fn from(value: etl_postgres::store::DestinationTableSchemaStatus) -> Self {
+        match value {
+            etl_postgres::store::DestinationTableSchemaStatus::Applying => {
+                DestinationTableSchemaStatus::Applying
+            }
+            etl_postgres::store::DestinationTableSchemaStatus::Applied => {
+                DestinationTableSchemaStatus::Applied
+            }
+        }
+    }
+}
+
+impl From<DestinationTableSchemaStatus> for etl_postgres::store::DestinationTableSchemaStatus {
+    fn from(value: DestinationTableSchemaStatus) -> Self {
+        match value {
+            DestinationTableSchemaStatus::Applying => {
+                etl_postgres::store::DestinationTableSchemaStatus::Applying
+            }
+            DestinationTableSchemaStatus::Applied => {
+                etl_postgres::store::DestinationTableSchemaStatus::Applied
+            }
+        }
+    }
+}
+
 /// Unified metadata for a table at a destination.
 ///
 /// Tracks all destination-related state for a replicated table in a single

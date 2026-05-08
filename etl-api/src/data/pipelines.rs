@@ -1,9 +1,6 @@
 use std::ops::DerefMut;
 
-use etl_postgres::tokio::{
-    PgSourceClient, PgSourceError, PgSourceTransaction, cleanup,
-    slots::{self, ReplicationSlotOperationError},
-};
+use etl_postgres::tokio::{PgSourceClient, PgSourceError, PgSourceTransaction, cleanup, slots};
 use sqlx::{FromRow, PgConnection, PgExecutor, PgTransaction};
 use thiserror::Error;
 
@@ -66,20 +63,11 @@ pub enum PipelinesDbError {
 
     #[error("Source database operation failed: {0}")]
     Source(#[source] Box<PgSourceError>),
-
-    #[error("Replication slot operation failed: {0}")]
-    ReplicationSlot(#[source] Box<ReplicationSlotOperationError>),
 }
 
 impl From<PgSourceError> for PipelinesDbError {
     fn from(error: PgSourceError) -> Self {
         Self::Source(Box::new(error))
-    }
-}
-
-impl From<ReplicationSlotOperationError> for PipelinesDbError {
-    fn from(error: ReplicationSlotOperationError) -> Self {
-        Self::ReplicationSlot(Box::new(error))
     }
 }
 
@@ -278,7 +266,7 @@ pub async fn delete_pipelines_source_state(
     source_txn: &PgSourceTransaction<'_>,
     pipelines: &[PipelineDeletion],
 ) -> Result<Vec<i64>, PipelinesDbError> {
-    let pipeline_ids = pipelines.iter().map(|pipeline| pipeline.id).collect::<Vec<_>>();
+    let pipeline_ids: Vec<_> = pipelines.iter().map(|pipeline| pipeline.id).collect();
     Ok(cleanup::delete_pipelines_source_state(source_txn, &pipeline_ids).await?)
 }
 

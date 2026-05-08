@@ -2,29 +2,14 @@ use std::collections::HashMap;
 
 use crate::{
     store::{DestinationTableMetadataRow, DestinationTableSchemaStatus},
-    tokio::{PgSourceClient, PgSourceError, PgSourceTransaction},
+    tokio::{PgSourceClient, PgSourceError, PgSourceTransaction, store::parse_snapshot_id},
     types::{SnapshotId, TableId},
 };
 
-fn destination_schema_status_from_str(
-    status: &str,
-) -> Result<DestinationTableSchemaStatus, PgSourceError> {
-    match status {
-        "applying" => Ok(DestinationTableSchemaStatus::Applying),
-        "applied" => Ok(DestinationTableSchemaStatus::Applied),
-        _ => {
-            Err(PgSourceError::InvalidData(format!("Unknown destination schema status '{status}'")))
-        }
-    }
-}
-
-fn parse_snapshot_id(value: &str) -> Result<SnapshotId, PgSourceError> {
-    SnapshotId::from_pg_lsn_string(value).map_err(|err| {
-        PgSourceError::InvalidData(format!("Snapshot ID deserialization failed: {err}"))
-    })
-}
-
 /// Stores destination table metadata in the source metadata tables.
+///
+/// Uses upsert semantics: if a row already exists for `(pipeline_id,
+/// table_id)`, all metadata fields are replaced with the new values.
 #[allow(clippy::too_many_arguments)]
 pub async fn store_destination_table_metadata(
     source_client: &PgSourceClient,
@@ -38,7 +23,7 @@ pub async fn store_destination_table_metadata(
 ) -> Result<(), PgSourceError> {
     let snapshot_id = snapshot_id.to_pg_lsn_string();
     let previous_snapshot_id = previous_snapshot_id.map(SnapshotId::to_pg_lsn_string);
-    let schema_status = schema_status.as_str();
+    let schema_status: &'static str = schema_status.into();
 
     source_client
         .execute(
@@ -46,7 +31,7 @@ pub async fn store_destination_table_metadata(
             insert into etl.destination_tables_metadata
                 (pipeline_id, table_id, destination_table_id, snapshot_id,
                  previous_snapshot_id, schema_status, replication_mask)
-            values ($1, $2, $3, $4::text::pg_lsn, $5::text::pg_lsn, $6::text::etl.destination_table_schema_status, $7)
+            values ($1, $2, $3, $4::pg_lsn, $5::pg_lsn, $6::etl.destination_table_schema_status, $7)
             on conflict (pipeline_id, table_id)
             do update set
                 destination_table_id = excluded.destination_table_id,
@@ -72,6 +57,8 @@ pub async fn store_destination_table_metadata(
 }
 
 /// Loads destination table metadata from source metadata tables.
+///
+/// Returns metadata keyed by source table ID.
 pub async fn load_destination_tables_metadata(
     source_client: &PgSourceClient,
     pipeline_id: i64,
@@ -89,7 +76,7 @@ pub async fn load_destination_tables_metadata(
         )
         .await?;
 
-    let mut metadata = HashMap::new();
+    let mut metadata = HashMap::with_capacity(rows.len());
     for row in rows {
         let table_id: TableId = row.get("table_id");
         let snapshot_id = parse_snapshot_id(row.get::<_, String>("snapshot_id").as_str())?;
@@ -105,7 +92,7 @@ pub async fn load_destination_tables_metadata(
                 destination_table_id: row.get("destination_table_id"),
                 snapshot_id,
                 previous_snapshot_id,
-                schema_status: destination_schema_status_from_str(
+                schema_status: DestinationTableSchemaStatus::try_from(
                     row.get::<_, String>("schema_status").as_str(),
                 )?,
                 replication_mask: row.get("replication_mask"),

@@ -4,16 +4,11 @@ use tokio_postgres::{Row, types::PgLsn};
 
 use crate::{
     store::type_mappings::{postgres_type_to_string, string_to_postgres_type},
-    tokio::{PgSourceClient, PgSourceError, PgSourceTransaction},
+    tokio::{PgSourceClient, PgSourceError, PgSourceTransaction, store::parse_snapshot_id},
     types::{ColumnSchema, SnapshotId, TableId, TableName, TableSchema},
 };
 
-fn parse_snapshot_id(value: &str) -> Result<SnapshotId, PgSourceError> {
-    SnapshotId::from_pg_lsn_string(value).map_err(|err| {
-        PgSourceError::InvalidData(format!("Snapshot ID deserialization failed: {err}"))
-    })
-}
-
+/// Builds a [`ColumnSchema`] from a joined table schema row.
 fn parse_column_schema(row: &Row) -> ColumnSchema {
     ColumnSchema {
         name: row.get("column_name"),
@@ -26,6 +21,9 @@ fn parse_column_schema(row: &Row) -> ColumnSchema {
 }
 
 /// Stores a table schema in source metadata tables.
+///
+/// Upserts the schema row, replaces all existing column rows for that schema
+/// version, and commits both operations atomically.
 pub async fn store_table_schema(
     source_client: &mut PgSourceClient,
     pipeline_id: i64,
@@ -37,7 +35,7 @@ pub async fn store_table_schema(
         .query_one(
             r#"
             insert into etl.table_schemas (pipeline_id, table_id, schema_name, table_name, snapshot_id)
-            values ($1, $2, $3, $4, $5::text::pg_lsn)
+            values ($1, $2, $3, $4, $5::pg_lsn)
             on conflict (pipeline_id, table_id, snapshot_id)
             do update set
                 schema_name = excluded.schema_name,
@@ -56,9 +54,11 @@ pub async fn store_table_schema(
         .await?
         .get(0);
 
+    // Delete existing columns for this table schema to handle schema changes.
     tx.execute("delete from etl.table_columns where table_schema_id = $1", &[&table_schema_id])
         .await?;
 
+    // Insert all columns for the upserted schema version.
     for column_schema in &table_schema.column_schemas {
         tx.execute(
             r#"
@@ -85,6 +85,8 @@ pub async fn store_table_schema(
 }
 
 /// Loads all current table schemas for a pipeline.
+///
+/// This is equivalent to loading schemas at the maximum snapshot ID.
 pub async fn load_table_schemas(
     source_client: &PgSourceClient,
     pipeline_id: i64,
@@ -93,6 +95,9 @@ pub async fn load_table_schemas(
 }
 
 /// Loads one table schema at or before a snapshot.
+///
+/// Returns `None` if no schema version exists for the table at or before the
+/// requested snapshot.
 pub async fn load_table_schema_at_snapshot(
     source_client: &PgSourceClient,
     pipeline_id: i64,
@@ -118,7 +123,7 @@ pub async fn load_table_schema_at_snapshot(
             inner join etl.table_columns tc on ts.id = tc.table_schema_id
             where ts.id = (
                 select id from etl.table_schemas
-                where pipeline_id = $1 and table_id = $2 and snapshot_id <= $3::text::pg_lsn
+                where pipeline_id = $1 and table_id = $2 and snapshot_id <= $3::pg_lsn
                 order by snapshot_id desc
                 limit 1
             )
@@ -136,12 +141,19 @@ pub async fn load_table_schema_at_snapshot(
 }
 
 /// Loads all table schemas at or before a snapshot.
+///
+/// For each table, returns the schema version with the largest snapshot ID that
+/// is less than or equal to the requested snapshot.
 pub async fn load_table_schemas_at_snapshot(
     source_client: &PgSourceClient,
     pipeline_id: i64,
     snapshot_id: SnapshotId,
 ) -> Result<Vec<TableSchema>, PgSourceError> {
     let snapshot_id = snapshot_id.to_pg_lsn_string();
+
+    // Use DISTINCT ON to efficiently find the latest schema version for each
+    // table. PostgreSQL optimizes DISTINCT ON with ORDER BY using index scans
+    // when possible.
     let rows = source_client
         .query(
             r#"
@@ -154,7 +166,7 @@ pub async fn load_table_schemas_at_snapshot(
                     ts.snapshot_id
                 from etl.table_schemas ts
                 where ts.pipeline_id = $1
-                  and ts.snapshot_id <= $2::text::pg_lsn
+                  and ts.snapshot_id <= $2::pg_lsn
                 order by ts.table_id, ts.snapshot_id desc
             )
             select
@@ -176,7 +188,8 @@ pub async fn load_table_schemas_at_snapshot(
         )
         .await?;
 
-    let mut table_schemas = HashMap::new();
+    let row_count = rows.len();
+    let mut table_schemas = HashMap::with_capacity(row_count);
     for row in rows {
         let table_id: TableId = row.get("table_id");
         let schema_name: String = row.get("schema_name");
@@ -187,7 +200,7 @@ pub async fn load_table_schemas_at_snapshot(
             TableSchema::with_snapshot_id(
                 table_id,
                 TableName::new(schema_name, table_name),
-                vec![],
+                Vec::with_capacity(row_count),
                 snapshot_id,
             )
         });
@@ -198,6 +211,7 @@ pub async fn load_table_schemas_at_snapshot(
     Ok(table_schemas.into_values().collect())
 }
 
+/// Reconstructs a single [`TableSchema`] from ordered schema column rows.
 fn table_schema_from_rows(rows: Vec<Row>) -> Result<TableSchema, PgSourceError> {
     let first_row = rows.first().expect("table schema rows must be non-empty");
     let table_id: TableId = first_row.get("table_id");
@@ -208,7 +222,7 @@ fn table_schema_from_rows(rows: Vec<Row>) -> Result<TableSchema, PgSourceError> 
     let mut table_schema = TableSchema::with_snapshot_id(
         table_id,
         TableName::new(schema_name, table_name),
-        vec![],
+        Vec::with_capacity(rows.len()),
         snapshot_id,
     );
 
@@ -220,6 +234,9 @@ fn table_schema_from_rows(rows: Vec<Row>) -> Result<TableSchema, PgSourceError> 
 }
 
 /// Deletes obsolete table schema versions from source metadata tables.
+///
+/// For each table, keeps the newest schema version at or before that table's
+/// retention LSN and deletes older versions in one atomic statement.
 pub async fn delete_obsolete_table_schema_versions(
     source_client: &PgSourceClient,
     pipeline_id: i64,
@@ -265,6 +282,9 @@ pub async fn delete_obsolete_table_schema_versions(
 }
 
 /// Deletes all table schemas for a pipeline.
+///
+/// Column rows are removed by the `table_columns.table_schema_id`
+/// `ON DELETE CASCADE` constraint.
 pub async fn delete_table_schemas_for_all_tables(
     txn: &PgSourceTransaction<'_>,
     pipeline_id: i64,
@@ -273,6 +293,9 @@ pub async fn delete_table_schemas_for_all_tables(
 }
 
 /// Deletes table schemas for one table.
+///
+/// Column rows are removed by the `table_columns.table_schema_id`
+/// `ON DELETE CASCADE` constraint.
 pub async fn delete_table_schemas(
     txn: &PgSourceTransaction<'_>,
     pipeline_id: i64,
