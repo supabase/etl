@@ -18,8 +18,8 @@ sqlx = []
 
 [dependencies]
 
-bytes = { workspace = true }
 aws-lc-rs = { workspace = true }
+bytes = { workspace = true }
 const-oid = { workspace = true, default-features = false }
 etl-config = { workspace = true }
 futures = { workspace = true }

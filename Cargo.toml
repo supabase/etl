@@ -114,19 +114,12 @@ sqlx = { version = "0.8.6", default-features = false }
 sysinfo = { version = "0.38.2", default-features = false }
 tempfile = { version = "3.23.0", default-features = false }
 thiserror = "2.0.12"
-tikv-jemalloc-ctl = { version = "0.6.0", default-features = false, features = [
-    "stats",
-] }
-tikv-jemallocator = { version = "0.6.1", default-features = false, features = [
-    "background_threads_runtime_support",
-    "unprefixed_malloc_on_supported_platforms",
-] }
+tikv-jemalloc-ctl = { version = "0.6.0", default-features = false, features = ["stats"] }
+tikv-jemallocator = { version = "0.6.1", default-features = false, features = ["background_threads_runtime_support", "unprefixed_malloc_on_supported_platforms"] }
 tokio = { version = "1.47.0", default-features = false }
 tokio-postgres = { git = "https://github.com/iambriccardo/rust-postgres", default-features = false, rev = "31acf55c7e5c2244e5bb3a36e7afa2a01bf52c38" }
 tokio-rustls = { version = "0.26.2", default-features = false }
-tokio-stream = { version = "0.1.18", default-features = false, features = [
-    "sync",
-] }
+tokio-stream = { version = "0.1.18", default-features = false, features = ["sync"] }
 tonic = { version = "0.14.2", default-features = false }
 tracing = { version = "0.1.41", default-features = false }
 tracing-actix-web = { version = "0.7.19", default-features = false }
@@ -135,9 +128,7 @@ tracing-log = { version = "0.2.0", default-features = false }
 tracing-subscriber = { version = "0.3.19", default-features = false }
 url = { version = "2.5.8", features = ["serde"] }
 utoipa = { version = "5.4.0", default-features = false }
-utoipa-swagger-ui = { version = "9.0.2", default-features = false, features = [
-    "vendored",
-] }
+utoipa-swagger-ui = { version = "9.0.2", default-features = false, features = ["vendored"] }
 uuid = { version = "1.17.0", default-features = false }
 x509-cert = { version = "0.2.2", default-features = false }
 
