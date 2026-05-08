@@ -5,6 +5,7 @@ pub mod data;
 pub mod feature_flags;
 pub mod k8s;
 pub mod routes;
+pub mod sentry_scrubbing;
 pub mod span_builder;
 pub mod startup;
 pub mod utils;

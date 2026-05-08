@@ -149,7 +149,7 @@ impl<'a> FromSql<'a> for PgNumeric {
             Err(InvalidSign(v)) => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    format!("invalid sign {v:#04x}"),
+                    format!("Invalid sign {v:#04x}"),
                 )
                 .into());
             }

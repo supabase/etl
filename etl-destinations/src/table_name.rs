@@ -36,7 +36,7 @@ fn validate_table_name_component_for_underscore_encoding(
     if value.starts_with('_') || value.ends_with('_') {
         bail!(
             ErrorKind::ValidationError,
-            "destination table name cannot use leading or trailing underscores",
+            "Destination table name cannot use leading or trailing underscores",
             format!(
                 "{component_name} '{value}' cannot start or end with '_' because underscore-based \
                  destination table naming would be ambiguous"
@@ -47,7 +47,7 @@ fn validate_table_name_component_for_underscore_encoding(
     if value.is_empty() {
         return Err(etl_error!(
             ErrorKind::ValidationError,
-            "destination table name component cannot be empty",
+            "Destination table name component cannot be empty",
             format!(
                 "{component_name} cannot be empty when building an underscore-escaped destination \
                  table name"

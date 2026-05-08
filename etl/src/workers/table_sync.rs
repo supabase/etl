@@ -57,10 +57,10 @@ fn table_sync_worker_panic_error(payload: Box<dyn Any + Send>) -> EtlError {
     } else if let Some(message) = payload.downcast_ref::<String>() {
         message.clone()
     } else {
-        "table sync worker panicked with non-string payload".to_owned()
+        "Table sync worker panicked with non-string payload".to_owned()
     };
 
-    etl_error!(ErrorKind::TableSyncWorkerPanic, "table sync worker panicked", detail)
+    etl_error!(ErrorKind::TableSyncWorkerPanic, "Table sync worker panicked", detail)
 }
 
 /// Internal state of [`TableSyncWorkerState`].
@@ -607,7 +607,7 @@ where
                 .ok_or_else(|| {
                     etl_error!(
                         ErrorKind::InvalidState,
-                        "table sync worker panic requested retry after unwinding"
+                        "Table sync worker panic requested retry after unwinding"
                     )
                 })
             }
@@ -716,7 +716,7 @@ where
         .map_err(|err| {
             etl_error!(
                 ErrorKind::InvalidState,
-                "table sync worker semaphore closed while acquiring run permit",
+                "Table sync worker semaphore closed while acquiring run permit",
                 err
             )
         })?;

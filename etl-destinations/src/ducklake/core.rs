@@ -430,7 +430,7 @@ where
             return Err(etl_error!(
                 ErrorKind::ConfigError,
                 "DuckLake pool size must be greater than zero",
-                "pool_size must be at least 1"
+                "Pool size must be at least 1"
             ));
         }
 
@@ -588,8 +588,8 @@ where
                     .ok_or_else(|| {
                         etl_error!(
                             ErrorKind::DestinationError,
-                            "Ducklake initialization failed",
-                            "maintenance worker should exist before metrics sampler"
+                            "DuckLake initialization failed",
+                            "Maintenance worker should exist before metrics sampler"
                         )
                     })?
                     .notification_tx

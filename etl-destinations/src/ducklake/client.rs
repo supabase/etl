@@ -241,7 +241,7 @@ impl DuckLakeConnectionError {
 
     /// Creates one connection validation error.
     fn validation(error: duckdb::Error) -> Self {
-        Self { message: format!("ducklake duckdb connection validation failed: {error}") }
+        Self { message: format!("DuckLake DuckDB connection validation failed: {error}") }
     }
 }
 
@@ -510,7 +510,7 @@ pub(super) fn duckdb_blocking_timeout_error(
         ErrorKind::DestinationQueryFailed,
         "DuckLake blocking operation timed out",
         format!(
-            "operation_kind={}, stage={stage}, timeout_ms={}",
+            "Operation kind={}, stage={stage}, timeout_ms={}",
             operation_kind.as_str(),
             timeout.as_millis()
         )

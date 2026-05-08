@@ -115,7 +115,7 @@ async fn state_store_operations() {
         reason: "Test error".to_owned(),
         solution: Some("Test solution".to_owned()),
         retry_policy: RetryPolicy::ManualRetry,
-        source_err: etl_error!(ErrorKind::Unknown, "test error"),
+        source_err: etl_error!(ErrorKind::Unknown, "Test error"),
     };
     store.update_table_replication_state(table_id, errored_phase.clone()).await.unwrap();
 
@@ -716,7 +716,7 @@ async fn errored_state_with_different_retry_policies() {
         reason: "Fatal error".to_owned(),
         solution: None,
         retry_policy: RetryPolicy::NoRetry,
-        source_err: etl_error!(ErrorKind::Unknown, "test error"),
+        source_err: etl_error!(ErrorKind::Unknown, "Test error"),
     };
     store.update_table_replication_state(table_id, errored_no_retry.clone()).await.unwrap();
 
@@ -729,7 +729,7 @@ async fn errored_state_with_different_retry_policies() {
         reason: "Temporary error".to_owned(),
         solution: Some("Wait and retry".to_owned()),
         retry_policy: RetryPolicy::TimedRetry { next_retry },
-        source_err: etl_error!(ErrorKind::Unknown, "test error"),
+        source_err: etl_error!(ErrorKind::Unknown, "Test error"),
     };
     store.update_table_replication_state(table_id, errored_timed_retry.clone()).await.unwrap();
 

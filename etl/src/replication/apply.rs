@@ -1211,7 +1211,7 @@ where
         if changed.is_err() {
             return Err(etl_error!(
                 ErrorKind::SourceConnectionFailed,
-                "postgresql connection updates ended during the apply loop"
+                "PostgreSQL connection updates ended during the apply loop"
             ));
         }
 
@@ -1220,11 +1220,11 @@ where
             PostgresConnectionUpdate::Running => Ok(()),
             PostgresConnectionUpdate::Terminated => Err(etl_error!(
                 ErrorKind::SourceConnectionFailed,
-                "postgresql connection terminated during the apply loop"
+                "PostgreSQL connection terminated during the apply loop"
             )),
             PostgresConnectionUpdate::Errored { error } => Err(etl_error!(
                 ErrorKind::SourceConnectionFailed,
-                "postgresql connection errored during the apply loop",
+                "PostgreSQL connection errored during the apply loop",
                 error.to_string()
             )),
         }
@@ -3303,7 +3303,7 @@ mod apply_worker {
         let state = ctx.pool.get_active_worker_state(table_id).await.ok_or_else(|| {
             etl_error!(
                 ErrorKind::InvalidState,
-                "table sync worker state missing while marking table errored",
+                "Table sync worker state missing while marking table errored",
                 format!("table_id={table_id}")
             )
         })?;

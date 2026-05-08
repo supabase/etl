@@ -1,19 +1,14 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use etl_api::config::ApiConfig;
+use etl_api::{
+    config::ApiConfig,
+    sentry_scrubbing::{SENSITIVE_ENDPOINT_TAG, SENSITIVE_ENDPOINT_TAG_VALUE},
+};
 use etl_config::{Environment, load_config};
 use secrecy::ExposeSecret;
 use sentry::protocol::{Event, Request};
 use tracing::debug;
-
-const SENSITIVE_ENDPOINT_PATHS: &[&str] = &[
-    "/v1/tenants-sources",
-    "/v1/sources",
-    "/v1/destinations",
-    "/v1/destinations-pipelines",
-    "/v1/pipelines",
-];
 
 /// Initializes Sentry error tracking and performance monitoring for the API.
 ///
@@ -64,10 +59,6 @@ fn sample_trace_rate(ctx: &sentry::TransactionContext) -> f32 {
         })
         .unwrap_or(transaction_name);
 
-    if is_sensitive_endpoint_path(endpoint) {
-        return 0.0;
-    }
-
     match endpoint {
         "/metrics" | "/health_check" => 0.001,
         _ => 0.01,
@@ -93,32 +84,10 @@ fn scrub_sensitive_event_payloads(mut event: Event<'static>) -> Event<'static> {
 
 /// Returns whether a Sentry event is for an endpoint that can carry secrets.
 fn is_sensitive_event(event: &Event<'_>) -> bool {
-    event.request.as_ref().is_some_and(is_sensitive_request)
-        || event.transaction.as_deref().is_some_and(is_sensitive_transaction)
-}
-
-/// Returns whether a request points to a route that can carry secrets.
-fn is_sensitive_request(request: &Request) -> bool {
-    request.url.as_ref().is_some_and(|url| is_sensitive_endpoint_path(url.path()))
-}
-
-/// Returns whether a transaction name points to a route that can carry secrets.
-fn is_sensitive_transaction(transaction: &str) -> bool {
-    transaction.split_once(' ').is_some_and(|(_, path)| is_sensitive_endpoint_path(path))
-}
-
-/// Returns whether a path belongs to a route that can carry secrets.
-fn is_sensitive_endpoint_path(path: &str) -> bool {
-    SENSITIVE_ENDPOINT_PATHS.contains(&path)
-        || has_path_prefix(path, "/v1/sources/")
-        || has_path_prefix(path, "/v1/destinations/")
-        || has_path_prefix(path, "/v1/destinations-pipelines/")
-        || has_path_prefix(path, "/v1/pipelines/")
-}
-
-/// Returns whether the path has a non-empty suffix after the prefix.
-fn has_path_prefix(path: &str, prefix: &str) -> bool {
-    path.strip_prefix(prefix).is_some_and(|suffix| !suffix.is_empty())
+    event
+        .tags
+        .get(SENSITIVE_ENDPOINT_TAG)
+        .is_some_and(|value| value == SENSITIVE_ENDPOINT_TAG_VALUE)
 }
 
 /// Removes payload and credential-bearing request data.
@@ -162,9 +131,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn scrub_sensitive_event_payloads_removes_payloads_for_tenant_source_route() {
-        let mut event =
-            Event { request: Some(request_for_path("/v1/tenants-sources")), ..Default::default() };
+    fn scrub_sensitive_event_payloads_removes_payloads_for_tagged_route() {
+        let mut event = sensitive_event(request_for_path("/v1/tenants-sources"));
         event.extra.insert("request_body".to_owned(), Value::String("secret".to_owned()));
         event.extra.insert("response.body".to_owned(), Value::String("secret".to_owned()));
         event.extra.insert("tenant_id".to_owned(), Value::String("project".to_owned()));
@@ -189,7 +157,7 @@ mod tests {
     }
 
     #[test]
-    fn scrub_sensitive_event_payloads_keeps_payloads_for_non_sensitive_route() {
+    fn scrub_sensitive_event_payloads_keeps_payloads_for_untagged_route() {
         let event = Event { request: Some(request_for_path("/v1/images")), ..Default::default() };
 
         let event = scrub_sensitive_event_payloads(event);
@@ -202,46 +170,28 @@ mod tests {
     }
 
     #[test]
-    fn sensitive_endpoint_path_matches_config_routes() {
-        assert!(is_sensitive_endpoint_path("/v1/tenants-sources"));
-        assert!(is_sensitive_endpoint_path("/v1/sources"));
-        assert!(is_sensitive_endpoint_path("/v1/sources/42"));
-        assert!(is_sensitive_endpoint_path("/v1/sources/42/publications"));
-        assert!(is_sensitive_endpoint_path("/v1/sources/42/publications/my_pub"));
-        assert!(is_sensitive_endpoint_path("/v1/sources/42/tables"));
-        assert!(is_sensitive_endpoint_path("/v1/destinations"));
-        assert!(is_sensitive_endpoint_path("/v1/destinations/42"));
-        assert!(is_sensitive_endpoint_path("/v1/destinations-pipelines"));
-        assert!(is_sensitive_endpoint_path("/v1/destinations-pipelines/42/43"));
-        assert!(is_sensitive_endpoint_path("/v1/pipelines"));
-        assert!(is_sensitive_endpoint_path("/v1/pipelines/42"));
-        assert!(is_sensitive_endpoint_path("/v1/pipelines/42/start"));
-        assert!(is_sensitive_endpoint_path("/v1/pipelines/42/replication-status"));
-        assert!(is_sensitive_endpoint_path("/v1/pipelines/validate"));
-    }
-
-    #[test]
-    fn sensitive_endpoint_path_ignores_unrelated_routes() {
-        assert!(!is_sensitive_endpoint_path("/v1/images"));
-        assert!(!is_sensitive_endpoint_path("/v1/tenants"));
-        assert!(!is_sensitive_endpoint_path("/health_check"));
-    }
-
-    #[test]
-    fn sensitive_event_can_match_transaction_without_request() {
-        let event = Event {
-            transaction: Some("POST /v1/sources/{source_id}".to_owned()),
-            ..Default::default()
-        };
+    fn sensitive_event_matches_sentry_scope_tag() {
+        let event = sensitive_event(request_for_path("/v1/sources"));
 
         assert!(is_sensitive_event(&event));
     }
 
     #[test]
-    fn sample_trace_rate_disables_sensitive_endpoint_transactions() {
+    fn sensitive_event_ignores_untagged_event() {
+        let event = Event {
+            request: Some(request_for_path("/v1/sources")),
+            transaction: Some("POST /v1/sources".to_owned()),
+            ..Default::default()
+        };
+
+        assert!(!is_sensitive_event(&event));
+    }
+
+    #[test]
+    fn sample_trace_rate_keeps_default_rate_for_api_transactions() {
         let ctx = sentry::TransactionContext::new("POST /v1/tenants-sources", "http.server");
 
-        assert_eq!(sample_trace_rate(&ctx), 0.0);
+        assert_eq!(sample_trace_rate(&ctx), 0.01);
     }
 
     #[test]
@@ -249,6 +199,12 @@ mod tests {
         let ctx = sentry::TransactionContext::new("GET /health_check", "http.server");
 
         assert_eq!(sample_trace_rate(&ctx), 0.001);
+    }
+
+    fn sensitive_event(request: Request) -> Event<'static> {
+        let mut event = Event { request: Some(request), ..Default::default() };
+        event.tags.insert(SENSITIVE_ENDPOINT_TAG.to_owned(), SENSITIVE_ENDPOINT_TAG_VALUE.into());
+        event
     }
 
     fn request_for_path(path: &str) -> Request {

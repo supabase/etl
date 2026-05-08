@@ -1078,16 +1078,16 @@ mod tests {
 
     #[test]
     fn error_source_preserved() {
-        let io_err = std::io::Error::other("boom");
+        let io_err = std::io::Error::other("Boom");
         let err = EtlError::from(io_err);
         let source = err.source().expect("missing source");
-        assert_eq!(source.to_string(), "boom");
+        assert_eq!(source.to_string(), "Boom");
     }
 
     #[test]
     fn many_forwards_source() {
-        let inner = EtlError::from(std::io::Error::other("inner failure"));
-        let outer: EtlError = vec![inner.clone(), EtlError::from((ErrorKind::Unknown, "x"))].into();
+        let inner = EtlError::from(std::io::Error::other("Inner failure"));
+        let outer: EtlError = vec![inner.clone(), EtlError::from((ErrorKind::Unknown, "X"))].into();
         let source = outer.source().expect("missing aggregate source");
         assert_eq!(source.to_string(), inner.to_string());
     }
@@ -1117,11 +1117,11 @@ mod tests {
         let err = etl_error!(
             ErrorKind::IoError,
             "I/O failure",
-            "disk unavailable",
-            source: std::io::Error::other("disk unavailable")
+            "Disk unavailable",
+            source: std::io::Error::other("Disk unavailable")
         );
         let source = err.source().expect("missing macro source");
-        assert_eq!(source.to_string(), "disk unavailable");
+        assert_eq!(source.to_string(), "Disk unavailable");
     }
 
     #[test]
@@ -1143,7 +1143,7 @@ mod tests {
             bail!(
                 ErrorKind::IoError,
                 "Test error with source",
-                source: std::io::Error::other("socket closed")
+                source: std::io::Error::other("Socket closed")
             );
         }
 
@@ -1168,7 +1168,7 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert_eq!(err.kind(), ErrorKind::IoError);
-        assert_eq!(err.source().expect("missing bail source").to_string(), "socket closed");
+        assert_eq!(err.source().expect("missing bail source").to_string(), "Socket closed");
     }
 
     #[test]

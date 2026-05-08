@@ -107,7 +107,7 @@ where
                 if changed.is_err() {
                     return Err(etl_error!(
                         ErrorKind::SourceConnectionFailed,
-                        "postgresql connection updates ended during table copy"
+                        "PostgreSQL connection updates ended during table copy"
                     ));
                 }
 
@@ -117,13 +117,13 @@ where
                     PostgresConnectionUpdate::Terminated => {
                         return Err(etl_error!(
                             ErrorKind::SourceConnectionFailed,
-                            "postgresql connection terminated during table copy"
+                            "PostgreSQL connection terminated during table copy"
                         ));
                     }
                     PostgresConnectionUpdate::Errored { error } => {
                         return Err(etl_error!(
                             ErrorKind::SourceConnectionFailed,
-                            "postgresql connection errored during table copy",
+                            "PostgreSQL connection errored during table copy",
                             error.to_string()
                         ));
                     }

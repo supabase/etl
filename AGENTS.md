@@ -123,9 +123,9 @@
 - For table replication phase logs, always use
   `table_replication_phase_type` for one phase and
   `table_replication_phase_types` for lists.
-- For Sentry, disable or scrub request/response body capture on sensitive API
-  endpoints such as source, destination, tenant-source, destination-pipeline,
-  and pipeline create/update routes.
+- For Sentry, wrap sensitive API route groups with the sensitive Sentry scope
+  marker and scrub request/response body capture from marked events. Do not
+  duplicate route sensitivity with separate path matchers in the scrubber.
 
 ## Testing
 - Tests run via `cargo-nextest` (process-per-test). Use `cargo xtask nextest run` for the full sharded suite, or `cargo nextest run` for single-crate runs.

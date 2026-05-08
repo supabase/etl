@@ -126,7 +126,7 @@ impl DestinationPipelineError {
             | DestinationPipelineError::PipelinesDb(PipelinesDbError::Database(_))
             | DestinationPipelineError::Database(_)
             | DestinationPipelineError::Validation(_)
-            | DestinationPipelineError::K8sCore(_) => "internal server error".to_owned(),
+            | DestinationPipelineError::K8sCore(_) => "Internal server error".to_owned(),
             // Every other message is ok, as they do not divulge sensitive information.
             e => e.to_string(),
         }

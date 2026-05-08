@@ -2065,7 +2065,7 @@ fn maybe_fail_after_atomic_batch_commit_for_tests(table_name: &str) -> EtlResult
         *fail_table = None;
         return Err(etl_error!(
             ErrorKind::DestinationQueryFailed,
-            "ducklake test hook injected post-commit failure"
+            "DuckLake test hook injected post-commit failure"
         ));
     }
 
@@ -2081,7 +2081,7 @@ fn maybe_fail_after_copy_batch_commit_for_tests(table_name: &str) -> EtlResult<(
         *fail_table = None;
         return Err(etl_error!(
             ErrorKind::DestinationQueryFailed,
-            "ducklake test hook injected copy post-commit failure"
+            "DuckLake test hook injected copy post-commit failure"
         ));
     }
 

@@ -17,7 +17,7 @@ pub enum ParseDucklakeUrlError {
     Parse(#[source] url::ParseError),
 
     /// Converting a filesystem path into a `file://` URL failed.
-    #[error("failed to convert path `{}` to a file url", .0.display())]
+    #[error("Failed to convert path `{}` to a file url", .0.display())]
     FilePath(PathBuf),
 }
 

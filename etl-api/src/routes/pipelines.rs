@@ -169,7 +169,7 @@ impl PipelineError {
             | PipelineError::Database(_)
             | PipelineError::Validation(
                 ValidationError::TrustedRootCerts(_) | ValidationError::Environment(_),
-            ) => "internal server error".to_owned(),
+            ) => "Internal server error".to_owned(),
             // Do not expose validation error details as they may contain credential info.
             PipelineError::Validation(ValidationError::BigQuery(_)) => {
                 "BigQuery validation failed".to_owned()
@@ -178,7 +178,7 @@ impl PipelineError {
                 "Iceberg validation failed".to_owned()
             }
             PipelineError::Validation(ValidationError::Database(_)) => {
-                "database validation failed".to_owned()
+                "Database validation failed".to_owned()
             }
             // Every other message is ok, as they do not divulge sensitive information.
             e => e.to_string(),

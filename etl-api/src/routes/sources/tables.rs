@@ -47,7 +47,7 @@ impl TableError {
             // Do not expose internal database details in error messages
             TableError::SourcesDb(SourcesDbError::Database(_))
             | TableError::TablesDb(TablesDbError::Database(_))
-            | TableError::Database(_) => "internal server error".to_owned(),
+            | TableError::Database(_) => "Internal server error".to_owned(),
             // Every other message is ok, as they do not divulge sensitive information
             e => e.to_string(),
         }
