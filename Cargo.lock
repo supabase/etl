@@ -2172,6 +2172,7 @@ dependencies = [
  "clap",
  "etl",
  "etl-destinations",
+ "reqwest",
  "rustls",
  "tokio",
  "tracing",
