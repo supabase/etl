@@ -19,7 +19,6 @@ pub enum TableReplicationStateType {
 
 impl TableReplicationStateType {
     /// Returns the Postgres enum value for this state.
-    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Init => "init",

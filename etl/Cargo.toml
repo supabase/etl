@@ -21,7 +21,7 @@ byteorder = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
 etl-config = { workspace = true }
-etl-postgres = { workspace = true, features = ["tokio", "replication"] }
+etl-postgres = { workspace = true, features = ["tokio"] }
 fail = { workspace = true }
 futures = { workspace = true }
 metrics = { workspace = true }
@@ -41,7 +41,7 @@ tracing = { workspace = true, default-features = true }
 uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]
-etl-postgres = { workspace = true, features = ["tokio", "replication", "test-utils"] }
+etl-postgres = { workspace = true, features = ["tokio", "test-utils"] }
 etl-telemetry = { workspace = true }
 
 [[test]]

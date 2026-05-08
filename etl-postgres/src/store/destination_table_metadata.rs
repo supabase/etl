@@ -11,7 +11,6 @@ pub enum DestinationTableSchemaStatus {
 
 impl DestinationTableSchemaStatus {
     /// Returns the Postgres enum value for this status.
-    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Applying => "applying",

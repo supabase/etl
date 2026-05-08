@@ -15,8 +15,6 @@ doctest = false
 test-utils = []
 tokio = []
 sqlx = []
-bigquery = []
-replication = ["tokio"]
 
 [dependencies]
 

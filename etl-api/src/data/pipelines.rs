@@ -65,10 +65,22 @@ pub enum PipelinesDbError {
     ReplicatorsDb(#[from] ReplicatorsDbError),
 
     #[error("Source database operation failed: {0}")]
-    Source(#[from] PgSourceError),
+    Source(#[source] Box<PgSourceError>),
 
     #[error("Replication slot operation failed: {0}")]
-    ReplicationSlot(#[from] ReplicationSlotOperationError),
+    ReplicationSlot(#[source] Box<ReplicationSlotOperationError>),
+}
+
+impl From<PgSourceError> for PipelinesDbError {
+    fn from(error: PgSourceError) -> Self {
+        Self::Source(Box::new(error))
+    }
+}
+
+impl From<ReplicationSlotOperationError> for PipelinesDbError {
+    fn from(error: ReplicationSlotOperationError) -> Self {
+        Self::ReplicationSlot(Box::new(error))
+    }
 }
 
 pub async fn count_pipelines_for_tenant<'c, E>(

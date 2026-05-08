@@ -20,11 +20,11 @@ use crate::tokio::MakeRustlsConnect;
 pub enum PgSourceError {
     /// A database operation failed.
     #[error("Database error: {0}")]
-    Database(#[from] tokio_postgres::Error),
+    Database(#[source] Box<tokio_postgres::Error>),
 
     /// A TLS configuration or handshake operation failed.
     #[error("TLS error: {0}")]
-    Tls(#[from] rustls::Error),
+    Tls(#[source] Box<rustls::Error>),
 
     /// A trusted root certificate failed PEM parsing.
     #[error("Invalid trusted root certificate: {0}")]
@@ -33,6 +33,18 @@ pub enum PgSourceError {
     /// Source data could not be decoded into the expected type.
     #[error("Invalid source data: {0}")]
     InvalidData(String),
+}
+
+impl From<tokio_postgres::Error> for PgSourceError {
+    fn from(error: tokio_postgres::Error) -> Self {
+        Self::Database(Box::new(error))
+    }
+}
+
+impl From<rustls::Error> for PgSourceError {
+    fn from(error: rustls::Error) -> Self {
+        Self::Tls(Box::new(error))
+    }
 }
 
 fn tls_config(config: &PgConnectionConfig) -> Result<ClientConfig, PgSourceError> {

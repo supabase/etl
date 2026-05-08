@@ -12,12 +12,18 @@ use crate::{
 #[derive(Debug, Error)]
 pub enum ReplicationSlotOperationError {
     /// A source database operation failed.
-    #[error(transparent)]
-    Source(#[from] PgSourceError),
+    #[error("Source database operation failed: {0}")]
+    Source(#[source] Box<PgSourceError>),
 
     /// A slot name could not be derived or parsed.
     #[error(transparent)]
     Slot(#[from] EtlReplicationSlotError),
+}
+
+impl From<PgSourceError> for ReplicationSlotOperationError {
+    fn from(error: PgSourceError) -> Self {
+        Self::Source(Box::new(error))
+    }
 }
 
 /// Creates the pattern to match on the table sync worker replication slot and
