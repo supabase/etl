@@ -227,13 +227,6 @@ impl ShutdownState {
     }
 }
 
-/// Formats relation column names without using debug output.
-fn format_column_names(column_names: &HashSet<String>) -> String {
-    let mut column_names = column_names.iter().map(String::as_str).collect::<Vec<_>>();
-    column_names.sort_unstable();
-    column_names.join(",")
-}
-
 impl Display for ShutdownState {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -2283,6 +2276,12 @@ where
         // decode later tuple payloads.
         let replicated_columns = parse_replicated_column_names(message)?;
         let identity_columns = parse_replica_identity_column_names(message)?;
+
+        fn format_column_names(column_names: &HashSet<String>) -> String {
+            let mut column_names = column_names.iter().map(String::as_str).collect::<Vec<_>>();
+            column_names.sort_unstable();
+            column_names.join(",")
+        }
 
         info!(
             table_id = %table_id,

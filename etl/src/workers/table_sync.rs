@@ -214,17 +214,17 @@ impl TableSyncWorkerState {
     /// to state changes.
     pub(crate) async fn wait_for_phase_type(
         &self,
-        phase_types: &[TableReplicationPhaseType],
+        target_phase_types: &[TableReplicationPhaseType],
         mut shutdown_rx: ShutdownRx,
     ) -> ShutdownResult<MutexGuard<'_, TableSyncWorkerStateInner>, ()> {
         loop {
             let inner = self.inner.lock().await;
 
             let current_phase = inner.table_replication_phase.as_type();
-            if phase_types.contains(&current_phase) {
+            if target_phase_types.contains(&current_phase) {
                 info!(
                     table_id = inner.table_id.0,
-                    table_replication_phase_type = %current_phase,
+                    current_table_replication_phase_type = %current_phase,
                     "table replication phase reached",
                 );
 
@@ -233,8 +233,8 @@ impl TableSyncWorkerState {
 
             info!(
                 table_id = inner.table_id.0,
-                table_replication_phase_type = %current_phase,
-                table_replication_phase_types = %format_phase_types(phase_types),
+                current_table_replication_phase_type = %current_phase,
+                target_table_replication_phase_types = %format_phase_types(target_phase_types),
                 "waiting for table replication phase",
             );
 
@@ -253,7 +253,7 @@ impl TableSyncWorkerState {
 
                 _ = shutdown_rx.changed() => {
                     info!(
-                        table_replication_phase_types = %format_phase_types(phase_types),
+                        target_table_replication_phase_types = %format_phase_types(target_phase_types),
                         "shutdown signal received, cancelling wait for phase",
                     );
 
