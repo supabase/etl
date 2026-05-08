@@ -1,6 +1,10 @@
 use std::{collections::HashSet, fmt, num::NonZeroI32, sync::Arc, time::Duration};
 
-use etl_postgres::{below_version, replication::extract_server_version, version::POSTGRES_15};
+use etl_postgres::{
+    below_version,
+    tokio::{MakeRustlsConnect, db::extract_server_version},
+    version::POSTGRES_15,
+};
 use pg_escape::{quote_identifier, quote_literal};
 use postgres_replication::LogicalReplicationStream;
 use rustls::{
@@ -21,7 +25,6 @@ use crate::{
     error::{ErrorKind, EtlResult},
     etl_error,
     types::{ColumnSchema, PgLsn, SnapshotId, TableId, TableName, TableSchema},
-    utils::MakeRustlsConnect,
 };
 
 /// Maximum time to wait for a replication slot deletion to complete.

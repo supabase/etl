@@ -19,7 +19,7 @@ use std::{
 
 use etl_config::shared::PipelineConfig;
 use etl_postgres::{
-    replication::slots::EtlReplicationSlot,
+    slots::EtlReplicationSlot,
     types::{
         IdentityMask, ReplicatedTableSchema, ReplicationMask, SnapshotId, TableId, TableSchema,
     },

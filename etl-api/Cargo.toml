@@ -32,7 +32,7 @@ constant_time_eq = { workspace = true }
 etl = { workspace = true }
 etl-config = { workspace = true, features = ["utoipa", "supabase"] }
 etl-destinations = { workspace = true, features = ["bigquery", "clickhouse", "ducklake", "iceberg"] }
-etl-postgres = { workspace = true, features = ["replication"] }
+etl-postgres = { workspace = true, features = ["replication", "tokio"] }
 etl-telemetry = { workspace = true }
 k8s-openapi = { workspace = true, features = ["latest"] }
 kube = { workspace = true, features = ["runtime", "derive", "client", "rustls-tls"] }
@@ -47,6 +47,7 @@ serde_json = { workspace = true, features = ["std"] }
 sqlx = { workspace = true, features = ["runtime-tokio-rustls", "macros", "postgres", "json", "migrate"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tokio-postgres = { workspace = true }
 tracing = { workspace = true, default-features = false }
 tracing-actix-web = { workspace = true, features = ["emit_event_on_error"] }
 url = { workspace = true }

@@ -929,27 +929,48 @@ impl From<sqlx::Error> for EtlError {
     }
 }
 
-/// Converts [`etl_postgres::replication::slots::EtlReplicationSlotError`] to
+/// Converts [`etl_postgres::tokio::PgSourceError`] to [`EtlError`].
+impl From<etl_postgres::tokio::PgSourceError> for EtlError {
+    fn from(err: etl_postgres::tokio::PgSourceError) -> EtlError {
+        let kind = match &err {
+            etl_postgres::tokio::PgSourceError::Database(_)
+            | etl_postgres::tokio::PgSourceError::InvalidData(_) => ErrorKind::SourceQueryFailed,
+            etl_postgres::tokio::PgSourceError::Tls(_)
+            | etl_postgres::tokio::PgSourceError::Pem(_) => ErrorKind::SourceConnectionFailed,
+        };
+
+        let detail = err.to_string();
+        let source = Arc::new(err);
+        EtlError::from_components(
+            kind,
+            Cow::Borrowed("Source database operation failed"),
+            Some(Cow::Owned(detail)),
+            Some(source),
+        )
+    }
+}
+
+/// Converts [`etl_postgres::slots::EtlReplicationSlotError`] to
 /// [`EtlError`] with appropriate error kind.
-impl From<etl_postgres::replication::slots::EtlReplicationSlotError> for EtlError {
-    fn from(err: etl_postgres::replication::slots::EtlReplicationSlotError) -> EtlError {
+impl From<etl_postgres::slots::EtlReplicationSlotError> for EtlError {
+    fn from(err: etl_postgres::slots::EtlReplicationSlotError) -> EtlError {
         match err {
-            etl_postgres::replication::slots::EtlReplicationSlotError::InvalidSlotNameLength(
-                slot_name,
-            ) => EtlError::from_components(
-                ErrorKind::ValidationError,
-                Cow::Borrowed("Replication slot name exceeds maximum length"),
-                Some(Cow::Owned(slot_name)),
-                None,
-            ),
-            etl_postgres::replication::slots::EtlReplicationSlotError::InvalidSlotName(
-                slot_name,
-            ) => EtlError::from_components(
-                ErrorKind::ValidationError,
-                Cow::Borrowed("Replication slot name is invalid"),
-                Some(Cow::Owned(slot_name)),
-                None,
-            ),
+            etl_postgres::slots::EtlReplicationSlotError::InvalidSlotNameLength(slot_name) => {
+                EtlError::from_components(
+                    ErrorKind::ValidationError,
+                    Cow::Borrowed("Replication slot name exceeds maximum length"),
+                    Some(Cow::Owned(slot_name)),
+                    None,
+                )
+            }
+            etl_postgres::slots::EtlReplicationSlotError::InvalidSlotName(slot_name) => {
+                EtlError::from_components(
+                    ErrorKind::ValidationError,
+                    Cow::Borrowed("Replication slot name is invalid"),
+                    Some(Cow::Owned(slot_name)),
+                    None,
+                )
+            }
         }
     }
 }

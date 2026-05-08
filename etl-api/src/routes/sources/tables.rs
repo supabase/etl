@@ -3,6 +3,7 @@ use actix_web::{
     http::{StatusCode, header::ContentType},
     web::{Data, Json, Path},
 };
+use etl_postgres::tokio::PgSourceError;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use thiserror::Error;
@@ -35,7 +36,7 @@ enum TableError {
     TablesDb(#[from] TablesDbError),
 
     #[error("Database connection error: {0}")]
-    Database(#[from] sqlx::Error),
+    Database(#[from] PgSourceError),
 
     #[error(transparent)]
     TrustedRootCerts(#[from] TrustedRootCertsError),
@@ -110,10 +111,10 @@ pub(crate) async fn read_table_names(
         .ok_or(TableError::SourceNotFound(source_id))?;
 
     let tls_config = trusted_root_certs_cache.get_tls_config(api_config.source.tls_enabled).await?;
-    let source_pool =
+    let source_client =
         connect_to_source_database_from_api(&source_config.into_connection_config(tls_config))
             .await?;
-    let tables = data::tables::get_tables(&source_pool).await?;
+    let tables = data::tables::get_tables(&source_client).await?;
     let response = ReadTablesResponse { tables };
 
     Ok(Json(response))

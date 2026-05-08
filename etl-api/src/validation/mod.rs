@@ -4,14 +4,15 @@
 //! and runtime requirements before creating sources, destinations, or
 //! pipelines.
 
+mod source;
 mod validators;
 
 use std::fmt;
 
 use async_trait::async_trait;
 use etl_config::Environment;
+use etl_postgres::tokio::{PgSourceClient, PgSourceError};
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
 use thiserror::Error;
 use utoipa::ToSchema;
 
@@ -30,10 +31,10 @@ use crate::{
 pub struct ValidationContext {
     /// Runtime environment for environment-specific configuration.
     pub environment: Environment,
-    /// Connection pool to the source PostgreSQL database.
+    /// Client connected to the source PostgreSQL database.
     /// Required for source and pipeline validation, optional for destination
     /// validation.
-    pub source_pool: Option<PgPool>,
+    pub source_client: Option<PgSourceClient>,
     /// Trusted username used to validate the source role profile.
     pub trusted_username: Option<String>,
 }
@@ -41,7 +42,7 @@ pub struct ValidationContext {
 impl ValidationContext {
     /// Creates a new validation context builder.
     pub fn builder(environment: Environment) -> ValidationContextBuilder {
-        ValidationContextBuilder { environment, source_pool: None, trusted_username: None }
+        ValidationContextBuilder { environment, source_client: None, trusted_username: None }
     }
 
     /// Builds a [`ValidationContext`] by connecting to a source database.
@@ -52,13 +53,13 @@ impl ValidationContext {
     ) -> Result<Self, ValidationError> {
         let tls_config =
             trusted_root_certs_cache.get_tls_config(api_config.source.tls_enabled).await?;
-        let source_pool =
+        let source_client =
             connect_to_source_database_from_api(&source_config.into_connection_config(tls_config))
                 .await?;
         let environment = Environment::load()?;
 
         Ok(Self::builder(environment)
-            .source_pool(source_pool)
+            .source_client(source_client)
             .trusted_username(api_config.source.trusted_username.clone())
             .build())
     }
@@ -67,14 +68,14 @@ impl ValidationContext {
 /// Builder for constructing a [`ValidationContext`].
 pub struct ValidationContextBuilder {
     environment: Environment,
-    source_pool: Option<PgPool>,
+    source_client: Option<PgSourceClient>,
     trusted_username: Option<String>,
 }
 
 impl ValidationContextBuilder {
-    /// Sets the source database connection pool.
-    pub fn source_pool(mut self, pool: PgPool) -> Self {
-        self.source_pool = Some(pool);
+    /// Sets the source database client.
+    pub fn source_client(mut self, client: PgSourceClient) -> Self {
+        self.source_client = Some(client);
         self
     }
 
@@ -88,7 +89,7 @@ impl ValidationContextBuilder {
     pub fn build(self) -> ValidationContext {
         ValidationContext {
             environment: self.environment,
-            source_pool: self.source_pool,
+            source_client: self.source_client,
             trusted_username: self.trusted_username,
         }
     }
@@ -139,6 +140,10 @@ pub enum ValidationError {
     /// Failed to execute a database query.
     #[error("Database query failed: {0}")]
     Database(#[from] sqlx::Error),
+
+    /// Failed to execute a source database operation.
+    #[error("Source database operation failed: {0}")]
+    Source(#[from] PgSourceError),
 
     /// Failed to load trusted root certs for source connections.
     #[error(transparent)]

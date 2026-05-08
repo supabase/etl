@@ -2,7 +2,7 @@ use std::{any::Any, ops::Deref, panic::AssertUnwindSafe, sync::Arc, time::Durati
 
 use chrono::{Duration as ChronoDuration, Utc};
 use etl_config::shared::PipelineConfig;
-use etl_postgres::{replication::slots::EtlReplicationSlot, types::TableId};
+use etl_postgres::{slots::EtlReplicationSlot, types::TableId};
 use futures::FutureExt;
 use metrics::counter;
 use tokio::{

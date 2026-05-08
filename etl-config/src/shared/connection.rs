@@ -322,13 +322,16 @@ pub trait IntoConnectOptions<Output> {
 impl IntoConnectOptions<SqlxConnectOptions> for PgConnectionConfig {
     /// Creates sqlx connection options without database name.
     fn without_db(&self, options: Option<&PgConnectionOptions>) -> SqlxConnectOptions {
-        let host = self.hostaddr.map_or_else(|| self.host.clone(), |hostaddr| hostaddr.to_string());
-        let ssl_mode = match (self.tls.enabled, self.hostaddr) {
+        let host = match (self.tls.enabled, self.hostaddr) {
             // sqlx 0.8.6 does not expose libpq's separate hostaddr field. When
-            // dialing a numeric address, verify the CA but avoid hostname
-            // verification against the IP literal.
-            (true, Some(_)) => SqlxSslMode::VerifyCa,
-            (true, None) => SqlxSslMode::VerifyFull,
+            // TLS is enabled, keep the DNS hostname as the SQLx host so SNI and
+            // certificate verification use the canonical database hostname.
+            (true, _) => self.host.clone(),
+            (false, Some(hostaddr)) => hostaddr.to_string(),
+            (false, None) => self.host.clone(),
+        };
+        let ssl_mode = match (self.tls.enabled, self.hostaddr) {
+            (true, _) => SqlxSslMode::VerifyFull,
             (false, _) => SqlxSslMode::Prefer,
         };
         let mut connect_options = SqlxConnectOptions::new_without_pgpass()
@@ -477,14 +480,26 @@ mod tests {
     }
 
     #[test]
-    fn sqlx_options_use_hostaddr_as_network_target() {
+    fn sqlx_options_use_host_when_tls_is_enabled() {
         let hostaddr = "2a05:d014:1c06:5f0c:d7a9:8616:bee2:30df".parse().unwrap();
         let config = pg_connection_config(Some(hostaddr));
 
         let options: SqlxConnectOptions = config.with_db(None);
 
+        assert_eq!(options.get_host(), "db.abcdefghijklmnopqrst.supabase.co");
+        assert!(matches!(options.get_ssl_mode(), SqlxSslMode::VerifyFull));
+    }
+
+    #[test]
+    fn sqlx_options_use_hostaddr_when_tls_is_disabled() {
+        let hostaddr = "2a05:d014:1c06:5f0c:d7a9:8616:bee2:30df".parse().unwrap();
+        let mut config = pg_connection_config(Some(hostaddr));
+        config.tls = TlsConfig::disabled();
+
+        let options: SqlxConnectOptions = config.with_db(None);
+
         assert_eq!(options.get_host(), hostaddr.to_string());
-        assert!(matches!(options.get_ssl_mode(), SqlxSslMode::VerifyCa));
+        assert!(matches!(options.get_ssl_mode(), SqlxSslMode::Prefer));
     }
 
     #[test]

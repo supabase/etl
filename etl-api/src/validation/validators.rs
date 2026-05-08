@@ -12,10 +12,16 @@ use etl_destinations::{
     iceberg::{IcebergClient, S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_SECRET_ACCESS_KEY},
 };
 use secrecy::ExposeSecret;
-use sqlx::FromRow;
 use url::Url;
 
-use super::{ValidationContext, ValidationError, ValidationFailure, Validator};
+use super::{
+    ValidationContext, ValidationError, ValidationFailure, Validator,
+    source::{
+        audit_source_role, current_user, current_user_has_replication_permission,
+        publication_exists, publication_table_summary, publication_tables_with_generated_columns,
+        publication_tables_without_primary_keys, replication_slot_counts, wal_level,
+    },
+};
 use crate::configs::{
     destination::{FullApiDestinationConfig, FullApiIcebergConfig},
     pipeline::FullApiPipelineConfig,
@@ -27,22 +33,6 @@ const ETL_SCHEMA_NAME: &str = "etl";
 #[derive(Debug)]
 pub(super) struct SourceValidator;
 
-#[derive(Debug, FromRow)]
-struct SourceRoleAudit {
-    rolcanlogin: bool,
-    rolreplication: bool,
-    rolbypassrls: bool,
-    rolcreaterole: bool,
-    rolcreatedb: bool,
-    rolinherit: bool,
-    rolvaliduntil_is_null: bool,
-    etl_schema_exists: bool,
-    etl_schema_usage: Option<bool>,
-    etl_schema_create: Option<bool>,
-    controls_all_existing_etl_tables: Option<bool>,
-    can_create_schema_if_missing: Option<bool>,
-}
-
 #[async_trait]
 impl Validator for SourceValidator {
     async fn validate(
@@ -53,11 +43,10 @@ impl Validator for SourceValidator {
             return Ok(vec![]);
         };
 
-        let source_pool =
-            ctx.source_pool.as_ref().expect("source pool required for source validation");
+        let source_client =
+            ctx.source_client.as_ref().expect("source client required for source validation");
 
-        let current_user: String =
-            sqlx::query_scalar("select current_user").fetch_one(source_pool).await?;
+        let current_user = current_user(source_client).await?;
 
         if current_user != *expected_username {
             return Ok(vec![ValidationFailure::critical(
@@ -69,82 +58,7 @@ impl Validator for SourceValidator {
         // This validation is best effort: it relies on catalog metadata and
         // privilege checks to confirm the trusted role profile without running
         // invasive probes against the customer database.
-        let audit = sqlx::query_as::<_, SourceRoleAudit>(
-            r#"
-            with target as (
-              -- Load the direct role attributes for the trusted ETL user.
-              select
-                oid,
-                rolcanlogin,
-                rolreplication,
-                rolbypassrls,
-                rolcreaterole,
-                rolcreatedb,
-                rolinherit,
-                rolvaliduntil is null as rolvaliduntil_is_null
-              from pg_roles
-              where rolname = $1
-            ),
-            etl_schema as (
-              -- Check whether the etl schema already exists.
-              select oid
-              from pg_namespace
-              where nspname = $2
-            ),
-            etl_tables as (
-              -- List the existing tables in the etl schema, if present.
-              select
-                c.relowner
-              from pg_class c
-              join etl_schema s on s.oid = c.relnamespace
-              where c.relkind in ('r', 'p')
-            ),
-            etl_table_ownership as (
-              -- Determine whether the trusted role controls every existing ETL table.
-              -- pg_has_role(..., 'USAGE') means the owning role's privileges are
-              -- immediately available without requiring SET ROLE, which matches
-              -- how ETL connects and operates.
-              select
-                coalesce(bool_and(pg_has_role($1, relowner, 'USAGE')), true)
-                  as controls_all_existing_etl_tables
-              from etl_tables
-            )
-            select
-              t.rolcanlogin,
-              t.rolreplication,
-              t.rolbypassrls,
-              t.rolcreaterole,
-              t.rolcreatedb,
-              t.rolinherit,
-              t.rolvaliduntil_is_null,
-              exists(select 1 from etl_schema) as etl_schema_exists,
-              case
-                when exists(select 1 from etl_schema)
-                then has_schema_privilege($1, $2, 'USAGE')
-                else null
-              end as etl_schema_usage,
-              case
-                when exists(select 1 from etl_schema)
-                then has_schema_privilege($1, $2, 'CREATE')
-                else null
-              end as etl_schema_create,
-              case
-                when exists(select 1 from etl_schema)
-                then (select controls_all_existing_etl_tables from etl_table_ownership)
-                else null
-              end as controls_all_existing_etl_tables,
-              case
-                when not exists(select 1 from etl_schema)
-                then has_database_privilege($1, current_database(), 'CREATE')
-                else null
-              end as can_create_schema_if_missing
-            from target t
-            "#,
-        )
-        .bind(expected_username)
-        .bind(ETL_SCHEMA_NAME)
-        .fetch_optional(source_pool)
-        .await?;
+        let audit = audit_source_role(source_client, expected_username, ETL_SCHEMA_NAME).await?;
 
         let Some(audit) = audit else {
             return Ok(vec![ValidationFailure::critical(
@@ -210,14 +124,10 @@ impl Validator for PublicationExistsValidator {
         &self,
         ctx: &ValidationContext,
     ) -> Result<Vec<ValidationFailure>, ValidationError> {
-        let source_pool =
-            ctx.source_pool.as_ref().expect("source pool required for publication validation");
+        let source_client =
+            ctx.source_client.as_ref().expect("source client required for publication validation");
 
-        let exists: bool =
-            sqlx::query_scalar("select exists(select 1 from pg_publication where pubname = $1)")
-                .bind(&self.publication_name)
-                .fetch_one(source_pool)
-                .await?;
+        let exists = publication_exists(source_client, &self.publication_name).await?;
 
         if exists {
             Ok(vec![])
@@ -252,22 +162,14 @@ impl Validator for ReplicationSlotsValidator {
         &self,
         ctx: &ValidationContext,
     ) -> Result<Vec<ValidationFailure>, ValidationError> {
-        let source_pool = ctx
-            .source_pool
+        let source_client = ctx
+            .source_client
             .as_ref()
-            .expect("source pool required for replication slots validation");
+            .expect("source client required for replication slots validation");
 
-        let max_slots: i32 = sqlx::query_scalar(
-            "select setting::int from pg_settings where name = 'max_replication_slots'",
-        )
-        .fetch_one(source_pool)
-        .await?;
+        let (max_slots, used_slots) = replication_slot_counts(source_client).await?;
 
-        let used_slots: i64 = sqlx::query_scalar("select count(*) from pg_replication_slots")
-            .fetch_one(source_pool)
-            .await?;
-
-        let free_slots = max_slots as i64 - used_slots;
+        let free_slots = max_slots - used_slots;
         // We need 1 slot for the apply worker plus at most `max_table_sync_workers`
         // other slots for table sync workers.
         let required_slots = self.max_table_sync_workers as i64 + 1;
@@ -300,12 +202,10 @@ impl Validator for WalLevelValidator {
         &self,
         ctx: &ValidationContext,
     ) -> Result<Vec<ValidationFailure>, ValidationError> {
-        let source_pool =
-            ctx.source_pool.as_ref().expect("source pool required for WAL level validation");
+        let source_client =
+            ctx.source_client.as_ref().expect("source client required for WAL level validation");
 
-        let wal_level: String = sqlx::query_scalar("select current_setting('wal_level')")
-            .fetch_one(source_pool)
-            .await?;
+        let wal_level = wal_level(source_client).await?;
 
         if wal_level == "logical" {
             Ok(vec![])
@@ -331,17 +231,12 @@ impl Validator for ReplicationPermissionsValidator {
         &self,
         ctx: &ValidationContext,
     ) -> Result<Vec<ValidationFailure>, ValidationError> {
-        let source_pool = ctx
-            .source_pool
+        let source_client = ctx
+            .source_client
             .as_ref()
-            .expect("source pool required for replication permissions validation");
+            .expect("source client required for replication permissions validation");
 
-        // Check if user is superuser OR has replication privilege
-        let has_permission: bool = sqlx::query_scalar(
-            "select rolsuper or rolreplication from pg_roles where rolname = current_user",
-        )
-        .fetch_one(source_pool)
-        .await?;
+        let has_permission = current_user_has_replication_permission(source_client).await?;
 
         if has_permission {
             Ok(vec![])
@@ -372,24 +267,12 @@ impl Validator for PublicationHasTablesValidator {
         &self,
         ctx: &ValidationContext,
     ) -> Result<Vec<ValidationFailure>, ValidationError> {
-        let source_pool = ctx
-            .source_pool
+        let source_client = ctx
+            .source_client
             .as_ref()
-            .expect("source pool required for publication tables validation");
+            .expect("source client required for publication tables validation");
 
-        // Check if publication publishes all tables or has specific tables
-        let result: Option<(bool, i64)> = sqlx::query_as(
-            r#"
-            select
-                p.puballtables,
-                (select count(*) from pg_publication_tables pt where pt.pubname = p.pubname)
-            from pg_publication p
-            where p.pubname = $1
-            "#,
-        )
-        .bind(&self.publication_name)
-        .fetch_optional(source_pool)
-        .await?;
+        let result = publication_table_summary(source_client, &self.publication_name).await?;
 
         // If publication doesn't exist, skip this check (PublicationExistsValidator
         // handles it)
@@ -430,32 +313,11 @@ impl Validator for PrimaryKeysValidator {
         &self,
         ctx: &ValidationContext,
     ) -> Result<Vec<ValidationFailure>, ValidationError> {
-        let source_pool =
-            ctx.source_pool.as_ref().expect("source pool required for primary keys validation");
+        let source_client =
+            ctx.source_client.as_ref().expect("source client required for primary keys validation");
 
-        // Find tables without primary keys using pg_publication_rel for direct OID
-        // access
-        let tables_without_pk: Vec<String> = sqlx::query_scalar(
-            r#"
-            select n.nspname || '.' || c.relname
-            from pg_publication_rel pr
-            join pg_publication p on p.oid = pr.prpubid
-            join pg_class c on c.oid = pr.prrelid
-            join pg_namespace n on n.oid = c.relnamespace
-            where p.pubname = $1
-              and not exists (
-                select 1
-                from pg_constraint con
-                where con.conrelid = pr.prrelid
-                  and con.contype = 'p'
-              )
-            order by n.nspname, c.relname
-            limit 100
-            "#,
-        )
-        .bind(&self.publication_name)
-        .fetch_all(source_pool)
-        .await?;
+        let tables_without_pk =
+            publication_tables_without_primary_keys(source_client, &self.publication_name).await?;
 
         if tables_without_pk.is_empty() {
             Ok(vec![])
@@ -490,36 +352,14 @@ impl Validator for GeneratedColumnsValidator {
         &self,
         ctx: &ValidationContext,
     ) -> Result<Vec<ValidationFailure>, ValidationError> {
-        let source_pool = ctx
-            .source_pool
+        let source_client = ctx
+            .source_client
             .as_ref()
-            .expect("source pool required for generated columns validation");
+            .expect("source client required for generated columns validation");
 
-        // Find tables with generated columns using pg_publication_rel for direct OID
-        // access
-        let tables_with_generated: Vec<String> = sqlx::query_scalar(
-            r#"
-            select distinct n.nspname || '.' || c.relname
-            from pg_publication_rel pr
-            join pg_publication p on p.oid = pr.prpubid
-            join pg_class c on c.oid = pr.prrelid
-            join pg_namespace n on n.oid = c.relnamespace
-            where p.pubname = $1
-              and exists (
-                select 1
-                from pg_attribute a
-                where a.attrelid = pr.prrelid
-                  and a.attnum > 0
-                  and not a.attisdropped
-                  and a.attgenerated != ''
-              )
-            order by 1
-            limit 100
-            "#,
-        )
-        .bind(&self.publication_name)
-        .fetch_all(source_pool)
-        .await?;
+        let tables_with_generated =
+            publication_tables_with_generated_columns(source_client, &self.publication_name)
+                .await?;
 
         if tables_with_generated.is_empty() {
             Ok(vec![])

@@ -1832,11 +1832,9 @@ dependencies = [
 name = "etl"
 version = "0.1.0"
 dependencies = [
- "aws-lc-rs",
  "byteorder",
  "bytes",
  "chrono",
- "const-oid",
  "etl-config",
  "etl-postgres",
  "etl-telemetry",
@@ -1854,11 +1852,9 @@ dependencies = [
  "sysinfo",
  "tokio",
  "tokio-postgres",
- "tokio-rustls",
  "tokio-stream",
  "tracing",
  "uuid",
- "x509-cert",
 ]
 
 [[package]]
@@ -1895,6 +1891,7 @@ dependencies = [
  "sqlx",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-postgres",
  "tracing",
  "tracing-actix-web",
  "url",
@@ -1995,15 +1992,21 @@ dependencies = [
 name = "etl-postgres"
 version = "0.1.0"
 dependencies = [
+ "aws-lc-rs",
  "bytes",
+ "const-oid",
  "etl-config",
+ "futures",
  "pg_escape",
+ "rustls",
  "serde_json",
  "sqlx",
  "thiserror 2.0.18",
  "tokio",
  "tokio-postgres",
+ "tokio-rustls",
  "tracing",
+ "x509-cert",
 ]
 
 [[package]]

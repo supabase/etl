@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use etl_config::shared::PipelineConfig;
 use etl_postgres::{
-    replication::slots::EtlReplicationSlot,
+    slots::EtlReplicationSlot,
     types::{ReplicatedTableSchema, ReplicationMask, SchemaError, TableId},
 };
 use metrics::histogram;

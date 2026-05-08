@@ -17,7 +17,10 @@ use etl_destinations::{
         LAKEKEEPER_URL, LakekeeperClient, MINIO_PASSWORD, MINIO_URL, MINIO_USERNAME,
     },
 };
-use etl_postgres::sqlx::test_utils::{create_pg_database, drop_pg_database};
+use etl_postgres::{
+    sqlx::test_utils::{create_pg_database, drop_pg_database},
+    tokio::PgSourceClient,
+};
 use sqlx::Executor;
 
 use crate::support::database::get_test_db_config;
@@ -31,8 +34,9 @@ async fn create_validation_context_with_source()
 -> (ValidationContext, sqlx::PgPool, etl_config::shared::PgConnectionConfig) {
     let config = get_test_db_config();
     let pool = create_pg_database(&config).await;
+    let source_client = PgSourceClient::connect(&config).await.expect("source client connects");
     let environment = Environment::load().expect("Failed to load environment");
-    let ctx = ValidationContext::builder(environment).source_pool(pool.clone()).build();
+    let ctx = ValidationContext::builder(environment).source_client(source_client).build();
 
     (ctx, pool, config)
 }
@@ -178,10 +182,11 @@ async fn validate_pipeline_wal_level_success() {
 #[tokio::test]
 async fn validate_source_with_trusted_username_mismatch() {
     let config = get_test_db_config();
-    let pool = create_pg_database(&config).await;
+    let _pool = create_pg_database(&config).await;
+    let source_client = PgSourceClient::connect(&config).await.expect("source client connects");
     let environment = Environment::load().expect("Failed to load environment");
     let ctx = ValidationContext::builder(environment)
-        .source_pool(pool)
+        .source_client(source_client)
         .trusted_username(Some("different_user".to_owned()))
         .build();
 
@@ -196,10 +201,11 @@ async fn validate_source_with_trusted_username_mismatch() {
 
 #[tokio::test]
 async fn validate_destination_includes_source_validation() {
-    let (ctx, _pool, config) = create_validation_context_with_source().await;
+    let (_ctx, _pool, config) = create_validation_context_with_source().await;
+    let source_client = PgSourceClient::connect(&config).await.expect("source client connects");
     let environment = Environment::load().expect("Failed to load environment");
     let ctx = ValidationContext::builder(environment)
-        .source_pool(ctx.source_pool.expect("source pool should be present for validation"))
+        .source_client(source_client)
         .trusted_username(Some("different_user".to_owned()))
         .build();
 
@@ -216,10 +222,11 @@ async fn validate_destination_includes_source_validation() {
 
 #[tokio::test]
 async fn validate_pipeline_includes_source_validation() {
-    let (ctx, _pool, config) = create_validation_context_with_source().await;
+    let (_ctx, _pool, config) = create_validation_context_with_source().await;
+    let source_client = PgSourceClient::connect(&config).await.expect("source client connects");
     let environment = Environment::load().expect("Failed to load environment");
     let ctx = ValidationContext::builder(environment)
-        .source_pool(ctx.source_pool.expect("source pool should be present for validation"))
+        .source_client(source_client)
         .trusted_username(Some("different_user".to_owned()))
         .build();
 

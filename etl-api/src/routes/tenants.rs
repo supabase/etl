@@ -1,11 +1,10 @@
-use std::ops::DerefMut;
-
 use actix_web::{
     HttpResponse, Responder, ResponseError, delete, get,
     http::{StatusCode, header::ContentType},
     post, put,
     web::{Data, Json, Path},
 };
+use etl_postgres::tokio::{PgSourceError, cleanup};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use thiserror::Error;
@@ -49,6 +48,9 @@ pub enum TenantError {
     #[error("Database error: {0}")]
     Database(#[from] sqlx::Error),
 
+    #[error("Source database operation failed: {0}")]
+    Source(#[from] PgSourceError),
+
     #[error(transparent)]
     TrustedRootCerts(#[from] TrustedRootCertsError),
 
@@ -65,7 +67,12 @@ impl TenantError {
             // Do not expose internal database details in error messages
             TenantError::TenantsDb(TenantsDbError::Database(_))
             | TenantError::SourcesDb(SourcesDbError::Database(_))
-            | TenantError::PipelinesDb(PipelinesDbError::Database(_))
+            | TenantError::PipelinesDb(
+                PipelinesDbError::Database(_)
+                | PipelinesDbError::Source(_)
+                | PipelinesDbError::ReplicationSlot(_),
+            )
+            | TenantError::Source(_)
             | TenantError::Database(_)
             | TenantError::TrustedRootCerts(_)
             | TenantError::K8sCore(_) => "Internal server error".to_owned(),
@@ -83,6 +90,7 @@ impl ResponseError for TenantError {
             TenantError::TenantsDb(_)
             | TenantError::SourcesDb(_)
             | TenantError::PipelinesDb(_)
+            | TenantError::Source(_)
             | TenantError::Database(_)
             | TenantError::TrustedRootCerts(_)
             | TenantError::K8sCore(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -323,12 +331,12 @@ pub(crate) async fn delete_tenant(
         // If the source database is already unreachable during tenant teardown, we
         // treat it as effectively deleted and keep removing the tenant's
         // API-side state.
-        let source_pool = match connect_to_source_database_from_api(
+        let mut source_client = match connect_to_source_database_from_api(
             &source.config.into_connection_config(tls_config.clone()),
         )
         .await
         {
-            Ok(source_pool) => source_pool,
+            Ok(source_client) => source_client,
             Err(error) => {
                 tracing::warn!(
                     tenant_id = %tenant_id,
@@ -340,13 +348,13 @@ pub(crate) async fn delete_tenant(
                 continue;
             }
         };
-        let mut source_txn = source_pool.begin().await?;
+        let source_txn = source_client.transaction().await?;
         let deleted_pipeline_ids =
-            delete_pipelines_source_state(source_txn.deref_mut(), &source_pipelines).await?;
-        data::sources::uninstall_source_installation(source_txn.deref_mut()).await?;
-        source_txn.commit().await?;
+            delete_pipelines_source_state(&source_txn, &source_pipelines).await?;
+        cleanup::uninstall_source_installation(&source_txn).await?;
+        source_txn.commit().await.map_err(PgSourceError::from)?;
         for pipeline_id in deleted_pipeline_ids {
-            delete_pipeline_replication_slots(&source_pool, pipeline_id).await?;
+            delete_pipeline_replication_slots(&source_client, pipeline_id).await?;
         }
     }
 

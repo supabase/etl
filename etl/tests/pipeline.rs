@@ -26,7 +26,7 @@ use etl::{
 use etl_config::shared::{BatchConfig, InvalidatedSlotBehavior, TableSyncCopyConfig};
 use etl_postgres::{
     below_version,
-    replication::slots::EtlReplicationSlot,
+    slots::EtlReplicationSlot,
     tokio::test_utils::{ReplicationSlotState, id_column_schema},
     types::{ColumnSchema, TableId},
     version::POSTGRES_15,

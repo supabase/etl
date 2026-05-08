@@ -6,7 +6,7 @@
 
 use std::{collections::HashSet, sync::Arc};
 
-use etl_postgres::replication::slots::EtlReplicationSlot;
+use etl_postgres::slots::EtlReplicationSlot;
 use tokio::sync::Semaphore;
 use tracing::{error, info, warn};
 

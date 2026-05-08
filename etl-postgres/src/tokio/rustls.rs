@@ -25,18 +25,18 @@ use tokio_postgres::tls::{ChannelBinding, MakeTlsConnect, TlsConnect};
 use tokio_rustls::{TlsConnector, client::TlsStream};
 use x509_cert::{TbsCertificate, der::Decode};
 
-/// A `MakeTlsConnect` implementation using `rustls`.
+/// A [`MakeTlsConnect`] implementation using Rustls.
 ///
-/// That way you can connect to Postgres using `rustls` as the TLS stack.
+/// This is shared by source-side clients that use [`tokio_postgres`].
 #[derive(Clone)]
-pub(crate) struct MakeRustlsConnect {
+pub struct MakeRustlsConnect {
     config: Arc<ClientConfig>,
 }
 
 impl MakeRustlsConnect {
-    /// Creates a new `MakeRustlsConnect` from the provided `ClientConfig`.
+    /// Creates a new [`MakeRustlsConnect`] from the provided [`ClientConfig`].
     #[must_use]
-    pub(crate) fn new(config: ClientConfig) -> Self {
+    pub fn new(config: ClientConfig) -> Self {
         Self { config: Arc::new(config) }
     }
 }
@@ -59,7 +59,8 @@ where
     }
 }
 
-pub(crate) struct TlsConnectFuture<S> {
+/// Future returned while establishing a Rustls connection.
+pub struct TlsConnectFuture<S> {
     inner: tokio_rustls::Connect<S>,
 }
 
@@ -74,9 +75,11 @@ where
     }
 }
 
-pub(crate) struct RustlsConnect(RustlsConnectData);
+/// Per-connection Rustls connector.
+pub struct RustlsConnect(RustlsConnectData);
 
-pub(crate) struct RustlsConnectData {
+/// Data needed to establish one Rustls connection.
+pub struct RustlsConnectData {
     hostname: ServerName<'static>,
     connector: TlsConnector,
 }
@@ -94,12 +97,14 @@ where
     }
 }
 
-pub(crate) struct RustlsStream<S>(TlsStream<S>);
+/// Rustls stream wrapper implementing [`tokio_postgres::tls::TlsStream`].
+pub struct RustlsStream<S>(TlsStream<S>);
 
 impl<S> RustlsStream<S>
 where
     S: Unpin,
 {
+    /// Projects to the wrapped TLS stream.
     fn project_stream(self: Pin<&mut Self>) -> Pin<&mut TlsStream<S>> {
         Pin::new(&mut self.get_mut().0)
     }
@@ -116,7 +121,7 @@ where
                 .ok()
                 .and_then(|cert| {
                     let digest = match cert.signature.oid {
-                        // Note: SHA1 is upgraded to SHA256 as per https://datatracker.ietf.org/doc/html/rfc5929#section-4.1
+                        // SHA1 is upgraded to SHA256 per RFC 5929 section 4.1.
                         ID_SHA_1
                         | ID_SHA_256
                         | SHA_1_WITH_RSA_ENCRYPTION
@@ -185,7 +190,8 @@ mod tests {
     use super::*;
 
     #[derive(Debug)]
-    struct AcceptAllVerifier {}
+    struct AcceptAllVerifier;
+
     impl ServerCertVerifier for AcceptAllVerifier {
         fn verify_server_cert(
             &self,
@@ -239,7 +245,7 @@ mod tests {
         let mut config = ClientConfig::builder()
             .with_root_certificates(rustls::RootCertStore::empty())
             .with_no_client_auth();
-        config.dangerous().set_certificate_verifier(Arc::new(AcceptAllVerifier {}));
+        config.dangerous().set_certificate_verifier(Arc::new(AcceptAllVerifier));
 
         let tls = MakeRustlsConnect::new(config);
 

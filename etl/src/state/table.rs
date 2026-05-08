@@ -1,7 +1,7 @@
 use std::fmt;
 
 use chrono::{DateTime, Duration, Utc};
-use etl_postgres::replication::state;
+use etl_postgres::store as state;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -642,7 +642,7 @@ mod tests {
         let row = state::TableReplicationStateRow {
             id: 1,
             pipeline_id: 1,
-            table_id: sqlx::postgres::types::Oid(42),
+            table_id: TableId::new(42),
             state: state::TableReplicationStateType::Init,
             metadata: None,
             prev: None,
@@ -656,7 +656,7 @@ mod tests {
         let row = state::TableReplicationStateRow {
             id: 1,
             pipeline_id: 1,
-            table_id: sqlx::postgres::types::Oid(42),
+            table_id: TableId::new(42),
             state: state::TableReplicationStateType::Init,
             metadata: Some(serde_json::json!({"type": "nonexistent_variant"})),
             prev: None,
@@ -686,7 +686,7 @@ mod tests {
             let row = state::TableReplicationStateRow {
                 id: 1,
                 pipeline_id: 1,
-                table_id: sqlx::postgres::types::Oid(42),
+                table_id: TableId::new(42),
                 state: state_type,
                 metadata: Some(metadata),
                 prev: None,

@@ -1,6 +1,5 @@
 use etl_config::shared::{ETL_API_OPTIONS, PgConnectionConfig};
-use etl_postgres::replication::connect_to_source_database;
-use sqlx::PgPool;
+use etl_postgres::tokio::{PgSourceClient, PgSourceError};
 
 pub mod destinations;
 pub mod destinations_pipelines;
@@ -14,26 +13,14 @@ pub mod tenants;
 pub mod tenants_sources;
 pub mod utils;
 
-/// Minimum number of connections for the source Postgres connection pool.
-const MIN_POOL_CONNECTIONS: u32 = 1;
-/// Maximum number of connections for the source Postgres connection pool.
-const MAX_POOL_CONNECTIONS: u32 = 1;
-
-/// Connects to the source database with the specified configuration and default
-/// connection pool size.
+/// Connects to the source database with API session options.
 ///
-/// Uses state management options with moderate timeouts suitable for
+/// Uses API options with moderate timeouts suitable for
 /// administrative queries like listing tables and reading publications. If
 /// configured, the source connection uses `hostaddr` as the TCP target and
 /// preserves `host` as the canonical database hostname in stored API state.
 pub async fn connect_to_source_database_from_api(
     config: &PgConnectionConfig,
-) -> Result<PgPool, sqlx::Error> {
-    connect_to_source_database(
-        config,
-        MIN_POOL_CONNECTIONS,
-        MAX_POOL_CONNECTIONS,
-        Some(&ETL_API_OPTIONS),
-    )
-    .await
+) -> Result<PgSourceClient, PgSourceError> {
+    PgSourceClient::connect_with_options(config, Some(&ETL_API_OPTIONS)).await
 }

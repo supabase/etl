@@ -66,7 +66,11 @@ impl SourceError {
         match self {
             // Do not expose internal database details in error messages
             SourceError::SourcesDb(SourcesDbError::Database(_))
-            | SourceError::PipelinesDb(PipelinesDbError::Database(_))
+            | SourceError::PipelinesDb(
+                PipelinesDbError::Database(_)
+                | PipelinesDbError::Source(_)
+                | PipelinesDbError::ReplicationSlot(_),
+            )
             | SourceError::Validation(_)
             | SourceError::K8sCore(_) => "Internal server error".to_owned(),
             // Every other message is ok, as they do not divulge sensitive information

@@ -16,19 +16,25 @@ test-utils = []
 tokio = []
 sqlx = []
 bigquery = []
-replication = ["sqlx"]
+replication = ["tokio"]
 
 [dependencies]
 
 bytes = { workspace = true }
+aws-lc-rs = { workspace = true }
+const-oid = { workspace = true, default-features = false }
 etl-config = { workspace = true }
+futures = { workspace = true }
 pg_escape = { workspace = true }
+rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
 serde_json = { workspace = true }
 sqlx = { workspace = true, features = ["runtime-tokio-rustls", "macros", "postgres", "json", "migrate"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tokio-postgres = { workspace = true, features = ["runtime", "with-chrono-0_4", "with-uuid-1", "with-serde_json-1"] }
+tokio-rustls = { workspace = true, default-features = false }
 tracing = { workspace = true }
+x509-cert = { workspace = true, default-features = false }
 
 [lints]
 workspace = true

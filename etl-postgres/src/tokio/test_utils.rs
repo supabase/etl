@@ -10,8 +10,8 @@ use tokio_postgres::{
 use tracing::info;
 
 use crate::{
-    replication::extract_server_version,
     requires_version,
+    tokio::db::extract_server_version,
     types::{ColumnSchema, TableId, TableName},
     version::POSTGRES_15,
 };

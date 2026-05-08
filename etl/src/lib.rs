@@ -173,5 +173,4 @@ pub mod store;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
 pub mod types;
-mod utils;
 mod workers;

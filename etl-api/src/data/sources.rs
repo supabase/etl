@@ -1,6 +1,6 @@
 use std::fmt::Debug;
 
-use sqlx::{PgConnection, PgExecutor};
+use sqlx::PgExecutor;
 use thiserror::Error;
 
 use crate::configs::{
@@ -284,57 +284,4 @@ where
     }
 
     Ok(sources)
-}
-
-pub async fn uninstall_source_installation(conn: &mut PgConnection) -> Result<(), sqlx::Error> {
-    drop_current_user_owned_ddl_event_triggers(conn).await?;
-    drop_current_user_owned_etl_schema(conn).await
-}
-
-/// Drops ETL-managed DDL event triggers owned by the current user.
-async fn drop_current_user_owned_ddl_event_triggers(
-    conn: &mut PgConnection,
-) -> Result<(), sqlx::Error> {
-    let ddl_message_trigger_owned_by_current_user: bool = sqlx::query_scalar(
-        r#"
-        select exists(
-            select 1
-            from pg_event_trigger
-            where evtname = 'supabase_etl_ddl_message_trigger'
-              and evtowner = (select oid from pg_roles where rolname = current_user)
-        )
-        "#,
-    )
-    .fetch_one(&mut *conn)
-    .await?;
-
-    if ddl_message_trigger_owned_by_current_user {
-        sqlx::query("drop event trigger if exists supabase_etl_ddl_message_trigger")
-            .execute(&mut *conn)
-            .await?;
-    }
-
-    Ok(())
-}
-
-/// Drops the `etl` schema when it is owned by the current user.
-async fn drop_current_user_owned_etl_schema(conn: &mut PgConnection) -> Result<(), sqlx::Error> {
-    let etl_schema_owned_by_current_user: bool = sqlx::query_scalar(
-        r#"
-        select exists(
-            select 1
-            from pg_namespace
-            where nspname = 'etl'
-              and nspowner = (select oid from pg_roles where rolname = current_user)
-        )
-        "#,
-    )
-    .fetch_one(&mut *conn)
-    .await?;
-
-    if etl_schema_owned_by_current_user {
-        sqlx::query("drop schema if exists etl cascade").execute(&mut *conn).await?;
-    }
-
-    Ok(())
 }

@@ -1,8 +1,12 @@
 use std::ops::DerefMut;
 
-use etl_postgres::replication::{destination_metadata, health, schema, slots, state};
-use sqlx::{FromRow, PgConnection, PgExecutor, PgPool, PgTransaction};
+use etl_postgres::tokio::{
+    PgSourceClient, PgSourceError, cleanup,
+    slots::{self, ReplicationSlotOperationError},
+};
+use sqlx::{FromRow, PgConnection, PgExecutor, PgTransaction};
 use thiserror::Error;
+use tokio_postgres::Transaction;
 
 use crate::{
     configs::{
@@ -61,8 +65,11 @@ pub enum PipelinesDbError {
     #[error(transparent)]
     ReplicatorsDb(#[from] ReplicatorsDbError),
 
-    #[error("Slot operation failed: {0}")]
-    SlotError(#[from] slots::EtlReplicationSlotError),
+    #[error("Source database operation failed: {0}")]
+    Source(#[from] PgSourceError),
+
+    #[error("Replication slot operation failed: {0}")]
+    ReplicationSlot(#[from] ReplicationSlotOperationError),
 }
 
 pub async fn count_pipelines_for_tenant<'c, E>(
@@ -224,13 +231,13 @@ where
 
 pub async fn delete_pipeline_api_and_source_state(
     api_connection: &mut PgConnection,
-    source_connection: &mut PgConnection,
+    source_txn: &Transaction<'_>,
     tenant_id: &str,
     pipeline: &PipelineDeletion,
 ) -> Result<(), PipelinesDbError> {
     delete_pipeline_api_state(api_connection, tenant_id, pipeline).await?;
 
-    delete_pipeline_source_state(source_connection, pipeline.id).await
+    delete_pipeline_source_state(source_txn, pipeline.id).await
 }
 
 pub async fn delete_pipeline_api_state(
@@ -250,45 +257,25 @@ pub async fn delete_pipeline_api_state(
 }
 
 pub async fn delete_pipeline_source_state(
-    source_connection: &mut PgConnection,
+    source_txn: &Transaction<'_>,
     pipeline_id: i64,
 ) -> Result<(), PipelinesDbError> {
-    // Delete state, schema, and destination table metadata from the source
-    // database, only if ETL tables exist.
-    if health::etl_tables_present(&mut *source_connection).await? {
-        state::delete_replication_state_for_all_tables(&mut *source_connection, pipeline_id)
-            .await?;
-        schema::delete_table_schemas_for_all_tables(&mut *source_connection, pipeline_id).await?;
-        destination_metadata::delete_destination_tables_metadata_for_all_tables(
-            &mut *source_connection,
-            pipeline_id,
-        )
-        .await?;
-    }
-
-    Ok(())
+    Ok(cleanup::delete_pipeline_source_state(source_txn, pipeline_id).await?)
 }
 
 pub async fn delete_pipelines_source_state(
-    source_connection: &mut PgConnection,
+    source_txn: &Transaction<'_>,
     pipelines: &[PipelineDeletion],
 ) -> Result<Vec<i64>, PipelinesDbError> {
-    let mut deleted_pipeline_ids = Vec::with_capacity(pipelines.len());
-    for pipeline in pipelines {
-        delete_pipeline_source_state(source_connection, pipeline.id).await?;
-        deleted_pipeline_ids.push(pipeline.id);
-    }
-
-    Ok(deleted_pipeline_ids)
+    let pipeline_ids = pipelines.iter().map(|pipeline| pipeline.id).collect::<Vec<_>>();
+    Ok(cleanup::delete_pipelines_source_state(source_txn, &pipeline_ids).await?)
 }
 
 pub async fn delete_pipeline_replication_slots(
-    source_pool: &PgPool,
+    source_client: &PgSourceClient,
     pipeline_id: i64,
 ) -> Result<(), PipelinesDbError> {
-    slots::delete_pipeline_replication_slots(source_pool, pipeline_id as u64).await?;
-
-    Ok(())
+    Ok(slots::delete_pipeline_replication_slots(source_client, pipeline_id).await?)
 }
 
 pub async fn read_all_pipelines<'c, E>(

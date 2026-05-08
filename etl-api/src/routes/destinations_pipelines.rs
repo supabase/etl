@@ -6,6 +6,7 @@ use actix_web::{
     post,
     web::{Data, Json, Path},
 };
+use etl_postgres::tokio::PgSourceError;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use thiserror::Error;
@@ -84,6 +85,9 @@ enum DestinationPipelineError {
     #[error("Database error: {0}")]
     Database(#[from] sqlx::Error),
 
+    #[error("Source database operation failed: {0}")]
+    Source(#[from] PgSourceError),
+
     #[error(transparent)]
     TrustedRootCerts(#[from] TrustedRootCertsError),
 
@@ -123,7 +127,12 @@ impl DestinationPipelineError {
             | DestinationPipelineError::DestinationsDb(DestinationsDbError::Database(_))
             | DestinationPipelineError::ImagesDb(ImagesDbError::Database(_))
             | DestinationPipelineError::SourcesDb(SourcesDbError::Database(_))
-            | DestinationPipelineError::PipelinesDb(PipelinesDbError::Database(_))
+            | DestinationPipelineError::PipelinesDb(
+                PipelinesDbError::Database(_)
+                | PipelinesDbError::Source(_)
+                | PipelinesDbError::ReplicationSlot(_),
+            )
+            | DestinationPipelineError::Source(_)
             | DestinationPipelineError::Database(_)
             | DestinationPipelineError::Validation(_)
             | DestinationPipelineError::K8sCore(_) => "Internal server error".to_owned(),
@@ -145,6 +154,7 @@ impl ResponseError for DestinationPipelineError {
             | DestinationPipelineError::Database(_)
             | DestinationPipelineError::K8sCore(_)
             | DestinationPipelineError::TrustedRootCerts(_)
+            | DestinationPipelineError::Source(_)
             | DestinationPipelineError::Validation(_) => StatusCode::INTERNAL_SERVER_ERROR,
             DestinationPipelineError::TenantId(_)
             | DestinationPipelineError::SourceNotFound(_)
@@ -428,12 +438,12 @@ pub(crate) async fn delete_destination_and_pipeline(
     )
     .await?
     .ok_or(DestinationPipelineError::SourceNotFound(pipeline.source_id))?;
-    let source_pool = match connect_to_source_database_from_api(
+    let mut source_client = match connect_to_source_database_from_api(
         &source.config.into_connection_config(tls_config),
     )
     .await
     {
-        Ok(source_pool) => Some(source_pool),
+        Ok(source_client) => Some(source_client),
         Err(error) => {
             tracing::warn!(
                 tenant_id = %tenant_id,
@@ -448,44 +458,60 @@ pub(crate) async fn delete_destination_and_pipeline(
         }
     };
     let mut api_txn = pool.begin().await?;
-    let mut source_txn = if let Some(source_pool) = source_pool.as_ref() {
-        Some(source_pool.begin().await?)
-    } else {
-        None
-    };
-    if let Some(source_txn) = source_txn.as_mut() {
+    let destination_deleted = if let Some(source_client) = source_client.as_mut() {
+        let source_txn = source_client.transaction().await?;
         delete_pipeline_api_and_source_state(
             api_txn.deref_mut(),
-            source_txn.deref_mut(),
+            &source_txn,
             tenant_id,
             &pipeline,
         )
         .await?;
+
+        let remaining_pipelines = read_pipelines_for_destination_for_deletion(
+            api_txn.deref_mut(),
+            tenant_id,
+            destination_id,
+        )
+        .await?;
+        let destination_deleted = if remaining_pipelines.is_empty() {
+            data::destinations::delete_destination(api_txn.deref_mut(), tenant_id, destination_id)
+                .await?
+                .ok_or(DestinationPipelineError::DestinationNotFound(destination_id))?;
+            true
+        } else {
+            false
+        };
+
+        // Commit the API transaction first. If the source transaction committed first
+        // and the API commit failed afterwards, the API database could still
+        // reference pipeline state that no longer exists in the source database.
+        api_txn.commit().await?;
+        source_txn.commit().await.map_err(PgSourceError::from)?;
+        delete_pipeline_replication_slots(source_client, pipeline.id).await?;
+
+        destination_deleted
     } else {
         delete_pipeline_api_state(api_txn.deref_mut(), tenant_id, &pipeline).await?;
-    }
 
-    let remaining_pipelines =
-        read_pipelines_for_destination_for_deletion(api_txn.deref_mut(), tenant_id, destination_id)
-            .await?;
-    let destination_deleted = if remaining_pipelines.is_empty() {
-        data::destinations::delete_destination(api_txn.deref_mut(), tenant_id, destination_id)
-            .await?
-            .ok_or(DestinationPipelineError::DestinationNotFound(destination_id))?;
-        true
-    } else {
-        false
+        let remaining_pipelines = read_pipelines_for_destination_for_deletion(
+            api_txn.deref_mut(),
+            tenant_id,
+            destination_id,
+        )
+        .await?;
+        let destination_deleted = if remaining_pipelines.is_empty() {
+            data::destinations::delete_destination(api_txn.deref_mut(), tenant_id, destination_id)
+                .await?
+                .ok_or(DestinationPipelineError::DestinationNotFound(destination_id))?;
+            true
+        } else {
+            false
+        };
+        api_txn.commit().await?;
+
+        destination_deleted
     };
-    // Commit the API transaction first. If the source transaction committed first
-    // and the API commit failed afterwards, the API database could still
-    // reference pipeline state that no longer exists in the source database.
-    api_txn.commit().await?;
-    if let Some(source_txn) = source_txn {
-        source_txn.commit().await?;
-    }
-    if let Some(source_pool) = source_pool.as_ref() {
-        delete_pipeline_replication_slots(source_pool, pipeline.id).await?;
-    }
 
     Ok(Json(DeleteDestinationPipelineResponse {
         destination_id,

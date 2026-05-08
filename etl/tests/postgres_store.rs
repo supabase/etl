@@ -17,13 +17,25 @@ use etl::{
     },
     test_utils::database::spawn_source_database,
 };
-use etl_postgres::{
-    replication::connect_to_source_database,
-    types::{ColumnSchema, ReplicationMask, SnapshotId, TableId, TableName, TableSchema},
+use etl_postgres::types::{
+    ColumnSchema, ReplicationMask, SnapshotId, TableId, TableName, TableSchema,
 };
 use etl_telemetry::tracing::init_test_tracing;
-use sqlx::postgres::types::Oid as SqlxTableId;
+use sqlx::postgres::{PgPoolOptions, types::Oid as SqlxTableId};
 use tokio_postgres::types::{PgLsn, Type as PgType};
+
+async fn connect_to_source_database(
+    config: &etl_config::shared::PgConnectionConfig,
+) -> sqlx::PgPool {
+    use etl_config::shared::IntoConnectOptions;
+
+    PgPoolOptions::new()
+        .min_connections(1)
+        .max_connections(1)
+        .connect_with(config.with_db(None))
+        .await
+        .expect("Failed to connect to source database with sqlx")
+}
 
 /// Creates a test column schema with sensible defaults.
 fn test_column(
@@ -142,9 +154,7 @@ async fn state_store_rollback() {
     store.update_table_replication_state(table_id, data_sync_phase.clone()).await.unwrap();
 
     // Verify two rows exist before rollback (init + data_sync)
-    let pool = connect_to_source_database(&database.config, 1, 1, None)
-        .await
-        .expect("Failed to connect to source database with sqlx");
+    let pool = connect_to_source_database(&database.config).await;
     let count_before: i64 = sqlx::query_scalar(
         "select count(*) from etl.replication_state where pipeline_id = $1 and table_id = $2",
     )
@@ -522,7 +532,7 @@ async fn schema_store_prunes_obsolete_versions_from_database_and_cache() {
         store.store_table_schema(table_schema).await.unwrap();
     }
 
-    let pool = connect_to_source_database(&database.config, 1, 1, None).await.unwrap();
+    let pool = connect_to_source_database(&database.config).await;
     let obsolete_schema_ids: Vec<i64> = sqlx::query_scalar(
         r#"
         select id
@@ -873,9 +883,7 @@ async fn replication_mask_loads_correctly_from_string_bytea() {
     let table_id = TableId::new(12345);
     let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
 
-    let pool = connect_to_source_database(&database.config, 1, 1, None)
-        .await
-        .expect("Failed to connect to source database with sqlx");
+    let pool = connect_to_source_database(&database.config).await;
 
     // Manually insert a row with a specific replication mask bytea.
     // The mask [1, 0, 1, 1, 0] represents columns: replicated, not replicated,
@@ -922,9 +930,7 @@ async fn replication_mask_various_patterns() {
     let pipeline_id = 1;
     let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
 
-    let pool = connect_to_source_database(&database.config, 1, 1, None)
-        .await
-        .expect("Failed to connect to source database with sqlx");
+    let pool = connect_to_source_database(&database.config).await;
 
     // Test various mask patterns
     let test_cases: Vec<(TableId, &str, Vec<u8>)> = vec![

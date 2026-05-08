@@ -8,7 +8,12 @@ use actix_web::{
 };
 use etl::state::table::{RetryPolicy, TableReplicationPhase};
 use etl_postgres::{
-    replication::{TableLookupError, get_table_names_from_table_ids, health, lag, state},
+    lag::SlotLagMetrics as PgSlotLagMetrics,
+    tokio::{
+        PgSourceError,
+        db::{self as pg_db, TableLookupError},
+        health, lag as pg_lag, store as pg_store,
+    },
     types::TableId,
 };
 use serde::{Deserialize, Serialize};
@@ -117,6 +122,9 @@ pub enum PipelineError {
     #[error("There was an error while looking up table information in the source database: {0}")]
     TableLookup(#[from] TableLookupError),
 
+    #[error("Source database operation failed: {0}")]
+    Source(#[from] PgSourceError),
+
     #[error("Database error: {0}")]
     Database(#[from] sqlx::Error),
 
@@ -162,10 +170,15 @@ impl PipelineError {
             // Do not expose internal database details in error messages.
             PipelineError::SourcesDb(SourcesDbError::Database(_))
             | PipelineError::DestinationsDb(DestinationsDbError::Database(_))
-            | PipelineError::PipelinesDb(PipelinesDbError::Database(_))
+            | PipelineError::PipelinesDb(
+                PipelinesDbError::Database(_)
+                | PipelinesDbError::Source(_)
+                | PipelinesDbError::ReplicationSlot(_),
+            )
             | PipelineError::ReplicatorsDb(ReplicatorsDbError::Database(_))
             | PipelineError::ImagesDb(ImagesDbError::Database(_))
             | PipelineError::TableLookup(_)
+            | PipelineError::Source(_)
             | PipelineError::Database(_)
             | PipelineError::Validation(
                 ValidationError::TrustedRootCerts(_) | ValidationError::Environment(_),
@@ -199,6 +212,7 @@ impl ResponseError for PipelineError {
             | PipelineError::ImagesDb(_)
             | PipelineError::K8s(_)
             | PipelineError::TrustedRootCerts(_)
+            | PipelineError::Source(_)
             | PipelineError::Database(_)
             | PipelineError::TableLookup(_)
             | PipelineError::InvalidTableReplicationState(_)
@@ -386,8 +400,8 @@ pub struct SlotLagMetricsResponse {
     pub flush_lag: Option<i64>,
 }
 
-impl From<lag::SlotLagMetrics> for SlotLagMetricsResponse {
-    fn from(metrics: lag::SlotLagMetrics) -> Self {
+impl From<PgSlotLagMetrics> for SlotLagMetricsResponse {
+    fn from(metrics: PgSlotLagMetrics) -> Self {
         Self {
             restart_lsn_bytes: metrics.restart_lsn_bytes,
             confirmed_flush_lsn_bytes: metrics.confirmed_flush_lsn_bytes,
@@ -764,12 +778,12 @@ pub(crate) async fn delete_pipeline(
     .await?
     .ok_or(PipelineError::SourceNotFound(pipeline.source_id))?;
 
-    let source_pool = match connect_to_source_database_from_api(
+    let mut source_client = match connect_to_source_database_from_api(
         &source.config.into_connection_config(tls_config),
     )
     .await
     {
-        Ok(source_pool) => Some(source_pool),
+        Ok(source_client) => Some(source_client),
         Err(error) => {
             tracing::warn!(
                 tenant_id = %tenant_id,
@@ -783,18 +797,18 @@ pub(crate) async fn delete_pipeline(
         }
     };
     let mut api_txn = pool.begin().await?;
-    if let Some(source_pool) = source_pool {
-        let mut source_txn = source_pool.begin().await?;
+    if let Some(source_client) = source_client.as_mut() {
+        let source_txn = source_client.transaction().await?;
         delete_pipeline_api_and_source_state(
             api_txn.deref_mut(),
-            source_txn.deref_mut(),
+            &source_txn,
             tenant_id,
             &pipeline,
         )
         .await?;
         api_txn.commit().await?;
-        source_txn.commit().await?;
-        delete_pipeline_replication_slots(&source_pool, pipeline.id).await?;
+        source_txn.commit().await.map_err(PgSourceError::from)?;
+        delete_pipeline_replication_slots(source_client, pipeline.id).await?;
     } else {
         delete_pipeline_api_state(api_txn.deref_mut(), tenant_id, &pipeline).await?;
         api_txn.commit().await?;
@@ -1096,34 +1110,31 @@ pub(crate) async fn get_pipeline_replication_status(
 
     // Connect to the source database to read the necessary state
     let tls_config = trusted_root_certs_cache.get_tls_config(api_config.source.tls_enabled).await?;
-    let source_pool =
+    let mut source_client =
         connect_to_source_database_from_api(&source.config.into_connection_config(tls_config))
             .await?;
 
     // Start transaction for all source database operations
-    let mut source_txn = source_pool.begin().await?;
+    let source_txn = source_client.transaction().await?;
 
     // Ensure ETL tables exist in the source DB
-    if !health::etl_tables_present(source_txn.deref_mut()).await? {
+    if !health::etl_tables_present(&source_txn).await? {
         return Err(PipelineError::EtlStateNotInitialized);
     }
 
     // Fetch replication state for all tables in this pipeline
-    let state_rows =
-        state::get_table_replication_state_rows(source_txn.deref_mut(), pipeline_id).await?;
-    let mut lag_metrics =
-        lag::get_pipeline_lag_metrics(source_txn.deref_mut(), pipeline_id as u64).await?;
+    let state_rows = pg_store::table_replication_state_rows(&source_txn, pipeline_id).await?;
+    let mut lag_metrics = pg_lag::pipeline_lag_metrics(&source_txn, pipeline_id).await?;
     let apply_lag = lag_metrics.apply.map(Into::into);
 
     // Collect all table IDs and fetch their names in a single batch query
-    let table_ids: Vec<TableId> =
-        state_rows.iter().map(|row| TableId::new(row.table_id.0)).collect();
-    let table_names = get_table_names_from_table_ids(source_txn.deref_mut(), &table_ids).await?;
+    let table_ids: Vec<TableId> = state_rows.iter().map(|row| row.table_id).collect();
+    let table_names = pg_db::table_names_from_table_ids(&source_txn, &table_ids).await?;
 
     // Convert database states to UI-friendly format
     let mut tables: Vec<TableReplicationStatus> = Vec::with_capacity(state_rows.len());
     for row in state_rows {
-        let table_id = TableId::new(row.table_id.0);
+        let table_id = row.table_id;
         let table_name =
             table_names.get(&table_id).ok_or(TableLookupError::TableNotFound(table_id))?;
 
@@ -1194,27 +1205,26 @@ pub(crate) async fn rollback_tables(
 
     // Connect to the source database to perform rollback
     let tls_config = trusted_root_certs_cache.get_tls_config(api_config.source.tls_enabled).await?;
-    let source_pool =
+    let mut source_client =
         connect_to_source_database_from_api(&source.config.into_connection_config(tls_config))
             .await?;
 
     // Start transaction for all source database operations
-    let mut source_txn = source_pool.begin().await?;
+    let source_txn = source_client.transaction().await?;
 
     // Ensure ETL tables exist in the source DB
-    if !health::etl_tables_present(source_txn.deref_mut()).await? {
+    if !health::etl_tables_present(&source_txn).await? {
         return Err(PipelineError::EtlStateNotInitialized);
     }
 
     // Get all table states for this pipeline
-    let state_rows =
-        state::get_table_replication_state_rows(source_txn.deref_mut(), pipeline_id).await?;
+    let state_rows = pg_store::table_replication_state_rows(&source_txn, pipeline_id).await?;
 
     // Determine which tables to rollback based on target
     let target_table_ids: Vec<u32> = match &rollback_request.target {
         RollbackTablesTarget::SingleTable { table_id } => {
             // Single table mode, validate the table exists
-            if !state_rows.iter().any(|row| row.table_id.0 == *table_id) {
+            if !state_rows.iter().any(|row| row.table_id.into_inner() == *table_id) {
                 return Err(PipelineError::MissingTableReplicationState);
             }
 
@@ -1229,7 +1239,7 @@ pub(crate) async fn rollback_tables(
                         serde_json::from_value::<TableReplicationPhase>(metadata.clone())
                     && phase.is_errored()
                 {
-                    errored_table_ids.push(row.table_id.0);
+                    errored_table_ids.push(row.table_id.into_inner());
                 }
             }
 
@@ -1241,7 +1251,8 @@ pub(crate) async fn rollback_tables(
         }
         RollbackTablesTarget::AllTables => {
             // All tables mode, collect all table IDs
-            let table_ids: Vec<u32> = state_rows.iter().map(|row| row.table_id.0).collect();
+            let table_ids: Vec<u32> =
+                state_rows.iter().map(|row| row.table_id.into_inner()).collect();
 
             if table_ids.is_empty() {
                 return Err(PipelineError::NotRollbackable(
@@ -1257,8 +1268,8 @@ pub(crate) async fn rollback_tables(
     for table_id in target_table_ids {
         let new_state_row = match rollback_type {
             RollbackType::Individual => {
-                let Some(new_state_row) = state::rollback_replication_state(
-                    source_txn.deref_mut(),
+                let Some(new_state_row) = pg_store::rollback_replication_state(
+                    &source_txn,
                     pipeline_id,
                     TableId::new(table_id),
                 )
@@ -1272,12 +1283,8 @@ pub(crate) async fn rollback_tables(
                 new_state_row
             }
             RollbackType::Full => {
-                state::reset_replication_state(
-                    source_txn.deref_mut(),
-                    pipeline_id,
-                    TableId::new(table_id),
-                )
-                .await?
+                pg_store::reset_replication_state(&source_txn, pipeline_id, TableId::new(table_id))
+                    .await?
             }
         };
 
@@ -1289,7 +1296,7 @@ pub(crate) async fn rollback_tables(
         rolled_back_tables.push(RolledBackTable { table_id, new_state: new_phase.into() });
     }
 
-    source_txn.commit().await?;
+    source_txn.commit().await.map_err(PgSourceError::from)?;
 
     let response = RollbackTablesResponse { pipeline_id, tables: rolled_back_tables };
 
