@@ -128,7 +128,7 @@ pub struct CreateTenantSourceResponse {
     tag = "Tenants & Sources"
 )]
 #[post("/tenants-sources")]
-pub async fn create_tenant_and_source(
+pub(crate) async fn create_tenant_and_source(
     pool: Data<PgPool>,
     api_config: Data<ApiConfig>,
     trusted_root_certs_cache: Data<TrustedRootCertsCache>,

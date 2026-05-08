@@ -11,14 +11,14 @@ use gcp_bigquery_client::model::{table_cell::TableCell, table_row::TableRow};
 use uuid::Uuid;
 
 #[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
-pub struct BigQueryUser {
+pub(crate) struct BigQueryUser {
     id: i32,
     name: String,
     age: i32,
 }
 
 impl BigQueryUser {
-    pub fn new(id: i32, name: &str, age: i32) -> Self {
+    pub(crate) fn new(id: i32, name: &str, age: i32) -> Self {
         Self { id, name: name.to_owned(), age }
     }
 }
@@ -36,13 +36,13 @@ impl From<TableRow> for BigQueryUser {
 }
 
 #[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
-pub struct BigQueryOrder {
+pub(crate) struct BigQueryOrder {
     id: i32,
     description: String,
 }
 
 impl BigQueryOrder {
-    pub fn new(id: i32, description: &str) -> Self {
+    pub(crate) fn new(id: i32, description: &str) -> Self {
         Self { id, description: description.to_owned() }
     }
 }
@@ -59,14 +59,14 @@ impl From<TableRow> for BigQueryOrder {
 }
 
 #[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
-pub struct BigQueryReplicaIdentityRow {
+pub(crate) struct BigQueryReplicaIdentityRow {
     id: i32,
     name: String,
     large_text: String,
 }
 
 impl BigQueryReplicaIdentityRow {
-    pub fn new(id: i32, name: &str, large_text: &str) -> Self {
+    pub(crate) fn new(id: i32, name: &str, large_text: &str) -> Self {
         Self { id, name: name.to_owned(), large_text: large_text.to_owned() }
     }
 }
@@ -84,7 +84,7 @@ impl From<TableRow> for BigQueryReplicaIdentityRow {
 }
 
 #[derive(Debug)]
-pub struct NullableColsScalar {
+pub(crate) struct NullableColsScalar {
     id: i32,
     b: Option<bool>,
     t: Option<String>,
@@ -106,7 +106,7 @@ pub struct NullableColsScalar {
 }
 
 impl NullableColsScalar {
-    pub fn all_nulls(id: i32) -> Self {
+    pub(crate) fn all_nulls(id: i32) -> Self {
         Self {
             id,
             b: None,
@@ -130,7 +130,7 @@ impl NullableColsScalar {
     }
 
     #[expect(clippy::too_many_arguments)]
-    pub fn with_non_null_values(
+    pub(crate) fn with_non_null_values(
         id: i32,
         b: bool,
         t: String,
@@ -288,7 +288,7 @@ impl Ord for NullableColsScalar {
 }
 
 #[derive(Debug)]
-pub struct NullableColsArray {
+pub(crate) struct NullableColsArray {
     id: i32,
     b_arr: Option<Vec<bool>>,
     t_arr: Option<Vec<String>>,
@@ -310,7 +310,7 @@ pub struct NullableColsArray {
 }
 
 impl NullableColsArray {
-    pub fn all_empty(id: i32) -> Self {
+    pub(crate) fn all_empty(id: i32) -> Self {
         Self {
             id,
             b_arr: Some(vec![]),
@@ -334,7 +334,7 @@ impl NullableColsArray {
     }
 
     #[expect(clippy::too_many_arguments)]
-    pub fn with_non_null_values(
+    pub(crate) fn with_non_null_values(
         id: i32,
         b_arr: Vec<bool>,
         t_arr: Vec<String>,
@@ -545,7 +545,7 @@ impl Ord for NullableColsArray {
 }
 
 #[derive(Debug)]
-pub struct NonNullableColsScalar {
+pub(crate) struct NonNullableColsScalar {
     id: i32,
     b: bool,
     t: String,
@@ -568,7 +568,7 @@ pub struct NonNullableColsScalar {
 
 impl NonNullableColsScalar {
     #[expect(clippy::too_many_arguments)]
-    pub fn new(
+    pub(crate) fn new(
         id: i32,
         b: bool,
         t: String,
@@ -700,7 +700,7 @@ impl Ord for NonNullableColsScalar {
     }
 }
 
-pub fn parse_bigquery_table_rows<T>(table_rows: Vec<TableRow>) -> Vec<T>
+pub(crate) fn parse_bigquery_table_rows<T>(table_rows: Vec<TableRow>) -> Vec<T>
 where
     T: Ord,
     T: From<TableRow>,

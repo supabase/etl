@@ -10,7 +10,7 @@ use etl_destinations::iceberg::{IcebergClient, UNIX_EPOCH};
 use futures::StreamExt;
 
 /// Converts a RecordBatch back to a vector of TableRows.
-pub fn record_batch_to_table_rows(batch: &RecordBatch) -> Vec<TableRow> {
+pub(crate) fn record_batch_to_table_rows(batch: &RecordBatch) -> Vec<TableRow> {
     let mut rows = Vec::with_capacity(batch.num_rows());
 
     for row_idx in 0..batch.num_rows() {
@@ -316,7 +316,7 @@ fn arrow_value_to_cell(array: &ArrayRef, row_idx: usize) -> Cell {
 }
 
 /// Read all rows from the destination table.
-pub async fn read_all_rows(
+pub(crate) async fn read_all_rows(
     client: &IcebergClient,
     namespace: String,
     table_name: String,

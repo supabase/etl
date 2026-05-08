@@ -20,9 +20,7 @@ path = "src/bin/ducklake.rs"
 
 clap = { workspace = true, default-features = true, features = ["std", "derive"] }
 etl = { workspace = true }
-etl-config = { workspace = true }
 etl-destinations = { workspace = true, features = ["bigquery", "clickhouse", "ducklake"] }
-etl-telemetry = { workspace = true }
 rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
 tokio = { workspace = true, features = ["macros", "signal"] }
 tracing = { workspace = true, default-features = true }

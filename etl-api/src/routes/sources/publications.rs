@@ -115,7 +115,7 @@ pub struct ReadPublicationsResponse {
     )
 )]
 #[post("/sources/{source_id}/publications")]
-pub async fn create_publication(
+pub(crate) async fn create_publication(
     req: HttpRequest,
     pool: Data<PgPool>,
     api_config: Data<ApiConfig>,
@@ -158,7 +158,7 @@ pub async fn create_publication(
     )
 )]
 #[get("/sources/{source_id}/publications/{publication_name}")]
-pub async fn read_publication(
+pub(crate) async fn read_publication(
     req: HttpRequest,
     pool: Data<PgPool>,
     api_config: Data<ApiConfig>,
@@ -201,7 +201,7 @@ pub async fn read_publication(
     )
 )]
 #[post("/sources/{source_id}/publications/{publication_name}")]
-pub async fn update_publication(
+pub(crate) async fn update_publication(
     req: HttpRequest,
     pool: Data<PgPool>,
     api_config: Data<ApiConfig>,
@@ -244,7 +244,7 @@ pub async fn update_publication(
     )
 )]
 #[delete("/sources/{source_id}/publications/{publication_name}")]
-pub async fn delete_publication(
+pub(crate) async fn delete_publication(
     req: HttpRequest,
     pool: Data<PgPool>,
     api_config: Data<ApiConfig>,
@@ -282,7 +282,7 @@ pub async fn delete_publication(
     )
 )]
 #[get("/sources/{source_id}/publications")]
-pub async fn read_all_publications(
+pub(crate) async fn read_all_publications(
     req: HttpRequest,
     pool: Data<PgPool>,
     api_config: Data<ApiConfig>,

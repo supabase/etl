@@ -13,7 +13,7 @@ use tracing::debug;
 /// Initializes Sentry error tracking and performance monitoring for the API.
 ///
 /// Returns [`None`] when no Sentry configuration is provided.
-pub fn init() -> Result<Option<sentry::ClientInitGuard>> {
+pub(crate) fn init() -> Result<Option<sentry::ClientInitGuard>> {
     if let Ok(config) = load_config::<ApiConfig>()
         && let Some(sentry_config) = &config.sentry
     {

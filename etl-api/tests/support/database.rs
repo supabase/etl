@@ -29,7 +29,7 @@ const DEFAULT_DATABASE_PASSWORD: &str = "postgres";
 ///
 /// Generates a unique database name using a UUID suffix to avoid conflicts
 /// between concurrent test runs.
-pub fn get_test_db_config() -> PgConnectionConfig {
+pub(crate) fn get_test_db_config() -> PgConnectionConfig {
     PgConnectionConfig {
         host: std::env::var("TESTS_DATABASE_HOST").unwrap_or(DEFAULT_DATABASE_HOST.into()),
         hostaddr: None,
@@ -55,7 +55,7 @@ pub fn get_test_db_config() -> PgConnectionConfig {
 /// migrations from the "./migrations" directory after creation. Returns a
 /// [`PgPool`] connected to the newly created and migrated database. Panics if
 /// database creation or migration fails.
-pub async fn create_etl_api_database(config: &PgConnectionConfig) -> PgPool {
+pub(crate) async fn create_etl_api_database(config: &PgConnectionConfig) -> PgPool {
     let connection_pool = create_pg_database(config).await;
 
     sqlx::migrate!("./migrations")
@@ -66,7 +66,7 @@ pub async fn create_etl_api_database(config: &PgConnectionConfig) -> PgPool {
     connection_pool
 }
 
-pub async fn create_test_source_database(
+pub(crate) async fn create_test_source_database(
     app: &TestApp,
     tenant_id: &str,
 ) -> (PgPool, i64, PgConnectionConfig) {
@@ -96,14 +96,14 @@ pub async fn create_test_source_database(
     (source_pool, response.id, source_db_config)
 }
 
-pub struct TrustedSourceDatabase {
+pub(crate) struct TrustedSourceDatabase {
     pub admin_pool: PgPool,
     pub admin_config: PgConnectionConfig,
     pub trusted_config: PgConnectionConfig,
     pub trusted_username: String,
 }
 
-pub async fn create_trusted_source_database() -> TrustedSourceDatabase {
+pub(crate) async fn create_trusted_source_database() -> TrustedSourceDatabase {
     let mut admin_config = get_test_db_config();
     admin_config.name = format!("test_trusted_source_db_{}", Uuid::new_v4());
 
@@ -142,7 +142,7 @@ pub async fn create_trusted_source_database() -> TrustedSourceDatabase {
     TrustedSourceDatabase { admin_pool, admin_config, trusted_config, trusted_username }
 }
 
-pub async fn drop_trusted_source_database(database: TrustedSourceDatabase) {
+pub(crate) async fn drop_trusted_source_database(database: TrustedSourceDatabase) {
     let TrustedSourceDatabase { admin_pool, admin_config, trusted_config, trusted_username } =
         database;
 
@@ -170,7 +170,7 @@ pub async fn drop_trusted_source_database(database: TrustedSourceDatabase) {
 /// # Panics
 /// Panics if database connection fails, schema creation fails, or migrations
 /// fail.
-pub async fn run_etl_migrations_on_source_database(source_db_config: &PgConnectionConfig) {
+pub(crate) async fn run_etl_migrations_on_source_database(source_db_config: &PgConnectionConfig) {
     let options = source_db_config.with_db(Some(&ETL_MIGRATION_OPTIONS));
     let mut connection =
         PgConnection::connect_with(&options).await.expect("failed to connect to source database");

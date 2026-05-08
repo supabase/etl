@@ -10,7 +10,7 @@
 ///
 /// Fields must match the SELECT column list in the test query exactly.
 #[derive(clickhouse::Row, serde::Deserialize, Debug, Clone)]
-pub struct AllTypesRow {
+pub(crate) struct AllTypesRow {
     pub id: i64,
     pub smallint_col: i16,
     pub integer_col: i32,
@@ -43,7 +43,7 @@ pub struct AllTypesRow {
 /// Covers edge cases that the `all_types` test does not: nullable scalars,
 /// NULL array elements, empty strings, and multi-byte UTF-8.
 #[derive(clickhouse::Row, serde::Deserialize, Debug)]
-pub struct BoundaryValuesRow {
+pub(crate) struct BoundaryValuesRow {
     pub id: i64,
     pub nullable_text: Option<String>,
     pub nullable_int: Option<i32>,
@@ -57,7 +57,7 @@ pub struct BoundaryValuesRow {
 /// epoch (pre-1970 and far-future). The `date_col` is the signed day offset
 /// from 1970-01-01.
 #[derive(clickhouse::Row, serde::Deserialize, Debug)]
-pub struct DateBoundariesRow {
+pub(crate) struct DateBoundariesRow {
     pub id: i64,
     pub date_col: i32,
     pub cdc_operation: String,

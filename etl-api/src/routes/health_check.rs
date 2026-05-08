@@ -9,6 +9,6 @@ use actix_web::{HttpResponse, Responder, get};
     tag = "Health",
 )]
 #[get("/health_check")]
-pub async fn health_check() -> impl Responder {
+pub(crate) async fn health_check() -> impl Responder {
     HttpResponse::Ok().body("ok")
 }

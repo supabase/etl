@@ -99,7 +99,7 @@ pub struct ReadImagesResponse {
     tag = "Images"
 )]
 #[post("/images")]
-pub async fn create_image(
+pub(crate) async fn create_image(
     pool: Data<PgPool>,
     image: Json<CreateImageRequest>,
 ) -> Result<impl Responder, ImageError> {
@@ -126,7 +126,7 @@ pub async fn create_image(
     tag = "Images"
 )]
 #[get("/images/{image_id}")]
-pub async fn read_image(
+pub(crate) async fn read_image(
     pool: Data<PgPool>,
     image_id: Path<i64>,
 ) -> Result<impl Responder, ImageError> {
@@ -155,7 +155,7 @@ pub async fn read_image(
     tag = "Images"
 )]
 #[post("/images/{image_id}")]
-pub async fn update_image(
+pub(crate) async fn update_image(
     pool: Data<PgPool>,
     image_id: Path<i64>,
     image: Json<UpdateImageRequest>,
@@ -184,7 +184,7 @@ pub async fn update_image(
     tag = "Images"
 )]
 #[delete("/images/{image_id}")]
-pub async fn delete_image(
+pub(crate) async fn delete_image(
     pool: Data<PgPool>,
     image_id: Path<i64>,
 ) -> Result<impl Responder, ImageError> {
@@ -207,7 +207,7 @@ pub async fn delete_image(
     tag = "Images"
 )]
 #[get("/images")]
-pub async fn read_all_images(pool: Data<PgPool>) -> Result<impl Responder, ImageError> {
+pub(crate) async fn read_all_images(pool: Data<PgPool>) -> Result<impl Responder, ImageError> {
     let mut images = vec![];
     for image in data::images::read_all_images(&**pool).await? {
         let image =
