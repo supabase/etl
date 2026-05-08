@@ -5,12 +5,11 @@ use metrics::{counter, histogram};
 use tracing::warn;
 
 use crate::snowflake::{
-    Error, Result,
+    Error, OffsetToken, Result, RowBatch, StreamClient,
     metrics::{
         ETL_SNOWFLAKE_BATCH_BYTES, ETL_SNOWFLAKE_BATCH_SIZE,
         ETL_SNOWFLAKE_CHANNEL_RECOVERIES_TOTAL, ETL_SNOWFLAKE_INSERT_ERRORS_TOTAL,
     },
-    streaming::{OffsetToken, RowBatch, StreamClient},
 };
 
 /// Manages the state and lifecycle of a single Snowpipe Streaming channel.
