@@ -13,7 +13,7 @@ use clap::{Args, ValueEnum};
 /// `.config/nextest.toml`.
 const SHARED_PG_FILTER: &str = "\
     test(exclusive_) | binary_id(etl::main) | (binary_id(etl-destinations::main) & \
-                                test(/^(bigquery|clickhouse|ducklake|iceberg)::/)) | \
+                                test(/^(bigquery|clickhouse|ducklake|iceberg|snowflake)::/)) | \
                                 (binary_id(etl-destinations) & \
                                 test(/ducklake::core::tests::postgres_backed::/))";
 

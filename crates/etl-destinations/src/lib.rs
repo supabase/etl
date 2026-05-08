@@ -10,7 +10,8 @@ mod retry;
     feature = "bigquery",
     feature = "clickhouse",
     feature = "ducklake",
-    feature = "iceberg"
+    feature = "iceberg",
+    feature = "snowflake"
 ))]
 mod table_name;
 
