@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::{
     store::{DestinationTableMetadataRow, DestinationTableSchemaStatus},
-    tokio::{PgSourceClient, PgSourceError},
+    tokio::{PgSourceClient, PgSourceError, PgSourceTransaction},
     types::{SnapshotId, TableId},
 };
 
@@ -118,7 +118,7 @@ pub async fn load_destination_tables_metadata(
 
 /// Deletes all destination table metadata for a pipeline.
 pub async fn delete_destination_tables_metadata_for_all_tables(
-    txn: &tokio_postgres::Transaction<'_>,
+    txn: &PgSourceTransaction<'_>,
     pipeline_id: i64,
 ) -> Result<u64, PgSourceError> {
     Ok(txn
@@ -131,7 +131,7 @@ pub async fn delete_destination_tables_metadata_for_all_tables(
 
 /// Deletes destination table metadata for one table.
 pub async fn delete_destination_table_metadata(
-    txn: &tokio_postgres::Transaction<'_>,
+    txn: &PgSourceTransaction<'_>,
     pipeline_id: i64,
     table_id: TableId,
 ) -> Result<u64, PgSourceError> {

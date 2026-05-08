@@ -1,14 +1,12 @@
-use tokio_postgres::Transaction;
-
 use crate::{
     lag::{PipelineLagMetrics, SlotLagMetrics},
     slots::EtlReplicationSlot,
-    tokio::PgSourceError,
+    tokio::{PgSourceError, PgSourceTransaction},
 };
 
 /// Reads pipeline lag metrics.
 pub async fn pipeline_lag_metrics(
-    txn: &Transaction<'_>,
+    txn: &PgSourceTransaction<'_>,
     pipeline_id: i64,
 ) -> Result<PipelineLagMetrics, PgSourceError> {
     let pipeline_id = pipeline_id as u64;

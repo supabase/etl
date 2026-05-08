@@ -348,11 +348,11 @@ pub(crate) async fn delete_tenant(
                 continue;
             }
         };
-        let source_txn = source_client.transaction().await?;
+        let source_txn = source_client.begin().await?;
         let deleted_pipeline_ids =
             delete_pipelines_source_state(&source_txn, &source_pipelines).await?;
         cleanup::uninstall_source_installation(&source_txn).await?;
-        source_txn.commit().await.map_err(PgSourceError::from)?;
+        source_txn.commit().await?;
         for pipeline_id in deleted_pipeline_ids {
             delete_pipeline_replication_slots(&source_client, pipeline_id).await?;
         }

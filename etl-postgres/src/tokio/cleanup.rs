@@ -1,10 +1,8 @@
-use tokio_postgres::Transaction;
-
-use crate::tokio::{PgSourceError, health, store};
+use crate::tokio::{PgSourceError, PgSourceTransaction, health, store};
 
 /// Deletes all source-side metadata for a pipeline.
 pub async fn delete_pipeline_source_state(
-    txn: &Transaction<'_>,
+    txn: &PgSourceTransaction<'_>,
     pipeline_id: i64,
 ) -> Result<(), PgSourceError> {
     if health::etl_tables_present(txn).await? {
@@ -18,7 +16,7 @@ pub async fn delete_pipeline_source_state(
 
 /// Deletes all source-side metadata for multiple pipelines.
 pub async fn delete_pipelines_source_state(
-    txn: &Transaction<'_>,
+    txn: &PgSourceTransaction<'_>,
     pipeline_ids: &[i64],
 ) -> Result<Vec<i64>, PgSourceError> {
     let mut deleted_pipeline_ids = Vec::with_capacity(pipeline_ids.len());
@@ -31,7 +29,9 @@ pub async fn delete_pipelines_source_state(
 }
 
 /// Uninstalls current-user-owned ETL source objects.
-pub async fn uninstall_source_installation(txn: &Transaction<'_>) -> Result<(), PgSourceError> {
+pub async fn uninstall_source_installation(
+    txn: &PgSourceTransaction<'_>,
+) -> Result<(), PgSourceError> {
     let trigger_owned_by_current_user: bool = txn
         .query_one(
             r#"

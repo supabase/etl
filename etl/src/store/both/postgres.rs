@@ -226,7 +226,7 @@ impl StateStore for PostgresStore {
 
         let mut inner = self.inner.lock().await;
         let mut source_client = self.source_client.lock().await;
-        let source_txn = source_client.transaction().await?;
+        let source_txn = source_client.begin().await?;
         let replication_state_rows =
             pg_store::table_replication_state_rows(&source_txn, self.pipeline_id as i64).await?;
         source_txn.commit().await?;
@@ -276,7 +276,7 @@ impl StateStore for PostgresStore {
 
         // Perform all database updates in a single transaction.
         let mut source_client = self.source_client.lock().await;
-        let tx = source_client.transaction().await?;
+        let tx = source_client.begin().await?;
         for (table_id, state_type, metadata) in db_updates {
             pg_store::update_replication_state_raw(
                 &tx,
@@ -307,7 +307,7 @@ impl StateStore for PostgresStore {
     ) -> EtlResult<TableReplicationPhase> {
         let mut inner = self.inner.lock().await;
         let mut source_client = self.source_client.lock().await;
-        let tx = source_client.transaction().await?;
+        let tx = source_client.begin().await?;
 
         let restored_row =
             pg_store::rollback_replication_state(&tx, self.pipeline_id as i64, table_id)
@@ -596,7 +596,7 @@ impl CleanupStore for PostgresStore {
     async fn cleanup_table_state(&self, table_id: TableId) -> EtlResult<()> {
         let mut inner = self.inner.lock().await;
         let mut source_client = self.source_client.lock().await;
-        let tx = source_client.transaction().await?;
+        let tx = source_client.begin().await?;
         let pipeline_id = self.pipeline_id as i64;
 
         pg_store::delete_destination_table_metadata(&tx, pipeline_id, table_id).await.map_err(

@@ -459,7 +459,7 @@ pub(crate) async fn delete_destination_and_pipeline(
     };
     let mut api_txn = pool.begin().await?;
     let destination_deleted = if let Some(source_client) = source_client.as_mut() {
-        let source_txn = source_client.transaction().await?;
+        let source_txn = source_client.begin().await?;
         delete_pipeline_api_and_source_state(
             api_txn.deref_mut(),
             &source_txn,
@@ -487,7 +487,7 @@ pub(crate) async fn delete_destination_and_pipeline(
         // and the API commit failed afterwards, the API database could still
         // reference pipeline state that no longer exists in the source database.
         api_txn.commit().await?;
-        source_txn.commit().await.map_err(PgSourceError::from)?;
+        source_txn.commit().await?;
         delete_pipeline_replication_slots(source_client, pipeline.id).await?;
 
         destination_deleted

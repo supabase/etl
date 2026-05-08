@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{fmt, ops::Deref};
 
 use etl_config::shared::{
     ETL_API_OPTIONS, IntoConnectOptions, PgConnectionConfig, PgConnectionOptions,
@@ -35,9 +35,62 @@ pub enum PgSourceError {
     InvalidData(String),
 }
 
+fn tls_config(config: &PgConnectionConfig) -> Result<ClientConfig, PgSourceError> {
+    let mut root_store = rustls::RootCertStore::empty();
+    for cert in CertificateDer::pem_slice_iter(config.tls.trusted_root_certs.as_bytes()) {
+        root_store.add(cert?)?;
+    }
+
+    Ok(ClientConfig::builder().with_root_certificates(root_store).with_no_client_auth())
+}
+
+fn spawn_connection<T>(connection: Connection<Socket, T::Stream>)
+where
+    T: MakeTlsConnect<Socket>,
+    T::Stream: Send + 'static,
+{
+    tokio::spawn(async move {
+        match connection.await {
+            Ok(()) => info!("source postgres connection terminated"),
+            Err(error) => error!(error = %error, "source postgres connection error"),
+        }
+    });
+}
+
 /// A tokio-postgres source database client.
 pub struct PgSourceClient {
     client: Client,
+}
+
+/// A source database transaction.
+pub struct PgSourceTransaction<'a> {
+    inner: Transaction<'a>,
+}
+
+impl fmt::Debug for PgSourceTransaction<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PgSourceTransaction").finish_non_exhaustive()
+    }
+}
+
+impl PgSourceTransaction<'_> {
+    /// Commits the transaction.
+    pub async fn commit(self) -> Result<(), PgSourceError> {
+        Ok(self.inner.commit().await?)
+    }
+
+    /// Rolls back the transaction.
+    pub async fn rollback(self) -> Result<(), PgSourceError> {
+        Ok(self.inner.rollback().await?)
+    }
+}
+
+impl<'a> Deref for PgSourceTransaction<'a> {
+    type Target = Transaction<'a>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
 }
 
 impl fmt::Debug for PgSourceClient {
@@ -76,9 +129,9 @@ impl PgSourceClient {
         Ok(Self { client })
     }
 
-    /// Starts a source database transaction.
-    pub async fn transaction(&mut self) -> Result<Transaction<'_>, PgSourceError> {
-        Ok(self.client.transaction().await?)
+    /// Begins a source database transaction.
+    pub async fn begin(&mut self) -> Result<PgSourceTransaction<'_>, PgSourceError> {
+        Ok(PgSourceTransaction { inner: self.client.transaction().await? })
     }
 
     /// Executes a statement and returns the affected row count.
@@ -121,26 +174,4 @@ impl PgSourceClient {
     ) -> Result<Option<Row>, PgSourceError> {
         Ok(self.client.query_opt(query, params).await?)
     }
-}
-
-fn tls_config(config: &PgConnectionConfig) -> Result<ClientConfig, PgSourceError> {
-    let mut root_store = rustls::RootCertStore::empty();
-    for cert in CertificateDer::pem_slice_iter(config.tls.trusted_root_certs.as_bytes()) {
-        root_store.add(cert?)?;
-    }
-
-    Ok(ClientConfig::builder().with_root_certificates(root_store).with_no_client_auth())
-}
-
-fn spawn_connection<T>(connection: Connection<Socket, T::Stream>)
-where
-    T: MakeTlsConnect<Socket>,
-    T::Stream: Send + 'static,
-{
-    tokio::spawn(async move {
-        match connection.await {
-            Ok(()) => info!("source postgres connection terminated"),
-            Err(error) => error!(error = %error, "source postgres connection error"),
-        }
-    });
 }

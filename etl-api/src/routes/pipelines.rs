@@ -798,7 +798,7 @@ pub(crate) async fn delete_pipeline(
     };
     let mut api_txn = pool.begin().await?;
     if let Some(source_client) = source_client.as_mut() {
-        let source_txn = source_client.transaction().await?;
+        let source_txn = source_client.begin().await?;
         delete_pipeline_api_and_source_state(
             api_txn.deref_mut(),
             &source_txn,
@@ -807,7 +807,7 @@ pub(crate) async fn delete_pipeline(
         )
         .await?;
         api_txn.commit().await?;
-        source_txn.commit().await.map_err(PgSourceError::from)?;
+        source_txn.commit().await?;
         delete_pipeline_replication_slots(source_client, pipeline.id).await?;
     } else {
         delete_pipeline_api_state(api_txn.deref_mut(), tenant_id, &pipeline).await?;
@@ -1115,7 +1115,7 @@ pub(crate) async fn get_pipeline_replication_status(
             .await?;
 
     // Start transaction for all source database operations
-    let source_txn = source_client.transaction().await?;
+    let source_txn = source_client.begin().await?;
 
     // Ensure ETL tables exist in the source DB
     if !health::etl_tables_present(&source_txn).await? {
@@ -1210,7 +1210,7 @@ pub(crate) async fn rollback_tables(
             .await?;
 
     // Start transaction for all source database operations
-    let source_txn = source_client.transaction().await?;
+    let source_txn = source_client.begin().await?;
 
     // Ensure ETL tables exist in the source DB
     if !health::etl_tables_present(&source_txn).await? {
@@ -1296,7 +1296,7 @@ pub(crate) async fn rollback_tables(
         rolled_back_tables.push(RolledBackTable { table_id, new_state: new_phase.into() });
     }
 
-    source_txn.commit().await.map_err(PgSourceError::from)?;
+    source_txn.commit().await?;
 
     let response = RollbackTablesResponse { pipeline_id, tables: rolled_back_tables };
 

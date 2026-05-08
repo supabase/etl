@@ -1,8 +1,6 @@
-use tokio_postgres::Transaction;
-
 use crate::{
     store::{TableReplicationStateRow, TableReplicationStateType},
-    tokio::PgSourceError,
+    tokio::{PgSourceError, PgSourceTransaction},
     types::TableId,
 };
 
@@ -35,7 +33,7 @@ fn replication_state_row(
 
 /// Reads current table replication states for a pipeline.
 pub async fn table_replication_state_rows(
-    txn: &Transaction<'_>,
+    txn: &PgSourceTransaction<'_>,
     pipeline_id: i64,
 ) -> Result<Vec<TableReplicationStateRow>, PgSourceError> {
     let rows = txn
@@ -54,7 +52,7 @@ pub async fn table_replication_state_rows(
 
 /// Updates replication state using raw database types.
 pub async fn update_replication_state_raw(
-    txn: &Transaction<'_>,
+    txn: &PgSourceTransaction<'_>,
     pipeline_id: i64,
     table_id: TableId,
     state: TableReplicationStateType,
@@ -81,7 +79,7 @@ pub async fn update_replication_state_raw(
 
 /// Rolls back one table to its previous replication state.
 pub async fn rollback_replication_state(
-    txn: &Transaction<'_>,
+    txn: &PgSourceTransaction<'_>,
     pipeline_id: i64,
     table_id: TableId,
 ) -> Result<Option<TableReplicationStateRow>, PgSourceError> {
@@ -127,7 +125,7 @@ pub async fn rollback_replication_state(
 
 /// Resets one table to initial replication state.
 pub async fn reset_replication_state(
-    txn: &Transaction<'_>,
+    txn: &PgSourceTransaction<'_>,
     pipeline_id: i64,
     table_id: TableId,
 ) -> Result<TableReplicationStateRow, PgSourceError> {
@@ -155,7 +153,7 @@ pub async fn reset_replication_state(
 
 /// Deletes all replication state entries for a pipeline.
 pub async fn delete_replication_state_for_all_tables(
-    txn: &Transaction<'_>,
+    txn: &PgSourceTransaction<'_>,
     pipeline_id: i64,
 ) -> Result<u64, PgSourceError> {
     Ok(txn
@@ -165,7 +163,7 @@ pub async fn delete_replication_state_for_all_tables(
 
 /// Deletes replication state entries for one table.
 pub async fn delete_replication_state(
-    txn: &Transaction<'_>,
+    txn: &PgSourceTransaction<'_>,
     pipeline_id: i64,
     table_id: TableId,
 ) -> Result<u64, PgSourceError> {

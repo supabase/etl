@@ -1,6 +1,4 @@
-use tokio_postgres::Transaction;
-
-use crate::tokio::PgSourceError;
+use crate::tokio::{PgSourceError, PgSourceTransaction};
 
 /// Fully-qualified table names required by ETL.
 pub const ETL_TABLE_NAMES: [&str; 4] = [
@@ -11,8 +9,8 @@ pub const ETL_TABLE_NAMES: [&str; 4] = [
 ];
 
 /// Returns whether all ETL metadata tables are present.
-pub async fn etl_tables_present(txn: &Transaction<'_>) -> Result<bool, PgSourceError> {
-    let table_names = ETL_TABLE_NAMES.to_vec();
+pub async fn etl_tables_present(txn: &PgSourceTransaction<'_>) -> Result<bool, PgSourceError> {
+    let table_names = ETL_TABLE_NAMES.iter().map(ToString::to_string).collect::<Vec<_>>();
 
     Ok(txn
         .query_one(

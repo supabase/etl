@@ -20,6 +20,8 @@ pub enum ReplicationSlotOperationError {
     Slot(#[from] EtlReplicationSlotError),
 }
 
+/// Creates the pattern to match on the table sync worker replication slot and
+/// escapes it to make sure it's parsed correctly by Postgres.
 fn table_sync_like_pattern(pipeline_id: u64) -> Result<String, EtlReplicationSlotError> {
     let prefix = EtlReplicationSlot::table_sync_prefix(pipeline_id)?;
     Ok(format!("{}%", prefix.replace('_', r"\_")))

@@ -136,6 +136,9 @@
 - Prefer running `cargo nextest list` before using filters or crate-specific commands if there is any doubt.
 - When fixing a specific crate, run the narrowest relevant tests first, then broaden if needed.
 - Add or update tests when behavior changes, regressions are possible, or new logic is introduced.
+- Keep unit and library tests free of external Postgres dependencies. Tests that
+  require a running Postgres instance belong in integration tests or the full
+  `cargo xtask nextest run` suite, not in crate-local `#[cfg(test)]` modules.
 - Prefer existing test utilities and fixtures over custom test plumbing. Before adding bespoke
   setup, waits, assertions, or database helpers, check nearby tests and `etl/src/test_utils/` for
   an existing helper and reuse it when it fits.

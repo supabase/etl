@@ -1,12 +1,11 @@
 use std::ops::DerefMut;
 
 use etl_postgres::tokio::{
-    PgSourceClient, PgSourceError, cleanup,
+    PgSourceClient, PgSourceError, PgSourceTransaction, cleanup,
     slots::{self, ReplicationSlotOperationError},
 };
 use sqlx::{FromRow, PgConnection, PgExecutor, PgTransaction};
 use thiserror::Error;
-use tokio_postgres::Transaction;
 
 use crate::{
     configs::{
@@ -231,7 +230,7 @@ where
 
 pub async fn delete_pipeline_api_and_source_state(
     api_connection: &mut PgConnection,
-    source_txn: &Transaction<'_>,
+    source_txn: &PgSourceTransaction<'_>,
     tenant_id: &str,
     pipeline: &PipelineDeletion,
 ) -> Result<(), PipelinesDbError> {
@@ -257,14 +256,14 @@ pub async fn delete_pipeline_api_state(
 }
 
 pub async fn delete_pipeline_source_state(
-    source_txn: &Transaction<'_>,
+    source_txn: &PgSourceTransaction<'_>,
     pipeline_id: i64,
 ) -> Result<(), PipelinesDbError> {
     Ok(cleanup::delete_pipeline_source_state(source_txn, pipeline_id).await?)
 }
 
 pub async fn delete_pipelines_source_state(
-    source_txn: &Transaction<'_>,
+    source_txn: &PgSourceTransaction<'_>,
     pipelines: &[PipelineDeletion],
 ) -> Result<Vec<i64>, PipelinesDbError> {
     let pipeline_ids = pipelines.iter().map(|pipeline| pipeline.id).collect::<Vec<_>>();

@@ -1,10 +1,10 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
 use tokio_postgres::{Row, types::PgLsn};
 
 use crate::{
     store::type_mappings::{postgres_type_to_string, string_to_postgres_type},
-    tokio::{PgSourceClient, PgSourceError},
+    tokio::{PgSourceClient, PgSourceError, PgSourceTransaction},
     types::{ColumnSchema, SnapshotId, TableId, TableName, TableSchema},
 };
 
@@ -31,7 +31,7 @@ pub async fn store_table_schema(
     pipeline_id: i64,
     table_schema: &TableSchema,
 ) -> Result<(), PgSourceError> {
-    let tx = source_client.transaction().await?;
+    let tx = source_client.begin().await?;
     let snapshot_id = table_schema.snapshot_id.to_pg_lsn_string();
     let table_schema_id: i64 = tx
         .query_one(
@@ -176,12 +176,26 @@ pub async fn load_table_schemas_at_snapshot(
         )
         .await?;
 
-    let mut rows_by_table_id: BTreeMap<TableId, Vec<Row>> = BTreeMap::new();
+    let mut table_schemas = HashMap::new();
     for row in rows {
-        rows_by_table_id.entry(row.get("table_id")).or_default().push(row);
+        let table_id: TableId = row.get("table_id");
+        let schema_name: String = row.get("schema_name");
+        let table_name: String = row.get("table_name");
+        let snapshot_id = parse_snapshot_id(row.get::<_, String>("snapshot_id").as_str())?;
+
+        let entry = table_schemas.entry(table_id).or_insert_with(|| {
+            TableSchema::with_snapshot_id(
+                table_id,
+                TableName::new(schema_name, table_name),
+                vec![],
+                snapshot_id,
+            )
+        });
+
+        entry.add_column_schema(parse_column_schema(&row));
     }
 
-    rows_by_table_id.into_values().map(table_schema_from_rows).collect()
+    Ok(table_schemas.into_values().collect())
 }
 
 fn table_schema_from_rows(rows: Vec<Row>) -> Result<TableSchema, PgSourceError> {
@@ -252,21 +266,15 @@ pub async fn delete_obsolete_table_schema_versions(
 
 /// Deletes all table schemas for a pipeline.
 pub async fn delete_table_schemas_for_all_tables(
-    txn: &tokio_postgres::Transaction<'_>,
+    txn: &PgSourceTransaction<'_>,
     pipeline_id: i64,
 ) -> Result<u64, PgSourceError> {
-    txn.execute(
-        "delete from etl.table_columns where table_schema_id in (select id from etl.table_schemas \
-         where pipeline_id = $1)",
-        &[&pipeline_id],
-    )
-    .await?;
     Ok(txn.execute("delete from etl.table_schemas where pipeline_id = $1", &[&pipeline_id]).await?)
 }
 
 /// Deletes table schemas for one table.
 pub async fn delete_table_schemas(
-    txn: &tokio_postgres::Transaction<'_>,
+    txn: &PgSourceTransaction<'_>,
     pipeline_id: i64,
     table_id: TableId,
 ) -> Result<u64, PgSourceError> {

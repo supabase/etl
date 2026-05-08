@@ -26,6 +26,7 @@ pub async fn create_publication(
 ) -> Result<(), PublicationsDbError> {
     let query = create_publication_query(publication);
     source_client.execute(query.as_str(), &[]).await?;
+
     Ok(())
 }
 
@@ -35,6 +36,7 @@ pub async fn update_publication(
 ) -> Result<(), PublicationsDbError> {
     let query = update_publication_query(publication);
     source_client.execute(query.as_str(), &[]).await?;
+
     Ok(())
 }
 
@@ -44,6 +46,7 @@ pub async fn drop_publication(
 ) -> Result<(), PublicationsDbError> {
     let query = drop_publication_query(publication_name);
     source_client.execute(query.as_str(), &[]).await?;
+
     Ok(())
 }
 
@@ -65,7 +68,24 @@ pub async fn read_publication(
         )
         .await?;
 
-    Ok(publication_from_rows(rows).into_iter().next())
+    let mut tables = vec![];
+    let mut name: Option<String> = None;
+    for row in rows {
+        let pub_name: String = row.get("pubname");
+        if let Some(ref name) = name {
+            assert_eq!(name.as_str(), pub_name);
+        } else {
+            name = Some(pub_name);
+        }
+
+        let schema: Option<String> = row.get("schemaname");
+        let table_name: Option<String> = row.get("tablename");
+        if let (Some(schema), Some(table_name)) = (schema, table_name) {
+            tables.push(Table { schema, name: table_name });
+        }
+    }
+
+    Ok(name.map(|name| Publication { name, tables }))
 }
 
 pub async fn read_all_publications(
@@ -143,38 +163,7 @@ fn push_qualified_tables(query: &mut String, tables: &[Table]) {
 
 #[cfg(test)]
 mod tests {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    use etl_config::shared::{PgConnectionConfig, TcpKeepaliveConfig, TlsConfig};
-    use etl_postgres::{tokio::test_utils::PgDatabase, types::TableName};
-    use tokio_postgres::Client;
-
     use super::*;
-
-    fn test_connection_config() -> PgConnectionConfig {
-        let database_suffix = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system time should be after unix epoch")
-            .as_nanos();
-
-        PgConnectionConfig {
-            host: std::env::var("TESTS_DATABASE_HOST").unwrap_or_else(|_| "localhost".to_owned()),
-            hostaddr: None,
-            port: std::env::var("TESTS_DATABASE_PORT")
-                .unwrap_or_else(|_| "5430".to_owned())
-                .parse()
-                .expect("TESTS_DATABASE_PORT must be a valid port number"),
-            name: format!("api_publications_{database_suffix}"),
-            username: std::env::var("TESTS_DATABASE_USERNAME")
-                .unwrap_or_else(|_| "postgres".to_owned()),
-            password: std::env::var("TESTS_DATABASE_PASSWORD")
-                .ok()
-                .or(Some("postgres".to_owned()))
-                .map(Into::into),
-            tls: TlsConfig::disabled(),
-            keepalive: TcpKeepaliveConfig::default(),
-        }
-    }
 
     #[test]
     fn publication_queries_quote_identifiers() {
@@ -201,59 +190,5 @@ mod tests {
             drop_publication_query(&publication.name),
             "drop publication if exists \"pub\"\"; drop schema public; --\""
         );
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn publication_helpers_manage_publications() {
-        let database = PgDatabase::<Client>::new(test_connection_config()).await;
-        database.run_sql("create schema publication_test").await.unwrap();
-        database
-            .create_table(
-                TableName::new("publication_test".to_owned(), "table_1".to_owned()),
-                true,
-                &[("name", "text")],
-            )
-            .await
-            .unwrap();
-        database
-            .create_table(
-                TableName::new("publication_test".to_owned(), "table_2".to_owned()),
-                true,
-                &[("name", "text")],
-            )
-            .await
-            .unwrap();
-
-        let source_client = PgSourceClient::connect(&database.config).await.unwrap();
-        let publication = Publication {
-            name: "api_publication_pub".to_owned(),
-            tables: vec![Table {
-                schema: "publication_test".to_owned(),
-                name: "table_1".to_owned(),
-            }],
-        };
-
-        create_publication(&publication, &source_client).await.unwrap();
-
-        let read = read_publication(&publication.name, &source_client).await.unwrap().unwrap();
-        assert_eq!(read.name, publication.name);
-        assert_eq!(read.tables.len(), 1);
-        assert_eq!(read.tables[0].name, "table_1");
-
-        let updated_publication = Publication {
-            name: publication.name.clone(),
-            tables: vec![Table {
-                schema: "publication_test".to_owned(),
-                name: "table_2".to_owned(),
-            }],
-        };
-        update_publication(&updated_publication, &source_client).await.unwrap();
-
-        let read = read_publication(&publication.name, &source_client).await.unwrap().unwrap();
-        assert_eq!(read.tables.len(), 1);
-        assert_eq!(read.tables[0].name, "table_2");
-
-        drop_publication(&publication.name, &source_client).await.unwrap();
-        assert!(read_publication(&publication.name, &source_client).await.unwrap().is_none());
     }
 }
