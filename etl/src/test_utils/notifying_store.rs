@@ -77,7 +77,7 @@ impl Inner {
         });
 
         self.table_schema_count_conditions.retain(|(tid, expected_count, notify)| {
-            let schemas_count = self.table_schemas.table_len(*tid);
+            let schemas_count = self.table_schemas.snapshots_count(*tid);
             let should_retain = schemas_count < *expected_count;
             if !should_retain {
                 notify.notify_one();
@@ -385,7 +385,7 @@ impl SchemaStore for NotifyingStore {
     async fn load_table_schemas(&self) -> EtlResult<usize> {
         let inner = self.inner.read().await;
 
-        Ok(inner.table_schemas.len())
+        Ok(inner.table_schemas.total_snapshots_count())
     }
 
     async fn store_table_schema(&self, table_schema: TableSchema) -> EtlResult<Arc<TableSchema>> {

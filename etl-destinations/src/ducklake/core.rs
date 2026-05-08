@@ -1477,6 +1477,7 @@ mod tests {
     fn local_pg_connection_config(database_name: String) -> PgConnectionConfig {
         PgConnectionConfig {
             host: env::var("TESTS_DATABASE_HOST").expect("TESTS_DATABASE_HOST must be set"),
+            hostaddr: None,
             port: env::var("TESTS_DATABASE_PORT")
                 .expect("TESTS_DATABASE_PORT must be set")
                 .parse()

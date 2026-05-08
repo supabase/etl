@@ -23,7 +23,9 @@ const MAX_POOL_CONNECTIONS: u32 = 1;
 /// connection pool size.
 ///
 /// Uses state management options with moderate timeouts suitable for
-/// administrative queries like listing tables and reading publications.
+/// administrative queries like listing tables and reading publications. If
+/// configured, the source connection uses `hostaddr` as the TCP target and
+/// preserves `host` as the canonical database hostname in stored API state.
 pub async fn connect_to_source_database_from_api(
     config: &PgConnectionConfig,
 ) -> Result<PgPool, sqlx::Error> {

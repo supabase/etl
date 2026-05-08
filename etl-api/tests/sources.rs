@@ -38,6 +38,7 @@ use crate::support::{
 fn source_config_from_db_config(source_db_config: &PgConnectionConfig) -> FullApiSourceConfig {
     FullApiSourceConfig {
         host: source_db_config.host.clone(),
+        hostaddr: source_db_config.hostaddr,
         port: source_db_config.port,
         name: source_db_config.name.clone(),
         username: source_db_config.username.clone(),

@@ -162,6 +162,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
     // Note: TLS is disabled in this example — enable for production use
     let pg_connection_config = PgConnectionConfig {
         host: args.db_args.db_host,
+        hostaddr: None,
         port: args.db_args.db_port,
         name: args.db_args.db_name,
         username: args.db_args.db_username,

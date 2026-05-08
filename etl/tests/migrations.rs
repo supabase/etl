@@ -27,6 +27,7 @@ const POSTGRES_STORE_BASE_VERSION: i64 = 20250827000000;
 fn local_pg_connection_config() -> PgConnectionConfig {
     PgConnectionConfig {
         host: std::env::var("TESTS_DATABASE_HOST").unwrap_or(DEFAULT_DATABASE_HOST.into()),
+        hostaddr: None,
         port: std::env::var("TESTS_DATABASE_PORT")
             .unwrap_or(DEFAULT_DATABASE_PORT.into())
             .parse()

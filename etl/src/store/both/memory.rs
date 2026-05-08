@@ -213,7 +213,7 @@ impl SchemaStore for MemoryStore {
     async fn load_table_schemas(&self) -> EtlResult<usize> {
         let inner = self.inner.lock().await;
 
-        Ok(inner.table_schemas.len())
+        Ok(inner.table_schemas.total_snapshots_count())
     }
 
     async fn store_table_schema(&self, table_schema: TableSchema) -> EtlResult<Arc<TableSchema>> {

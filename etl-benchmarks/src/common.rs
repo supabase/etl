@@ -665,6 +665,7 @@ pub fn pipeline_config(
         publication_name,
         pg_connection: PgConnectionConfig {
             host: pg.host.clone(),
+            hostaddr: None,
             port: pg.port,
             name: pg.database.clone(),
             username: pg.username.clone(),

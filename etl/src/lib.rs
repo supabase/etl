@@ -109,6 +109,7 @@
 //!     // Configure Postgres connection
 //!     let pg_config = PgConnectionConfig {
 //!         host: "localhost".to_string(),
+//!         hostaddr: None,
 //!         port: 5432,
 //!         name: "mydb".to_string(),
 //!         username: "postgres".to_string(),

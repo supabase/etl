@@ -1,4 +1,4 @@
-use std::{sync::LazyLock, time::Duration};
+use std::{net::IpAddr, sync::LazyLock, time::Duration};
 
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
@@ -196,6 +196,13 @@ impl PgConnectionOptions {
 pub struct PgConnectionConfig {
     /// Hostname or IP address of the Postgres server.
     pub host: String,
+    /// Numeric IP address used for the TCP connection.
+    ///
+    /// When present, this is used as the network target while [`Self::host`]
+    /// remains the database hostname used for TLS identity. This matches
+    /// libpq's `hostaddr` behavior for Postgres clients that support separate
+    /// host and hostaddr values.
+    pub hostaddr: Option<IpAddr>,
     /// Port number on which the Postgres server is listening.
     pub port: u16,
     /// Name of the Postgres database to connect to.
@@ -223,6 +230,9 @@ impl Config for PgConnectionConfig {
 pub struct PgConnectionConfigWithoutSecrets {
     /// Hostname or IP address of the Postgres server.
     pub host: String,
+    /// Numeric IP address used for the TCP connection.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hostaddr: Option<IpAddr>,
     /// Port number on which the Postgres server is listening.
     pub port: u16,
     /// Name of the Postgres database to connect to.
@@ -240,6 +250,7 @@ impl From<PgConnectionConfig> for PgConnectionConfigWithoutSecrets {
     fn from(value: PgConnectionConfig) -> Self {
         PgConnectionConfigWithoutSecrets {
             host: value.host,
+            hostaddr: value.hostaddr,
             port: value.port,
             name: value.name,
             username: value.username,
@@ -311,9 +322,17 @@ pub trait IntoConnectOptions<Output> {
 impl IntoConnectOptions<SqlxConnectOptions> for PgConnectionConfig {
     /// Creates sqlx connection options without database name.
     fn without_db(&self, options: Option<&PgConnectionOptions>) -> SqlxConnectOptions {
-        let ssl_mode = if self.tls.enabled { SqlxSslMode::VerifyFull } else { SqlxSslMode::Prefer };
+        let host = self.hostaddr.map_or_else(|| self.host.clone(), |hostaddr| hostaddr.to_string());
+        let ssl_mode = match (self.tls.enabled, self.hostaddr) {
+            // sqlx 0.8.6 does not expose libpq's separate hostaddr field. When
+            // dialing a numeric address, verify the CA but avoid hostname
+            // verification against the IP literal.
+            (true, Some(_)) => SqlxSslMode::VerifyCa,
+            (true, None) => SqlxSslMode::VerifyFull,
+            (false, _) => SqlxSslMode::Prefer,
+        };
         let mut connect_options = SqlxConnectOptions::new_without_pgpass()
-            .host(&self.host)
+            .host(&host)
             .username(&self.username)
             .port(self.port)
             .ssl_mode(ssl_mode)
@@ -367,6 +386,10 @@ impl IntoConnectOptions<TokioPgConnectOptions> for PgConnectionConfig {
             // TODO: Does setting ssl mode has an effect here?
             .ssl_mode(ssl_mode);
 
+        if let Some(hostaddr) = self.hostaddr {
+            config.hostaddr(hostaddr);
+        }
+
         if let Some(password) = &self.password {
             config.password(password.expose_secret());
         }
@@ -400,6 +423,19 @@ impl IntoConnectOptions<TokioPgConnectOptions> for PgConnectionConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pg_connection_config(hostaddr: Option<IpAddr>) -> PgConnectionConfig {
+        PgConnectionConfig {
+            host: "db.abcdefghijklmnopqrst.supabase.co".to_owned(),
+            hostaddr,
+            port: 5432,
+            name: "postgres".to_owned(),
+            username: "postgres".to_owned(),
+            password: None,
+            tls: TlsConfig { trusted_root_certs: "root-certs".to_owned(), enabled: true },
+            keepalive: TcpKeepaliveConfig::default(),
+        }
+    }
 
     #[test]
     fn replication_options_string_format() {
@@ -438,5 +474,45 @@ mod tests {
     #[test]
     fn api_options_application_name() {
         assert_eq!(ETL_API_OPTIONS.application_name, "supabase_etl_api");
+    }
+
+    #[test]
+    fn sqlx_options_use_hostaddr_as_network_target() {
+        let hostaddr = "2a05:d014:1c06:5f0c:d7a9:8616:bee2:30df".parse().unwrap();
+        let config = pg_connection_config(Some(hostaddr));
+
+        let options: SqlxConnectOptions = config.with_db(None);
+
+        assert_eq!(options.get_host(), hostaddr.to_string());
+        assert!(matches!(options.get_ssl_mode(), SqlxSslMode::VerifyCa));
+    }
+
+    #[test]
+    fn config_without_secrets_preserves_hostaddr() {
+        let hostaddr = "2a05:d014:1c06:5f0c:d7a9:8616:bee2:30df".parse().unwrap();
+        let config = pg_connection_config(Some(hostaddr));
+
+        let config_without_secrets = PgConnectionConfigWithoutSecrets::from(config);
+        let serialized = serde_json::to_value(&config_without_secrets).unwrap();
+
+        assert_eq!(config_without_secrets.hostaddr, Some(hostaddr));
+        assert_eq!(serialized["hostaddr"], hostaddr.to_string());
+    }
+
+    #[test]
+    fn tokio_postgres_options_keep_host_and_hostaddr_separate() {
+        let hostaddr = "2a05:d014:1c06:5f0c:d7a9:8616:bee2:30df".parse().unwrap();
+        let config = pg_connection_config(Some(hostaddr));
+
+        let options: TokioPgConnectOptions = config.with_db(None);
+
+        assert_eq!(options.get_hostaddrs(), &[hostaddr]);
+        match options.get_hosts().first().expect("host is configured") {
+            tokio_postgres::config::Host::Tcp(host) => {
+                assert_eq!(host, "db.abcdefghijklmnopqrst.supabase.co");
+            }
+            #[cfg(unix)]
+            tokio_postgres::config::Host::Unix(_) => panic!("expected tcp host"),
+        }
     }
 }
