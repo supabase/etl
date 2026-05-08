@@ -1,4 +1,4 @@
-use std::{future::Future, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -7,7 +7,14 @@ use tracing::{debug, warn};
 
 use crate::{
     retry::{RetryDecision, RetryPolicy, retry_with_backoff},
-    snowflake::{Error, Result, auth::TokenProvider, encoding::RowBatch},
+    snowflake::{
+        Error, Result,
+        auth::TokenProvider,
+        streaming::{
+            ChannelStatusResponse, InsertRowsResponse, OffsetToken, OpenChannelResponse, RowBatch,
+            StreamClient,
+        },
+    },
 };
 
 const SNOWPIPE_RETRY_POLICY: RetryPolicy = RetryPolicy {
@@ -17,97 +24,6 @@ const SNOWPIPE_RETRY_POLICY: RetryPolicy = RetryPolicy {
 };
 
 const USER_AGENT: &str = "supabase-etl/0.1.0";
-
-/// Response from opening or reopening a channel.
-#[derive(Debug)]
-pub struct OpenChannelResponse {
-    /// Server-managed sequencer token.
-    ///
-    /// Must be passed to subsequent `insert_rows` calls on this channel.
-    pub continuation_token: String,
-
-    /// Last committed offset token.
-    ///
-    /// `None` if the channel has never committed data.
-    pub offset_token: Option<String>,
-}
-
-/// Response from inserting rows into a channel.
-#[derive(Debug)]
-pub struct InsertRowsResponse {
-    /// Updated continuation token for the next `insert_rows` call.
-    pub continuation_token: String,
-}
-
-/// Per-channel status from a bulk status check.
-#[derive(Debug)]
-pub struct ChannelStatusResponse {
-    /// Channel name.
-    pub channel: String,
-
-    /// Snowflake-assigned status code (e.g. `ACTIVE`, `SUCCESS`).
-    pub status_code: String,
-
-    /// Last committed offset token, or `None` if no data has been committed.
-    pub offset_token: Option<String>,
-}
-
-/// Abstraction over Snowpipe Streaming ingestion backends.
-///
-/// Enables swapping between REST API and SDK sidecar (should we decide to
-/// implement it to scale ingestion 10x) without changing destination logic.
-pub trait StreamClient: Send + Sync + 'static {
-    /// Discover the ingest hostname for this account.
-    ///
-    /// Normally, never changes and is discovered only once per account.
-    fn discover_ingest_host(&self) -> impl Future<Output = Result<String>> + Send;
-
-    /// Open or reopen a channel.
-    ///
-    /// Returns the continuation token and last committed offset token (if any).
-    fn open_channel(
-        &self,
-        database: &str,
-        schema: &str,
-        pipe: &str,
-        channel: &str,
-    ) -> impl Future<Output = Result<OpenChannelResponse>> + Send;
-
-    /// Drop a channel.
-    ///
-    /// Committed data remains in the table.
-    fn drop_channel(
-        &self,
-        database: &str,
-        schema: &str,
-        pipe: &str,
-        channel: &str,
-    ) -> impl Future<Output = Result<()>> + Send;
-
-    /// Insert a pre-serialized NDJSON batch into a channel.
-    ///
-    /// The `continuation_token` is the server sequencer from `open_channel`
-    /// or the previous `insert_rows` call.
-    fn insert_rows(
-        &self,
-        database: &str,
-        schema: &str,
-        pipe: &str,
-        channel: &str,
-        batch: RowBatch,
-        offset_token: &str,
-        continuation_token: &str,
-    ) -> impl Future<Output = Result<InsertRowsResponse>> + Send;
-
-    /// Status check for one or more channels.
-    fn channel_status(
-        &self,
-        database: &str,
-        schema: &str,
-        pipe: &str,
-        channels: &[String],
-    ) -> impl Future<Output = Result<Vec<ChannelStatusResponse>>> + Send;
-}
 
 /// [`StreamClient`] backed by the Snowpipe Streaming REST API.
 ///
@@ -184,11 +100,11 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
         &self,
         database: &str,
         schema: &str,
-        pipe: &str,
+        table: &str,
         channel: &str,
     ) -> Result<OpenChannelResponse> {
         let host = self.get_or_discover_host().await?;
-        let url = channel_url(host, database, schema, pipe, channel);
+        let url = channel_url(host, database, schema, table, channel);
 
         let auth = Arc::clone(&self.auth);
         let http = self.http.clone();
@@ -249,7 +165,9 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
                         continuation_token: response.next_continuation_token,
                         offset_token: response
                             .channel_status
-                            .and_then(|cs| cs.last_committed_offset_token),
+                            .and_then(|cs| cs.last_committed_offset_token)
+                            .map(|s| s.parse::<OffsetToken>())
+                            .transpose()?,
                     })
                 }
             },
@@ -262,19 +180,18 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
         &self,
         database: &str,
         schema: &str,
-        pipe: &str,
+        table: &str,
         channel: &str,
-        batch: RowBatch,
-        offset_token: &str,
+        batch: &RowBatch,
         continuation_token: &str,
     ) -> Result<InsertRowsResponse> {
         let host = self.get_or_discover_host().await?;
-        let base_url = insert_url(host, database, schema, pipe, channel);
+        let base_url = insert_url(host, database, schema, table, channel);
 
-        let compressed = batch.into_compressed()?;
+        let compressed = batch.bytes().to_vec();
         let query_params = [
             ("continuationToken", continuation_token.to_string()),
-            ("offsetToken", offset_token.to_string()),
+            ("offsetToken", batch.offset().as_ref().to_string()),
         ];
 
         let auth = Arc::clone(&self.auth);
@@ -320,11 +237,8 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
                     let body = resp.text().await.unwrap_or_default();
 
                     if status != 200 {
-                        // Try to parse Snowpipe status code from error body
                         if let Ok(err_resp) = serde_json::from_str::<SnowpipeErrorResponse>(&body) {
                             if let Some(code) = err_resp.status_code {
-                                // Authentication error: JWT is either expired or invalid.
-                                // Invalidate token (on the next run new token is generated).
                                 if code == 3 {
                                     auth.invalidate_token().await;
                                 }
@@ -351,11 +265,11 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
         &self,
         database: &str,
         schema: &str,
-        pipe: &str,
+        table: &str,
         channel: &str,
     ) -> Result<()> {
         let host = self.get_or_discover_host().await?;
-        let url = channel_url(host, database, schema, pipe, channel);
+        let url = channel_url(host, database, schema, table, channel);
 
         let auth = Arc::clone(&self.auth);
         let http = self.http.clone();
@@ -404,11 +318,11 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
         &self,
         database: &str,
         schema: &str,
-        pipe: &str,
+        table: &str,
         channels: &[String],
     ) -> Result<Vec<ChannelStatusResponse>> {
         let host = self.get_or_discover_host().await?;
-        let url = channel_status_url(host, database, schema, pipe);
+        let url = channel_status_url(host, database, schema, table);
 
         let auth = Arc::clone(&self.auth);
         let http = self.http.clone();
@@ -458,12 +372,17 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
                     Ok(response
                         .channel_statuses
                         .into_iter()
-                        .map(|(name, ch)| ChannelStatusResponse {
-                            channel: name,
-                            status_code: ch.channel_status_code.unwrap_or_default(),
-                            offset_token: ch.last_committed_offset_token,
+                        .map(|(name, ch)| {
+                            Ok(ChannelStatusResponse {
+                                channel: name,
+                                status_code: ch.channel_status_code.unwrap_or_default(),
+                                offset_token: ch
+                                    .last_committed_offset_token
+                                    .map(|s| s.parse::<OffsetToken>())
+                                    .transpose()?,
+                            })
                         })
-                        .collect())
+                        .collect::<Result<Vec<_>>>()?)
                 }
             },
         )
@@ -472,18 +391,25 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
     }
 }
 
-fn channel_url(host: &str, db: &str, schema: &str, pipe: &str, channel: &str) -> String {
+fn pipe_name(table: &str) -> String {
+    format!("{table}-STREAMING")
+}
+
+fn channel_url(host: &str, db: &str, schema: &str, table: &str, channel: &str) -> String {
+    let pipe = pipe_name(table);
     format!("{host}/v2/streaming/databases/{db}/schemas/{schema}/pipes/{pipe}/channels/{channel}")
 }
 
-fn insert_url(host: &str, db: &str, schema: &str, pipe: &str, channel: &str) -> String {
+fn insert_url(host: &str, db: &str, schema: &str, table: &str, channel: &str) -> String {
+    let pipe = pipe_name(table);
     format!(
         "{host}/v2/streaming/data/databases/{db}/schemas/{schema}/pipes/{pipe}/channels/{channel}/\
          rows"
     )
 }
 
-fn channel_status_url(host: &str, db: &str, schema: &str, pipe: &str) -> String {
+fn channel_status_url(host: &str, db: &str, schema: &str, table: &str) -> String {
+    let pipe = pipe_name(table);
     format!("{host}/v2/streaming/databases/{db}/schemas/{schema}/pipes/{pipe}:bulk-channel-status")
 }
 
@@ -558,7 +484,13 @@ struct BulkStatusChannel {
 
 #[cfg(test)]
 mod tests {
+    use etl::types::{Cell, ColumnSchema, TableRow, Type};
+
     use super::*;
+    use crate::snowflake::{
+        encoding::{CdcMeta, CdcOperation, serialize_row},
+        streaming::{OffsetToken, RowBatchBuilder},
+    };
 
     #[test]
     fn should_retry_decision() {
@@ -585,58 +517,61 @@ mod tests {
 
     #[test]
     fn ndjson_formatting() {
-        use etl::types::{Cell, ColumnSchema, TableRow, Type};
         let cols = [
             ColumnSchema::new("id".into(), Type::INT4, -1, 1, None, true),
             ColumnSchema::new("name".into(), Type::TEXT, -1, 2, None, true),
         ];
 
-        let mut batch = RowBatch::with_capacity(1024);
-        batch
-            .push_row(&cols, &TableRow::new(vec![Cell::I32(1), Cell::String("Alice".into())]))
-            .unwrap();
-        batch
-            .push_row(&cols, &TableRow::new(vec![Cell::I32(2), Cell::String("Bob".into())]))
-            .unwrap();
+        let mut buf = Vec::new();
+        serialize_row(
+            &mut buf,
+            &cols,
+            &TableRow::new(vec![Cell::I32(1), Cell::String("Alice".into())]),
+            CdcMeta::new(CdcOperation::Insert, "0"),
+        )
+        .unwrap();
+        serialize_row(
+            &mut buf,
+            &cols,
+            &TableRow::new(vec![Cell::I32(2), Cell::String("Bob".into())]),
+            CdcMeta::new(CdcOperation::Insert, "0"),
+        )
+        .unwrap();
 
-        let text = std::str::from_utf8(batch.as_bytes()).unwrap();
+        let text = std::str::from_utf8(&buf).unwrap();
         let lines: Vec<&str> = text.trim_end().split('\n').collect();
         assert_eq!(lines.len(), 2);
 
         let row0: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
-        assert_eq!(row0, serde_json::json!({"id": 1, "name": "Alice"}));
+        assert_eq!(row0["id"], 1);
+        assert_eq!(row0["name"], "Alice");
 
         let row1: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
-        assert_eq!(row1, serde_json::json!({"id": 2, "name": "Bob"}));
+        assert_eq!(row1["id"], 2);
+        assert_eq!(row1["name"], "Bob");
     }
 
     #[test]
-    fn into_compressed_roundtrip() {
-        use etl::types::{Cell, ColumnSchema, TableRow, Type};
+    fn compressed_roundtrip() {
         let cols = [ColumnSchema::new("id".into(), Type::INT4, -1, 1, None, true)];
+        let mut builder = RowBatchBuilder::new().unwrap();
+        builder
+            .push_row(
+                &cols,
+                &TableRow::new(vec![Cell::I32(42)]),
+                CdcMeta::new(CdcOperation::Insert, "0"),
+                &OffsetToken::zero(),
+            )
+            .unwrap();
 
-        let mut batch = RowBatch::with_capacity(1024);
-        batch.push_row(&cols, &TableRow::new(vec![Cell::I32(42)])).unwrap();
+        let batches = builder.finish().unwrap();
+        let batch = batches.iter().next().unwrap();
+        assert!(batch.size() > 0);
 
-        let raw = batch.as_bytes().to_vec();
-
-        let compressed = batch.into_compressed().unwrap();
-        assert!(!compressed.is_empty());
-
-        let decompressed = zstd::decode_all(compressed.as_slice()).unwrap();
-        assert_eq!(decompressed, raw);
-    }
-
-    #[test]
-    fn into_compressed_rejects_oversized() {
-        use etl::types::{Cell, ColumnSchema, TableRow, Type};
-        let cols = [ColumnSchema::new("data".into(), Type::TEXT, -1, 1, None, true)];
-
-        let large_value = "x".repeat(4 * 1024 * 1024 + 1);
-        let mut batch = RowBatch::with_capacity(4 * 1024 * 1024 + 256);
-        batch.push_row(&cols, &TableRow::new(vec![Cell::String(large_value)])).unwrap();
-
-        let err = batch.into_compressed().unwrap_err();
-        assert!(matches!(err, Error::Encoding(msg) if msg.contains("limit")));
+        let decompressed = zstd::decode_all(batch.bytes()).unwrap();
+        let text = String::from_utf8(decompressed).unwrap();
+        let line = text.trim();
+        let val: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert_eq!(val["id"], 42);
     }
 }

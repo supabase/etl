@@ -39,6 +39,12 @@ impl OffsetToken {
     }
 }
 
+impl Default for OffsetToken {
+    fn default() -> Self {
+        Self::zero()
+    }
+}
+
 impl fmt::Display for OffsetToken {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)

@@ -17,7 +17,7 @@ pub(super) fn register_metrics() {
         describe_histogram!(
             ETL_SNOWFLAKE_BATCH_BYTES,
             Unit::Bytes,
-            "Batch size in bytes (pre-compression)"
+            "Batch size in bytes (compressed)"
         );
 
         describe_counter!(
