@@ -31,6 +31,13 @@ default = []
 bigquery = ["etl-destinations/bigquery"]
 clickhouse = ["etl-destinations/clickhouse"]
 ducklake = ["etl-destinations/ducklake"]
+snowflake = ["etl-destinations/snowflake"]
+
+[[bin]]
+name = "snowflake"
+path = "src/bin/snowflake.rs"
+required-features = ["snowflake"]
+test = false
 
 [dependencies]
 
@@ -39,6 +46,7 @@ etl = { workspace = true }
 etl-destinations = { workspace = true }
 etl-telemetry = { workspace = true }
 k8s-openapi = { workspace = true, features = ["latest"] }
+reqwest = { workspace = true, features = ["json"] }
 rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
 tokio = { workspace = true, features = ["macros", "signal"] }
 tracing = { workspace = true, default-features = true }
