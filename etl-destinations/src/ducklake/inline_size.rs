@@ -4,7 +4,7 @@ use etl::{
 };
 use metrics::gauge;
 use pg_escape::{quote_identifier, quote_literal};
-use sqlx::PgPool;
+use sqlx::{AssertSqlSafe, PgPool};
 
 use crate::ducklake::metrics::{ETL_DUCKLAKE_TABLE_ACTIVE_INLINED_DATA_BYTES, TABLE_LABEL};
 
@@ -33,16 +33,17 @@ impl DuckLakePendingInlineSizeSampler {
         table_name: &str,
     ) -> EtlResult<DuckLakePendingInlineDataSizes> {
         let sql = pending_inline_data_bytes_query(&self.metadata_schema);
-        let inlined_bytes: i64 =
-            sqlx::query_scalar(&sql).bind(table_name).fetch_one(&self.pool).await.map_err(
-                |source| {
-                    etl_error!(
-                        ErrorKind::DestinationQueryFailed,
-                        "DuckLake inline-size sampler query failed",
-                        source: source
-                    )
-                },
-            )?;
+        let inlined_bytes: i64 = sqlx::query_scalar(AssertSqlSafe(sql))
+            .bind(table_name)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|source| {
+                etl_error!(
+                    ErrorKind::DestinationQueryFailed,
+                    "DuckLake inline-size sampler query failed",
+                    source: source
+                )
+            })?;
         Ok(record_pending_inline_data_sizes(inlined_bytes, table_name))
     }
 }

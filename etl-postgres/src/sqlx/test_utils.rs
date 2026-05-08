@@ -1,5 +1,6 @@
 use etl_config::shared::{IntoConnectOptions, PgConnectionConfig};
-use sqlx::{Connection, Executor, PgConnection, PgPool};
+use pg_escape::{quote_identifier, quote_literal};
+use sqlx::{AssertSqlSafe, Connection, PgConnection, PgPool};
 
 /// Creates a new Postgres database and returns a connection pool.
 ///
@@ -13,8 +14,9 @@ pub async fn create_pg_database(config: &PgConnectionConfig) -> PgPool {
     let mut connection = PgConnection::connect_with(&config.without_db(None))
         .await
         .expect("Failed to connect to Postgres");
-    connection
-        .execute(&*format!(r#"create database "{}";"#, config.name))
+    let create_database_query = format!("create database {};", quote_identifier(&config.name));
+    sqlx::query(AssertSqlSafe(create_database_query))
+        .execute(&mut connection)
         .await
         .expect("Failed to create database");
 
@@ -41,24 +43,24 @@ pub async fn drop_pg_database(config: &PgConnectionConfig) {
     };
 
     // Forcefully terminate any remaining connections to the database.
-    if let Err(e) = connection
-        .execute(&*format!(
-            r#"
+    let terminate_connections_query = format!(
+        r#"
             select pg_terminate_backend(pg_stat_activity.pid)
             from pg_stat_activity
-            where pg_stat_activity.datname = '{}'
+            where pg_stat_activity.datname = {}
             and pid <> pg_backend_pid();"#,
-            config.name
-        ))
-        .await
+        quote_literal(&config.name)
+    );
+    if let Err(e) =
+        sqlx::query(AssertSqlSafe(terminate_connections_query)).execute(&mut connection).await
     {
         eprintln!("warning: failed to terminate connections for database {}: {}", config.name, e);
     }
 
     // Drop the database.
-    if let Err(e) =
-        connection.execute(&*format!(r#"drop database if exists "{}";"#, config.name)).await
-    {
+    let drop_database_query =
+        format!("drop database if exists {};", quote_identifier(&config.name));
+    if let Err(e) = sqlx::query(AssertSqlSafe(drop_database_query)).execute(&mut connection).await {
         eprintln!("warning: failed to drop database {}: {}", config.name, e);
     }
 }

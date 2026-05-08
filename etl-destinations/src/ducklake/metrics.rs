@@ -11,7 +11,7 @@ use etl::{
 use metrics::{Unit, describe_counter, describe_gauge, describe_histogram, gauge, histogram};
 use parking_lot::Mutex;
 use pg_escape::{quote_identifier, quote_literal};
-use sqlx::PgPool;
+use sqlx::{AssertSqlSafe, PgPool};
 use tokio::{
     sync::{mpsc, watch},
     task::JoinHandle,
@@ -502,17 +502,18 @@ pub(super) async fn query_table_storage_metrics(
         active_delete_files,
         active_delete_bytes,
         deleted_rows,
-    ): (i64, i64, i64, i64, i64, i64, i64) =
-        sqlx::query_as(&sql).bind(table_name).fetch_one(metadata_pg_pool).await.map_err(
-            |source| {
-                etl_error!(
-                    ErrorKind::DestinationQueryFailed,
-                    "DuckLake table storage metrics query failed",
-                    format!("table={table_name}, metadata_schema={metadata_schema}"),
-                    source: source
-                )
-            },
-        )?;
+    ): (i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(AssertSqlSafe(sql))
+        .bind(table_name)
+        .fetch_one(metadata_pg_pool)
+        .await
+        .map_err(|source| {
+            etl_error!(
+                ErrorKind::DestinationQueryFailed,
+                "DuckLake table storage metrics query failed",
+                format!("table={table_name}, metadata_schema={metadata_schema}"),
+                source: source
+            )
+        })?;
 
     Ok(DuckLakeTableStorageMetrics {
         active_data_files,
@@ -541,7 +542,7 @@ pub(super) async fn query_catalog_maintenance_metrics(
         files_scheduled_for_deletion_bytes,
         oldest_scheduled_deletion_epoch_ms,
     ): (i64, i64, Option<i64>, i64, i64, Option<i64>) =
-        sqlx::query_as(&sql).fetch_one(metadata_pg_pool).await.map_err(|source| {
+        sqlx::query_as(AssertSqlSafe(sql)).fetch_one(metadata_pg_pool).await.map_err(|source| {
             etl_error!(
                 ErrorKind::DestinationQueryFailed,
                 "DuckLake catalog maintenance metrics query failed",

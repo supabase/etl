@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
-use pg_escape::{quote_identifier, quote_literal};
+use pg_escape::quote_identifier;
 use serde::Serialize;
-use sqlx::{Executor, PgPool, Row};
+use sqlx::{AssertSqlSafe, PgPool, Row};
 use thiserror::Error;
 use utoipa::ToSchema;
 
@@ -48,7 +48,7 @@ pub async fn create_publication(
     // replication
     query.push_str(" with (publish_via_partition_root = true)");
 
-    pool.execute(query.as_str()).await?;
+    sqlx::query(AssertSqlSafe(query)).execute(pool).await?;
     Ok(())
 }
 
@@ -74,7 +74,7 @@ pub async fn update_publication(
         }
     }
 
-    pool.execute(query.as_str()).await?;
+    sqlx::query(AssertSqlSafe(query)).execute(pool).await?;
     Ok(())
 }
 
@@ -87,7 +87,7 @@ pub async fn drop_publication(
     let quoted_publication_name = quote_identifier(publication_name);
     query.push_str(&quoted_publication_name);
 
-    pool.execute(query.as_str()).await?;
+    sqlx::query(AssertSqlSafe(query)).execute(pool).await?;
     Ok(())
 }
 
@@ -95,25 +95,19 @@ pub async fn read_publication(
     publication_name: &str,
     pool: &PgPool,
 ) -> Result<Option<Publication>, PublicationsDbError> {
-    let mut query = String::new();
-    query.push_str(
-        r#"
+    let query = r#"
         select p.pubname,
             pt.schemaname as "schemaname?",
             pt.tablename as "tablename?"
         from pg_publication p
         left join pg_publication_tables pt on p.pubname = pt.pubname
-        where p.pubname =
-	   "#,
-    );
-
-    let quoted_publication_name = quote_literal(publication_name);
-    query.push_str(&quoted_publication_name);
+        where p.pubname = $1;
+	   "#;
 
     let mut tables = vec![];
     let mut name: Option<String> = None;
 
-    for row in pool.fetch_all(query.as_str()).await? {
+    for row in sqlx::query(query).bind(publication_name).fetch_all(pool).await? {
         let pub_name: String = row.get("pubname");
         if let Some(ref name) = name {
             assert_eq!(name.as_str(), pub_name);
@@ -142,7 +136,7 @@ pub async fn read_all_publications(pool: &PgPool) -> Result<Vec<Publication>, Pu
 
     let mut pub_name_to_tables: HashMap<String, Vec<Table>> = HashMap::new();
 
-    for row in pool.fetch_all(query).await? {
+    for row in sqlx::query(query).fetch_all(pool).await? {
         let pub_name: String = row.get("pubname");
         let schema: Option<String> = row.get("schemaname?");
         let table_name: Option<String> = row.get("tablename?");

@@ -189,16 +189,14 @@ pub async fn delete_pipeline_replication_slots(
         // associated with this pipeline id. We use both the exact apply slot
         // name and the table-sync prefix so cleanup can still succeed even if
         // ETL metadata was already removed.
-        let terminate_query = String::from(
-            r#"
+        let terminate_query = r#"
             select pg_terminate_backend(r.active_pid)
             from pg_replication_slots r
             where (r.slot_name = $1 or r.slot_name like $2 escape '\')
               and r.active = true
               and r.active_pid is not null;
-            "#,
-        );
-        let result = sqlx::query(&terminate_query)
+            "#;
+        let result = sqlx::query(terminate_query)
             .bind(&apply_slot_name)
             .bind(&table_sync_pattern)
             .execute(pool)
@@ -215,14 +213,12 @@ pub async fn delete_pipeline_replication_slots(
         // Phase 2: drop all matching replication slots, whether still active or already
         // inactive. Note: pg_drop_replication_slot will signal walsenders to
         // terminate if still active
-        let drop_query = String::from(
-            r#"
+        let drop_query = r#"
             select pg_drop_replication_slot(r.slot_name)
             from pg_replication_slots r
             where r.slot_name = $1 or r.slot_name like $2 escape '\';
-            "#,
-        );
-        let result = sqlx::query(&drop_query)
+            "#;
+        let result = sqlx::query(drop_query)
             .bind(&apply_slot_name)
             .bind(&table_sync_pattern)
             .execute(pool)

@@ -27,7 +27,7 @@ etl-telemetry = { workspace = true }
 rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-sqlx = { workspace = true, features = ["runtime-tokio-rustls", "postgres", "migrate"] }
+sqlx = { workspace = true, features = ["runtime-tokio", "tls-rustls", "postgres", "migrate"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "signal"] }
 tracing = { workspace = true, default-features = true }
 

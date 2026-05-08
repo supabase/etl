@@ -88,7 +88,7 @@ regex = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true, features = ["json"] }
 serde = { workspace = true, optional = true, features = ["derive"] }
 serde_json = { workspace = true, optional = true }
-sqlx = { workspace = true, optional = true, features = ["runtime-tokio-rustls", "postgres"] }
+sqlx = { workspace = true, optional = true, features = ["runtime-tokio", "tls-rustls", "postgres"] }
 tokio = { workspace = true, optional = true, features = ["rt", "sync", "time"] }
 tokio-postgres = { workspace = true, optional = true }
 tonic = { workspace = true, optional = true }
