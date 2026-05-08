@@ -1,10 +1,12 @@
 mod batch;
+mod channel;
 mod offset_token;
 mod rest_client;
 
 use std::future::Future;
 
 pub use batch::{RowBatch, RowBatchBuilder};
+pub use channel::ChannelHandle;
 pub use offset_token::OffsetToken;
 pub use rest_client::RestStreamClient;
 
