@@ -73,7 +73,7 @@ impl ResponseError for TableError {
     }
 
     fn error_response(&self) -> HttpResponse {
-        let error_message = ErrorMessage { error: self.to_message() };
+        let error_message = ErrorMessage { message: self.to_message() };
         let body =
             serde_json::to_string(&error_message).expect("failed to serialize error message");
         HttpResponse::build(self.status_code()).insert_header(ContentType::json()).body(body)

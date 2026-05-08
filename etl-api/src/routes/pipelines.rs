@@ -40,7 +40,7 @@ use crate::{
             delete_pipeline_resources_in_k8s, is_replicator_active, is_replicator_pod_stopped,
         },
     },
-    routes::{ErrorMessage, TenantIdError, extract_tenant_id},
+    routes::{ErrorMessage, TenantIdError, extract_tenant_id, utils as route_utils},
     utils::parse_docker_image_tag,
     validation,
     validation::{FailureType, ValidationContext, ValidationError, ValidationFailure},
@@ -51,7 +51,7 @@ pub enum PipelineError {
     #[error("The pipeline with id {0} was not found")]
     PipelineNotFound(i64),
 
-    #[error("The pipeline with id {0} is active. Stop it before deleting it.")]
+    #[error("The pipeline with id {0} is active; stop it before deleting it")]
     ActivePipeline(i64),
 
     #[error("The source with id {0} was not found")]
@@ -78,10 +78,10 @@ pub enum PipelineError {
     #[error("The table replication state is not valid: {0}")]
     InvalidTableReplicationState(serde_json::Error),
 
-    #[error("The table state is not rollbackable: {0}")]
+    #[error("Table cannot be rolled back: {0}")]
     NotRollbackable(String),
 
-    #[error("The ETL table state has not been initialized first")]
+    #[error("Replication has not started yet for this pipeline")]
     EtlStateNotInitialized,
 
     #[error("Invalid destination config")]
@@ -105,13 +105,13 @@ pub enum PipelineError {
     #[error(transparent)]
     ImagesDb(#[from] ImagesDbError),
 
-    #[error("A pipeline already exists for this source and destination combination")]
+    #[error("A pipeline already exists for this source and destination")]
     DuplicatePipeline,
 
-    #[error("The specified image id {0} does not match the default image id")]
+    #[error("The selected pipeline version is not available")]
     ImageIdNotDefault(i64),
 
-    #[error("The maximum number of pipelines ({limit}) has been reached for this project")]
+    #[error("This project has reached its maximum of {limit} pipelines")]
     PipelineLimitReached { limit: i64 },
 
     #[error("There was an error while looking up table information in the source database: {0}")]
@@ -159,7 +159,9 @@ impl From<crate::k8s::core::K8sCoreError> for PipelineError {
 impl PipelineError {
     fn to_message(&self) -> String {
         match self {
-            // Do not expose internal database details in error messages.
+            // Do not expose internal details in error messages. These all map to 500 status
+            // codes and the underlying causes (database, k8s, replicator/image plumbing,
+            // missing config) are not actionable by the user.
             PipelineError::SourcesDb(SourcesDbError::Database(_))
             | PipelineError::DestinationsDb(DestinationsDbError::Database(_))
             | PipelineError::PipelinesDb(PipelinesDbError::Database(_))
@@ -167,18 +169,19 @@ impl PipelineError {
             | PipelineError::ImagesDb(ImagesDbError::Database(_))
             | PipelineError::TableLookup(_)
             | PipelineError::Database(_)
+            | PipelineError::ReplicatorNotFound(_)
+            | PipelineError::ImageNotFound(_)
+            | PipelineError::NoDefaultImageFound
+            | PipelineError::InvalidConfig(_)
+            | PipelineError::K8s(_)
+            | PipelineError::MissingEnvironment
+            | PipelineError::MissingTableReplicationState
+            | PipelineError::InvalidTableReplicationState(_)
             | PipelineError::Validation(
                 ValidationError::TrustedRootCerts(_) | ValidationError::Environment(_),
             ) => "Internal server error".to_owned(),
-            // Do not expose validation error details as they may contain credential info.
-            PipelineError::Validation(ValidationError::BigQuery(_)) => {
-                "BigQuery validation failed".to_owned()
-            }
-            PipelineError::Validation(ValidationError::Iceberg(_)) => {
-                "Iceberg validation failed".to_owned()
-            }
-            PipelineError::Validation(ValidationError::Database(_)) => {
-                "Database validation failed".to_owned()
+            PipelineError::Validation(error) => {
+                route_utils::validation_error_message(error).to_owned()
             }
             // Every other message is ok, as they do not divulge sensitive information.
             e => e.to_string(),
@@ -203,8 +206,8 @@ impl ResponseError for PipelineError {
             | PipelineError::TableLookup(_)
             | PipelineError::InvalidTableReplicationState(_)
             | PipelineError::MissingEnvironment
-            | PipelineError::MissingTableReplicationState
-            | PipelineError::Validation(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            | PipelineError::MissingTableReplicationState => StatusCode::INTERNAL_SERVER_ERROR,
+            PipelineError::Validation(error) => route_utils::validation_error_status_code(error),
             PipelineError::ActivePipeline(_) | PipelineError::DuplicatePipeline => {
                 StatusCode::CONFLICT
             }
@@ -222,7 +225,7 @@ impl ResponseError for PipelineError {
     }
 
     fn error_response(&self) -> HttpResponse {
-        let error_message = ErrorMessage { error: self.to_message() };
+        let error_message = ErrorMessage { message: self.to_message() };
         let body =
             serde_json::to_string(&error_message).expect("failed to serialize error message");
         HttpResponse::build(self.status_code()).insert_header(ContentType::json()).body(body)

@@ -46,8 +46,10 @@ impl TenantSourceError {
                 | TenantSourceDbError::Sources(_)
                 | TenantSourceDbError::Tenants(_),
             )
-            | TenantSourceError::Database(_)
-            | TenantSourceError::Validation(_) => "Internal server error".to_owned(),
+            | TenantSourceError::Database(_) => "Internal server error".to_owned(),
+            TenantSourceError::Validation(error) => {
+                utils::validation_error_message(error).to_owned()
+            }
             // Every other message is ok, as they do not divulge sensitive information
             e => e.to_string(),
         }
@@ -60,15 +62,16 @@ impl ResponseError for TenantSourceError {
             TenantSourceError::TenantSourceDb(TenantSourceDbError::Tenants(
                 TenantsDbError::Conflict(_),
             )) => StatusCode::CONFLICT,
-            TenantSourceError::TenantSourceDb(_)
-            | TenantSourceError::Database(_)
-            | TenantSourceError::Validation(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            TenantSourceError::ValidationFailed(_) => StatusCode::FORBIDDEN,
+            TenantSourceError::TenantSourceDb(_) | TenantSourceError::Database(_) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+            TenantSourceError::Validation(error) => utils::validation_error_status_code(error),
+            TenantSourceError::ValidationFailed(_) => StatusCode::UNPROCESSABLE_ENTITY,
         }
     }
 
     fn error_response(&self) -> HttpResponse {
-        let error_message = ErrorMessage { error: self.to_message() };
+        let error_message = ErrorMessage { message: self.to_message() };
         let body =
             serde_json::to_string(&error_message).expect("failed to serialize error message");
         HttpResponse::build(self.status_code()).insert_header(ContentType::json()).body(body)
@@ -122,7 +125,7 @@ pub struct CreateTenantSourceResponse {
     responses(
         (status = 200, description = "Tenant and source created successfully", body = CreateTenantSourceResponse),
         (status = 400, description = "Bad request", body = ErrorMessage),
-        (status = 403, description = "Source profile validation failed", body = ErrorMessage),
+        (status = 422, description = "Source profile validation failed", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage),
     ),
     tag = "Tenants & Sources"

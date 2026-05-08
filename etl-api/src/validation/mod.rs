@@ -137,8 +137,12 @@ impl fmt::Display for ValidationFailure {
 #[derive(Debug, Error)]
 pub enum ValidationError {
     /// Failed to execute a database query.
-    #[error("Database query failed: {0}")]
-    Database(#[from] sqlx::Error),
+    #[error("Database query failed")]
+    Database {
+        /// Underlying database error.
+        #[from]
+        source: sqlx::Error,
+    },
 
     /// Failed to load trusted root certs for source connections.
     #[error(transparent)]

@@ -54,10 +54,10 @@ pub enum SourceError {
     #[error(transparent)]
     K8sCore(#[from] K8sCoreError),
 
-    #[error("The pipeline with id {0} is active. Stop it before deleting it.")]
+    #[error("The pipeline with id {0} is active; stop it before deleting it")]
     ActivePipeline(i64),
 
-    #[error("The source with id {0} is still used by pipelines. Delete those pipelines first.")]
+    #[error("The source with id {0} is still used by pipelines; delete those pipelines first")]
     SourceInUse(i64),
 }
 
@@ -67,8 +67,8 @@ impl SourceError {
             // Do not expose internal database details in error messages
             SourceError::SourcesDb(SourcesDbError::Database(_))
             | SourceError::PipelinesDb(PipelinesDbError::Database(_))
-            | SourceError::Validation(_)
             | SourceError::K8sCore(_) => "Internal server error".to_owned(),
+            SourceError::Validation(error) => utils::validation_error_message(error).to_owned(),
             // Every other message is ok, as they do not divulge sensitive information
             e => e.to_string(),
         }
@@ -80,17 +80,17 @@ impl ResponseError for SourceError {
         match self {
             SourceError::SourceNotFound(_) => StatusCode::NOT_FOUND,
             SourceError::TenantId(_) => StatusCode::BAD_REQUEST,
-            SourceError::SourcesDb(_)
-            | SourceError::PipelinesDb(_)
-            | SourceError::Validation(_)
-            | SourceError::K8sCore(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            SourceError::ValidationFailed(_) => StatusCode::FORBIDDEN,
+            SourceError::SourcesDb(_) | SourceError::PipelinesDb(_) | SourceError::K8sCore(_) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+            SourceError::Validation(error) => utils::validation_error_status_code(error),
+            SourceError::ValidationFailed(_) => StatusCode::UNPROCESSABLE_ENTITY,
             SourceError::ActivePipeline(_) | SourceError::SourceInUse(_) => StatusCode::CONFLICT,
         }
     }
 
     fn error_response(&self) -> HttpResponse {
-        let error_message = ErrorMessage { error: self.to_message() };
+        let error_message = ErrorMessage { message: self.to_message() };
         let body =
             serde_json::to_string(&error_message).expect("failed to serialize error message");
         HttpResponse::build(self.status_code()).insert_header(ContentType::json()).body(body)
@@ -189,7 +189,7 @@ pub struct ValidateSourceResponse {
     responses(
         (status = 200, description = "Source created successfully", body = CreateSourceResponse),
         (status = 400, description = "Bad request", body = ErrorMessage),
-        (status = 403, description = "Source profile validation failed", body = ErrorMessage),
+        (status = 422, description = "Source profile validation failed", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage),
     ),
     tag = "Sources"
@@ -312,7 +312,7 @@ pub async fn read_source(
     responses(
         (status = 200, description = "Source updated successfully"),
         (status = 404, description = "Source not found", body = ErrorMessage),
-        (status = 403, description = "Source profile validation failed", body = ErrorMessage),
+        (status = 422, description = "Source profile validation failed", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage),
     ),
     tag = "Sources"
