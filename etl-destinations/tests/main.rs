@@ -1,14 +1,10 @@
 mod support;
 
 #[cfg(all(feature = "bigquery", feature = "test-utils"))]
-mod bigquery_pipeline;
+mod bigquery;
 #[cfg(all(feature = "clickhouse", feature = "test-utils"))]
-mod clickhouse_pipeline;
+mod clickhouse;
 #[cfg(feature = "ducklake")]
-mod ducklake_destination;
-#[cfg(feature = "ducklake")]
-mod ducklake_pipeline;
+mod ducklake;
 #[cfg(all(feature = "iceberg", feature = "test-utils"))]
-mod iceberg_client;
-#[cfg(all(feature = "iceberg", feature = "test-utils"))]
-mod iceberg_destination;
+mod iceberg;
