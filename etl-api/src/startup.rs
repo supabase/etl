@@ -376,6 +376,11 @@ pub fn run(
                     .service(update_image)
                     .service(delete_image)
                     .service(read_all_images)
+                    // Routes in this scope can carry source/destination credentials,
+                    // connection config, table/publication metadata, replication config, or
+                    // source-derived data. Keep new routes here when their request, response,
+                    // path/query values, validation errors, or Sentry extras may include secrets
+                    // or customer data. Leave only low-sensitivity metadata routes outside.
                     .service(
                         web::scope("")
                             .wrap(middleware::from_fn(mark_sensitive_sentry_scope))

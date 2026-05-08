@@ -604,9 +604,22 @@ fn record_skipped_catalog_maintenance(expire_snapshots_due: bool, cleanup_old_fi
 /// Returns whether this maintenance failure matches a known DuckLake compaction
 /// bug.
 fn is_known_ducklake_compaction_single_output_file_error(error: &EtlError) -> bool {
-    error.detail().is_some_and(|detail| {
-        detail.contains("INTERNAL Error: DuckLakeCompaction - expected a single output file")
-    })
+    const KNOWN_ERROR: &str = "INTERNAL Error: DuckLakeCompaction - expected a single output file";
+
+    if error.detail().is_some_and(|detail| detail.contains(KNOWN_ERROR)) {
+        return true;
+    }
+
+    let mut source = std::error::Error::source(error);
+    while let Some(error) = source {
+        if error.to_string().contains(KNOWN_ERROR) {
+            return true;
+        }
+
+        source = error.source();
+    }
+
+    false
 }
 
 /// Returns the failing maintenance operation and reason for one known

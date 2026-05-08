@@ -23,9 +23,10 @@ pub async fn mark_sensitive_sentry_scope<B>(
 where
     B: MessageBody + 'static,
 {
-    let hub = sentry::Hub::current();
-    let _guard = hub.push_scope();
-    hub.configure_scope(|scope| {
+    // The Actix Sentry integration creates a request-local hub before calling
+    // downstream middleware. Tag that hub directly so returned handler errors
+    // are still marked when the outer Sentry middleware captures them.
+    sentry::configure_scope(|scope| {
         scope.set_tag(SENSITIVE_ENDPOINT_TAG, SENSITIVE_ENDPOINT_TAG_VALUE);
     });
 

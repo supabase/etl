@@ -78,7 +78,7 @@ mod tests {
         assert_eq!(err.kind(), ErrorKind::ValidationError);
         assert_eq!(
             err.description(),
-            Some("destination table name cannot use leading or trailing underscores")
+            Some("Destination table name cannot use leading or trailing underscores")
         );
     }
 
@@ -90,7 +90,7 @@ mod tests {
         assert_eq!(err.kind(), ErrorKind::ValidationError);
         assert_eq!(
             err.description(),
-            Some("destination table name cannot use leading or trailing underscores")
+            Some("Destination table name cannot use leading or trailing underscores")
         );
     }
 
