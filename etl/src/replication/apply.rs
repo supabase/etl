@@ -75,7 +75,7 @@ use crate::{
         EventsStream, SharedTableCache, StatusUpdateResult, StatusUpdateType,
         client::{PgReplicationClient, PostgresConnectionUpdate},
     },
-    state::table::{TableReplicationError, TableReplicationPhase, TableReplicationPhaseType},
+    state::table::{TableReplicationPhase, TableReplicationPhaseType},
     store::{
         schema::{SchemaStore, TableSchemaRetention},
         state::StateStore,
@@ -358,8 +358,6 @@ struct HandleMessageResult {
     /// Set when a batch should be ended earlier than the normal batching
     /// parameters.
     end_batch: bool,
-    /// Set when the table has encountered an error.
-    table_replication_error: Option<TableReplicationError>,
 }
 
 impl HandleMessageResult {
@@ -1850,10 +1848,6 @@ where
             self.flush_batch(reason).await?;
         }
 
-        if let Some(error) = result.table_replication_error {
-            self.mark_table_errored(error).await?;
-        }
-
         Ok(())
     }
 
@@ -2614,28 +2608,6 @@ where
 
         Ok(())
     }
-
-    /// Marks a table as errored.
-    ///
-    /// Dispatches to worker-specific implementation based on the worker
-    /// context.
-    async fn mark_table_errored(
-        &mut self,
-        table_replication_error: TableReplicationError,
-    ) -> EtlResult<()> {
-        let exit_intent = match &mut self.worker_context {
-            WorkerContext::Apply(ctx) => {
-                apply_worker::mark_table_errored(ctx, table_replication_error).await
-            }
-            WorkerContext::TableSync(ctx) => {
-                table_sync_worker::mark_table_errored(ctx, table_replication_error).await
-            }
-        }?;
-
-        self.state.record_exit_intent(exit_intent);
-
-        Ok(())
-    }
 }
 
 /// Returns tables that are still synchronizing.
@@ -3301,29 +3273,6 @@ mod apply_worker {
         Ok(None)
     }
 
-    /// Marks a table as errored.
-    ///
-    /// Updates the state store and continues the loop.
-    pub(super) async fn mark_table_errored<S, D>(
-        ctx: &ApplyWorkerContext<S, D>,
-        table_replication_error: TableReplicationError,
-    ) -> EtlResult<Option<ExitIntent>>
-    where
-        S: StateStore + Clone + Send + Sync + 'static,
-    {
-        let table_id = table_replication_error.table_id();
-        let state = ctx.pool.get_active_worker_state(table_id).await.ok_or_else(|| {
-            etl_error!(
-                ErrorKind::InvalidState,
-                "Table sync worker state missing while marking table errored",
-                format!("table_id={table_id}")
-            )
-        })?;
-        let mut state_guard = state.lock().await;
-        state_guard.set_and_store(table_replication_error.into(), &ctx.store).await?;
-
-        Ok(None)
-    }
     /// Creates a new table sync worker for the specified table.
     fn build_table_sync_worker<S, D>(
         ctx: &ApplyWorkerContext<S, D>,
@@ -3505,25 +3454,6 @@ mod table_sync_worker {
         }
 
         Ok(None)
-    }
-    /// Marks a table as errored.
-    ///
-    /// Updates the state and returns Complete if the table matches this worker.
-    pub(super) async fn mark_table_errored<S>(
-        ctx: &mut TableSyncWorkerContext<S>,
-        table_replication_error: TableReplicationError,
-    ) -> EtlResult<Option<ExitIntent>>
-    where
-        S: StateStore + Clone + Send + Sync + 'static,
-    {
-        if ctx.table_id != table_replication_error.table_id() {
-            return Ok(None);
-        }
-
-        let mut inner = ctx.table_sync_worker_state.lock().await;
-        inner.set_and_store(table_replication_error.into(), &ctx.state_store).await?;
-
-        Ok(Some(ExitIntent::Complete))
     }
 }
 
