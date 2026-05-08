@@ -1,11 +1,16 @@
 use std::sync::Arc;
 
 use etl::types::PipelineId;
+use metrics::{counter, histogram};
+use tracing::warn;
 
 use crate::snowflake::{
     Error, Result,
-    encoding::RowBatch,
-    streaming::{OffsetToken, StreamClient},
+    metrics::{
+        ETL_SNOWFLAKE_BATCH_BYTES, ETL_SNOWFLAKE_BATCH_SIZE,
+        ETL_SNOWFLAKE_CHANNEL_RECOVERIES_TOTAL, ETL_SNOWFLAKE_INSERT_ERRORS_TOTAL,
+    },
+    streaming::{OffsetToken, RowBatch, StreamClient},
 };
 
 /// Manages the state and lifecycle of a single Snowpipe Streaming channel.
@@ -83,29 +88,47 @@ impl<C: StreamClient> ChannelHandle<C> {
         Ok(())
     }
 
-    /// Insert a batch of rows into the channel.
-    ///
-    /// Updates the continuation token and last offset token on success.
-    pub async fn insert_rows(&mut self, batch: RowBatch, offset: &OffsetToken) -> Result<()> {
+    /// Send all batches, recovering from channel GC errors.
+    pub async fn process_batches(&mut self, batches: Vec<RowBatch>) -> Result<()> {
+        fn is_stale_channel(e: &Error) -> bool {
+            matches!(e, Error::Snowpipe { status_code: 4, .. })
+                || matches!(e, Error::HttpStatus { status: 404, .. })
+        }
+
+        for batch in &batches {
+            histogram!(ETL_SNOWFLAKE_BATCH_SIZE).record(batch.row_count() as f64);
+            histogram!(ETL_SNOWFLAKE_BATCH_BYTES).record(batch.size() as f64);
+
+            match self.send_batch(batch).await {
+                Ok(()) => {}
+                // If channel is stale, try to reopen it, once.
+                Err(e) if is_stale_channel(&e) => {
+                    counter!(ETL_SNOWFLAKE_CHANNEL_RECOVERIES_TOTAL).increment(1);
+                    warn!(table = %self.table, "channel was closed, reopenning and retrying insert");
+                    self.open().await?;
+                    self.send_batch(batch).await?;
+                }
+                Err(e) => {
+                    counter!(ETL_SNOWFLAKE_INSERT_ERRORS_TOTAL).increment(1);
+                    return Err(e);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn send_batch(&mut self, batch: &RowBatch) -> Result<()> {
         let ct = self.continuation_token.as_deref().ok_or_else(|| {
-            Error::Channel("insert_rows called on channel without continuation token".into())
+            Error::Channel("send_batch called on channel without continuation token".into())
         })?;
 
         let response = self
             .client
-            .insert_rows(
-                &self.database,
-                &self.schema,
-                &self.table,
-                &self.channel,
-                batch,
-                offset,
-                ct,
-            )
+            .insert_rows(&self.database, &self.schema, &self.table, &self.channel, batch, ct)
             .await?;
 
         self.continuation_token = Some(response.continuation_token);
-        self.last_offset_token = Some(offset.clone());
+        self.last_offset_token = Some(batch.offset().clone());
 
         Ok(())
     }

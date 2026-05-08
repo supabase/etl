@@ -1,6 +1,5 @@
-use std::fmt;
+use std::{fmt, io::Write};
 
-use bytes::{BufMut, BytesMut};
 use etl::types::{
     ArrayCell, Cell, ColumnSchema, DATE_FORMAT, PgNumeric, TIME_FORMAT, TIMESTAMP_FORMAT,
     TIMESTAMPTZ_FORMAT_HH_MM, TableRow,
@@ -14,11 +13,6 @@ use crate::snowflake::{
     Error, Result,
     schema::{CDC_OPERATION_COLUMN, CDC_SEQUENCE_COLUMN},
 };
-
-/// Snowflake Streaming API limit for the rows attribute.
-///
-/// https://docs.snowflake.com/en/user-guide/snowpipe-streaming/snowpipe-streaming-high-performance-rest-api
-const MAX_BATCH_BYTES: usize = 4 * 1024 * 1024;
 
 /// CDC operation type appended to every row sent via Snowpipe Streaming.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,87 +49,23 @@ impl<'a> CdcMeta<'a> {
     }
 }
 
-/// Single-buffer batch accumulator for Streaming NDJSON.
-///
-/// Serializes `Cell` values directly into a pre-allocated buffer.
-#[derive(Debug, Clone)]
-pub struct RowBatch {
-    /// Write-optimized buffer, provides the `io::Write` adapter that
-    /// `serde_json::to_writer` needs.
-    data: BytesMut,
-
-    /// Count of encoded rows.
-    row_count: usize,
-}
-
-impl RowBatch {
-    /// Pre-allocate `bytes` of buffer capacity.
-    pub fn with_capacity(bytes: usize) -> Self {
-        Self { data: BytesMut::with_capacity(bytes), row_count: 0 }
-    }
-
-    /// Serialize one row as a JSON line.
-    ///
-    /// Appends meta-columns at the end.
-    /// Errors on non-finite floats or NaN numerics.
-    pub fn push_row(
-        &mut self,
-        cols: &[ColumnSchema],
-        row: &TableRow,
-        cdc: CdcMeta<'_>,
-    ) -> Result<()> {
-        let serializable = RowSerializer {
-            cols,
-            cells: row.values(),
-            operation: cdc.operation.as_str(),
-            sequence: cdc.sequence,
-        };
-        serde_json::to_writer((&mut self.data).writer(), &serializable)
-            .map_err(|e| Error::Encoding(e.to_string()))?;
-
-        self.data.put_u8(b'\n');
-        self.row_count += 1;
-
-        Ok(())
-    }
-
-    /// NDJSON size in bytes (pre-compression).
-    pub fn byte_size(&self) -> usize {
-        self.data.len()
-    }
-
-    /// Number of rows serialized so far.
-    pub fn row_count(&self) -> usize {
-        self.row_count
-    }
-
-    /// True when no rows have been pushed.
-    pub fn is_empty(&self) -> bool {
-        self.row_count == 0
-    }
-
-    /// Raw NDJSON bytes, ready for zstd compression.
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.data
-    }
-
-    /// Validate size, compress with zstd, and consume the batch.
-    ///
-    /// TODO: The size check is currently on uncompressed NDJSON. The Snowflake
-    /// docs specify a 4 MB "rows attribute" limit but don't clarify compressed
-    /// vs uncompressed. If the limit is on compressed size, this check is
-    /// overly conservative. Verify and move the check post-compression.
-    pub fn into_compressed(self) -> Result<Vec<u8>> {
-        if self.data.len() > MAX_BATCH_BYTES {
-            return Err(Error::Encoding(format!(
-                "batch exceeds {} byte limit ({} bytes)",
-                MAX_BATCH_BYTES,
-                self.data.len()
-            )));
-        }
-        zstd::encode_all(&self.data[..], 3)
-            .map_err(|e| Error::Encoding(format!("zstd compression failed: {e}")))
-    }
+/// Serialize a single row as an NDJSON line into any `Write` sink.
+pub(crate) fn serialize_row(
+    writer: &mut impl Write,
+    cols: &[ColumnSchema],
+    row: &TableRow,
+    cdc: CdcMeta<'_>,
+) -> Result<()> {
+    let serializable = RowSerializer {
+        cols,
+        cells: row.values(),
+        operation: cdc.operation.as_str(),
+        sequence: cdc.sequence,
+    };
+    serde_json::to_writer(&mut *writer, &serializable)
+        .map_err(|e| Error::Encoding(e.to_string()))?;
+    writer.write_all(b"\n").map_err(|e| Error::Encoding(e.to_string()))?;
+    Ok(())
 }
 
 struct RowSerializer<'a> {
@@ -362,12 +292,12 @@ mod tests {
 
     fn push_single_cell(cell: Cell) -> std::result::Result<Value, Error> {
         let cols = [col("v")];
-        let mut batch = RowBatch::with_capacity(1024);
+        let mut buf = Vec::new();
 
         let row = TableRow::new(vec![cell]);
-        batch.push_row(&cols, &row, CdcMeta::new(CdcOperation::Insert, "0"))?;
+        serialize_row(&mut buf, &cols, &row, CdcMeta::new(CdcOperation::Insert, "0"))?;
 
-        let line = std::str::from_utf8(batch.as_bytes()).unwrap().trim();
+        let line = std::str::from_utf8(&buf).unwrap().trim();
         let map: serde_json::Map<String, Value> = serde_json::from_str(line).unwrap();
 
         Ok(map.get("v").unwrap().clone())
@@ -481,48 +411,37 @@ mod tests {
     #[test]
     fn multi_column_row() {
         let cols = [col("id"), col("name")];
-        let mut batch = RowBatch::with_capacity(1024);
+        let mut buf = Vec::new();
         let row = TableRow::new(vec![Cell::I32(1), Cell::String("hello".into())]);
-        batch.push_row(&cols, &row, CdcMeta::new(CdcOperation::Insert, "0")).unwrap();
+        serialize_row(&mut buf, &cols, &row, CdcMeta::new(CdcOperation::Insert, "0")).unwrap();
 
-        let line = std::str::from_utf8(batch.as_bytes()).unwrap().trim();
+        let line = std::str::from_utf8(&buf).unwrap().trim();
         let map: serde_json::Map<String, Value> = serde_json::from_str(line).unwrap();
         assert_eq!(map.get("id").unwrap(), &json!(1));
         assert_eq!(map.get("name").unwrap(), &json!("hello"));
     }
 
     #[test]
-    fn byte_size_is_exact() {
-        let cols = [col("id"), col("name")];
-        let mut batch = RowBatch::with_capacity(1024);
-
-        let row = TableRow::new(vec![Cell::I32(42), Cell::String("hello".into())]);
-        batch.push_row(&cols, &row, CdcMeta::new(CdcOperation::Insert, "0")).unwrap();
-        assert_eq!(batch.byte_size(), batch.as_bytes().len());
-    }
-
-    #[test]
     fn multi_row_ndjson() {
         let cols = [col("id")];
+        let mut buf = Vec::new();
 
-        let mut batch = RowBatch::with_capacity(1024);
-        batch
-            .push_row(
-                &cols,
-                &TableRow::new(vec![Cell::I32(1)]),
-                CdcMeta::new(CdcOperation::Insert, "0"),
-            )
-            .unwrap();
-        batch
-            .push_row(
-                &cols,
-                &TableRow::new(vec![Cell::I32(2)]),
-                CdcMeta::new(CdcOperation::Insert, "0"),
-            )
-            .unwrap();
-        assert_eq!(batch.row_count(), 2);
+        serialize_row(
+            &mut buf,
+            &cols,
+            &TableRow::new(vec![Cell::I32(1)]),
+            CdcMeta::new(CdcOperation::Insert, "0"),
+        )
+        .unwrap();
+        serialize_row(
+            &mut buf,
+            &cols,
+            &TableRow::new(vec![Cell::I32(2)]),
+            CdcMeta::new(CdcOperation::Insert, "0"),
+        )
+        .unwrap();
 
-        let text = std::str::from_utf8(batch.as_bytes()).unwrap();
+        let text = std::str::from_utf8(&buf).unwrap();
         let lines: Vec<&str> = text.trim_end().split('\n').collect();
         assert_eq!(lines.len(), 2);
         let v0: Value = serde_json::from_str(lines[0]).unwrap();
@@ -532,22 +451,15 @@ mod tests {
     }
 
     #[test]
-    fn empty_batch() {
-        let batch = RowBatch::with_capacity(1024);
-        assert!(batch.is_empty());
-        assert_eq!(batch.row_count(), 0);
-        assert_eq!(batch.byte_size(), 0);
-    }
-
-    #[test]
-    fn push_row_cdc_columns() {
+    fn cdc_columns() {
         let cols = [col("id"), col("name")];
-        let mut batch = RowBatch::with_capacity(1024);
+        let mut buf = Vec::new();
 
         let row = TableRow::new(vec![Cell::I32(1), Cell::String("Alice".into())]);
-        batch.push_row(&cols, &row, CdcMeta::new(CdcOperation::Insert, "0000/0000")).unwrap();
+        serialize_row(&mut buf, &cols, &row, CdcMeta::new(CdcOperation::Insert, "0000/0000"))
+            .unwrap();
 
-        let line = std::str::from_utf8(batch.as_bytes()).unwrap().trim();
+        let line = std::str::from_utf8(&buf).unwrap().trim();
         let map: serde_json::Map<String, Value> = serde_json::from_str(line).unwrap();
         assert_eq!(map.get("id").unwrap(), &json!(1));
         assert_eq!(map.get("name").unwrap(), &json!("Alice"));

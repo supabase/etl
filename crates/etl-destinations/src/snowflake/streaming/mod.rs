@@ -1,12 +1,14 @@
+mod batch;
 mod offset_token;
 mod rest_client;
 
 use std::future::Future;
 
+pub use batch::{RowBatch, RowBatchBuilder};
 pub use offset_token::OffsetToken;
 pub use rest_client::RestStreamClient;
 
-use crate::snowflake::{Result, encoding::RowBatch};
+use crate::snowflake::Result;
 
 /// Response from opening or reopening a channel.
 #[derive(Debug)]
@@ -74,7 +76,7 @@ pub trait StreamClient: Send + Sync + 'static {
         channel: &str,
     ) -> impl Future<Output = Result<()>> + Send;
 
-    /// Insert a pre-serialized NDJSON batch into a channel.
+    /// Insert a pre-built batch into a channel.
     ///
     /// The `continuation_token` is the server sequencer from `open_channel`
     /// or the previous `insert_rows` call.
@@ -84,8 +86,7 @@ pub trait StreamClient: Send + Sync + 'static {
         schema: &str,
         table: &str,
         channel: &str,
-        batch: RowBatch,
-        offset_token: &OffsetToken,
+        batch: &RowBatch,
         continuation_token: &str,
     ) -> impl Future<Output = Result<InsertRowsResponse>> + Send;
 
