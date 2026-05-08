@@ -29,7 +29,11 @@ pub struct ScopedToken {
 
 /// Abstracts the HTTP call that exchanges a self-signed JWT for a scoped token.
 pub trait TokenExchanger: Send + Sync {
-    fn exchange(&self, account_url: &str, jwt: &str) -> impl Future<Output = Result<ScopedToken>> + Send;
+    fn exchange(
+        &self,
+        account_url: &str,
+        jwt: &str,
+    ) -> impl Future<Output = Result<ScopedToken>> + Send;
 }
 
 /// Provides a valid bearer token and supports invalidation.
