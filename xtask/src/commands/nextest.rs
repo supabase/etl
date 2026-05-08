@@ -11,11 +11,11 @@ use clap::{Args, ValueEnum};
 ///
 /// This must stay in sync with the `shared-pg` test group in
 /// `.config/nextest.toml`.
-const SHARED_PG_FILTER: &str =
-    "\
+const SHARED_PG_FILTER: &str = "\
     test(exclusive_) | binary_id(etl::main) | (binary_id(etl-destinations::main) & \
-     test(/^(bigquery|clickhouse|ducklake|iceberg)::/)) | \
-     (binary_id(etl-destinations) & test(/ducklake::core::tests::postgres_backed::/))";
+                                test(/^(bigquery|clickhouse|ducklake|iceberg)::/)) | \
+                                (binary_id(etl-destinations) & \
+                                test(/ducklake::core::tests::postgres_backed::/))";
 
 use super::shared::{DEFAULT_BASE_PORT, DEFAULT_PG_SHARD_COUNT};
 
