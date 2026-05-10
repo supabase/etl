@@ -6,6 +6,7 @@
 //! worker lifecycle coordination, and data consistency validation.
 
 pub mod database;
+pub mod delayed_confirm_destination;
 pub mod event;
 pub mod materialize;
 pub mod memory_destination;
