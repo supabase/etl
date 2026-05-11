@@ -8,6 +8,7 @@ FullApiPipelineConfig {
         BatchConfig {
             max_fill_ms: 10,
             memory_budget_ratio: 0.2,
+            max_bytes: 8388608,
         },
     ),
     table_error_retry_delay_ms: Some(

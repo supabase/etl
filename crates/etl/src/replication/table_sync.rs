@@ -386,7 +386,7 @@ where
             let slot = replication_client.get_slot(&slot_name).await?;
             info!(table_id = table_id.0, confirmed_flush_lsn = %slot.confirmed_flush_lsn, "resuming table sync");
 
-            PgLsn::from(u64::from(slot.confirmed_flush_lsn).saturating_add(1))
+            slot.confirmed_flush_lsn
         }
         _ => unreachable!("phase type already validated above"),
     };

@@ -110,8 +110,8 @@ pub(crate) enum StatusUpdateType {
     /// Represents a periodic heartbeat sent while the apply loop is otherwise
     /// idle.
     PeriodicKeepAlive,
-    /// Represents an update before shutdown that requires acknowledgement from
-    /// Postgres.
+    /// Represents an update before shutdown that requests an immediate reply
+    /// from Postgres.
     ShutdownFlush,
 }
 

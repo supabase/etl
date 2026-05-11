@@ -676,6 +676,7 @@ pub fn pipeline_config(
         batch: BatchConfig {
             max_fill_ms: tuning.batch_max_fill_ms,
             memory_budget_ratio: tuning.memory_budget_ratio,
+            max_bytes: BatchConfig::DEFAULT_MAX_BYTES,
         },
         table_error_retry_delay_ms: PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_DELAY_MS,
         table_error_retry_max_attempts: PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS,

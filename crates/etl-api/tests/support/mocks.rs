@@ -237,7 +237,11 @@ pub(crate) mod pipelines {
     pub(crate) fn new_pipeline_config() -> FullApiPipelineConfig {
         FullApiPipelineConfig {
             publication_name: "publication".to_owned(),
-            batch: Some(BatchConfig { max_fill_ms: 5, memory_budget_ratio: 0.2 }),
+            batch: Some(BatchConfig {
+                max_fill_ms: 5,
+                memory_budget_ratio: 0.2,
+                max_bytes: 8 * 1024 * 1024,
+            }),
             table_error_retry_delay_ms: Some(10000),
             table_error_retry_max_attempts: Some(5),
             max_table_sync_workers: Some(2),
@@ -256,7 +260,11 @@ pub(crate) mod pipelines {
     pub(crate) fn updated_pipeline_config() -> FullApiPipelineConfig {
         FullApiPipelineConfig {
             publication_name: "updated_publication".to_owned(),
-            batch: Some(BatchConfig { max_fill_ms: 10, memory_budget_ratio: 0.2 }),
+            batch: Some(BatchConfig {
+                max_fill_ms: 10,
+                memory_budget_ratio: 0.2,
+                max_bytes: 8 * 1024 * 1024,
+            }),
             table_error_retry_delay_ms: Some(20000),
             table_error_retry_max_attempts: Some(10),
             max_table_sync_workers: Some(4),

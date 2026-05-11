@@ -53,7 +53,7 @@ pub trait SchemaStore {
         table_schema: TableSchema,
     ) -> impl Future<Output = EtlResult<Arc<TableSchema>>> + Send;
 
-    /// Prunes obsolete table schema versions for tables at safe cleanup points.
+    /// Prunes obsolete table schema versions for tables at cleanup points.
     ///
     /// For each table id, implementations should find the newest schema version
     /// at or before that table's retention LSN, preserve it, and remove older

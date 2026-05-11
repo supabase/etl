@@ -8,13 +8,17 @@ use crate::types::{PgLsn, SnapshotId, TableId, TableSchema};
 /// Per-table schema cleanup retention boundary.
 ///
 /// Retention can be bounded by a stored schema snapshot that the destination
-/// still needs, or by the replication slot's confirmed flush LSN. Both are LSN
-/// values, but the variant records why that boundary was chosen.
+/// still needs, or by the replication slot's current confirmed flush LSN. Both
+/// are LSN values, but the variant records why that boundary was chosen.
+///
+/// A confirmed-flush boundary is PostgreSQL's current slot state, not
+/// necessarily a slot value saved to disk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TableSchemaRetention {
     /// Retain schemas according to a destination-useful schema snapshot.
     SnapshotId(SnapshotId),
-    /// Retain schemas according to the replication slot's confirmed flush LSN.
+    /// Retain schemas according to the replication slot's current confirmed
+    /// flush LSN.
     ConfirmedFlushLsn(PgLsn),
 }
 

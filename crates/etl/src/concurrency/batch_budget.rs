@@ -24,6 +24,7 @@ pub(crate) struct BatchBudgetController {
     pipeline_id: PipelineId,
     memory_monitor: MemoryMonitor,
     memory_budget_ratio: f64,
+    max_batch_bytes: usize,
     active_streams: Arc<AtomicUsize>,
 }
 
@@ -33,11 +34,13 @@ impl BatchBudgetController {
         pipeline_id: PipelineId,
         memory_monitor: MemoryMonitor,
         memory_budget_ratio: f32,
+        max_batch_bytes: usize,
     ) -> Self {
         Self {
             pipeline_id,
             memory_monitor,
             memory_budget_ratio: f64::from(memory_budget_ratio),
+            max_batch_bytes: max_batch_bytes.max(1),
             active_streams: Arc::new(AtomicUsize::new(0)),
         }
     }
@@ -59,19 +62,22 @@ impl BatchBudgetController {
 
     /// Returns the ideal per-batch size in bytes.
     ///
-    /// The budget is computed as:
+    /// The memory budget is computed as:
     /// `(total_memory_bytes * target_ratio) / active_streams`.
     ///
     /// This intentionally subdivides the configured memory percentage across
     /// concurrently active streams, leaving headroom for other allocations
     /// in the process, such as destination batch construction and
-    /// serialization buffers.
+    /// serialization buffers. The configured max byte size is a ceiling, so
+    /// memory pressure can always force the effective batch size lower.
     pub(crate) fn ideal_batch_size_bytes(&self) -> usize {
         let total_memory_bytes = self.memory_monitor.total_memory_bytes() as f64;
         let target_ratio = self.memory_budget_ratio;
         let target_bytes = (total_memory_bytes * target_ratio).max(1.0) as usize;
         let active_streams = self.active_streams.load(Ordering::Relaxed).max(1);
-        let ideal_batch_size_bytes = (target_bytes / active_streams).max(1);
+        let memory_budget_batch_size_bytes = (target_bytes / active_streams).max(1);
+        let ideal_batch_size_bytes =
+            memory_budget_batch_size_bytes.min(self.max_batch_bytes).max(1);
 
         debug!(
             pipeline_id = self.pipeline_id,
@@ -79,6 +85,8 @@ impl BatchBudgetController {
             target_ratio,
             target_bytes,
             active_streams,
+            memory_budget_batch_size_bytes,
+            max_batch_bytes = self.max_batch_bytes,
             ideal_batch_size_bytes,
             "computed ideal batch budget size"
         );
@@ -141,5 +149,39 @@ pub(crate) struct ActiveStreamsGuard {
 impl Drop for ActiveStreamsGuard {
     fn drop(&mut self) {
         self.active_streams.fetch_sub(self.units, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::concurrency::memory_monitor::MemoryMonitor;
+
+    #[test]
+    fn ideal_batch_size_divides_memory_budget_by_active_streams() {
+        let memory_monitor = MemoryMonitor::new_for_test();
+        memory_monitor.set_total_memory_bytes_for_test(10_000);
+        let controller = BatchBudgetController::new(1, memory_monitor, 0.2, 10_000);
+        let _guard = controller.register_stream_load(4);
+
+        assert_eq!(controller.ideal_batch_size_bytes(), 500);
+    }
+
+    #[test]
+    fn ideal_batch_size_is_capped_by_configured_max_bytes() {
+        let memory_monitor = MemoryMonitor::new_for_test();
+        memory_monitor.set_total_memory_bytes_for_test(10 * 1024 * 1024 * 1024);
+        let controller = BatchBudgetController::new(1, memory_monitor, 0.2, 8 * 1024 * 1024);
+
+        assert_eq!(controller.ideal_batch_size_bytes(), 8 * 1024 * 1024);
+    }
+
+    #[test]
+    fn ideal_batch_size_uses_memory_budget_when_lower_than_configured_max_bytes() {
+        let memory_monitor = MemoryMonitor::new_for_test();
+        memory_monitor.set_total_memory_bytes_for_test(10_000);
+        let controller = BatchBudgetController::new(1, memory_monitor, 0.2, 10_000);
+
+        assert_eq!(controller.ideal_batch_size_bytes(), 2_000);
     }
 }
