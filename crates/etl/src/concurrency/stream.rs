@@ -387,7 +387,7 @@ mod tests {
     fn test_cached_budget(memory_monitor: &MemoryMonitor) -> CachedBatchBudget {
         memory_monitor.set_total_memory_bytes_for_test(10_000_000_000);
 
-        BatchBudgetController::new(1, memory_monitor.clone(), 0.2, BatchConfig::DEFAULT_MAX_BYTES)
+        BatchBudgetController::new(1, memory_monitor.clone(), 0.2, 16 * 1024 * 1024)
             .cached()
     }
 

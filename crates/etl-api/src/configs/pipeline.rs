@@ -328,7 +328,7 @@ mod tests {
             batch: BatchConfig {
                 max_fill_ms: 5000,
                 memory_budget_ratio: 0.2,
-                max_bytes: BatchConfig::DEFAULT_MAX_BYTES,
+                max_bytes: 16 * 1024 * 1024,
             },
             table_error_retry_delay_ms: 2000,
             table_error_retry_max_attempts: 7,
