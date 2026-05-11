@@ -38,6 +38,7 @@ FullApiPipelineConfig {
         Error,
     ),
     replicator_resources: None,
+    ducklake_maintenance: None,
     log_level: Some(
         Info,
     ),
