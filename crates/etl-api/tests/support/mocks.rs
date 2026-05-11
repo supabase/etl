@@ -240,7 +240,7 @@ pub(crate) mod pipelines {
             batch: Some(BatchConfig {
                 max_fill_ms: 5,
                 memory_budget_ratio: 0.2,
-                max_bytes: 16 * 1024 * 1024,
+                max_bytes: 8 * 1024 * 1024,
             }),
             table_error_retry_delay_ms: Some(10000),
             table_error_retry_max_attempts: Some(5),
@@ -262,7 +262,7 @@ pub(crate) mod pipelines {
             batch: Some(BatchConfig {
                 max_fill_ms: 10,
                 memory_budget_ratio: 0.2,
-                max_bytes: 16 * 1024 * 1024,
+                max_bytes: 8 * 1024 * 1024,
             }),
             table_error_retry_delay_ms: Some(20000),
             table_error_retry_max_attempts: Some(10),

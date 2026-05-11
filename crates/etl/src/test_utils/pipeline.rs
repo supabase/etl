@@ -52,7 +52,7 @@ pub fn test_slot_name(slot_name: &str) -> String {
 ///     .with_batch_config(BatchConfig {
 ///         max_fill_ms: 5000,
 ///         memory_budget_ratio: 0.2,
-///         max_bytes: 16 * 1024 * 1024,
+///         max_bytes: 8 * 1024 * 1024,
 ///     })
 ///     .with_retry_config(2000, 10)
 ///     .build();
@@ -125,7 +125,7 @@ where
             batch: BatchConfig {
                 max_fill_ms: 1000,
                 memory_budget_ratio: 0.2,
-                max_bytes: 16 * 1024 * 1024,
+                max_bytes: 8 * 1024 * 1024,
             },
             table_error_retry_delay_ms: 1000,
             table_error_retry_max_attempts: 2,

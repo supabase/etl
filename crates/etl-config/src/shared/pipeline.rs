@@ -45,7 +45,7 @@ pub struct BatchConfig {
     /// value between this limit and the memory-ratio budget computed from
     /// [`Self::memory_budget_ratio`].
     #[serde(default = "default_batch_max_bytes")]
-    #[cfg_attr(feature = "utoipa", schema(example = 16777216))]
+    #[cfg_attr(feature = "utoipa", schema(example = 8388608))]
     pub max_bytes: usize,
 }
 
@@ -62,10 +62,10 @@ impl BatchConfig {
 
     /// Default maximum preferred source batch size in bytes.
     ///
-    /// The 16 MiB cap bounds a single stream's burst before reactive memory
+    /// The 8 MiB cap bounds a single stream's burst before reactive memory
     /// backpressure can observe new allocations, while still fitting thousands
     /// of typical CDC rows and staying near common streaming request limits.
-    pub const DEFAULT_MAX_BYTES: usize = 16 * 1024 * 1024;
+    pub const DEFAULT_MAX_BYTES: usize = 8 * 1024 * 1024;
 
     /// Validates batch configuration settings.
     ///
@@ -456,6 +456,35 @@ impl From<PipelineConfig> for PipelineConfigWithoutSecrets {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn batch_config_deserializes_without_max_bytes() {
+        let json = r#"{"max_fill_ms":5000,"memory_budget_ratio":0.2}"#;
+        let config: BatchConfig = serde_json::from_str(json).unwrap();
+
+        assert_eq!(config.max_fill_ms, 5000);
+        assert_eq!(config.memory_budget_ratio, 0.2);
+        assert_eq!(config.max_bytes, BatchConfig::DEFAULT_MAX_BYTES);
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn batch_config_deserializes_with_max_bytes() {
+        let json = r#"{"max_fill_ms":5000,"memory_budget_ratio":0.2,"max_bytes":4194304}"#;
+        let config: BatchConfig = serde_json::from_str(json).unwrap();
+
+        assert_eq!(config.max_bytes, 4 * 1024 * 1024);
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn batch_config_deserialization_ignores_unknown_fields() {
+        let json = r#"{"max_fill_ms":5000,"memory_budget_ratio":0.2,"max_bytes":4194304,"future_field":true}"#;
+        let config: BatchConfig = serde_json::from_str(json).unwrap();
+
+        assert_eq!(config.max_bytes, 4 * 1024 * 1024);
+        config.validate().unwrap();
+    }
 
     #[test]
     fn table_sync_copy_serialization_skip_all() {
