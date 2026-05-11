@@ -9,6 +9,7 @@ mod stream;
 mod table_cache;
 mod table_sync;
 
+pub use apply::WorkerType;
 pub(crate) use apply::{
     ApplyLoop, ApplyLoopResult, ApplyWorkerContext, TableSyncWorkerContext, WorkerContext,
 };

@@ -18,6 +18,7 @@ use crate::{
     },
     replication::{
         ApplyLoop, ApplyLoopResult, ApplyWorkerContext, SharedTableCache, WorkerContext,
+        WorkerType,
         client::{GetOrCreateSlotResult, PgReplicationClient, SlotState},
     },
     state::table::{TableReplicationPhase, TableReplicationPhaseType},
@@ -332,7 +333,7 @@ where
     }
 }
 
-/// Determines the LSN position from which the apply worker should start reading
+/// Determines the position from which the apply worker should start reading
 /// the replication stream.
 ///
 /// This function implements critical replication consistency logic by managing
@@ -359,17 +360,18 @@ async fn get_start_lsn<S: StateStore>(
     invalidated_slot_behavior: &InvalidatedSlotBehavior,
 ) -> EtlResult<PgLsn> {
     let slot_name: String = EtlReplicationSlot::for_apply_worker(pipeline_id).try_into()?;
+    let worker_type = WorkerType::Apply;
 
     // We try to get or create the slot. Both operations will return an LSN that we
     // can use to start streaming events.
     let slot = replication_client.get_or_create_slot(&slot_name).await?;
-    let start_lsn = slot.get_start_lsn();
+    let slot_start_lsn = slot.get_start_lsn();
 
     match &slot {
         GetOrCreateSlotResult::GetSlot(result) => {
             info!(
                 slot_name,
-                %start_lsn,
+                %slot_start_lsn,
                 confirmed_flush_lsn = %result.confirmed_flush_lsn,
                 "apply worker resume position selected from existing replication slot"
             );
@@ -377,7 +379,7 @@ async fn get_start_lsn<S: StateStore>(
         GetOrCreateSlotResult::CreateSlot(result) => {
             info!(
                 slot_name,
-                %start_lsn,
+                %slot_start_lsn,
                 consistent_point = %result.consistent_point,
                 "apply worker resume position selected from new replication slot"
             );
@@ -414,8 +416,54 @@ async fn get_start_lsn<S: StateStore>(
         return Err(err);
     }
 
-    // We return the LSN from which we will start streaming events.
-    Ok(start_lsn)
+    // A newly created slot is a new lineage. Any existing durable progress for
+    // the apply worker belongs to an older slot and must not influence startup.
+    if matches!(slot, GetOrCreateSlotResult::CreateSlot(_)) {
+        if let Err(err) = store.delete_replication_progress(worker_type).await {
+            warn!(
+                slot_name,
+                error = %err,
+                "failed to delete stale apply worker durable progress after creating a new slot"
+            );
+
+            replication_client.delete_slot_if_exists(&slot_name).await?;
+
+            return Err(err);
+        }
+
+        return Ok(slot_start_lsn);
+    }
+
+    let durable_flush_lsn = store.get_replication_progress(worker_type).await?;
+    if let Some(durable_flush_lsn) = durable_flush_lsn {
+        if durable_flush_lsn < slot_start_lsn {
+            bail!(
+                ErrorKind::InvalidState,
+                "Durable replication progress is behind the replication slot",
+                format!(
+                    "Durable progress for apply worker is {}, but replication slot '{}' starts \
+                     from {}. Starting would skip data that ETL has not durably acknowledged.",
+                    durable_flush_lsn, slot_name, slot_start_lsn
+                )
+            );
+        }
+
+        info!(
+            slot_name,
+            %durable_flush_lsn,
+            "apply worker resume position selected from durable replication progress"
+        );
+
+        Ok(durable_flush_lsn)
+    } else {
+        info!(
+            slot_name,
+            %slot_start_lsn,
+            "apply worker durable replication progress not found, using slot fallback"
+        );
+
+        Ok(slot_start_lsn)
+    }
 }
 
 /// Handles the case when the apply worker slot is found to be invalidated.
@@ -468,6 +516,8 @@ async fn handle_invalidated_slot<S: StateStore>(
             store.update_table_replication_states(table_states_updates).await?;
 
             info!(reset_count, "reset table replication states to init for resync");
+
+            store.delete_replication_progress(WorkerType::Apply).await?;
 
             // We delete and recreate the main apply worker slot.
             replication_client.delete_slot_if_exists(slot_name).await?;

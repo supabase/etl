@@ -21,7 +21,7 @@ use crate::{
     error::{ErrorKind, EtlResult},
     etl_error,
     metrics::{ETL_TABLE_COPY_DURATION_SECONDS, PARTITIONING_LABEL},
-    replication::{client::PgReplicationClient, table_cache::SharedTableCache},
+    replication::{WorkerType, client::PgReplicationClient, table_cache::SharedTableCache},
     state::table::{TableReplicationPhase, TableReplicationPhaseType},
     store::{schema::SchemaStore, state::StateStore},
     types::PipelineId,
@@ -137,9 +137,9 @@ where
     //   have to restart
     //  copying all the table data and delete the slot.
     // - `FinishedCopy` -> this means that the table was successfully copied, but we
-    //   didn't manage to
-    //  complete the table sync function, so we just want to continue the cdc stream
-    // from the slot's confirmed_flush_lsn value.
+    //   didn't manage to complete the table sync function, so we just want to
+    //   continue the cdc stream from durable table-sync progress when available, or
+    //   from the slot's confirmed flush LSN otherwise.
     //
     // In case the phase is any other phase, we will return an error.
     let start_lsn = match phase_type {
@@ -157,6 +157,7 @@ where
             // We try to delete the slot also during `Init` because we support state
             // rollback and a slot might be there from the previous run.
             replication_client.delete_slot_if_exists(&slot_name).await?;
+            store.delete_replication_progress(WorkerType::TableSync { table_id }).await?;
 
             // We must truncate the destination table before starting a copy to avoid data
             // inconsistencies.
@@ -384,9 +385,38 @@ where
         }
         TableReplicationPhaseType::FinishedCopy => {
             let slot = replication_client.get_slot(&slot_name).await?;
-            info!(table_id = table_id.0, confirmed_flush_lsn = %slot.confirmed_flush_lsn, "resuming table sync");
+            let worker_type = WorkerType::TableSync { table_id };
+            let durable_flush_lsn = store.get_replication_progress(worker_type).await?;
+            if let Some(durable_flush_lsn) = durable_flush_lsn {
+                if durable_flush_lsn < slot.confirmed_flush_lsn {
+                    bail!(
+                        ErrorKind::InvalidState,
+                        "Durable replication progress is behind the replication slot",
+                        format!(
+                            "Durable progress for table sync worker on table {} is {}, but \
+                             replication slot '{}' starts from {}. Starting would skip data that \
+                             ETL has not durably acknowledged.",
+                            table_id, durable_flush_lsn, slot_name, slot.confirmed_flush_lsn
+                        )
+                    );
+                }
 
-            slot.confirmed_flush_lsn
+                info!(
+                    table_id = table_id.0,
+                    %durable_flush_lsn,
+                    "resuming table sync from durable replication progress"
+                );
+
+                durable_flush_lsn
+            } else {
+                info!(
+                    table_id = table_id.0,
+                    confirmed_flush_lsn = %slot.confirmed_flush_lsn,
+                    "durable table sync progress not found, using slot fallback"
+                );
+
+                slot.confirmed_flush_lsn
+            }
         }
         _ => unreachable!("phase type already validated above"),
     };
