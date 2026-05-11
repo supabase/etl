@@ -2,7 +2,7 @@
 use std::sync::atomic::AtomicUsize;
 use std::{
     borrow::Cow,
-    error, fmt,
+    error, fmt, process,
     sync::{
         Arc, LazyLock, Mutex, Weak,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -41,9 +41,25 @@ static POSTGRES_PASSWORD_REGEX: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 /// Timeout applied to each foreground DuckLake blocking operation.
-pub(super) const FOREGROUND_QUERY_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+pub(super) const FOREGROUND_QUERY_TIMEOUT: Duration = Duration::from_secs(3 * 60);
 /// Timeout applied to each maintenance DuckLake blocking operation.
-pub(super) const MAINTENANCE_QUERY_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+pub(super) const MAINTENANCE_QUERY_TIMEOUT: Duration = Duration::from_secs(3 * 60);
+/// Extra time allowed for a timed-out DuckDB operation to return after
+/// interrupt() has been called. If the operation is still stuck after this,
+/// the process is no longer safe to keep running.
+const BLOCKING_ABORT_GRACE: Duration = Duration::from_secs(30);
+
+trait DuckDbQueryInterrupt: Send + Sync + 'static {
+    fn interrupt(&self);
+}
+
+impl DuckDbQueryInterrupt for duckdb::InterruptHandle {
+    fn interrupt(&self) {
+        duckdb::InterruptHandle::interrupt(self);
+    }
+}
+
+type DuckDbQueryInterruptHandle = Arc<dyn DuckDbQueryInterrupt>;
 
 /// Timeout class applied to one DuckDB blocking operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -72,7 +88,7 @@ impl DuckDbBlockingOperationKind {
 /// expires.
 pub(super) struct DuckDbQueryWatchdog {
     timed_out: Arc<AtomicBool>,
-    interrupt_tx: Option<oneshot::Sender<Arc<duckdb::InterruptHandle>>>,
+    interrupt_tx: Option<oneshot::Sender<DuckDbQueryInterruptHandle>>,
     done_tx: Option<oneshot::Sender<()>>,
     task: Option<JoinHandle<()>>,
 }
@@ -81,7 +97,7 @@ impl DuckDbQueryWatchdog {
     fn spawn(deadline: Instant) -> Self {
         let timed_out = Arc::new(AtomicBool::new(false));
         let timeout_flag = Arc::clone(&timed_out);
-        let (interrupt_tx, interrupt_rx) = oneshot::channel::<Arc<duckdb::InterruptHandle>>();
+        let (interrupt_tx, interrupt_rx) = oneshot::channel::<DuckDbQueryInterruptHandle>();
         let (done_tx, done_rx) = oneshot::channel();
         let task = tokio::spawn(async move {
             let mut interrupt_rx = Box::pin(interrupt_rx);
@@ -131,6 +147,10 @@ impl DuckDbQueryWatchdog {
     }
 
     fn publish_interrupt_handle(&mut self, handle: Arc<duckdb::InterruptHandle>) {
+        self.publish_query_interrupt_handle(handle);
+    }
+
+    fn publish_query_interrupt_handle(&mut self, handle: DuckDbQueryInterruptHandle) {
         if let Some(interrupt_tx) = self.interrupt_tx.take() {
             let _ = interrupt_tx.send(handle);
         }
@@ -517,6 +537,20 @@ pub(super) fn duckdb_blocking_timeout_error(
     )
 }
 
+fn abort_stuck_duckdb_blocking_operation(
+    operation_kind: DuckDbBlockingOperationKind,
+    timeout: Duration,
+    abort_grace: Duration,
+) -> ! {
+    tracing::error!(
+        operation_kind = operation_kind.as_str(),
+        timeout_ms = timeout.as_millis() as u64,
+        abort_grace_ms = abort_grace.as_millis() as u64,
+        "ducklake blocking operation did not return after timeout interrupt; aborting process"
+    );
+    process::abort();
+}
+
 /// Runs one DuckDB operation on Tokio's blocking pool after acquiring a permit
 /// that matches the configured DuckDB concurrency limit and then checking out a
 /// warm pooled DuckDB connection.
@@ -572,8 +606,9 @@ where
     // connection active.
     let mut watchdog = DuckDbQueryWatchdog::spawn(deadline);
     let watchdog_task = watchdog.async_task_handle()?;
+    let abort_deadline = deadline + BLOCKING_ABORT_GRACE;
 
-    let blocking_result = tokio::task::spawn_blocking(move || -> EtlResult<R> {
+    let blocking_task = tokio::task::spawn_blocking(move || -> EtlResult<R> {
         // Please if you modify the code inside this blocking task do not add any
         // blocking operations that could delay other tasks waiting on this slot.
         let _permit = permit;
@@ -629,8 +664,25 @@ where
         }
 
         res
-    })
-    .await;
+    });
+
+    let blocking_result = tokio::select! {
+        biased;
+        result = blocking_task => result,
+        _ = tokio::time::sleep_until(abort_deadline) => {
+            // The blocking task still owns the pooled connection here, so the
+            // async side cannot mark it broken and return it to r2d2 for
+            // eviction. If DuckDB does not return after interrupt plus grace,
+            // the stuck native call also keeps holding its semaphore permit and
+            // blocking thread, so restarting the process is the recoverable
+            // boundary.
+            abort_stuck_duckdb_blocking_operation(
+                operation_kind,
+                timeout,
+                BLOCKING_ABORT_GRACE,
+            );
+        }
+    };
 
     // Await the watchdog so it cannot outlive the finished blocking task and
     // accidentally interrupt a later operation that reuses the connection.
@@ -647,9 +699,12 @@ where
 mod tests {
     use std::sync::Arc;
 
-    use tokio::sync::{Semaphore, oneshot};
+    use tokio::sync::{Barrier, Semaphore, oneshot};
 
     use super::*;
+
+    const WATCHDOG_DEADLINE: Duration = Duration::from_millis(20);
+    const WATCHDOG_JOIN_TIMEOUT: Duration = Duration::from_secs(1);
 
     fn make_blocking_test_manager() -> DuckLakeConnectionManager {
         DuckLakeConnectionManager {
@@ -659,6 +714,138 @@ mod tests {
             #[cfg(feature = "test-utils")]
             open_count: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    fn watchdog_interrupt_handle() -> (duckdb::Connection, DuckDbQueryInterruptHandle) {
+        let conn =
+            duckdb::Connection::open_in_memory().expect("failed to open watchdog test connection");
+        let handle = conn.interrupt_handle();
+        (conn, handle)
+    }
+
+    struct DelayedInterruptHandle {
+        delay: Duration,
+        calls: std::sync::atomic::AtomicUsize,
+        started: AtomicBool,
+        completed: AtomicBool,
+    }
+
+    impl DelayedInterruptHandle {
+        fn new(delay: Duration) -> Self {
+            Self {
+                delay,
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                started: AtomicBool::new(false),
+                completed: AtomicBool::new(false),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::Relaxed)
+        }
+
+        fn started(&self) -> bool {
+            self.started.load(Ordering::Relaxed)
+        }
+
+        fn completed(&self) -> bool {
+            self.completed.load(Ordering::Relaxed)
+        }
+    }
+
+    impl DuckDbQueryInterrupt for DelayedInterruptHandle {
+        fn interrupt(&self) {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            self.started.store(true, Ordering::Relaxed);
+            std::thread::sleep(self.delay);
+            self.completed.store(true, Ordering::Relaxed);
+        }
+    }
+
+    fn delayed_interrupt_handle(
+        delay: Duration,
+    ) -> (Arc<DelayedInterruptHandle>, DuckDbQueryInterruptHandle) {
+        let handle = Arc::new(DelayedInterruptHandle::new(delay));
+        (Arc::clone(&handle), handle)
+    }
+
+    async fn wait_for_delayed_interrupt_to_start(handle: &DelayedInterruptHandle) {
+        tokio::time::timeout(WATCHDOG_JOIN_TIMEOUT, async {
+            while !handle.started() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("delayed interrupt should start");
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum WatchdogSignal {
+        PublishInterrupt,
+        Finish,
+        DropInterruptSender,
+        DropDoneSender,
+    }
+
+    type WatchdogSignalCase =
+        (&'static str, &'static [WatchdogSignal], bool, &'static [WatchdogSignal], bool);
+
+    fn apply_watchdog_signal(
+        watchdog: &mut DuckDbQueryWatchdog,
+        handle: &DuckDbQueryInterruptHandle,
+        signal: WatchdogSignal,
+    ) {
+        match signal {
+            WatchdogSignal::PublishInterrupt => {
+                watchdog.publish_query_interrupt_handle(Arc::clone(handle));
+            }
+            WatchdogSignal::Finish => {
+                watchdog.finish();
+            }
+            WatchdogSignal::DropInterruptSender => {
+                drop(watchdog.interrupt_tx.take());
+            }
+            WatchdogSignal::DropDoneSender => {
+                drop(watchdog.done_tx.take());
+            }
+        }
+    }
+
+    async fn assert_watchdog_sequence_completes(
+        name: &str,
+        before_deadline: &[WatchdogSignal],
+        wait_past_deadline: bool,
+        after_deadline: &[WatchdogSignal],
+        expected_timed_out: bool,
+    ) {
+        let (_conn, interrupt_handle) = watchdog_interrupt_handle();
+        let mut watchdog = DuckDbQueryWatchdog::spawn(Instant::now() + WATCHDOG_DEADLINE);
+        let watchdog_task = watchdog.async_task_handle().expect("failed to extract watchdog task");
+
+        for signal in before_deadline {
+            apply_watchdog_signal(&mut watchdog, &interrupt_handle, *signal);
+            tokio::task::yield_now().await;
+        }
+
+        if wait_past_deadline {
+            tokio::time::sleep(WATCHDOG_DEADLINE * 2).await;
+        }
+
+        for signal in after_deadline {
+            apply_watchdog_signal(&mut watchdog, &interrupt_handle, *signal);
+            tokio::task::yield_now().await;
+        }
+
+        tokio::time::timeout(WATCHDOG_JOIN_TIMEOUT, watchdog_task)
+            .await
+            .unwrap_or_else(|_| panic!("watchdog sequence `{name}` deadlocked"))
+            .unwrap_or_else(|error| panic!("watchdog sequence `{name}` panicked: {error}"));
+
+        assert_eq!(
+            watchdog.timed_out(),
+            expected_timed_out,
+            "unexpected timeout state for watchdog sequence `{name}`"
+        );
     }
 
     #[test]
@@ -783,6 +970,274 @@ mod tests {
             DuckLakeConnectionError::setup_phase(&step, error).to_string(),
             "ducklake duckdb connection setup phase `attach_catalog` failed: attach failed: \
              postgres:host='localhost' user='ducklake' password='[redacted]'"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_watchdog_signal_order_matrix_does_not_deadlock() {
+        use WatchdogSignal::{DropDoneSender, DropInterruptSender, Finish, PublishInterrupt};
+
+        let cases: &[WatchdogSignalCase] = &[
+            ("finish_before_interrupt_handle", &[Finish], false, &[], false),
+            ("done_sender_dropped_before_interrupt_handle", &[DropDoneSender], false, &[], false),
+            ("interrupt_sender_dropped_before_deadline", &[DropInterruptSender], false, &[], false),
+            (
+                "interrupt_handle_then_finish_before_deadline",
+                &[PublishInterrupt, Finish],
+                false,
+                &[],
+                false,
+            ),
+            (
+                "interrupt_handle_then_done_sender_drop_before_deadline",
+                &[PublishInterrupt, DropDoneSender],
+                false,
+                &[],
+                false,
+            ),
+            (
+                "finish_then_interrupt_handle_before_deadline",
+                &[Finish, PublishInterrupt],
+                false,
+                &[],
+                false,
+            ),
+            (
+                "interrupt_handle_before_deadline_then_deadline",
+                &[PublishInterrupt],
+                true,
+                &[],
+                true,
+            ),
+            ("deadline_then_interrupt_handle", &[], true, &[PublishInterrupt], true),
+            ("deadline_then_finish", &[], true, &[Finish], true),
+            ("deadline_then_interrupt_sender_drop", &[], true, &[DropInterruptSender], true),
+            ("deadline_then_done_sender_drop", &[], true, &[DropDoneSender], true),
+            (
+                "deadline_then_both_senders_drop",
+                &[],
+                true,
+                &[DropDoneSender, DropInterruptSender],
+                true,
+            ),
+            (
+                "interrupt_handle_before_deadline_then_finish_after_deadline",
+                &[PublishInterrupt],
+                true,
+                &[Finish],
+                true,
+            ),
+        ];
+
+        for (name, before_deadline, wait_past_deadline, after_deadline, expected_timed_out) in cases
+        {
+            assert_watchdog_sequence_completes(
+                name,
+                before_deadline,
+                *wait_past_deadline,
+                after_deadline,
+                *expected_timed_out,
+            )
+            .await;
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn query_watchdog_concurrent_signal_races_do_not_deadlock() {
+        for signal_after_deadline in [false, true] {
+            for iteration in 0..50 {
+                let (_conn, interrupt_handle) = watchdog_interrupt_handle();
+                let deadline = if signal_after_deadline {
+                    Instant::now() + WATCHDOG_DEADLINE
+                } else {
+                    Instant::now() + Duration::from_secs(1)
+                };
+                let mut watchdog = DuckDbQueryWatchdog::spawn(deadline);
+                let interrupt_tx =
+                    watchdog.interrupt_tx.take().expect("watchdog interrupt sender should exist");
+                let done_tx = watchdog.done_tx.take().expect("watchdog done sender should exist");
+                let watchdog_task =
+                    watchdog.async_task_handle().expect("failed to extract watchdog task");
+                let barrier = Arc::new(Barrier::new(3));
+
+                let interrupt_sender = tokio::spawn({
+                    let barrier = Arc::clone(&barrier);
+                    let interrupt_handle = Arc::clone(&interrupt_handle);
+                    async move {
+                        barrier.wait().await;
+                        let _ = interrupt_tx.send(interrupt_handle);
+                    }
+                });
+                let done_sender = tokio::spawn({
+                    let barrier = Arc::clone(&barrier);
+                    async move {
+                        barrier.wait().await;
+                        let _ = done_tx.send(());
+                    }
+                });
+
+                if signal_after_deadline {
+                    tokio::time::sleep(WATCHDOG_DEADLINE * 2).await;
+                }
+
+                barrier.wait().await;
+
+                tokio::time::timeout(WATCHDOG_JOIN_TIMEOUT, watchdog_task)
+                    .await
+                    .unwrap_or_else(|_| {
+                        panic!(
+                            "watchdog concurrent signal race deadlocked: \
+                             signal_after_deadline={signal_after_deadline}, iteration={iteration}"
+                        )
+                    })
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "watchdog concurrent signal race panicked: \
+                             signal_after_deadline={signal_after_deadline}, iteration={iteration}, \
+                             error={error}"
+                        )
+                    });
+                interrupt_sender.await.expect("interrupt sender task should not panic");
+                done_sender.await.expect("done sender task should not panic");
+
+                assert_eq!(
+                    watchdog.timed_out(),
+                    signal_after_deadline,
+                    "unexpected timeout state for concurrent signal race: \
+                     signal_after_deadline={signal_after_deadline}, iteration={iteration}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn query_watchdog_slow_interrupt_before_deadline_does_not_deadlock() {
+        let (delayed_handle, interrupt_handle) =
+            delayed_interrupt_handle(Duration::from_millis(100));
+        let mut watchdog = DuckDbQueryWatchdog::spawn(Instant::now() + WATCHDOG_DEADLINE);
+        let watchdog_task = watchdog.async_task_handle().expect("failed to extract watchdog task");
+
+        watchdog.publish_query_interrupt_handle(interrupt_handle);
+
+        tokio::time::timeout(WATCHDOG_JOIN_TIMEOUT, watchdog_task)
+            .await
+            .expect("watchdog with slow interrupt should not deadlock")
+            .expect("watchdog task should not panic");
+
+        assert!(watchdog.timed_out());
+        assert_eq!(delayed_handle.calls(), 1);
+        assert!(delayed_handle.completed());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn query_watchdog_slow_interrupt_after_deadline_does_not_deadlock() {
+        let (delayed_handle, interrupt_handle) =
+            delayed_interrupt_handle(Duration::from_millis(100));
+        let mut watchdog = DuckDbQueryWatchdog::spawn(Instant::now() + WATCHDOG_DEADLINE);
+        let watchdog_task = watchdog.async_task_handle().expect("failed to extract watchdog task");
+
+        tokio::time::sleep(WATCHDOG_DEADLINE * 2).await;
+        watchdog.publish_query_interrupt_handle(interrupt_handle);
+
+        tokio::time::timeout(WATCHDOG_JOIN_TIMEOUT, watchdog_task)
+            .await
+            .expect("watchdog with slow late interrupt should not deadlock")
+            .expect("watchdog task should not panic");
+
+        assert!(watchdog.timed_out());
+        assert_eq!(delayed_handle.calls(), 1);
+        assert!(delayed_handle.completed());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn query_watchdog_finish_while_slow_interrupt_is_running_does_not_deadlock() {
+        let (delayed_handle, interrupt_handle) =
+            delayed_interrupt_handle(Duration::from_millis(100));
+        let mut watchdog = DuckDbQueryWatchdog::spawn(Instant::now() + WATCHDOG_DEADLINE);
+        let watchdog_task = watchdog.async_task_handle().expect("failed to extract watchdog task");
+
+        watchdog.publish_query_interrupt_handle(interrupt_handle);
+        wait_for_delayed_interrupt_to_start(&delayed_handle).await;
+        watchdog.finish();
+
+        tokio::time::timeout(WATCHDOG_JOIN_TIMEOUT, watchdog_task)
+            .await
+            .expect("watchdog should finish after slow interrupt returns")
+            .expect("watchdog task should not panic");
+
+        assert!(watchdog.timed_out());
+        assert_eq!(delayed_handle.calls(), 1);
+        assert!(delayed_handle.completed());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn query_watchdog_slow_interrupt_starves_single_worker_runtime_until_it_returns() {
+        let interrupt_delay = Duration::from_millis(100);
+        let (delayed_handle, interrupt_handle) = delayed_interrupt_handle(interrupt_delay);
+        let mut watchdog = DuckDbQueryWatchdog::spawn(Instant::now() + WATCHDOG_DEADLINE);
+        let watchdog_task = watchdog.async_task_handle().expect("failed to extract watchdog task");
+        let (observer_started_tx, observer_started_rx) = oneshot::channel();
+        let started_at = std::time::Instant::now();
+        let observer_task = tokio::spawn(async move {
+            observer_started_tx.send(()).expect("observer start receiver should be open");
+            tokio::time::sleep(WATCHDOG_DEADLINE * 2).await;
+            std::time::Instant::now()
+        });
+
+        observer_started_rx.await.expect("observer should start");
+        watchdog.publish_query_interrupt_handle(interrupt_handle);
+
+        tokio::time::timeout(WATCHDOG_JOIN_TIMEOUT, watchdog_task)
+            .await
+            .expect("watchdog should not deadlock on a single worker runtime")
+            .expect("watchdog task should not panic");
+        let observer_finished_at = observer_task.await.expect("observer task should not panic");
+
+        assert!(watchdog.timed_out());
+        assert_eq!(delayed_handle.calls(), 1);
+        assert!(delayed_handle.completed());
+        assert!(
+            observer_finished_at.duration_since(started_at) >= interrupt_delay,
+            "single worker runtime should not poll other async tasks while interrupt() blocks"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn query_watchdog_slow_interrupts_serialize_on_single_worker_runtime() {
+        let interrupt_delay = Duration::from_millis(100);
+        let (first_delayed_handle, first_interrupt_handle) =
+            delayed_interrupt_handle(interrupt_delay);
+        let (second_delayed_handle, second_interrupt_handle) =
+            delayed_interrupt_handle(interrupt_delay);
+        let mut first_watchdog = DuckDbQueryWatchdog::spawn(Instant::now() + WATCHDOG_DEADLINE);
+        let mut second_watchdog = DuckDbQueryWatchdog::spawn(Instant::now() + WATCHDOG_DEADLINE);
+        let first_watchdog_task =
+            first_watchdog.async_task_handle().expect("failed to extract first watchdog task");
+        let second_watchdog_task =
+            second_watchdog.async_task_handle().expect("failed to extract second watchdog task");
+        let started_at = std::time::Instant::now();
+
+        first_watchdog.publish_query_interrupt_handle(first_interrupt_handle);
+        second_watchdog.publish_query_interrupt_handle(second_interrupt_handle);
+
+        tokio::time::timeout(WATCHDOG_JOIN_TIMEOUT, async {
+            let (first_result, second_result) =
+                tokio::join!(first_watchdog_task, second_watchdog_task);
+            first_result.expect("first watchdog task should not panic");
+            second_result.expect("second watchdog task should not panic");
+        })
+        .await
+        .expect("serialized slow interrupts should not deadlock on a single worker runtime");
+
+        assert!(first_watchdog.timed_out());
+        assert!(second_watchdog.timed_out());
+        assert_eq!(first_delayed_handle.calls(), 1);
+        assert_eq!(second_delayed_handle.calls(), 1);
+        assert!(first_delayed_handle.completed());
+        assert!(second_delayed_handle.completed());
+        assert!(
+            started_at.elapsed() >= interrupt_delay * 2,
+            "single worker runtime should serialize blocking interrupt() calls"
         );
     }
 
