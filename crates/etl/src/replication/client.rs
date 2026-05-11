@@ -12,7 +12,7 @@ use tokio_postgres::{
     Client, Config, Connection, CopyOutStream, NoTls, SimpleQueryMessage, SimpleQueryRow, Socket,
     config::ReplicationMode, error::SqlState, tls::MakeTlsConnect,
 };
-use tracing::{Instrument, error, info, warn};
+use tracing::{Instrument, debug, error, info, warn};
 
 use crate::{
     bail,
@@ -164,13 +164,7 @@ impl GetOrCreateSlotResult {
     pub(crate) fn get_start_lsn(&self) -> PgLsn {
         match self {
             GetOrCreateSlotResult::CreateSlot(result) => result.consistent_point,
-            GetOrCreateSlotResult::GetSlot(result) => {
-                // `START_REPLICATION` resumes from the requested position, so
-                // when a slot already reports a durable flush point we must
-                // advance past that byte to avoid replaying the last flushed
-                // transaction after reconnect.
-                PgLsn::from(u64::from(result.confirmed_flush_lsn).saturating_add(1))
-            }
+            GetOrCreateSlotResult::GetSlot(result) => result.confirmed_flush_lsn,
         }
     }
 }
@@ -403,11 +397,23 @@ impl PgReplicationClient {
     /// Establishes a connection to Postgres. The connection uses TLS if
     /// configured in the supplied [`PgConnectionConfig`].
     ///
-    /// The connection is configured for logical replication mode
+    /// The connection is configured for logical replication mode.
     pub async fn connect(pg_connection_config: PgConnectionConfig) -> EtlResult<Self> {
         match pg_connection_config.tls.enabled {
             true => PgReplicationClient::connect_tls(pg_connection_config).await,
             false => PgReplicationClient::connect_no_tls(pg_connection_config).await,
+        }
+    }
+
+    /// Establishes a regular query connection to Postgres.
+    ///
+    /// This connection does not use logical replication mode, so it does not
+    /// consume a `max_wal_senders` slot. It is intended for catalog checks that
+    /// support a running replication connection.
+    pub(crate) async fn connect_query(pg_connection_config: PgConnectionConfig) -> EtlResult<Self> {
+        match pg_connection_config.tls.enabled {
+            true => PgReplicationClient::connect_query_tls(pg_connection_config).await,
+            false => PgReplicationClient::connect_query_no_tls(pg_connection_config).await,
         }
     }
 
@@ -436,9 +442,30 @@ impl PgReplicationClient {
         })
     }
 
+    /// Establishes a regular non-TLS query connection to Postgres.
+    async fn connect_query_no_tls(pg_connection_config: PgConnectionConfig) -> EtlResult<Self> {
+        let config: Config = pg_connection_config.clone().with_db(Some(&ETL_REPLICATION_OPTIONS));
+
+        let (client, connection) = config.connect(NoTls).await?;
+
+        let server_version =
+            connection.parameter("server_version").and_then(extract_server_version);
+
+        let connection_updates_rx = spawn_postgres_connection::<NoTls>(connection);
+
+        debug!("connected to postgres query connection without tls");
+
+        Ok(PgReplicationClient {
+            client: Arc::new(client),
+            pg_connection_config: Arc::new(pg_connection_config),
+            server_version,
+            connection_updates_rx,
+        })
+    }
+
     /// Establishes a TLS-encrypted connection to Postgres.
     ///
-    /// The connection is configured for logical replication mode
+    /// The connection is configured for logical replication mode.
     async fn connect_tls(pg_connection_config: PgConnectionConfig) -> EtlResult<Self> {
         let mut config: Config =
             pg_connection_config.clone().with_db(Some(&ETL_REPLICATION_OPTIONS));
@@ -465,6 +492,38 @@ impl PgReplicationClient {
         let connection_updates_rx = spawn_postgres_connection::<MakeRustlsConnect>(connection);
 
         info!("connected to postgres with tls");
+
+        Ok(PgReplicationClient {
+            client: Arc::new(client),
+            pg_connection_config: Arc::new(pg_connection_config),
+            server_version,
+            connection_updates_rx,
+        })
+    }
+
+    /// Establishes a regular TLS-encrypted query connection to Postgres.
+    async fn connect_query_tls(pg_connection_config: PgConnectionConfig) -> EtlResult<Self> {
+        let config: Config = pg_connection_config.clone().with_db(Some(&ETL_REPLICATION_OPTIONS));
+
+        let mut root_store = rustls::RootCertStore::empty();
+        for cert in
+            CertificateDer::pem_slice_iter(pg_connection_config.tls.trusted_root_certs.as_bytes())
+        {
+            let cert = cert?;
+            root_store.add(cert)?;
+        }
+
+        let tls_config =
+            ClientConfig::builder().with_root_certificates(root_store).with_no_client_auth();
+
+        let (client, connection) = config.connect(MakeRustlsConnect::new(tls_config)).await?;
+
+        let server_version =
+            connection.parameter("server_version").and_then(extract_server_version);
+
+        let connection_updates_rx = spawn_postgres_connection::<MakeRustlsConnect>(connection);
+
+        debug!("connected to postgres query connection with tls");
 
         Ok(PgReplicationClient {
             client: Arc::new(client),
@@ -1698,7 +1757,26 @@ impl PgReplicationClient {
 mod tests {
     use etl_postgres::types::TableName;
 
-    use super::{CtidPartition, PgReplicationClient};
+    use super::{
+        CreateSlotResult, CtidPartition, GetOrCreateSlotResult, GetSlotResult, PgReplicationClient,
+    };
+    use crate::types::PgLsn;
+
+    #[test]
+    fn existing_logical_slot_resumes_from_confirmed_flush_lsn() {
+        let confirmed_flush_lsn = PgLsn::from(100u64);
+        let slot = GetOrCreateSlotResult::GetSlot(GetSlotResult { confirmed_flush_lsn });
+
+        assert_eq!(slot.get_start_lsn(), confirmed_flush_lsn);
+    }
+
+    #[test]
+    fn new_logical_slot_starts_from_consistent_point() {
+        let consistent_point = PgLsn::from(200u64);
+        let slot = GetOrCreateSlotResult::CreateSlot(CreateSlotResult { consistent_point });
+
+        assert_eq!(slot.get_start_lsn(), consistent_point);
+    }
 
     #[test]
     fn build_ctid_copy_query_quotes_mixed_case_table_names() {
