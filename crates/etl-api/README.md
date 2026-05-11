@@ -1,0 +1,124 @@
+# `etl` - API
+
+This API service provides a RESTful interface for managing Postgres replication pipelines. It enables you to:
+
+- Create and manage replication pipelines between Postgres sources and destinations
+- Handle multi-tenant replication configurations
+- Manage publications and tables for replication
+- Control pipeline lifecycle (start/stop/status)
+- Secure configuration with encryption
+- Deploy and manage replicators in Kubernetes
+
+## Features
+
+- RESTful API endpoints for pipeline management
+- Multi-tenant support with isolated configurations
+- Kubernetes deployment support
+- Secure configuration management
+- Database schema versioning with migrations
+- Integration with the core ETL system
+
+## Table of Contents
+
+- [Prerequisites](#prerequisites)
+- [Development](#development)
+- [Environment Variables](#environment-variables)
+- [Authentication](#authentication)
+
+## Prerequisites
+
+Before running the API, you must have:
+
+- A running Postgres instance reachable via `DATABASE_URL`.
+- The `etl-api` database schema applied (SQLx migrations).
+
+For the full local development stack, use the setup script to start Postgres,
+run migrations, and apply the local Kubernetes resources.
+
+```bash
+./scripts/init.sh
+```
+
+Alternative: if you already have a Postgres database, set `DATABASE_URL` and apply migrations manually:
+
+```bash
+export DATABASE_URL=postgres://USER:PASSWORD@HOST:PORT/DB
+sqlx migrate run --source crates/etl-api/migrations
+```
+
+## Configuration
+
+### Configuration Directory
+
+The configuration directory is determined by:
+- **`APP_CONFIG_DIR`** environment variable: If set, use this absolute path as the configuration directory
+- **Fallback**: `configuration/` directory relative to the binary location
+
+Configuration files are loaded in this order:
+1. `base.(yaml|yml|json)` - Base configuration for all environments
+2. `{environment}.(yaml|yml|json)` - Environment-specific overrides (environment defaults to `prod` unless `APP_ENVIRONMENT` is set to `dev`, `staging`, or `prod`)
+3. `APP_`-prefixed environment variables - Runtime overrides (nested keys use `__`, lists split on `,`)
+
+### Examples
+
+Using default configuration directory:
+```bash
+# Looks for configuration files in ./configuration/
+./etl-api
+```
+
+Using custom configuration directory:
+```bash
+# Looks for configuration files in /etc/etl-api/config/
+export APP_CONFIG_DIR=/etc/etl-api/config
+./etl-api
+```
+
+## Development
+
+### Database Migrations
+
+#### Adding a New Migration
+
+To create a new migration file:
+
+```bash
+sqlx migrate add <migration-name>
+```
+
+#### Running Migrations
+
+To apply all pending migrations:
+
+```bash
+sqlx migrate run --source crates/etl-api/migrations
+```
+
+#### Resetting Database
+
+To reset the database to its initial state:
+
+```bash
+sqlx migrate reset
+```
+
+#### Updating SQLx Metadata
+
+After making changes to the database schema, update the SQLx metadata:
+
+```bash
+cargo sqlx prepare
+```
+
+## Authentication
+
+- The API uses Bearer token auth via the `Authorization` header.
+- Configure authentication with `api_keys` (each is base64 of 32 random bytes). All listed keys are accepted, enabling seamless key rotation.
+
+Config example (YAML):
+
+```yaml
+api_keys:
+  - XOUbHmWbt9h7nWl15wWwyWQnctmFGNjpawMc3lT5CFs=
+  - h1QqT7u+8t4q0t3m8rjOa2qK7F8w6h9C1xYzPqL7pmc=
+```

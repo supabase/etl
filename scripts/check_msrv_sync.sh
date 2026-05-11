@@ -34,7 +34,7 @@ if [[ -z "${toolchain_msrv}" ]]; then
 fi
 
 # Use a workspace member manifest so cargo-msrv can resolve the inherited rust-version.
-resolved_msrv=$(cargo msrv show --manifest-path etl/Cargo.toml --output-format minimal)
+resolved_msrv=$(cargo msrv show --manifest-path crates/etl/Cargo.toml --output-format minimal)
 
 if [[ -z "${resolved_msrv}" ]]; then
   echo "failed to read rust-version via cargo-msrv" >&2
