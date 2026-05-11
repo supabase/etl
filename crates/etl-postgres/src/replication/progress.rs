@@ -33,7 +33,7 @@ where
         from etl.replication_progress
         where pipeline_id = $1
           and worker_type = $2::etl.replication_worker_type
-          and table_id is not distinct from $3
+          and coalesce(table_id, 0::oid) = coalesce($3::oid, 0::oid)
         "#,
     )
     .bind(pipeline_id)
@@ -63,7 +63,7 @@ where
         r#"
         insert into etl.replication_progress (pipeline_id, worker_type, table_id, flush_lsn)
         values ($1, $2::etl.replication_worker_type, $3, $4::pg_lsn)
-        on conflict on constraint uq_replication_progress_pipeline_worker_table
+        on conflict (pipeline_id, worker_type, coalesce(table_id, 0::oid))
         do update set
             flush_lsn = case
                 when excluded.flush_lsn > etl.replication_progress.flush_lsn
@@ -103,7 +103,7 @@ where
         delete from etl.replication_progress
         where pipeline_id = $1
           and worker_type = $2::etl.replication_worker_type
-          and table_id is not distinct from $3
+          and coalesce(table_id, 0::oid) = coalesce($3::oid, 0::oid)
         "#,
     )
     .bind(pipeline_id)

@@ -331,6 +331,7 @@ impl ReplicationProgress {
         }
 
         debug_assert!(self.last_received_lsn >= self.last_flush_lsn);
+        debug_assert!(new_lsn <= self.last_received_lsn);
 
         self.last_flush_lsn = new_lsn;
     }
@@ -2326,10 +2327,12 @@ where
         &mut self,
         last_commit_end_lsn: PgLsn,
     ) -> EtlResult<()> {
-        // Store durable replication progress before reporting it to PostgreSQL.
-        // Progress only advances at commit end LSN boundaries, so restart uses
-        // the same "everything before this LSN is safe" boundary semantics as
-        // PostgreSQL logical replication feedback.
+        // Store durable replication progress before reporting it to PostgreSQL. This
+        // is the same commit-end boundary that status updates later report as both
+        // `flush_lsn` and `apply_lsn`; the only difference is when each side is
+        // emitted. Durable progress is recorded as soon as the destination
+        // acknowledges the batch, while PostgreSQL feedback is sent by the regular
+        // keep-alive and shutdown paths.
         let durable_flush_lsn = self
             .schema_store
             .upsert_replication_progress(self.worker_context.worker_type(), last_commit_end_lsn)

@@ -20,10 +20,8 @@ create table etl.replication_progress (
         (worker_type = 'apply' and table_id is null)
         or
         (worker_type = 'table_sync' and table_id is not null)
-    ),
-    constraint uq_replication_progress_pipeline_worker_table
-        unique nulls not distinct (pipeline_id, worker_type, table_id)
+    )
 );
 
-create index idx_replication_progress_pipeline
-    on etl.replication_progress (pipeline_id);
+create unique index uq_replication_progress_pipeline_worker_table
+    on etl.replication_progress (pipeline_id, worker_type, coalesce(table_id, 0::oid));
