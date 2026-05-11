@@ -156,6 +156,11 @@ impl PgSourceClient {
         Ok(PgSourceTransaction { inner: self.client.transaction().await? })
     }
 
+    /// Returns whether the underlying connection is closed.
+    pub fn is_closed(&self) -> bool {
+        self.client.is_closed()
+    }
+
     /// Executes a statement and returns the affected row count.
     pub async fn execute(
         &self,
