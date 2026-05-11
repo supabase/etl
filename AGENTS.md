@@ -1,17 +1,17 @@
 # Repository Guidelines
 
 ## Workspace Layout
-- Root workspace crates:
-  - `etl/`: core replication library.
-  - `etl-api/`: HTTP API service.
-  - `etl-replicator/`: standalone replicator binary.
-  - `etl-postgres/`: Postgres integration.
-  - `etl-destinations/`: destination implementations.
-  - `etl-config/`: configuration types and loading.
-  - `etl-telemetry/`: tracing and Prometheus setup.
-  - `etl-examples/`: examples.
-  - `etl-benchmarks/`: benchmarks.
-  - `xtask/`: workspace automation commands.
+- Rust workspace crates live under `crates/`:
+  - `crates/etl/`: core replication library.
+  - `crates/etl-api/`: HTTP API service.
+  - `crates/etl-replicator/`: standalone replicator binary.
+  - `crates/etl-postgres/`: Postgres integration.
+  - `crates/etl-destinations/`: destination implementations.
+  - `crates/etl-config/`: configuration types and loading.
+  - `crates/etl-telemetry/`: tracing and Prometheus setup.
+  - `crates/etl-examples/`: examples.
+  - `crates/etl-benchmarks/`: benchmarks.
+  - `crates/xtask/`: workspace automation commands.
 - Docs live in `docs/`.
 - Local development and ops tooling live in `scripts/` and `DEVELOPMENT.md`.
 - Tests live next to code in `src/` or `tests/`.
@@ -137,7 +137,7 @@
 - When fixing a specific crate, run the narrowest relevant tests first, then broaden if needed.
 - Add or update tests when behavior changes, regressions are possible, or new logic is introduced.
 - Prefer existing test utilities and fixtures over custom test plumbing. Before adding bespoke
-  setup, waits, assertions, or database helpers, check nearby tests and `etl/src/test_utils/` for
+  setup, waits, assertions, or database helpers, check nearby tests and `crates/etl/src/test_utils/` for
   an existing helper and reuse it when it fits.
 - Register `NotifyingStore::notify_on_*` and `TestDestinationWrapper::wait_for_*` handles before the producer can fire. These helpers only arm on updates that arrive *after* registration, so register the notifier first, then start the producer.
 - If your tests need `TESTS_DATABASE_HOST` to be set or a test instance of PostgreSQL you can use `cargo xtask postgres create` command to spawn a postgres instance

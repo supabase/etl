@@ -1,0 +1,16 @@
+---
+source: crates/etl-api/src/configs/destination.rs
+expression: full_config
+---
+{
+  "iceberg": {
+    "rest": {
+      "catalog_uri": "https://catalog.example.com/iceberg",
+      "warehouse_name": "my-warehouse",
+      "namespace": "my-namespace",
+      "s3_access_key_id": "id",
+      "s3_secret_access_key": "key",
+      "s3_endpoint": "http://localhost:8080"
+    }
+  }
+}

@@ -32,7 +32,7 @@
     <br />
     <a href="https://supabase.github.io/etl"><strong>Documentation</strong></a>
     ·
-    <a href="https://github.com/supabase/etl/tree/main/etl-examples"><strong>Examples</strong></a>
+    <a href="https://github.com/supabase/etl/tree/main/crates/etl-examples"><strong>Examples</strong></a>
     ·
     <a href="https://github.com/supabase/etl/issues"><strong>Issues</strong></a>
   </p>
@@ -176,7 +176,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 For a guided walkthrough, start with
 [Your First Pipeline](https://supabase.github.io/etl/guides/first-pipeline/).
-For runnable destination examples, see [`etl-examples`](etl-examples/README.md).
+For runnable destination examples, see [`etl-examples`](crates/etl-examples/README.md).
 
 ## Destinations
 
