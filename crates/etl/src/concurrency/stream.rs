@@ -387,17 +387,32 @@ mod tests {
     fn test_cached_budget(memory_monitor: &MemoryMonitor) -> CachedBatchBudget {
         memory_monitor.set_total_memory_bytes_for_test(10_000_000_000);
 
-        BatchBudgetController::new(1, memory_monitor.clone(), 0.2).cached()
+        BatchBudgetController::new(1, memory_monitor.clone(), 0.2, 16 * 1024 * 1024).cached()
     }
 
     /// Returns a cached budget and the computed byte limit for assertions in
     /// byte-based tests.
     fn test_cached_budget_with_limit(memory_monitor: &MemoryMonitor) -> (CachedBatchBudget, usize) {
         memory_monitor.set_total_memory_bytes_for_test(10_000);
-        let mut cached_budget = BatchBudgetController::new(1, memory_monitor.clone(), 0.2).cached();
+        let mut cached_budget = BatchBudgetController::new(
+            1,
+            memory_monitor.clone(),
+            0.2,
+            BatchConfig::DEFAULT_MAX_BYTES,
+        )
+        .cached();
         let limit = cached_budget.current_batch_size_bytes();
 
         (cached_budget, limit)
+    }
+
+    /// Returns a test batch config with the supplied fill timeout.
+    fn test_batch_config(max_fill_ms: u64) -> BatchConfig {
+        BatchConfig {
+            max_fill_ms,
+            memory_budget_ratio: BatchConfig::DEFAULT_MEMORY_BUDGET_RATIO,
+            max_bytes: BatchConfig::DEFAULT_MAX_BYTES,
+        }
     }
 
     #[test]
@@ -512,7 +527,7 @@ mod tests {
         let memory = MemoryMonitor::new_for_test();
         let memory_sub = memory.subscribe();
 
-        let batch_config = BatchConfig { max_fill_ms: 10_000, memory_budget_ratio: 0.2 };
+        let batch_config = test_batch_config(10_000);
         let mut stream = Box::pin(TryBatchBackpressureStream::wrap(
             TwoThenPending::new(),
             "test_stream",
@@ -543,7 +558,7 @@ mod tests {
         memory.set_backpressure_active_for_test(true);
         let memory_sub = memory.subscribe();
 
-        let batch_config = BatchConfig { max_fill_ms: 10_000, memory_budget_ratio: 0.2 };
+        let batch_config = test_batch_config(10_000);
         let mut stream = Box::pin(TryBatchBackpressureStream::wrap(
             futures::stream::iter(vec![Ok::<i32, &'static str>(1)]),
             "test_stream",
@@ -571,7 +586,7 @@ mod tests {
         let memory = MemoryMonitor::new_for_test();
         let memory_sub = memory.subscribe();
 
-        let batch_config = BatchConfig { max_fill_ms: 10_000, memory_budget_ratio: 0.2 };
+        let batch_config = test_batch_config(10_000);
         let stream = TryBatchBackpressureStream::wrap(
             futures::stream::iter(vec![Ok::<i32, &'static str>(2)]),
             "test_stream",
@@ -614,7 +629,7 @@ mod tests {
         let memory = MemoryMonitor::new_for_test();
         let memory_sub = memory.subscribe();
 
-        let batch_config = BatchConfig { max_fill_ms: 100, memory_budget_ratio: 0.2 };
+        let batch_config = test_batch_config(100);
         let mut stream = Box::pin(TryBatchBackpressureStream::wrap(
             TwoThenPending::new(),
             "test_stream",
@@ -640,7 +655,7 @@ mod tests {
         let memory = MemoryMonitor::new_for_test();
         let memory_sub = memory.subscribe();
 
-        let batch_config = BatchConfig { max_fill_ms: 10_000, memory_budget_ratio: 0.2 };
+        let batch_config = test_batch_config(10_000);
         let (cached_budget, byte_limit) = test_cached_budget_with_limit(&memory);
         let byte_size = (byte_limit / 2).max(1);
         let items = vec![
@@ -668,7 +683,7 @@ mod tests {
         let memory = MemoryMonitor::new_for_test();
         let memory_sub = memory.subscribe();
 
-        let batch_config = BatchConfig { max_fill_ms: 10_000, memory_budget_ratio: 0.2 };
+        let batch_config = test_batch_config(10_000);
         let (cached_budget, byte_limit) = test_cached_budget_with_limit(&memory);
         let first = (byte_limit / 4).max(1);
         let second = (byte_limit / 4).max(1);
@@ -695,7 +710,7 @@ mod tests {
         let memory = MemoryMonitor::new_for_test();
         let memory_sub = memory.subscribe();
 
-        let batch_config = BatchConfig { max_fill_ms: 100, memory_budget_ratio: 0.2 };
+        let batch_config = test_batch_config(100);
         let mut stream = Box::pin(TryBatchBackpressureStream::wrap(
             TwoThenPending::new(),
             "test_stream",
@@ -725,7 +740,7 @@ mod tests {
         let memory = MemoryMonitor::new_for_test();
         let memory_sub = memory.subscribe();
 
-        let batch_config = BatchConfig { max_fill_ms: 10_000, memory_budget_ratio: 0.2 };
+        let batch_config = test_batch_config(10_000);
         let mut stream = Box::pin(TryBatchBackpressureStream::wrap(
             futures::stream::iter(vec![Ok::<i32, &'static str>(7), Ok(8)]),
             "test_stream",
@@ -750,7 +765,7 @@ mod tests {
         let memory = MemoryMonitor::new_for_test();
         let memory_sub = memory.subscribe();
 
-        let batch_config = BatchConfig { max_fill_ms: 10_000, memory_budget_ratio: 0.2 };
+        let batch_config = test_batch_config(10_000);
         let mut stream = Box::pin(TryBatchBackpressureStream::wrap(
             futures::stream::empty::<Result<i32, &'static str>>(),
             "test_stream",
