@@ -107,6 +107,9 @@ const KEEP_ALIVE_DEADLINE_FRACTION: f64 = 0.6;
 /// deadline at that scale would make the apply loop spin sending forced keep
 /// alives, which is not operationally useful. We clamp to `100ms`.
 const MIN_KEEP_ALIVE_DEADLINE_DURATION: Duration = Duration::from_millis(100);
+/// Interval for checking whether PostgreSQL reflected the shutdown flush LSN
+/// in the logical slot state.
+const SHUTDOWN_SLOT_CONFIRMATION_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 /// Minimum interval between best-effort schema cleanup tasks during normal
 /// replication.
 ///
@@ -197,9 +200,9 @@ impl ExitIntent {
 
 /// Represents the shutdown state of the apply loop.
 ///
-/// Tracks the progress of a graceful shutdown, ensuring that PostgreSQL
-/// acknowledges our flush position before we terminate to prevent data
-/// duplication on restart.
+/// Tracks the progress of a graceful shutdown, ensuring that PostgreSQL has
+/// observed our flush position before we terminate to reduce replay on a
+/// pipeline restart.
 #[derive(Debug, Clone)]
 pub(crate) enum ShutdownState {
     /// Normal operation.
@@ -211,12 +214,12 @@ pub(crate) enum ShutdownState {
     DrainingForShutdown,
     /// Shutdown drain completed.
     ///
-    /// The loop now waits only for PostgreSQL to acknowledge the shutdown
-    /// flush position.
-    WaitingForPrimaryKeepAlive {
-        /// The LSN we sent in the status update that PostgreSQL should
-        /// acknowledge.
-        acked_flush_lsn: PgLsn,
+    /// The loop now waits for the replication slot's `confirmed_flush_lsn` to
+    /// reach the final shutdown flush position.
+    WaitingForSlotConfirmation {
+        /// The LSN we sent in the final status update that PostgreSQL should
+        /// reflect in the logical replication slot's current state.
+        target_flush_lsn: PgLsn,
     },
 }
 
@@ -232,8 +235,8 @@ impl Display for ShutdownState {
         match self {
             Self::NoShutdown => write!(f, "no_shutdown"),
             Self::DrainingForShutdown => write!(f, "draining_for_shutdown"),
-            Self::WaitingForPrimaryKeepAlive { acked_flush_lsn } => {
-                write!(f, "waiting_for_primary_keep_alive({acked_flush_lsn})")
+            Self::WaitingForSlotConfirmation { target_flush_lsn } => {
+                write!(f, "waiting_for_slot_confirmation({target_flush_lsn})")
             }
         }
     }
@@ -420,6 +423,8 @@ struct ApplyLoopState {
     flush_deadline: Option<Instant>,
     /// The deadline for the next proactive keep alive status update.
     keep_alive_deadline: Instant,
+    /// The next time shutdown should check the slot-confirmed flush LSN.
+    shutdown_slot_confirmation_deadline: Instant,
     /// Destination write result waiting to be applied to replication progress.
     pending_flush_result: Option<PendingWriteEventsResult<()>>,
     /// The strongest exit that this apply loop invocation should eventually
@@ -474,6 +479,7 @@ impl ApplyLoopState {
             shutdown_state: ShutdownState::NoShutdown,
             flush_deadline: None,
             keep_alive_deadline: Instant::now() + keep_alive_deadline_duration,
+            shutdown_slot_confirmation_deadline: Instant::now(),
             pending_flush_result: None,
             exit_intent: None,
             processing_paused: false,
@@ -541,6 +547,17 @@ impl ApplyLoopState {
     /// Resets the keep alive deadline using the configured duration.
     fn reset_keep_alive_deadline(&mut self, keep_alive_deadline_duration: Duration) {
         self.keep_alive_deadline = Instant::now() + keep_alive_deadline_duration;
+    }
+
+    /// Resets the shutdown slot confirmation check deadline.
+    fn reset_shutdown_slot_confirmation_deadline(&mut self) {
+        self.shutdown_slot_confirmation_deadline =
+            Instant::now() + SHUTDOWN_SLOT_CONFIRMATION_CHECK_INTERVAL;
+    }
+
+    /// Expires the shutdown slot confirmation check deadline immediately.
+    fn expire_shutdown_slot_confirmation_deadline(&mut self) {
+        self.shutdown_slot_confirmation_deadline = Instant::now();
     }
 
     /// Updates the last commit end LSN to track transaction boundaries.
@@ -888,10 +905,10 @@ where
 
         loop {
             #[cfg(feature = "failpoints")]
-            if matches!(self.state.shutdown_state, ShutdownState::WaitingForPrimaryKeepAlive { .. })
+            if matches!(self.state.shutdown_state, ShutdownState::WaitingForSlotConfirmation { .. })
                 && etl_fail_point_active(SEND_STATUS_UPDATE_FP)
             {
-                warn!("not waiting for primary keep alive on shutdown due to active failpoint");
+                warn!("not waiting for slot confirmation on shutdown due to active failpoint");
 
                 return Ok(self.finish_shutdown());
             }
@@ -912,11 +929,11 @@ where
                     )
                     .await
                 }
-                ShutdownState::WaitingForPrimaryKeepAlive { acked_flush_lsn } => {
+                ShutdownState::WaitingForSlotConfirmation { target_flush_lsn } => {
                     self.run_shutdown_wait_iteration(
                         events_stream.as_mut(),
                         &mut connection_updates_rx,
-                        *acked_flush_lsn,
+                        *target_flush_lsn,
                     )
                     .await
                 }
@@ -1053,7 +1070,7 @@ where
     /// After the selected branch runs, the loop advances idle syncing state.
     /// Once buffered or in-flight destination work is resolved, it sends the
     /// final shutdown status update and transitions to
-    /// [`ShutdownState::WaitingForPrimaryKeepAlive`].
+    /// [`ShutdownState::WaitingForSlotConfirmation`].
     async fn run_draining_shutdown_iteration(
         &mut self,
         mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
@@ -1096,8 +1113,8 @@ where
         // Try to keep advancing syncing tables whenever the system becomes idle.
         self.maybe_process_syncing_tables_when_idle().await?;
 
-        // Once the drain is complete, start waiting for PostgreSQL to
-        // acknowledge the final flush position.
+        // Once the drain is complete, start waiting for PostgreSQL to reflect the
+        // final flush position in the slot's current state.
         if !self.state.has_unresolved_batch_work() {
             self.initiate_graceful_shutdown(events_stream.as_mut()).await?;
         }
@@ -1105,24 +1122,24 @@ where
         Ok(None)
     }
 
-    /// Runs one iteration of the final shutdown acknowledgement phase.
+    /// Runs one iteration of the final shutdown confirmation phase.
     ///
     /// In this phase the loop no longer accepts new replication messages and
     /// no longer waits for destination flush results.
     ///
     /// Priority order:
     /// 1. PostgreSQL connection lifecycle updates.
-    /// 2. PostgreSQL keepalives that may acknowledge `acked_flush_lsn`.
-    /// 3. Periodic keep alive status updates.
+    /// 2. Slot confirmation checks for the target shutdown flush LSN.
+    /// 3. Replication stream draining.
+    /// 4. Periodic keep alive status updates.
     ///
-    /// Once the acknowledgement arrives, unresolved work causes
-    /// [`ApplyLoopResult::Paused`]; otherwise the recorded exit result may be
-    /// reused.
+    /// `PrimaryKeepAlive.wal_end` is not used as the shutdown barrier because
+    /// it reports the sender's stream position, not slot-confirmed progress.
     async fn run_shutdown_wait_iteration(
         &mut self,
         mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
         connection_updates_rx: &mut watch::Receiver<PostgresConnectionUpdate>,
-        acked_flush_lsn: PgLsn,
+        target_flush_lsn: PgLsn,
     ) -> EtlResult<Option<ApplyLoopResult>> {
         tokio::select! {
             biased;
@@ -1133,29 +1150,50 @@ where
                 Self::handle_connection_update(changed, connection_updates_rx)?;
             }
 
-            // PRIORITY 2: Wait for the keepalive that acknowledges the shutdown flush LSN.
-            // Once this barrier is reached, shutdown may finish.
-            message = events_stream.next() => {
-                if self
-                    .handle_shutdown_keepalive_wait_message(events_stream.as_mut(), message, acked_flush_lsn)
-                    .await?
-                {
+            // PRIORITY 2: Check current slot state. If it has not caught up,
+            // resend the same final status update and retry later.
+            _ = Self::wait_for_shutdown_slot_confirmation_deadline(
+                self.state.shutdown_slot_confirmation_deadline
+            ) => {
+                if self.try_confirm_shutdown_flush_lsn(target_flush_lsn).await {
                     return Ok(Some(self.finish_shutdown()));
                 }
+
+                self.send_status_update(
+                    events_stream.as_mut(),
+                    target_flush_lsn,
+                    true,
+                    StatusUpdateType::ShutdownFlush,
+                )
+                .await?;
+
+                self.state.reset_shutdown_slot_confirmation_deadline();
             }
 
-            // PRIORITY 3: Resend a heartbeat once the computed keep alive deadline expires while
-            // shutdown is waiting for the primary keep alive acknowledgement barrier. This is a
-            // last-resort safeguard for cases where PostgreSQL keep alives stop reaching the loop,
-            // for example because the source has gone quiet, the stream is backpressured, or the
-            // network is delayed. In normal operation, PostgreSQL's own keep alives should drive
-            // this wait.
+            // PRIORITY 3: Keep polling the copy-both stream while waiting for slot
+            // confirmation so that we don't create build-up on the Postgres side, even though
+            // we don't advance the flush lsn.
+            message = events_stream.next() => {
+                self
+                    .handle_shutdown_wait_stream_message(
+                        events_stream.as_mut(),
+                        message,
+                        target_flush_lsn,
+                    )
+                    .await?;
+            }
+
+            // PRIORITY 4: Resend a heartbeat once the computed keep alive deadline expires while
+            // shutdown is waiting for the slot confirmation barrier. This is a last-resort
+            // safeguard for cases where PostgreSQL keep alives stop reaching the loop, for example
+            // because the source has gone quiet, the stream is backpressured, or the network is
+            // delayed.
             _ = Self::wait_for_keep_alive_deadline(self.state.keep_alive_deadline) => {
                 self.send_status_update(
                     events_stream.as_mut(),
-                    self.state.effective_flush_lsn(),
+                    target_flush_lsn,
                     true,
-                    StatusUpdateType::PeriodicKeepAlive,
+                    StatusUpdateType::ShutdownFlush,
                 )
                 .await?;
 
@@ -1167,8 +1205,8 @@ where
         Ok(None)
     }
 
-    /// Returns the final loop result after PostgreSQL has acknowledged the
-    /// shutdown status update.
+    /// Returns the final loop result after PostgreSQL has confirmed the
+    /// shutdown flush LSN in the replication slot.
     ///
     /// By the time shutdown reaches this point, the drain phase should have
     /// resolved any buffered or in-flight destination work. The loop therefore
@@ -1234,6 +1272,11 @@ where
         tokio::time::sleep_until(deadline.into()).await;
     }
 
+    /// Waits until the shutdown slot confirmation check deadline expires.
+    async fn wait_for_shutdown_slot_confirmation_deadline(deadline: Instant) {
+        tokio::time::sleep_until(deadline.into()).await;
+    }
+
     /// Computes the keep alive deadline from PostgreSQL's `wal_sender_timeout`.
     ///
     /// PostgreSQL normally sends a keep alive after roughly half of this
@@ -1247,101 +1290,142 @@ where
             .max(MIN_KEEP_ALIVE_DEADLINE_DURATION)
     }
 
-    /// Processes a replication message while shutdown is waiting for PostgreSQL
-    /// to acknowledge the requested flush LSN.
+    /// Checks whether PostgreSQL reflected the final shutdown flush LSN in the
+    /// logical replication slot state.
     ///
-    /// Returns `true` if the message is a keepalive with `wal_end >=
-    /// acked_flush_lsn`, `false` if still waiting for the right keepalive.
-    async fn handle_shutdown_keepalive_wait_message(
+    /// `confirmed_flush_lsn` is current slot state, not proof that PostgreSQL
+    /// has fsynced the slot. A source crash before the next slot save can make
+    /// this value retreat.
+    async fn try_confirm_shutdown_flush_lsn(&self, target_flush_lsn: PgLsn) -> bool {
+        let worker_type = self.worker_context.worker_type();
+
+        match self.get_actual_confirmed_flush_lsn().await {
+            Ok(confirmed_flush_lsn) if confirmed_flush_lsn >= target_flush_lsn => {
+                info!(
+                    %worker_type,
+                    %confirmed_flush_lsn,
+                    %target_flush_lsn,
+                    "confirmed shutdown flush lsn in replication slot, safe to stop pipeline",
+                );
+
+                true
+            }
+            Ok(confirmed_flush_lsn) => {
+                debug!(
+                    %worker_type,
+                    %confirmed_flush_lsn,
+                    %target_flush_lsn,
+                    "shutdown flush lsn not confirmed in replication slot yet",
+                );
+
+                false
+            }
+            Err(error) => {
+                warn!(
+                    %worker_type,
+                    %target_flush_lsn,
+                    error = %error,
+                    "failed to confirm shutdown flush lsn in replication slot; continuing to wait",
+                );
+
+                false
+            }
+        }
+    }
+
+    /// Processes a replication message while shutdown is waiting for the slot
+    /// to confirm the final flush LSN.
+    async fn handle_shutdown_wait_stream_message(
         &mut self,
         mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
         message: Option<EtlResult<ReplicationMessage<LogicalReplicationMessage>>>,
-        acked_flush_lsn: PgLsn,
-    ) -> EtlResult<bool> {
+        target_flush_lsn: PgLsn,
+    ) -> EtlResult<()> {
         let worker_type = self.worker_context.worker_type();
 
         let Some(message) = message else {
             warn!(
                 %worker_type,
-                "replication stream ended while waiting for keep alive acknowledgement",
+                "replication stream ended while waiting for slot confirmation",
             );
 
             bail!(
                 ErrorKind::SourceConnectionFailed,
-                "Replication stream ended while waiting for keep alive acknowledgement"
+                "Replication stream ended while waiting for slot confirmation"
             )
         };
 
         match message? {
             ReplicationMessage::PrimaryKeepAlive(keepalive) => {
                 let wal_end = PgLsn::from(keepalive.wal_end());
+                self.state.replication_progress.update_last_received_lsn(wal_end);
 
-                // `acked_flush_lsn` is the effective flush LSN included in the status update
-                // for shutdown. We only treat a keepalive as the shutdown
-                // acknowledgement once its `wal_end` has reached or passed that
-                // barrier, which guarantees the reply was produced after
-                // PostgreSQL observed at least that replication position.
-                if wal_end >= acked_flush_lsn {
-                    info!(
-                        %worker_type,
-                        %wal_end,
-                        %acked_flush_lsn,
-                        "received keep alive acknowledgement, safe to shutdown",
-                    );
-
-                    self.state.reset_keep_alive_deadline(self.keep_alive_deadline_duration);
-
-                    return Ok(true);
-                }
-
-                // This shouldn't happen in practice because if we did process up to LSN `x` it
-                // means next keep alive messages from that must be at least
-                // `x`.
                 debug!(
                     %worker_type,
                     %wal_end,
-                    %acked_flush_lsn,
-                    "received keep alive but wal_end < acked_flush_lsn, continuing to wait",
+                    %target_flush_lsn,
+                    reply_requested = keepalive.reply() == 1,
+                    "received keep alive while waiting for slot confirmation",
                 );
 
+                // `wal_end` advances only received/write progress; shutdown
+                // flush/apply feedback stays pinned to the final target.
                 self.send_status_update(
                     events_stream.as_mut(),
-                    self.state.effective_flush_lsn(),
+                    target_flush_lsn,
                     true,
-                    StatusUpdateType::KeepAlive,
+                    StatusUpdateType::ShutdownFlush,
                 )
                 .await?;
 
                 self.state.reset_keep_alive_deadline(self.keep_alive_deadline_duration);
             }
+            ReplicationMessage::XLogData(message) => {
+                // Track received/write progress without reporting this data as
+                // flushed or applied.
+                let start_lsn = PgLsn::from(message.wal_start());
+                self.state.replication_progress.update_last_received_lsn(start_lsn);
+
+                let end_lsn = PgLsn::from(message.wal_end());
+                self.state.replication_progress.update_last_received_lsn(end_lsn);
+
+                debug!(
+                    %worker_type,
+                    %start_lsn,
+                    %end_lsn,
+                    %target_flush_lsn,
+                    "ignoring logical replication data while waiting for slot confirmation",
+                );
+            }
             _ => {
-                // Ignore non-keepalive messages while waiting for shutdown acknowledgement.
+                // Ignore non-keepalive messages while waiting for slot confirmation.
                 // These events will be replayed on restart from the confirmed LSN.
                 debug!(
                     %worker_type,
-                    "ignoring non-keepalive message while waiting for shutdown acknowledgement",
+                    %target_flush_lsn,
+                    "ignoring replication message while waiting for slot confirmation",
                 );
             }
         }
 
-        Ok(false)
+        Ok(())
     }
 
     /// Handles a shutdown signal by transitioning to
     /// [`ShutdownState::DrainingForShutdown`] or
-    /// [`ShutdownState::WaitingForPrimaryKeepAlive`].
+    /// [`ShutdownState::WaitingForSlotConfirmation`].
     ///
     /// Shutdown stops new message intake immediately. If there is already
     /// buffered or in-flight destination work, the loop first drains that work
     /// so the best durable position can advance before sending the final
     /// shutdown status update. Otherwise it transitions directly into waiting
-    /// for PostgreSQL to acknowledge the current flush position.
+    /// for PostgreSQL to reflect the current flush position in the slot.
     ///
     /// Note: the shutdown system is best-effort. Graceful shutdown may not
-    /// complete if we are blocked on non-interruptible code or if keepalive
-    /// messages never arrive from the server. It is the responsibility of
-    /// the caller to forcefully kill the process if shutdown does
-    /// not complete within an acceptable timeframe.
+    /// complete if we are blocked on non-interruptible code or if PostgreSQL
+    /// never confirms the final flush LSN. It is the responsibility of the
+    /// caller to forcefully kill the process if shutdown does not complete
+    /// within an acceptable timeframe.
     async fn handle_shutdown_signal(
         &mut self,
         mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
@@ -1381,14 +1465,14 @@ where
 
         info!(
             %worker_type,
-            "shutdown signal received, no unresolved work left, entering final acknowledgement wait",
+            "shutdown signal received, no unresolved work left, entering slot confirmation wait",
         );
 
         self.initiate_graceful_shutdown(events_stream.as_mut()).await
     }
 
     /// Initiates graceful shutdown by sending a status update and transitioning
-    /// to [`ShutdownState::WaitingForPrimaryKeepAlive`].
+    /// to [`ShutdownState::WaitingForSlotConfirmation`].
     ///
     /// The status update uses the best durable position currently known by the
     /// loop.
@@ -1405,7 +1489,7 @@ where
         info!(
             %worker_type,
             %flush_lsn,
-            "sending shutdown status update and waiting for primary keep alive acknowledgement",
+            "sending shutdown status update and waiting for slot confirmation",
         );
 
         self.send_status_update(
@@ -1417,7 +1501,8 @@ where
         .await?;
 
         self.state.shutdown_state =
-            ShutdownState::WaitingForPrimaryKeepAlive { acked_flush_lsn: flush_lsn };
+            ShutdownState::WaitingForSlotConfirmation { target_flush_lsn: flush_lsn };
+        self.state.expire_shutdown_slot_confirmation_deadline();
 
         Ok(())
     }
@@ -1428,9 +1513,8 @@ where
     /// Some callers intentionally resend the same effective flush LSN with
     /// `force = true`. Those updates are about keeping the replication
     /// connection alive while the system is idle, not about advertising
-    /// newly acknowledged progress. Keepalive replies from the main replication
-    /// stream and the final shutdown acknowledgement path still use this same
-    /// helper.
+    /// newly flushed progress. Keepalive replies from the main replication
+    /// stream and final shutdown confirmation still use this same helper.
     async fn send_status_update(
         &mut self,
         mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
@@ -1461,12 +1545,8 @@ where
     /// Attempts to spawn a best-effort task that prunes obsolete schema
     /// versions.
     ///
-    /// Cleanup is interval-gated on the status-update path, but the loop reads
-    /// the slot's actual `confirmed_flush_lsn` and determines table ownership
-    /// before spawning the pruning task. This avoids using the optimistic
-    /// status update boundary, which is acceptable for replaying data but
-    /// can break decoding if schema versions are pruned before PostgreSQL
-    /// stores the acknowledgement.
+    /// Cleanup reads the slot's `confirmed_flush_lsn` before choosing pruning
+    /// boundaries, rather than trusting the status update that was just sent.
     async fn maybe_spawn_schema_cleanup(&mut self) -> EtlResult<()> {
         self.collect_finished_schema_cleanup_task().await;
 
@@ -1480,8 +1560,7 @@ where
 
         let worker_type = self.worker_context.worker_type();
 
-        // We load the confirmed flush lsn from the slot that is being used by this
-        // apply loop.
+        // Use current slot state instead of the local status-update watermark.
         let confirmed_flush_lsn = match self.get_actual_confirmed_flush_lsn().await {
             Ok(confirmed_flush_lsn) => confirmed_flush_lsn,
             Err(err) => {
@@ -1587,16 +1666,17 @@ where
         Ok(())
     }
 
-    /// Returns the slot-confirmed flush LSN to use as the cleanup boundary.
+    /// Returns the current slot-confirmed flush LSN to use as the cleanup
+    /// boundary.
     ///
-    /// Streaming status updates are optimistic: after sending one, the client
-    /// can keep processing and tolerate replay if PostgreSQL never stores the
-    /// acknowledgement. Schema cleanup is different because deleting a schema
-    /// that may still be needed on replay can stop decoding, so cleanup reads
-    /// `confirmed_flush_lsn` from the replication slot.
+    /// Schema cleanup uses this instead of the local status-update watermark
+    /// because pruning schemas too early can break replay.
+    ///
+    /// This is current PostgreSQL slot state, not source-crash durability. A
+    /// source crash before a slot save can make the value retreat.
     async fn get_actual_confirmed_flush_lsn(&self) -> EtlResult<PgLsn> {
         let replication_client =
-            PgReplicationClient::connect(self.config.pg_connection.clone()).await?;
+            PgReplicationClient::connect_query(self.config.pg_connection.clone()).await?;
         let slot = replication_client.get_slot(&self.state.slot_name).await?;
 
         Ok(slot.confirmed_flush_lsn)
@@ -1606,9 +1686,9 @@ where
     ///
     /// The shared cache is used only to find active tables, and the worker's
     /// normal ownership check decides which of those tables can be considered.
-    /// A table's cleanup boundary is capped both by the slot's confirmed flush
-    /// LSN and by the earliest destination metadata snapshot that may still be
-    /// needed.
+    /// A table's cleanup boundary is capped by the slot's current confirmed
+    /// flush LSN and by the earliest destination metadata snapshot that may
+    /// still be needed.
     async fn get_table_schema_retentions(
         &self,
         confirmed_flush_lsn: PgLsn,
