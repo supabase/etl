@@ -1,4 +1,5 @@
 mod auth;
+mod client;
 mod config;
 mod core;
 mod encoding;
@@ -14,6 +15,7 @@ pub mod test_utils;
 pub use core::{DefaultSnowflakeDestination, SnowflakeDestination};
 
 pub use auth::{AuthManager, HttpExchanger, TokenExchanger, TokenProvider};
+pub use client::SnowflakeClient;
 pub use config::Config;
 pub use encoding::{CdcMeta, CdcOperation};
 pub use error::{Error, Result};

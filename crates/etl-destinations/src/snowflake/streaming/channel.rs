@@ -87,6 +87,12 @@ impl<C: StreamClient> ChannelHandle<C> {
         Ok(())
     }
 
+    /// Drop and reopen the channel, resetting offsets.
+    pub async fn reset(&mut self) -> Result<()> {
+        self.drop_channel().await?;
+        self.open().await
+    }
+
     /// Send all batches, recovering from channel GC errors.
     pub async fn process_batches(&mut self, batches: Vec<RowBatch>) -> Result<()> {
         fn is_stale_channel(e: &Error) -> bool {
