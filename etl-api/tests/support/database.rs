@@ -14,7 +14,7 @@ use etl_config::{
 use etl_postgres::sqlx::test_utils::create_pg_database;
 use pg_escape::{quote_identifier, quote_literal};
 use secrecy::ExposeSecret;
-use sqlx::{Connection, Executor, PgConnection, PgPool};
+use sqlx::{AssertSqlSafe, Connection, PgConnection, PgPool};
 use uuid::Uuid;
 
 use crate::support::test_app::TestApp;
@@ -116,22 +116,24 @@ pub(crate) async fn create_trusted_source_database() -> TrustedSourceDatabase {
         .await
         .expect("Failed to connect to Postgres");
 
-    connection
-        .execute(&*format!(
-            "create role {} with login password {} superuser inherit nocreaterole nocreatedb \
-             replication bypassrls connection limit -1",
-            quote_identifier(&trusted_username),
-            quote_literal(&trusted_password),
-        ))
+    let create_role_query = format!(
+        "create role {} with login password {} superuser inherit nocreaterole nocreatedb \
+         replication bypassrls connection limit -1",
+        quote_identifier(&trusted_username),
+        quote_literal(&trusted_password),
+    );
+    sqlx::query(AssertSqlSafe(create_role_query))
+        .execute(&mut connection)
         .await
         .expect("Failed to create trusted ETL role");
 
-    connection
-        .execute(&*format!(
-            "grant create on database {} to {}",
-            quote_identifier(&admin_config.name),
-            quote_identifier(&trusted_username),
-        ))
+    let grant_create_query = format!(
+        "grant create on database {} to {}",
+        quote_identifier(&admin_config.name),
+        quote_identifier(&trusted_username),
+    );
+    sqlx::query(AssertSqlSafe(grant_create_query))
+        .execute(&mut connection)
         .await
         .expect("Failed to grant CREATE on database to trusted ETL role");
 
@@ -154,8 +156,9 @@ pub(crate) async fn drop_trusted_source_database(database: TrustedSourceDatabase
         .await
         .expect("Failed to connect to Postgres");
 
-    connection
-        .execute(&*format!("drop role if exists {}", quote_identifier(&trusted_username),))
+    let drop_role_query = format!("drop role if exists {}", quote_identifier(&trusted_username));
+    sqlx::query(AssertSqlSafe(drop_role_query))
+        .execute(&mut connection)
         .await
         .expect("Failed to drop trusted ETL role");
 
@@ -191,11 +194,14 @@ pub(crate) async fn run_etl_migrations_on_source_database(source_db_config: &PgC
     let mut store_migrator = sqlx::migrate!("../etl/migrations/postgres_store");
     store_migrator.set_ignore_missing(true);
     store_migrator
-        .run_direct(&mut connection)
+        .run_direct(None, &mut connection)
         .await
         .expect("failed to run ETL Postgres store migrations");
 
     let mut source_migrator = sqlx::migrate!("../etl/migrations/source");
     source_migrator.set_ignore_missing(true);
-    source_migrator.run_direct(&mut connection).await.expect("failed to run ETL source migrations");
+    source_migrator
+        .run_direct(None, &mut connection)
+        .await
+        .expect("failed to run ETL source migrations");
 }

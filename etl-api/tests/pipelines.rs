@@ -16,7 +16,7 @@ use etl_postgres::sqlx::test_utils::drop_pg_database;
 use etl_telemetry::tracing::init_test_tracing;
 use pg_escape::quote_identifier;
 use reqwest::StatusCode;
-use sqlx::{PgPool, postgres::types::Oid};
+use sqlx::{AssertSqlSafe, PgPool, postgres::types::Oid};
 
 use crate::support::{
     database::{create_test_source_database, run_etl_migrations_on_source_database},
@@ -167,10 +167,10 @@ async fn test_rollback(
 async fn create_test_table(source_db_pool: &PgPool, table_name: &str) -> Oid {
     sqlx::query("create schema if not exists test").execute(source_db_pool).await.unwrap();
 
-    sqlx::query(&format!(
+    sqlx::query(AssertSqlSafe(format!(
         "create table if not exists test.{} (id serial primary key, name text)",
         quote_identifier(table_name)
-    ))
+    )))
     .execute(source_db_pool)
     .await
     .expect("Failed to create test table");

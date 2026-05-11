@@ -24,7 +24,7 @@ bytes = { workspace = true }
 etl-config = { workspace = true }
 pg_escape = { workspace = true }
 serde_json = { workspace = true }
-sqlx = { workspace = true, features = ["runtime-tokio-rustls", "macros", "postgres", "json", "migrate"] }
+sqlx = { workspace = true, features = ["runtime-tokio", "tls-rustls", "macros", "postgres", "json", "migrate"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tokio-postgres = { workspace = true, features = ["runtime", "with-chrono-0_4", "with-uuid-1", "with-serde_json-1"] }
