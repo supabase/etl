@@ -55,7 +55,7 @@ pub enum TenantError {
     #[error(transparent)]
     K8sCore(#[from] K8sCoreError),
 
-    #[error("The pipeline with id {0} is active. Stop it before deleting it.")]
+    #[error("The pipeline with id {0} is active; stop it before deleting it")]
     ActivePipeline(i64),
 }
 
@@ -91,7 +91,7 @@ impl ResponseError for TenantError {
     }
 
     fn error_response(&self) -> HttpResponse {
-        let error_message = ErrorMessage { error: self.to_message() };
+        let error_message = ErrorMessage { message: self.to_message() };
         let body =
             serde_json::to_string(&error_message).expect("failed to serialize error message");
         HttpResponse::build(self.status_code()).insert_header(ContentType::json()).body(body)

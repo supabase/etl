@@ -21,7 +21,7 @@ use crate::{
         K8sClient,
         core::{K8sCoreError, first_active_pipeline_id},
     },
-    routes::{ErrorMessage, TenantIdError, extract_tenant_id},
+    routes::{ErrorMessage, TenantIdError, extract_tenant_id, utils},
     validation,
     validation::{FailureType, ValidationContext, ValidationError, ValidationFailure},
 };
@@ -49,34 +49,26 @@ pub enum DestinationError {
     #[error(transparent)]
     K8sCore(#[from] K8sCoreError),
 
-    #[error("The pipeline with id {0} is active. Stop it before deleting it.")]
+    #[error("The pipeline with id {0} is active; stop it before deleting it")]
     ActivePipeline(i64),
 
-    #[error(
-        "The destination with id {0} is still used by pipelines. Delete those pipelines first."
-    )]
+    #[error("The destination with id {0} is still used by pipelines; delete those pipelines first")]
     DestinationInUse(i64),
 }
 
 impl DestinationError {
     pub fn to_message(&self) -> String {
         match self {
-            // Do not expose internal database details in error messages.
+            // Do not expose internal details in error messages.
             DestinationError::DestinationsDb(DestinationsDbError::Database(_))
             | DestinationError::PipelinesDb(PipelinesDbError::Database(_))
+            | DestinationError::Environment(_)
             | DestinationError::K8sCore(_) => "Internal server error".to_owned(),
-            // Do not expose validation error details as they may contain credential info.
-            DestinationError::Validation(ValidationError::BigQuery(_)) => {
-                "BigQuery validation failed".to_owned()
-            }
-            DestinationError::Validation(ValidationError::Iceberg(_)) => {
-                "Iceberg validation failed".to_owned()
-            }
-            DestinationError::Validation(ValidationError::Database(_)) => {
-                "Database validation failed".to_owned()
+            DestinationError::Validation(error) => {
+                utils::validation_error_message(error).to_owned()
             }
             // Every other message is ok, as they do not divulge sensitive information.
-            e => e.to_string(),
+            err => err.to_string(),
         }
     }
 }
@@ -86,9 +78,9 @@ impl ResponseError for DestinationError {
         match self {
             DestinationError::DestinationsDb(_)
             | DestinationError::PipelinesDb(_)
-            | DestinationError::Validation(_)
             | DestinationError::Environment(_)
             | DestinationError::K8sCore(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            DestinationError::Validation(error) => utils::validation_error_status_code(error),
             DestinationError::DestinationNotFound(_) => StatusCode::NOT_FOUND,
             DestinationError::ActivePipeline(_) | DestinationError::DestinationInUse(_) => {
                 StatusCode::CONFLICT
@@ -98,7 +90,7 @@ impl ResponseError for DestinationError {
     }
 
     fn error_response(&self) -> HttpResponse {
-        let error_message = ErrorMessage { error: self.to_message() };
+        let error_message = ErrorMessage { message: self.to_message() };
         let body =
             serde_json::to_string(&error_message).expect("failed to serialize error message");
         HttpResponse::build(self.status_code()).insert_header(ContentType::json()).body(body)

@@ -18,12 +18,12 @@ pub mod utils;
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ErrorMessage {
     #[schema(example = "an error occurred in the api")]
-    pub error: String,
+    pub message: String,
 }
 
 #[derive(Debug, Error)]
 pub enum TenantIdError {
-    #[error("The tenant id is missing in the request")]
+    #[error("The tenant id is missing from the request")]
     TenantIdMissing,
 
     #[error("The tenant id in the request is invalid")]

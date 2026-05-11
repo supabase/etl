@@ -11,7 +11,7 @@ use sqlx::PgPool;
 use thiserror::Error;
 use utoipa::ToSchema;
 
-use super::{ErrorMessage, TenantIdError, extract_tenant_id};
+use super::{ErrorMessage, TenantIdError, extract_tenant_id, utils};
 use crate::{
     config::ApiConfig,
     configs::{
@@ -60,10 +60,10 @@ enum DestinationPipelineError {
     #[error("The pipeline with id {0} is not connected to destination with id {1}")]
     PipelineDestinationMismatch(i64, i64),
 
-    #[error("A pipeline already exists for this source and destination combination")]
+    #[error("A pipeline already exists for this source and destination")]
     DuplicatePipeline,
 
-    #[error("The maximum number of pipelines ({limit}) has been reached for this project")]
+    #[error("This project has reached its maximum of {limit} pipelines")]
     PipelineLimitReached { limit: i64 },
 
     #[error(transparent)]
@@ -93,7 +93,7 @@ enum DestinationPipelineError {
     #[error(transparent)]
     K8sCore(#[from] K8sCoreError),
 
-    #[error("The pipeline with id {0} is active. Stop it before deleting it.")]
+    #[error("The pipeline with id {0} is active; stop it before deleting it")]
     ActivePipeline(i64),
 
     #[error("Invalid pipeline request: {0}")]
@@ -116,7 +116,7 @@ impl From<DestinationPipelinesDbError> for DestinationPipelineError {
 impl DestinationPipelineError {
     fn to_message(&self) -> String {
         match self {
-            // Do not expose internal database details in error messages.
+            // Do not expose internal details in error messages.
             DestinationPipelineError::DestinationPipelinesDb(
                 DestinationPipelinesDbError::Database(_),
             )
@@ -125,8 +125,11 @@ impl DestinationPipelineError {
             | DestinationPipelineError::SourcesDb(SourcesDbError::Database(_))
             | DestinationPipelineError::PipelinesDb(PipelinesDbError::Database(_))
             | DestinationPipelineError::Database(_)
-            | DestinationPipelineError::Validation(_)
+            | DestinationPipelineError::NoDefaultImageFound
             | DestinationPipelineError::K8sCore(_) => "Internal server error".to_owned(),
+            DestinationPipelineError::Validation(error) => {
+                utils::validation_error_message(error).to_owned()
+            }
             // Every other message is ok, as they do not divulge sensitive information.
             e => e.to_string(),
         }
@@ -144,8 +147,10 @@ impl ResponseError for DestinationPipelineError {
             | DestinationPipelineError::PipelinesDb(_)
             | DestinationPipelineError::Database(_)
             | DestinationPipelineError::K8sCore(_)
-            | DestinationPipelineError::TrustedRootCerts(_)
-            | DestinationPipelineError::Validation(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            | DestinationPipelineError::TrustedRootCerts(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            DestinationPipelineError::Validation(error) => {
+                utils::validation_error_status_code(error)
+            }
             DestinationPipelineError::TenantId(_)
             | DestinationPipelineError::SourceNotFound(_)
             | DestinationPipelineError::DestinationNotFound(_)
@@ -161,7 +166,7 @@ impl ResponseError for DestinationPipelineError {
     }
 
     fn error_response(&self) -> HttpResponse {
-        let error_message = ErrorMessage { error: self.to_message() };
+        let error_message = ErrorMessage { message: self.to_message() };
         let body =
             serde_json::to_string(&error_message).expect("failed to serialize error message");
         HttpResponse::build(self.status_code()).insert_header(ContentType::json()).body(body)

@@ -52,7 +52,7 @@ async fn replication_status_fails_when_etl_tables_missing() {
             .text()
             .await
             .unwrap()
-            .contains("The ETL table state has not been initialized first")
+            .contains("Replication has not started yet for this pipeline")
     );
 
     drop_pg_database(&source_db_config).await;
@@ -78,7 +78,7 @@ async fn rollback_tables_fails_when_etl_tables_missing() {
             .text()
             .await
             .unwrap()
-            .contains("The ETL table state has not been initialized first")
+            .contains("Replication has not started yet for this pipeline")
     );
 
     drop_pg_database(&source_db_config).await;

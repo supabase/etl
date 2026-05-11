@@ -329,8 +329,8 @@ async fn source_creation_with_non_matching_trusted_username_fails() {
     // Assert
     assert_eq!(
         response.status(),
-        StatusCode::FORBIDDEN,
-        "Expected FORBIDDEN status for non-matching trusted username"
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "Expected UNPROCESSABLE_ENTITY status for non-matching trusted username"
     );
 
     drop_pg_database(&source_db_config).await;
@@ -481,7 +481,7 @@ async fn source_creation_with_matching_trusted_username_but_invalid_role_profile
     let status = response.status();
     let body = response.text().await.expect("failed to read response body");
 
-    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert!(body.contains("ETL needs to work properly"));
 
     drop_pg_database(&source_db_config).await;

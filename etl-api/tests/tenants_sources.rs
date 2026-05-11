@@ -142,7 +142,7 @@ async fn tenant_and_source_creation_with_non_matching_trusted_username_fails() {
 
     let response = app.create_tenant_source(&tenant_source).await;
 
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
 
     drop_pg_database(&source_db_config).await;
 }
@@ -169,7 +169,7 @@ async fn tenant_and_source_creation_with_invalid_trusted_role_profile_fails() {
     let status = response.status();
     let body = response.text().await.expect("failed to read response body");
 
-    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert!(body.contains("ETL needs to work properly"));
 
     drop_pg_database(&source_db_config).await;
