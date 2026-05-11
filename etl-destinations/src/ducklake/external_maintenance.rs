@@ -100,7 +100,9 @@ where
     info!(
         ducklake_maintenance = %config.name,
         namespace = %config.namespace,
-        "ducklake external maintenance watcher started"
+        "ducklake external maintenance watcher started: ducklake_maintenance={}, namespace={}",
+        config.name,
+        config.namespace
     );
 
     loop {
@@ -117,7 +119,10 @@ where
                     info!(
                         ducklake_maintenance = %config.name,
                         run_id = %held.run_id,
-                        "ducklake maintenance resource disappeared, resuming foreground mutations"
+                        "ducklake maintenance resource disappeared, resuming foreground mutations: \
+                         ducklake_maintenance={}, run_id={}",
+                        config.name,
+                        held.run_id
                     );
                     record_external_maintenance_pause_duration(&held, "resource_deleted");
                 }
@@ -126,7 +131,9 @@ where
                 warn!(
                     error = %error,
                     ducklake_maintenance = %config.name,
-                    "failed to read ducklake maintenance resource"
+                    "failed to read ducklake maintenance resource: ducklake_maintenance={}, error={}",
+                    config.name,
+                    error
                 );
 
                 if held_pause.as_ref().is_some_and(|pause| pause.expires_at <= Utc::now()) {
@@ -134,7 +141,10 @@ where
                     warn!(
                         ducklake_maintenance = %config.name,
                         run_id = expired.as_ref().map(|pause| pause.run_id.as_str()),
-                        "ducklake maintenance pause expired while Kubernetes API was unavailable"
+                        "ducklake maintenance pause expired while Kubernetes API was unavailable: \
+                         ducklake_maintenance={}, run_id={}",
+                        config.name,
+                        expired.as_ref().map_or("none", |pause| pause.run_id.as_str())
                     );
                     if let Some(expired) = expired.as_ref() {
                         record_external_maintenance_pause_duration(expired, "expired");
@@ -161,7 +171,10 @@ async fn reconcile_pause<S>(
             info!(
                 ducklake_maintenance = %name,
                 run_id = %held.run_id,
-                "ducklake external maintenance pause cleared, resuming foreground mutations"
+                "ducklake external maintenance pause cleared, resuming foreground mutations: \
+                 ducklake_maintenance={}, run_id={}",
+                name,
+                held.run_id
             );
             record_external_maintenance_pause_duration(&held, "cleared");
             patch_replicator_status(api, name, "Running", None, None).await;
@@ -182,7 +195,11 @@ async fn reconcile_pause<S>(
             ducklake_maintenance = %name,
             previous_run_id = %held.run_id,
             next_run_id = %pause.run_id,
-            "ducklake external maintenance pause replaced, resuming previous run before pausing again"
+            "ducklake external maintenance pause replaced, resuming previous run before pausing again: \
+             ducklake_maintenance={}, previous_run_id={}, next_run_id={}",
+            name,
+            held.run_id,
+            pause.run_id
         );
         record_external_maintenance_pause_duration(&held, "replaced");
         patch_replicator_status(api, name, "Running", None, None).await;
@@ -192,7 +209,11 @@ async fn reconcile_pause<S>(
         ducklake_maintenance = %name,
         run_id = %pause.run_id,
         expires_at = %pause.expires_at.to_rfc3339(),
-        "ducklake external maintenance pause requested, waiting for foreground mutations to drain"
+        "ducklake external maintenance pause requested, waiting for foreground mutations to drain: \
+         ducklake_maintenance={}, run_id={}, expires_at={}",
+        name,
+        pause.run_id,
+        pause.expires_at.to_rfc3339()
     );
     patch_replicator_status(api, name, "Pausing", Some(&pause.run_id), None).await;
 
@@ -202,7 +223,11 @@ async fn reconcile_pause<S>(
             ducklake_maintenance = %name,
             run_id = %pause.run_id,
             expires_at = %pause.expires_at.to_rfc3339(),
-            "ducklake external maintenance pause expired before quiescence, resuming foreground mutations"
+            "ducklake external maintenance pause expired before quiescence, resuming foreground mutations: \
+             ducklake_maintenance={}, run_id={}, expires_at={}",
+            name,
+            pause.run_id,
+            pause.expires_at.to_rfc3339()
         );
         patch_replicator_status(api, name, "Running", None, None).await;
         return;
@@ -215,7 +240,12 @@ async fn reconcile_pause<S>(
         run_id = %pause.run_id,
         quiesced_at = %quiesced_at.to_rfc3339(),
         expires_at = %pause.expires_at.to_rfc3339(),
-        "ducklake external maintenance quiesced, foreground mutations are paused"
+        "ducklake external maintenance quiesced, foreground mutations are paused: \
+         ducklake_maintenance={}, run_id={}, quiesced_at={}, expires_at={}",
+        name,
+        pause.run_id,
+        quiesced_at.to_rfc3339(),
+        pause.expires_at.to_rfc3339()
     );
     patch_replicator_status(api, name, "Quiesced", Some(&pause.run_id), Some(quiesced_at)).await;
 

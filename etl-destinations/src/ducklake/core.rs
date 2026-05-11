@@ -1,12 +1,14 @@
 #[cfg(feature = "test-utils")]
 use std::sync::atomic::AtomicUsize;
+#[cfg(test)]
+use std::time::Duration;
 use std::{
     collections::{HashMap, HashSet},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::Instant,
 };
 
 use etl::{
@@ -916,15 +918,20 @@ where
                     join_set.spawn(async move {
                         let _table_write_permit = table_write_permit;
                         let checkpoint_wait_started = tokio::time::Instant::now();
+                        info!(
+                            table = %destination_table_name,
+                            "ducklake waiting for checkpoint gate before streaming write: table={}",
+                            destination_table_name
+                        );
                         let _checkpoint_guard = checkpoint_gate.read_owned().await;
                         let checkpoint_wait = checkpoint_wait_started.elapsed();
-                        if checkpoint_wait > Duration::from_secs(1) {
-                            info!(
-                                table = %destination_table_name,
-                                checkpoint_wait_ms = checkpoint_wait.as_millis() as u64,
-                                "ducklake waited for checkpoint gate before streaming write"
-                            );
-                        }
+                        info!(
+                            table = %destination_table_name,
+                            checkpoint_wait_ms = checkpoint_wait.as_millis() as u64,
+                            "ducklake acquired checkpoint gate before streaming write: table={}, checkpoint_wait_ms={}",
+                            destination_table_name,
+                            checkpoint_wait.as_millis()
+                        );
                         let last_sequence_key =
                             read_table_streaming_progress_sequence_key_blocking(
                                 Arc::clone(&pool),
@@ -937,7 +944,8 @@ where
                         if pending_mutations.is_empty() {
                             debug!(
                                 table = %destination_table_name,
-                                "ducklake streaming mutation replay skipped, no pending events"
+                                "ducklake streaming mutation replay skipped, no pending events: table={}",
+                                destination_table_name
                             );
                             return Ok::<(), etl::error::EtlError>(());
                         }
@@ -946,7 +954,10 @@ where
                             table = %destination_table_name,
                             pending_mutation_count = pending_mutations.len(),
                             is_first_streaming_batch,
-                            "ducklake applying streaming mutations"
+                            "ducklake applying streaming mutations: table={}, pending_mutation_count={}, is_first_streaming_batch={}",
+                            destination_table_name,
+                            pending_mutations.len(),
+                            is_first_streaming_batch
                         );
 
                         let maintenance_notification =
@@ -965,7 +976,9 @@ where
                         info!(
                             table = %destination_table_name,
                             is_first_streaming_batch,
-                            "ducklake applied streaming mutations"
+                            "ducklake applied streaming mutations: table={}, is_first_streaming_batch={}",
+                            destination_table_name,
+                            is_first_streaming_batch
                         );
                         if let (Some(worker), Some(notification)) =
                             (maintenance_worker.as_ref(), maintenance_notification)
@@ -1020,7 +1033,21 @@ where
                     let blocking_slots = Arc::clone(&self.blocking_slots);
                     join_set.spawn(async move {
                         let _table_write_permit = table_write_permit;
+                        let checkpoint_wait_started = tokio::time::Instant::now();
+                        info!(
+                            table = %table_name,
+                            "ducklake waiting for checkpoint gate before streaming truncate: table={}",
+                            table_name
+                        );
                         let _checkpoint_guard = checkpoint_gate.read_owned().await;
+                        let checkpoint_wait = checkpoint_wait_started.elapsed();
+                        info!(
+                            table = %table_name,
+                            checkpoint_wait_ms = checkpoint_wait.as_millis() as u64,
+                            "ducklake acquired checkpoint gate before streaming truncate: table={}, checkpoint_wait_ms={}",
+                            table_name,
+                            checkpoint_wait.as_millis()
+                        );
                         let last_sequence_key =
                             read_table_streaming_progress_sequence_key_blocking(
                                 Arc::clone(&pool),
@@ -1033,11 +1060,19 @@ where
                         if pending_truncates.is_empty() {
                             debug!(
                                 table = %table_name,
-                                "ducklake streaming truncate replay skipped, no pending events"
+                                "ducklake streaming truncate replay skipped, no pending events: table={}",
+                                table_name
                             );
                             return Ok(());
                         }
 
+                        info!(
+                            table = %table_name,
+                            pending_truncate_count = pending_truncates.len(),
+                            "ducklake applying streaming truncates: table={}, pending_truncate_count={}",
+                            table_name,
+                            pending_truncates.len()
+                        );
                         let prepared_batch =
                             prepare_truncate_table_batch(table_name, pending_truncates);
                         apply_table_batch_with_retry(pool, blocking_slots, prepared_batch).await
@@ -1074,7 +1109,9 @@ where
         info!(
             table_id = %table_id,
             table = %table_name,
-            "ducklake destination table cache miss, ensuring table exists"
+            "ducklake destination table cache miss, ensuring table exists: table_id={}, table={}",
+            table_id,
+            table_name
         );
 
         let _table_creation_permit =
@@ -1196,14 +1233,19 @@ where
             Err(TryAcquireError::NoPermits) => {
                 info!(
                     table = %table_name,
-                    "ducklake waiting for table write slot"
+                    "ducklake waiting for table write slot: table={}",
+                    table_name
                 );
+                let started = Instant::now();
                 let permit = table_slot.acquire_owned().await.map_err(|_| {
                     etl_error!(ErrorKind::InvalidState, "DuckLake table write semaphore closed")
                 })?;
                 info!(
                     table = %table_name,
-                    "ducklake acquired table write slot after wait"
+                    wait_ms = started.elapsed().as_millis() as u64,
+                    "ducklake acquired table write slot after wait: table={}, wait_ms={}",
+                    table_name,
+                    started.elapsed().as_millis()
                 );
                 Ok(permit)
             }
@@ -1216,16 +1258,42 @@ where
     /// Acquires shared mutation access so exclusive background maintenance
     /// cannot start in the middle of a foreground write sequence.
     async fn acquire_mutation_guard(&self) -> OwnedRwLockReadGuard<()> {
-        Arc::clone(&self.checkpoint_gate).read_owned().await
+        let started = Instant::now();
+        info!(
+            metadata_schema = %self.metadata_schema,
+            "ducklake waiting for shared mutation guard: metadata_schema={}",
+            self.metadata_schema
+        );
+        let guard = Arc::clone(&self.checkpoint_gate).read_owned().await;
+        info!(
+            metadata_schema = %self.metadata_schema,
+            wait_ms = started.elapsed().as_millis() as u64,
+            "ducklake acquired shared mutation guard: metadata_schema={}, wait_ms={}",
+            self.metadata_schema,
+            started.elapsed().as_millis()
+        );
+        guard
     }
 
     /// Acquires exclusive DuckLake mutation access for an external maintenance
     /// run. While this guard is held, new foreground writes and in-process
     /// background maintenance operations wait before mutating the catalog.
     pub async fn acquire_external_maintenance_pause(&self) -> DuckLakeExternalMaintenancePause {
-        DuckLakeExternalMaintenancePause {
-            _guard: Arc::clone(&self.checkpoint_gate).write_owned().await,
-        }
+        let started = Instant::now();
+        info!(
+            metadata_schema = %self.metadata_schema,
+            "ducklake waiting for exclusive external maintenance mutation guard: metadata_schema={}",
+            self.metadata_schema
+        );
+        let guard = Arc::clone(&self.checkpoint_gate).write_owned().await;
+        info!(
+            metadata_schema = %self.metadata_schema,
+            wait_ms = started.elapsed().as_millis() as u64,
+            "ducklake acquired exclusive external maintenance mutation guard: metadata_schema={}, wait_ms={}",
+            self.metadata_schema,
+            started.elapsed().as_millis()
+        );
+        DuckLakeExternalMaintenancePause { _guard: guard }
     }
 
     /// Samples catalog state and returns which externally coordinated
