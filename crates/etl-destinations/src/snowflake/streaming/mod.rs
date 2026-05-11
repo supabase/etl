@@ -1,3 +1,4 @@
+//! Abstraction over the Snowflake Streaming API.
 mod batch;
 mod channel;
 mod offset_token;
