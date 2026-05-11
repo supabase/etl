@@ -234,7 +234,8 @@ impl DuckDbQueryWatchdog {
                 warn!(
                     operation_id,
                     operation_kind = operation_kind.as_str(),
-                    "ducklake query watchdog calling interrupt after timeout: operation_id={}, operation_kind={}",
+                    "ducklake query watchdog calling interrupt after timeout: operation_id={}, \
+                     operation_kind={}",
                     operation_id,
                     operation_kind.as_str()
                 );
@@ -242,7 +243,8 @@ impl DuckDbQueryWatchdog {
                 warn!(
                     operation_id,
                     operation_kind = operation_kind.as_str(),
-                    "ducklake query watchdog interrupt returned after timeout: operation_id={}, operation_kind={}",
+                    "ducklake query watchdog interrupt returned after timeout: operation_id={}, \
+                     operation_kind={}",
                     operation_id,
                     operation_kind.as_str()
                 );
@@ -309,7 +311,8 @@ impl DuckDbQueryWatchdog {
                 operation_id = self.operation_id,
                 operation_kind = self.operation_kind.as_str(),
                 timeout_ms = self.timeout.as_millis() as u64,
-                "ducklake query watchdog publishing interrupt handle: operation_id={}, operation_kind={}, timeout_ms={}",
+                "ducklake query watchdog publishing interrupt handle: operation_id={}, \
+                 operation_kind={}, timeout_ms={}",
                 self.operation_id,
                 self.operation_kind.as_str(),
                 self.timeout.as_millis()
@@ -333,7 +336,8 @@ impl DuckDbQueryWatchdog {
                 operation_id = self.operation_id,
                 operation_kind = self.operation_kind.as_str(),
                 timed_out = self.timed_out(),
-                "ducklake query watchdog finish signal sent: operation_id={}, operation_kind={}, timed_out={}",
+                "ducklake query watchdog finish signal sent: operation_id={}, operation_kind={}, \
+                 timed_out={}",
                 self.operation_id,
                 self.operation_kind.as_str(),
                 self.timed_out()
@@ -806,8 +810,8 @@ where
         operation_kind = operation_kind.as_str(),
         deadline_remaining_ms = remaining_ms_until(deadline),
         available_permits = blocking_slots.available_permits(),
-        "ducklake blocking operation waiting for semaphore slot: operation_id={}, operation_kind={}, \
-         deadline_remaining_ms={}, available_permits={}",
+        "ducklake blocking operation waiting for semaphore slot: operation_id={}, \
+         operation_kind={}, deadline_remaining_ms={}, available_permits={}",
         operation_id,
         operation_kind.as_str(),
         remaining_ms_until(deadline),
@@ -839,8 +843,8 @@ where
                 operation_kind = operation_kind.as_str(),
                 timeout_ms = timeout.as_millis() as u64,
                 slot_wait_ms = slot_wait_started.elapsed().as_millis() as u64,
-                "ducklake blocking operation timed out waiting for semaphore slot: operation_id={}, \
-                 operation_kind={}, timeout_ms={}, slot_wait_ms={}",
+                "ducklake blocking operation timed out waiting for semaphore slot: \
+                 operation_id={}, operation_kind={}, timeout_ms={}, slot_wait_ms={}",
                 operation_id,
                 operation_kind.as_str(),
                 timeout.as_millis(),
@@ -882,8 +886,8 @@ where
             operation_id,
             operation_kind = operation_kind.as_str(),
             deadline_remaining_ms = remaining_ms_until(deadline),
-            "ducklake blocking operation entered spawn_blocking task: operation_id={}, operation_kind={}, \
-             deadline_remaining_ms={}",
+            "ducklake blocking operation entered spawn_blocking task: operation_id={}, \
+             operation_kind={}, deadline_remaining_ms={}",
             operation_id,
             operation_kind.as_str(),
             remaining_ms_until(deadline)
@@ -897,8 +901,8 @@ where
             warn!(
                 operation_id,
                 operation_kind = operation_kind.as_str(),
-                "ducklake blocking operation deadline reached before pool checkout: operation_id={}, \
-                 operation_kind={}",
+                "ducklake blocking operation deadline reached before pool checkout: \
+                 operation_id={}, operation_kind={}",
                 operation_id,
                 operation_kind.as_str()
             );
@@ -982,8 +986,8 @@ where
             warn!(
                 operation_id,
                 operation_kind = operation_kind.as_str(),
-                "ducklake blocking operation deadline reached before query execution: operation_id={}, \
-                 operation_kind={}",
+                "ducklake blocking operation deadline reached before query execution: \
+                 operation_id={}, operation_kind={}",
                 operation_id,
                 operation_kind.as_str()
             );
@@ -1005,8 +1009,8 @@ where
             warn!(
                 operation_id,
                 operation_kind = operation_kind.as_str(),
-                "ducklake blocking operation timed out before query started; marking pooled connection broken: \
-                 operation_id={}, operation_kind={}",
+                "ducklake blocking operation timed out before query started; marking pooled \
+                 connection broken: operation_id={}, operation_kind={}",
                 operation_id,
                 operation_kind.as_str()
             );
@@ -1018,8 +1022,8 @@ where
             operation_id,
             operation_kind = operation_kind.as_str(),
             deadline_remaining_ms = remaining_ms_until(deadline),
-            "ducklake blocking operation invoking DuckDB closure: operation_id={}, operation_kind={}, \
-             deadline_remaining_ms={}",
+            "ducklake blocking operation invoking DuckDB closure: operation_id={}, \
+             operation_kind={}, deadline_remaining_ms={}",
             operation_id,
             operation_kind.as_str(),
             remaining_ms_until(deadline)
@@ -1032,8 +1036,8 @@ where
             duration_ms = operation_duration_ms,
             timed_out = watchdog.timed_out(),
             result_is_error = res.is_err(),
-            "ducklake blocking operation DuckDB closure returned: operation_id={}, operation_kind={}, \
-             duration_ms={}, timed_out={}, result_is_error={}",
+            "ducklake blocking operation DuckDB closure returned: operation_id={}, \
+             operation_kind={}, duration_ms={}, timed_out={}, result_is_error={}",
             operation_id,
             operation_kind.as_str(),
             operation_duration_ms,
@@ -1052,8 +1056,8 @@ where
                 operation_id,
                 operation_kind = operation_kind.as_str(),
                 duration_ms = operation_duration_ms,
-                "ducklake blocking operation returned after timeout; marking pooled connection broken: \
-                 operation_id={}, operation_kind={}, duration_ms={}",
+                "ducklake blocking operation returned after timeout; marking pooled connection \
+                 broken: operation_id={}, operation_kind={}, duration_ms={}",
                 operation_id,
                 operation_kind.as_str(),
                 operation_duration_ms
@@ -1093,8 +1097,8 @@ where
         operation_id,
         operation_kind = operation_kind.as_str(),
         abort_deadline_remaining_ms = remaining_ms_until(abort_deadline),
-        "ducklake blocking operation waiting for blocking task or abort deadline: operation_id={}, \
-         operation_kind={}, abort_deadline_remaining_ms={}",
+        "ducklake blocking operation waiting for blocking task or abort deadline: \
+         operation_id={}, operation_kind={}, abort_deadline_remaining_ms={}",
         operation_id,
         operation_kind.as_str(),
         remaining_ms_until(abort_deadline)
@@ -1123,7 +1127,8 @@ where
             operation_id,
             operation_kind = operation_kind.as_str(),
             timed_out = watchdog_timed_out.load(Ordering::Relaxed),
-            "ducklake blocking operation task joined with success: operation_id={}, operation_kind={}, timed_out={}",
+            "ducklake blocking operation task joined with success: operation_id={}, \
+             operation_kind={}, timed_out={}",
             operation_id,
             operation_kind.as_str(),
             watchdog_timed_out.load(Ordering::Relaxed)
@@ -1160,7 +1165,8 @@ where
         operation_id,
         operation_kind = operation_kind.as_str(),
         timed_out = watchdog_timed_out.load(Ordering::Relaxed),
-        "ducklake blocking operation awaiting watchdog task: operation_id={}, operation_kind={}, timed_out={}",
+        "ducklake blocking operation awaiting watchdog task: operation_id={}, operation_kind={}, \
+         timed_out={}",
         operation_id,
         operation_kind.as_str(),
         watchdog_timed_out.load(Ordering::Relaxed)
@@ -1170,7 +1176,8 @@ where
             operation_id,
             operation_kind = operation_kind.as_str(),
             timed_out = watchdog_timed_out.load(Ordering::Relaxed),
-            "ducklake blocking operation watchdog task joined: operation_id={}, operation_kind={}, timed_out={}",
+            "ducklake blocking operation watchdog task joined: operation_id={}, \
+             operation_kind={}, timed_out={}",
             operation_id,
             operation_kind.as_str(),
             watchdog_timed_out.load(Ordering::Relaxed)
@@ -1598,8 +1605,8 @@ mod tests {
                     .unwrap_or_else(|error| {
                         panic!(
                             "watchdog concurrent signal race panicked: \
-                             signal_after_deadline={signal_after_deadline}, iteration={iteration}, \
-                             error={error}"
+                             signal_after_deadline={signal_after_deadline}, \
+                             iteration={iteration}, error={error}"
                         )
                     });
                 interrupt_sender.await.expect("interrupt sender task should not panic");
