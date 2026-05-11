@@ -11,7 +11,7 @@ usage() {
   echo ""
   echo "Targets:"
   echo "  etl-api    Run etl-api migrations (public schema)"
-  echo "  etl        Run etl migrations (etl schema)"
+  echo "  etl        Run etl source and Postgres store migrations (etl schema)"
   echo "  all        Run all migrations (default if no target specified)"
   echo ""
   echo "Options:"
@@ -66,14 +66,20 @@ run_etl_api_migrations() {
 }
 
 run_etl_migrations() {
-  local migrations_dir="${ROOT_DIR}/etl/migrations"
+  local source_migrations_dir="${ROOT_DIR}/etl/migrations/source"
+  local store_migrations_dir="${ROOT_DIR}/etl/migrations/postgres_store"
 
-  if [ ! -d "$migrations_dir" ]; then
-    echo >&2 "Error: 'etl/migrations' folder not found at $migrations_dir"
+  echo "Running etl migrations..."
+
+  if [ ! -d "$source_migrations_dir" ]; then
+    echo >&2 "Error: 'etl/migrations/source' folder not found at $source_migrations_dir"
     exit 1
   fi
 
-  echo "Running etl migrations..."
+  if [ ! -d "$store_migrations_dir" ]; then
+    echo >&2 "Error: 'etl/migrations/postgres_store' folder not found at $store_migrations_dir"
+    exit 1
+  fi
 
   # Create the etl schema if it doesn't exist.
   # This matches the behavior in etl/src/migrations.rs.
@@ -85,7 +91,8 @@ run_etl_migrations() {
   local migration_url="${DATABASE_URL}?${sqlx_migrations_opts}"
 
   sqlx database create --database-url "${DATABASE_URL}"
-  sqlx migrate run --source "$migrations_dir" --database-url "${migration_url}"
+  sqlx migrate run --source "$store_migrations_dir" --database-url "${migration_url}" --ignore-missing
+  sqlx migrate run --source "$source_migrations_dir" --database-url "${migration_url}" --ignore-missing
   echo "etl migrations complete!"
 }
 

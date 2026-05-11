@@ -64,7 +64,7 @@ impl DestinationError {
             // Do not expose internal database details in error messages.
             DestinationError::DestinationsDb(DestinationsDbError::Database(_))
             | DestinationError::PipelinesDb(PipelinesDbError::Database(_))
-            | DestinationError::K8sCore(_) => "internal server error".to_owned(),
+            | DestinationError::K8sCore(_) => "Internal server error".to_owned(),
             // Do not expose validation error details as they may contain credential info.
             DestinationError::Validation(ValidationError::BigQuery(_)) => {
                 "BigQuery validation failed".to_owned()
@@ -73,7 +73,7 @@ impl DestinationError {
                 "Iceberg validation failed".to_owned()
             }
             DestinationError::Validation(ValidationError::Database(_)) => {
-                "database validation failed".to_owned()
+                "Database validation failed".to_owned()
             }
             // Every other message is ok, as they do not divulge sensitive information.
             e => e.to_string(),
@@ -187,7 +187,7 @@ pub struct ValidateDestinationResponse {
     tag = "Destinations"
 )]
 #[post("/destinations")]
-pub async fn create_destination(
+pub(crate) async fn create_destination(
     req: HttpRequest,
     pool: Data<PgPool>,
     encryption_key: Data<EncryptionKey>,
@@ -225,7 +225,7 @@ pub async fn create_destination(
     tag = "Destinations"
 )]
 #[get("/destinations/{destination_id}")]
-pub async fn read_destination(
+pub(crate) async fn read_destination(
     req: HttpRequest,
     pool: Data<PgPool>,
     encryption_key: Data<EncryptionKey>,
@@ -264,7 +264,7 @@ pub async fn read_destination(
     tag = "Destinations"
 )]
 #[post("/destinations/{destination_id}")]
-pub async fn update_destination(
+pub(crate) async fn update_destination(
     req: HttpRequest,
     pool: Data<PgPool>,
     destination_id: Path<i64>,
@@ -305,7 +305,7 @@ pub async fn update_destination(
     tag = "Destinations"
 )]
 #[delete("/destinations/{destination_id}")]
-pub async fn delete_destination(
+pub(crate) async fn delete_destination(
     req: HttpRequest,
     pool: Data<PgPool>,
     destination_id: Path<i64>,
@@ -355,7 +355,7 @@ pub async fn delete_destination(
     tag = "Destinations"
 )]
 #[get("/destinations")]
-pub async fn read_all_destinations(
+pub(crate) async fn read_all_destinations(
     req: HttpRequest,
     pool: Data<PgPool>,
     encryption_key: Data<EncryptionKey>,
@@ -395,7 +395,7 @@ pub async fn read_all_destinations(
     tag = "Destinations"
 )]
 #[post("/destinations/validate")]
-pub async fn validate_destination(
+pub(crate) async fn validate_destination(
     req: HttpRequest,
     request: Json<ValidateDestinationRequest>,
 ) -> Result<impl Responder, DestinationError> {

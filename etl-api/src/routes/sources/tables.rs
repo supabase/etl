@@ -46,9 +46,8 @@ impl TableError {
         match self {
             // Do not expose internal database details in error messages
             TableError::SourcesDb(SourcesDbError::Database(_))
-            | TableError::TablesDb(TablesDbError::Database(_)) => {
-                "internal server error".to_owned()
-            }
+            | TableError::TablesDb(TablesDbError::Database(_))
+            | TableError::Database(_) => "Internal server error".to_owned(),
             // Every other message is ok, as they do not divulge sensitive information
             e => e.to_string(),
         }
@@ -94,7 +93,7 @@ impl ResponseError for TableError {
     )
 )]
 #[get("/sources/{source_id}/tables")]
-pub async fn read_table_names(
+pub(crate) async fn read_table_names(
     req: HttpRequest,
     pool: Data<PgPool>,
     api_config: Data<ApiConfig>,

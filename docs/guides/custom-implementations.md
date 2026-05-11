@@ -401,6 +401,10 @@ impl Destination for HttpDestination {
 
 Create `src/main.rs`:
 
+The custom store owns ETL runtime state. `Pipeline::start()` still prepares the
+source database with ETL's schema snapshot helpers and schema-change event
+trigger before replication begins.
+
 ```rust
 mod custom_store;
 mod http_destination;
@@ -418,24 +422,26 @@ use std::error::Error;
 async fn main() -> Result<(), Box<dyn Error>> {
     tracing_subscriber::fmt::init();
 
+    let pg_config = PgConnectionConfig {
+        host: "localhost".to_string(),
+        port: 5432,
+        name: "your_database".to_string(),
+        username: "postgres".to_string(),
+        password: Some("your_password".to_string().into()),
+        tls: TlsConfig {
+            enabled: false,
+            trusted_root_certs: String::new(),
+        },
+        keepalive: TcpKeepaliveConfig::default(),
+    };
+
     let store = CustomStore::new();
     let destination = HttpDestination::new("https://your-endpoint.example.com".to_string())?;
 
     let config = PipelineConfig {
         id: 1,
         publication_name: "my_publication".to_string(),
-        pg_connection: PgConnectionConfig {
-            host: "localhost".to_string(),
-            port: 5432,
-            name: "your_database".to_string(),
-            username: "postgres".to_string(),
-            password: Some("your_password".to_string().into()),
-            tls: TlsConfig {
-                enabled: false,
-                trusted_root_certs: String::new(),
-            },
-            keepalive: TcpKeepaliveConfig::default(),
-        },
+        pg_connection: pg_config,
         batch: BatchConfig {
             max_fill_ms: 5000,
             memory_budget_ratio: 0.2,

@@ -4,6 +4,7 @@ expression: response.config
 ---
 StrippedApiSourceConfig {
     host: "localhost",
+    hostaddr: None,
     port: 5432,
     name: "postgres",
     username: "postgres",

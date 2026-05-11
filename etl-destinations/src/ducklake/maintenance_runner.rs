@@ -281,7 +281,7 @@ async fn open_maintenance_executor(
                 etl_error!(
                     ErrorKind::DestinationQueryFailed,
                     "DuckLake target_file_size configuration failed",
-                    format_query_error_detail(&sql, &source),
+                    format_query_error_detail(&sql),
                     source: source
                 )
             })?;
@@ -434,7 +434,7 @@ async fn merge_adjacent_files_for_rewrite(duckdb: &DuckDbMaintenanceExecutor) ->
                 etl_error!(
                     ErrorKind::DestinationQueryFailed,
                     "DuckLake rewrite-triggered merge adjacent files failed",
-                    format_query_error_detail(&sql, &source),
+                    format_query_error_detail(&sql),
                     source: source
                 )
             })?;
@@ -618,7 +618,7 @@ fn rewrite_data_files(conn: &duckdb::Connection, table_name: &str) -> EtlResult<
         etl_error!(
             ErrorKind::DestinationQueryFailed,
             "DuckLake rewrite data files failed",
-            format_query_error_detail(&sql, &source),
+            format_query_error_detail(&sql),
             source: source
         )
     })?;
@@ -635,7 +635,7 @@ fn count_maintenance_files(
         etl_error!(
             ErrorKind::DestinationQueryFailed,
             description,
-            format_query_error_detail(sql, &source),
+            format_query_error_detail(sql),
             source: source
         )
     })?;

@@ -72,7 +72,20 @@
 
 ## Error Handling And Panics
 - Use typed errors and `Result` for recoverable failures.
-- Prefer propagating errors with context instead of flattening to strings.
+- Propagate errors with context instead of flattening to strings. When wrapping
+  a real error, attach it with `source: error` or
+  `.with_source(error)` instead of embedding `{error}`, `error.to_string()`, or
+  `format!("{error}")` into the message or detail. Keep detail fields for
+  contextual data we own, such as operation names, table names, IDs, counts, or
+  SQL statements.
+- Do not leak Postgres, SQLx, or other database errors from `etl-api` HTTP
+  responses. Keep the original error in the internal chain and logs, but return
+  a generic customer-facing message for database failures.
+- Keep ETL Postgres and DuckDB errors useful for internal debugging by
+  preserving the source chain and owned context, while still avoiding highly
+  critical data.
+- Error messages should use normal sentence casing and start with an uppercase
+  letter. This applies to static error text, including `thiserror` messages.
 - Reserve panics for programmer errors or violated invariants.
 - Use `debug_assert!` and `unreachable!` where they make internal invariants explicit, but prefer typed errors for runtime failures that can be triggered by external input or system state.
 - Only document `# Panics` when a function can actually panic.
@@ -96,6 +109,23 @@
 - Register metric descriptions once using `std::sync::Once` or another one-time initialization pattern.
 - For background metric polling, prefer one `spawn_*_metrics_task` helper per source and one orchestration helper that starts them.
 - Prefer low-cardinality labels unless higher-cardinality labels are operationally necessary.
+- Do not log highly critical sensitive information: passwords, secrets, tokens,
+  request or response bodies for sensitive API endpoints, or source row/cell
+  values. Prefer metadata that helps debugging without exposing values, such as
+  table and column names, type names, counts, lengths, LSNs, IDs, and operation
+  names.
+- In production logs, key errors as `error = %err` or `error = %error`
+  regardless of the local variable name. Do not use `err =`, `source =`, or
+  debug formatting for the primary error field.
+- Prefer `Display` formatting (`%`) or explicit structured fields over
+  `Debug` formatting (`?`) for structs in logs, unless the type is known not to
+  contain sensitive values.
+- For table replication phase logs, always use
+  `table_replication_phase_type` for one phase and
+  `table_replication_phase_types` for lists.
+- For Sentry, wrap sensitive API route groups with the sensitive Sentry scope
+  marker and scrub request/response body capture from marked events. Do not
+  duplicate route sensitivity with separate path matchers in the scrubber.
 
 ## Testing
 - Tests run via `cargo-nextest` (process-per-test). Use `cargo xtask nextest run` for the full sharded suite, or `cargo nextest run` for single-crate runs.
@@ -106,6 +136,9 @@
 - Prefer running `cargo nextest list` before using filters or crate-specific commands if there is any doubt.
 - When fixing a specific crate, run the narrowest relevant tests first, then broaden if needed.
 - Add or update tests when behavior changes, regressions are possible, or new logic is introduced.
+- Prefer existing test utilities and fixtures over custom test plumbing. Before adding bespoke
+  setup, waits, assertions, or database helpers, check nearby tests and `etl/src/test_utils/` for
+  an existing helper and reuse it when it fits.
 - Register `NotifyingStore::notify_on_*` and `TestDestinationWrapper::wait_for_*` handles before the producer can fire. These helpers only arm on updates that arrive *after* registration, so register the notifier first, then start the producer.
 - If your tests need `TESTS_DATABASE_HOST` to be set or a test instance of PostgreSQL you can use `cargo xtask postgres create` command to spawn a postgres instance
 

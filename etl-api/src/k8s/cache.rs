@@ -17,13 +17,13 @@ use crate::k8s::{
 #[derive(Debug, Error)]
 pub enum TrustedRootCertsError {
     /// The ConfigMap data field is missing.
-    #[error("trusted root certificates ConfigMap data is missing")]
+    #[error("Trusted root certificates ConfigMap data is missing")]
     ConfigMapDataMissing,
     /// The trusted root certificates key is missing from the ConfigMap.
-    #[error("trusted root certificates key is missing from ConfigMap")]
+    #[error("Trusted root certificates key is missing from ConfigMap")]
     CertsKeyMissing,
     /// The trusted root certificates value is empty.
-    #[error("trusted root certificates are empty")]
+    #[error("Trusted root certificates are empty")]
     CertsEmpty,
     /// A Kubernetes API error occurred.
     #[error("Kubernetes error: {0}")]

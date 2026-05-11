@@ -143,12 +143,9 @@ impl ClickHouseClient {
     /// destination's `validate_connectivity` so callers (notably the
     /// `etl-api` validators) can treat the two destinations uniformly.
     pub async fn validate_connectivity(&self) -> EtlResult<()> {
-        self.inner
-            .query("SELECT 1")
-            .fetch_one::<u8>()
-            .await
-            .map(|_| ())
-            .map_err(|e| etl_error!(ErrorKind::Unknown, "ClickHouse connectivity check failed", e))
+        self.inner.query("SELECT 1").fetch_one::<u8>().await.map(|_| ()).map_err(
+            |err| etl_error!(ErrorKind::Unknown, "ClickHouse connectivity check failed", source: err),
+        )
     }
 
     /// Executes a DDL statement (e.g. `CREATE TABLE IF NOT EXISTS …`) and
@@ -156,13 +153,10 @@ impl ClickHouseClient {
     /// histogram labelled with the DDL `kind` and `table_name`.
     pub(crate) async fn execute_ddl(&self, kind: DdlKind, sql: &str) -> EtlResult<()> {
         let ddl_start = Instant::now();
-        let result = self.inner.query(sql).execute().await.map_err(|e| {
-            etl_error!(
-                ErrorKind::Unknown,
-                "ClickHouse DDL failed",
-                format!("DDL execution failed: {e}")
-            )
-        });
+        let result =
+            self.inner.query(sql).execute().await.map_err(
+                |err| etl_error!(ErrorKind::Unknown, "ClickHouse DDL failed", source: err),
+            );
         metrics::histogram!(
             ETL_CLICKHOUSE_DDL_DURATION_SECONDS,
             "kind" => kind.as_label(),
@@ -184,11 +178,12 @@ impl ClickHouseClient {
             .bind(table_name)
             .fetch_all::<ClickHouseTableColumn>()
             .await
-            .map_err(|e| {
+            .map_err(|err| {
                 etl_error!(
                     ErrorKind::Unknown,
                     "ClickHouse schema query failed",
-                    format!("Failed to query columns for table '{table_name}': {e}")
+                    format!("table: {table_name}"),
+                    source: err
                 )
             })
     }
@@ -236,11 +231,12 @@ impl ClickHouseClient {
 
     /// Executes `TRUNCATE TABLE IF EXISTS` for the supplied table.
     pub(crate) async fn truncate_table(&self, table_name: &str) -> EtlResult<()> {
-        self.inner.query(&build_truncate_table_sql(table_name)).execute().await.map_err(|e| {
+        self.inner.query(&build_truncate_table_sql(table_name)).execute().await.map_err(|err| {
             etl_error!(
                 ErrorKind::Unknown,
                 "ClickHouse truncate failed",
-                format!("Failed to truncate table '{table_name}': {e}")
+                format!("table: {table_name}"),
+                source: err
             )
         })
     }
@@ -287,11 +283,12 @@ impl ClickHouseClient {
                 bytes += row_buf.len() as u64;
             }
 
-            insert.end().await.map_err(|e| {
+            insert.end().await.map_err(|err| {
                 etl_error!(
                     ErrorKind::Unknown,
                     "ClickHouse insert flush failed",
-                    format!("Failed to flush INSERT for '{table_name}': {e}")
+                    format!("table: {table_name}"),
+                    source: err
                 )
             })?;
             metrics::histogram!(

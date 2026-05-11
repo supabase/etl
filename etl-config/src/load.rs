@@ -72,31 +72,31 @@ impl ConfigFileKind {
 #[derive(Debug, Error)]
 pub enum LoadConfigError {
     /// Failed to determine the current working directory.
-    #[error("failed to determine the current directory")]
+    #[error("Failed to determine the current directory")]
     CurrentDir(#[source] io::Error),
 
     /// The configured `configuration` directory does not exist.
-    #[error("configuration directory `{0}` does not exist")]
+    #[error("Configuration directory `{0}` does not exist")]
     MissingConfigurationDirectory(PathBuf),
 
     /// Could not locate one of the required configuration files.
-    #[error("could not locate {kind} configuration in `{directory}`; attempted: {attempted}")]
+    #[error("Could not locate {kind} configuration in `{directory}`; attempted: {attempted}")]
     ConfigurationFileMissing { kind: &'static str, directory: PathBuf, attempted: String },
 
     /// Environment variable overrides failed to merge into the configuration.
-    #[error("failed to load configuration from environment variables")]
+    #[error("Failed to load configuration from environment variables")]
     EnvironmentVariables(#[source] config::ConfigError),
 
     /// The configuration files were parsed but deserialization failed.
-    #[error("failed to deserialize configuration")]
+    #[error("Failed to deserialize configuration")]
     Deserialization(#[source] config::ConfigError),
 
     /// Failed to determine the runtime environment (`APP_ENVIRONMENT`).
-    #[error("failed to determine runtime environment")]
+    #[error("Failed to determine runtime environment")]
     Environment(#[source] io::Error),
 
     /// Failed to initialize the configuration builder.
-    #[error("failed to initialize configuration builder")]
+    #[error("Failed to initialize configuration builder")]
     Builder(#[source] config::ConfigError),
 }
 

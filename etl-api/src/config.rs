@@ -138,11 +138,11 @@ pub struct EncryptionKey {
 #[derive(Debug, Error)]
 pub enum ApiKeyConversionError {
     /// The API key is not valid base64.
-    #[error("api key is not base64 encoded")]
+    #[error("API key is not base64 encoded")]
     NotBase64Encoded,
 
     /// The API key does not have the expected length of 32 bytes.
-    #[error("expected length of api key is 32, but actual length is {0}")]
+    #[error("Expected length of API key is 32, but actual length is {0}")]
     LengthNot32Bytes(usize),
 }
 

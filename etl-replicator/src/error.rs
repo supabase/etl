@@ -47,10 +47,10 @@ impl ReplicatorError {
     /// Returns a short category label for this error.
     fn category(&self) -> &'static str {
         match self {
-            ReplicatorError::Etl(_) => "replicator error",
-            ReplicatorError::Config(_, _) => "configuration error",
-            ReplicatorError::Migration(_, _) => "migration error",
-            ReplicatorError::Io(_, _) => "i/o error",
+            ReplicatorError::Etl(_) => "Replicator error",
+            ReplicatorError::Config(_, _) => "Configuration error",
+            ReplicatorError::Migration(_, _) => "Migration error",
+            ReplicatorError::Io(_, _) => "I/O error",
         }
     }
 
@@ -72,15 +72,15 @@ impl ReplicatorError {
     /// Returns a user-oriented report for terminal output.
     pub(crate) fn render_report(&self) -> String {
         let mut out = String::new();
-        out.push_str("replicator failed\n");
-        out.push_str(&format!("category: {}\n", self.category()));
-        out.push_str(&format!("error: {self}\n"));
+        out.push_str("Replicator failed\n");
+        out.push_str(&format!("Category: {}\n", self.category()));
+        out.push_str(&format!("Error: {self}\n"));
 
         if !matches!(self, ReplicatorError::Etl(err) if err.errors().is_some()) {
             let mut source = Error::source(self);
             let mut idx = 1usize;
             while let Some(err) = source {
-                out.push_str(&format!("cause {idx}: {err}\n"));
+                out.push_str(&format!("Cause {idx}: {err}\n"));
                 source = err.source();
                 idx += 1;
             }
@@ -89,7 +89,7 @@ impl ReplicatorError {
         if should_render_backtrace()
             && let Some(backtrace) = self.backtrace()
         {
-            out.push_str("backtrace:\n");
+            out.push_str("Backtrace:\n");
             out.push_str(&backtrace.to_string());
             if !out.ends_with('\n') {
                 out.push('\n');
@@ -105,9 +105,9 @@ impl fmt::Display for ReplicatorError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ReplicatorError::Etl(err) => write!(f, "{err}"),
-            ReplicatorError::Config(source, _) => write!(f, "configuration error: {source}"),
-            ReplicatorError::Migration(source, _) => write!(f, "migration error: {source}"),
-            ReplicatorError::Io(source, _) => write!(f, "i/o error: {source}"),
+            ReplicatorError::Config(source, _) => write!(f, "Configuration error: {source}"),
+            ReplicatorError::Migration(source, _) => write!(f, "Migration error: {source}"),
+            ReplicatorError::Io(source, _) => write!(f, "I/O error: {source}"),
         }
     }
 }

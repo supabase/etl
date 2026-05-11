@@ -131,7 +131,7 @@ impl DestinationTableMetadata {
         if !self.is_applied() {
             return Err(crate::etl_error!(
                 ErrorKind::InvalidState,
-                "destination table schema is not in applied state",
+                "Destination table schema is not in applied state",
                 format!(
                     "table '{}' has schema_status '{:?}'; the DDL may not have completed — manual \
                      intervention may be required",

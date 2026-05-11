@@ -47,13 +47,13 @@ impl ReplicatorResourcesConfig {
         if let Some(cpu_request_millicores) = self.cpu_request_millicores
             && cpu_request_millicores <= 0
         {
-            return Err("replicator cpu request must be greater than 0".to_owned());
+            return Err("Replicator cpu request must be greater than 0".to_owned());
         }
 
         if let Some(memory_request_mib) = self.memory_request_mib
             && memory_request_mib <= 0
         {
-            return Err("replicator memory request must be greater than 0".to_owned());
+            return Err("Replicator memory request must be greater than 0".to_owned());
         }
 
         Ok(())

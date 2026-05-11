@@ -14,11 +14,7 @@ pub(crate) fn parse_bool(s: &str) -> EtlResult<bool> {
     } else if s == "f" {
         Ok(false)
     } else {
-        bail!(
-            ErrorKind::InvalidData,
-            "Invalid boolean value",
-            format!("Boolean value must be 't' or 'f' (received: {s})")
-        );
+        bail!(ErrorKind::InvalidData, "Invalid boolean value", "Boolean value must be 't' or 'f'");
     }
 }
 
@@ -44,7 +40,7 @@ mod tests {
         let err = result.unwrap_err();
         assert!(matches!(err.kind(), ErrorKind::InvalidData));
         assert!(err.to_string().contains("Boolean value must be 't' or 'f'"));
-        assert!(err.to_string().contains("received: "));
+        assert!(!err.to_string().contains("received: "));
     }
 
     #[test]
@@ -53,7 +49,7 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(matches!(err.kind(), ErrorKind::InvalidData));
-        assert!(err.to_string().contains("received: true"));
+        assert!(!err.to_string().contains("true"));
     }
 
     #[test]
@@ -62,7 +58,7 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(matches!(err.kind(), ErrorKind::InvalidData));
-        assert!(err.to_string().contains("received: false"));
+        assert!(!err.to_string().contains("false"));
     }
 
     #[test]

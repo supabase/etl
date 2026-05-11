@@ -297,6 +297,7 @@ async fn tenant_with_inactive_pipelines_can_be_deleted_and_uninstalls_source_sta
         name: "Test Source".to_owned(),
         config: FullApiSourceConfig {
             host: trusted_source.trusted_config.host.clone(),
+            hostaddr: trusted_source.trusted_config.hostaddr,
             port: trusted_source.trusted_config.port,
             name: trusted_source.trusted_config.name.clone(),
             username: trusted_source.trusted_config.username.clone(),

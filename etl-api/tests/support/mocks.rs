@@ -17,12 +17,12 @@ use etl_config::SerializableSecretString;
 use crate::support::test_app::TestApp;
 
 /// Creates a default image and returns its id.
-pub async fn create_default_image(app: &TestApp) -> i64 {
+pub(crate) async fn create_default_image(app: &TestApp) -> i64 {
     create_image_with_name(app, "some/image".to_owned(), true).await
 }
 
 /// Creates an image with the provided name and default flag and returns its id.
-pub async fn create_image_with_name(app: &TestApp, name: String, is_default: bool) -> i64 {
+pub(crate) async fn create_image_with_name(app: &TestApp, name: String, is_default: bool) -> i64 {
     let image = CreateImageRequest { name, is_default };
     let response = app.create_image(&image).await;
     let response: CreateImageResponse =
@@ -32,21 +32,21 @@ pub async fn create_image_with_name(app: &TestApp, name: String, is_default: boo
 }
 
 /// Destination helpers.
-pub mod destinations {
+pub(crate) mod destinations {
     use super::*;
 
     /// Returns a default destination name.
-    pub fn new_name() -> String {
+    pub(crate) fn new_name() -> String {
         "BigQuery Destination".to_owned()
     }
 
     /// Returns an updated destination name.
-    pub fn updated_name() -> String {
+    pub(crate) fn updated_name() -> String {
         "BigQuery Destination (Updated)".to_owned()
     }
 
     /// Returns an updated destination config.
-    pub fn updated_destination_config() -> FullApiDestinationConfig {
+    pub(crate) fn updated_destination_config() -> FullApiDestinationConfig {
         FullApiDestinationConfig::BigQuery {
             project_id: "project-id-updated".to_owned(),
             dataset_id: "dataset-id-updated".to_owned(),
@@ -59,7 +59,7 @@ pub mod destinations {
     }
 
     /// Returns a default destination config (BigQuery).
-    pub fn new_bigquery_destination_config() -> FullApiDestinationConfig {
+    pub(crate) fn new_bigquery_destination_config() -> FullApiDestinationConfig {
         FullApiDestinationConfig::BigQuery {
             project_id: "project-id".to_owned(),
             dataset_id: "dataset-id".to_owned(),
@@ -70,7 +70,7 @@ pub mod destinations {
     }
 
     /// Returns a default Iceberg Supabase destination config.
-    pub fn new_iceberg_supabase_destination_config() -> FullApiDestinationConfig {
+    pub(crate) fn new_iceberg_supabase_destination_config() -> FullApiDestinationConfig {
         use etl_api::configs::destination::FullApiIcebergConfig;
 
         FullApiDestinationConfig::Iceberg {
@@ -91,7 +91,7 @@ pub mod destinations {
     }
 
     /// Returns an updated Iceberg Supabase destination config.
-    pub fn updated_iceberg_supabase_destination_config() -> FullApiDestinationConfig {
+    pub(crate) fn updated_iceberg_supabase_destination_config() -> FullApiDestinationConfig {
         use etl_api::configs::destination::FullApiIcebergConfig;
 
         FullApiDestinationConfig::Iceberg {
@@ -113,7 +113,7 @@ pub mod destinations {
 
     /// Creates a destination with the provided name and config and returns its
     /// id.
-    pub async fn create_destination_with_config(
+    pub(crate) async fn create_destination_with_config(
         app: &TestApp,
         tenant_id: &str,
         name: String,
@@ -127,7 +127,7 @@ pub mod destinations {
     }
 
     /// Creates a default destination and returns its id.
-    pub async fn create_destination(app: &TestApp, tenant_id: &str) -> i64 {
+    pub(crate) async fn create_destination(app: &TestApp, tenant_id: &str) -> i64 {
         create_destination_with_config(
             app,
             tenant_id,
@@ -139,18 +139,19 @@ pub mod destinations {
 }
 
 /// Source helpers.
-pub mod sources {
+pub(crate) mod sources {
     use super::*;
 
     /// Returns a default source name.
-    pub fn new_name() -> String {
+    pub(crate) fn new_name() -> String {
         "Postgres Source".to_owned()
     }
 
     /// Returns a default Postgres source config.
-    pub fn new_source_config() -> FullApiSourceConfig {
+    pub(crate) fn new_source_config() -> FullApiSourceConfig {
         FullApiSourceConfig {
             host: "localhost".to_owned(),
+            hostaddr: None,
             port: 5432,
             name: "postgres".to_owned(),
             username: "postgres".to_owned(),
@@ -159,14 +160,15 @@ pub mod sources {
     }
 
     /// Returns an updated source name.
-    pub fn updated_name() -> String {
+    pub(crate) fn updated_name() -> String {
         "Postgres Source (Updated)".to_owned()
     }
 
     /// Returns an updated Postgres source config.
-    pub fn updated_source_config() -> FullApiSourceConfig {
+    pub(crate) fn updated_source_config() -> FullApiSourceConfig {
         FullApiSourceConfig {
             host: "example.com".to_owned(),
+            hostaddr: None,
             port: 2345,
             name: "sergtsop".to_owned(),
             username: "sergtsop".to_owned(),
@@ -175,12 +177,12 @@ pub mod sources {
     }
 
     /// Creates a default source and returns its id.
-    pub async fn create_source(app: &TestApp, tenant_id: &str) -> i64 {
+    pub(crate) async fn create_source(app: &TestApp, tenant_id: &str) -> i64 {
         create_source_with_config(app, tenant_id, new_name(), new_source_config()).await
     }
 
     /// Creates a source with the provided name and config and returns its id.
-    pub async fn create_source_with_config(
+    pub(crate) async fn create_source_with_config(
         app: &TestApp,
         tenant_id: &str,
         name: String,
@@ -195,13 +197,13 @@ pub mod sources {
 }
 
 /// Tenant helpers.
-pub mod tenants {
+pub(crate) mod tenants {
     use etl_api::routes::tenants::{CreateTenantRequest, CreateTenantResponse};
 
     use super::*;
 
     /// Creates a default tenant and returns its id.
-    pub async fn create_tenant(app: &TestApp) -> String {
+    pub(crate) async fn create_tenant(app: &TestApp) -> String {
         create_tenant_with_id_and_name(
             app,
             "abcdefghijklmnopqrst".to_owned(),
@@ -211,7 +213,11 @@ pub mod tenants {
     }
 
     /// Creates a tenant with a given id and name and returns its id.
-    pub async fn create_tenant_with_id_and_name(app: &TestApp, id: String, name: String) -> String {
+    pub(crate) async fn create_tenant_with_id_and_name(
+        app: &TestApp,
+        id: String,
+        name: String,
+    ) -> String {
         let tenant = CreateTenantRequest { id, name };
         let response = app.create_tenant(&tenant).await;
         let response: CreateTenantResponse =
@@ -221,14 +227,14 @@ pub mod tenants {
 }
 
 /// Pipeline config helpers.
-pub mod pipelines {
+pub(crate) mod pipelines {
     use etl_api::configs::log::LogLevel;
     use etl_config::shared::{BatchConfig, MemoryBackpressureConfig, TableSyncCopyConfig};
 
     use super::*;
 
     /// Returns a default pipeline config.
-    pub fn new_pipeline_config() -> FullApiPipelineConfig {
+    pub(crate) fn new_pipeline_config() -> FullApiPipelineConfig {
         FullApiPipelineConfig {
             publication_name: "publication".to_owned(),
             batch: Some(BatchConfig { max_fill_ms: 5, memory_budget_ratio: 0.2 }),
@@ -247,7 +253,7 @@ pub mod pipelines {
     }
 
     /// Returns an updated pipeline config.
-    pub fn updated_pipeline_config() -> FullApiPipelineConfig {
+    pub(crate) fn updated_pipeline_config() -> FullApiPipelineConfig {
         FullApiPipelineConfig {
             publication_name: "updated_publication".to_owned(),
             batch: Some(BatchConfig { max_fill_ms: 10, memory_budget_ratio: 0.2 }),
@@ -266,7 +272,7 @@ pub mod pipelines {
     }
 
     /// Creates a pipeline with the provided config and returns its id.
-    pub async fn create_pipeline_with_config(
+    pub(crate) async fn create_pipeline_with_config(
         app: &TestApp,
         tenant_id: &str,
         source_id: i64,

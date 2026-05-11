@@ -1,3 +1,5 @@
+use std::net::IpAddr;
+
 use etl_config::{
     SerializableSecretString,
     shared::{PgConnectionConfig, TcpKeepaliveConfig, TlsConfig},
@@ -20,6 +22,9 @@ pub struct FullApiSourceConfig {
     #[schema(example = "localhost")]
     #[serde(deserialize_with = "crate::utils::trim_string")]
     pub host: String,
+    #[schema(value_type = String, example = "2a05:d014:1c06:5f0c:d7a9:8616:bee2:30df")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hostaddr: Option<IpAddr>,
     #[schema(example = 5432)]
     pub port: u16,
     #[schema(example = "mydb")]
@@ -37,6 +42,7 @@ impl From<StoredSourceConfig> for FullApiSourceConfig {
     fn from(stored_source_config: StoredSourceConfig) -> Self {
         Self {
             host: stored_source_config.host,
+            hostaddr: stored_source_config.hostaddr,
             port: stored_source_config.port,
             name: stored_source_config.name,
             username: stored_source_config.username,
@@ -50,6 +56,9 @@ impl From<StoredSourceConfig> for FullApiSourceConfig {
 pub struct StrippedApiSourceConfig {
     #[schema(example = "localhost")]
     pub host: String,
+    #[schema(value_type = String, example = "2a05:d014:1c06:5f0c:d7a9:8616:bee2:30df")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hostaddr: Option<IpAddr>,
     #[schema(example = 5432)]
     pub port: u16,
     #[schema(example = "mydb")]
@@ -60,13 +69,20 @@ pub struct StrippedApiSourceConfig {
 
 impl From<StoredSourceConfig> for StrippedApiSourceConfig {
     fn from(source: StoredSourceConfig) -> Self {
-        Self { host: source.host, port: source.port, name: source.name, username: source.username }
+        Self {
+            host: source.host,
+            hostaddr: source.hostaddr,
+            port: source.port,
+            name: source.name,
+            username: source.username,
+        }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct StoredSourceConfig {
     pub host: String,
+    pub hostaddr: Option<IpAddr>,
     pub port: u16,
     pub name: String,
     pub username: String,
@@ -79,6 +95,7 @@ impl StoredSourceConfig {
     pub fn into_connection_config(self, tls_config: TlsConfig) -> PgConnectionConfig {
         PgConnectionConfig {
             host: self.host,
+            hostaddr: self.hostaddr,
             port: self.port,
             name: self.name,
             username: self.username,
@@ -93,6 +110,7 @@ impl From<FullApiSourceConfig> for StoredSourceConfig {
     fn from(full_api_source_config: FullApiSourceConfig) -> Self {
         Self {
             host: full_api_source_config.host,
+            hostaddr: full_api_source_config.hostaddr,
             port: full_api_source_config.port,
             name: full_api_source_config.name,
             username: full_api_source_config.username,
@@ -114,6 +132,7 @@ impl Encrypt<EncryptedStoredSourceConfig> for StoredSourceConfig {
 
         Ok(EncryptedStoredSourceConfig {
             host: self.host,
+            hostaddr: self.hostaddr,
             port: self.port,
             name: self.name,
             username: self.username,
@@ -125,6 +144,8 @@ impl Encrypt<EncryptedStoredSourceConfig> for StoredSourceConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EncryptedStoredSourceConfig {
     host: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hostaddr: Option<IpAddr>,
     port: u16,
     name: String,
     username: String,
@@ -146,6 +167,7 @@ impl Decrypt<StoredSourceConfig> for EncryptedStoredSourceConfig {
 
         Ok(StoredSourceConfig {
             host: self.host,
+            hostaddr: self.hostaddr,
             port: self.port,
             name: self.name,
             username: self.username,
@@ -163,6 +185,7 @@ mod tests {
     fn stored_source_config_encryption_decryption() {
         let config = StoredSourceConfig {
             host: "localhost".to_owned(),
+            hostaddr: Some("2a05:d014:1c06:5f0c:d7a9:8616:bee2:30df".parse().unwrap()),
             port: 5432,
             name: "testdb".to_owned(),
             username: "user".to_owned(),
@@ -175,6 +198,7 @@ mod tests {
         let decrypted = encrypted.decrypt(&key).unwrap();
 
         assert_eq!(config.host, decrypted.host);
+        assert_eq!(config.hostaddr, decrypted.hostaddr);
         assert_eq!(config.port, decrypted.port);
         assert_eq!(config.name, decrypted.name);
         assert_eq!(config.username, decrypted.username);
@@ -193,6 +217,7 @@ mod tests {
     fn full_api_source_config_conversion() {
         let full_config = FullApiSourceConfig {
             host: "localhost".to_owned(),
+            hostaddr: Some("2a05:d014:1c06:5f0c:d7a9:8616:bee2:30df".parse().unwrap()),
             port: 5432,
             name: "testdb".to_owned(),
             username: "user".to_owned(),
@@ -203,6 +228,7 @@ mod tests {
         let back_to_full: FullApiSourceConfig = stored.into();
 
         assert_eq!(full_config.host, back_to_full.host);
+        assert_eq!(full_config.hostaddr, back_to_full.hostaddr);
         assert_eq!(full_config.port, back_to_full.port);
         assert_eq!(full_config.name, back_to_full.name);
         assert_eq!(full_config.username, back_to_full.username);

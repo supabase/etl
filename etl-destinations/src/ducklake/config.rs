@@ -672,7 +672,7 @@ fn build_setup_plan_with_strategy(
                 etl_error!(
                     ErrorKind::ConfigError,
                     "Vendored DuckDB extensions not found",
-                    "missing vendored DuckDB extension root"
+                    "Missing vendored DuckDB extension root"
                 )
             })?;
             let ducklake_extension =

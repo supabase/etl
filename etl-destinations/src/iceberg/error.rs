@@ -35,7 +35,7 @@ pub(crate) fn iceberg_error_to_etl_error(err: iceberg::Error) -> EtlError {
         _ => (ErrorKind::Unknown, "Unknown iceberg error"),
     };
 
-    etl_error!(kind, description, err.to_string())
+    etl_error!(kind, description, source: err)
 }
 
 /// Converts Arrow errors to ETL errors with appropriate classification.
@@ -73,5 +73,5 @@ pub(crate) fn arrow_error_to_etl_error(err: ArrowError) -> EtlError {
         }
     };
 
-    etl_error!(kind, description, err.to_string())
+    etl_error!(kind, description, source: err)
 }

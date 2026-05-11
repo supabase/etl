@@ -109,6 +109,7 @@
 //!     // Configure Postgres connection
 //!     let pg_config = PgConnectionConfig {
 //!         host: "localhost".to_string(),
+//!         hostaddr: None,
 //!         port: 5432,
 //!         name: "mydb".to_string(),
 //!         username: "postgres".to_string(),
@@ -117,7 +118,7 @@
 //!         keepalive: TcpKeepaliveConfig::default(),
 //!     };
 //!
-//!     // Create memory-based store and destination for testing
+//!     // Create memory-based store and destination for testing.
 //!     let store = MemoryStore::new();
 //!     let destination = NoopDestination;
 //!
@@ -164,6 +165,7 @@ pub mod error;
 pub mod failpoints;
 mod macros;
 pub mod metrics;
+pub mod migrations;
 pub mod pipeline;
 pub mod replication;
 pub mod state;

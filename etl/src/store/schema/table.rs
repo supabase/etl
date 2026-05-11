@@ -40,12 +40,13 @@ pub(crate) struct TableSchemaSnapshots {
 
 impl TableSchemaSnapshots {
     /// Returns the total number of stored schema snapshots.
-    pub(crate) fn len(&self) -> usize {
+    pub(crate) fn total_snapshots_count(&self) -> usize {
         self.table_schemas.values().map(BTreeMap::len).sum()
     }
 
-    /// Returns the number of stored snapshots for a table.
-    pub(crate) fn table_len(&self, table_id: TableId) -> usize {
+    /// Returns the number of stored schema snapshots for a table.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) fn snapshots_count(&self, table_id: TableId) -> usize {
         self.table_schemas.get(&table_id).map_or(0, BTreeMap::len)
     }
 
@@ -220,8 +221,8 @@ mod tests {
                 .snapshot_id,
             SnapshotId::from(200)
         );
-        assert_eq!(snapshots.table_len(table_id), 2);
-        assert_eq!(snapshots.table_len(other_table_id), 1);
+        assert_eq!(snapshots.snapshots_count(table_id), 2);
+        assert_eq!(snapshots.snapshots_count(other_table_id), 1);
     }
 
     #[test]
@@ -260,8 +261,8 @@ mod tests {
                 .snapshot_id,
             SnapshotId::from(300)
         );
-        assert_eq!(snapshots.table_len(other_table_id), 1);
-        assert_eq!(snapshots.table_len(untouched_table_id), 1);
+        assert_eq!(snapshots.snapshots_count(other_table_id), 1);
+        assert_eq!(snapshots.snapshots_count(untouched_table_id), 1);
     }
 
     #[test]
@@ -277,6 +278,6 @@ mod tests {
         )]));
 
         assert_eq!(removed, 0);
-        assert_eq!(snapshots.table_len(table_id), 1);
+        assert_eq!(snapshots.snapshots_count(table_id), 1);
     }
 }

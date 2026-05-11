@@ -1,8 +1,9 @@
-use std::{ops::Deref, sync::Arc, time::Duration};
+use std::{any::Any, ops::Deref, panic::AssertUnwindSafe, sync::Arc, time::Duration};
 
 use chrono::{Duration as ChronoDuration, Utc};
 use etl_config::shared::PipelineConfig;
 use etl_postgres::{replication::slots::EtlReplicationSlot, types::TableId};
+use futures::FutureExt;
 use metrics::counter;
 use tokio::{
     sync::{Mutex, MutexGuard, Notify, Semaphore},
@@ -33,6 +34,11 @@ use crate::{
     },
 };
 
+/// Formats phase types without using debug output.
+fn format_phase_types(phase_types: &[TableReplicationPhaseType]) -> String {
+    phase_types.iter().map(TableReplicationPhaseType::as_static_str).collect::<Vec<_>>().join(",")
+}
+
 /// Result for a table sync worker task.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) enum TableSyncWorkerResult {
@@ -42,6 +48,19 @@ pub(crate) enum TableSyncWorkerResult {
     Shutdown,
     /// The worker stopped after persisting the table error state.
     Errored,
+}
+
+/// Builds an error from a panic caught inside the table sync worker.
+fn table_sync_worker_panic_error(payload: Box<dyn Any + Send>) -> EtlError {
+    let detail = if let Some(message) = payload.downcast_ref::<&'static str>() {
+        message.to_string()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "Table sync worker panicked with non-string payload".to_owned()
+    };
+
+    etl_error!(ErrorKind::TableSyncWorkerPanic, "Table sync worker panicked", detail)
 }
 
 /// Internal state of [`TableSyncWorkerState`].
@@ -195,17 +214,17 @@ impl TableSyncWorkerState {
     /// to state changes.
     pub(crate) async fn wait_for_phase_type(
         &self,
-        phase_types: &[TableReplicationPhaseType],
+        target_phase_types: &[TableReplicationPhaseType],
         mut shutdown_rx: ShutdownRx,
     ) -> ShutdownResult<MutexGuard<'_, TableSyncWorkerStateInner>, ()> {
         loop {
             let inner = self.inner.lock().await;
 
             let current_phase = inner.table_replication_phase.as_type();
-            if phase_types.contains(&current_phase) {
+            if target_phase_types.contains(&current_phase) {
                 info!(
                     table_id = inner.table_id.0,
-                    %current_phase,
+                    current_table_replication_phase_type = %current_phase,
                     "table replication phase reached",
                 );
 
@@ -214,8 +233,8 @@ impl TableSyncWorkerState {
 
             info!(
                 table_id = inner.table_id.0,
-                %current_phase,
-                phase_types = ?phase_types,
+                current_table_replication_phase_type = %current_phase,
+                target_table_replication_phase_types = %format_phase_types(target_phase_types),
                 "waiting for table replication phase",
             );
 
@@ -233,7 +252,10 @@ impl TableSyncWorkerState {
                 biased;
 
                 _ = shutdown_rx.changed() => {
-                    info!(phase_types = ?phase_types, "shutdown signal received, cancelling wait for phase");
+                    info!(
+                        target_table_replication_phase_types = %format_phase_types(target_phase_types),
+                        "shutdown signal received, cancelling wait for phase",
+                    );
 
                     return ShutdownResult::Shutdown(());
                 }
@@ -442,7 +464,7 @@ where
 
                     info!(
                         table_id = table_id.0,
-                        sleep_duration = ?sleep_duration,
+                        sleep_duration_ms = sleep_duration.as_millis(),
                         "retrying table sync worker",
                     );
 
@@ -545,12 +567,51 @@ where
             table_id = self.table_id.0,
         );
 
-        let fut =
-            self.guarded_run_table_sync_worker(state.clone()).instrument(table_sync_worker_span);
+        let fut = self.run_table_sync_worker_task(state.clone(), table_sync_worker_span);
 
         pool.spawn(table_id, state, fut).await;
 
         Ok(())
+    }
+
+    /// Runs the table sync worker task and converts panics to table errors.
+    async fn run_table_sync_worker_task(
+        self,
+        state: TableSyncWorkerState,
+        table_sync_worker_span: tracing::Span,
+    ) -> EtlResult<TableSyncWorkerResult> {
+        let table_id = self.table_id;
+        let config = Arc::clone(&self.config);
+        let store = self.store.clone();
+        let mut shutdown_rx = self.shutdown_rx.clone();
+
+        let result = AssertUnwindSafe(
+            self.guarded_run_table_sync_worker(state.clone()).instrument(table_sync_worker_span),
+        )
+        .catch_unwind()
+        .await;
+
+        match result {
+            Ok(result) => result,
+            Err(payload) => {
+                let err = table_sync_worker_panic_error(payload);
+                Self::handle_table_sync_worker_error(
+                    table_id,
+                    config.as_ref(),
+                    &state,
+                    &store,
+                    &mut shutdown_rx,
+                    err,
+                )
+                .await?
+                .ok_or_else(|| {
+                    etl_error!(
+                        ErrorKind::InvalidState,
+                        "Table sync worker panic requested retry after unwinding"
+                    )
+                })
+            }
+        }
     }
 
     /// Runs the table sync worker with retry logic and error handling.
@@ -590,6 +651,7 @@ where
             };
 
             let result = worker.run_table_sync_worker(state.clone()).await;
+
             match result {
                 Ok(result) => {
                     let mut state_guard = state.lock().await;
@@ -654,7 +716,7 @@ where
         .map_err(|err| {
             etl_error!(
                 ErrorKind::InvalidState,
-                "table sync worker semaphore closed while acquiring run permit",
+                "Table sync worker semaphore closed while acquiring run permit",
                 err
             )
         })?;

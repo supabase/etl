@@ -241,7 +241,7 @@ impl DuckLakeConnectionError {
 
     /// Creates one connection validation error.
     fn validation(error: duckdb::Error) -> Self {
-        Self { message: format!("ducklake duckdb connection validation failed: {error}") }
+        Self { message: format!("DuckLake DuckDB connection validation failed: {error}") }
     }
 }
 
@@ -294,7 +294,7 @@ impl LazyDuckLakePool {
             if let Err(error) = &pool {
                 warn!(
                     purpose,
-                    error = ?error,
+                    error = %error,
                     "ducklake background pool warm-up failed"
                 );
             }
@@ -427,11 +427,10 @@ impl r2d2::ManageConnection for DuckLakeConnectionManager {
     }
 }
 
-/// Formats a DuckDB query failure so the displayed [`EtlError`] includes
-/// both the SQL statement and the underlying DuckDB error message.
-pub(super) fn format_query_error_detail(sql: &str, error: &duckdb::Error) -> String {
+/// Formats owned query context for a DuckDB query failure.
+pub(super) fn format_query_error_detail(sql: &str) -> String {
     let compact_sql = sql.split_whitespace().collect::<Vec<_>>().join(" ");
-    format!("sql: {compact_sql}; source: {error}")
+    format!("sql: {compact_sql}")
 }
 
 /// Returns whether one setup step attaches a PostgreSQL-backed catalog.
@@ -511,7 +510,7 @@ pub(super) fn duckdb_blocking_timeout_error(
         ErrorKind::DestinationQueryFailed,
         "DuckLake blocking operation timed out",
         format!(
-            "operation_kind={}, stage={stage}, timeout_ms={}",
+            "Operation kind={}, stage={stage}, timeout_ms={}",
             operation_kind.as_str(),
             timeout.as_millis()
         )
@@ -736,16 +735,12 @@ mod tests {
     }
 
     #[test]
-    fn format_query_error_detail_compacts_sql_and_includes_source() {
+    fn format_query_error_detail_compacts_sql() {
         let sql = r#"CREATE TABLE lake."orders" ("id" INTEGER NOT NULL)"#;
-        let error = duckdb::Error::DuckDBFailure(
-            duckdb::ffi::Error::new(1),
-            Some("parser error".to_owned()),
-        );
 
         assert_eq!(
-            format_query_error_detail(sql, &error),
-            "sql: CREATE TABLE lake.\"orders\" (\"id\" INTEGER NOT NULL); source: parser error"
+            format_query_error_detail(sql),
+            "sql: CREATE TABLE lake.\"orders\" (\"id\" INTEGER NOT NULL)"
         );
     }
 

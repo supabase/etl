@@ -123,7 +123,7 @@ impl TaskSet {
                 Err(etl_error!(
                     ErrorKind::InvalidState,
                     "Background task panicked",
-                    err.to_string()
+                    source: err
                 ))
             }
         }

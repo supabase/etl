@@ -21,7 +21,7 @@ use k8s_openapi::api::core::v1::ConfigMap;
 use tokio::sync::RwLock;
 
 #[derive(Clone)]
-pub struct MockK8sState {
+pub(crate) struct MockK8sState {
     pod_status: Arc<RwLock<PodStatus>>,
     create_calls: Arc<AtomicUsize>,
     last_replicator_resources: Arc<RwLock<Option<ReplicatorResourcesConfig>>>,
@@ -38,25 +38,25 @@ impl Default for MockK8sState {
 }
 
 impl MockK8sState {
-    pub async fn set_pod_status(&self, pod_status: PodStatus) {
+    pub(crate) async fn set_pod_status(&self, pod_status: PodStatus) {
         *self.pod_status.write().await = pod_status;
     }
 
-    pub fn create_calls(&self) -> usize {
+    pub(crate) fn create_calls(&self) -> usize {
         self.create_calls.load(Ordering::Relaxed)
     }
 
-    pub async fn last_replicator_resources(&self) -> Option<ReplicatorResourcesConfig> {
+    pub(crate) async fn last_replicator_resources(&self) -> Option<ReplicatorResourcesConfig> {
         self.last_replicator_resources.read().await.clone()
     }
 }
 
-pub struct MockK8sClient {
+pub(crate) struct MockK8sClient {
     state: MockK8sState,
 }
 
 impl MockK8sClient {
-    pub fn new(state: MockK8sState) -> Self {
+    pub(crate) fn new(state: MockK8sState) -> Self {
         Self { state }
     }
 

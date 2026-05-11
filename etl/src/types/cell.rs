@@ -10,12 +10,14 @@ use crate::{
 macro_rules! convert_array_variant {
     ($variant:ident, $vec:expr) => {
         if $vec.iter().any(|v| v.is_none()) {
+            let element_count = $vec.len();
+            let null_count = $vec.iter().filter(|v| v.is_none()).count();
             bail!(
                 ErrorKind::NullValuesNotSupportedInArrayInDestination,
                 "NULL values in arrays not supported in this destination",
                 format!(
-                    "Array {:?} contains NULL values which are not supported in this destination",
-                    $vec
+                    "Array contains {null_count} NULL values across {element_count} elements, \
+                     which are not supported in this destination"
                 )
             )
         } else {
@@ -384,6 +386,8 @@ mod tests {
         assert!(
             error.to_string().contains("NULL values in arrays not supported in this destination")
         );
+        assert!(!error.to_string().contains("test"));
+        assert!(!error.to_string().contains("hello"));
     }
 
     #[test]

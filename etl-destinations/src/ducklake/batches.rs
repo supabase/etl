@@ -78,6 +78,12 @@ const APPLIED_BATCHES_TABLE: &str = "__etl_applied_table_batches";
 /// Inline small marker-table writes in the DuckLake metadata catalog instead of
 /// creating Parquet files for this metadata-like table.
 const APPLIED_BATCHES_TABLE_DATA_INLINING_ROW_LIMIT: usize = 256;
+
+/// Formats an optional LSN without using debug output.
+fn format_optional_lsn(lsn: Option<PgLsn>) -> String {
+    lsn.map_or_else(|| "none".to_owned(), |lsn| lsn.to_string())
+}
+
 /// ETL-managed per-table streaming replay progress for steady-state CDC
 /// retries.
 const STREAMING_PROGRESS_TABLE: &str = "__etl_streaming_progress";
@@ -325,7 +331,7 @@ pub(super) async fn ensure_applied_batches_table_exists(
                     return Err(etl_error!(
                         ErrorKind::DestinationQueryFailed,
                         "DuckLake CREATE TABLE failed",
-                        format_query_error_detail(&ddl, &error),
+                        format_query_error_detail(&ddl),
                         source: error
                     ));
                 }
@@ -336,12 +342,12 @@ pub(super) async fn ensure_applied_batches_table_exists(
                 APPLIED_BATCHES_TABLE_DATA_INLINING_ROW_LIMIT,
                 quote_literal(APPLIED_BATCHES_TABLE),
             );
-            conn.execute_batch(&set_option_sql).map_err(|error| {
+            conn.execute_batch(&set_option_sql).map_err(|err| {
                 etl_error!(
                     ErrorKind::DestinationQueryFailed,
                     "DuckLake set_option failed",
-                    format_query_error_detail(&set_option_sql, &error),
-                    source: error
+                    format_query_error_detail(&set_option_sql),
+                    source: err
                 )
             })?;
 
@@ -389,13 +395,13 @@ pub(super) async fn ensure_streaming_progress_table_exists(
         move |conn| -> EtlResult<()> {
             match conn.execute_batch(&ddl) {
                 Ok(()) => {}
-                Err(error) if is_create_table_conflict(&error, &table_name) => {}
-                Err(error) => {
+                Err(err) if is_create_table_conflict(&err, &table_name) => {}
+                Err(err) => {
                     return Err(etl_error!(
                         ErrorKind::DestinationQueryFailed,
                         "DuckLake CREATE TABLE failed",
-                        format_query_error_detail(&ddl, &error),
-                        source: error
+                        format_query_error_detail(&ddl),
+                        source: err
                     ));
                 }
             }
@@ -409,7 +415,7 @@ pub(super) async fn ensure_streaming_progress_table_exists(
                 etl_error!(
                     ErrorKind::DestinationQueryFailed,
                     "DuckLake set_option failed",
-                    format_query_error_detail(&set_option_sql, &error),
+                    format_query_error_detail(&set_option_sql),
                     source: error
                 )
             })?;
@@ -456,7 +462,7 @@ pub(super) async fn apply_table_batches_with_retry(
                 max = attempt.max_retries,
                 table = %table_name,
                 batch_count,
-                error = ?attempt.error,
+                error = %attempt.error,
                 "ducklake table batch sequence failed, retrying"
             );
         },
@@ -528,7 +534,7 @@ pub(super) async fn apply_table_batch_with_retry(
                 max = attempt.max_retries,
                 table = %table_name,
                 batch_id = %batch_id,
-                error = ?attempt.error,
+                error = %attempt.error,
                 "ducklake table mutation attempt failed, retrying"
             );
         },
@@ -666,12 +672,12 @@ pub(super) fn clear_applied_batch_markers_for_kind(
         quote_literal(table_name),
         quote_literal(batch_kind.as_str())
     );
-    conn.execute_batch(&sql).map_err(|error| {
+    conn.execute_batch(&sql).map_err(|err| {
         etl_error!(
             ErrorKind::DestinationQueryFailed,
             "DuckLake batch marker delete failed",
-            format_query_error_detail(&sql, &error),
-            source: error
+            format_query_error_detail(&sql),
+            source: err
         )
     })?;
     Ok(())
@@ -687,12 +693,12 @@ pub(super) fn clear_table_streaming_progress(
          WHERE table_name = {};"#,
         quote_literal(table_name),
     );
-    conn.execute_batch(&sql).map_err(|error| {
+    conn.execute_batch(&sql).map_err(|err| {
         etl_error!(
             ErrorKind::DestinationQueryFailed,
             "DuckLake streaming progress delete failed",
-            format_query_error_detail(&sql, &error),
-            source: error
+            format_query_error_detail(&sql),
+            source: err
         )
     })?;
     Ok(())
@@ -737,49 +743,49 @@ fn read_table_streaming_progress(
          WHERE table_name = {} LIMIT 1;"#,
         quote_literal(table_name),
     );
-    let mut statement = conn.prepare(&sql).map_err(|error| {
+    let mut statement = conn.prepare(&sql).map_err(|err| {
         etl_error!(
             ErrorKind::DestinationQueryFailed,
             "DuckLake streaming progress query prepare failed",
-            format_query_error_detail(&sql, &error),
-            source: error
+            format_query_error_detail(&sql),
+            source: err
         )
     })?;
-    let mut rows = statement.query([]).map_err(|error| {
+    let mut rows = statement.query([]).map_err(|err| {
         etl_error!(
             ErrorKind::DestinationQueryFailed,
             "DuckLake streaming progress query failed",
-            format_query_error_detail(&sql, &error),
-            source: error
+            format_query_error_detail(&sql),
+            source: err
         )
     })?;
 
-    let Some(row) = rows.next().map_err(|error| {
+    let Some(row) = rows.next().map_err(|err| {
         etl_error!(
             ErrorKind::DestinationQueryFailed,
             "DuckLake streaming progress row fetch failed",
-            format_query_error_detail(&sql, &error),
-            source: error
+            format_query_error_detail(&sql),
+            source: err
         )
     })?
     else {
         return Ok(None);
     };
 
-    let last_commit_lsn: u64 = row.get(0).map_err(|error| {
+    let last_commit_lsn: u64 = row.get(0).map_err(|err| {
         etl_error!(
             ErrorKind::DestinationQueryFailed,
             "DuckLake streaming progress commit lsn read failed",
-            format_query_error_detail(&sql, &error),
-            source: error
+            format_query_error_detail(&sql),
+            source: err
         )
     })?;
-    let last_tx_ordinal: u64 = row.get(1).map_err(|error| {
+    let last_tx_ordinal: u64 = row.get(1).map_err(|err| {
         etl_error!(
             ErrorKind::DestinationQueryFailed,
             "DuckLake streaming progress tx ordinal read failed",
-            format_query_error_detail(&sql, &error),
-            source: error
+            format_query_error_detail(&sql),
+            source: err
         )
     })?;
 
@@ -1459,29 +1465,29 @@ fn applied_batch_marker_exists(
         quote_literal(&batch.table_name),
         quote_literal(&batch.batch_id)
     );
-    let mut statement = conn.prepare(&sql).map_err(|error| {
+    let mut statement = conn.prepare(&sql).map_err(|err| {
         etl_error!(
             ErrorKind::DestinationQueryFailed,
             "DuckLake marker query prepare failed",
-            format_query_error_detail(&sql, &error),
-            source: error
+            format_query_error_detail(&sql),
+            source: err
         )
     })?;
-    let mut rows = statement.query([]).map_err(|error| {
+    let mut rows = statement.query([]).map_err(|err| {
         etl_error!(
             ErrorKind::DestinationQueryFailed,
             "DuckLake marker query failed",
-            format_query_error_detail(&sql, &error),
-            source: error
+            format_query_error_detail(&sql),
+            source: err
         )
     })?;
 
-    rows.next().map(|row| row.is_some()).map_err(|error| {
+    rows.next().map(|row| row.is_some()).map_err(|err| {
         etl_error!(
             ErrorKind::DestinationQueryFailed,
             "DuckLake marker query row fetch failed",
-            format_query_error_detail(&sql, &error),
-            source: error
+            format_query_error_detail(&sql),
+            source: err
         )
     })
 }
@@ -1500,12 +1506,12 @@ fn insert_applied_batch_marker(
         optional_lsn_to_sql_literal(batch.first_start_lsn),
         optional_lsn_to_sql_literal(batch.last_commit_lsn),
     );
-    conn.execute_batch(&sql).map_err(|error| {
+    conn.execute_batch(&sql).map_err(|err| {
         etl_error!(
             ErrorKind::DestinationQueryFailed,
             "DuckLake batch marker insert failed",
-            format_query_error_detail(&sql, &error),
-            source: error
+            format_query_error_detail(&sql),
+            source: err
         )
     })?;
     Ok(())
@@ -1535,12 +1541,12 @@ fn update_table_streaming_progress(
         u64::from(last_sequence_key.commit_lsn),
         last_sequence_key.tx_ordinal,
     );
-    conn.execute_batch(&sql).map_err(|error| {
+    conn.execute_batch(&sql).map_err(|err| {
         etl_error!(
             ErrorKind::DestinationQueryFailed,
             "DuckLake streaming progress update failed",
-            format_query_error_detail(&sql, &error),
-            source: error
+            format_query_error_detail(&sql),
+            source: err
         )
     })?;
     Ok(())
@@ -1578,12 +1584,13 @@ impl ReusableStagingTable {
             table_name = &self.table_name,
             staging = &self.staging_name,
         );
-        conn.execute_batch(&sql).map_err(|error| {
-            tracing::error!(?error, "error INSERT INTO");
+        conn.execute_batch(&sql).map_err(|err| {
+            tracing::error!(error = %err, "error INSERT INTO");
             etl_error!(
                 ErrorKind::DestinationQueryFailed,
                 "DuckLake INSERT SELECT failed",
-                source: error
+                format_query_error_detail(&sql),
+                source: err
             )
         })?;
         Ok(())
@@ -1599,7 +1606,7 @@ impl ReusableStagingTable {
             "DROP TABLE IF EXISTS {staging:?}",
             staging = &self.staging_name
         )) {
-            tracing::error!(?error, "error drop table staging");
+            tracing::error!(error = %error, "error drop table staging");
         }
     }
 
@@ -1608,7 +1615,7 @@ impl ReusableStagingTable {
         if self.created {
             let sql = format!("TRUNCATE TABLE {staging:?};", staging = &self.staging_name);
             conn.execute_batch(&sql).map_err(|error| {
-                tracing::error!(?error, "error clear staging");
+                tracing::error!(error = %error, "error clear staging");
                 etl_error!(
                     ErrorKind::DestinationQueryFailed,
                     "DuckLake staging table clear failed",
@@ -1631,7 +1638,7 @@ impl ReusableStagingTable {
             table_name = &self.table_name,
         ))
         .map_err(|error| {
-            tracing::error!(?error, "error CREATE TEMP TABLE");
+            tracing::error!(error = %error, "error CREATE TEMP TABLE");
 
             etl_error!(
                 ErrorKind::DestinationQueryFailed,
@@ -1648,7 +1655,7 @@ impl ReusableStagingTable {
         match prepared_rows {
             PreparedRows::Appender(all_values) => {
                 let mut appender = conn.appender(&self.staging_name).map_err(|error| {
-                    tracing::error!(?error, "error appender");
+                    tracing::error!(error = %error, "error appender");
                     etl_error!(
                         ErrorKind::DestinationQueryFailed,
                         "DuckLake staging appender creation failed",
@@ -1657,22 +1664,22 @@ impl ReusableStagingTable {
                 })?;
                 for values in all_values {
                     appender.append_row(duckdb::appender_params_from_iter(values)).map_err(
-                        |error| {
-                            tracing::error!(?error, "error append row");
+                        |err| {
+                            tracing::error!(error = %err, "error append row");
                             etl_error!(
                                 ErrorKind::DestinationQueryFailed,
                                 "DuckLake staging append_row failed",
-                                source: error
+                                source: err
                             )
                         },
                     )?;
                 }
-                appender.flush().map_err(|error| {
-                    tracing::error!(?error, "error flush");
+                appender.flush().map_err(|err| {
+                    tracing::error!(error = %err, "error flush");
                     etl_error!(
                         ErrorKind::DestinationQueryFailed,
                         "DuckLake staging appender flush failed",
-                        source: error
+                        source: err
                     )
                 })?;
             }
@@ -1696,7 +1703,7 @@ fn apply_table_batch(
     let batch_started = Instant::now();
 
     conn.execute_batch("BEGIN TRANSACTION").map_err(|error| {
-        tracing::error!(?error, "error transaction");
+        tracing::error!(error = %error, "error transaction");
         etl_error!(
             ErrorKind::DestinationQueryFailed,
             "DuckLake BEGIN TRANSACTION failed",
@@ -1733,7 +1740,7 @@ fn apply_table_batch(
     match result {
         Ok(()) => {
             conn.execute_batch("COMMIT").map_err(|error| {
-                tracing::error!(?error, "error commit");
+                tracing::error!(error = %error, "error commit");
                 reusable_staging_table.cleanup(conn);
                 etl_error!(
                     ErrorKind::DestinationQueryFailed,
@@ -1758,8 +1765,8 @@ fn apply_table_batch(
                 table = %batch.table_name,
                 batch_id = %batch.batch_id,
                 batch_kind = batch.batch_kind.as_str(),
-                first_start_lsn = ?batch.first_start_lsn,
-                last_commit_lsn = ?batch.last_commit_lsn,
+                first_start_lsn = %format_optional_lsn(batch.first_start_lsn),
+                last_commit_lsn = %format_optional_lsn(batch.last_commit_lsn),
                 sub_batch_kind = batch_log_kind(batch),
                 insert_sub_batch_rows = apply_sub_batch_rows(batch),
                 "ducklake batch committed"
@@ -1770,13 +1777,14 @@ fn apply_table_batch(
 
             Ok(())
         }
-        Err(error) => {
+        Err(err) => {
             let rollback = conn.execute_batch("ROLLBACK");
             reusable_staging_table.cleanup(conn);
-            if let Err(rollback) = rollback {
-                tracing::error!(?rollback, "error rollback");
+            if let Err(err) = rollback {
+                tracing::error!(error = %err, "error rollback");
             }
-            Err(error)
+
+            Err(err)
         }
     }
 }
@@ -1785,11 +1793,11 @@ fn apply_table_batch(
 fn apply_truncate_batch_action(conn: &duckdb::Connection, table_name: &str) -> EtlResult<()> {
     let sql = format!(r#"TRUNCATE TABLE {LAKE_CATALOG}."{table_name}";"#);
     conn.execute_batch(&sql).map_err(|error| {
-        tracing::error!(?error, "error TRUNCATE TABLE");
+        tracing::error!(error = %error, "error TRUNCATE TABLE");
         etl_error!(
             ErrorKind::DestinationQueryFailed,
             "DuckLake TRUNCATE TABLE failed",
-            format_query_error_detail(&sql, &error),
+            format_query_error_detail(&sql),
             source: error
         )
     })?;
@@ -1871,10 +1879,11 @@ fn apply_delete_mutation(
         let sql_query =
             format!(r#"DELETE FROM {LAKE_CATALOG}."{table_name}" WHERE {where_clause};"#);
         conn.execute_batch(&sql_query).map_err(|error| {
-            tracing::error!(?error, "error DELETE FROM");
+            tracing::error!(error = %error, "error DELETE FROM");
             etl_error!(
                 ErrorKind::DestinationQueryFailed,
                 "DuckLake DELETE failed",
+                format_query_error_detail(&sql_query),
                 source: error
             )
         })?;
@@ -1897,12 +1906,13 @@ fn apply_update_mutation(
     let set_clause = assignments.join(", ");
     let sql_query =
         format!(r#"UPDATE {LAKE_CATALOG}."{table_name}" SET {set_clause} WHERE {predicate};"#);
-    conn.execute_batch(&sql_query).map_err(|error| {
-        tracing::error!(?error, "error UPDATE");
+    conn.execute_batch(&sql_query).map_err(|err| {
+        tracing::error!(error = %err, "error UPDATE");
         etl_error!(
             ErrorKind::DestinationQueryFailed,
             "DuckLake UPDATE failed",
-            source: error
+            format_query_error_detail(&sql_query),
+            source: err
         )
     })?;
 
@@ -1979,12 +1989,12 @@ fn insert_rows_into_staging_with_sql(
 ) -> EtlResult<()> {
     for chunk in row_literals.chunks(SQL_INSERT_BATCH_SIZE) {
         conn.execute_batch(&format!("INSERT INTO {staging:?} VALUES {};", chunk.join(", ")))
-            .map_err(|error| {
-                tracing::error!(?error, "error insert_rows_into_staging_with_sql");
+            .map_err(|err| {
+                tracing::error!(error = %err, "error insert_rows_into_staging_with_sql");
                 etl_error!(
                     ErrorKind::DestinationQueryFailed,
                     "DuckLake staging row insert failed",
-                    source: error
+                    source: err
                 )
             })?;
     }
@@ -2055,7 +2065,7 @@ fn maybe_fail_after_atomic_batch_commit_for_tests(table_name: &str) -> EtlResult
         *fail_table = None;
         return Err(etl_error!(
             ErrorKind::DestinationQueryFailed,
-            "ducklake test hook injected post-commit failure"
+            "DuckLake test hook injected post-commit failure"
         ));
     }
 
@@ -2071,7 +2081,7 @@ fn maybe_fail_after_copy_batch_commit_for_tests(table_name: &str) -> EtlResult<(
         *fail_table = None;
         return Err(etl_error!(
             ErrorKind::DestinationQueryFailed,
-            "ducklake test hook injected copy post-commit failure"
+            "DuckLake test hook injected copy post-commit failure"
         ));
     }
 

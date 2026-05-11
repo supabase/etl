@@ -248,9 +248,9 @@ impl EventsStream {
         // midnight on 2000-01-01.
         let ts = POSTGRES_EPOCH
             .elapsed()
-            .map_err(|err| {
-                etl_error!(ErrorKind::InvalidState, "Invalid PostgreSQL epoch", err.to_string())
-            })?
+            .map_err(
+                |err| etl_error!(ErrorKind::InvalidState, "Invalid PostgreSQL epoch", source: err),
+            )?
             .as_micros() as i64;
 
         // We will send the `flush_lsn` as `apply_lsn` since in our case, we don't

@@ -141,7 +141,7 @@ fn date_to_date32_days(d: NaiveDate) -> EtlResult<i32> {
     if d < date32_min() || d > date32_max() {
         return Err(etl_error!(
             ErrorKind::ConversionError,
-            "date out of ClickHouse Date32 range",
+            "Date out of ClickHouse Date32 range",
             format!("{d} is outside the supported range {}..={}", date32_min(), date32_max())
         ));
     }

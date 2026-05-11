@@ -68,7 +68,7 @@ impl TenantError {
             | TenantError::PipelinesDb(PipelinesDbError::Database(_))
             | TenantError::Database(_)
             | TenantError::TrustedRootCerts(_)
-            | TenantError::K8sCore(_) => "internal server error".to_owned(),
+            | TenantError::K8sCore(_) => "Internal server error".to_owned(),
             // Every other message is ok, as they do not divulge sensitive information
             e => e.to_string(),
         }
@@ -159,7 +159,7 @@ pub struct ReadTenantsResponse {
     tag = "Tenants"
 )]
 #[post("/tenants")]
-pub async fn create_tenant(
+pub(crate) async fn create_tenant(
     pool: Data<PgPool>,
     tenant: Json<CreateTenantRequest>,
     root_span: RootSpan,
@@ -190,7 +190,7 @@ pub async fn create_tenant(
     tag = "Tenants"
 )]
 #[put("/tenants/{tenant_id}")]
-pub async fn create_or_update_tenant(
+pub(crate) async fn create_or_update_tenant(
     pool: Data<PgPool>,
     tenant_id: Path<String>,
     tenant: Json<CreateOrUpdateTenantRequest>,
@@ -221,7 +221,7 @@ pub async fn create_or_update_tenant(
     tag = "Tenants"
 )]
 #[get("/tenants/{tenant_id}")]
-pub async fn read_tenant(
+pub(crate) async fn read_tenant(
     pool: Data<PgPool>,
     tenant_id: Path<String>,
     root_span: RootSpan,
@@ -253,7 +253,7 @@ pub async fn read_tenant(
     tag = "Tenants"
 )]
 #[post("/tenants/{tenant_id}")]
-pub async fn update_tenant(
+pub(crate) async fn update_tenant(
     pool: Data<PgPool>,
     tenant_id: Path<String>,
     tenant: Json<UpdateTenantRequest>,
@@ -286,7 +286,7 @@ pub async fn update_tenant(
     tag = "Tenants"
 )]
 #[delete("/tenants/{tenant_id}")]
-pub async fn delete_tenant(
+pub(crate) async fn delete_tenant(
     pool: Data<PgPool>,
     api_config: Data<ApiConfig>,
     encryption_key: Data<EncryptionKey>,
@@ -368,7 +368,7 @@ pub async fn delete_tenant(
     tag = "Tenants"
 )]
 #[get("/tenants")]
-pub async fn read_all_tenants(pool: Data<PgPool>) -> Result<impl Responder, TenantError> {
+pub(crate) async fn read_all_tenants(pool: Data<PgPool>) -> Result<impl Responder, TenantError> {
     let tenants: Vec<ReadTenantResponse> = data::tenants::read_all_tenants(&**pool)
         .await?
         .drain(..)

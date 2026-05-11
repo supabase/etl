@@ -33,7 +33,7 @@ enum TenantSourceError {
     #[error(transparent)]
     Validation(#[from] ValidationError),
 
-    #[error("{0}")]
+    #[error("Validation failed: {0}")]
     ValidationFailed(String),
 }
 
@@ -47,7 +47,7 @@ impl TenantSourceError {
                 | TenantSourceDbError::Tenants(_),
             )
             | TenantSourceError::Database(_)
-            | TenantSourceError::Validation(_) => "internal server error".to_owned(),
+            | TenantSourceError::Validation(_) => "Internal server error".to_owned(),
             // Every other message is ok, as they do not divulge sensitive information
             e => e.to_string(),
         }
@@ -128,7 +128,7 @@ pub struct CreateTenantSourceResponse {
     tag = "Tenants & Sources"
 )]
 #[post("/tenants-sources")]
-pub async fn create_tenant_and_source(
+pub(crate) async fn create_tenant_and_source(
     pool: Data<PgPool>,
     api_config: Data<ApiConfig>,
     trusted_root_certs_cache: Data<TrustedRootCertsCache>,

@@ -30,7 +30,7 @@ pub enum K8sCoreError {
     #[error("A K8s error occurred: {0}")]
     K8s(#[from] K8sError),
 
-    #[error("invalid destination config")]
+    #[error("Invalid destination config")]
     InvalidConfig(#[from] serde_json::Error),
 
     #[error("Could not load app environment")]
@@ -535,6 +535,7 @@ mod tests {
     fn source_config_with_password() -> StoredSourceConfig {
         StoredSourceConfig {
             host: "localhost".to_owned(),
+            hostaddr: None,
             port: 5432,
             name: "postgres".to_owned(),
             username: "postgres".to_owned(),
@@ -728,6 +729,7 @@ mod tests {
     async fn ducklake_creates_postgres_and_s3_secrets() {
         let source_config = StoredSourceConfig {
             host: "localhost".to_owned(),
+            hostaddr: None,
             port: 5432,
             name: "postgres".to_owned(),
             username: "postgres".to_owned(),
@@ -767,6 +769,7 @@ mod tests {
     async fn ducklake_without_s3_still_creates_postgres_secret() {
         let source_config = StoredSourceConfig {
             host: "localhost".to_owned(),
+            hostaddr: None,
             port: 5432,
             name: "postgres".to_owned(),
             username: "postgres".to_owned(),

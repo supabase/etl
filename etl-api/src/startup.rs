@@ -1,6 +1,6 @@
 use std::{net::TcpListener, sync::Arc};
 
-use actix_web::{App, HttpServer, dev::Server, web};
+use actix_web::{App, HttpServer, dev::Server, middleware, web};
 use actix_web_httpauth::middleware::HttpAuthentication;
 use actix_web_metrics::ActixWebMetricsBuilder;
 use aws_lc_rs::aead::{AES_256_GCM, RandomizedNonceKey};
@@ -75,6 +75,7 @@ use crate::{
             CreateTenantSourceRequest, CreateTenantSourceResponse, create_tenant_and_source,
         },
     },
+    sentry_scrubbing::mark_sensitive_sentry_scope,
     span_builder::ApiRootSpanBuilder,
 };
 
@@ -369,55 +370,64 @@ pub fn run(
                     .service(update_tenant)
                     .service(delete_tenant)
                     .service(read_all_tenants)
-                    // sources
-                    .service(create_source)
-                    .service(validate_source)
-                    .service(read_source)
-                    .service(update_source)
-                    .service(delete_source)
-                    .service(read_all_sources)
-                    //destinations
-                    .service(validate_destination)
-                    .service(create_destination)
-                    .service(read_destination)
-                    .service(update_destination)
-                    .service(delete_destination)
-                    .service(read_all_destinations)
-                    // pipelines
-                    .service(validate_pipeline)
-                    .service(create_pipeline)
-                    .service(read_pipeline)
-                    .service(update_pipeline)
-                    .service(delete_pipeline)
-                    .service(read_all_pipelines)
-                    .service(start_pipeline)
-                    .service(stop_pipeline)
-                    .service(stop_all_pipelines)
-                    .service(get_pipeline_status)
-                    .service(get_pipeline_version)
-                    .service(get_pipeline_replication_status)
-                    .service(rollback_tables)
-                    .service(update_pipeline_version)
-                    // tables
-                    .service(read_table_names)
-                    // publications
-                    .service(create_publication)
-                    .service(read_publication)
-                    .service(update_publication)
-                    .service(delete_publication)
-                    .service(read_all_publications)
                     // images
                     .service(create_image)
                     .service(read_image)
                     .service(update_image)
                     .service(delete_image)
                     .service(read_all_images)
-                    // tenants_sources
-                    .service(create_tenant_and_source)
-                    // destinations-pipelines
-                    .service(create_destination_and_pipeline)
-                    .service(update_destination_and_pipeline)
-                    .service(delete_destination_and_pipeline),
+                    // Routes in this scope can carry source/destination credentials,
+                    // connection config, table/publication metadata, replication config, or
+                    // source-derived data. Keep new routes here when their request, response,
+                    // path/query values, validation errors, or Sentry extras may include secrets
+                    // or customer data. Leave only low-sensitivity metadata routes outside.
+                    .service(
+                        web::scope("")
+                            .wrap(middleware::from_fn(mark_sensitive_sentry_scope))
+                            // sources
+                            .service(create_source)
+                            .service(validate_source)
+                            .service(read_source)
+                            .service(update_source)
+                            .service(delete_source)
+                            .service(read_all_sources)
+                            // destinations
+                            .service(validate_destination)
+                            .service(create_destination)
+                            .service(read_destination)
+                            .service(update_destination)
+                            .service(delete_destination)
+                            .service(read_all_destinations)
+                            // pipelines
+                            .service(validate_pipeline)
+                            .service(create_pipeline)
+                            .service(read_pipeline)
+                            .service(update_pipeline)
+                            .service(delete_pipeline)
+                            .service(read_all_pipelines)
+                            .service(start_pipeline)
+                            .service(stop_pipeline)
+                            .service(stop_all_pipelines)
+                            .service(get_pipeline_status)
+                            .service(get_pipeline_version)
+                            .service(get_pipeline_replication_status)
+                            .service(rollback_tables)
+                            .service(update_pipeline_version)
+                            // tables
+                            .service(read_table_names)
+                            // publications
+                            .service(create_publication)
+                            .service(read_publication)
+                            .service(update_publication)
+                            .service(delete_publication)
+                            .service(read_all_publications)
+                            // tenants_sources
+                            .service(create_tenant_and_source)
+                            // destinations-pipelines
+                            .service(create_destination_and_pipeline)
+                            .service(update_destination_and_pipeline)
+                            .service(delete_destination_and_pipeline),
+                    ),
             )
             .app_data(prometheus_handle.clone())
             .app_data(config.clone())

@@ -105,6 +105,66 @@ fn assert_restarted_schema_snapshot_pairs(
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn table_sync_worker_panic_marks_table_errored() {
+    let _scenario = FailScenario::setup();
+    fail::cfg(START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP, "1*panic").unwrap();
+
+    init_test_tracing();
+
+    let mut database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+
+    // Insert initial test data.
+    let rows_inserted = 10;
+    insert_users_data(&mut database, &database_schema.users_schema().name, 1..=rows_inserted).await;
+
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+
+    // We start the pipeline from scratch.
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    // Register notifications for table sync phases.
+    let users_state_notify = store
+        .notify_on_table_state_type(
+            database_schema.users_schema().id,
+            TableReplicationPhaseType::Errored,
+        )
+        .await;
+
+    pipeline.start().await.unwrap();
+
+    users_state_notify.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let table_state = store
+        .get_table_replication_state(database_schema.users_schema().id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        table_state,
+        TableReplicationPhase::Errored { retry_policy: RetryPolicy::ManualRetry, .. }
+    ));
+
+    // Verify no data is there.
+    let table_rows = destination.get_table_rows().await;
+    assert!(table_rows.is_empty());
+
+    // Verify table schemas were correctly stored.
+    let table_schemas = store.get_latest_table_schemas().await;
+    assert!(table_schemas.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn table_copy_fails_after_data_sync_threw_an_error_with_no_retry() {
     let _scenario = FailScenario::setup();
     fail::cfg(START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP, "1*return(no_retry)").unwrap();

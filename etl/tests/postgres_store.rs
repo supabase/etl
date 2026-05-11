@@ -115,7 +115,7 @@ async fn state_store_operations() {
         reason: "Test error".to_owned(),
         solution: Some("Test solution".to_owned()),
         retry_policy: RetryPolicy::ManualRetry,
-        source_err: etl_error!(ErrorKind::Unknown, "test error"),
+        source_err: etl_error!(ErrorKind::Unknown, "Test error"),
     };
     store.update_table_replication_state(table_id, errored_phase.clone()).await.unwrap();
 
@@ -716,7 +716,7 @@ async fn errored_state_with_different_retry_policies() {
         reason: "Fatal error".to_owned(),
         solution: None,
         retry_policy: RetryPolicy::NoRetry,
-        source_err: etl_error!(ErrorKind::Unknown, "test error"),
+        source_err: etl_error!(ErrorKind::Unknown, "Test error"),
     };
     store.update_table_replication_state(table_id, errored_no_retry.clone()).await.unwrap();
 
@@ -729,7 +729,7 @@ async fn errored_state_with_different_retry_policies() {
         reason: "Temporary error".to_owned(),
         solution: Some("Wait and retry".to_owned()),
         retry_policy: RetryPolicy::TimedRetry { next_retry },
-        source_err: etl_error!(ErrorKind::Unknown, "test error"),
+        source_err: etl_error!(ErrorKind::Unknown, "Test error"),
     };
     store.update_table_replication_state(table_id, errored_timed_retry.clone()).await.unwrap();
 
@@ -871,6 +871,7 @@ async fn replication_mask_loads_correctly_from_string_bytea() {
     let database = spawn_source_database().await;
     let pipeline_id = 1;
     let table_id = TableId::new(12345);
+    let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
 
     let pool = connect_to_source_database(&database.config, 1, 1, None)
         .await
@@ -895,8 +896,7 @@ async fn replication_mask_loads_correctly_from_string_bytea() {
     .await
     .unwrap();
 
-    // Load metadata using the store
-    let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
+    // Load metadata using the store.
     store.load_destination_tables_metadata().await.unwrap();
 
     // Verify the loaded replication mask matches what was inserted
@@ -920,6 +920,7 @@ async fn replication_mask_various_patterns() {
 
     let database = spawn_source_database().await;
     let pipeline_id = 1;
+    let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
 
     let pool = connect_to_source_database(&database.config, 1, 1, None)
         .await
@@ -963,8 +964,7 @@ async fn replication_mask_various_patterns() {
         .unwrap();
     }
 
-    // Load all metadata using the store
-    let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
+    // Load all metadata using the store.
     store.load_destination_tables_metadata().await.unwrap();
 
     // Verify each test case
