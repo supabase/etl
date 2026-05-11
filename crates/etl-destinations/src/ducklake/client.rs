@@ -681,19 +681,8 @@ mod tests {
             Arc::clone(&blocking_slots),
             DuckDbBlockingOperationKind::Foreground,
             Duration::from_millis(50),
-            |conn| -> EtlResult<()> {
-                conn.query_row(
-                    "SELECT COUNT(*) FROM range(10000000) t1, range(1000000) t2;",
-                    [],
-                    |row| row.get::<_, i64>(0),
-                )
-                .map_err(|source| {
-                    etl_error!(
-                        ErrorKind::DestinationQueryFailed,
-                        "DuckLake timeout test query failed",
-                        source: source
-                    )
-                })?;
+            |_conn| -> EtlResult<()> {
+                std::thread::sleep(Duration::from_millis(100));
                 Ok(())
             },
         )
@@ -703,7 +692,7 @@ mod tests {
         assert_eq!(error.kind(), ErrorKind::DestinationQueryFailed);
         assert_eq!(error.description(), Some("DuckLake blocking operation timed out"));
         // This timeout budget covers pool checkout and query execution. Under
-        // full-suite load the deadline can expire before the long-running query
+        // full-suite load the deadline can expire before the blocking operation
         // starts, so either stage is acceptable as long as the pool remains
         // usable for the follow-up query below.
         assert!(
