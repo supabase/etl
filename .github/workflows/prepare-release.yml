@@ -66,9 +66,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          NEXT_VERSION=$(grep -m1 '^version = "' etl/Cargo.toml | sed -E 's/version = "([0-9]+\.[0-9]+\.[0-9]+)"/\1/')
+          NEXT_VERSION=$(grep -m1 '^version = "' crates/etl/Cargo.toml | sed -E 's/version = "([0-9]+\.[0-9]+\.[0-9]+)"/\1/')
           if [[ -z "${NEXT_VERSION}" ]]; then
-            echo "Failed to parse bumped version from etl/Cargo.toml" >&2
+            echo "Failed to parse bumped version from crates/etl/Cargo.toml" >&2
             exit 1
           fi
           echo "next=${NEXT_VERSION}" >> "$GITHUB_OUTPUT"

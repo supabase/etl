@@ -90,7 +90,7 @@ jobs:
       - name: Verify MSRV
         run: |
           cargo msrv verify \
-            --manifest-path etl/Cargo.toml \
+            --manifest-path crates/etl/Cargo.toml \
             --output-format minimal \
             -- cargo check --workspace --all-features --locked
 

@@ -52,10 +52,10 @@ setup_database_url() {
 }
 
 run_etl_api_migrations() {
-  local migrations_dir="${ROOT_DIR}/etl-api/migrations"
+  local migrations_dir="${ROOT_DIR}/crates/etl-api/migrations"
 
   if [ ! -d "$migrations_dir" ]; then
-    echo >&2 "Error: 'etl-api/migrations' folder not found at $migrations_dir"
+    echo >&2 "Error: 'crates/etl-api/migrations' folder not found at $migrations_dir"
     exit 1
   fi
 
@@ -66,23 +66,23 @@ run_etl_api_migrations() {
 }
 
 run_etl_migrations() {
-  local source_migrations_dir="${ROOT_DIR}/etl/migrations/source"
-  local store_migrations_dir="${ROOT_DIR}/etl/migrations/postgres_store"
+  local source_migrations_dir="${ROOT_DIR}/crates/etl/migrations/source"
+  local store_migrations_dir="${ROOT_DIR}/crates/etl/migrations/postgres_store"
 
   echo "Running etl migrations..."
 
   if [ ! -d "$source_migrations_dir" ]; then
-    echo >&2 "Error: 'etl/migrations/source' folder not found at $source_migrations_dir"
+    echo >&2 "Error: 'crates/etl/migrations/source' folder not found at $source_migrations_dir"
     exit 1
   fi
 
   if [ ! -d "$store_migrations_dir" ]; then
-    echo >&2 "Error: 'etl/migrations/postgres_store' folder not found at $store_migrations_dir"
+    echo >&2 "Error: 'crates/etl/migrations/postgres_store' folder not found at $store_migrations_dir"
     exit 1
   fi
 
   # Create the etl schema if it doesn't exist.
-  # This matches the behavior in etl/src/migrations.rs.
+  # This matches the behavior in crates/etl/src/migrations.rs.
   psql "${DATABASE_URL}" -v ON_ERROR_STOP=1 -c "create schema if not exists etl;" > /dev/null
 
   # Create a temporary sqlx-cli compatible database URL that sets the search_path.

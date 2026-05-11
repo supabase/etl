@@ -1,0 +1,1445 @@
+use std::ops::DerefMut;
+
+use actix_web::{
+    HttpRequest, HttpResponse, Responder, ResponseError, delete, get,
+    http::{StatusCode, header::ContentType},
+    post,
+    web::{Data, Json, Path},
+};
+use etl::state::table::{RetryPolicy, TableReplicationPhase};
+use etl_postgres::{
+    replication::{TableLookupError, get_table_names_from_table_ids, health, lag, state},
+    types::TableId,
+};
+use serde::{Deserialize, Serialize};
+use sqlx::PgPool;
+use thiserror::Error;
+use utoipa::ToSchema;
+
+use crate::{
+    config::ApiConfig,
+    configs::{encryption::EncryptionKey, pipeline::FullApiPipelineConfig},
+    data,
+    data::{
+        connect_to_source_database_from_api,
+        destinations::{DestinationsDbError, destination_exists},
+        images::ImagesDbError,
+        pipelines::{
+            MAX_PIPELINES_PER_TENANT, PipelinesDbError, delete_pipeline_api_and_source_state,
+            delete_pipeline_api_state, delete_pipeline_replication_slots, read_pipeline_components,
+            read_pipeline_for_deletion,
+        },
+        replicators::ReplicatorsDbError,
+        sources::SourcesDbError,
+    },
+    feature_flags::{FeatureFlagsClient, get_max_pipelines_per_tenant},
+    k8s::{
+        K8sClient, K8sError, PodStatus, TrustedRootCertsCache, TrustedRootCertsError,
+        core::{
+            create_k8s_object_prefix, create_or_update_pipeline_resources_in_k8s,
+            delete_pipeline_resources_in_k8s, is_replicator_active, is_replicator_pod_stopped,
+        },
+    },
+    routes::{ErrorMessage, TenantIdError, extract_tenant_id, utils as route_utils},
+    utils::parse_docker_image_tag,
+    validation,
+    validation::{FailureType, ValidationContext, ValidationError, ValidationFailure},
+};
+
+#[derive(Debug, Error)]
+pub enum PipelineError {
+    #[error("The pipeline with id {0} was not found")]
+    PipelineNotFound(i64),
+
+    #[error("The pipeline with id {0} is active; stop it before deleting it")]
+    ActivePipeline(i64),
+
+    #[error("The source with id {0} was not found")]
+    SourceNotFound(i64),
+
+    #[error("The destination with id {0} was not found")]
+    DestinationNotFound(i64),
+
+    #[error("The replicator with pipeline id {0} was not found")]
+    ReplicatorNotFound(i64),
+
+    #[error("The image with replicator id {0} was not found")]
+    ImageNotFound(i64),
+
+    #[error("No default image was found")]
+    NoDefaultImageFound,
+
+    #[error(transparent)]
+    TenantId(#[from] TenantIdError),
+
+    #[error("The table replication state is not present")]
+    MissingTableReplicationState,
+
+    #[error("The table replication state is not valid: {0}")]
+    InvalidTableReplicationState(serde_json::Error),
+
+    #[error("Table cannot be rolled back: {0}")]
+    NotRollbackable(String),
+
+    #[error("Replication has not started yet for this pipeline")]
+    EtlStateNotInitialized,
+
+    #[error("Invalid destination config")]
+    InvalidConfig(#[from] serde_json::Error),
+
+    #[error("A K8s error occurred: {0}")]
+    K8s(#[from] K8sError),
+
+    #[error(transparent)]
+    SourcesDb(#[from] SourcesDbError),
+
+    #[error(transparent)]
+    DestinationsDb(#[from] DestinationsDbError),
+
+    #[error(transparent)]
+    PipelinesDb(PipelinesDbError),
+
+    #[error(transparent)]
+    ReplicatorsDb(#[from] ReplicatorsDbError),
+
+    #[error(transparent)]
+    ImagesDb(#[from] ImagesDbError),
+
+    #[error("A pipeline already exists for this source and destination")]
+    DuplicatePipeline,
+
+    #[error("The selected pipeline version is not available")]
+    ImageIdNotDefault(i64),
+
+    #[error("This project has reached its maximum of {limit} pipelines")]
+    PipelineLimitReached { limit: i64 },
+
+    #[error("There was an error while looking up table information in the source database: {0}")]
+    TableLookup(#[from] TableLookupError),
+
+    #[error("Database error: {0}")]
+    Database(#[from] sqlx::Error),
+
+    #[error("Could not load app environment")]
+    MissingEnvironment,
+
+    #[error(transparent)]
+    TrustedRootCerts(#[from] TrustedRootCertsError),
+
+    #[error(transparent)]
+    Validation(#[from] ValidationError),
+
+    #[error("Invalid pipeline request: {0}")]
+    InvalidPipelineRequest(String),
+}
+
+impl From<PipelinesDbError> for PipelineError {
+    fn from(e: PipelinesDbError) -> Self {
+        match e {
+            PipelinesDbError::Database(err)
+                if data::utils::is_unique_constraint_violation_error(&err) =>
+            {
+                Self::DuplicatePipeline
+            }
+            e => Self::PipelinesDb(e),
+        }
+    }
+}
+
+impl From<crate::k8s::core::K8sCoreError> for PipelineError {
+    fn from(error: crate::k8s::core::K8sCoreError) -> Self {
+        match error {
+            crate::k8s::core::K8sCoreError::K8s(error) => Self::K8s(error),
+            crate::k8s::core::K8sCoreError::InvalidConfig(error) => Self::InvalidConfig(error),
+            crate::k8s::core::K8sCoreError::MissingEnvironment => Self::MissingEnvironment,
+        }
+    }
+}
+
+impl PipelineError {
+    fn to_message(&self) -> String {
+        match self {
+            // Do not expose internal details in error messages. These all map to 500 status
+            // codes and the underlying causes (database, k8s, replicator/image plumbing,
+            // missing config) are not actionable by the user.
+            PipelineError::SourcesDb(SourcesDbError::Database(_))
+            | PipelineError::DestinationsDb(DestinationsDbError::Database(_))
+            | PipelineError::PipelinesDb(PipelinesDbError::Database(_))
+            | PipelineError::ReplicatorsDb(ReplicatorsDbError::Database(_))
+            | PipelineError::ImagesDb(ImagesDbError::Database(_))
+            | PipelineError::TableLookup(_)
+            | PipelineError::Database(_)
+            | PipelineError::ReplicatorNotFound(_)
+            | PipelineError::ImageNotFound(_)
+            | PipelineError::NoDefaultImageFound
+            | PipelineError::InvalidConfig(_)
+            | PipelineError::K8s(_)
+            | PipelineError::MissingEnvironment
+            | PipelineError::MissingTableReplicationState
+            | PipelineError::InvalidTableReplicationState(_)
+            | PipelineError::Validation(
+                ValidationError::TrustedRootCerts(_) | ValidationError::Environment(_),
+            ) => "Internal server error".to_owned(),
+            PipelineError::Validation(error) => {
+                route_utils::validation_error_message(error).to_owned()
+            }
+            // Every other message is ok, as they do not divulge sensitive information.
+            e => e.to_string(),
+        }
+    }
+}
+impl ResponseError for PipelineError {
+    fn status_code(&self) -> StatusCode {
+        match self {
+            PipelineError::InvalidConfig(_)
+            | PipelineError::ReplicatorNotFound(_)
+            | PipelineError::ImageNotFound(_)
+            | PipelineError::NoDefaultImageFound
+            | PipelineError::SourcesDb(_)
+            | PipelineError::DestinationsDb(_)
+            | PipelineError::PipelinesDb(_)
+            | PipelineError::ReplicatorsDb(_)
+            | PipelineError::ImagesDb(_)
+            | PipelineError::K8s(_)
+            | PipelineError::TrustedRootCerts(_)
+            | PipelineError::Database(_)
+            | PipelineError::TableLookup(_)
+            | PipelineError::InvalidTableReplicationState(_)
+            | PipelineError::MissingEnvironment
+            | PipelineError::MissingTableReplicationState => StatusCode::INTERNAL_SERVER_ERROR,
+            PipelineError::Validation(error) => route_utils::validation_error_status_code(error),
+            PipelineError::ActivePipeline(_) | PipelineError::DuplicatePipeline => {
+                StatusCode::CONFLICT
+            }
+            PipelineError::PipelineNotFound(_)
+            | PipelineError::EtlStateNotInitialized
+            | PipelineError::ImageIdNotDefault(_)
+            | PipelineError::DestinationNotFound(_)
+            | PipelineError::SourceNotFound(_) => StatusCode::NOT_FOUND,
+            PipelineError::TenantId(_) | PipelineError::NotRollbackable(_) => {
+                StatusCode::BAD_REQUEST
+            }
+            PipelineError::InvalidPipelineRequest(_) => StatusCode::BAD_REQUEST,
+            PipelineError::PipelineLimitReached { .. } => StatusCode::UNPROCESSABLE_ENTITY,
+        }
+    }
+
+    fn error_response(&self) -> HttpResponse {
+        let error_message = ErrorMessage { message: self.to_message() };
+        let body =
+            serde_json::to_string(&error_message).expect("failed to serialize error message");
+        HttpResponse::build(self.status_code()).insert_header(ContentType::json()).body(body)
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct CreatePipelineRequest {
+    #[schema(example = 1, required = true)]
+    pub source_id: i64,
+    #[schema(example = 1, required = true)]
+    pub destination_id: i64,
+    #[schema(required = true)]
+    pub config: FullApiPipelineConfig,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct CreatePipelineResponse {
+    #[schema(example = 1)]
+    pub id: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct UpdatePipelineRequest {
+    #[schema(example = 1, required = true)]
+    pub source_id: i64,
+    #[schema(example = 1, required = true)]
+    pub destination_id: i64,
+    #[schema(required = true)]
+    pub config: FullApiPipelineConfig,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ReadPipelineResponse {
+    #[schema(example = 1)]
+    pub id: i64,
+    #[schema(example = "abczjjlmfsijwrlnwatw")]
+    pub tenant_id: String,
+    #[schema(example = 1)]
+    pub source_id: i64,
+    #[schema(example = "My Postgres Source")]
+    pub source_name: String,
+    #[schema(example = 1)]
+    pub destination_id: i64,
+    #[schema(example = "My BigQuery Destination")]
+    pub destination_name: String,
+    #[schema(example = 1)]
+    pub replicator_id: i64,
+    pub config: FullApiPipelineConfig,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ReadPipelinesResponse {
+    pub pipelines: Vec<ReadPipelineResponse>,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct UpdatePipelineVersionRequest {
+    #[schema(example = 1, required = true)]
+    pub version_id: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct GetPipelineStatusResponse {
+    #[schema(example = 1)]
+    pub pipeline_id: i64,
+    pub status: PipelineStatus,
+}
+
+/// UI-friendly representation of table replication state
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+#[serde(tag = "name")]
+pub enum SimpleTableReplicationState {
+    Queued,
+    CopyingTable,
+    CopiedTable,
+    FollowingWal,
+    Error {
+        reason: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        solution: Option<String>,
+        retry_policy: SimpleRetryPolicy,
+    },
+}
+
+/// Simplified retry policy for UI display
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+#[serde(tag = "policy")]
+pub enum SimpleRetryPolicy {
+    NoRetry,
+    ManualRetry,
+    TimedRetry {
+        #[schema(example = "2023-12-25T12:00:00Z")]
+        next_retry: String,
+    },
+}
+
+impl From<TableReplicationPhase> for SimpleTableReplicationState {
+    fn from(phase: TableReplicationPhase) -> Self {
+        match phase {
+            TableReplicationPhase::Init => SimpleTableReplicationState::Queued,
+            TableReplicationPhase::DataSync => SimpleTableReplicationState::CopyingTable,
+            TableReplicationPhase::FinishedCopy => SimpleTableReplicationState::CopiedTable,
+            TableReplicationPhase::SyncDone { .. }
+            | TableReplicationPhase::SyncWait { .. }
+            | TableReplicationPhase::Catchup { .. }
+            | TableReplicationPhase::Ready => SimpleTableReplicationState::FollowingWal,
+            TableReplicationPhase::Errored { reason, solution, retry_policy, .. } => {
+                let simple_retry_policy = match retry_policy {
+                    RetryPolicy::NoRetry => SimpleRetryPolicy::NoRetry,
+                    RetryPolicy::ManualRetry => SimpleRetryPolicy::ManualRetry,
+                    RetryPolicy::TimedRetry { next_retry } => {
+                        SimpleRetryPolicy::TimedRetry { next_retry: next_retry.to_rfc3339() }
+                    }
+                };
+
+                SimpleTableReplicationState::Error {
+                    reason,
+                    solution,
+                    retry_policy: simple_retry_policy,
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct TableReplicationStatus {
+    #[schema(example = 1)]
+    pub table_id: u32,
+    #[schema(example = "public.users")]
+    pub table_name: String,
+    pub state: SimpleTableReplicationState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = true)]
+    pub table_sync_lag: Option<SlotLagMetricsResponse>,
+}
+
+/// Lag metrics reported for replication slots.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct SlotLagMetricsResponse {
+    /// Bytes between the current WAL location and the slot restart LSN.
+    #[schema(example = 1024)]
+    pub restart_lsn_bytes: i64,
+    /// Bytes between the current WAL location and the confirmed flush LSN.
+    #[schema(example = 2048)]
+    pub confirmed_flush_lsn_bytes: i64,
+    /// How many bytes of WAL are still safe to build up before the limit of the
+    /// slot is reached.
+    #[schema(example = 8192)]
+    pub safe_wal_size_bytes: i64,
+    /// Write lag expressed in milliseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = 1500, nullable = true)]
+    pub write_lag: Option<i64>,
+    /// Flush lag expressed in milliseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = 1200, nullable = true)]
+    pub flush_lag: Option<i64>,
+}
+
+impl From<lag::SlotLagMetrics> for SlotLagMetricsResponse {
+    fn from(metrics: lag::SlotLagMetrics) -> Self {
+        Self {
+            restart_lsn_bytes: metrics.restart_lsn_bytes,
+            confirmed_flush_lsn_bytes: metrics.confirmed_flush_lsn_bytes,
+            safe_wal_size_bytes: metrics.safe_wal_size_bytes,
+            write_lag: metrics.write_lag_ms,
+            flush_lag: metrics.flush_lag_ms,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct GetPipelineReplicationStatusResponse {
+    #[schema(example = 1)]
+    pub pipeline_id: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = true)]
+    pub apply_lag: Option<SlotLagMetricsResponse>,
+    pub table_statuses: Vec<TableReplicationStatus>,
+}
+
+#[derive(Debug, Copy, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RollbackType {
+    Individual,
+    Full,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+#[serde(tag = "type")]
+pub enum RollbackTablesTarget {
+    SingleTable {
+        #[schema(example = 1)]
+        table_id: u32,
+    },
+    AllErroredTables,
+    AllTables,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct RollbackTablesRequest {
+    pub target: RollbackTablesTarget,
+    pub rollback_type: RollbackType,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct RolledBackTable {
+    #[schema(example = 1)]
+    pub table_id: u32,
+    pub new_state: SimpleTableReplicationState,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct RollbackTablesResponse {
+    #[schema(example = 1)]
+    pub pipeline_id: i64,
+    pub tables: Vec<RolledBackTable>,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+#[serde(tag = "name")]
+pub enum PipelineStatus {
+    Stopped,
+    Starting,
+    Started,
+    Stopping,
+    Failed,
+    Unknown,
+}
+
+impl From<PodStatus> for PipelineStatus {
+    fn from(value: PodStatus) -> Self {
+        match value {
+            PodStatus::Stopped => PipelineStatus::Stopped,
+            PodStatus::Starting => PipelineStatus::Starting,
+            PodStatus::Started => PipelineStatus::Started,
+            PodStatus::Stopping => PipelineStatus::Stopping,
+            PodStatus::Failed => PipelineStatus::Failed,
+            PodStatus::Unknown => PipelineStatus::Unknown,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct PipelineVersion {
+    #[schema(example = 1)]
+    pub id: i64,
+    #[schema(example = "1.2.3")]
+    pub name: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct GetPipelineVersionResponse {
+    #[schema(example = 1)]
+    pub pipeline_id: i64,
+    pub version: PipelineVersion,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new_version: Option<PipelineVersion>,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ValidatePipelineRequest {
+    #[schema(required = true, example = 1)]
+    pub source_id: i64,
+    #[schema(required = true)]
+    pub config: FullApiPipelineConfig,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ValidationFailureResponse {
+    #[schema(example = "Publication Not Found")]
+    pub name: String,
+    #[schema(example = "Publication 'my_publication' does not exist in the source database")]
+    pub reason: String,
+    #[schema(example = "critical")]
+    pub failure_type: FailureType,
+}
+
+fn validate_pipeline_request(config: &FullApiPipelineConfig) -> Result<(), PipelineError> {
+    config.validate().map_err(PipelineError::InvalidPipelineRequest)
+}
+
+impl From<ValidationFailure> for ValidationFailureResponse {
+    fn from(failure: ValidationFailure) -> Self {
+        Self { name: failure.name, reason: failure.reason, failure_type: failure.failure_type }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ValidatePipelineResponse {
+    pub validation_failures: Vec<ValidationFailureResponse>,
+}
+
+#[utoipa::path(
+    summary = "Create a pipeline",
+    description = "Creates a pipeline linking a source to a destination.",
+    request_body = CreatePipelineRequest,
+    params(
+        ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
+    ),
+    responses(
+        (status = 200, description = "Pipeline created successfully", body = CreatePipelineResponse),
+        (status = 400, description = "Bad request", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage),
+    ),
+    tag = "Pipelines"
+)]
+#[post("/pipelines")]
+pub(crate) async fn create_pipeline(
+    req: HttpRequest,
+    pool: Data<PgPool>,
+    encryption_key: Data<EncryptionKey>,
+    pipeline: Json<CreatePipelineRequest>,
+    feature_flags_client: Option<Data<FeatureFlagsClient>>,
+) -> Result<impl Responder, PipelineError> {
+    let tenant_id = extract_tenant_id(&req)?;
+    let pipeline = pipeline.into_inner();
+    validate_pipeline_request(&pipeline.config)?;
+
+    let mut txn = pool.begin().await?;
+
+    // Verify source exists
+    data::sources::read_source(txn.deref_mut(), tenant_id, pipeline.source_id, &encryption_key)
+        .await?
+        .ok_or(PipelineError::SourceNotFound(pipeline.source_id))?;
+
+    if !destination_exists(txn.deref_mut(), tenant_id, pipeline.destination_id).await? {
+        return Err(PipelineError::DestinationNotFound(pipeline.destination_id));
+    }
+
+    let max_pipelines = get_max_pipelines_per_tenant(
+        feature_flags_client.as_ref(),
+        tenant_id,
+        MAX_PIPELINES_PER_TENANT,
+    )
+    .await;
+    let pipeline_count =
+        data::pipelines::count_pipelines_for_tenant(txn.deref_mut(), tenant_id).await?;
+    if pipeline_count >= max_pipelines {
+        return Err(PipelineError::PipelineLimitReached { limit: max_pipelines });
+    }
+
+    let image = data::images::read_default_image(txn.deref_mut())
+        .await?
+        .ok_or(PipelineError::NoDefaultImageFound)?;
+
+    let id = data::pipelines::create_pipeline(
+        &mut txn,
+        tenant_id,
+        pipeline.source_id,
+        pipeline.destination_id,
+        image.id,
+        pipeline.config,
+    )
+    .await?;
+    txn.commit().await?;
+
+    let response = CreatePipelineResponse { id };
+
+    Ok(Json(response))
+}
+
+#[utoipa::path(
+    summary = "Retrieve a pipeline",
+    description = "Returns a pipeline by ID for the given tenant.",
+    params(
+        ("pipeline_id" = i64, Path, description = "Unique ID of the pipeline"),
+        ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
+    ),
+    responses(
+        (status = 200, description = "Pipeline retrieved successfully", body = ReadPipelineResponse),
+        (status = 404, description = "Pipeline not found", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage)
+    ),
+    tag = "Pipelines"
+)]
+#[get("/pipelines/{pipeline_id}")]
+pub(crate) async fn read_pipeline(
+    req: HttpRequest,
+    pool: Data<PgPool>,
+    pipeline_id: Path<i64>,
+) -> Result<impl Responder, PipelineError> {
+    let tenant_id = extract_tenant_id(&req)?;
+    let pipeline_id = pipeline_id.into_inner();
+
+    let response = data::pipelines::read_pipeline(&**pool, tenant_id, pipeline_id)
+        .await?
+        .map(|pipeline| {
+            Ok::<ReadPipelineResponse, serde_json::Error>(ReadPipelineResponse {
+                id: pipeline.id,
+                tenant_id: pipeline.tenant_id,
+                source_id: pipeline.source_id,
+                source_name: pipeline.source_name,
+                destination_id: pipeline.destination_id,
+                destination_name: pipeline.destination_name,
+                replicator_id: pipeline.replicator_id,
+                config: pipeline.config.into(),
+            })
+        })
+        .transpose()?
+        .ok_or(PipelineError::PipelineNotFound(pipeline_id))?;
+
+    Ok(Json(response))
+}
+
+#[utoipa::path(
+    summary = "Update a pipeline",
+    description = "Updates a pipeline's source, destination, or configuration.",
+    request_body = UpdatePipelineRequest,
+    params(
+        ("pipeline_id" = i64, Path, description = "Unique ID of the pipeline"),
+        ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
+    ),
+    responses(
+        (status = 200, description = "Pipeline updated successfully"),
+        (status = 404, description = "Pipeline not found", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage)
+    ),
+    tag = "Pipelines"
+)]
+// Forcing {pipeline_id} to be all digits by appending :\\d+
+// to avoid this route clashing with /pipelines/stop
+#[post("/pipelines/{pipeline_id:\\d+}")]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn update_pipeline(
+    req: HttpRequest,
+    pool: Data<PgPool>,
+    trusted_root_certs_cache: Data<TrustedRootCertsCache>,
+    api_config: Data<ApiConfig>,
+    k8s_client: Data<dyn K8sClient>,
+    pipeline_id: Path<i64>,
+    pipeline: Json<UpdatePipelineRequest>,
+    encryption_key: Data<EncryptionKey>,
+) -> Result<impl Responder, PipelineError> {
+    let tenant_id = extract_tenant_id(&req)?;
+    let pipeline_id = pipeline_id.into_inner();
+    let pipeline = pipeline.into_inner();
+    let k8s_client = k8s_client.into_inner();
+    validate_pipeline_request(&pipeline.config)?;
+
+    let mut txn = pool.begin().await?;
+
+    // Verify source exists
+    data::sources::read_source(txn.deref_mut(), tenant_id, pipeline.source_id, &encryption_key)
+        .await?
+        .ok_or(PipelineError::SourceNotFound(pipeline.source_id))?;
+
+    if !destination_exists(txn.deref_mut(), tenant_id, pipeline.destination_id).await? {
+        return Err(PipelineError::DestinationNotFound(pipeline.destination_id));
+    }
+
+    data::pipelines::update_pipeline(
+        txn.deref_mut(),
+        tenant_id,
+        pipeline_id,
+        pipeline.source_id,
+        pipeline.destination_id,
+        pipeline.config,
+    )
+    .await?
+    .ok_or(PipelineError::PipelineNotFound(pipeline_id))?;
+
+    let (pipeline, replicator, image, source, destination) =
+        read_pipeline_components(&mut txn, tenant_id, pipeline_id, &encryption_key).await?;
+
+    if is_replicator_pod_stopped(k8s_client.as_ref(), tenant_id, replicator.id).await? {
+        txn.commit().await?;
+
+        return Ok(HttpResponse::Ok().finish());
+    }
+
+    let tls_config = trusted_root_certs_cache.get_tls_config(api_config.source.tls_enabled).await?;
+    create_or_update_pipeline_resources_in_k8s(
+        k8s_client.as_ref(),
+        tenant_id,
+        pipeline,
+        replicator,
+        image,
+        source,
+        destination,
+        api_config.supabase_api_url.as_deref(),
+        tls_config,
+    )
+    .await?;
+
+    txn.commit().await?;
+
+    Ok(HttpResponse::Ok().finish())
+}
+
+#[utoipa::path(
+    summary = "Delete a pipeline",
+    description = "Deletes a pipeline and its associated resources.",
+    params(
+        ("pipeline_id" = i64, Path, description = "Unique ID of the pipeline"),
+        ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
+    ),
+    responses(
+        (status = 200, description = "Pipeline deleted successfully"),
+        (status = 409, description = "Pipeline is active", body = ErrorMessage),
+        (status = 404, description = "Pipeline not found", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage)
+    ),
+    tag = "Pipelines"
+)]
+#[delete("/pipelines/{pipeline_id}")]
+pub(crate) async fn delete_pipeline(
+    req: HttpRequest,
+    pool: Data<PgPool>,
+    api_config: Data<ApiConfig>,
+    encryption_key: Data<EncryptionKey>,
+    k8s_client: Data<dyn K8sClient>,
+    trusted_root_certs_cache: Data<TrustedRootCertsCache>,
+    pipeline_id: Path<i64>,
+) -> Result<impl Responder, PipelineError> {
+    let tenant_id = extract_tenant_id(&req)?;
+    let pipeline_id = pipeline_id.into_inner();
+
+    let pipeline = read_pipeline_for_deletion(&**pool, tenant_id, pipeline_id)
+        .await?
+        .ok_or(PipelineError::PipelineNotFound(pipeline_id))?;
+    if is_replicator_active(k8s_client.as_ref(), tenant_id, pipeline.replicator_id).await? {
+        return Err(PipelineError::ActivePipeline(pipeline.id));
+    }
+
+    let tls_config = trusted_root_certs_cache.get_tls_config(api_config.source.tls_enabled).await?;
+    let source = data::sources::read_source_connection(
+        &**pool,
+        tenant_id,
+        pipeline.source_id,
+        &encryption_key,
+    )
+    .await?
+    .ok_or(PipelineError::SourceNotFound(pipeline.source_id))?;
+
+    let source_pool = match connect_to_source_database_from_api(
+        &source.config.into_connection_config(tls_config),
+    )
+    .await
+    {
+        Ok(source_pool) => Some(source_pool),
+        Err(error) => {
+            tracing::warn!(
+                tenant_id = %tenant_id,
+                pipeline_id = pipeline.id,
+                source_id = pipeline.source_id,
+                error = %error,
+                "failed to connect to source database during pipeline deletion, skipping source cleanup",
+            );
+
+            None
+        }
+    };
+    let mut api_txn = pool.begin().await?;
+    if let Some(source_pool) = source_pool {
+        let mut source_txn = source_pool.begin().await?;
+        delete_pipeline_api_and_source_state(
+            api_txn.deref_mut(),
+            source_txn.deref_mut(),
+            tenant_id,
+            &pipeline,
+        )
+        .await?;
+        api_txn.commit().await?;
+        source_txn.commit().await?;
+        delete_pipeline_replication_slots(&source_pool, pipeline.id).await?;
+    } else {
+        delete_pipeline_api_state(api_txn.deref_mut(), tenant_id, &pipeline).await?;
+        api_txn.commit().await?;
+    }
+
+    Ok(HttpResponse::Ok().finish())
+}
+
+#[utoipa::path(
+    summary = "List pipelines",
+    description = "Returns all pipelines for the specified tenant.",
+    params(
+        ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
+    ),
+    responses(
+        (status = 200, description = "Pipelines listed successfully", body = ReadPipelinesResponse),
+        (status = 500, description = "Internal server error", body = ErrorMessage)
+    ),
+    tag = "Pipelines"
+)]
+#[get("/pipelines")]
+pub(crate) async fn read_all_pipelines(
+    req: HttpRequest,
+    pool: Data<PgPool>,
+) -> Result<impl Responder, PipelineError> {
+    let tenant_id = extract_tenant_id(&req)?;
+
+    let mut pipelines = vec![];
+    for pipeline in data::pipelines::read_all_pipelines(&**pool, tenant_id).await? {
+        let pipeline = ReadPipelineResponse {
+            id: pipeline.id,
+            tenant_id: pipeline.tenant_id,
+            source_id: pipeline.source_id,
+            source_name: pipeline.source_name,
+            destination_id: pipeline.destination_id,
+            destination_name: pipeline.destination_name,
+            replicator_id: pipeline.replicator_id,
+            config: pipeline.config.into(),
+        };
+        pipelines.push(pipeline);
+    }
+
+    let response = ReadPipelinesResponse { pipelines };
+
+    Ok(Json(response))
+}
+
+#[utoipa::path(
+    summary = "Start a pipeline",
+    description = "Starts the pipeline by deploying its replicator.",
+    params(
+        ("pipeline_id" = i64, Path, description = "Unique ID of the pipeline"),
+        ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
+    ),
+    responses(
+        (status = 200, description = "Pipeline started successfully"),
+        (status = 500, description = "Internal server error", body = ErrorMessage)
+    ),
+    tag = "Pipelines"
+)]
+#[post("/pipelines/{pipeline_id}/start")]
+pub(crate) async fn start_pipeline(
+    req: HttpRequest,
+    pool: Data<PgPool>,
+    encryption_key: Data<EncryptionKey>,
+    k8s_client: Data<dyn K8sClient>,
+    trusted_root_certs_cache: Data<TrustedRootCertsCache>,
+    api_config: Data<ApiConfig>,
+    pipeline_id: Path<i64>,
+) -> Result<impl Responder, PipelineError> {
+    let tenant_id = extract_tenant_id(&req)?;
+    let pipeline_id = pipeline_id.into_inner();
+    let k8s_client = k8s_client.into_inner();
+
+    let mut txn = pool.begin().await?;
+    let (pipeline, replicator, image, source, destination) =
+        read_pipeline_components(&mut txn, tenant_id, pipeline_id, &encryption_key).await?;
+
+    let tls_config = trusted_root_certs_cache.get_tls_config(api_config.source.tls_enabled).await?;
+
+    // We update the pipeline in K8s.
+    create_or_update_pipeline_resources_in_k8s(
+        k8s_client.as_ref(),
+        tenant_id,
+        pipeline,
+        replicator,
+        image,
+        source,
+        destination,
+        api_config.supabase_api_url.as_deref(),
+        tls_config,
+    )
+    .await?;
+    txn.commit().await?;
+
+    Ok(HttpResponse::Ok().finish())
+}
+
+#[utoipa::path(
+    summary = "Stop a pipeline",
+    description = "Stops the pipeline by terminating its replicator.",
+    params(
+        ("pipeline_id" = i64, Path, description = "Unique ID of the pipeline"),
+        ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
+    ),
+    responses(
+        (status = 200, description = "Pipeline stopped successfully"),
+        (status = 500, description = "Internal server error", body = ErrorMessage)
+    ),
+    tag = "Pipelines"
+)]
+#[post("/pipelines/{pipeline_id}/stop")]
+pub(crate) async fn stop_pipeline(
+    req: HttpRequest,
+    pool: Data<PgPool>,
+    k8s_client: Data<dyn K8sClient>,
+    pipeline_id: Path<i64>,
+) -> Result<impl Responder, PipelineError> {
+    let tenant_id = extract_tenant_id(&req)?;
+    let pipeline_id = pipeline_id.into_inner();
+    let k8s_client = k8s_client.into_inner();
+
+    let mut txn = pool.begin().await?;
+    let replicator =
+        data::replicators::read_replicator_by_pipeline_id(txn.deref_mut(), tenant_id, pipeline_id)
+            .await?
+            .ok_or(PipelineError::ReplicatorNotFound(pipeline_id))?;
+
+    delete_pipeline_resources_in_k8s(k8s_client.as_ref(), tenant_id, replicator).await?;
+    txn.commit().await?;
+
+    Ok(HttpResponse::Ok().finish())
+}
+
+#[utoipa::path(
+    summary = "Stop all pipelines",
+    description = "Stops all pipelines for the specified tenant.",
+    params(
+        ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
+    ),
+    responses(
+        (status = 200, description = "All pipelines stopped successfully"),
+        (status = 500, description = "Internal server error", body = ErrorMessage)
+    ),
+    tag = "Pipelines"
+)]
+#[post("/pipelines/stop")]
+pub(crate) async fn stop_all_pipelines(
+    req: HttpRequest,
+    pool: Data<PgPool>,
+    k8s_client: Data<dyn K8sClient>,
+) -> Result<impl Responder, PipelineError> {
+    let tenant_id = extract_tenant_id(&req)?;
+    let k8s_client = k8s_client.into_inner();
+
+    let mut txn = pool.begin().await?;
+    let replicators = data::replicators::read_replicators(txn.deref_mut(), tenant_id).await?;
+    for replicator in replicators {
+        delete_pipeline_resources_in_k8s(k8s_client.as_ref(), tenant_id, replicator).await?;
+    }
+    txn.commit().await?;
+
+    Ok(HttpResponse::Ok().finish())
+}
+
+#[utoipa::path(
+    summary = "Get pipeline version",
+    description = "Returns the current version for the pipeline and an optional new default version.",
+    params(
+        ("pipeline_id" = i64, Path, description = "Unique ID of the pipeline"),
+        ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
+    ),
+    responses(
+        (status = 200, description = "Pipeline version retrieved successfully", body = GetPipelineVersionResponse),
+        (status = 404, description = "Pipeline not found", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage)
+    ),
+    tag = "Pipelines"
+)]
+#[get("/pipelines/{pipeline_id}/version")]
+pub(crate) async fn get_pipeline_version(
+    req: HttpRequest,
+    pool: Data<PgPool>,
+    pipeline_id: Path<i64>,
+) -> Result<impl Responder, PipelineError> {
+    let tenant_id = extract_tenant_id(&req)?;
+    let pipeline_id = pipeline_id.into_inner();
+
+    let mut txn = pool.begin().await?;
+
+    let replicator =
+        data::replicators::read_replicator_by_pipeline_id(txn.deref_mut(), tenant_id, pipeline_id)
+            .await?
+            .ok_or(PipelineError::ReplicatorNotFound(pipeline_id))?;
+
+    let current_image = data::images::read_image_by_replicator_id(txn.deref_mut(), replicator.id)
+        .await?
+        .ok_or(PipelineError::ImageNotFound(replicator.id))?;
+
+    let default_image = data::images::read_default_image(txn.deref_mut()).await?;
+
+    txn.commit().await?;
+
+    let current_version =
+        PipelineVersion { id: current_image.id, name: parse_docker_image_tag(&current_image.name) };
+
+    let new_version = match default_image {
+        Some(default_image) if default_image.id != current_image.id => Some(PipelineVersion {
+            id: default_image.id,
+            name: parse_docker_image_tag(&default_image.name),
+        }),
+        _ => None,
+    };
+
+    let response =
+        GetPipelineVersionResponse { pipeline_id, version: current_version, new_version };
+
+    Ok(Json(response))
+}
+
+#[utoipa::path(
+    summary = "Check pipeline status",
+    description = "Returns the current status of the pipeline's replicator.",
+    params(
+        ("pipeline_id" = i64, Path, description = "Unique ID of the pipeline"),
+        ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
+    ),
+    responses(
+        (status = 200, description = "Pipeline status retrieved successfully", body = GetPipelineStatusResponse),
+        (status = 500, description = "Internal server error", body = ErrorMessage)
+    ),
+    tag = "Pipelines"
+)]
+#[get("/pipelines/{pipeline_id}/status")]
+pub(crate) async fn get_pipeline_status(
+    req: HttpRequest,
+    pool: Data<PgPool>,
+    k8s_client: Data<dyn K8sClient>,
+    pipeline_id: Path<i64>,
+) -> Result<impl Responder, PipelineError> {
+    let tenant_id = extract_tenant_id(&req)?;
+    let pipeline_id = pipeline_id.into_inner();
+    let k8s_client = k8s_client.into_inner();
+
+    let replicator =
+        data::replicators::read_replicator_by_pipeline_id(&**pool, tenant_id, pipeline_id)
+            .await?
+            .ok_or(PipelineError::ReplicatorNotFound(pipeline_id))?;
+
+    let prefix = create_k8s_object_prefix(tenant_id, replicator.id);
+    let pod_status = k8s_client.get_replicator_pod_status(&prefix).await?;
+    let status = pod_status.into();
+
+    let response = GetPipelineStatusResponse { pipeline_id, status };
+
+    Ok(Json(response))
+}
+
+#[utoipa::path(
+    summary = "Get replication status",
+    description = "Returns the replication status for all tables in the pipeline.",
+    params(
+        ("pipeline_id" = i64, Path, description = "Unique ID of the pipeline"),
+        ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
+    ),
+    responses(
+        (status = 200, description = "Replication status retrieved successfully", body = GetPipelineReplicationStatusResponse),
+        (status = 404, description = "Pipeline not found", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage)
+    ),
+    tag = "Pipelines"
+)]
+#[get("/pipelines/{pipeline_id}/replication-status")]
+pub(crate) async fn get_pipeline_replication_status(
+    req: HttpRequest,
+    pool: Data<PgPool>,
+    api_config: Data<ApiConfig>,
+    encryption_key: Data<EncryptionKey>,
+    trusted_root_certs_cache: Data<TrustedRootCertsCache>,
+    pipeline_id: Path<i64>,
+) -> Result<impl Responder, PipelineError> {
+    let tenant_id = extract_tenant_id(&req)?;
+    let pipeline_id = pipeline_id.into_inner();
+
+    let mut txn = pool.begin().await?;
+
+    // Read the pipeline to ensure it exists and get the source configuration
+    let pipeline = data::pipelines::read_pipeline(txn.deref_mut(), tenant_id, pipeline_id)
+        .await?
+        .ok_or(PipelineError::PipelineNotFound(pipeline_id))?;
+
+    // Get the source configuration
+    let source =
+        data::sources::read_source(txn.deref_mut(), tenant_id, pipeline.source_id, &encryption_key)
+            .await?
+            .ok_or(PipelineError::SourceNotFound(pipeline.source_id))?;
+
+    txn.commit().await?;
+
+    // Connect to the source database to read the necessary state
+    let tls_config = trusted_root_certs_cache.get_tls_config(api_config.source.tls_enabled).await?;
+    let source_pool =
+        connect_to_source_database_from_api(&source.config.into_connection_config(tls_config))
+            .await?;
+
+    // Start transaction for all source database operations
+    let mut source_txn = source_pool.begin().await?;
+
+    // Ensure ETL tables exist in the source DB
+    if !health::etl_tables_present(source_txn.deref_mut()).await? {
+        return Err(PipelineError::EtlStateNotInitialized);
+    }
+
+    // Fetch replication state for all tables in this pipeline
+    let state_rows =
+        state::get_table_replication_state_rows(source_txn.deref_mut(), pipeline_id).await?;
+    let mut lag_metrics =
+        lag::get_pipeline_lag_metrics(source_txn.deref_mut(), pipeline_id as u64).await?;
+    let apply_lag = lag_metrics.apply.map(Into::into);
+
+    // Collect all table IDs and fetch their names in a single batch query
+    let table_ids: Vec<TableId> =
+        state_rows.iter().map(|row| TableId::new(row.table_id.0)).collect();
+    let table_names = get_table_names_from_table_ids(source_txn.deref_mut(), &table_ids).await?;
+
+    // Convert database states to UI-friendly format
+    let mut tables: Vec<TableReplicationStatus> = Vec::with_capacity(state_rows.len());
+    for row in state_rows {
+        let table_id = TableId::new(row.table_id.0);
+        let table_name =
+            table_names.get(&table_id).ok_or(TableLookupError::TableNotFound(table_id))?;
+
+        // Extract the metadata row from the database
+        let phase: TableReplicationPhase =
+            row.metadata.ok_or(PipelineError::MissingTableReplicationState).and_then(|m| {
+                serde_json::from_value(m).map_err(PipelineError::InvalidTableReplicationState)
+            })?;
+
+        tables.push(TableReplicationStatus {
+            table_id: table_id.into_inner(),
+            table_name: table_name.to_string(),
+            state: phase.into(),
+            table_sync_lag: lag_metrics.table_sync.remove(&table_id).map(Into::into),
+        });
+    }
+
+    let response =
+        GetPipelineReplicationStatusResponse { pipeline_id, apply_lag, table_statuses: tables };
+
+    Ok(Json(response))
+}
+
+#[utoipa::path(
+    summary = "Roll back tables",
+    description = "Rolls back the replication state of tables in the pipeline. Supports rolling back a single table, all errored tables or all tables.",
+    request_body = RollbackTablesRequest,
+    params(
+        ("pipeline_id" = i64, Path, description = "Unique ID of the pipeline"),
+        ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
+    ),
+    responses(
+        (status = 200, description = "Table state(s) rolled back successfully", body = RollbackTablesResponse),
+        (status = 400, description = "Bad request – state not rollbackable", body = ErrorMessage),
+        (status = 404, description = "Pipeline or table not found", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage)
+    ),
+    tag = "Pipelines"
+)]
+#[post("/pipelines/{pipeline_id}/rollback-tables")]
+pub(crate) async fn rollback_tables(
+    req: HttpRequest,
+    pool: Data<PgPool>,
+    api_config: Data<ApiConfig>,
+    encryption_key: Data<EncryptionKey>,
+    trusted_root_certs_cache: Data<TrustedRootCertsCache>,
+    pipeline_id: Path<i64>,
+    rollback_request: Json<RollbackTablesRequest>,
+) -> Result<impl Responder, PipelineError> {
+    let tenant_id = extract_tenant_id(&req)?;
+    let pipeline_id = pipeline_id.into_inner();
+    let rollback_type = rollback_request.rollback_type;
+
+    let mut txn = pool.begin().await?;
+
+    // Read the pipeline to ensure it exists and get the source configuration
+    let pipeline = data::pipelines::read_pipeline(txn.deref_mut(), tenant_id, pipeline_id)
+        .await?
+        .ok_or(PipelineError::PipelineNotFound(pipeline_id))?;
+
+    // Get the source configuration
+    let source =
+        data::sources::read_source(txn.deref_mut(), tenant_id, pipeline.source_id, &encryption_key)
+            .await?
+            .ok_or(PipelineError::SourceNotFound(pipeline.source_id))?;
+
+    txn.commit().await?;
+
+    // Connect to the source database to perform rollback
+    let tls_config = trusted_root_certs_cache.get_tls_config(api_config.source.tls_enabled).await?;
+    let source_pool =
+        connect_to_source_database_from_api(&source.config.into_connection_config(tls_config))
+            .await?;
+
+    // Start transaction for all source database operations
+    let mut source_txn = source_pool.begin().await?;
+
+    // Ensure ETL tables exist in the source DB
+    if !health::etl_tables_present(source_txn.deref_mut()).await? {
+        return Err(PipelineError::EtlStateNotInitialized);
+    }
+
+    // Get all table states for this pipeline
+    let state_rows =
+        state::get_table_replication_state_rows(source_txn.deref_mut(), pipeline_id).await?;
+
+    // Determine which tables to rollback based on target
+    let target_table_ids: Vec<u32> = match &rollback_request.target {
+        RollbackTablesTarget::SingleTable { table_id } => {
+            // Single table mode, validate the table exists
+            if !state_rows.iter().any(|row| row.table_id.0 == *table_id) {
+                return Err(PipelineError::MissingTableReplicationState);
+            }
+
+            vec![*table_id]
+        }
+        RollbackTablesTarget::AllErroredTables => {
+            // All errored tables mode, find all tables in errored state
+            let mut errored_table_ids = Vec::new();
+            for row in &state_rows {
+                if let Some(metadata) = &row.metadata
+                    && let Ok(phase) =
+                        serde_json::from_value::<TableReplicationPhase>(metadata.clone())
+                    && phase.is_errored()
+                {
+                    errored_table_ids.push(row.table_id.0);
+                }
+            }
+
+            if errored_table_ids.is_empty() {
+                return Err(PipelineError::NotRollbackable("No errored tables found".to_owned()));
+            }
+
+            errored_table_ids
+        }
+        RollbackTablesTarget::AllTables => {
+            // All tables mode, collect all table IDs
+            let table_ids: Vec<u32> = state_rows.iter().map(|row| row.table_id.0).collect();
+
+            if table_ids.is_empty() {
+                return Err(PipelineError::NotRollbackable(
+                    "No tables found for this pipeline".to_owned(),
+                ));
+            }
+
+            table_ids
+        }
+    };
+
+    let mut rolled_back_tables = Vec::with_capacity(target_table_ids.len());
+    for table_id in target_table_ids {
+        let new_state_row = match rollback_type {
+            RollbackType::Individual => {
+                let Some(new_state_row) = state::rollback_replication_state(
+                    source_txn.deref_mut(),
+                    pipeline_id,
+                    TableId::new(table_id),
+                )
+                .await?
+                else {
+                    return Err(PipelineError::NotRollbackable(format!(
+                        "No previous state to rollback to for table {table_id}",
+                    )));
+                };
+
+                new_state_row
+            }
+            RollbackType::Full => {
+                state::reset_replication_state(
+                    source_txn.deref_mut(),
+                    pipeline_id,
+                    TableId::new(table_id),
+                )
+                .await?
+            }
+        };
+
+        let new_phase: TableReplicationPhase =
+            new_state_row.metadata.ok_or(PipelineError::MissingTableReplicationState).and_then(
+                |m| serde_json::from_value(m).map_err(PipelineError::InvalidTableReplicationState),
+            )?;
+
+        rolled_back_tables.push(RolledBackTable { table_id, new_state: new_phase.into() });
+    }
+
+    source_txn.commit().await?;
+
+    let response = RollbackTablesResponse { pipeline_id, tables: rolled_back_tables };
+
+    Ok(Json(response))
+}
+
+#[utoipa::path(
+    summary = "Update pipeline version",
+    description = "Updates the pipeline's version while preserving its state.",
+    request_body = UpdatePipelineVersionRequest,
+    params(
+        ("pipeline_id" = i64, Path, description = "Unique ID of the pipeline"),
+        ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
+    ),
+    responses(
+        (status = 200, description = "Pipeline version updated successfully"),
+        (status = 400, description = "Bad request or pipeline not running", body = ErrorMessage),
+        (status = 404, description = "Pipeline or version not found", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage)
+    ),
+    tag = "Pipelines"
+)]
+#[post("/pipelines/{pipeline_id}/version")]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn update_pipeline_version(
+    req: HttpRequest,
+    pool: Data<PgPool>,
+    encryption_key: Data<EncryptionKey>,
+    k8s_client: Data<dyn K8sClient>,
+    trusted_root_certs_cache: Data<TrustedRootCertsCache>,
+    api_config: Data<ApiConfig>,
+    pipeline_id: Path<i64>,
+    update_request: Json<UpdatePipelineVersionRequest>,
+) -> Result<impl Responder, PipelineError> {
+    let tenant_id = extract_tenant_id(&req)?;
+    let pipeline_id = pipeline_id.into_inner();
+    let update_request = update_request.into_inner();
+    let k8s_client = k8s_client.into_inner();
+
+    let mut txn = pool.begin().await?;
+    let (pipeline, replicator, current_image, source, destination) =
+        read_pipeline_components(&mut txn, tenant_id, pipeline_id, &encryption_key).await?;
+
+    // Only allow updating to the current default image. The client must provide the
+    // version id and it must match the default version id. If it does not, we
+    // consider this a race condition and we fail the update.
+    let default_image = data::images::read_default_image(txn.deref_mut())
+        .await?
+        .ok_or(PipelineError::NoDefaultImageFound)?;
+
+    if update_request.version_id != default_image.id {
+        return Err(PipelineError::ImageIdNotDefault(update_request.version_id));
+    }
+
+    let target_image = default_image;
+
+    // If the image ids are different, we change the database entry.
+    if target_image.id != current_image.id {
+        data::replicators::update_replicator_image(
+            txn.deref_mut(),
+            tenant_id,
+            replicator.id,
+            target_image.id,
+        )
+        .await?
+        .ok_or(PipelineError::ReplicatorNotFound(pipeline_id))?;
+    }
+
+    // If the images have equal name, we don't care about their id from the K8S
+    // perspective, so we won't update any resources.
+    if target_image.name == current_image.name {
+        txn.commit().await?;
+
+        return Ok(HttpResponse::Ok().finish());
+    }
+
+    // If a replicator is not running, we don't want to create/update k8s resources.
+    // It's fine to just update the image version in the db.
+    if is_replicator_pod_stopped(k8s_client.as_ref(), tenant_id, replicator.id).await? {
+        txn.commit().await?;
+
+        return Ok(HttpResponse::Ok().finish());
+    }
+
+    let tls_config = trusted_root_certs_cache.get_tls_config(api_config.source.tls_enabled).await?;
+
+    create_or_update_pipeline_resources_in_k8s(
+        k8s_client.as_ref(),
+        tenant_id,
+        pipeline,
+        replicator,
+        target_image,
+        source,
+        destination,
+        api_config.supabase_api_url.as_deref(),
+        tls_config,
+    )
+    .await?;
+
+    txn.commit().await?;
+
+    Ok(HttpResponse::Ok().finish())
+}
+
+#[utoipa::path(
+    summary = "Validate pipeline configuration",
+    description = "Validates pipeline prerequisites against the source database.",
+    request_body = ValidatePipelineRequest,
+    params(
+        ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
+    ),
+    responses(
+        (status = 200, description = "Validation completed", body = ValidatePipelineResponse),
+        (status = 400, description = "Bad request", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage)
+    ),
+    tag = "Pipelines"
+)]
+#[post("/pipelines/validate")]
+pub(crate) async fn validate_pipeline(
+    req: HttpRequest,
+    pool: Data<PgPool>,
+    api_config: Data<ApiConfig>,
+    trusted_root_certs_cache: Data<TrustedRootCertsCache>,
+    request: Json<ValidatePipelineRequest>,
+    encryption_key: Data<EncryptionKey>,
+) -> Result<impl Responder, PipelineError> {
+    let tenant_id = extract_tenant_id(&req)?;
+    let request = request.into_inner();
+    validate_pipeline_request(&request.config)?;
+
+    let source =
+        data::sources::read_source(pool.as_ref(), tenant_id, request.source_id, &encryption_key)
+            .await?
+            .ok_or(PipelineError::SourceNotFound(request.source_id))?;
+
+    let ctx = ValidationContext::build_from_source(
+        source.config,
+        api_config.as_ref(),
+        trusted_root_certs_cache.as_ref(),
+    )
+    .await?;
+
+    let failures = validation::validate_pipeline(&ctx, &request.config).await?;
+    let response = ValidatePipelineResponse {
+        validation_failures: failures.into_iter().map(Into::into).collect(),
+    };
+
+    Ok(Json(response))
+}

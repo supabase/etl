@@ -158,7 +158,7 @@ The project uses SQLx for database migrations. There are two sets of migrations:
 
 ### ETL API Migrations
 
-Located in `etl-api/migrations/`, these create the control plane schema (`app` schema) for managing tenants, sources, destinations, and pipelines.
+Located in `crates/etl-api/migrations/`, these create the control plane schema (`app` schema) for managing tenants, sources, destinations, and pipelines.
 
 **Running API migrations:**
 
@@ -167,36 +167,36 @@ Located in `etl-api/migrations/`, these create the control plane schema (`app` s
 ./scripts/run_migrations.sh etl-api
 
 # Or manually with SQLx CLI
-sqlx migrate run --source etl-api/migrations
+sqlx migrate run --source crates/etl-api/migrations
 ```
 
 **Creating a new API migration:**
 
 ```bash
-cd etl-api
+cd crates/etl-api
 sqlx migrate add <migration_name>
 ```
 
 **Resetting the API database:**
 
 ```bash
-cd etl-api
+cd crates/etl-api
 sqlx migrate revert
 ```
 
 **Updating SQLx metadata after schema changes:**
 
 ```bash
-cd etl-api
+cd crates/etl-api
 cargo sqlx prepare
 ```
 
 ### ETL Source And Store Migrations
 
-Located under `etl/migrations/`, these prepare the source database:
+Located under `crates/etl/migrations/`, these prepare the source database:
 
-- `etl/migrations/source/`: ETL source helpers required by every pipeline, such as schema snapshot functions and the DDL event trigger. `Pipeline::start()` runs these automatically.
-- `etl/migrations/postgres_store/`: Postgres-backed state store tables used to persist replication state, versioned table schemas, and destination metadata. `PostgresStore::new()` runs these automatically.
+- `crates/etl/migrations/source/`: ETL source helpers required by every pipeline, such as schema snapshot functions and the DDL event trigger. `Pipeline::start()` runs these automatically.
+- `crates/etl/migrations/postgres_store/`: Postgres-backed state store tables used to persist replication state, versioned table schemas, and destination metadata. `PostgresStore::new()` runs these automatically.
 
 Both migration sets write to `etl._sqlx_migrations`. When running them
 separately, always use SQLx's `--ignore-missing` flag so each migrator validates
@@ -215,18 +215,18 @@ mismatch.
 
 # Or manually with SQLx CLI (requires setting search_path)
 psql $DATABASE_URL -c "create schema if not exists etl;"
-sqlx migrate run --source etl/migrations/postgres_store --database-url "${DATABASE_URL}?options=-csearch_path%3Detl" --ignore-missing
-sqlx migrate run --source etl/migrations/source --database-url "${DATABASE_URL}?options=-csearch_path%3Detl" --ignore-missing
+sqlx migrate run --source crates/etl/migrations/postgres_store --database-url "${DATABASE_URL}?options=-csearch_path%3Detl" --ignore-missing
+sqlx migrate run --source crates/etl/migrations/source --database-url "${DATABASE_URL}?options=-csearch_path%3Detl" --ignore-missing
 ```
 
 **Reverting ETL migrations manually:**
 
 ```bash
 # Revert source migrations.
-sqlx migrate revert --source etl/migrations/source --database-url "${DATABASE_URL}?options=-csearch_path%3Detl" --ignore-missing
+sqlx migrate revert --source crates/etl/migrations/source --database-url "${DATABASE_URL}?options=-csearch_path%3Detl" --ignore-missing
 
 # Revert Postgres store migrations.
-sqlx migrate revert --source etl/migrations/postgres_store --database-url "${DATABASE_URL}?options=-csearch_path%3Detl" --ignore-missing
+sqlx migrate revert --source crates/etl/migrations/postgres_store --database-url "${DATABASE_URL}?options=-csearch_path%3Detl" --ignore-missing
 ```
 
 Use `--target-version 0` to revert every migration in one migration set. Revert
@@ -252,14 +252,14 @@ This design decision ensures:
 **Creating a new Postgres state store migration:**
 
 ```bash
-cd etl
+cd crates/etl
 sqlx migrate add -r --source migrations/postgres_store <migration_name>
 ```
 
 **Creating a new ETL source migration:**
 
 ```bash
-cd etl
+cd crates/etl
 sqlx migrate add -r --source migrations/source <migration_name>
 ```
 
@@ -293,11 +293,11 @@ APP_ENVIRONMENT=dev APP_DATABASE__URL=postgres://localhost/mydb cargo run
 #### Running from Source
 
 ```bash
-cd etl-api
+cd crates/etl-api
 APP_ENVIRONMENT=dev cargo run
 ```
 
-The API loads configuration from `etl-api/configuration/{environment}.yaml`. See `etl-api/README.md` for available configuration options.
+The API loads configuration from `crates/etl-api/configuration/{environment}.yaml`. See `crates/etl-api/README.md` for available configuration options.
 
 #### Running with Docker
 
@@ -305,8 +305,8 @@ Docker images are available for the etl-api. You must mount the configuration fi
 
 ```bash
 docker run \
-  -v $(pwd)/etl-api/configuration/base.yaml:/app/configuration/base.yaml \
-  -v $(pwd)/etl-api/configuration/dev.yaml:/app/configuration/dev.yaml \
+  -v $(pwd)/crates/etl-api/configuration/base.yaml:/app/configuration/base.yaml \
+  -v $(pwd)/crates/etl-api/configuration/dev.yaml:/app/configuration/dev.yaml \
   -e APP_ENVIRONMENT=dev \
   -p 8080:8080 \
   ramsup/etl-api:latest
@@ -340,7 +340,7 @@ kubectl --context orbstack apply -f scripts/etl-data-plane.yaml
 kubectl --context orbstack apply -f scripts/trusted-root-certs-config.yaml
 ```
 
-**Note:** For the complete list of expected Kubernetes resources and their specifications, refer to the constants and resource creation logic in `etl-api/src/k8s/http.rs`.
+**Note:** For the complete list of expected Kubernetes resources and their specifications, refer to the constants and resource creation logic in `crates/etl-api/src/k8s/http.rs`.
 
 ### ETL Replicator
 
@@ -349,11 +349,11 @@ The replicator can run as a standalone binary without Kubernetes.
 #### Running from Source
 
 ```bash
-cd etl-replicator
+cd crates/etl-replicator
 APP_ENVIRONMENT=dev cargo run
 ```
 
-The replicator loads configuration from `etl-replicator/configuration/{environment}.yaml`.
+The replicator loads configuration from `crates/etl-replicator/configuration/{environment}.yaml`.
 
 #### Running with Docker
 
@@ -361,8 +361,8 @@ Docker images are available for the etl-replicator. You must mount the configura
 
 ```bash
 docker run \
-  -v $(pwd)/etl-replicator/configuration/base.yaml:/app/configuration/base.yaml \
-  -v $(pwd)/etl-replicator/configuration/dev.yaml:/app/configuration/dev.yaml \
+  -v $(pwd)/crates/etl-replicator/configuration/base.yaml:/app/configuration/base.yaml \
+  -v $(pwd)/crates/etl-replicator/configuration/dev.yaml:/app/configuration/dev.yaml \
   -e APP_ENVIRONMENT=dev \
   etl-replicator:latest
 ```
