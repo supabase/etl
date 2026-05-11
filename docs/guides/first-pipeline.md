@@ -144,6 +144,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         batch: BatchConfig {
             max_fill_ms: 5000,
             memory_budget_ratio: 0.2,
+            max_bytes: 16 * 1024 * 1024,
         },
         table_error_retry_delay_ms: 10000,
         table_error_retry_max_attempts: 5,

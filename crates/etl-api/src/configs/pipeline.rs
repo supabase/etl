@@ -215,7 +215,11 @@ mod tests {
     fn stored_pipeline_config_serialization() {
         let config = StoredPipelineConfig {
             publication_name: "test_publication".to_owned(),
-            batch: BatchConfig { max_fill_ms: 5000, memory_budget_ratio: 0.2 },
+            batch: BatchConfig {
+                max_fill_ms: 5000,
+                memory_budget_ratio: 0.2,
+                max_bytes: 16 * 1024 * 1024,
+            },
             table_error_retry_delay_ms: 2000,
             table_error_retry_max_attempts: 7,
             max_table_sync_workers: 4,
@@ -321,7 +325,11 @@ mod tests {
     fn stored_pipeline_config_deserializes_without_replicator_resources() {
         let config = StoredPipelineConfig {
             publication_name: "test_publication".to_owned(),
-            batch: BatchConfig { max_fill_ms: 5000, memory_budget_ratio: 0.2 },
+            batch: BatchConfig {
+                max_fill_ms: 5000,
+                memory_budget_ratio: 0.2,
+                max_bytes: BatchConfig::DEFAULT_MAX_BYTES,
+            },
             table_error_retry_delay_ms: 2000,
             table_error_retry_max_attempts: 7,
             max_table_sync_workers: 4,
