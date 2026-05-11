@@ -171,9 +171,9 @@ mod tests {
     fn ideal_batch_size_is_capped_by_configured_max_bytes() {
         let memory_monitor = MemoryMonitor::new_for_test();
         memory_monitor.set_total_memory_bytes_for_test(10 * 1024 * 1024 * 1024);
-        let controller = BatchBudgetController::new(1, memory_monitor, 0.2, 16 * 1024 * 1024);
+        let controller = BatchBudgetController::new(1, memory_monitor, 0.2, 8 * 1024 * 1024);
 
-        assert_eq!(controller.ideal_batch_size_bytes(), 16 * 1024 * 1024);
+        assert_eq!(controller.ideal_batch_size_bytes(), 8 * 1024 * 1024);
     }
 
     #[test]

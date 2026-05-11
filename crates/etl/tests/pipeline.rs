@@ -378,7 +378,7 @@ async fn table_copy_replicates_many_rows_with_parallel_connections() {
     .with_batch_config(BatchConfig {
         max_fill_ms: 1000,
         memory_budget_ratio: 0.2,
-        max_bytes: 16 * 1024 * 1024,
+        max_bytes: 8 * 1024 * 1024,
     })
     .build();
 
