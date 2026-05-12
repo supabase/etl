@@ -30,10 +30,13 @@ const REWRITE_DATA_FILES_MIN_ACTIVE_DATA_FILES_ENV: &str =
     "ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_REWRITE_DATA_FILES_MIN_ACTIVE_DATA_FILES";
 const REQUEST_COOLDOWN_SECONDS_ENV: &str =
     "ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_REQUEST_COOLDOWN_SECONDS";
+const KUBERNETES_API_TIMEOUT_SECONDS_ENV: &str =
+    "ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_KUBERNETES_API_TIMEOUT_SECONDS";
 const DEFAULT_POLL_SECONDS: u64 = 5;
 const DEFAULT_INLINE_FLUSH_MIN_INLINED_BYTES: u64 = 10_000_000;
 const DEFAULT_REWRITE_DATA_FILES_MIN_ACTIVE_DATA_FILES: i64 = 40;
 const DEFAULT_REQUEST_COOLDOWN_SECONDS: u64 = 300;
+const DEFAULT_KUBERNETES_API_TIMEOUT_SECONDS: u64 = 10;
 const OPERATION_INLINE_FLUSH: &str = "flush_inlined_data";
 const OPERATION_REWRITE_DATA_FILES: &str = "rewrite_data_files";
 const REASON_PENDING_INLINED_DATA_BYTES_THRESHOLD: &str = "pending_inlined_data_bytes_threshold";
@@ -61,6 +64,7 @@ struct HeldPause {
     run_id: String,
     expires_at: DateTime<Utc>,
     quiesced_at: DateTime<Utc>,
+    quiesced_reported: bool,
     _pause: DuckLakeExternalMaintenancePause,
 }
 
@@ -70,6 +74,7 @@ struct WatcherConfig {
     namespace: String,
     poll_interval: Duration,
     request_cooldown: Duration,
+    kubernetes_api_timeout: Duration,
     inline_flush_min_inlined_bytes: u64,
     rewrite_data_files_min_active_data_files: i64,
 }
@@ -106,50 +111,56 @@ where
     );
 
     loop {
-        match api.get(&config.name).await {
+        match time::timeout(config.kubernetes_api_timeout, api.get(&config.name)).await {
             Ok(resource) => {
+                let resource = match resource {
+                    Ok(resource) => resource,
+                    Err(kube::Error::Api(error)) if error.code == 404 => {
+                        if let Some(held) = held_pause.take() {
+                            info!(
+                                ducklake_maintenance = %config.name,
+                                run_id = %held.run_id,
+                                "ducklake maintenance resource disappeared, resuming foreground mutations: \
+                                 ducklake_maintenance={}, run_id={}",
+                                config.name,
+                                held.run_id
+                            );
+                            release_held_pause(&config.name, held, "resource_deleted");
+                        }
+                        time::sleep(config.poll_interval).await;
+                        continue;
+                    }
+                    Err(error) => {
+                        warn!(
+                            error = %error,
+                            ducklake_maintenance = %config.name,
+                            timeout_ms = config.kubernetes_api_timeout.as_millis() as u64,
+                            "failed to read ducklake maintenance resource: ducklake_maintenance={}, \
+                             timeout_ms={}, error={}",
+                            config.name,
+                            config.kubernetes_api_timeout.as_millis(),
+                            error
+                        );
+                        release_expired_pause_if_needed(&api, &config, &mut held_pause).await;
+                        time::sleep(config.poll_interval).await;
+                        continue;
+                    }
+                };
                 let active_pause = active_pause_request(&resource);
-                reconcile_pause(&api, &config.name, &destination, &mut held_pause, active_pause)
-                    .await;
+                reconcile_pause(&api, &config, &destination, &mut held_pause, active_pause).await;
                 maybe_request_operations(&api, &config.name, &destination, &resource, &config)
                     .await;
             }
-            Err(kube::Error::Api(error)) if error.code == 404 => {
-                if let Some(held) = held_pause.take() {
-                    info!(
-                        ducklake_maintenance = %config.name,
-                        run_id = %held.run_id,
-                        "ducklake maintenance resource disappeared, resuming foreground mutations: \
-                         ducklake_maintenance={}, run_id={}",
-                        config.name,
-                        held.run_id
-                    );
-                    record_external_maintenance_pause_duration(&held, "resource_deleted");
-                }
-            }
-            Err(error) => {
+            Err(_) => {
                 warn!(
-                    error = %error,
                     ducklake_maintenance = %config.name,
-                    "failed to read ducklake maintenance resource: ducklake_maintenance={}, error={}",
+                    timeout_ms = config.kubernetes_api_timeout.as_millis() as u64,
+                    "timed out reading ducklake maintenance resource: ducklake_maintenance={}, \
+                     timeout_ms={}",
                     config.name,
-                    error
+                    config.kubernetes_api_timeout.as_millis()
                 );
-
-                if held_pause.as_ref().is_some_and(|pause| pause.expires_at <= Utc::now()) {
-                    let expired = held_pause.take();
-                    warn!(
-                        ducklake_maintenance = %config.name,
-                        run_id = expired.as_ref().map(|pause| pause.run_id.as_str()),
-                        "ducklake maintenance pause expired while Kubernetes API was unavailable: \
-                         ducklake_maintenance={}, run_id={}",
-                        config.name,
-                        expired.as_ref().map_or("none", |pause| pause.run_id.as_str())
-                    );
-                    if let Some(expired) = expired.as_ref() {
-                        record_external_maintenance_pause_duration(expired, "expired");
-                    }
-                }
+                release_expired_pause_if_needed(&api, &config, &mut held_pause).await;
             }
         }
 
@@ -159,13 +170,14 @@ where
 
 async fn reconcile_pause<S>(
     api: &Api<DynamicObject>,
-    name: &str,
+    config: &WatcherConfig,
     destination: &DuckLakeDestination<S>,
     held_pause: &mut Option<HeldPause>,
     active_pause: Option<PauseRequest>,
 ) where
     S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
 {
+    let name = config.name.as_str();
     let Some(pause) = active_pause.filter(|pause| pause.expires_at > Utc::now()) else {
         if let Some(held) = held_pause.take() {
             info!(
@@ -176,17 +188,36 @@ async fn reconcile_pause<S>(
                 name,
                 held.run_id
             );
-            record_external_maintenance_pause_duration(&held, "cleared");
-            patch_replicator_status(api, name, "Running", None, None).await;
+            release_held_pause(name, held, "cleared");
+            patch_replicator_status(
+                api,
+                name,
+                "Running",
+                None,
+                None,
+                config.kubernetes_api_timeout,
+            )
+            .await;
         }
         return;
     };
 
-    if let Some(held) = held_pause.as_ref()
+    if let Some(held) = held_pause.as_mut()
         && held.run_id == pause.run_id
     {
-        patch_replicator_status(api, name, "Quiesced", Some(&held.run_id), Some(held.quiesced_at))
-            .await;
+        if !held.quiesced_reported
+            && patch_replicator_status(
+                api,
+                name,
+                "Quiesced",
+                Some(&held.run_id),
+                Some(held.quiesced_at),
+                config.kubernetes_api_timeout,
+            )
+            .await
+        {
+            held.quiesced_reported = true;
+        }
         return;
     }
 
@@ -201,8 +232,9 @@ async fn reconcile_pause<S>(
             held.run_id,
             pause.run_id
         );
-        record_external_maintenance_pause_duration(&held, "replaced");
-        patch_replicator_status(api, name, "Running", None, None).await;
+        release_held_pause(name, held, "replaced");
+        patch_replicator_status(api, name, "Running", None, None, config.kubernetes_api_timeout)
+            .await;
     }
 
     info!(
@@ -215,7 +247,15 @@ async fn reconcile_pause<S>(
         pause.run_id,
         pause.expires_at.to_rfc3339()
     );
-    patch_replicator_status(api, name, "Pausing", Some(&pause.run_id), None).await;
+    patch_replicator_status(
+        api,
+        name,
+        "Pausing",
+        Some(&pause.run_id),
+        None,
+        config.kubernetes_api_timeout,
+    )
+    .await;
 
     let external_pause = destination.acquire_external_maintenance_pause().await;
     if pause.expires_at <= Utc::now() {
@@ -229,7 +269,19 @@ async fn reconcile_pause<S>(
             pause.run_id,
             pause.expires_at.to_rfc3339()
         );
-        patch_replicator_status(api, name, "Running", None, None).await;
+        release_held_pause(
+            name,
+            HeldPause {
+                run_id: pause.run_id,
+                expires_at: pause.expires_at,
+                quiesced_at: Utc::now(),
+                quiesced_reported: false,
+                _pause: external_pause,
+            },
+            "expired",
+        );
+        patch_replicator_status(api, name, "Running", None, None, config.kubernetes_api_timeout)
+            .await;
         return;
     }
 
@@ -247,14 +299,86 @@ async fn reconcile_pause<S>(
         quiesced_at.to_rfc3339(),
         pause.expires_at.to_rfc3339()
     );
-    patch_replicator_status(api, name, "Quiesced", Some(&pause.run_id), Some(quiesced_at)).await;
+    let quiesced_reported = patch_replicator_status(
+        api,
+        name,
+        "Quiesced",
+        Some(&pause.run_id),
+        Some(quiesced_at),
+        config.kubernetes_api_timeout,
+    )
+    .await;
+    if !quiesced_reported {
+        warn!(
+            ducklake_maintenance = %name,
+            run_id = %pause.run_id,
+            timeout_ms = config.kubernetes_api_timeout.as_millis() as u64,
+            "ducklake external maintenance quiesced status was not confirmed; keeping foreground \
+             mutations paused until the status patch succeeds or the pause expires: \
+             ducklake_maintenance={}, run_id={}, timeout_ms={}",
+            name,
+            pause.run_id,
+            config.kubernetes_api_timeout.as_millis()
+        );
+    }
 
     *held_pause = Some(HeldPause {
         run_id: pause.run_id,
         expires_at: pause.expires_at,
         quiesced_at,
+        quiesced_reported,
         _pause: external_pause,
     });
+}
+
+async fn release_expired_pause_if_needed(
+    api: &Api<DynamicObject>,
+    config: &WatcherConfig,
+    held_pause: &mut Option<HeldPause>,
+) {
+    if held_pause.as_ref().is_none_or(|pause| pause.expires_at > Utc::now()) {
+        return;
+    }
+
+    let Some(expired) = held_pause.take() else {
+        return;
+    };
+    warn!(
+        ducklake_maintenance = %config.name,
+        run_id = %expired.run_id,
+        "ducklake maintenance pause expired while Kubernetes API was unavailable: \
+         ducklake_maintenance={}, run_id={}",
+        config.name,
+        expired.run_id
+    );
+    release_held_pause(&config.name, expired, "expired");
+    patch_replicator_status(
+        api,
+        &config.name,
+        "Running",
+        None,
+        None,
+        config.kubernetes_api_timeout,
+    )
+    .await;
+}
+
+fn release_held_pause(name: &str, held: HeldPause, outcome: &'static str) {
+    let held_ms =
+        Utc::now().signed_duration_since(held.quiesced_at).num_milliseconds().max(0) as u64;
+    record_external_maintenance_pause_duration(&held, outcome);
+    info!(
+        ducklake_maintenance = %name,
+        run_id = %held.run_id,
+        outcome,
+        held_ms,
+        "ducklake external maintenance pause guard released: ducklake_maintenance={}, run_id={}, \
+         outcome={}, held_ms={}",
+        name,
+        held.run_id,
+        outcome,
+        held_ms
+    );
 }
 
 fn record_external_maintenance_pause_duration(held: &HeldPause, outcome: &'static str) {
@@ -350,7 +474,8 @@ async fn patch_replicator_status(
     state: &str,
     observed_run_id: Option<&str>,
     quiesced_at: Option<DateTime<Utc>>,
-) {
+    timeout: Duration,
+) -> bool {
     let patch = json!({
         "status": {
             "replicator": {
@@ -362,13 +487,34 @@ async fn patch_replicator_status(
     });
     let params = PatchParams::default();
 
-    if let Err(error) = api.patch_status(name, &params, &Patch::Merge(&patch)).await {
-        warn!(
-            error = %error,
-            ducklake_maintenance = %name,
-            state,
-            "failed to patch ducklake maintenance replicator status"
-        );
+    match time::timeout(timeout, api.patch_status(name, &params, &Patch::Merge(&patch))).await {
+        Ok(Ok(_)) => true,
+        Ok(Err(error)) => {
+            warn!(
+                error = %error,
+                ducklake_maintenance = %name,
+                state,
+                "failed to patch ducklake maintenance replicator status: \
+                 ducklake_maintenance={}, state={}, error={}",
+                name,
+                state,
+                error
+            );
+            false
+        }
+        Err(_) => {
+            warn!(
+                ducklake_maintenance = %name,
+                state,
+                timeout_ms = timeout.as_millis() as u64,
+                "timed out patching ducklake maintenance replicator status: \
+                 ducklake_maintenance={}, state={}, timeout_ms={}",
+                name,
+                state,
+                timeout.as_millis()
+            );
+            false
+        }
     }
 }
 
@@ -391,16 +537,36 @@ async fn patch_operation_requests(
     });
     let params = PatchParams::default();
 
-    if let Err(error) = api.patch_status(name, &params, &Patch::Merge(&patch)).await {
-        warn!(
-            error = %error,
-            ducklake_maintenance = %name,
-            "failed to patch ducklake maintenance operation request"
-        );
-        return false;
+    match time::timeout(
+        config.kubernetes_api_timeout,
+        api.patch_status(name, &params, &Patch::Merge(&patch)),
+    )
+    .await
+    {
+        Ok(Ok(_)) => true,
+        Ok(Err(error)) => {
+            warn!(
+                error = %error,
+                ducklake_maintenance = %name,
+                "failed to patch ducklake maintenance operation request: \
+                 ducklake_maintenance={}, error={}",
+                name,
+                error
+            );
+            false
+        }
+        Err(_) => {
+            warn!(
+                ducklake_maintenance = %name,
+                timeout_ms = config.kubernetes_api_timeout.as_millis() as u64,
+                "timed out patching ducklake maintenance operation request: \
+                 ducklake_maintenance={}, timeout_ms={}",
+                name,
+                config.kubernetes_api_timeout.as_millis()
+            );
+            false
+        }
     }
-
-    true
 }
 
 fn record_external_maintenance_triggers(
@@ -531,12 +697,18 @@ impl WatcherConfig {
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or(DEFAULT_REQUEST_COOLDOWN_SECONDS);
+        let kubernetes_api_timeout = env::var(KUBERNETES_API_TIMEOUT_SECONDS_ENV)
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|seconds| *seconds > 0)
+            .unwrap_or(DEFAULT_KUBERNETES_API_TIMEOUT_SECONDS);
 
         Some(Self {
             name,
             namespace,
             poll_interval: Duration::from_secs(poll_seconds),
             request_cooldown: Duration::from_secs(request_cooldown),
+            kubernetes_api_timeout: Duration::from_secs(kubernetes_api_timeout),
             inline_flush_min_inlined_bytes,
             rewrite_data_files_min_active_data_files,
         })
