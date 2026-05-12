@@ -1,4 +1,4 @@
-use tokio_postgres::types::{PgLsn, Type};
+use tokio_postgres::types::{Kind, PgLsn, Type};
 
 /// Converts a Postgres type OID to a [`Type`] instance.
 ///
@@ -10,30 +10,9 @@ pub fn convert_type_oid_to_type(type_oid: u32) -> Type {
 
 /// Returns whether the Postgres type is an array type.
 pub fn is_array_type(typ: &Type) -> bool {
-    matches!(
-        typ,
-        &Type::BOOL_ARRAY
-            | &Type::CHAR_ARRAY
-            | &Type::BPCHAR_ARRAY
-            | &Type::VARCHAR_ARRAY
-            | &Type::NAME_ARRAY
-            | &Type::TEXT_ARRAY
-            | &Type::INT2_ARRAY
-            | &Type::INT4_ARRAY
-            | &Type::INT8_ARRAY
-            | &Type::FLOAT4_ARRAY
-            | &Type::FLOAT8_ARRAY
-            | &Type::NUMERIC_ARRAY
-            | &Type::DATE_ARRAY
-            | &Type::TIME_ARRAY
-            | &Type::TIMESTAMP_ARRAY
-            | &Type::TIMESTAMPTZ_ARRAY
-            | &Type::UUID_ARRAY
-            | &Type::JSON_ARRAY
-            | &Type::JSONB_ARRAY
-            | &Type::OID_ARRAY
-            | &Type::BYTEA_ARRAY
-    )
+    // `int2vector` and `oidvector` have array kind, but they are not regular
+    // PostgreSQL array types and do not use underscore-prefixed array names.
+    matches!(typ.kind(), Kind::Array(_)) && typ.name().starts_with('_')
 }
 
 /// Creates a hex-encoded sequence number from Postgres LSNs to ensure correct
@@ -78,6 +57,7 @@ mod tests {
         assert!(is_array_type(&Type::FLOAT4_ARRAY));
         assert!(is_array_type(&Type::FLOAT8_ARRAY));
         assert!(is_array_type(&Type::NUMERIC_ARRAY));
+        assert!(is_array_type(&Type::MONEY_ARRAY));
         assert!(is_array_type(&Type::DATE_ARRAY));
         assert!(is_array_type(&Type::TIME_ARRAY));
         assert!(is_array_type(&Type::TIMESTAMP_ARRAY));
@@ -87,6 +67,16 @@ mod tests {
         assert!(is_array_type(&Type::JSONB_ARRAY));
         assert!(is_array_type(&Type::OID_ARRAY));
         assert!(is_array_type(&Type::BYTEA_ARRAY));
+        assert!(is_array_type(&Type::INTERVAL_ARRAY));
+        assert!(is_array_type(&Type::TIMETZ_ARRAY));
+        assert!(is_array_type(&Type::INET_ARRAY));
+        assert!(is_array_type(&Type::CIDR_ARRAY));
+        assert!(is_array_type(&Type::MACADDR_ARRAY));
+        assert!(is_array_type(&Type::MACADDR8_ARRAY));
+        assert!(is_array_type(&Type::XML_ARRAY));
+        assert!(is_array_type(&Type::INT4_RANGE_ARRAY));
+        assert!(is_array_type(&Type::NUMMULTI_RANGE_ARRAY));
+        assert!(is_array_type(&Type::INT2_VECTOR_ARRAY));
 
         // scalar types
         assert!(!is_array_type(&Type::BOOL));
@@ -101,6 +91,7 @@ mod tests {
         assert!(!is_array_type(&Type::FLOAT4));
         assert!(!is_array_type(&Type::FLOAT8));
         assert!(!is_array_type(&Type::NUMERIC));
+        assert!(!is_array_type(&Type::MONEY));
         assert!(!is_array_type(&Type::DATE));
         assert!(!is_array_type(&Type::TIME));
         assert!(!is_array_type(&Type::TIMESTAMP));
@@ -110,6 +101,18 @@ mod tests {
         assert!(!is_array_type(&Type::JSONB));
         assert!(!is_array_type(&Type::OID));
         assert!(!is_array_type(&Type::BYTEA));
+        assert!(!is_array_type(&Type::INTERVAL));
+        assert!(!is_array_type(&Type::TIMETZ));
+        assert!(!is_array_type(&Type::INET));
+        assert!(!is_array_type(&Type::CIDR));
+        assert!(!is_array_type(&Type::MACADDR));
+        assert!(!is_array_type(&Type::MACADDR8));
+        assert!(!is_array_type(&Type::XML));
+        assert!(!is_array_type(&Type::INT4_RANGE));
+        assert!(!is_array_type(&Type::NUMMULTI_RANGE));
+        assert!(!is_array_type(&Type::INT2_VECTOR));
+        assert!(!is_array_type(&Type::OID_VECTOR));
+        assert!(!is_array_type(&Type::ANYARRAY));
     }
 
     #[test]

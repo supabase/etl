@@ -1452,7 +1452,7 @@ mod tests {
         PgConnectionConfig, PipelineConfig, ReplicatorConfig, ReplicatorConfigWithoutSecrets,
         TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
     };
-    use insta::assert_json_snapshot;
+    use insta::{assert_json_snapshot, assert_snapshot};
 
     use super::*;
     use crate::configs::pipeline::ReplicatorResourcesConfig;
@@ -1461,6 +1461,23 @@ mod tests {
 
     fn create_k8s_object_prefix(tenant_id: &str, replicator_id: i64) -> String {
         format!("{tenant_id}-{replicator_id}")
+    }
+
+    fn redact_restarted_at_annotation(stateful_set_json: &mut serde_json::Value) {
+        let restarted_at = stateful_set_json
+            .pointer_mut("/spec/template/metadata/annotations/etl.supabase.com~1restarted-at")
+            .expect("stateful set should have a restarted-at annotation");
+
+        *restarted_at = serde_json::Value::String("[timestamp]".to_owned());
+    }
+
+    macro_rules! assert_stateful_set_json_snapshot {
+        ($stateful_set_json:expr) => {{
+            let mut stateful_set_json = $stateful_set_json.clone();
+            redact_restarted_at_annotation(&mut stateful_set_json);
+
+            assert_snapshot!(serde_json::to_string_pretty(&stateful_set_json).unwrap());
+        }};
     }
 
     fn container_environment_has_var(
@@ -1973,7 +1990,7 @@ mod tests {
             &config,
         );
 
-        assert_json_snapshot!(stateful_set_json, { ".spec.template.metadata.annotations[\"etl.supabase.com/restarted-at\"]" => "[timestamp]"});
+        assert_stateful_set_json_snapshot!(stateful_set_json);
         let _stateful_set: StatefulSet = serde_json::from_value(stateful_set_json).unwrap();
 
         // Staging env
@@ -2006,7 +2023,7 @@ mod tests {
             &config,
         );
 
-        assert_json_snapshot!(stateful_set_json, { ".spec.template.metadata.annotations[\"etl.supabase.com/restarted-at\"]" => "[timestamp]"});
+        assert_stateful_set_json_snapshot!(stateful_set_json);
         let _stateful_set: StatefulSet = serde_json::from_value(stateful_set_json).unwrap();
 
         // Prod env
@@ -2039,7 +2056,7 @@ mod tests {
             &config,
         );
 
-        assert_json_snapshot!(stateful_set_json, { ".spec.template.metadata.annotations[\"etl.supabase.com/restarted-at\"]" => "[timestamp]"});
+        assert_stateful_set_json_snapshot!(stateful_set_json);
         let _stateful_set: StatefulSet = serde_json::from_value(stateful_set_json).unwrap();
     }
 
@@ -2079,7 +2096,7 @@ mod tests {
             &config,
         );
 
-        assert_json_snapshot!(stateful_set_json, { ".spec.template.metadata.annotations[\"etl.supabase.com/restarted-at\"]" => "[timestamp]"});
+        assert_stateful_set_json_snapshot!(stateful_set_json);
         let _stateful_set: StatefulSet = serde_json::from_value(stateful_set_json).unwrap();
 
         // Staging env
@@ -2112,7 +2129,7 @@ mod tests {
             &config,
         );
 
-        assert_json_snapshot!(stateful_set_json, { ".spec.template.metadata.annotations[\"etl.supabase.com/restarted-at\"]" => "[timestamp]"});
+        assert_stateful_set_json_snapshot!(stateful_set_json);
         let _stateful_set: StatefulSet = serde_json::from_value(stateful_set_json).unwrap();
 
         // Prod env
@@ -2145,7 +2162,7 @@ mod tests {
             &config,
         );
 
-        assert_json_snapshot!(stateful_set_json, { ".spec.template.metadata.annotations[\"etl.supabase.com/restarted-at\"]" => "[timestamp]"});
+        assert_stateful_set_json_snapshot!(stateful_set_json);
         let _stateful_set: StatefulSet = serde_json::from_value(stateful_set_json).unwrap();
     }
 
@@ -2185,7 +2202,7 @@ mod tests {
             &config,
         );
 
-        assert_json_snapshot!(stateful_set_json, { ".spec.template.metadata.annotations[\"etl.supabase.com/restarted-at\"]" => "[timestamp]"});
+        assert_stateful_set_json_snapshot!(stateful_set_json);
         let _stateful_set: StatefulSet = serde_json::from_value(stateful_set_json).unwrap();
 
         // Staging env
@@ -2218,7 +2235,7 @@ mod tests {
             &config,
         );
 
-        assert_json_snapshot!(stateful_set_json, { ".spec.template.metadata.annotations[\"etl.supabase.com/restarted-at\"]" => "[timestamp]"});
+        assert_stateful_set_json_snapshot!(stateful_set_json);
         let _stateful_set: StatefulSet = serde_json::from_value(stateful_set_json).unwrap();
 
         // Prod env
@@ -2251,7 +2268,7 @@ mod tests {
             &config,
         );
 
-        assert_json_snapshot!(stateful_set_json, { ".spec.template.metadata.annotations[\"etl.supabase.com/restarted-at\"]" => "[timestamp]"});
+        assert_stateful_set_json_snapshot!(stateful_set_json);
         let _stateful_set: StatefulSet = serde_json::from_value(stateful_set_json).unwrap();
     }
 }
