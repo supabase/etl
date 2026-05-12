@@ -452,6 +452,15 @@ mod tests {
     }
 
     #[test]
+    fn bigquery_table_row_try_from_rejects_json_integer_precision_loss() {
+        let json = serde_json::from_str(r#"{"value":18446744073709551616}"#).unwrap();
+        let table_row = TableRow::new(vec![Cell::Json(json)]);
+
+        let result = BigQueryTableRow::try_from(table_row);
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn bigquery_table_row_try_from_delegates_date_domain_validation_to_bigquery() {
         let invalid_date = NaiveDate::from_ymd_opt(1, 1, 1).unwrap().pred_opt().unwrap(); // Date before year 1
 

@@ -1802,6 +1802,12 @@ async fn table_validation_out_of_bounds_values() {
         .await
         .unwrap();
 
+    let infinite_numeric_table = test_table_name("infinite_numeric");
+    let infinite_numeric_table_id = database
+        .create_table(infinite_numeric_table.clone(), true, &[("infinite_numeric", "numeric")])
+        .await
+        .unwrap();
+
     let old_date_table = test_table_name("old_date");
     let old_date_table_id = database
         .create_table(old_date_table.clone(), true, &[("test_date", "date")])
@@ -1828,6 +1834,20 @@ async fn table_validation_out_of_bounds_values() {
                 "insert into {} (huge_numeric) values ({})",
                 huge_numeric_table.as_quoted_identifier(),
                 "'123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890'"
+            ),
+            &[],
+        )
+        .await
+        .unwrap();
+
+    database
+        .client
+        .as_ref()
+        .unwrap()
+        .execute(
+            &format!(
+                "insert into {} (infinite_numeric) values ('Infinity'::numeric)",
+                infinite_numeric_table.as_quoted_identifier()
             ),
             &[],
         )
@@ -1885,7 +1905,13 @@ async fn table_validation_out_of_bounds_values() {
     database
         .create_publication(
             &publication_name,
-            &[huge_numeric_table, old_date_table, nan_array_table, wide_json_table],
+            &[
+                huge_numeric_table,
+                infinite_numeric_table,
+                old_date_table,
+                nan_array_table,
+                wide_json_table,
+            ],
         )
         .await
         .expect("Failed to create publication");
@@ -1901,6 +1927,10 @@ async fn table_validation_out_of_bounds_values() {
     // Register notifications for errored replication phase
     let huge_numeric_error_notify = store
         .notify_on_table_state_type(huge_numeric_table_id, TableReplicationPhaseType::Errored)
+        .await;
+
+    let infinite_numeric_error_notify = store
+        .notify_on_table_state_type(infinite_numeric_table_id, TableReplicationPhaseType::Errored)
         .await;
 
     let old_date_error_notify = store
@@ -1919,15 +1949,20 @@ async fn table_validation_out_of_bounds_values() {
 
     // Wait for all tables to enter errored state
     huge_numeric_error_notify.notified().await;
+    infinite_numeric_error_notify.notified().await;
     old_date_error_notify.notified().await;
     nan_array_error_notify.notified().await;
     wide_json_error_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
-    for table_id in
-        [huge_numeric_table_id, old_date_table_id, nan_array_table_id, wide_json_table_id]
-    {
+    for table_id in [
+        huge_numeric_table_id,
+        infinite_numeric_table_id,
+        old_date_table_id,
+        nan_array_table_id,
+        wide_json_table_id,
+    ] {
         let table_state = store.get_table_replication_state(table_id).await.unwrap().unwrap();
         assert!(matches!(table_state, TableReplicationPhase::Errored { .. }));
     }

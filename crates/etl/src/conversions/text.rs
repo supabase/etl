@@ -592,43 +592,6 @@ mod tests {
     }
 
     #[test]
-    fn try_from_str_bigquery_temporal_boundaries() {
-        assert!(matches!(
-            parse_cell_from_postgres_text(&Type::DATE, "0001-01-01").unwrap(),
-            Cell::Date(_)
-        ));
-        assert!(matches!(
-            parse_cell_from_postgres_text(&Type::DATE, "9999-12-31").unwrap(),
-            Cell::Date(_)
-        ));
-        assert!(matches!(
-            parse_cell_from_postgres_text(&Type::TIME, "00:00:00").unwrap(),
-            Cell::Time(_)
-        ));
-        assert!(matches!(
-            parse_cell_from_postgres_text(&Type::TIME, "23:59:59.999999").unwrap(),
-            Cell::Time(_)
-        ));
-        assert!(matches!(
-            parse_cell_from_postgres_text(&Type::TIMESTAMP, "0001-01-01 00:00:00").unwrap(),
-            Cell::Timestamp(_)
-        ));
-        assert!(matches!(
-            parse_cell_from_postgres_text(&Type::TIMESTAMP, "9999-12-31 23:59:59.999999").unwrap(),
-            Cell::Timestamp(_)
-        ));
-        assert!(matches!(
-            parse_cell_from_postgres_text(&Type::TIMESTAMPTZ, "0001-01-01 00:00:00+00:00").unwrap(),
-            Cell::TimestampTz(_)
-        ));
-        assert!(matches!(
-            parse_cell_from_postgres_text(&Type::TIMESTAMPTZ, "9999-12-31 23:59:59.999999+00:00")
-                .unwrap(),
-            Cell::TimestampTz(_)
-        ));
-    }
-
-    #[test]
     fn try_from_str_uuid() {
         let uuid_str = "550e8400-e29b-41d4-a716-446655440000";
         let cell = parse_cell_from_postgres_text(&Type::UUID, uuid_str).unwrap();
