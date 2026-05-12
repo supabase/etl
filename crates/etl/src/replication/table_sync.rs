@@ -388,26 +388,24 @@ where
             let worker_type = WorkerType::TableSync { table_id };
             let durable_flush_lsn = store.get_replication_progress(worker_type).await?;
             if let Some(durable_flush_lsn) = durable_flush_lsn {
-                if durable_flush_lsn < slot.confirmed_flush_lsn {
-                    bail!(
-                        ErrorKind::InvalidState,
-                        "Durable replication progress is behind the replication slot",
-                        format!(
-                            "Durable progress for table sync worker on table {} is {}, but \
-                             replication slot '{}' starts from {}. Starting would skip data that \
-                             ETL has not durably acknowledged.",
-                            table_id, durable_flush_lsn, slot_name, slot.confirmed_flush_lsn
-                        )
-                    );
-                }
+                // Durable progress and slot progress can legitimately differ. During idle
+                // periods we keep sending PostgreSQL feedback with the received LSN, but
+                // we do not persist those idle-only advances to the state database to
+                // avoid extra writes. Conversely, durable progress can be ahead if ETL
+                // flushed a batch but PostgreSQL did not confirm the feedback yet. In the
+                // future we could persist idle progress too, but for now startup uses the
+                // latest safe boundary available from either source.
+                let start_lsn = durable_flush_lsn.max(slot.confirmed_flush_lsn);
 
                 info!(
                     table_id = table_id.0,
                     %durable_flush_lsn,
-                    "resuming table sync from durable replication progress"
+                    confirmed_flush_lsn = %slot.confirmed_flush_lsn,
+                    %start_lsn,
+                    "resuming table sync from durable replication progress and replication slot"
                 );
 
-                durable_flush_lsn
+                start_lsn
             } else {
                 info!(
                     table_id = table_id.0,

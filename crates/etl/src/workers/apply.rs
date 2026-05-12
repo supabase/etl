@@ -436,25 +436,24 @@ async fn get_start_lsn<S: StateStore>(
 
     let durable_flush_lsn = store.get_replication_progress(worker_type).await?;
     if let Some(durable_flush_lsn) = durable_flush_lsn {
-        if durable_flush_lsn < slot_start_lsn {
-            bail!(
-                ErrorKind::InvalidState,
-                "Durable replication progress is behind the replication slot",
-                format!(
-                    "Durable progress for apply worker is {}, but replication slot '{}' starts \
-                     from {}. Starting would skip data that ETL has not durably acknowledged.",
-                    durable_flush_lsn, slot_name, slot_start_lsn
-                )
-            );
-        }
+        // Durable progress and slot progress can legitimately differ. During idle
+        // periods we keep sending PostgreSQL feedback with the received LSN, but
+        // we do not persist those idle-only advances to the state database to
+        // avoid extra writes. Conversely, durable progress can be ahead if ETL
+        // flushed a batch but PostgreSQL did not confirm the feedback yet. In the
+        // future we could persist idle progress too, but for now startup uses the
+        // latest safe boundary available from either source.
+        let start_lsn = durable_flush_lsn.max(slot_start_lsn);
 
         info!(
             slot_name,
             %durable_flush_lsn,
-            "apply worker resume position selected from durable replication progress"
+            %slot_start_lsn,
+            %start_lsn,
+            "apply worker resume position selected from durable replication progress and replication slot"
         );
 
-        Ok(durable_flush_lsn)
+        Ok(start_lsn)
     } else {
         info!(
             slot_name,
