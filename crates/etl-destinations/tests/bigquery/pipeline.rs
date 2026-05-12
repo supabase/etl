@@ -1824,6 +1824,12 @@ async fn table_validation_out_of_bounds_values() {
     let wide_json_table_id =
         database.create_table(wide_json_table.clone(), true, &[("payload", "json")]).await.unwrap();
 
+    let imprecise_json_integer_table = test_table_name("imprecise_json_integer");
+    let imprecise_json_integer_table_id = database
+        .create_table(imprecise_json_integer_table.clone(), true, &[("payload", "json")])
+        .await
+        .unwrap();
+
     // Insert out-of-bounds data into each table
     database
         .client
@@ -1896,6 +1902,20 @@ async fn table_validation_out_of_bounds_values() {
         .await
         .unwrap();
 
+    database
+        .client
+        .as_ref()
+        .unwrap()
+        .execute(
+            &format!(
+                "insert into {} (payload) values ('{{\"value\":18446744073709551616}}'::json)",
+                imprecise_json_integer_table.as_quoted_identifier()
+            ),
+            &[],
+        )
+        .await
+        .unwrap();
+
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
     let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
@@ -1911,6 +1931,7 @@ async fn table_validation_out_of_bounds_values() {
                 old_date_table,
                 nan_array_table,
                 wide_json_table,
+                imprecise_json_integer_table,
             ],
         )
         .await
@@ -1945,6 +1966,13 @@ async fn table_validation_out_of_bounds_values() {
         .notify_on_table_state_type(wide_json_table_id, TableReplicationPhaseType::Errored)
         .await;
 
+    let imprecise_json_integer_error_notify = store
+        .notify_on_table_state_type(
+            imprecise_json_integer_table_id,
+            TableReplicationPhaseType::Errored,
+        )
+        .await;
+
     pipeline.start().await.unwrap();
 
     // Wait for all tables to enter errored state
@@ -1953,6 +1981,7 @@ async fn table_validation_out_of_bounds_values() {
     old_date_error_notify.notified().await;
     nan_array_error_notify.notified().await;
     wide_json_error_notify.notified().await;
+    imprecise_json_integer_error_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -1962,6 +1991,7 @@ async fn table_validation_out_of_bounds_values() {
         old_date_table_id,
         nan_array_table_id,
         wide_json_table_id,
+        imprecise_json_integer_table_id,
     ] {
         let table_state = store.get_table_replication_state(table_id).await.unwrap().unwrap();
         assert!(matches!(table_state, TableReplicationPhase::Errored { .. }));
