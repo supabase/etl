@@ -120,7 +120,7 @@ async fn run(config: ReplicatorConfig) -> MaintenanceResult<()> {
             )?,
         },
         expire_snapshots: ExpireSnapshotsMaintenanceConfig {
-            enabled: env_bool("ETL_DUCKLAKE_MAINTENANCE__EXPIRE_SNAPSHOTS__ENABLED", true),
+            enabled: env_bool("ETL_DUCKLAKE_MAINTENANCE__EXPIRE_SNAPSHOTS__ENABLED", false),
             older_than: expire_snapshots_older_than.clone().unwrap_or_else(|| "7 days".to_owned()),
         },
         cleanup_old_files: CleanupOldFilesMaintenanceConfig {

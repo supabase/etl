@@ -954,7 +954,7 @@ fn create_ducklake_maintenance_json(
             "maxTablesPerRun": config.policy.max_tables_per_run,
           },
           "expireSnapshots": {
-            "enabled": true,
+            "enabled": false,
           },
           "cleanupOldFiles": {
             "enabled": true,

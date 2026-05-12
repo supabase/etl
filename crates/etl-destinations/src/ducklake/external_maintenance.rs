@@ -690,7 +690,7 @@ fn operation_policy(resource: &DynamicObject) -> OperationPolicy {
         expire_snapshots_enabled: expire_snapshots
             .and_then(|value| value.get("enabled"))
             .and_then(serde_json::Value::as_bool)
-            .unwrap_or(true),
+            .unwrap_or(false),
     }
 }
 
@@ -736,5 +736,36 @@ impl WatcherConfig {
             inline_flush_min_inlined_bytes,
             rewrite_data_files_min_active_data_files,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn operation_policy_defaults_expire_snapshots_disabled() {
+        let resource: DynamicObject = serde_json::from_value(json!({
+            "apiVersion": "etl.supabase.com/v1alpha1",
+            "kind": "DuckLakeMaintenance",
+            "metadata": {
+                "name": "pipeline-maintenance"
+            },
+            "spec": {
+                "operations": {
+                    "inlineFlush": {},
+                    "rewriteDataFiles": {}
+                }
+            }
+        }))
+        .unwrap();
+
+        let policy = operation_policy(&resource);
+
+        assert!(policy.inline_flush_enabled);
+        assert!(policy.rewrite_data_files_enabled);
+        assert!(!policy.expire_snapshots_enabled);
     }
 }
