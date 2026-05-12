@@ -78,15 +78,15 @@ pub struct RowBatchBuilder {
 }
 
 impl RowBatchBuilder {
-    pub fn new() -> Result<Self> {
-        Ok(Self {
-            encoder: new_encoder()?,
+    pub fn new() -> Self {
+        Self {
+            encoder: new_encoder(),
             scratch: Vec::with_capacity(4096),
             current_row_count: 0,
             current_offset: OffsetToken::zero(),
             input_since_flush: 0,
             batches: Vec::new(),
-        })
+        }
     }
 
     /// Append a row.
@@ -163,7 +163,7 @@ impl RowBatchBuilder {
     }
 
     fn next_batch(&mut self) -> Result<()> {
-        let old_encoder = mem::replace(&mut self.encoder, new_encoder()?);
+        let old_encoder = mem::replace(&mut self.encoder, new_encoder());
         let compressed =
             old_encoder.finish().map_err(|e| Error::Encoding(format!("zstd finish: {e}")))?;
 
@@ -180,9 +180,9 @@ impl RowBatchBuilder {
     }
 }
 
-fn new_encoder() -> Result<Encoder<'static, Vec<u8>>> {
+fn new_encoder() -> Encoder<'static, Vec<u8>> {
     Encoder::new(Vec::new(), ZSTD_COMPRESSION_LEVEL)
-        .map_err(|e| Error::Encoding(format!("zstd encoder init: {e}")))
+        .expect("hardcoded zstd compression level must be valid")
 }
 
 #[cfg(test)]
@@ -210,7 +210,7 @@ mod tests {
     #[test]
     fn single_batch() {
         let cols = [col("id"), col("name")];
-        let mut builder = RowBatchBuilder::new().unwrap();
+        let mut builder = RowBatchBuilder::new();
 
         for i in 0..10 {
             let row = TableRow::new(vec![Cell::I32(i), Cell::String(format!("row_{i}"))]);
@@ -239,7 +239,7 @@ mod tests {
 
     #[test]
     fn empty_builder() {
-        let builder = RowBatchBuilder::new().unwrap();
+        let builder = RowBatchBuilder::new();
         let batches = builder.finish().unwrap();
         assert!(batches.is_empty());
         assert_eq!(batches.len(), 0);
@@ -248,7 +248,7 @@ mod tests {
     #[test]
     fn batch_splitting() {
         let cols = [col("data")];
-        let mut builder = RowBatchBuilder::new().unwrap();
+        let mut builder = RowBatchBuilder::new();
 
         for i in 0..100 {
             let value = incompressible_string(100_000, i as u64);
@@ -280,7 +280,7 @@ mod tests {
     #[test]
     fn oversized_row_rejected() {
         let cols = [col("data")];
-        let mut builder = RowBatchBuilder::new().unwrap();
+        let mut builder = RowBatchBuilder::new();
 
         let huge_value = "x".repeat(MAX_UNCOMPRESSED_ROW_BYTES + 1);
         let row = TableRow::new(vec![Cell::String(huge_value)]);
@@ -294,7 +294,7 @@ mod tests {
     #[test]
     fn offset_tracks_last_row() {
         let cols = [col("id")];
-        let mut builder = RowBatchBuilder::new().unwrap();
+        let mut builder = RowBatchBuilder::new();
 
         let offsets = ["0000000000000001/0000000000000000", "0000000000000002/0000000000000000"];
         for token_str in &offsets {

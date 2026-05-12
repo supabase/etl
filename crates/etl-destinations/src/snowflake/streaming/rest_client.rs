@@ -554,7 +554,7 @@ mod tests {
     #[test]
     fn compressed_roundtrip() {
         let cols = [ColumnSchema::new("id".into(), Type::INT4, -1, 1, None, true)];
-        let mut builder = RowBatchBuilder::new().unwrap();
+        let mut builder = RowBatchBuilder::new();
         builder
             .push_row(
                 &cols,
