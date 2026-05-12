@@ -512,10 +512,17 @@ impl ApplyLoopState {
         !self.handling_transaction() && !self.has_unresolved_batch_work()
     }
 
-    /// Returns the effective flush LSN to report to PostgreSQL.
+    /// Returns the effective flush LSN to report to PostgreSQL and use for
+    /// idle coordination.
     ///
     /// When idle, returns the last received LSN since no actual flushes occur.
     /// Otherwise, returns the last flush LSN from completed transactions.
+    ///
+    /// Idle-only advances are intentionally not written to durable replication
+    /// progress. Persisted progress is a commit-boundary resume floor, while
+    /// this value may include keepalive-driven positions that are useful for
+    /// PostgreSQL feedback and table-sync coordination but not worth writing to
+    /// the customer database on every idle keepalive.
     ///
     /// Note that when a transaction is now started, the last flush LSN will be
     /// used, and it might jump back compared to the last received LSN that
@@ -1171,8 +1178,9 @@ where
     /// Initiates graceful shutdown by sending a final status update just to
     /// make sure that Postgres can advance its state once more.
     ///
-    /// The status update uses the best durable position currently known by the
-    /// loop.
+    /// The status update uses the loop's effective flush position. When idle,
+    /// this may include received keepalive progress that is intentionally not
+    /// persisted as durable ETL progress.
     async fn initiate_graceful_shutdown(
         &mut self,
         mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
@@ -2289,12 +2297,12 @@ where
         &mut self,
         last_commit_end_lsn: PgLsn,
     ) -> EtlResult<()> {
-        // Store durable replication progress before reporting it to PostgreSQL. This
-        // is the same commit-end boundary that status updates later report as both
-        // `flush_lsn` and `apply_lsn`; the only difference is when each side is
-        // emitted. Durable progress is recorded as soon as the destination
-        // acknowledges the batch, while PostgreSQL feedback is sent by the regular
-        // keep-alive and shutdown paths.
+        // Store durable replication progress at commit boundaries after the
+        // destination acknowledges the batch. This gives restarts a durable
+        // lower-bound resume point: once startup chooses this point, no event
+        // older than it will be emitted. It is not meant to eliminate every
+        // duplicate, and idle keepalive-only progress is intentionally left out
+        // to avoid writing to the customer database on every quiet heartbeat.
         let durable_flush_lsn =
             self.upsert_durable_replication_progress(last_commit_end_lsn).await?;
         self.state.replication_progress.update_last_flush_lsn(durable_flush_lsn);
@@ -2350,9 +2358,11 @@ where
     /// of work so draining stays focused on already-started flushes and
     /// shutdown barriers.
     ///
-    /// Idle syncing uses the durable flush LSN boundary. Keep alive messages
-    /// may advance write progress, but they do not by themselves create a
-    /// commit boundary that is safe to persist or use for handoff.
+    /// Idle syncing uses the effective flush LSN so table handoff can make
+    /// progress even when no new transactions arrive. Keepalive messages may
+    /// advance that effective position, but those idle-only advances are not
+    /// persisted as durable replication progress because they would create
+    /// extra writes during normal quiet periods.
     async fn maybe_process_syncing_tables_when_idle(&mut self) -> EtlResult<()> {
         if self.state.exit_intent.is_some() {
             return Ok(());
