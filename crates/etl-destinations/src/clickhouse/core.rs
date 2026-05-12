@@ -924,7 +924,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use etl::types::{ColumnSchema, IdentityMask, ReplicationMask, TableName, TableSchema};
+    use etl::types::{
+        ArrayCell, ColumnSchema, IdentityMask, ReplicationMask, TableName, TableSchema,
+    };
 
     use super::*;
 
