@@ -8,11 +8,12 @@ pub mod client;
 mod stream;
 mod table_cache;
 mod table_sync;
+mod worker_type;
 
-pub use apply::WorkerType;
 pub(crate) use apply::{
     ApplyLoop, ApplyLoopResult, ApplyWorkerContext, TableSyncWorkerContext, WorkerContext,
 };
 pub(crate) use stream::{EventsStream, StatusUpdateResult, StatusUpdateType, TableCopyStream};
 pub(crate) use table_cache::SharedTableCache;
 pub(crate) use table_sync::{TableSyncResult, start_table_sync};
+pub use worker_type::WorkerType;

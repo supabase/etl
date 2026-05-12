@@ -18,11 +18,8 @@ use std::{
 };
 
 use etl_config::shared::PipelineConfig;
-use etl_postgres::{
-    replication::slots::EtlReplicationSlot,
-    types::{
-        IdentityMask, ReplicatedTableSchema, ReplicationMask, SnapshotId, TableId, TableSchema,
-    },
+use etl_postgres::types::{
+    IdentityMask, ReplicatedTableSchema, ReplicationMask, SnapshotId, TableId, TableSchema,
 };
 use futures::StreamExt;
 use metrics::{counter, histogram};
@@ -72,7 +69,7 @@ use crate::{
         ETL_TRANSACTIONS_TOTAL, OUTCOME_LABEL, WORKER_TYPE_LABEL,
     },
     replication::{
-        EventsStream, SharedTableCache, StatusUpdateResult, StatusUpdateType,
+        EventsStream, SharedTableCache, StatusUpdateResult, StatusUpdateType, WorkerType,
         client::{PgReplicationClient, PostgresConnectionUpdate},
     },
     state::table::{TableReplicationPhase, TableReplicationPhaseType},
@@ -114,52 +111,6 @@ const MIN_KEEP_ALIVE_DEADLINE_DURATION: Duration = Duration::from_millis(100);
 /// progress points where durable ETL progress may have advanced. The next
 /// deadline is scheduled when the previous cleanup task finishes.
 const SCHEMA_CLEANUP_INTERVAL: Duration = Duration::from_hours(1);
-
-/// Type of worker driving the apply loop.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-pub enum WorkerType {
-    /// The main apply worker that coordinates table sync workers.
-    Apply,
-    /// A table sync worker that synchronizes a specific table.
-    TableSync {
-        /// The table being synchronized.
-        table_id: TableId,
-    },
-}
-
-impl WorkerType {
-    /// Builds an [`EtlReplicationSlot`] for this worker type.
-    pub(crate) fn build_etl_replication_slot(&self, pipeline_id: u64) -> EtlReplicationSlot {
-        match self {
-            Self::Apply => EtlReplicationSlot::Apply { pipeline_id },
-            Self::TableSync { table_id } => {
-                EtlReplicationSlot::TableSync { pipeline_id, table_id: *table_id }
-            }
-        }
-    }
-
-    /// Returns a low-cardinality worker type label for metrics and tags.
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Apply => "apply",
-            Self::TableSync { .. } => "table_sync",
-        }
-    }
-
-    /// Returns the durable progress table ID used by the state store.
-    pub(crate) fn progress_table_id(self) -> Option<TableId> {
-        match self {
-            Self::Apply => None,
-            Self::TableSync { table_id } => Some(table_id),
-        }
-    }
-}
-
-impl Display for WorkerType {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.as_str())
-    }
-}
 
 /// Result type for the apply loop execution.
 ///
@@ -1215,7 +1166,8 @@ where
         self.initiate_graceful_shutdown(events_stream.as_mut()).await
     }
 
-    /// Initiates graceful shutdown by sending a final status update.
+    /// Initiates graceful shutdown by sending a final status update just to
+    /// make sure that Postgres can advance its state once more.
     ///
     /// The status update uses the best durable position currently known by the
     /// loop.

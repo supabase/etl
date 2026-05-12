@@ -23,5 +23,10 @@ create table etl.replication_progress (
     )
 );
 
-create unique index uq_replication_progress_pipeline_worker_table
-    on etl.replication_progress (pipeline_id, worker_type, coalesce(table_id, 0::oid));
+create unique index uq_replication_progress_pipeline_apply
+    on etl.replication_progress (pipeline_id, worker_type)
+    where table_id is null;
+
+create unique index uq_replication_progress_pipeline_table_sync
+    on etl.replication_progress (pipeline_id, worker_type, table_id)
+    where table_id is not null;
