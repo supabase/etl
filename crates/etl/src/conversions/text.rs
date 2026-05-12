@@ -3,6 +3,7 @@ use core::str;
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime};
 use etl_postgres::types::{
     DATE_FORMAT, TIME_FORMAT, TIMESTAMP_FORMAT, TIMESTAMPTZ_FORMAT_HH_MM, TIMESTAMPTZ_FORMAT_HHMM,
+    is_array_type,
 };
 use tokio_postgres::types::Type;
 use uuid::Uuid;
@@ -32,14 +33,15 @@ pub(crate) fn parse_cell_from_postgres_text(typ: &Type, str: &str) -> EtlResult<
             |str| Ok(Some(parse_bool(str)?)),
             ArrayCell::Bool,
         ),
-        Type::CHAR | Type::BPCHAR | Type::VARCHAR | Type::NAME | Type::TEXT => {
+        Type::CHAR | Type::BPCHAR | Type::VARCHAR | Type::NAME | Type::TEXT | Type::MONEY => {
             Ok(Cell::String(str.to_owned()))
         }
         Type::CHAR_ARRAY
         | Type::BPCHAR_ARRAY
         | Type::VARCHAR_ARRAY
         | Type::NAME_ARRAY
-        | Type::TEXT_ARRAY => parse_cell_from_postgres_text_array(
+        | Type::TEXT_ARRAY
+        | Type::MONEY_ARRAY => parse_cell_from_postgres_text_array(
             str,
             |str| Ok(Some(str.to_owned())),
             ArrayCell::String,
@@ -161,6 +163,11 @@ pub(crate) fn parse_cell_from_postgres_text(typ: &Type, str: &str) -> EtlResult<
         Type::OID_ARRAY => {
             parse_cell_from_postgres_text_array(str, |str| Ok(Some(str.parse()?)), ArrayCell::U32)
         }
+        _ if is_array_type(typ) => parse_cell_from_postgres_text_array(
+            str,
+            |str| Ok(Some(str.to_owned())),
+            ArrayCell::String,
+        ),
         _ => Ok(Cell::String(str.to_owned())),
     }
 }
@@ -307,10 +314,70 @@ mod tests {
     }
 
     #[test]
+    fn try_from_str_integer_boundaries() {
+        assert_eq!(
+            parse_cell_from_postgres_text(&Type::INT2, "-32768").unwrap(),
+            Cell::I16(i16::MIN)
+        );
+        assert_eq!(
+            parse_cell_from_postgres_text(&Type::INT2, "32767").unwrap(),
+            Cell::I16(i16::MAX)
+        );
+        assert_eq!(
+            parse_cell_from_postgres_text(&Type::INT4, "-2147483648").unwrap(),
+            Cell::I32(i32::MIN)
+        );
+        assert_eq!(
+            parse_cell_from_postgres_text(&Type::INT4, "2147483647").unwrap(),
+            Cell::I32(i32::MAX)
+        );
+        assert_eq!(
+            parse_cell_from_postgres_text(&Type::INT8, "-9223372036854775808").unwrap(),
+            Cell::I64(i64::MIN)
+        );
+        assert_eq!(
+            parse_cell_from_postgres_text(&Type::INT8, "9223372036854775807").unwrap(),
+            Cell::I64(i64::MAX)
+        );
+        assert_eq!(
+            parse_cell_from_postgres_text(&Type::OID, "4294967295").unwrap(),
+            Cell::U32(u32::MAX)
+        );
+    }
+
+    #[test]
     fn try_from_str_integer_overflow() {
         assert!(parse_cell_from_postgres_text(&Type::INT2, "99999").is_err());
         assert!(parse_cell_from_postgres_text(&Type::INT4, "9999999999").is_err());
+        assert!(parse_cell_from_postgres_text(&Type::INT8, "9223372036854775808").is_err());
+        assert!(parse_cell_from_postgres_text(&Type::INT8, "-9223372036854775809").is_err());
         assert!(parse_cell_from_postgres_text(&Type::OID, "-1").is_err());
+        assert!(parse_cell_from_postgres_text(&Type::OID, "4294967296").is_err());
+    }
+
+    #[test]
+    fn try_from_str_integer_array_boundaries() {
+        assert_eq!(
+            parse_cell_from_postgres_text(&Type::INT2_ARRAY, "{-32768,32767,NULL}").unwrap(),
+            Cell::Array(ArrayCell::I16(vec![Some(i16::MIN), Some(i16::MAX), None]))
+        );
+        assert_eq!(
+            parse_cell_from_postgres_text(&Type::INT4_ARRAY, "{-2147483648,2147483647,NULL}")
+                .unwrap(),
+            Cell::Array(ArrayCell::I32(vec![Some(i32::MIN), Some(i32::MAX), None]))
+        );
+        assert_eq!(
+            parse_cell_from_postgres_text(
+                &Type::INT8_ARRAY,
+                "{-9223372036854775808,9223372036854775807,NULL}",
+            )
+            .unwrap(),
+            Cell::Array(ArrayCell::I64(vec![Some(i64::MIN), Some(i64::MAX), None]))
+        );
+        assert_eq!(
+            parse_cell_from_postgres_text(&Type::OID_ARRAY, "{0,4294967295,NULL}").unwrap(),
+            Cell::Array(ArrayCell::U32(vec![Some(0), Some(u32::MAX), None]))
+        );
     }
 
     #[test]
@@ -329,6 +396,61 @@ mod tests {
     }
 
     #[test]
+    fn try_from_str_float_boundaries() {
+        assert_eq!(
+            parse_cell_from_postgres_text(&Type::FLOAT4, "3.4028235e38").unwrap(),
+            Cell::F32(f32::MAX)
+        );
+        assert_eq!(
+            parse_cell_from_postgres_text(&Type::FLOAT4, "-3.4028235e38").unwrap(),
+            Cell::F32(-f32::MAX)
+        );
+        assert_eq!(
+            parse_cell_from_postgres_text(&Type::FLOAT8, "1.7976931348623157e308").unwrap(),
+            Cell::F64(f64::MAX)
+        );
+        assert_eq!(
+            parse_cell_from_postgres_text(&Type::FLOAT8, "-1.7976931348623157e308").unwrap(),
+            Cell::F64(-f64::MAX)
+        );
+    }
+
+    #[test]
+    fn try_from_str_float_array_boundaries() {
+        let cell = parse_cell_from_postgres_text(
+            &Type::FLOAT4_ARRAY,
+            "{-3.4028235e38,3.4028235e38,NaN,Infinity,-Infinity,NULL}",
+        )
+        .unwrap();
+        if let Cell::Array(ArrayCell::F32(values)) = cell {
+            assert_eq!(values[0], Some(-f32::MAX));
+            assert_eq!(values[1], Some(f32::MAX));
+            assert!(values[2].is_some_and(f32::is_nan));
+            assert_eq!(values[3], Some(f32::INFINITY));
+            assert_eq!(values[4], Some(f32::NEG_INFINITY));
+            assert_eq!(values[5], None);
+        } else {
+            panic!("Expected FLOAT4 array");
+        }
+
+        let cell = parse_cell_from_postgres_text(
+            &Type::FLOAT8_ARRAY,
+            "{-1.7976931348623157e308,1.7976931348623157e308,NaN,Infinity,-Infinity,NULL}",
+        )
+        .unwrap();
+        if let Cell::Array(ArrayCell::F64(values)) = cell {
+            assert_eq!(values[0], Some(-f64::MAX));
+            assert_eq!(values[1], Some(f64::MAX));
+            assert!(values[2].is_some_and(f64::is_nan));
+            assert_eq!(values[3], Some(f64::INFINITY));
+            assert_eq!(values[4], Some(f64::NEG_INFINITY));
+            assert_eq!(values[5], None);
+        } else {
+            panic!("Expected FLOAT8 array");
+        }
+    }
+
+    #[test]
     fn try_from_str_string_types() {
         let test_string = "Hello, World!";
 
@@ -340,6 +462,9 @@ mod tests {
 
         let cell = parse_cell_from_postgres_text(&Type::CHAR, test_string).unwrap();
         assert_eq!(cell, Cell::String(test_string.to_owned()));
+
+        let cell = parse_cell_from_postgres_text(&Type::MONEY, "$1,234.56").unwrap();
+        assert_eq!(cell, Cell::String("$1,234.56".to_owned()));
     }
 
     #[test]
@@ -353,6 +478,52 @@ mod tests {
 
         let cell = parse_cell_from_postgres_text(&Type::NUMERIC, "NaN").unwrap();
         assert_eq!(cell, Cell::Numeric(PgNumeric::NaN));
+
+        let cell = parse_cell_from_postgres_text(&Type::NUMERIC, "Infinity").unwrap();
+        assert_eq!(cell, Cell::Numeric(PgNumeric::PositiveInfinity));
+
+        let cell = parse_cell_from_postgres_text(&Type::NUMERIC, "-Infinity").unwrap();
+        assert_eq!(cell, Cell::Numeric(PgNumeric::NegativeInfinity));
+    }
+
+    #[test]
+    fn try_from_str_numeric_postgres_range_boundaries() {
+        let cell = parse_cell_from_postgres_text(&Type::NUMERIC, "1e131071").unwrap();
+        if let Cell::Numeric(PgNumeric::Value { weight, scale, digits, .. }) = cell {
+            assert_eq!(weight, i16::MAX);
+            assert_eq!(scale, 0);
+            assert_eq!(digits, vec![1000]);
+        } else {
+            panic!("Expected Numeric cell");
+        }
+
+        let cell = parse_cell_from_postgres_text(&Type::NUMERIC, "1e-16383").unwrap();
+        if let Cell::Numeric(PgNumeric::Value { weight, scale, digits, .. }) = cell {
+            assert_eq!(weight, -4096);
+            assert_eq!(scale, 16_383);
+            assert_eq!(digits, vec![10]);
+        } else {
+            panic!("Expected Numeric cell");
+        }
+
+        assert!(parse_cell_from_postgres_text(&Type::NUMERIC, "1e131072").is_err());
+        assert!(parse_cell_from_postgres_text(&Type::NUMERIC, "1e-16384").is_err());
+    }
+
+    #[test]
+    fn try_from_str_numeric_array_special_values() {
+        let cell =
+            parse_cell_from_postgres_text(&Type::NUMERIC_ARRAY, "{-Infinity,NaN,NULL,123.45}")
+                .unwrap();
+        assert_eq!(
+            cell,
+            Cell::Array(ArrayCell::Numeric(vec![
+                Some(PgNumeric::NegativeInfinity),
+                Some(PgNumeric::NaN),
+                None,
+                Some("123.45".parse().unwrap()),
+            ]))
+        );
     }
 
     #[test]
@@ -421,6 +592,43 @@ mod tests {
     }
 
     #[test]
+    fn try_from_str_bigquery_temporal_boundaries() {
+        assert!(matches!(
+            parse_cell_from_postgres_text(&Type::DATE, "0001-01-01").unwrap(),
+            Cell::Date(_)
+        ));
+        assert!(matches!(
+            parse_cell_from_postgres_text(&Type::DATE, "9999-12-31").unwrap(),
+            Cell::Date(_)
+        ));
+        assert!(matches!(
+            parse_cell_from_postgres_text(&Type::TIME, "00:00:00").unwrap(),
+            Cell::Time(_)
+        ));
+        assert!(matches!(
+            parse_cell_from_postgres_text(&Type::TIME, "23:59:59.999999").unwrap(),
+            Cell::Time(_)
+        ));
+        assert!(matches!(
+            parse_cell_from_postgres_text(&Type::TIMESTAMP, "0001-01-01 00:00:00").unwrap(),
+            Cell::Timestamp(_)
+        ));
+        assert!(matches!(
+            parse_cell_from_postgres_text(&Type::TIMESTAMP, "9999-12-31 23:59:59.999999").unwrap(),
+            Cell::Timestamp(_)
+        ));
+        assert!(matches!(
+            parse_cell_from_postgres_text(&Type::TIMESTAMPTZ, "0001-01-01 00:00:00+00:00").unwrap(),
+            Cell::TimestampTz(_)
+        ));
+        assert!(matches!(
+            parse_cell_from_postgres_text(&Type::TIMESTAMPTZ, "9999-12-31 23:59:59.999999+00:00")
+                .unwrap(),
+            Cell::TimestampTz(_)
+        ));
+    }
+
+    #[test]
     fn try_from_str_uuid() {
         let uuid_str = "550e8400-e29b-41d4-a716-446655440000";
         let cell = parse_cell_from_postgres_text(&Type::UUID, uuid_str).unwrap();
@@ -448,6 +656,20 @@ mod tests {
         assert!(matches!(cell, Cell::Json(_)));
 
         assert!(parse_cell_from_postgres_text(&Type::JSON, "invalid json").is_err());
+    }
+
+    #[test]
+    fn try_from_str_json_accepts_wide_number_literals() {
+        let json_str = r#"{"value":1e309}"#;
+        let cell = parse_cell_from_postgres_text(&Type::JSON, json_str).unwrap();
+        if let Cell::Json(json) = cell {
+            assert_eq!(json.to_string(), r#"{"value":1e+309}"#);
+        } else {
+            panic!("Expected Json cell");
+        }
+
+        let cell = parse_cell_from_postgres_text(&Type::JSONB, json_str).unwrap();
+        assert!(matches!(cell, Cell::Json(_)));
     }
 
     #[test]
@@ -492,6 +714,48 @@ mod tests {
             }
             _ => panic!("Expected TEXT array"),
         }
+    }
+
+    #[test]
+    fn parse_money_array_preserves_text_values() {
+        let cell =
+            parse_cell_from_postgres_text(&Type::MONEY_ARRAY, r#"{"$1,234.56",NULL,"-$0.01"}"#)
+                .unwrap();
+        assert_eq!(
+            cell,
+            Cell::Array(ArrayCell::String(vec![
+                Some("$1,234.56".to_owned()),
+                None,
+                Some("-$0.01".to_owned()),
+            ]))
+        );
+    }
+
+    #[test]
+    fn unsupported_builtin_arrays_preserve_array_shape_as_strings() {
+        let cell =
+            parse_cell_from_postgres_text(&Type::INTERVAL_ARRAY, r#"{"1 day",NULL,"2 hours"}"#)
+                .unwrap();
+        assert_eq!(
+            cell,
+            Cell::Array(ArrayCell::String(vec![
+                Some("1 day".to_owned()),
+                None,
+                Some("2 hours".to_owned()),
+            ]))
+        );
+
+        let cell =
+            parse_cell_from_postgres_text(&Type::INET_ARRAY, r#"{127.0.0.1,NULL,192.168.0.1}"#)
+                .unwrap();
+        assert_eq!(
+            cell,
+            Cell::Array(ArrayCell::String(vec![
+                Some("127.0.0.1".to_owned()),
+                None,
+                Some("192.168.0.1".to_owned()),
+            ]))
+        );
     }
 
     #[test]

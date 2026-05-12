@@ -35,6 +35,7 @@ bigquery = [
     "dep:tracing",
     "dep:tokio",
     "dep:metrics",
+    "dep:serde_json",
 ]
 iceberg = [
     "dep:iceberg",

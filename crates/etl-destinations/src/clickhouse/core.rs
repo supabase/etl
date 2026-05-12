@@ -836,6 +836,17 @@ fn default_cell(typ: &Type) -> Cell {
         Type::TIMESTAMP => Cell::Timestamp(chrono::DateTime::UNIX_EPOCH.naive_utc()),
         Type::TIMESTAMPTZ => Cell::TimestampTz(chrono::DateTime::UNIX_EPOCH),
         Type::UUID => Cell::Uuid(uuid::Uuid::nil()),
+        Type::CHAR
+        | Type::BPCHAR
+        | Type::VARCHAR
+        | Type::NAME
+        | Type::TEXT
+        | Type::NUMERIC
+        | Type::MONEY
+        | Type::TIME
+        | Type::JSON
+        | Type::JSONB
+        | Type::BYTEA => Cell::String(String::new()),
         Type::BOOL_ARRAY => Cell::Array(ArrayCell::Bool(Vec::new())),
         Type::INT2_ARRAY => Cell::Array(ArrayCell::I16(Vec::new())),
         Type::INT4_ARRAY => Cell::Array(ArrayCell::I32(Vec::new())),
@@ -847,7 +858,8 @@ fn default_cell(typ: &Type) -> Cell {
         | Type::VARCHAR_ARRAY
         | Type::CHAR_ARRAY
         | Type::BPCHAR_ARRAY
-        | Type::NAME_ARRAY => Cell::Array(ArrayCell::String(Vec::new())),
+        | Type::NAME_ARRAY
+        | Type::MONEY_ARRAY => Cell::Array(ArrayCell::String(Vec::new())),
         Type::NUMERIC_ARRAY => Cell::Array(ArrayCell::Numeric(Vec::new())),
         Type::DATE_ARRAY => Cell::Array(ArrayCell::Date(Vec::new())),
         Type::TIME_ARRAY => Cell::Array(ArrayCell::Time(Vec::new())),
@@ -856,6 +868,7 @@ fn default_cell(typ: &Type) -> Cell {
         Type::UUID_ARRAY => Cell::Array(ArrayCell::Uuid(Vec::new())),
         Type::JSON_ARRAY | Type::JSONB_ARRAY => Cell::Array(ArrayCell::Json(Vec::new())),
         Type::BYTEA_ARRAY => Cell::Array(ArrayCell::Bytes(Vec::new())),
+        _ if is_array_type(typ) => Cell::Array(ArrayCell::String(Vec::new())),
         _ => Cell::String(String::new()),
     }
 }
@@ -974,6 +987,12 @@ mod tests {
             ClickHouseValue::UInt64(lsn) => assert_eq!(lsn, u64::MAX),
             _ => panic!("expected UInt64 CDC LSN value"),
         }
+    }
+
+    #[test]
+    fn default_cell_money_values_are_strings() {
+        assert_eq!(default_cell(&Type::MONEY), Cell::String(String::new()));
+        assert_eq!(default_cell(&Type::MONEY_ARRAY), Cell::Array(ArrayCell::String(Vec::new())));
     }
 
     #[test]

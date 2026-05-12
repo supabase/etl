@@ -1251,6 +1251,7 @@ impl BigQueryClient {
                 &Type::INT2_ARRAY | &Type::INT4_ARRAY | &Type::INT8_ARRAY => "int64",
                 &Type::FLOAT4_ARRAY | &Type::FLOAT8_ARRAY => "float64",
                 &Type::NUMERIC_ARRAY => "bignumeric",
+                &Type::MONEY_ARRAY => "string",
                 &Type::DATE_ARRAY => "date",
                 &Type::TIME_ARRAY => "time",
                 &Type::TIMESTAMP_ARRAY | &Type::TIMESTAMPTZ_ARRAY => "timestamp",
@@ -1270,6 +1271,7 @@ impl BigQueryClient {
             &Type::INT2 | &Type::INT4 | &Type::INT8 => "int64",
             &Type::FLOAT4 | &Type::FLOAT8 => "float64",
             &Type::NUMERIC => "bignumeric",
+            &Type::MONEY => "string",
             &Type::DATE => "date",
             &Type::TIME => "time",
             &Type::TIMESTAMP | &Type::TIMESTAMPTZ => "timestamp",
@@ -1306,6 +1308,7 @@ impl BigQueryClient {
                 Type::FLOAT4 => ColumnType::Float,
                 Type::FLOAT8 => ColumnType::Double,
                 Type::NUMERIC => ColumnType::String,
+                Type::MONEY => ColumnType::String,
                 Type::DATE => ColumnType::String,
                 Type::TIME => ColumnType::String,
                 Type::TIMESTAMP => ColumnType::String,
@@ -1327,6 +1330,7 @@ impl BigQueryClient {
                 Type::FLOAT4_ARRAY => ColumnType::Float,
                 Type::FLOAT8_ARRAY => ColumnType::Double,
                 Type::NUMERIC_ARRAY => ColumnType::String,
+                Type::MONEY_ARRAY => ColumnType::String,
                 Type::DATE_ARRAY => ColumnType::String,
                 Type::TIME_ARRAY => ColumnType::String,
                 Type::TIMESTAMP_ARRAY => ColumnType::String,
@@ -1461,8 +1465,14 @@ mod tests {
     fn postgres_to_bigquery_type_basic_types() {
         assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::BOOL), "bool");
         assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::TEXT), "string");
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::INT2), "int64");
         assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::INT4), "int64");
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::INT8), "int64");
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::FLOAT4), "float64");
         assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::FLOAT8), "float64");
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::NUMERIC), "bignumeric");
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::MONEY), "string");
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::OID), "int64");
         assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::TIMESTAMP), "timestamp");
         assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::JSON), "json");
         assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::BYTEA), "bytes");
@@ -1472,14 +1482,35 @@ mod tests {
     fn postgres_to_bigquery_type_array_types() {
         assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::BOOL_ARRAY), "array<bool>");
         assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::TEXT_ARRAY), "array<string>");
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::INT2_ARRAY), "array<int64>");
         assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::INT4_ARRAY), "array<int64>");
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::INT8_ARRAY), "array<int64>");
+        assert_eq!(
+            BigQueryClient::postgres_to_bigquery_type(&Type::FLOAT4_ARRAY),
+            "array<float64>"
+        );
         assert_eq!(
             BigQueryClient::postgres_to_bigquery_type(&Type::FLOAT8_ARRAY),
             "array<float64>"
         );
         assert_eq!(
+            BigQueryClient::postgres_to_bigquery_type(&Type::NUMERIC_ARRAY),
+            "array<bignumeric>"
+        );
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::MONEY_ARRAY), "array<string>");
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::OID_ARRAY), "array<int64>");
+        assert_eq!(
             BigQueryClient::postgres_to_bigquery_type(&Type::TIMESTAMP_ARRAY),
             "array<timestamp>"
+        );
+        assert_eq!(
+            BigQueryClient::postgres_to_bigquery_type(&Type::INTERVAL_ARRAY),
+            "array<string>"
+        );
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::INET_ARRAY), "array<string>");
+        assert_eq!(
+            BigQueryClient::postgres_to_bigquery_type(&Type::INT4_RANGE_ARRAY),
+            "array<string>"
         );
     }
 

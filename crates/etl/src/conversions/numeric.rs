@@ -12,6 +12,9 @@ const NEGATIVE_SIGN: u16 = 0x4000;
 const NAN_SIGN: u16 = 0xC000; // NUMERIC_NAN
 const POSITIVE_INFINITY_SIGN: u16 = 0xD000; // NUMERIC_PINF
 const NEGATIVE_INFINITY_SIGN: u16 = 0xF000; // NUMERIC_NINF
+const POSTGRES_NUMERIC_MAX_SCALE: u32 = 16_383;
+const POSTGRES_NUMERIC_MIN_WEIGHT: i32 = i16::MIN as i32;
+const POSTGRES_NUMERIC_MAX_WEIGHT: i32 = i16::MAX as i32;
 
 /// Sign indicator for Postgres numeric values.
 ///
@@ -107,21 +110,21 @@ impl FromStr for PgNumeric {
         }
 
         // Handle sign
-        let sign = match chars.peek() {
+        let (sign, has_explicit_sign) = match chars.peek() {
             Some('+') => {
                 chars.next();
-                Sign::Positive
+                (Sign::Positive, true)
             }
             Some('-') => {
                 chars.next();
-                Sign::Negative
+                (Sign::Negative, true)
             }
-            _ => Sign::Positive,
+            _ => (Sign::Positive, false),
         };
 
         // Check for special values (NaN, infinity)
         if !matches!(chars.peek(), Some('0'..='9' | '.')) {
-            return parse_special_value(&mut chars, &sign);
+            return parse_special_value(&mut chars, &sign, has_explicit_sign);
         }
 
         // Parse regular numeric value
@@ -253,13 +256,14 @@ impl std::error::Error for ParseNumericError {}
 fn parse_special_value(
     chars: &mut Peekable<Chars>,
     sign: &Sign,
+    has_explicit_sign: bool,
 ) -> Result<PgNumeric, ParseNumericError> {
     let remaining: String = chars.collect();
-    let remaining_lower = remaining.to_lowercase();
+    let remaining_lower = remaining.trim_end().to_lowercase();
 
     if remaining_lower == "nan" {
-        // NaN must not have a sign
-        if matches!(sign, Sign::Negative) {
+        // NaN must not have a sign.
+        if has_explicit_sign {
             return Err(ParseNumericError::InvalidSyntax);
         }
         Ok(PgNumeric::NaN)
@@ -388,8 +392,12 @@ fn parse_numeric_value(
         return Err(ParseNumericError::InvalidSyntax);
     }
 
+    if dscale > POSTGRES_NUMERIC_MAX_SCALE {
+        return Err(ParseNumericError::ValueOutOfRange);
+    }
+
     // Convert to base-10000 representation
-    convert_to_base_10000(decimal_digits, dweight, dscale as u16, sign)
+    convert_to_base_10000(decimal_digits, dweight, dscale, sign)
 }
 
 /// Converts decimal digits to Postgres's base-10000 internal format.
@@ -401,16 +409,13 @@ fn parse_numeric_value(
 fn convert_to_base_10000(
     decimal_digits: Vec<u8>,
     dweight: i32,
-    dscale: u16,
+    dscale: u32,
     sign: Sign,
 ) -> Result<PgNumeric, ParseNumericError> {
+    let scale = u16::try_from(dscale).map_err(|_| ParseNumericError::ValueOutOfRange)?;
+
     if decimal_digits.is_empty() {
-        return Ok(PgNumeric::Value {
-            sign: Sign::Positive,
-            weight: 0,
-            scale: dscale,
-            digits: vec![],
-        });
+        return Ok(PgNumeric::Value { sign: Sign::Positive, weight: 0, scale, digits: vec![] });
     }
 
     // Calculate weight in base-10000 terms
@@ -445,12 +450,7 @@ fn convert_to_base_10000(
     // If all groups are zero, normalize to PostgreSQL canonical zero:
     // weight = 0, digits = [], positive sign; preserve scale.
     if base_10000_digits.iter().all(|&d| d == 0) {
-        return Ok(PgNumeric::Value {
-            sign: Sign::Positive,
-            weight: 0,
-            scale: dscale,
-            digits: vec![],
-        });
+        return Ok(PgNumeric::Value { sign: Sign::Positive, weight: 0, scale, digits: vec![] });
     }
 
     // Strip leading zeros first and record how many we removed so we can
@@ -464,13 +464,11 @@ fn convert_to_base_10000(
 
     // Adjust weight only by the number of leading zeros that were removed.
     let final_weight = weight - leading_zeros_before_strip;
+    if !(POSTGRES_NUMERIC_MIN_WEIGHT..=POSTGRES_NUMERIC_MAX_WEIGHT).contains(&final_weight) {
+        return Err(ParseNumericError::ValueOutOfRange);
+    }
 
-    Ok(PgNumeric::Value {
-        sign,
-        weight: final_weight as i16,
-        scale: dscale,
-        digits: base_10000_digits,
-    })
+    Ok(PgNumeric::Value { sign, weight: final_weight as i16, scale, digits: base_10000_digits })
 }
 
 /// Removes leading zero digits from a base-10000 digit sequence.
@@ -637,10 +635,73 @@ mod tests {
     #[test]
     fn parse_special_values() {
         assert_eq!(PgNumeric::from_str("NaN").unwrap(), PgNumeric::NaN);
+        assert_eq!(PgNumeric::from_str("NaN   ").unwrap(), PgNumeric::NaN);
+        assert_eq!(PgNumeric::from_str("+NaN").unwrap_err(), ParseNumericError::InvalidSyntax);
+        assert_eq!(PgNumeric::from_str("-NaN").unwrap_err(), ParseNumericError::InvalidSyntax);
         assert_eq!(PgNumeric::from_str("Infinity").unwrap(), PgNumeric::PositiveInfinity);
+        assert_eq!(PgNumeric::from_str("+Infinity   ").unwrap(), PgNumeric::PositiveInfinity);
         assert_eq!(PgNumeric::from_str("-Infinity").unwrap(), PgNumeric::NegativeInfinity);
         assert_eq!(PgNumeric::from_str("inf").unwrap(), PgNumeric::PositiveInfinity);
         assert_eq!(PgNumeric::from_str("-inf").unwrap(), PgNumeric::NegativeInfinity);
+    }
+
+    #[test]
+    fn parse_postgres_numeric_weight_boundaries() {
+        let max_weight = PgNumeric::from_str("1e131071").unwrap();
+        if let PgNumeric::Value { sign, weight, scale, ref digits } = max_weight {
+            assert_eq!(sign, Sign::Positive);
+            assert_eq!(weight, i16::MAX);
+            assert_eq!(scale, 0);
+            assert_eq!(digits.as_slice(), &[1000]);
+        } else {
+            panic!("Expected Value variant");
+        }
+
+        let min_scale_weight = PgNumeric::from_str("1e-16383").unwrap();
+        if let PgNumeric::Value { sign, weight, scale, ref digits } = min_scale_weight {
+            assert_eq!(sign, Sign::Positive);
+            assert_eq!(weight, -4096);
+            assert_eq!(scale, POSTGRES_NUMERIC_MAX_SCALE as u16);
+            assert_eq!(digits.as_slice(), &[10]);
+        } else {
+            panic!("Expected Value variant");
+        }
+
+        assert_eq!(
+            PgNumeric::from_str("1e131072").unwrap_err(),
+            ParseNumericError::ValueOutOfRange
+        );
+        assert_eq!(
+            PgNumeric::from_str("1e-16384").unwrap_err(),
+            ParseNumericError::ValueOutOfRange
+        );
+    }
+
+    #[test]
+    fn parse_postgres_numeric_max_shape_roundtrips_sql() {
+        let mut value = String::with_capacity(
+            POSTGRES_NUMERIC_MAX_SCALE as usize + POSTGRES_NUMERIC_MAX_WEIGHT as usize * 4 + 5,
+        );
+        value.push_str(&"9".repeat((POSTGRES_NUMERIC_MAX_WEIGHT as usize + 1) * 4));
+        value.push('.');
+        value.push_str(&"9".repeat(POSTGRES_NUMERIC_MAX_SCALE as usize));
+
+        let numeric = PgNumeric::from_str(&value).unwrap();
+        if let PgNumeric::Value { ref sign, weight, scale, ref digits } = numeric {
+            assert_eq!(*sign, Sign::Positive);
+            assert_eq!(weight, i16::MAX);
+            assert_eq!(scale, POSTGRES_NUMERIC_MAX_SCALE as u16);
+            assert_eq!(digits.len(), 36_864);
+            assert_eq!(digits.first(), Some(&9999));
+            assert_eq!(digits.last(), Some(&9990));
+        } else {
+            panic!("Expected Value variant");
+        }
+
+        let mut buf = BytesMut::new();
+        ToSql::to_sql(&numeric, &Type::NUMERIC, &mut buf).unwrap();
+        let round = PgNumeric::from_sql(&Type::NUMERIC, &buf).unwrap();
+        assert_eq!(numeric, round);
     }
 
     #[test]

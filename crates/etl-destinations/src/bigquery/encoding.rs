@@ -451,6 +451,19 @@ mod tests {
     }
 
     #[test]
+    fn bigquery_table_row_try_from_invalid_json_number() {
+        let json = serde_json::from_str(r#"{"value":1e309}"#).unwrap();
+        let table_row = TableRow::new(vec![Cell::Json(json)]);
+
+        let result = BigQueryTableRow::try_from(table_row);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::UnsupportedValueInDestination);
+        assert!(err.detail().unwrap().contains("Cell at index 0"));
+        assert!(err.detail().unwrap().contains("outside BigQuery's JSON numeric domain"));
+    }
+
+    #[test]
     fn bigquery_table_row_try_from_invalid_date() {
         let invalid_date = NaiveDate::from_ymd_opt(1, 1, 1).unwrap().pred_opt().unwrap(); // Date before year 1
 
