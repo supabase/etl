@@ -561,11 +561,19 @@ impl ApplyLoopState {
 
     /// Returns the effective flush LSN to report to PostgreSQL.
     ///
-    /// This value is always ETL-owned durable progress. It only advances after
-    /// the destination flushes a transaction batch and the state store has
-    /// durably recorded the transaction's commit end LSN.
+    /// When idle, returns the last received LSN since no actual flushes occur.
+    /// Otherwise, returns the last flush LSN from completed transactions.
+    ///
+    /// Note that when a transaction is now started, the last flush LSN will be
+    /// used, and it might jump back compared to the last received LSN that
+    /// we sent before, however this is fine since the status update logic
+    /// guarantees monotonically increasing LSNs.
     fn effective_flush_lsn(&self) -> PgLsn {
-        self.replication_progress.last_flush_lsn
+        if self.is_idle() {
+            self.replication_progress.last_received_lsn
+        } else {
+            self.replication_progress.last_flush_lsn
+        }
     }
 
     /// Tries to mark schema cleanup as running if the deadline has elapsed.
