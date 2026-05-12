@@ -29,6 +29,7 @@ ducklake = [
 ]
 bigquery = [
     "dep:gcp-bigquery-client",
+    "dep:serde_json",
     "dep:prost",
     "dep:rand",
     "dep:tonic",
@@ -87,7 +88,7 @@ rand = { workspace = true, optional = true, features = ["thread_rng"] }
 regex = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true, features = ["json"] }
 serde = { workspace = true, optional = true, features = ["derive"] }
-serde_json = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true, features = ["arbitrary_precision", "std"] }
 sqlx = { workspace = true, optional = true, features = ["runtime-tokio", "tls-rustls", "postgres"] }
 tokio = { workspace = true, optional = true, features = ["rt", "sync", "time"] }
 tokio-postgres = { workspace = true, optional = true }

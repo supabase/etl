@@ -19,7 +19,7 @@ fn postgres_column_type_to_clickhouse_sql(typ: &Type) -> &'static str {
         &Type::INT8 => "Int64",
         &Type::FLOAT4 => "Float32",
         &Type::FLOAT8 => "Float64",
-        &Type::NUMERIC => "String",
+        &Type::NUMERIC | &Type::MONEY => "String",
         &Type::DATE => "Date32",
         &Type::TIME => "String",
         &Type::TIMESTAMP => "DateTime64(6)",
@@ -40,7 +40,8 @@ fn postgres_array_element_clickhouse_sql(typ: &Type) -> &'static str {
         | &Type::BPCHAR_ARRAY
         | &Type::VARCHAR_ARRAY
         | &Type::NAME_ARRAY
-        | &Type::TEXT_ARRAY => "String",
+        | &Type::TEXT_ARRAY
+        | &Type::MONEY_ARRAY => "String",
         &Type::INT2_ARRAY => "Int16",
         &Type::INT4_ARRAY => "Int32",
         &Type::INT8_ARRAY => "Int64",
@@ -156,6 +157,7 @@ mod tests {
         assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::FLOAT4), "Float32");
         assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::FLOAT8), "Float64");
         assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::NUMERIC), "String");
+        assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::MONEY), "String");
         assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::DATE), "Date32");
         assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::TIME), "String");
         assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::TIMESTAMP), "DateTime64(6)");
@@ -174,6 +176,7 @@ mod tests {
     fn array_type_mapping() {
         assert_eq!(postgres_array_element_clickhouse_sql(&Type::BOOL_ARRAY), "Boolean");
         assert_eq!(postgres_array_element_clickhouse_sql(&Type::TEXT_ARRAY), "String");
+        assert_eq!(postgres_array_element_clickhouse_sql(&Type::MONEY_ARRAY), "String");
         assert_eq!(postgres_array_element_clickhouse_sql(&Type::INT4_ARRAY), "Int32");
         assert_eq!(postgres_array_element_clickhouse_sql(&Type::INT8_ARRAY), "Int64");
         assert_eq!(postgres_array_element_clickhouse_sql(&Type::FLOAT8_ARRAY), "Float64");
