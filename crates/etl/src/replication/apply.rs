@@ -36,7 +36,9 @@ use tokio_postgres::types::PgLsn;
 use tracing::{debug, error, info, warn};
 
 #[cfg(feature = "failpoints")]
-use crate::failpoints::{FORCE_SCHEMA_CLEANUP_FP, etl_fail_point_active};
+use crate::failpoints::{
+    FORCE_SCHEMA_CLEANUP_FP, STORE_REPLICATION_PROGRESS_FP, etl_fail_point_active,
+};
 use crate::{
     bail,
     concurrency::{
@@ -2293,10 +2295,8 @@ where
         // emitted. Durable progress is recorded as soon as the destination
         // acknowledges the batch, while PostgreSQL feedback is sent by the regular
         // keep-alive and shutdown paths.
-        let durable_flush_lsn = self
-            .schema_store
-            .upsert_replication_progress(self.worker_context.worker_type(), last_commit_end_lsn)
-            .await?;
+        let durable_flush_lsn =
+            self.upsert_durable_replication_progress(last_commit_end_lsn).await?;
         self.state.replication_progress.update_last_flush_lsn(durable_flush_lsn);
 
         let current_lsn = self.state.replication_progress.last_flush_lsn;
@@ -2320,6 +2320,25 @@ where
         self.state.record_exit_intent(exit_intent);
 
         Ok(())
+    }
+
+    /// Stores durable worker progress unless fault injection asks us to skip
+    /// it.
+    async fn upsert_durable_replication_progress(&self, flush_lsn: PgLsn) -> EtlResult<PgLsn> {
+        let worker_type = self.worker_context.worker_type();
+
+        #[cfg(feature = "failpoints")]
+        if etl_fail_point_active(STORE_REPLICATION_PROGRESS_FP) {
+            warn!(
+                %worker_type,
+                %flush_lsn,
+                "not storing durable replication progress due to active failpoint"
+            );
+
+            return Ok(flush_lsn);
+        }
+
+        self.schema_store.upsert_replication_progress(worker_type, flush_lsn).await
     }
 
     /// Processes syncing tables outside a transaction.
