@@ -6,10 +6,11 @@ use etl::{
     error::{ErrorKind, EtlResult},
     etl_error,
 };
+use metrics::histogram;
 use pg_escape::{quote_identifier, quote_literal};
 use sqlx::{AssertSqlSafe, PgPool, postgres::PgPoolOptions};
 use tokio::sync::Semaphore;
-use tracing::info;
+use tracing::{debug, info};
 use url::Url;
 
 use crate::ducklake::{
@@ -23,9 +24,9 @@ use crate::ducklake::{
         maintenance_target_file_size_sql,
     },
     inline_size::DuckLakePendingInlineSizeSampler,
-    maintenance::flush_table_inlined_data,
     metrics::{
-        DuckLakeTableStorageMetrics, query_table_storage_metrics,
+        DuckLakeTableStorageMetrics, ETL_DUCKLAKE_INLINE_FLUSH_DURATION_SECONDS,
+        ETL_DUCKLAKE_INLINE_FLUSH_ROWS, RESULT_LABEL, query_table_storage_metrics,
         resolve_ducklake_metadata_schema_blocking,
     },
 };
@@ -75,6 +76,10 @@ pub struct DuckLakeMaintenanceConfig {
     pub merge_adjacent_files: MergeAdjacentFilesMaintenanceConfig,
     /// Rewrite-data-files operation config.
     pub rewrite_data_files: RewriteDataFilesMaintenanceConfig,
+    /// Snapshot-expiration operation config.
+    pub expire_snapshots: ExpireSnapshotsMaintenanceConfig,
+    /// Old-file cleanup operation config.
+    pub cleanup_old_files: CleanupOldFilesMaintenanceConfig,
 }
 
 /// Inline flush operation config.
@@ -110,6 +115,24 @@ pub struct RewriteDataFilesMaintenanceConfig {
     pub max_tables_per_run: u32,
 }
 
+/// Snapshot-expiration operation config.
+#[derive(Clone, Debug)]
+pub struct ExpireSnapshotsMaintenanceConfig {
+    /// Whether snapshot expiration is enabled.
+    pub enabled: bool,
+    /// Retention window passed to DuckLake.
+    pub older_than: String,
+}
+
+/// Old-file cleanup operation config.
+#[derive(Clone, Debug)]
+pub struct CleanupOldFilesMaintenanceConfig {
+    /// Whether old-file cleanup is enabled.
+    pub enabled: bool,
+    /// Retention window passed to DuckLake.
+    pub older_than: String,
+}
+
 /// Structured outcome for one external maintenance run.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DuckLakeMaintenanceOutcome {
@@ -125,6 +148,10 @@ pub struct DuckLakeMaintenanceOutcome {
     pub rewrite_data_files_tables: u32,
     /// Files created by rewrite-data-files.
     pub rewrite_data_files_created: u64,
+    /// Snapshots expired by snapshot expiration.
+    pub expired_snapshots: u64,
+    /// Files removed by old-file cleanup.
+    pub cleaned_up_files: u64,
 }
 
 impl DuckLakeMaintenanceOutcome {
@@ -134,6 +161,8 @@ impl DuckLakeMaintenanceOutcome {
             || self.merge_adjacent_files_created > 0
             || self.rewrite_data_files_tables > 0
             || self.rewrite_data_files_created > 0
+            || self.expired_snapshots > 0
+            || self.cleaned_up_files > 0
     }
 }
 
@@ -142,6 +171,8 @@ pub async fn run_maintenance_once(
     config: DuckLakeMaintenanceConfig,
 ) -> EtlResult<DuckLakeMaintenanceOutcome> {
     validate_config(&config)?;
+    let cleanup_old_files_enabled =
+        config.cleanup_old_files.enabled || config.rewrite_data_files.enabled;
 
     info!(
         pool_size = config.pool_size,
@@ -155,6 +186,11 @@ pub async fn run_maintenance_once(
         rewrite_data_files_enabled = config.rewrite_data_files.enabled,
         rewrite_data_files_min_active_data_files = config.rewrite_data_files.min_active_data_files,
         rewrite_data_files_max_tables_per_run = config.rewrite_data_files.max_tables_per_run,
+        expire_snapshots_enabled = config.expire_snapshots.enabled,
+        expire_snapshots_older_than = %config.expire_snapshots.older_than,
+        cleanup_old_files_enabled,
+        cleanup_old_files_explicitly_enabled = config.cleanup_old_files.enabled,
+        cleanup_old_files_older_than = %config.cleanup_old_files.older_than,
         "ducklake external maintenance runner configured"
     );
 
@@ -220,6 +256,14 @@ pub async fn run_maintenance_once(
             &mut outcome,
         )
         .await?;
+    }
+
+    if config.expire_snapshots.enabled {
+        run_expire_snapshots(&duckdb, &config.expire_snapshots, &mut outcome).await?;
+    }
+
+    if cleanup_old_files_enabled {
+        run_cleanup_old_files(&duckdb, &config.cleanup_old_files, &mut outcome).await?;
     }
 
     info!(outcome = ?outcome, applied = outcome.applied(), "ducklake external maintenance completed");
@@ -493,6 +537,48 @@ async fn run_rewrite_data_files(
     Ok(())
 }
 
+/// Runs DuckLake snapshot expiration.
+async fn run_expire_snapshots(
+    duckdb: &DuckDbMaintenanceExecutor,
+    config: &ExpireSnapshotsMaintenanceConfig,
+    outcome: &mut DuckLakeMaintenanceOutcome,
+) -> EtlResult<()> {
+    info!(
+        older_than = %config.older_than,
+        "ducklake expire-snapshots executing"
+    );
+    let older_than = config.older_than.clone();
+    let expired_snapshots = duckdb.run(move |conn| expire_snapshots(conn, &older_than)).await?;
+    outcome.expired_snapshots = outcome.expired_snapshots.saturating_add(expired_snapshots);
+    info!(
+        older_than = %config.older_than,
+        expired_snapshots,
+        "ducklake expire-snapshots completed"
+    );
+    Ok(())
+}
+
+/// Runs DuckLake old-file cleanup.
+async fn run_cleanup_old_files(
+    duckdb: &DuckDbMaintenanceExecutor,
+    config: &CleanupOldFilesMaintenanceConfig,
+    outcome: &mut DuckLakeMaintenanceOutcome,
+) -> EtlResult<()> {
+    info!(
+        older_than = %config.older_than,
+        "ducklake cleanup-old-files executing"
+    );
+    let older_than = config.older_than.clone();
+    let cleaned_up_files = duckdb.run(move |conn| cleanup_old_files(conn, &older_than)).await?;
+    outcome.cleaned_up_files = outcome.cleaned_up_files.saturating_add(cleaned_up_files);
+    info!(
+        older_than = %config.older_than,
+        cleaned_up_files,
+        "ducklake cleanup-old-files completed"
+    );
+    Ok(())
+}
+
 /// Selects tables with small-file pressure for merge-adjacent-files.
 async fn select_merge_tables(
     metadata_pg_pool: &PgPool,
@@ -591,6 +677,54 @@ fn should_rewrite(metrics: &DuckLakeTableStorageMetrics, min_active_data_files: 
     metrics.active_data_files > min_active_data_files
 }
 
+/// Flushes inlined user data for one table.
+pub(super) fn flush_table_inlined_data(
+    conn: &duckdb::Connection,
+    table_name: &str,
+) -> EtlResult<u64> {
+    let flush_started = std::time::Instant::now();
+    let sql = format!(
+        r#"SELECT COALESCE(SUM(rows_flushed), 0)
+         FROM ducklake_flush_inlined_data({}, table_name => {});"#,
+        quote_literal(LAKE_CATALOG),
+        quote_literal(table_name),
+    );
+    let rows_flushed: i64 = conn.query_row(&sql, [], |row| row.get(0)).map_err(|source| {
+        etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            "DuckLake inlined data flush failed",
+            format_query_error_detail(&sql),
+            source: source
+        )
+    })?;
+    let rows_flushed = rows_flushed.max(0) as u64;
+    let flush_result = if rows_flushed > 0 { "flushed" } else { "noop" };
+    histogram!(
+        ETL_DUCKLAKE_INLINE_FLUSH_ROWS,
+        RESULT_LABEL => flush_result,
+    )
+    .record(rows_flushed as f64);
+    histogram!(
+        ETL_DUCKLAKE_INLINE_FLUSH_DURATION_SECONDS,
+        RESULT_LABEL => flush_result,
+    )
+    .record(flush_started.elapsed().as_secs_f64());
+
+    if rows_flushed > 0 {
+        debug!(
+            table = %table_name,
+            rows_flushed,
+            "ducklake inlined data flushed"
+        );
+    } else {
+        debug!(
+            table = %table_name,
+            "ducklake inlined data already flushed"
+        );
+    }
+    Ok(rows_flushed)
+}
+
 /// Calls DuckLake merge-adjacent-files for one table.
 fn merge_adjacent_files(
     conn: &duckdb::Connection,
@@ -623,6 +757,66 @@ fn rewrite_data_files(conn: &duckdb::Connection, table_name: &str) -> EtlResult<
         )
     })?;
     Ok(0)
+}
+
+/// Calls DuckLake snapshot expiration.
+fn expire_snapshots(conn: &duckdb::Connection, older_than: &str) -> EtlResult<u64> {
+    let sql = format!(
+        "CALL ducklake_expire_snapshots({}, older_than => CAST(now() AS TIMESTAMP) - CAST({} AS \
+         INTERVAL));",
+        quote_literal(LAKE_CATALOG),
+        quote_literal(older_than),
+    );
+    count_maintenance_rows(conn, &sql, "DuckLake expire snapshots failed")
+}
+
+/// Calls DuckLake old-file cleanup.
+fn cleanup_old_files(conn: &duckdb::Connection, older_than: &str) -> EtlResult<u64> {
+    let sql = format!(
+        "CALL ducklake_cleanup_old_files({}, older_than => CAST(now() AS TIMESTAMP) - CAST({} AS \
+         INTERVAL));",
+        quote_literal(LAKE_CATALOG),
+        quote_literal(older_than),
+    );
+    count_maintenance_rows(conn, &sql, "DuckLake cleanup old files failed")
+}
+
+/// Counts rows returned by one DuckLake maintenance call.
+fn count_maintenance_rows(
+    conn: &duckdb::Connection,
+    sql: &str,
+    description: &'static str,
+) -> EtlResult<u64> {
+    let mut statement = conn.prepare(sql).map_err(|source| {
+        etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            description,
+            format_query_error_detail(sql),
+            source: source
+        )
+    })?;
+    let mut rows = statement.query([]).map_err(|source| {
+        etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            description,
+            format_query_error_detail(sql),
+            source: source
+        )
+    })?;
+    let mut count = 0u64;
+
+    while let Some(_row) = rows.next().map_err(|source| {
+        etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            description,
+            format_query_error_detail(sql),
+            source: source
+        )
+    })? {
+        count = count.saturating_add(1);
+    }
+
+    Ok(count)
 }
 
 /// Counts files returned by one DuckLake maintenance function.
@@ -682,6 +876,20 @@ mod tests {
         assert!(
             DuckLakeMaintenanceOutcome {
                 rewrite_data_files_tables: 1,
+                ..DuckLakeMaintenanceOutcome::default()
+            }
+            .applied()
+        );
+        assert!(
+            DuckLakeMaintenanceOutcome {
+                expired_snapshots: 1,
+                ..DuckLakeMaintenanceOutcome::default()
+            }
+            .applied()
+        );
+        assert!(
+            DuckLakeMaintenanceOutcome {
+                cleaned_up_files: 1,
                 ..DuckLakeMaintenanceOutcome::default()
             }
             .applied()

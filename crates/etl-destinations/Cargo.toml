@@ -15,6 +15,7 @@ doctest = false
 [features]
 ducklake = [
     "dep:duckdb",
+    "dep:humantime",
     "dep:metrics",
     "dep:kube",
     "dep:parking_lot",
@@ -78,6 +79,7 @@ duckdb = { workspace = true, optional = true, features = ["bundled", "json", "pa
 etl = { workspace = true }
 futures = { workspace = true, optional = true }
 gcp-bigquery-client = { workspace = true, optional = true, features = ["rust-tls", "aws-lc-rs"] }
+humantime = { workspace = true, optional = true }
 iceberg = { workspace = true, optional = true }
 iceberg-catalog-rest = { workspace = true, optional = true }
 kube = { workspace = true, optional = true, features = ["client", "rustls-tls"] }

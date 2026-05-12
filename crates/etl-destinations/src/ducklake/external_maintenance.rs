@@ -39,19 +39,23 @@ const DEFAULT_REQUEST_COOLDOWN_SECONDS: u64 = 300;
 const DEFAULT_KUBERNETES_API_TIMEOUT_SECONDS: u64 = 10;
 const OPERATION_INLINE_FLUSH: &str = "flush_inlined_data";
 const OPERATION_REWRITE_DATA_FILES: &str = "rewrite_data_files";
+const OPERATION_EXPIRE_SNAPSHOTS: &str = "expire_snapshots";
 const REASON_PENDING_INLINED_DATA_BYTES_THRESHOLD: &str = "pending_inlined_data_bytes_threshold";
 const REASON_ACTIVE_DATA_FILES_THRESHOLD: &str = "active_data_files_threshold";
+const REASON_SNAPSHOT_RETENTION_THRESHOLD: &str = "snapshot_retention_threshold";
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct ExternalMaintenanceOperations {
     pub(super) inline_flush: bool,
     pub(super) rewrite_data_files: bool,
+    pub(super) expire_snapshots: bool,
 }
 
 impl ExternalMaintenanceOperations {
     fn covers(self, requested: Self) -> bool {
         (!requested.inline_flush || self.inline_flush)
             && (!requested.rewrite_data_files || self.rewrite_data_files)
+            && (!requested.expire_snapshots || self.expire_snapshots)
     }
 }
 
@@ -82,10 +86,7 @@ struct WatcherConfig {
 struct OperationPolicy {
     inline_flush_enabled: bool,
     rewrite_data_files_enabled: bool,
-}
-
-pub(super) fn external_maintenance_configured() -> bool {
-    WatcherConfig::from_env().is_some()
+    expire_snapshots_enabled: bool,
 }
 
 pub(super) async fn run_external_maintenance_watcher<S>(
@@ -419,6 +420,7 @@ async fn maybe_request_operations<S>(
         Ok(mut operations) => {
             operations.inline_flush &= policy.inline_flush_enabled;
             operations.rewrite_data_files &= policy.rewrite_data_files_enabled;
+            operations.expire_snapshots &= policy.expire_snapshots_enabled;
             operations
         }
         Err(error) => {
@@ -431,11 +433,12 @@ async fn maybe_request_operations<S>(
         }
     };
 
-    if !requested.inline_flush && !requested.rewrite_data_files {
+    if !requested.inline_flush && !requested.rewrite_data_files && !requested.expire_snapshots {
         debug!(
             ducklake_maintenance = %name,
             inline_flush = requested.inline_flush,
             rewrite_data_files = requested.rewrite_data_files,
+            expire_snapshots = requested.expire_snapshots,
             inline_flush_min_inlined_bytes = config.inline_flush_min_inlined_bytes,
             rewrite_data_files_min_active_data_files =
                 config.rewrite_data_files_min_active_data_files,
@@ -450,6 +453,7 @@ async fn maybe_request_operations<S>(
             ducklake_maintenance = %name,
             inline_flush = requested.inline_flush,
             rewrite_data_files = requested.rewrite_data_files,
+            expire_snapshots = requested.expire_snapshots,
             "ducklake external maintenance request already exists"
         );
         return;
@@ -459,6 +463,7 @@ async fn maybe_request_operations<S>(
         ducklake_maintenance = %name,
         inline_flush = requested.inline_flush,
         rewrite_data_files = requested.rewrite_data_files,
+        expire_snapshots = requested.expire_snapshots,
         inline_flush_min_inlined_bytes = config.inline_flush_min_inlined_bytes,
         rewrite_data_files_min_active_data_files = config.rewrite_data_files_min_active_data_files,
         "ducklake external maintenance requesting operations"
@@ -529,6 +534,7 @@ async fn patch_operation_requests(
             "operationRequests": {
                 "inlineFlush": requested.inline_flush,
                 "rewriteDataFiles": requested.rewrite_data_files,
+                "expireSnapshots": requested.expire_snapshots,
                 "inlineFlushMinInlinedBytes": config.inline_flush_min_inlined_bytes,
                 "rewriteDataFilesMinActiveDataFiles": config.rewrite_data_files_min_active_data_files,
                 "requestedAt": Utc::now().to_rfc3339(),
@@ -590,6 +596,15 @@ fn record_external_maintenance_triggers(
         )
         .increment(1);
     }
+
+    if requested.expire_snapshots && !already_requested.expire_snapshots {
+        counter!(
+            ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_TRIGGERED_TOTAL,
+            MAINTENANCE_OPERATION_LABEL => OPERATION_EXPIRE_SNAPSHOTS,
+            MAINTENANCE_REASON_LABEL => REASON_SNAPSHOT_RETENTION_THRESHOLD,
+        )
+        .increment(1);
+    }
 }
 
 fn requested_operations(resource: &DynamicObject) -> ExternalMaintenanceOperations {
@@ -606,6 +621,10 @@ fn requested_operations(resource: &DynamicObject) -> ExternalMaintenanceOperatio
             .unwrap_or(false),
         rewrite_data_files: requests
             .get("rewriteDataFiles")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        expire_snapshots: requests
+            .get("expireSnapshots")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false),
     }
@@ -657,6 +676,7 @@ fn operation_policy(resource: &DynamicObject) -> OperationPolicy {
     let operations = resource.data.get("spec").and_then(|spec| spec.get("operations"));
     let inline_flush = operations.and_then(|ops| ops.get("inlineFlush"));
     let rewrite_data_files = operations.and_then(|ops| ops.get("rewriteDataFiles"));
+    let expire_snapshots = operations.and_then(|ops| ops.get("expireSnapshots"));
 
     OperationPolicy {
         inline_flush_enabled: inline_flush
@@ -664,6 +684,10 @@ fn operation_policy(resource: &DynamicObject) -> OperationPolicy {
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(true),
         rewrite_data_files_enabled: rewrite_data_files
+            .and_then(|value| value.get("enabled"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true),
+        expire_snapshots_enabled: expire_snapshots
             .and_then(|value| value.get("enabled"))
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(true),

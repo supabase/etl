@@ -60,11 +60,9 @@ impl ReplicatorResourcesConfig {
     }
 }
 
-/// Opt-in DuckLake maintenance controller settings for one pipeline.
+/// DuckLake maintenance controller settings for one pipeline.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
 pub struct DuckLakeMaintenanceConfig {
-    #[serde(default)]
-    pub enabled: bool,
     #[schema(example = 3600)]
     #[serde(default = "default_ducklake_maintenance_min_interval_seconds")]
     pub min_interval_seconds: u64,
@@ -103,7 +101,6 @@ pub struct DuckLakeMaintenanceConfig {
 impl Default for DuckLakeMaintenanceConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
             min_interval_seconds: default_ducklake_maintenance_min_interval_seconds(),
             max_pause_seconds: default_ducklake_maintenance_max_pause_seconds(),
             min_inlined_bytes: default_ducklake_maintenance_min_inlined_bytes(),

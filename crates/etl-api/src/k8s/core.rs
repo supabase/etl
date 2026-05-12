@@ -130,6 +130,8 @@ pub async fn create_or_update_pipeline_resources_in_k8s(
     create_or_update_dynamic_replicator_secrets(k8s_client, &prefix, secrets).await?;
     create_or_update_replicator_config(k8s_client, &prefix, replicator_config, environment).await?;
     let replicator_image = image.name;
+    let ducklake_maintenance_for_replicator = matches!(destination_type, DestinationType::Ducklake)
+        .then(|| ducklake_maintenance.clone().unwrap_or_default());
 
     create_or_update_ducklake_maintenance(
         k8s_client,
@@ -139,7 +141,7 @@ pub async fn create_or_update_pipeline_resources_in_k8s(
         replicator.id,
         &replicator_image,
         destination_type,
-        ducklake_maintenance.clone(),
+        ducklake_maintenance,
     )
     .await?;
     create_or_update_replicator_stateful_set(
@@ -150,7 +152,7 @@ pub async fn create_or_update_pipeline_resources_in_k8s(
             environment,
             replicator_resources,
             destination_type,
-            ducklake_maintenance: ducklake_maintenance.filter(|policy| policy.enabled),
+            ducklake_maintenance: ducklake_maintenance_for_replicator,
             log_level,
         },
     )
@@ -417,7 +419,7 @@ async fn create_or_update_replicator_stateful_set(
     Ok(())
 }
 
-/// Creates, updates, or deletes the experimental DuckLake maintenance CR.
+/// Creates, updates, or deletes the DuckLake maintenance CR.
 #[allow(clippy::too_many_arguments)]
 async fn create_or_update_ducklake_maintenance(
     k8s_client: &dyn K8sClient,
@@ -429,16 +431,12 @@ async fn create_or_update_ducklake_maintenance(
     destination_type: DestinationType,
     ducklake_maintenance: Option<crate::configs::pipeline::DuckLakeMaintenanceConfig>,
 ) -> Result<(), K8sCoreError> {
-    let Some(policy) = ducklake_maintenance.filter(|policy| policy.enabled) else {
-        k8s_client.delete_ducklake_maintenance(prefix).await?;
-        return Ok(());
-    };
-
     if !matches!(destination_type, DestinationType::Ducklake) {
         k8s_client.delete_ducklake_maintenance(prefix).await?;
         return Ok(());
     }
 
+    let policy = ducklake_maintenance.unwrap_or_default();
     k8s_client
         .create_or_update_ducklake_maintenance(
             prefix,

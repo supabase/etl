@@ -7,7 +7,8 @@ use etl_config::{
     shared::{DestinationConfig, ReplicatorConfig},
 };
 use etl_destinations::ducklake::{
-    DuckLakeMaintenanceConfig, InlineFlushMaintenanceConfig, MergeAdjacentFilesMaintenanceConfig,
+    CleanupOldFilesMaintenanceConfig, DuckLakeMaintenanceConfig, ExpireSnapshotsMaintenanceConfig,
+    InlineFlushMaintenanceConfig, MergeAdjacentFilesMaintenanceConfig,
     RewriteDataFilesMaintenanceConfig, S3Config as DuckLakeS3Config, run_maintenance_once,
 };
 use rustls::crypto::aws_lc_rs;
@@ -53,6 +54,7 @@ async fn run(config: ReplicatorConfig) -> MaintenanceResult<()> {
         metadata_schema,
         duckdb_memory_cache_limit,
         maintenance_target_file_size,
+        expire_snapshots_older_than,
         ..
     } = config.destination
     else {
@@ -117,6 +119,14 @@ async fn run(config: ReplicatorConfig) -> MaintenanceResult<()> {
                 8,
             )?,
         },
+        expire_snapshots: ExpireSnapshotsMaintenanceConfig {
+            enabled: env_bool("ETL_DUCKLAKE_MAINTENANCE__EXPIRE_SNAPSHOTS__ENABLED", true),
+            older_than: expire_snapshots_older_than.clone().unwrap_or_else(|| "7 days".to_owned()),
+        },
+        cleanup_old_files: CleanupOldFilesMaintenanceConfig {
+            enabled: env_bool("ETL_DUCKLAKE_MAINTENANCE__CLEANUP_OLD_FILES__ENABLED", true),
+            older_than: expire_snapshots_older_than.unwrap_or_else(|| "7 days".to_owned()),
+        },
     };
 
     info!(
@@ -133,6 +143,10 @@ async fn run(config: ReplicatorConfig) -> MaintenanceResult<()> {
             maintenance_config.rewrite_data_files.min_active_data_files,
         rewrite_data_files_max_tables_per_run =
             maintenance_config.rewrite_data_files.max_tables_per_run,
+        expire_snapshots_enabled = maintenance_config.expire_snapshots.enabled,
+        expire_snapshots_older_than = %maintenance_config.expire_snapshots.older_than,
+        cleanup_old_files_enabled = maintenance_config.cleanup_old_files.enabled,
+        cleanup_old_files_older_than = %maintenance_config.cleanup_old_files.older_than,
         "ducklake external maintenance job starting"
     );
 
@@ -145,15 +159,19 @@ async fn run(config: ReplicatorConfig) -> MaintenanceResult<()> {
         merge_adjacent_files_created = outcome.merge_adjacent_files_created,
         rewrite_data_files_tables = outcome.rewrite_data_files_tables,
         rewrite_data_files_created = outcome.rewrite_data_files_created,
+        expired_snapshots = outcome.expired_snapshots,
+        cleaned_up_files = outcome.cleaned_up_files,
         "ducklake external maintenance job finished"
     );
     println!(
         "{{\"applied\":{},\"inlineFlushRows\":{},\"mergeAdjacentFilesCreated\":{},\"\
-         rewriteDataFilesCreated\":{}}}",
+         rewriteDataFilesCreated\":{},\"expiredSnapshots\":{},\"cleanedUpFiles\":{}}}",
         outcome.applied(),
         outcome.inline_flush_rows,
         outcome.merge_adjacent_files_created,
-        outcome.rewrite_data_files_created
+        outcome.rewrite_data_files_created,
+        outcome.expired_snapshots,
+        outcome.cleaned_up_files
     );
     Ok(())
 }

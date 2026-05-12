@@ -65,7 +65,7 @@ pub struct ReplicatorStatefulSetConfig {
     pub replicator_resources: Option<ReplicatorResourcesConfig>,
     /// Destination type used to select destination-specific env/secrets.
     pub destination_type: DestinationType,
-    /// Opt-in DuckLake maintenance policy.
+    /// DuckLake maintenance policy.
     pub ducklake_maintenance: Option<DuckLakeMaintenanceConfig>,
     /// Replicator log level.
     pub log_level: LogLevel,
@@ -274,14 +274,14 @@ pub trait K8sClient: Send + Sync {
     /// Does nothing if the stateful set does not exist.
     async fn delete_replicator_stateful_set(&self, prefix: &str) -> Result<(), K8sError>;
 
-    /// Creates or updates the experimental DuckLake maintenance CR.
+    /// Creates or updates the DuckLake maintenance CR.
     async fn create_or_update_ducklake_maintenance(
         &self,
         prefix: &str,
         config: DuckLakeMaintenanceResourceConfig,
     ) -> Result<(), K8sError>;
 
-    /// Deletes the experimental DuckLake maintenance CR.
+    /// Deletes the DuckLake maintenance CR.
     async fn delete_ducklake_maintenance(&self, prefix: &str) -> Result<(), K8sError>;
 
     /// Retrieves the current status of a replicator pod.

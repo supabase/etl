@@ -7,11 +7,9 @@ The metrics fall into four groups:
 
 - write-path metrics: show how the ETL writer is batching, waiting, retrying,
   and flushing inline data.
-- maintenance execution metrics: operation-level duration and skip metrics
-  emitted by the background maintenance worker with the primary reason and
-  outcome for each maintenance attempt.
-- external maintenance pause metrics: duration samples for time foreground
-  ingestion was actually quiesced by the Kubernetes external maintenance plane.
+- external maintenance metrics: operation-trigger counts and duration samples
+  for time foreground ingestion was quiesced by the Kubernetes maintenance
+  plane.
 - table-health samples: histograms recorded by a background sampler every
   30 seconds from the PostgreSQL DuckLake metadata catalog. They describe the
   current shape of tables known to the current destination instance.
@@ -58,15 +56,14 @@ These explain the pressure your writer is putting on DuckLake:
 - `etl_ducklake_inline_flush_rows`
 - `etl_ducklake_inline_flush_duration_seconds`
 
-The destination attaches DuckLake with `DATA_INLINING_ROW_LIMIT = 10000` and then
-lets a background maintenance worker flush and checkpoint inlined data after
-writes. Destination shutdown also runs one final best-effort inline flush sweep
-for known tables. These metrics tell you whether that strategy is helping.
+The destination attaches DuckLake with `DATA_INLINING_ROW_LIMIT = 10000`.
+External maintenance jobs flush inlined data during coordinated pauses. These
+metrics tell you whether that strategy is helping.
 
-The `batch_kind` label on these metrics uses:
+The `result` label on these metrics uses:
 
-- `mutation` for background CDC flushes
-- `shutdown` for the final best-effort shutdown sweep
+- `flushed` when rows were materialized
+- `noop` when no rows needed materialization
 
 How to read them:
 
@@ -78,57 +75,10 @@ How to read them:
 - if `inline_flush_rows` is often meaningfully larger than `upsert_rows`, the
   inlining limit is helping consolidate multiple atomic batches before files are
   materialized.
-- if `batch_kind="shutdown"` shows meaningful work, the process is still
-  relying on final shutdown cleanup to drain inline backlogs.
+### External maintenance metrics
 
-### Background maintenance metrics
-
-- `etl_ducklake_maintenance_duration_seconds`
-- `etl_ducklake_maintenance_skipped_total`
 - `etl_ducklake_external_maintenance_pause_duration_seconds`
 - `etl_ducklake_external_maintenance_triggered_total`
-
-`etl_ducklake_maintenance_duration_seconds` is emitted once per background
-maintenance operation that actually runs. Use the histogram `_count` as the
-event count for non-skipped outcomes.
-
-It carries these labels:
-
-- `task`: `flush`, `scheduled_maintenance`, `targeted_maintenance`, or `checkpoint`
-- `operation`: `flush_inlined_data`, `rewrite_data_files`,
-  `merge_adjacent_files`, or `checkpoint`
-- `reason`: the primary cause for the maintenance decision
-- `outcome`: `applied`, `noop`, or `failed`
-
-`etl_ducklake_maintenance_skipped_total` counts maintenance operations that
-were deferred because their guard or execution window was unavailable. It is
-labeled by `task`, `operation`, and `reason`.
-
-How to read it:
-
-- `task="flush"` with
-  `reason="pending_inlined_data_bytes_threshold"` means the flush was
-  scheduled from sampled inlined catalog-table size in a PostgreSQL-backed
-  DuckLake catalog. This includes both inlined inserts and inlined deletions.
-- `task="scheduled_maintenance"` with `reason="merge_interval"` means the
-  next `write_events` batch tried to run the tier-0 `< 1MiB -> ~5MiB`
-  `merge_adjacent_files` pass first.
-- `task="targeted_maintenance"` with
-  `reason="idle_rewrite_metrics_threshold"` or
-  `reason="emergency_rewrite_metrics_threshold"` means rewrite was selected
-  from sampled delete pressure.
-- `task="targeted_maintenance"` with
-  `reason="idle_merge_metrics_threshold"` or
-  `reason="emergency_merge_metrics_threshold"` means merge was selected from
-  sampled small-file pressure.
-- `task="targeted_maintenance"` may emit one duration series or two for a
-  maintenance cycle, depending on which operations crossed their thresholds.
-- rising `etl_ducklake_maintenance_skipped_total` means maintenance keeps
-  missing its execution window because writes or another guarded operation are
-  still active.
-- rising histogram `_count` for `outcome="failed"` points to maintenance
-  execution issues, while many `outcome="noop"` samples usually mean
-  maintenance is polling more often than work is actually accumulating.
 
 `etl_ducklake_external_maintenance_pause_duration_seconds` is emitted by the
 replicator when a Kubernetes-driven external maintenance pause ends. It measures

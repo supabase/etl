@@ -93,7 +93,7 @@ pub const TRUSTED_ROOT_CERT_CONFIG_MAP_NAME: &str = "trusted-root-certs-config";
 pub const TRUSTED_ROOT_CERT_KEY_NAME: &str = "trusted_root_certs";
 /// Label used to identify replicator pods.
 const REPLICATOR_APP_LABEL: &str = "etl-replicator-app";
-/// ServiceAccount used by replicator pods for opt-in runtime coordination.
+/// ServiceAccount used by replicator pods for runtime coordination.
 const REPLICATOR_SERVICE_ACCOUNT_NAME: &str = "etl-replicator";
 /// DuckLake maintenance CRD group.
 const DUCKLAKE_MAINTENANCE_GROUP: &str = "etl.supabase.com";
@@ -926,7 +926,6 @@ fn create_ducklake_maintenance_json(
         }
       },
       "spec": {
-        "enabled": config.policy.enabled,
         "pipelineRef": {
           "tenantId": config.tenant_id,
           "pipelineId": config.pipeline_id,
@@ -953,6 +952,12 @@ fn create_ducklake_maintenance_json(
             "enabled": true,
             "deleteThreshold": config.policy.delete_threshold,
             "maxTablesPerRun": config.policy.max_tables_per_run,
+          },
+          "expireSnapshots": {
+            "enabled": true,
+          },
+          "cleanupOldFiles": {
+            "enabled": true,
           }
         },
         "jobTemplate": {

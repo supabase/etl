@@ -88,6 +88,7 @@ etl-telemetry = { path = "crates/etl-telemetry", default-features = false }
 fail = { version = "0.5.1", default-features = false }
 futures = { version = "0.3.31", default-features = false }
 gcp-bigquery-client = { git = "https://github.com/iambriccardo/gcp-bigquery-client", rev = "c4fc59e338ca181d29b0dd53cac786fbe8513633", default-features = false }
+humantime = { version = "2.3.0", default-features = false }
 iceberg = { version = "0.8.0", default-features = false }
 iceberg-catalog-rest = { version = "0.8.0", default-features = false }
 insta = { version = "1.43.1", default-features = false }
