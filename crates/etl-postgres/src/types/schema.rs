@@ -9,6 +9,7 @@ use std::{
 use pg_escape::quote_identifier;
 use thiserror::Error;
 use tokio_postgres::types::{FromSql, PgLsn, ToSql, Type};
+use tracing::warn;
 
 /// Errors that can occur during schema operations.
 #[derive(Debug, Error)]
@@ -825,6 +826,16 @@ impl ReplicatedTableSchema {
     pub fn identity_column_schemas(
         &self,
     ) -> impl ExactSizeIterator<Item = &ColumnSchema> + Clone + '_ {
+        // Key tuples from PostgreSQL should only use columns present in the
+        // relation payload. We still check both masks so a wider source
+        // identity, such as an insert-only column-list publication, does not
+        // make us expect values for unpublished columns.
+        //
+        // Example: you have a table with (id, name, surname) and FULL replica
+        // identity. Then you only public (name, surname) with only INSERT(s) replicated
+        // which PostgreSQL allows. Then we filter the columns that are in both so (name, surname).
+        // If we didn't check also `replicated == 1` we would return all (id, name, surname), which
+        // will fail the validation of the INSERT tuple.
         let inner = self
             .table_schema
             .column_schemas
