@@ -203,10 +203,20 @@ impl ClickHouseClientConfig {
     /// Default slack between server-side and client-side budgets.
     pub const DEFAULT_CLIENT_TIMEOUT_EPSILON: Duration = Duration::from_secs(4);
 
-    /// Returns the client-side `tokio::time::timeout` budget that
-    /// corresponds to a given server-side timeout: `server + epsilon`.
-    pub(crate) fn client_budget(&self, server: Duration) -> Duration {
-        server + self.client_timeout_epsilon
+    /// Server-side budget for `op`: the corresponding field of this config.
+    pub(crate) fn server_budget(&self, op: ClickHouseOperationKind) -> Duration {
+        match op {
+            ClickHouseOperationKind::ConnectivityCheck => self.connectivity_check_timeout,
+            ClickHouseOperationKind::SchemaQuery => self.schema_query_server_timeout,
+            ClickHouseOperationKind::Ddl => self.ddl_server_timeout,
+            ClickHouseOperationKind::Insert => self.insert_server_timeout,
+        }
+    }
+
+    /// Client-side `tokio::time::timeout` budget for `op`: server budget
+    /// plus `client_timeout_epsilon`.
+    pub(crate) fn client_budget(&self, op: ClickHouseOperationKind) -> Duration {
+        self.server_budget(op) + self.client_timeout_epsilon
     }
 }
 
@@ -219,6 +229,55 @@ impl Default for ClickHouseClientConfig {
             insert_server_timeout: Self::DEFAULT_INSERT_SERVER_TIMEOUT,
             client_timeout_epsilon: Self::DEFAULT_CLIENT_TIMEOUT_EPSILON,
         }
+    }
+}
+
+/// Categories of ClickHouse client calls.
+///
+/// Enables the following:
+/// - selecting the server-side budget from [`ClickHouseClientConfig`],
+/// - mapping an inner `clickhouse::error::Error` onto the appropriate
+///   [`ErrorKind`] (`DestinationConnectionFailed` / `DestinationQueryFailed` /
+///   `DestinationAtomicBatchRetryable`),
+/// - producing the op name interpolated into error messages via `Display`.
+///
+/// Client-side deadlines always surface as
+/// [`ErrorKind::DestinationTimeout`], independent of the op.
+#[derive(Copy, Clone)]
+pub(crate) enum ClickHouseOperationKind {
+    /// Connectivity check (`SELECT 1`).
+    ConnectivityCheck,
+    /// Schema lookup against `system.columns`.
+    SchemaQuery,
+    /// DDL: CREATE / ALTER / DROP / RENAME / TRUNCATE.
+    Ddl,
+    /// INSERT statement flush.
+    Insert,
+}
+
+impl ClickHouseOperationKind {
+    /// Error kind used when the inner future returns a
+    /// `clickhouse::error::Error`.
+    pub(crate) fn failed_kind(self) -> ErrorKind {
+        match self {
+            ClickHouseOperationKind::ConnectivityCheck => ErrorKind::DestinationConnectionFailed,
+            ClickHouseOperationKind::SchemaQuery | ClickHouseOperationKind::Ddl => {
+                ErrorKind::DestinationQueryFailed
+            }
+            ClickHouseOperationKind::Insert => ErrorKind::DestinationAtomicBatchRetryable,
+        }
+    }
+}
+
+impl std::fmt::Display for ClickHouseOperationKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            ClickHouseOperationKind::ConnectivityCheck => "connectivity check",
+            ClickHouseOperationKind::SchemaQuery => "schema query",
+            ClickHouseOperationKind::Ddl => "DDL",
+            ClickHouseOperationKind::Insert => "insert",
+        };
+        f.write_str(name)
     }
 }
 

@@ -1,5 +1,4 @@
 use std::{
-    fmt,
     future::Future,
     sync::Arc,
     time::{Duration, Instant},
@@ -13,7 +12,7 @@ use etl::{
 use url::Url;
 
 use crate::clickhouse::{
-    core::ClickHouseClientConfig,
+    core::{ClickHouseClientConfig, ClickHouseOperationKind},
     encoding::{ClickHouseValue, encode_to_row_binary},
     metrics::{ETL_CLICKHOUSE_DDL_DURATION_SECONDS, ETL_CLICKHOUSE_INSERT_DURATION_SECONDS},
     schema::{clickhouse_column_type, quote_identifier},
@@ -27,73 +26,18 @@ fn secs_string(d: Duration) -> String {
     secs.to_string()
 }
 
-/// Classifies a ClickHouse client call so the three concerns of a wrapped
-/// call live in one place:
-///
-/// - `server_budget` picks the right field of [`ClickHouseClientConfig`],
-/// - `failed_kind` maps an inner `clickhouse::error::Error` onto the
-///   appropriate [`ErrorKind`] (`DestinationConnectionFailed` /
-///   `DestinationQueryFailed` / `DestinationAtomicBatchRetryable`),
-/// - `Display` produces the op name interpolated into error messages.
-///
-/// Client-side deadlines always surface as
-/// [`ErrorKind::DestinationTimeout`], independent of `op`.
-#[derive(Copy, Clone)]
-pub(crate) enum TimeoutOp {
-    /// Connectivity check (`SELECT 1`).
-    ConnectivityCheck,
-    /// Schema lookup against `system.columns`.
-    SchemaQuery,
-    /// DDL: CREATE / ALTER / DROP / RENAME / TRUNCATE.
-    Ddl,
-    /// INSERT statement flush.
-    Insert,
-}
-
-impl TimeoutOp {
-    /// Server-side budget for this op, selected from
-    /// [`ClickHouseClientConfig`].
-    fn server_budget(self, config: &ClickHouseClientConfig) -> Duration {
-        match self {
-            TimeoutOp::ConnectivityCheck => config.connectivity_check_timeout,
-            TimeoutOp::SchemaQuery => config.schema_query_server_timeout,
-            TimeoutOp::Ddl => config.ddl_server_timeout,
-            TimeoutOp::Insert => config.insert_server_timeout,
-        }
-    }
-
-    /// Error kind used when the inner future returns a
-    /// `clickhouse::error::Error`.
-    fn failed_kind(self) -> ErrorKind {
-        match self {
-            TimeoutOp::ConnectivityCheck => ErrorKind::DestinationConnectionFailed,
-            TimeoutOp::SchemaQuery | TimeoutOp::Ddl => ErrorKind::DestinationQueryFailed,
-            TimeoutOp::Insert => ErrorKind::DestinationAtomicBatchRetryable,
-        }
-    }
-}
-
-impl fmt::Display for TimeoutOp {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let name = match self {
-            TimeoutOp::ConnectivityCheck => "connectivity check",
-            TimeoutOp::SchemaQuery => "schema query",
-            TimeoutOp::Ddl => "DDL",
-            TimeoutOp::Insert => "insert",
-        };
-        f.write_str(name)
-    }
-}
-
-/// Runs `fut` under `tokio::time::timeout` using the client budget derived
-/// from `op` and `config`, and maps the three outcomes onto typed
-/// [`EtlResult`]s using `op` for kind selection and the human-readable
-/// description.
-async fn timeout_call<T, F>(op: TimeoutOp, config: &ClickHouseClientConfig, fut: F) -> EtlResult<T>
+/// Runs `fut` under `tokio::time::timeout` using the client budget for `op`
+/// from `config`, and maps the three outcomes onto typed [`EtlResult`]s
+/// using `op` for kind selection and the human-readable description.
+async fn timeout_call<T, F>(
+    op: ClickHouseOperationKind,
+    config: &ClickHouseClientConfig,
+    fut: F,
+) -> EtlResult<T>
 where
     F: Future<Output = Result<T, clickhouse::error::Error>>,
 {
-    let budget = config.client_budget(op.server_budget(config));
+    let budget = config.client_budget(op);
     match tokio::time::timeout(budget, fut).await {
         Ok(Ok(value)) => Ok(value),
         Ok(Err(err)) => Err(etl_error!(
@@ -255,7 +199,7 @@ impl ClickHouseClient {
     /// `etl-api` validators) can treat the two destinations uniformly.
     pub async fn validate_connectivity(&self) -> EtlResult<()> {
         timeout_call(
-            TimeoutOp::ConnectivityCheck,
+            ClickHouseOperationKind::ConnectivityCheck,
             &self.config,
             self.inner.query("SELECT 1").fetch_one::<u8>(),
         )
@@ -276,7 +220,8 @@ impl ClickHouseClient {
             .query(sql)
             .with_option("max_execution_time", &ddl_secs)
             .with_option("lock_acquire_timeout", &ddl_secs);
-        let result = timeout_call(TimeoutOp::Ddl, &self.config, query.execute()).await;
+        let result =
+            timeout_call(ClickHouseOperationKind::Ddl, &self.config, query.execute()).await;
         metrics::histogram!(
             ETL_CLICKHOUSE_DDL_DURATION_SECONDS,
             "kind" => kind.as_label(),
@@ -300,7 +245,7 @@ impl ClickHouseClient {
             .with_option("max_execution_time", &schema_secs)
             .bind(table_name);
         timeout_call(
-            TimeoutOp::SchemaQuery,
+            ClickHouseOperationKind::SchemaQuery,
             &self.config,
             query.fetch_all::<ClickHouseTableColumn>(),
         )
@@ -356,7 +301,7 @@ impl ClickHouseClient {
             .query(&build_truncate_table_sql(table_name))
             .with_option("max_execution_time", &ddl_secs)
             .with_option("lock_acquire_timeout", &ddl_secs);
-        timeout_call(TimeoutOp::Ddl, &self.config, query.execute()).await
+        timeout_call(ClickHouseOperationKind::Ddl, &self.config, query.execute()).await
     }
 
     /// Inserts `rows` into `table_name` using the RowBinary format.
@@ -401,7 +346,7 @@ impl ClickHouseClient {
                 bytes += row_buf.len() as u64;
             }
 
-            timeout_call(TimeoutOp::Insert, &self.config, insert.end()).await?;
+            timeout_call(ClickHouseOperationKind::Insert, &self.config, insert.end()).await?;
             metrics::histogram!(
                 ETL_CLICKHOUSE_INSERT_DURATION_SECONDS,
                 "source" => source,
@@ -487,19 +432,28 @@ mod tests {
     }
 
     #[test]
-    fn client_budget_adds_epsilon_to_server_timeout() {
+    fn client_budget_adds_epsilon_to_server_budget() {
         let mut config = ClickHouseClientConfig::default();
+        config.connectivity_check_timeout = Duration::from_secs(10);
         config.client_timeout_epsilon = Duration::from_secs(3);
-        assert_eq!(config.client_budget(Duration::from_secs(10)), Duration::from_secs(13));
-        assert_eq!(config.client_budget(Duration::ZERO), Duration::from_secs(3));
+        assert_eq!(
+            config.client_budget(ClickHouseOperationKind::ConnectivityCheck),
+            Duration::from_secs(13)
+        );
+
+        config.connectivity_check_timeout = Duration::ZERO;
+        assert_eq!(
+            config.client_budget(ClickHouseOperationKind::ConnectivityCheck),
+            Duration::from_secs(3)
+        );
     }
 
     #[test]
-    fn timeout_op_display_matches_error_messages() {
-        assert_eq!(TimeoutOp::ConnectivityCheck.to_string(), "connectivity check");
-        assert_eq!(TimeoutOp::SchemaQuery.to_string(), "schema query");
-        assert_eq!(TimeoutOp::Ddl.to_string(), "DDL");
-        assert_eq!(TimeoutOp::Insert.to_string(), "insert");
+    fn operation_kind_display_matches_error_messages() {
+        assert_eq!(ClickHouseOperationKind::ConnectivityCheck.to_string(), "connectivity check");
+        assert_eq!(ClickHouseOperationKind::SchemaQuery.to_string(), "schema query");
+        assert_eq!(ClickHouseOperationKind::Ddl.to_string(), "DDL");
+        assert_eq!(ClickHouseOperationKind::Insert.to_string(), "insert");
     }
 
     #[tokio::test(start_paused = true)]
@@ -509,7 +463,9 @@ mod tests {
         // in real wall-clock terms.
         let config = ClickHouseClientConfig::default();
         let never = std::future::pending::<Result<(), clickhouse::error::Error>>();
-        let err = timeout_call(TimeoutOp::ConnectivityCheck, &config, never).await.unwrap_err();
+        let err = timeout_call(ClickHouseOperationKind::ConnectivityCheck, &config, never)
+            .await
+            .unwrap_err();
         assert_eq!(err.kind(), ErrorKind::DestinationTimeout);
         assert!(
             err.detail()
@@ -523,7 +479,8 @@ mod tests {
     async fn timeout_call_propagates_inner_error() {
         let config = ClickHouseClientConfig::default();
         let fut = async { Err::<(), _>(clickhouse::error::Error::NotEnoughData) };
-        let err = timeout_call(TimeoutOp::SchemaQuery, &config, fut).await.unwrap_err();
+        let err =
+            timeout_call(ClickHouseOperationKind::SchemaQuery, &config, fut).await.unwrap_err();
         assert_eq!(err.kind(), ErrorKind::DestinationQueryFailed);
         assert!(
             err.detail().is_some_and(|d| d.contains("schema query") && d.contains("failed")),
@@ -536,33 +493,42 @@ mod tests {
     async fn timeout_call_passes_through_success() {
         let config = ClickHouseClientConfig::default();
         let fut = async { Ok::<u32, clickhouse::error::Error>(42) };
-        let value = timeout_call(TimeoutOp::Insert, &config, fut).await.unwrap();
+        let value = timeout_call(ClickHouseOperationKind::Insert, &config, fut).await.unwrap();
         assert_eq!(value, 42);
     }
 
     #[test]
-    fn timeout_op_server_budget_per_bucket() {
+    fn server_budget_per_operation_kind() {
         let config = ClickHouseClientConfig::default();
         assert_eq!(
-            TimeoutOp::ConnectivityCheck.server_budget(&config),
+            config.server_budget(ClickHouseOperationKind::ConnectivityCheck),
             config.connectivity_check_timeout
         );
         assert_eq!(
-            TimeoutOp::SchemaQuery.server_budget(&config),
+            config.server_budget(ClickHouseOperationKind::SchemaQuery),
             config.schema_query_server_timeout
         );
-        assert_eq!(TimeoutOp::Ddl.server_budget(&config), config.ddl_server_timeout);
-        assert_eq!(TimeoutOp::Insert.server_budget(&config), config.insert_server_timeout);
+        assert_eq!(config.server_budget(ClickHouseOperationKind::Ddl), config.ddl_server_timeout);
+        assert_eq!(
+            config.server_budget(ClickHouseOperationKind::Insert),
+            config.insert_server_timeout
+        );
     }
 
     #[test]
-    fn timeout_op_failed_kind_per_bucket() {
+    fn operation_kind_failed_kind_per_bucket() {
         assert_eq!(
-            TimeoutOp::ConnectivityCheck.failed_kind(),
+            ClickHouseOperationKind::ConnectivityCheck.failed_kind(),
             ErrorKind::DestinationConnectionFailed
         );
-        assert_eq!(TimeoutOp::SchemaQuery.failed_kind(), ErrorKind::DestinationQueryFailed);
-        assert_eq!(TimeoutOp::Ddl.failed_kind(), ErrorKind::DestinationQueryFailed);
-        assert_eq!(TimeoutOp::Insert.failed_kind(), ErrorKind::DestinationAtomicBatchRetryable);
+        assert_eq!(
+            ClickHouseOperationKind::SchemaQuery.failed_kind(),
+            ErrorKind::DestinationQueryFailed
+        );
+        assert_eq!(ClickHouseOperationKind::Ddl.failed_kind(), ErrorKind::DestinationQueryFailed);
+        assert_eq!(
+            ClickHouseOperationKind::Insert.failed_kind(),
+            ErrorKind::DestinationAtomicBatchRetryable
+        );
     }
 }
