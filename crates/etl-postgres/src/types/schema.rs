@@ -9,7 +9,6 @@ use std::{
 use pg_escape::quote_identifier;
 use thiserror::Error;
 use tokio_postgres::types::{FromSql, PgLsn, ToSql, Type};
-use tracing::warn;
 
 /// Errors that can occur during schema operations.
 #[derive(Debug, Error)]
