@@ -5,8 +5,8 @@ use std::{
 };
 
 use etl_postgres::types::{
-    ColumnSchema, IdentityMask, ReplicatedTableSchema, ReplicationMask, SnapshotId, TableId,
-    TableName, TableSchema, convert_type_oid_to_type,
+    ColumnSchema, IdentityMask, ReplicatedTableSchema, SnapshotId, TableId, TableName, TableSchema,
+    convert_type_oid_to_type,
 };
 use metrics::{counter, histogram};
 use postgres_replication::protocol;
@@ -115,17 +115,15 @@ impl IdentityMessage {
     /// The returned mask is expressed in full table-schema width so it can be
     /// combined with the replication mask held by [`ReplicatedTableSchema`].
     ///
-    /// `REPLICA IDENTITY FULL` uses the replicated columns themselves as the
-    /// row identity. `DEFAULT` uses the primary key, `USING INDEX` uses the
-    /// configured replica-identity index, and `NOTHING` produces an empty
-    /// identity mask.
+    /// `REPLICA IDENTITY FULL` uses every table column as the row identity.
+    /// `DEFAULT` uses the primary key, `USING INDEX` uses the configured
+    /// replica-identity index, and `NOTHING` produces an empty identity mask.
     pub(crate) fn build_identity_mask(
         &self,
         table_schema: &TableSchema,
-        replication_mask: &ReplicationMask,
     ) -> EtlResult<IdentityMask> {
         match self.relreplident.as_str() {
-            "f" => Ok(IdentityMask::from_bytes(replication_mask.as_slice().to_vec())),
+            "f" => Ok(IdentityMask::all(table_schema)),
             "d" => {
                 Ok(Self::build_identity_mask_from_attnums(table_schema, &self.primary_key_attnums))
             }
@@ -319,14 +317,15 @@ pub(crate) fn parse_replicated_column_names(
 /// Returns the set of relation-message key column names.
 ///
 /// PostgreSQL exposes replica-identity mode on the relation itself and
-/// key-column membership on each [`protocol::RelationBody`] column. For
-/// `REPLICA IDENTITY FULL`, every replicated column belongs to the old-row
-/// identity. Otherwise the low bit of the column flags marks identity
-/// membership. The column order is the same `attnum` order described in
-/// [`parse_replicated_column_names`]. This returns names because identity-mask
-/// membership is also name-based; tuple interpretation relies on the resulting
-/// replicated schema preserving relation-message order after the masks are
-/// applied.
+/// key-column membership on each [`protocol::RelationBody`] column. The low
+/// bit of the column flags marks identity membership for non-`FULL` replica
+/// identity modes. For `REPLICA IDENTITY FULL`, callers should build the
+/// identity mask from the full table schema because a relation message only
+/// contains columns selected by the publication column list. The column order
+/// is the same `attnum` order described in [`parse_replicated_column_names`].
+/// This returns names because identity-mask membership is also name-based;
+/// tuple interpretation relies on the resulting replicated schema preserving
+/// relation-message order after the masks are applied.
 pub(crate) fn parse_replica_identity_column_names(
     relation_body: &protocol::RelationBody,
 ) -> EtlResult<HashSet<String>> {
@@ -339,6 +338,9 @@ pub(crate) fn parse_replica_identity_column_names(
         _ => relation_body
             .columns()
             .iter()
+            // PostgreSQL sends relation column flags as a bitmask. Bit 0 is
+            // LOGICALREP_IS_REPLICA_IDENTITY, so `& 1` tests only that bit
+            // while ignoring any other protocol flags that may be present.
             .filter(|column| column.flags() & 1 == 1)
             .map(|column| column.name().map(ToString::to_string))
             .collect::<Result<HashSet<String>, _>>()?,
@@ -1169,7 +1171,7 @@ mod tests {
             replica_identity_index_attnums: vec![1],
         };
 
-        let identity_mask = identity.build_identity_mask(&table_schema, &replication_mask).unwrap();
+        let identity_mask = identity.build_identity_mask(&table_schema).unwrap();
         let identity_type = ReplicatedTableSchema::from_masks(
             Arc::new(table_schema),
             replication_mask,
@@ -1197,7 +1199,7 @@ mod tests {
             replica_identity_index_attnums: vec![2],
         };
 
-        let identity_mask = identity.build_identity_mask(&table_schema, &replication_mask).unwrap();
+        let identity_mask = identity.build_identity_mask(&table_schema).unwrap();
         let identity_type = ReplicatedTableSchema::from_masks(
             Arc::new(table_schema),
             replication_mask,
@@ -1206,6 +1208,27 @@ mod tests {
         .identity_type();
 
         assert_eq!(identity_type, IdentityType::AlternativeKey);
+    }
+
+    #[test]
+    fn build_identity_for_full_uses_all_table_columns() {
+        let table_schema = TableSchema::new(
+            TableId::new(42),
+            TableName::new("public".to_owned(), "test".to_owned()),
+            vec![
+                ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, Some(1), false),
+                ColumnSchema::new("email".to_owned(), Type::TEXT, -1, 2, None, false),
+            ],
+        );
+        let identity = IdentityMessage {
+            primary_key_attnums: vec![1],
+            relreplident: "f".to_owned(),
+            replica_identity_index_attnums: Vec::new(),
+        };
+
+        let identity_mask = identity.build_identity_mask(&table_schema).unwrap();
+
+        assert_eq!(identity_mask.as_slice(), &[1, 1]);
     }
 
     #[test]

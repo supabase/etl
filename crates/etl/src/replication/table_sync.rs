@@ -300,7 +300,7 @@ where
                         )
                     },
                 )?;
-            let identity_mask = identity.build_identity_mask(&table_schema, &replication_mask)?;
+            let identity_mask = identity.build_identity_mask(&table_schema)?;
 
             // Create the replicated table schema with the exact runtime identity
             // metadata so catchup and apply can continue decoding row events

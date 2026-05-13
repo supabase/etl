@@ -2377,6 +2377,7 @@ where
             used_bootstrap_snapshot,
         )
         .await?;
+
         let replication_mask = ReplicationMask::try_build(&table_schema, &replicated_columns)?;
         let identity_mask = IdentityMask::try_build(&table_schema, &identity_columns)?;
 
