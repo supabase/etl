@@ -27,9 +27,17 @@ fn secs_string(d: Duration) -> String {
     secs.to_string()
 }
 
-/// Classifies a ClickHouse client call so error mapping is centralised: each
-/// op chooses how a server-returned failure maps onto [`ErrorKind`].
-/// Client-side deadlines always map to [`ErrorKind::DestinationTimeout`].
+/// Classifies a ClickHouse client call so the three concerns of a wrapped
+/// call live in one place:
+///
+/// - `server_budget` picks the right field of [`ClickHouseClientConfig`],
+/// - `failed_kind` maps an inner `clickhouse::error::Error` onto the
+///   appropriate [`ErrorKind`] (`DestinationConnectionFailed` /
+///   `DestinationQueryFailed` / `DestinationAtomicBatchRetryable`),
+/// - `Display` produces the op name interpolated into error messages.
+///
+/// Client-side deadlines always surface as
+/// [`ErrorKind::DestinationTimeout`], independent of `op`.
 #[derive(Copy, Clone)]
 pub(crate) enum TimeoutOp {
     /// Connectivity check (`SELECT 1`).
@@ -43,6 +51,17 @@ pub(crate) enum TimeoutOp {
 }
 
 impl TimeoutOp {
+    /// Server-side budget for this op, selected from
+    /// [`ClickHouseClientConfig`].
+    fn server_budget(self, config: &ClickHouseClientConfig) -> Duration {
+        match self {
+            TimeoutOp::ConnectivityCheck => config.connectivity_check_timeout,
+            TimeoutOp::SchemaQuery => config.schema_query_server_timeout,
+            TimeoutOp::Ddl => config.ddl_server_timeout,
+            TimeoutOp::Insert => config.insert_server_timeout,
+        }
+    }
+
     /// Error kind used when the inner future returns a
     /// `clickhouse::error::Error`.
     fn failed_kind(self) -> ErrorKind {
@@ -66,13 +85,15 @@ impl fmt::Display for TimeoutOp {
     }
 }
 
-/// Runs `fut` under `tokio::time::timeout(budget, fut)` and maps the three
-/// outcomes onto typed [`EtlResult`]s using `op` for kind selection and the
-/// human-readable description.
-async fn timeout_call<T, F>(op: TimeoutOp, budget: Duration, fut: F) -> EtlResult<T>
+/// Runs `fut` under `tokio::time::timeout` using the client budget derived
+/// from `op` and `config`, and maps the three outcomes onto typed
+/// [`EtlResult`]s using `op` for kind selection and the human-readable
+/// description.
+async fn timeout_call<T, F>(op: TimeoutOp, config: &ClickHouseClientConfig, fut: F) -> EtlResult<T>
 where
     F: Future<Output = Result<T, clickhouse::error::Error>>,
 {
+    let budget = config.client_budget(op.server_budget(config));
     match tokio::time::timeout(budget, fut).await {
         Ok(Ok(value)) => Ok(value),
         Ok(Err(err)) => Err(etl_error!(
@@ -233,10 +254,9 @@ impl ClickHouseClient {
     /// destination's `validate_connectivity` so callers (notably the
     /// `etl-api` validators) can treat the two destinations uniformly.
     pub async fn validate_connectivity(&self) -> EtlResult<()> {
-        let budget = self.config.client_budget(self.config.connectivity_check_timeout);
         timeout_call(
             TimeoutOp::ConnectivityCheck,
-            budget,
+            &self.config,
             self.inner.query("SELECT 1").fetch_one::<u8>(),
         )
         .await?;
@@ -256,8 +276,7 @@ impl ClickHouseClient {
             .query(sql)
             .with_option("max_execution_time", &ddl_secs)
             .with_option("lock_acquire_timeout", &ddl_secs);
-        let budget = self.config.client_budget(self.config.ddl_server_timeout);
-        let result = timeout_call(TimeoutOp::Ddl, budget, query.execute()).await;
+        let result = timeout_call(TimeoutOp::Ddl, &self.config, query.execute()).await;
         metrics::histogram!(
             ETL_CLICKHOUSE_DDL_DURATION_SECONDS,
             "kind" => kind.as_label(),
@@ -280,9 +299,12 @@ impl ClickHouseClient {
             )
             .with_option("max_execution_time", &schema_secs)
             .bind(table_name);
-        let budget = self.config.client_budget(self.config.schema_query_server_timeout);
-        timeout_call(TimeoutOp::SchemaQuery, budget, query.fetch_all::<ClickHouseTableColumn>())
-            .await
+        timeout_call(
+            TimeoutOp::SchemaQuery,
+            &self.config,
+            query.fetch_all::<ClickHouseTableColumn>(),
+        )
+        .await
     }
 
     /// Adds a column to an existing ClickHouse table.
@@ -334,8 +356,7 @@ impl ClickHouseClient {
             .query(&build_truncate_table_sql(table_name))
             .with_option("max_execution_time", &ddl_secs)
             .with_option("lock_acquire_timeout", &ddl_secs);
-        let budget = self.config.client_budget(self.config.ddl_server_timeout);
-        timeout_call(TimeoutOp::Ddl, budget, query.execute()).await
+        timeout_call(TimeoutOp::Ddl, &self.config, query.execute()).await
     }
 
     /// Inserts `rows` into `table_name` using the RowBinary format.
@@ -380,8 +401,7 @@ impl ClickHouseClient {
                 bytes += row_buf.len() as u64;
             }
 
-            let budget = self.config.client_budget(self.config.insert_server_timeout);
-            timeout_call(TimeoutOp::Insert, budget, insert.end()).await?;
+            timeout_call(TimeoutOp::Insert, &self.config, insert.end()).await?;
             metrics::histogram!(
                 ETL_CLICKHOUSE_INSERT_DURATION_SECONDS,
                 "source" => source,
@@ -487,10 +507,9 @@ mod tests {
         // A future that never resolves; tokio's paused clock advances virtual
         // time when all tasks are stalled, so the timeout fires immediately
         // in real wall-clock terms.
+        let config = ClickHouseClientConfig::default();
         let never = std::future::pending::<Result<(), clickhouse::error::Error>>();
-        let err = timeout_call(TimeoutOp::ConnectivityCheck, Duration::from_secs(1), never)
-            .await
-            .unwrap_err();
+        let err = timeout_call(TimeoutOp::ConnectivityCheck, &config, never).await.unwrap_err();
         assert_eq!(err.kind(), ErrorKind::DestinationTimeout);
         assert!(
             err.detail()
@@ -502,9 +521,9 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn timeout_call_propagates_inner_error() {
+        let config = ClickHouseClientConfig::default();
         let fut = async { Err::<(), _>(clickhouse::error::Error::NotEnoughData) };
-        let err =
-            timeout_call(TimeoutOp::SchemaQuery, Duration::from_secs(1), fut).await.unwrap_err();
+        let err = timeout_call(TimeoutOp::SchemaQuery, &config, fut).await.unwrap_err();
         assert_eq!(err.kind(), ErrorKind::DestinationQueryFailed);
         assert!(
             err.detail().is_some_and(|d| d.contains("schema query") && d.contains("failed")),
@@ -515,9 +534,25 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn timeout_call_passes_through_success() {
+        let config = ClickHouseClientConfig::default();
         let fut = async { Ok::<u32, clickhouse::error::Error>(42) };
-        let value = timeout_call(TimeoutOp::Insert, Duration::from_secs(1), fut).await.unwrap();
+        let value = timeout_call(TimeoutOp::Insert, &config, fut).await.unwrap();
         assert_eq!(value, 42);
+    }
+
+    #[test]
+    fn timeout_op_server_budget_per_bucket() {
+        let config = ClickHouseClientConfig::default();
+        assert_eq!(
+            TimeoutOp::ConnectivityCheck.server_budget(&config),
+            config.connectivity_check_timeout
+        );
+        assert_eq!(
+            TimeoutOp::SchemaQuery.server_budget(&config),
+            config.schema_query_server_timeout
+        );
+        assert_eq!(TimeoutOp::Ddl.server_budget(&config), config.ddl_server_timeout);
+        assert_eq!(TimeoutOp::Insert.server_budget(&config), config.insert_server_timeout);
     }
 
     #[test]
