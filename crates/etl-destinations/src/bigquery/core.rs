@@ -1124,6 +1124,23 @@ fn validate_bigquery_replica_identity(
         );
     }
 
+    if !replicated_table_schema.all_primary_key_columns_replicated() {
+        let omitted_columns = replicated_table_schema
+            .unreplicated_primary_key_column_schemas()
+            .map(|column_schema| column_schema.name.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        bail!(
+            ErrorKind::SourceSchemaError,
+            "BigQuery requires all source primary-key columns to be replicated",
+            format!(
+                "Table '{}' omits source primary-key columns from replication: {}",
+                replicated_table_schema.name(),
+                omitted_columns
+            )
+        );
+    }
+
     match replicated_table_schema.identity_type() {
         IdentityType::PrimaryKey | IdentityType::Full => Ok(()),
         identity_type => {
@@ -1611,6 +1628,22 @@ mod tests {
         ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask)
     }
 
+    fn replicated_schema_with_partial_primary_key() -> ReplicatedTableSchema {
+        let table_schema = Arc::new(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_owned(), "users".to_owned()),
+            vec![
+                ColumnSchema::new("tenant_id".to_owned(), Type::INT4, -1, 1, Some(1), false),
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 2, Some(2), false),
+                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 3, None, true),
+            ],
+        ));
+        let replication_mask = etl::types::ReplicationMask::from_bytes(vec![0, 1, 1]);
+        let identity_mask = IdentityMask::from_bytes(vec![0, 1, 0]);
+
+        ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask)
+    }
+
     #[test]
     fn table_name_to_bigquery_table_id_no_underscores() {
         let table_name = TableName::new("schema".to_owned(), "table".to_owned());
@@ -1763,6 +1796,15 @@ mod tests {
 
         let error = validate_bigquery_replica_identity(&replicated_table_schema).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::SourceSchemaError);
+    }
+
+    #[test]
+    fn validate_bigquery_replica_identity_rejects_partial_primary_key() {
+        let replicated_table_schema = replicated_schema_with_partial_primary_key();
+
+        let error = validate_bigquery_replica_identity(&replicated_table_schema).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::SourceSchemaError);
+        assert!(error.to_string().contains("tenant_id"));
     }
 
     #[test]
