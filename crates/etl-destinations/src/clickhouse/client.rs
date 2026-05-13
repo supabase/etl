@@ -29,27 +29,36 @@ fn secs_string(d: Duration) -> String {
 /// Runs `fut` under `tokio::time::timeout` using the client budget for `op`
 /// from `config`. Inner ClickHouse errors map onto `op.failed_kind()`;
 /// client-side deadlines map onto [`ErrorKind::DestinationTimeout`].
+/// `context`, when present, is appended to the error detail (e.g.
+/// `"table: foo"`) so call-site-specific diagnostic info is preserved.
 async fn timeout_call<T, F>(
     op: ClickHouseOperationKind,
     config: &ClickHouseClientConfig,
+    context: Option<&str>,
     fut: F,
 ) -> EtlResult<T>
 where
     F: Future<Output = Result<T, clickhouse::error::Error>>,
 {
+    fn detail(op: ClickHouseOperationKind, what: &str, context: Option<&str>) -> String {
+        match context {
+            Some(c) => format!("ClickHouse {op} {what}; {c}"),
+            None => format!("ClickHouse {op} {what}"),
+        }
+    }
     let budget = config.client_budget(op);
     match tokio::time::timeout(budget, fut).await {
         Ok(Ok(value)) => Ok(value),
         Ok(Err(err)) => Err(etl_error!(
             op.failed_kind(),
             "ClickHouse call failed",
-            format!("ClickHouse {op} failed"),
+            detail(op, "failed", context),
             source: err
         )),
         Err(_) => Err(etl_error!(
             ErrorKind::DestinationTimeout,
             "ClickHouse call timed out",
-            format!("ClickHouse {op} timed out after {budget:?}")
+            detail(op, &format!("timed out after {budget:?}"), context)
         )),
     }
 }
@@ -179,9 +188,9 @@ impl ClickHouseClient {
         // Server-side transport timeouts. These bound the time the server is
         // willing to spend on the connection itself. `max_execution_time` and
         // `lock_acquire_timeout` are intentionally not set here: they are
-        // DDL-specific and would otherwise leak into probe and schema_query
-        // calls, which expect much tighter budgets. DDL applies them via
-        // per-call `.with_option(...)` overrides instead.
+        // DDL-specific and would otherwise leak into the connectivity check
+        // and schema query, which expect much tighter budgets. DDL and
+        // TRUNCATE apply them via per-call `.with_option(...)` overrides.
         client = client
             .with_option("connect_timeout", &secs_string(config.connectivity_check_timeout))
             .with_option("http_connection_timeout", &secs_string(config.connectivity_check_timeout))
@@ -201,6 +210,7 @@ impl ClickHouseClient {
         timeout_call(
             ClickHouseOperationKind::ConnectivityCheck,
             &self.config,
+            None,
             self.inner.query("SELECT 1").fetch_one::<u8>(),
         )
         .await?;
@@ -214,14 +224,15 @@ impl ClickHouseClient {
         let ddl_start = Instant::now();
         let ddl_secs = secs_string(self.config.ddl_server_timeout);
         // `max_execution_time` and `lock_acquire_timeout` are applied per-call
-        // so probe and schema_query do not inherit the (much larger) DDL budget.
+        // so the connectivity check and schema query do not inherit the (much
+        // larger) DDL budget.
         let query = self
             .inner
             .query(sql)
             .with_option("max_execution_time", &ddl_secs)
             .with_option("lock_acquire_timeout", &ddl_secs);
         let result =
-            timeout_call(ClickHouseOperationKind::Ddl, &self.config, query.execute()).await;
+            timeout_call(ClickHouseOperationKind::Ddl, &self.config, None, query.execute()).await;
         metrics::histogram!(
             ETL_CLICKHOUSE_DDL_DURATION_SECONDS,
             "kind" => kind.as_label(),
@@ -247,6 +258,7 @@ impl ClickHouseClient {
         timeout_call(
             ClickHouseOperationKind::SchemaQuery,
             &self.config,
+            Some(&format!("table: {table_name}")),
             query.fetch_all::<ClickHouseTableColumn>(),
         )
         .await
@@ -301,7 +313,13 @@ impl ClickHouseClient {
             .query(&build_truncate_table_sql(table_name))
             .with_option("max_execution_time", &ddl_secs)
             .with_option("lock_acquire_timeout", &ddl_secs);
-        timeout_call(ClickHouseOperationKind::Ddl, &self.config, query.execute()).await
+        timeout_call(
+            ClickHouseOperationKind::Ddl,
+            &self.config,
+            Some(&format!("table: {table_name}")),
+            query.execute(),
+        )
+        .await
     }
 
     /// Inserts `rows` into `table_name` using the RowBinary format.
@@ -346,7 +364,13 @@ impl ClickHouseClient {
                 bytes += row_buf.len() as u64;
             }
 
-            timeout_call(ClickHouseOperationKind::Insert, &self.config, insert.end()).await?;
+            timeout_call(
+                ClickHouseOperationKind::Insert,
+                &self.config,
+                Some(&format!("table: {table_name}")),
+                insert.end(),
+            )
+            .await?;
             metrics::histogram!(
                 ETL_CLICKHOUSE_INSERT_DURATION_SECONDS,
                 "source" => source,
@@ -463,7 +487,7 @@ mod tests {
         // in real wall-clock terms.
         let config = ClickHouseClientConfig::default();
         let never = std::future::pending::<Result<(), clickhouse::error::Error>>();
-        let err = timeout_call(ClickHouseOperationKind::ConnectivityCheck, &config, never)
+        let err = timeout_call(ClickHouseOperationKind::ConnectivityCheck, &config, None, never)
             .await
             .unwrap_err();
         assert_eq!(err.kind(), ErrorKind::DestinationTimeout);
@@ -476,11 +500,27 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn timeout_call_appends_context_to_detail() {
+        let config = ClickHouseClientConfig::default();
+        let never = std::future::pending::<Result<(), clickhouse::error::Error>>();
+        let err =
+            timeout_call(ClickHouseOperationKind::Insert, &config, Some("table: users"), never)
+                .await
+                .unwrap_err();
+        assert!(
+            err.detail().is_some_and(|d| d.contains("table: users")),
+            "unexpected detail: {:?}",
+            err.detail()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn timeout_call_propagates_inner_error() {
         let config = ClickHouseClientConfig::default();
         let fut = async { Err::<(), _>(clickhouse::error::Error::NotEnoughData) };
-        let err =
-            timeout_call(ClickHouseOperationKind::SchemaQuery, &config, fut).await.unwrap_err();
+        let err = timeout_call(ClickHouseOperationKind::SchemaQuery, &config, None, fut)
+            .await
+            .unwrap_err();
         assert_eq!(err.kind(), ErrorKind::DestinationQueryFailed);
         assert!(
             err.detail().is_some_and(|d| d.contains("schema query") && d.contains("failed")),
@@ -493,7 +533,8 @@ mod tests {
     async fn timeout_call_passes_through_success() {
         let config = ClickHouseClientConfig::default();
         let fut = async { Ok::<u32, clickhouse::error::Error>(42) };
-        let value = timeout_call(ClickHouseOperationKind::Insert, &config, fut).await.unwrap();
+        let value =
+            timeout_call(ClickHouseOperationKind::Insert, &config, None, fut).await.unwrap();
         assert_eq!(value, 42);
     }
 
@@ -530,5 +571,24 @@ mod tests {
             ClickHouseOperationKind::Insert.failed_kind(),
             ErrorKind::DestinationAtomicBatchRetryable
         );
+    }
+
+    #[test]
+    fn secs_string_rounds_subseconds_up() {
+        // Whole seconds pass through unchanged.
+        assert_eq!(secs_string(Duration::from_secs(5)), "5");
+        assert_eq!(secs_string(Duration::from_secs(60)), "60");
+        // Zero is preserved: in ClickHouse settings "0" usually means "no
+        // timeout", which is the right thing to propagate for a deliberate
+        // override.
+        assert_eq!(secs_string(Duration::ZERO), "0");
+        // Sub-second values round up to a 1s floor so they don't collapse to
+        // "0" and disable the setting unintentionally.
+        assert_eq!(secs_string(Duration::from_millis(1)), "1");
+        assert_eq!(secs_string(Duration::from_millis(500)), "1");
+        assert_eq!(secs_string(Duration::from_millis(999)), "1");
+        // Fractional seconds beyond 1s truncate to whole seconds (Duration::as_secs).
+        assert_eq!(secs_string(Duration::from_millis(1500)), "1");
+        assert_eq!(secs_string(Duration::from_millis(2999)), "2");
     }
 }
