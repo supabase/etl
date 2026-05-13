@@ -140,11 +140,11 @@ impl<C: StreamClient> ChannelHandle<C> {
 
     /// Last offset token committed by Snowflake for this channel.
     pub async fn committed_offset(&self) -> Result<Option<OffsetToken>> {
-        let statuses = self
+        let status = self
             .client
-            .channel_status(&self.database, &self.schema, &self.table, &[self.channel.clone()])
+            .channel_status(&self.database, &self.schema, &self.table, &self.channel)
             .await?;
 
-        Ok(statuses.into_iter().next().and_then(|s| s.offset_token))
+        Ok(status.offset_token)
     }
 }

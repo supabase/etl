@@ -93,12 +93,12 @@ pub trait StreamClient: Send + Sync + 'static {
         continuation_token: &str,
     ) -> impl Future<Output = Result<InsertRowsResponse>> + Send;
 
-    /// Status check for one or more channels.
+    /// Check channel status.
     fn channel_status(
         &self,
         database: &str,
         schema: &str,
         table: &str,
-        channels: &[String],
-    ) -> impl Future<Output = Result<Vec<ChannelStatusResponse>>> + Send;
+        channel: &str,
+    ) -> impl Future<Output = Result<ChannelStatusResponse>> + Send;
 }
