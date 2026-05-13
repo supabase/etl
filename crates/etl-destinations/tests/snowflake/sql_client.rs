@@ -1,40 +1,13 @@
-use std::sync::Arc;
-
 use etl_destinations::snowflake::{
-    AuthManager, HttpExchanger, SqlClient,
-    test_utils::{load_test_config, load_test_private_key_path},
+    AuthManager, HttpExchanger, SqlClient, test_utils::load_test_config,
 };
-use futures::FutureExt;
+
+use super::common::{build_auth, with_table_cleanup};
 
 fn build_sql_client() -> SqlClient<AuthManager<HttpExchanger>> {
     let config = load_test_config();
-    let key_path = load_test_private_key_path();
-    let auth = Arc::new(
-        AuthManager::new(&config, key_path.to_str().unwrap(), None)
-            .expect("AuthManager creation failed"),
-    );
+    let auth = build_auth();
     SqlClient::new(config, auth, reqwest::Client::new())
-}
-
-/// Run `test_fn`, then always clean up `tables` regardless of success or
-/// failure.
-async fn with_cleanup<F, Fut>(
-    client: &SqlClient<AuthManager<HttpExchanger>>,
-    tables: &[&str],
-    test_fn: F,
-) where
-    F: FnOnce() -> Fut,
-    Fut: std::future::Future<Output = ()>,
-{
-    let result = std::panic::AssertUnwindSafe(test_fn()).catch_unwind().await;
-
-    for table in tables {
-        let _ = client.drop_table(table).await;
-    }
-
-    if let Err(e) = result {
-        std::panic::resume_unwind(e);
-    }
 }
 
 #[tokio::test]
@@ -43,7 +16,7 @@ async fn ddl_lifecycle() {
     let client = build_sql_client();
     let table = format!("etl_test_{}", uuid::Uuid::new_v4().simple());
 
-    with_cleanup(&client, &[&table], || async {
+    with_table_cleanup(&client, &[&table], || async {
         client
             .create_table_if_not_exists(&table, r#""id" NUMBER(10,0), "name" VARCHAR"#)
             .await
@@ -89,7 +62,7 @@ async fn create_table_idempotent() {
     let client = build_sql_client();
     let table = format!("etl_test_{}", uuid::Uuid::new_v4().simple());
 
-    with_cleanup(&client, &[&table], || async {
+    with_table_cleanup(&client, &[&table], || async {
         client
             .create_table_if_not_exists(&table, r#""id" NUMBER(10,0)"#)
             .await
@@ -109,7 +82,7 @@ async fn schema_evolution_ddl() {
     let client = build_sql_client();
     let table = format!("etl_test_{}", uuid::Uuid::new_v4().simple());
 
-    with_cleanup(&client, &[&table], || async {
+    with_table_cleanup(&client, &[&table], || async {
         client
             .create_table_if_not_exists(&table, r#""id" NUMBER(10,0), "name" VARCHAR"#)
             .await
