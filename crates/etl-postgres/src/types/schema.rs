@@ -832,9 +832,10 @@ impl ReplicatedTableSchema {
         //
         // Example: you have a table with (id, name, surname) and FULL replica
         // identity. Then you only public (name, surname) with only INSERT(s) replicated
-        // which PostgreSQL allows. Then we filter the columns that are in both so (name, surname).
-        // If we didn't check also `replicated == 1` we would return all (id, name, surname), which
-        // will fail the validation of the INSERT tuple.
+        // which PostgreSQL allows. Then we filter the columns that are in both so
+        // (name, surname). If we didn't check also `replicated == 1` we would
+        // return all (id, name, surname), which will fail the validation of the
+        // INSERT tuple.
         let inner = self
             .table_schema
             .column_schemas
