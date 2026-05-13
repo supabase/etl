@@ -170,39 +170,30 @@ impl Default for ClickHouseInserterConfig {
     }
 }
 
-/// Per-operation timeouts applied to the [`ClickHouseClient`].
+/// Configuration for the [`ClickHouseClient`].
 ///
-/// The strategy is layered: server-side ClickHouse settings
-/// (`max_execution_time`, `http_receive_timeout`, etc.) bound the work done by
-/// the server, and a `tokio::time::timeout` on the client side bounds the
-/// wall-clock wait with a slightly larger budget (`server +
-/// client_timeout_epsilon`). The server-side limit usually wins so callers see
-/// a typed ClickHouse error; the client-side limit is the hard ceiling for
-/// unreachable or unresponsive servers and surfaces as
-/// [`etl::error::ErrorKind::DestinationTimeout`].
+/// Holds the server-side and client-side timeouts applied to each operation
+/// bucket. Additional client-level knobs can be added here over time.
 #[derive(Copy, Clone)]
 pub struct ClickHouseClientConfig {
-    /// Server-side budget for the connectivity probe (`SELECT 1`).
-    pub probe_server_timeout: Duration,
+    /// Server-side budget for the connectivity check (`SELECT 1`).
+    pub connectivity_check_timeout: Duration,
     /// Server-side budget for schema lookups (`system.columns`).
     pub schema_query_server_timeout: Duration,
     /// Server-side budget for DDL (CREATE / ALTER / DROP / RENAME / TRUNCATE).
-    /// Applied per-call so probe and schema_query do not inherit a
-    /// multi-minute `max_execution_time`.
     pub ddl_server_timeout: Duration,
     /// Server-side budget per INSERT statement. Wraps `insert.end().await`,
     /// which is the only awaited network step inside `insert_rows`; each
     /// flushed chunk therefore gets its own deadline.
     pub insert_server_timeout: Duration,
-    /// Slack added on top of the server-side timeout for the client-side
-    /// `tokio::time::timeout` budget, so the server's typed error wins the
-    /// race against our hard ceiling.
+    /// Slack added to the server-side budget to derive the client-side
+    /// `tokio::time::timeout`.
     pub client_timeout_epsilon: Duration,
 }
 
 impl ClickHouseClientConfig {
-    /// Default server-side budget for the connectivity probe.
-    pub const DEFAULT_PROBE_SERVER_TIMEOUT: Duration = Duration::from_secs(8);
+    /// Default server-side budget for the connectivity check.
+    pub const DEFAULT_CONNECTIVITY_CHECK_TIMEOUT: Duration = Duration::from_secs(8);
     /// Default server-side budget for schema lookups.
     pub const DEFAULT_SCHEMA_QUERY_SERVER_TIMEOUT: Duration = Duration::from_secs(16);
     /// Default server-side budget for DDL.
@@ -210,7 +201,7 @@ impl ClickHouseClientConfig {
     /// Default server-side budget per INSERT statement.
     pub const DEFAULT_INSERT_SERVER_TIMEOUT: Duration = Duration::from_secs(256);
     /// Default slack between server-side and client-side budgets.
-    pub const DEFAULT_CLIENT_TIMEOUT_EPSILON: Duration = Duration::from_secs(5);
+    pub const DEFAULT_CLIENT_TIMEOUT_EPSILON: Duration = Duration::from_secs(4);
 
     /// Returns the client-side `tokio::time::timeout` budget that
     /// corresponds to a given server-side timeout: `server + epsilon`.
@@ -222,7 +213,7 @@ impl ClickHouseClientConfig {
 impl Default for ClickHouseClientConfig {
     fn default() -> Self {
         Self {
-            probe_server_timeout: Self::DEFAULT_PROBE_SERVER_TIMEOUT,
+            connectivity_check_timeout: Self::DEFAULT_CONNECTIVITY_CHECK_TIMEOUT,
             schema_query_server_timeout: Self::DEFAULT_SCHEMA_QUERY_SERVER_TIMEOUT,
             ddl_server_timeout: Self::DEFAULT_DDL_SERVER_TIMEOUT,
             insert_server_timeout: Self::DEFAULT_INSERT_SERVER_TIMEOUT,

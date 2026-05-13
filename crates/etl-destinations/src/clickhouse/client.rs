@@ -223,8 +223,8 @@ impl ClickHouseClient {
         // calls, which expect much tighter budgets. DDL applies them via
         // per-call `.with_option(...)` overrides instead.
         client = client
-            .with_option("connect_timeout", &secs_string(config.probe_server_timeout))
-            .with_option("http_connection_timeout", &secs_string(config.probe_server_timeout))
+            .with_option("connect_timeout", &secs_string(config.connectivity_check_timeout))
+            .with_option("http_connection_timeout", &secs_string(config.connectivity_check_timeout))
             .with_option("http_send_timeout", &secs_string(config.insert_server_timeout))
             .with_option("http_receive_timeout", &secs_string(config.insert_server_timeout));
 
@@ -238,7 +238,7 @@ impl ClickHouseClient {
     /// destination's `validate_connectivity` so callers (notably the
     /// `etl-api` validators) can treat the two destinations uniformly.
     pub async fn validate_connectivity(&self) -> EtlResult<()> {
-        let budget = self.config.client_budget(self.config.probe_server_timeout);
+        let budget = self.config.client_budget(self.config.connectivity_check_timeout);
         timeout_call(TimeoutOp::Probe, budget, self.inner.query("SELECT 1").fetch_one::<u8>())
             .await?;
         Ok(())
