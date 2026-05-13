@@ -161,6 +161,7 @@
 pub mod concurrency;
 pub mod config;
 mod conversions;
+pub use conversions::compatibility;
 pub mod destination;
 #[cfg(feature = "egress")]
 pub mod egress;

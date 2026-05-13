@@ -3,6 +3,7 @@ use std::{str::FromStr, sync::Once, time::Duration};
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use etl::{
     config::BatchConfig,
+    destination::DestinationTypeCompatibility,
     error::ErrorKind,
     state::table::{TableReplicationPhase, TableReplicationPhaseType},
     store::state::StateStore,
@@ -154,7 +155,13 @@ async fn table_copy_and_streaming_with_restart() {
 
     // Rebuild the destination for the restart so the test exercises state/schema
     // recovery instead of relying on a reused, previously shut-down wrapper.
-    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
+    let raw_destination = bigquery_database
+        .build_destination_with_type_compatibility(
+            pipeline_id,
+            store.clone(),
+            DestinationTypeCompatibility::strict(),
+        )
+        .await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     // We restart the pipeline and check that we can process events since we have
@@ -1918,7 +1925,13 @@ async fn table_validation_out_of_bounds_values() {
 
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
+    let raw_destination = bigquery_database
+        .build_destination_with_type_compatibility(
+            pipeline_id,
+            store.clone(),
+            DestinationTypeCompatibility::strict(),
+        )
+        .await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     let publication_name = "test_pub_validation".to_owned();
@@ -1995,6 +2008,193 @@ async fn table_validation_out_of_bounds_values() {
     ] {
         let table_state = store.get_table_replication_state(table_id).await.unwrap().unwrap();
         assert!(matches!(table_state, TableReplicationPhase::Errored { .. }));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn table_type_compatibility_modes_handle_same_risky_data() {
+    if skip_if_missing_bigquery_env_vars() {
+        return;
+    }
+
+    init_test_tracing();
+    install_crypto_provider();
+
+    for type_compatibility in [
+        DestinationTypeCompatibility::strict(),
+        DestinationTypeCompatibility::lossless(),
+        DestinationTypeCompatibility::lossy(),
+    ] {
+        let mode_name = if type_compatibility.is_strict() {
+            "strict"
+        } else if type_compatibility.is_lossless() {
+            "lossless"
+        } else {
+            "lossy"
+        };
+
+        let database = spawn_source_database().await;
+        let bigquery_database = setup_bigquery_database().await;
+
+        let table_name = test_table_name(&format!("{mode_name}_types"));
+        let table_id = database
+            .create_table(
+                table_name.clone(),
+                true,
+                &[
+                    ("numeric_value", "numeric"),
+                    ("json_value", "json"),
+                    ("numeric_array", "numeric[]"),
+                    ("json_array", "json[]"),
+                ],
+            )
+            .await
+            .unwrap();
+
+        database
+            .client
+            .as_ref()
+            .unwrap()
+            .execute(
+                &format!(
+                    "insert into {} (
+                        numeric_value,
+                        json_value,
+                        numeric_array,
+                        json_array
+                    ) values (
+                        '0.000000000000000000000000000000000000001'::numeric,
+                        '{{\"value\":18446744073709551616}}'::json,
+                        array['0.000000000000000000000000000000000000001'::numeric],
+                        array['{{\"value\":18446744073709551616}}'::json]
+                    )",
+                    table_name.as_quoted_identifier()
+                ),
+                &[],
+            )
+            .await
+            .unwrap();
+
+        let store = NotifyingStore::new();
+        let pipeline_id: PipelineId = random();
+        let raw_destination = bigquery_database
+            .build_destination_with_type_compatibility(
+                pipeline_id,
+                store.clone(),
+                type_compatibility,
+            )
+            .await;
+        let destination = TestDestinationWrapper::wrap(raw_destination);
+
+        let publication_name = format!("test_pub_{mode_name}_types");
+        database
+            .create_publication(&publication_name, std::slice::from_ref(&table_name))
+            .await
+            .expect("Failed to create publication");
+
+        let mut pipeline = create_pipeline(
+            &database.config,
+            pipeline_id,
+            publication_name,
+            store.clone(),
+            destination,
+        );
+
+        let table_ready =
+            store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
+        let table_errored =
+            store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Errored).await;
+
+        pipeline.start().await.unwrap();
+
+        if type_compatibility.is_strict() {
+            let table_state = tokio::select! {
+                _ = table_errored.notified() => {
+                    store.get_table_replication_state(table_id).await.unwrap()
+                }
+                _ = table_ready.notified() => {
+                    store.get_table_replication_state(table_id).await.unwrap()
+                }
+                _ = sleep(Duration::from_secs(180)) => {
+                    store.get_table_replication_state(table_id).await.unwrap()
+                }
+            };
+
+            pipeline.shutdown_and_wait().await.unwrap();
+
+            let Some(TableReplicationPhase::Errored { reason, .. }) = table_state else {
+                panic!("strict table replication should have errored: {table_state:?}");
+            };
+
+            assert!(
+                reason.contains("[UnsupportedValueInDestination]"),
+                "strict mode should reject the risky payload locally: {reason}"
+            );
+            assert!(
+                reason.contains("would be rounded by BigQuery")
+                    || reason.contains("JSON integer would lose precision")
+                    || reason.contains("JSON integer is outside BigQuery"),
+                "strict mode should reject a silent BigQuery conversion risk: {reason}"
+            );
+
+            continue;
+        }
+
+        tokio::select! {
+            _ = table_ready.notified() => {}
+            _ = table_errored.notified() => {
+                let table_state = store.get_table_replication_state(table_id).await.unwrap();
+                pipeline.shutdown_and_wait().await.unwrap();
+                panic!("{mode_name} table replication errored: {table_state:?}");
+            }
+            _ = sleep(Duration::from_secs(180)) => {
+                let table_state = store.get_table_replication_state(table_id).await.unwrap();
+                pipeline.shutdown_and_wait().await.unwrap();
+                panic!("timed out waiting for {mode_name} table readiness: {table_state:?}");
+            }
+        }
+        pipeline.shutdown_and_wait().await.unwrap();
+
+        let destination_schema =
+            bigquery_database.query_table_schema(table_name.clone()).await.unwrap();
+        let column_type = |column_name: &str| {
+            destination_schema
+                .columns()
+                .iter()
+                .find(|column| column.column_name == column_name)
+                .map(|column| column.data_type.as_str())
+        };
+
+        if type_compatibility.is_lossless() {
+            for column_name in ["numeric_value", "json_value"] {
+                assert_eq!(column_type(column_name), Some("STRING"), "{column_name}");
+            }
+
+            for column_name in ["numeric_array", "json_array"] {
+                assert_eq!(column_type(column_name), Some("ARRAY<STRING>"), "{column_name}");
+            }
+        } else {
+            assert_eq!(column_type("numeric_value"), Some("BIGNUMERIC"));
+            assert_eq!(column_type("json_value"), Some("JSON"));
+            assert_eq!(column_type("numeric_array"), Some("ARRAY<BIGNUMERIC>"));
+            assert_eq!(column_type("json_array"), Some("ARRAY<JSON>"));
+        }
+
+        let destination_rows = bigquery_database.query_table(table_name).await.unwrap();
+        assert_eq!(destination_rows.len(), 1);
+
+        let table_schemas = store.get_table_schemas().await;
+        let source_table_schema = table_schemas
+            .get(&table_id)
+            .and_then(|schemas| schemas.first())
+            .map(|(_, table_schema)| table_schema)
+            .expect("source schema should be stored");
+        let numeric_column = source_table_schema
+            .column_schemas
+            .iter()
+            .find(|column| column.name == "numeric_value")
+            .expect("numeric column should exist");
+        assert_eq!(numeric_column.typ.name(), "numeric");
     }
 }
 

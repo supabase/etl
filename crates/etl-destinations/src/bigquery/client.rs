@@ -1,6 +1,7 @@
 use std::fmt;
 
 use etl::{
+    destination::DestinationTypeCompatibility,
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
     types::{Cell, ColumnSchema, PipelineId, ReplicatedTableSchema, Type, is_array_type},
@@ -28,6 +29,7 @@ use tonic::Code;
 use tracing::{debug, error, info, warn};
 
 use crate::bigquery::{
+    compatibility::BigQueryCompatibility,
     encoding::BigQueryTableRow,
     metrics::{
         ETL_BQ_APPEND_BATCHES_BATCH_ERRORS_TOTAL, ETL_BQ_APPEND_BATCHES_BATCH_ROW_ERRORS_TOTAL,
@@ -648,11 +650,30 @@ impl BigQueryClient {
         replicated_table_schema: &ReplicatedTableSchema,
         max_staleness_mins: Option<u16>,
     ) -> EtlResult<bool> {
+        self.create_or_replace_table_with_type_compatibility(
+            dataset_id,
+            table_id,
+            replicated_table_schema,
+            max_staleness_mins,
+            DestinationTypeCompatibility::default(),
+        )
+        .await
+    }
+
+    /// Creates or replaces a table with a type compatibility policy.
+    pub async fn create_or_replace_table_with_type_compatibility(
+        &self,
+        dataset_id: &BigQueryDatasetId,
+        table_id: &BigQueryTableId,
+        replicated_table_schema: &ReplicatedTableSchema,
+        max_staleness_mins: Option<u16>,
+        type_compatibility: DestinationTypeCompatibility,
+    ) -> EtlResult<bool> {
         let table_exists = self.table_exists(dataset_id, table_id).await?;
 
         let full_table_name = self.full_table_name(dataset_id, table_id)?;
 
-        let columns_spec = Self::create_columns_spec(replicated_table_schema)?;
+        let columns_spec = Self::create_columns_spec(replicated_table_schema, type_compatibility)?;
         let max_staleness_option = if let Some(max_staleness_mins) = max_staleness_mins {
             Self::max_staleness_option(max_staleness_mins)
         } else {
@@ -685,12 +706,37 @@ impl BigQueryClient {
         replicated_table_schema: &ReplicatedTableSchema,
         max_staleness_mins: Option<u16>,
     ) -> EtlResult<bool> {
+        self.create_table_if_missing_with_type_compatibility(
+            dataset_id,
+            table_id,
+            replicated_table_schema,
+            max_staleness_mins,
+            DestinationTypeCompatibility::default(),
+        )
+        .await
+    }
+
+    /// Creates a table if missing with a type compatibility policy.
+    pub async fn create_table_if_missing_with_type_compatibility(
+        &self,
+        dataset_id: &BigQueryDatasetId,
+        table_id: &BigQueryTableId,
+        replicated_table_schema: &ReplicatedTableSchema,
+        max_staleness_mins: Option<u16>,
+        type_compatibility: DestinationTypeCompatibility,
+    ) -> EtlResult<bool> {
         if self.table_exists(dataset_id, table_id).await? {
             return Ok(false);
         }
 
-        self.create_table(dataset_id, table_id, replicated_table_schema, max_staleness_mins)
-            .await?;
+        self.create_table_with_type_compatibility(
+            dataset_id,
+            table_id,
+            replicated_table_schema,
+            max_staleness_mins,
+            type_compatibility,
+        )
+        .await?;
 
         Ok(true)
     }
@@ -706,9 +752,28 @@ impl BigQueryClient {
         replicated_table_schema: &ReplicatedTableSchema,
         max_staleness_mins: Option<u16>,
     ) -> EtlResult<()> {
+        self.create_table_with_type_compatibility(
+            dataset_id,
+            table_id,
+            replicated_table_schema,
+            max_staleness_mins,
+            DestinationTypeCompatibility::default(),
+        )
+        .await
+    }
+
+    /// Creates a new table in the BigQuery dataset with a compatibility policy.
+    pub async fn create_table_with_type_compatibility(
+        &self,
+        dataset_id: &BigQueryDatasetId,
+        table_id: &BigQueryTableId,
+        replicated_table_schema: &ReplicatedTableSchema,
+        max_staleness_mins: Option<u16>,
+        type_compatibility: DestinationTypeCompatibility,
+    ) -> EtlResult<()> {
         let full_table_name = self.full_table_name(dataset_id, table_id)?;
 
-        let columns_spec = Self::create_columns_spec(replicated_table_schema)?;
+        let columns_spec = Self::create_columns_spec(replicated_table_schema, type_compatibility)?;
         let max_staleness_option = if let Some(max_staleness_mins) = max_staleness_mins {
             Self::max_staleness_option(max_staleness_mins)
         } else {
@@ -798,9 +863,29 @@ impl BigQueryClient {
         table_id: &BigQueryTableId,
         column_schema: &ColumnSchema,
     ) -> EtlResult<()> {
+        self.add_column_with_type_compatibility(
+            dataset_id,
+            table_id,
+            column_schema,
+            DestinationTypeCompatibility::default(),
+        )
+        .await
+    }
+
+    /// Adds a column using a type compatibility policy.
+    pub async fn add_column_with_type_compatibility(
+        &self,
+        dataset_id: &BigQueryDatasetId,
+        table_id: &BigQueryTableId,
+        column_schema: &ColumnSchema,
+        type_compatibility: DestinationTypeCompatibility,
+    ) -> EtlResult<()> {
         let full_table_name = self.full_table_name(dataset_id, table_id)?;
         let column_name = Self::sanitize_identifier(&column_schema.name, "BigQuery column name")?;
-        let column_type = Self::postgres_to_bigquery_type(&column_schema.typ);
+        let column_type = Self::postgres_to_bigquery_type_with_compatibility(
+            &column_schema.typ,
+            type_compatibility,
+        )?;
 
         info!(
             "adding column `{column_name}` ({column_type}) to table {full_table_name} in BigQuery"
@@ -1170,11 +1255,17 @@ impl BigQueryClient {
     }
 
     /// Generates SQL column specification for CREATE TABLE statements.
-    fn column_spec(column_schema: &ColumnSchema) -> EtlResult<String> {
+    fn column_spec(
+        column_schema: &ColumnSchema,
+        type_compatibility: DestinationTypeCompatibility,
+    ) -> EtlResult<String> {
         let column_name = Self::sanitize_identifier(&column_schema.name, "BigQuery column name")?;
+        let column_type = Self::postgres_to_bigquery_type_with_compatibility(
+            &column_schema.typ,
+            type_compatibility,
+        )?;
 
-        let mut column_spec =
-            format!("`{}` {}", column_name, Self::postgres_to_bigquery_type(&column_schema.typ));
+        let mut column_spec = format!("`{column_name}` {column_type}");
 
         if !column_schema.nullable && !is_array_type(&column_schema.typ) {
             column_spec.push_str(" not null");
@@ -1219,10 +1310,13 @@ impl BigQueryClient {
     }
 
     /// Builds complete column specifications for CREATE TABLE statements.
-    fn create_columns_spec(replicated_table_schema: &ReplicatedTableSchema) -> EtlResult<String> {
+    fn create_columns_spec(
+        replicated_table_schema: &ReplicatedTableSchema,
+        type_compatibility: DestinationTypeCompatibility,
+    ) -> EtlResult<String> {
         let mut column_spec = replicated_table_schema
             .column_schemas()
-            .map(Self::column_spec)
+            .map(|column_schema| Self::column_spec(column_schema, type_compatibility))
             .collect::<EtlResult<Vec<_>>>()?
             .join(",");
 
@@ -1239,7 +1333,26 @@ impl BigQueryClient {
     }
 
     /// Converts Postgres data types to BigQuery equivalent types.
+    #[cfg(test)]
     fn postgres_to_bigquery_type(typ: &Type) -> String {
+        Self::postgres_to_bigquery_type_with_compatibility(
+            typ,
+            DestinationTypeCompatibility::default(),
+        )
+        .expect("default BigQuery type compatibility should materialize every source type")
+    }
+
+    /// Converts Postgres data types using a compatibility policy.
+    fn postgres_to_bigquery_type_with_compatibility(
+        typ: &Type,
+        type_compatibility: DestinationTypeCompatibility,
+    ) -> EtlResult<String> {
+        let typ = BigQueryCompatibility::compatible_type(typ, type_compatibility)?;
+        Ok(Self::postgres_to_bigquery_native_type(&typ))
+    }
+
+    /// Converts Postgres data types to their native BigQuery representation.
+    fn postgres_to_bigquery_native_type(typ: &Type) -> String {
         if is_array_type(typ) {
             let element_type = match typ {
                 &Type::BOOL_ARRAY => "bool",
@@ -1254,7 +1367,8 @@ impl BigQueryClient {
                 &Type::MONEY_ARRAY => "string",
                 &Type::DATE_ARRAY => "date",
                 &Type::TIME_ARRAY => "time",
-                &Type::TIMESTAMP_ARRAY | &Type::TIMESTAMPTZ_ARRAY => "timestamp",
+                &Type::TIMESTAMP_ARRAY => "datetime",
+                &Type::TIMESTAMPTZ_ARRAY => "timestamp",
                 &Type::UUID_ARRAY => "string",
                 &Type::JSON_ARRAY | &Type::JSONB_ARRAY => "json",
                 &Type::OID_ARRAY => "int64",
@@ -1274,7 +1388,8 @@ impl BigQueryClient {
             &Type::MONEY => "string",
             &Type::DATE => "date",
             &Type::TIME => "time",
-            &Type::TIMESTAMP | &Type::TIMESTAMPTZ => "timestamp",
+            &Type::TIMESTAMP => "datetime",
+            &Type::TIMESTAMPTZ => "timestamp",
             &Type::UUID => "string",
             &Type::JSON | &Type::JSONB => "json",
             &Type::OID => "int64",
@@ -1292,56 +1407,16 @@ impl BigQueryClient {
     pub fn column_schemas_to_table_descriptor(
         replicated_table_schema: &ReplicatedTableSchema,
         use_cdc_sequence_column: bool,
-    ) -> TableDescriptor {
+        type_compatibility: DestinationTypeCompatibility,
+    ) -> EtlResult<TableDescriptor> {
         let mut field_descriptors = vec![];
         let mut number = 1;
 
         for column_schema in replicated_table_schema.column_schemas() {
-            let typ = match column_schema.typ {
-                Type::BOOL => ColumnType::Bool,
-                Type::CHAR | Type::BPCHAR | Type::VARCHAR | Type::NAME | Type::TEXT => {
-                    ColumnType::String
-                }
-                Type::INT2 => ColumnType::Int32,
-                Type::INT4 => ColumnType::Int32,
-                Type::INT8 => ColumnType::Int64,
-                Type::FLOAT4 => ColumnType::Float,
-                Type::FLOAT8 => ColumnType::Double,
-                Type::NUMERIC => ColumnType::String,
-                Type::MONEY => ColumnType::String,
-                Type::DATE => ColumnType::String,
-                Type::TIME => ColumnType::String,
-                Type::TIMESTAMP => ColumnType::String,
-                Type::TIMESTAMPTZ => ColumnType::String,
-                Type::UUID => ColumnType::String,
-                Type::JSON => ColumnType::String,
-                Type::JSONB => ColumnType::String,
-                Type::OID => ColumnType::Int32,
-                Type::BYTEA => ColumnType::Bytes,
-                Type::BOOL_ARRAY => ColumnType::Bool,
-                Type::CHAR_ARRAY
-                | Type::BPCHAR_ARRAY
-                | Type::VARCHAR_ARRAY
-                | Type::NAME_ARRAY
-                | Type::TEXT_ARRAY => ColumnType::String,
-                Type::INT2_ARRAY => ColumnType::Int32,
-                Type::INT4_ARRAY => ColumnType::Int32,
-                Type::INT8_ARRAY => ColumnType::Int64,
-                Type::FLOAT4_ARRAY => ColumnType::Float,
-                Type::FLOAT8_ARRAY => ColumnType::Double,
-                Type::NUMERIC_ARRAY => ColumnType::String,
-                Type::MONEY_ARRAY => ColumnType::String,
-                Type::DATE_ARRAY => ColumnType::String,
-                Type::TIME_ARRAY => ColumnType::String,
-                Type::TIMESTAMP_ARRAY => ColumnType::String,
-                Type::TIMESTAMPTZ_ARRAY => ColumnType::String,
-                Type::UUID_ARRAY => ColumnType::String,
-                Type::JSON_ARRAY => ColumnType::String,
-                Type::JSONB_ARRAY => ColumnType::String,
-                Type::OID_ARRAY => ColumnType::Int32,
-                Type::BYTEA_ARRAY => ColumnType::Bytes,
-                _ => ColumnType::String,
-            };
+            let typ = Self::postgres_to_bigquery_storage_write_type(
+                &column_schema.typ,
+                type_compatibility,
+            )?;
 
             let mode = if is_array_type(&column_schema.typ) {
                 ColumnMode::Repeated
@@ -1382,7 +1457,63 @@ impl BigQueryClient {
             });
         }
 
-        TableDescriptor { field_descriptors }
+        Ok(TableDescriptor { field_descriptors })
+    }
+
+    /// Converts Postgres data types to BigQuery Storage Write API types.
+    fn postgres_to_bigquery_storage_write_type(
+        typ: &Type,
+        type_compatibility: DestinationTypeCompatibility,
+    ) -> EtlResult<ColumnType> {
+        let typ = BigQueryCompatibility::compatible_type(typ, type_compatibility)?;
+
+        let column_type = match typ {
+            Type::BOOL => ColumnType::Bool,
+            Type::CHAR | Type::BPCHAR | Type::VARCHAR | Type::NAME | Type::TEXT => {
+                ColumnType::String
+            }
+            Type::INT2 => ColumnType::Int32,
+            Type::INT4 => ColumnType::Int32,
+            Type::INT8 => ColumnType::Int64,
+            Type::FLOAT4 => ColumnType::Float,
+            Type::FLOAT8 => ColumnType::Double,
+            Type::NUMERIC => ColumnType::String,
+            Type::MONEY => ColumnType::String,
+            Type::DATE => ColumnType::String,
+            Type::TIME => ColumnType::String,
+            Type::TIMESTAMP => ColumnType::String,
+            Type::TIMESTAMPTZ => ColumnType::String,
+            Type::UUID => ColumnType::String,
+            Type::JSON => ColumnType::String,
+            Type::JSONB => ColumnType::String,
+            Type::OID => ColumnType::Int64,
+            Type::BYTEA => ColumnType::Bytes,
+            Type::BOOL_ARRAY => ColumnType::Bool,
+            Type::CHAR_ARRAY
+            | Type::BPCHAR_ARRAY
+            | Type::VARCHAR_ARRAY
+            | Type::NAME_ARRAY
+            | Type::TEXT_ARRAY => ColumnType::String,
+            Type::INT2_ARRAY => ColumnType::Int32,
+            Type::INT4_ARRAY => ColumnType::Int32,
+            Type::INT8_ARRAY => ColumnType::Int64,
+            Type::FLOAT4_ARRAY => ColumnType::Float,
+            Type::FLOAT8_ARRAY => ColumnType::Double,
+            Type::NUMERIC_ARRAY => ColumnType::String,
+            Type::MONEY_ARRAY => ColumnType::String,
+            Type::DATE_ARRAY => ColumnType::String,
+            Type::TIME_ARRAY => ColumnType::String,
+            Type::TIMESTAMP_ARRAY => ColumnType::String,
+            Type::TIMESTAMPTZ_ARRAY => ColumnType::String,
+            Type::UUID_ARRAY => ColumnType::String,
+            Type::JSON_ARRAY => ColumnType::String,
+            Type::JSONB_ARRAY => ColumnType::String,
+            Type::OID_ARRAY => ColumnType::Int64,
+            Type::BYTEA_ARRAY => ColumnType::Bytes,
+            _ => ColumnType::String,
+        };
+
+        Ok(column_type)
     }
 }
 
@@ -1461,6 +1592,15 @@ mod tests {
         ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask)
     }
 
+    /// Converts a type with a compatibility policy for test assertions.
+    fn bigquery_type_with_compatibility(
+        typ: &Type,
+        compatibility: DestinationTypeCompatibility,
+    ) -> String {
+        BigQueryClient::postgres_to_bigquery_type_with_compatibility(typ, compatibility)
+            .expect("type should be compatible with BigQuery in this test")
+    }
+
     #[test]
     fn postgres_to_bigquery_type_basic_types() {
         assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::BOOL), "bool");
@@ -1473,7 +1613,8 @@ mod tests {
         assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::NUMERIC), "bignumeric");
         assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::MONEY), "string");
         assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::OID), "int64");
-        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::TIMESTAMP), "timestamp");
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::TIMESTAMP), "datetime");
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::TIMESTAMPTZ), "timestamp");
         assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::JSON), "json");
         assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::BYTEA), "bytes");
     }
@@ -1501,6 +1642,10 @@ mod tests {
         assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::OID_ARRAY), "array<int64>");
         assert_eq!(
             BigQueryClient::postgres_to_bigquery_type(&Type::TIMESTAMP_ARRAY),
+            "array<datetime>"
+        );
+        assert_eq!(
+            BigQueryClient::postgres_to_bigquery_type(&Type::TIMESTAMPTZ_ARRAY),
             "array<timestamp>"
         );
         assert_eq!(
@@ -1515,26 +1660,139 @@ mod tests {
     }
 
     #[test]
+    fn postgres_to_bigquery_type_lossless_maps_risky_types_to_string() {
+        let type_compatibility = DestinationTypeCompatibility::lossless();
+
+        assert_eq!(bigquery_type_with_compatibility(&Type::FLOAT8, type_compatibility), "string");
+        assert_eq!(bigquery_type_with_compatibility(&Type::NUMERIC, type_compatibility), "string");
+        assert_eq!(bigquery_type_with_compatibility(&Type::JSONB, type_compatibility), "string");
+        assert_eq!(
+            bigquery_type_with_compatibility(&Type::TIMESTAMPTZ, type_compatibility),
+            "string"
+        );
+        assert_eq!(
+            bigquery_type_with_compatibility(&Type::NUMERIC_ARRAY, type_compatibility),
+            "array<string>"
+        );
+        assert_eq!(
+            bigquery_type_with_compatibility(&Type::JSON_ARRAY, type_compatibility),
+            "array<string>"
+        );
+        assert_eq!(bigquery_type_with_compatibility(&Type::INT8, type_compatibility), "int64");
+    }
+
+    #[test]
+    fn postgres_to_bigquery_type_strict_rejects_non_native_types() {
+        for typ in [
+            Type::UUID,
+            Type::MONEY,
+            Type::INTERVAL,
+            Type::REGCLASS,
+            Type::UUID_ARRAY,
+            Type::INET_ARRAY,
+            Type::INT4_RANGE,
+        ] {
+            let result = BigQueryClient::postgres_to_bigquery_type_with_compatibility(
+                &typ,
+                DestinationTypeCompatibility::strict(),
+            );
+
+            assert!(matches!(
+                result,
+                Err(err) if err.kind() == ErrorKind::UnsupportedValueInDestination
+            ));
+        }
+    }
+
+    #[test]
+    fn postgres_to_bigquery_type_lossy_uses_string_for_non_native_types() {
+        let type_compatibility = DestinationTypeCompatibility::lossy();
+
+        assert_eq!(bigquery_type_with_compatibility(&Type::UUID, type_compatibility), "string");
+        assert_eq!(
+            bigquery_type_with_compatibility(&Type::INTERVAL_ARRAY, type_compatibility),
+            "array<string>"
+        );
+        assert_eq!(bigquery_type_with_compatibility(&Type::JSON, type_compatibility), "json");
+    }
+
+    #[test]
     fn column_spec() {
         let column_schema = test_column("test_col", Type::TEXT, 1, true, None);
-        let spec = BigQueryClient::column_spec(&column_schema).expect("column spec generation");
+        let spec =
+            BigQueryClient::column_spec(&column_schema, DestinationTypeCompatibility::strict())
+                .expect("column spec generation");
         assert_eq!(spec, "`test_col` string");
 
         let not_null_column = test_column("id", Type::INT4, 1, false, Some(1));
         let not_null_spec =
-            BigQueryClient::column_spec(&not_null_column).expect("not null column spec");
+            BigQueryClient::column_spec(&not_null_column, DestinationTypeCompatibility::strict())
+                .expect("not null column spec");
         assert_eq!(not_null_spec, "`id` int64 not null");
 
         let array_column = test_column("tags", Type::TEXT_ARRAY, 1, false, None);
-        let array_spec = BigQueryClient::column_spec(&array_column).expect("array column spec");
+        let array_spec =
+            BigQueryClient::column_spec(&array_column, DestinationTypeCompatibility::strict())
+                .expect("array column spec");
         assert_eq!(array_spec, "`tags` array<string>");
+    }
+
+    #[test]
+    fn column_spec_lossless_uses_string_for_risky_types() {
+        let numeric_column = test_column("amount", Type::NUMERIC, 1, false, None);
+        let numeric_spec =
+            BigQueryClient::column_spec(&numeric_column, DestinationTypeCompatibility::lossless())
+                .expect("numeric column spec");
+        assert_eq!(numeric_spec, "`amount` string not null");
+
+        let json_array_column = test_column("payloads", Type::JSONB_ARRAY, 2, true, None);
+        let json_array_spec = BigQueryClient::column_spec(
+            &json_array_column,
+            DestinationTypeCompatibility::lossless(),
+        )
+        .expect("json array column spec");
+        assert_eq!(json_array_spec, "`payloads` array<string>");
+
+        let timestamp_column = test_column("created_at", Type::TIMESTAMPTZ, 3, true, None);
+        let timestamp_spec = BigQueryClient::column_spec(
+            &timestamp_column,
+            DestinationTypeCompatibility::lossless(),
+        )
+        .expect("timestamp column spec");
+        assert_eq!(timestamp_spec, "`created_at` string");
+    }
+
+    #[test]
+    fn column_spec_strict_rejects_non_native_types() {
+        let column_schema = test_column("tenant_uuid", Type::UUID, 1, true, None);
+
+        let result =
+            BigQueryClient::column_spec(&column_schema, DestinationTypeCompatibility::strict());
+
+        assert!(matches!(
+            result,
+            Err(err) if err.kind() == ErrorKind::UnsupportedValueInDestination
+        ));
+    }
+
+    #[test]
+    fn column_spec_lossy_uses_string_for_non_native_types() {
+        let column_schema = test_column("tenant_uuid", Type::UUID, 1, false, None);
+
+        let spec =
+            BigQueryClient::column_spec(&column_schema, DestinationTypeCompatibility::lossy())
+                .expect("uuid column spec");
+
+        assert_eq!(spec, "`tenant_uuid` string not null");
     }
 
     #[test]
     fn column_spec_escapes_backticks() {
         let column_schema = test_column("pwn`name", Type::TEXT, 1, true, None);
 
-        let spec = BigQueryClient::column_spec(&column_schema).expect("escaped column spec");
+        let spec =
+            BigQueryClient::column_spec(&column_schema, DestinationTypeCompatibility::strict())
+                .expect("escaped column spec");
 
         assert_eq!(spec, "`pwn\\`name` string");
     }
@@ -1619,7 +1877,12 @@ mod tests {
         ];
         let schema = test_replicated_schema(columns);
 
-        let descriptor = BigQueryClient::column_schemas_to_table_descriptor(&schema, true);
+        let descriptor = BigQueryClient::column_schemas_to_table_descriptor(
+            &schema,
+            true,
+            DestinationTypeCompatibility::strict(),
+        )
+        .expect("table descriptor");
 
         assert_eq!(descriptor.field_descriptors.len(), 6); // 4 columns + CDC columns
 
@@ -1662,7 +1925,12 @@ mod tests {
         ];
         let schema = test_replicated_schema(columns);
 
-        let descriptor = BigQueryClient::column_schemas_to_table_descriptor(&schema, false);
+        let descriptor = BigQueryClient::column_schemas_to_table_descriptor(
+            &schema,
+            false,
+            DestinationTypeCompatibility::strict(),
+        )
+        .expect("table copy descriptor");
 
         assert!(matches!(descriptor.field_descriptors[0].mode, ColumnMode::Required));
         assert!(matches!(descriptor.field_descriptors[1].mode, ColumnMode::Nullable));
@@ -1678,20 +1946,44 @@ mod tests {
             test_column("numeric_col", Type::NUMERIC, 4, true, None),
             test_column("date_col", Type::DATE, 5, true, None),
             test_column("time_col", Type::TIME, 6, true, None),
+            test_column("oid_col", Type::OID, 7, true, None),
         ];
         let schema = test_replicated_schema(columns);
 
-        let descriptor = BigQueryClient::column_schemas_to_table_descriptor(&schema, true);
+        let descriptor = BigQueryClient::column_schemas_to_table_descriptor(
+            &schema,
+            true,
+            DestinationTypeCompatibility::lossy(),
+        )
+        .expect("complex table descriptor");
 
-        assert_eq!(descriptor.field_descriptors.len(), 8); // 6 columns + CDC columns
+        assert_eq!(descriptor.field_descriptors.len(), 9); // 7 columns + CDC columns
 
-        // Check that UUID, JSON, DATE, TIME are all mapped to String in storage
+        // Check that lossy non-native types use string storage API fields.
         assert!(matches!(descriptor.field_descriptors[0].typ, ColumnType::String)); // UUID
         assert!(matches!(descriptor.field_descriptors[1].typ, ColumnType::String)); // JSON
         assert!(matches!(descriptor.field_descriptors[2].typ, ColumnType::Bytes)); // BYTEA
         assert!(matches!(descriptor.field_descriptors[3].typ, ColumnType::String)); // NUMERIC
         assert!(matches!(descriptor.field_descriptors[4].typ, ColumnType::String)); // DATE
         assert!(matches!(descriptor.field_descriptors[5].typ, ColumnType::String)); // TIME
+        assert!(matches!(descriptor.field_descriptors[6].typ, ColumnType::Int64)); // OID
+    }
+
+    #[test]
+    fn column_schemas_to_table_descriptor_strict_rejects_non_native_types() {
+        let columns = vec![test_column("uuid_col", Type::UUID, 1, true, None)];
+        let schema = test_replicated_schema(columns);
+
+        let result = BigQueryClient::column_schemas_to_table_descriptor(
+            &schema,
+            true,
+            DestinationTypeCompatibility::strict(),
+        );
+
+        assert!(matches!(
+            result,
+            Err(err) if err.kind() == ErrorKind::UnsupportedValueInDestination
+        ));
     }
 
     #[test]

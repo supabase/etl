@@ -14,7 +14,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Args, ValueEnum};
 use etl::{
     destination::{
-        Destination,
+        Destination, DestinationTypeCompatibility,
         async_result::{TruncateTableResult, WriteEventsResult, WriteTableRowsResult},
     },
     error::EtlResult,
@@ -29,7 +29,7 @@ use etl_config::{
     },
 };
 #[cfg(feature = "bigquery")]
-use etl_destinations::bigquery::BigQueryDestination;
+use etl_destinations::bigquery::{BigQueryDestination, BigQueryDestinationOptions};
 use etl_telemetry::tracing::{LogFlusher, init_tracing};
 use serde::Serialize;
 use sqlx::{
@@ -474,13 +474,17 @@ impl BenchDestination {
                     .filter(|sa_key_file| !sa_key_file.trim().is_empty())
                     .context("BigQuery service account key file is required")?;
 
+                let bigquery_options = BigQueryDestinationOptions::new(
+                    dataset_id,
+                    destination_args.bq_max_staleness_mins,
+                    DestinationTypeCompatibility::default(),
+                    pipeline_id,
+                );
                 let destination = BigQueryDestination::new_with_key_path(
                     project_id,
-                    dataset_id,
                     &sa_key_file,
-                    destination_args.bq_max_staleness_mins,
                     destination_args.bq_connection_pool_size,
-                    pipeline_id,
+                    bigquery_options,
                     store,
                 )
                 .await?;

@@ -1,6 +1,7 @@
 mod base;
 mod connection;
 mod destination;
+mod destination_compatibility;
 mod pipeline;
 mod replicator;
 mod sentry;
@@ -14,6 +15,9 @@ pub use connection::{
 };
 pub use destination::{
     DestinationConfig, DestinationConfigWithoutSecrets, IcebergConfig, IcebergConfigWithoutSecrets,
+};
+pub use destination_compatibility::{
+    DestinationTypeCompatibility, DestinationTypeCompatibilityMode,
 };
 pub use pipeline::{
     BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PipelineConfig,

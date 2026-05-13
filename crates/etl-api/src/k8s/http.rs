@@ -1293,9 +1293,9 @@ fn get_restarted_at_annotation_value() -> String {
 #[allow(clippy::redundant_test_prefix)]
 mod tests {
     use etl_config::shared::{
-        BatchConfig, DestinationConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig,
-        PgConnectionConfig, PipelineConfig, ReplicatorConfig, ReplicatorConfigWithoutSecrets,
-        TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
+        BatchConfig, DestinationConfig, DestinationTypeCompatibilityMode, InvalidatedSlotBehavior,
+        MemoryBackpressureConfig, PgConnectionConfig, PipelineConfig, ReplicatorConfig,
+        ReplicatorConfigWithoutSecrets, TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
     };
     use insta::{assert_json_snapshot, assert_snapshot};
 
@@ -1463,6 +1463,7 @@ mod tests {
                 service_account_key: "sa-key".into(),
                 max_staleness_mins: None,
                 connection_pool_size: 4,
+                type_compatibility: DestinationTypeCompatibilityMode::Lossy,
             },
             pipeline: PipelineConfig {
                 id: 42,

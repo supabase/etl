@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use etl::{
     config::IcebergConfig,
-    destination::Destination,
+    destination::{Destination, DestinationTypeCompatibility},
     pipeline::Pipeline,
     store::{
         both::postgres::PostgresStore, cleanup::CleanupStore, schema::SchemaStore,
@@ -15,7 +15,7 @@ use etl_config::{
     shared::{DestinationConfig, PgConnectionConfig, ReplicatorConfig},
 };
 use etl_destinations::{
-    bigquery::BigQueryDestination,
+    bigquery::{BigQueryDestination, BigQueryDestinationOptions},
     clickhouse::{ClickHouseDestination, ClickHouseInserterConfig},
     ducklake::{DuckLakeDestination, S3Config as DucklakeS3Config},
     iceberg::{
@@ -62,14 +62,19 @@ pub(crate) async fn start_replicator_with_config(
             service_account_key,
             max_staleness_mins,
             connection_pool_size,
+            type_compatibility,
         } => {
+            let destination_options = BigQueryDestinationOptions::new(
+                dataset_id.clone(),
+                *max_staleness_mins,
+                DestinationTypeCompatibility::new(*type_compatibility),
+                pipeline_id,
+            );
             let destination = BigQueryDestination::new_with_key(
                 project_id.clone(),
-                dataset_id.clone(),
                 service_account_key.expose_secret(),
-                *max_staleness_mins,
                 *connection_pool_size,
-                pipeline_id,
+                destination_options,
                 state_store.clone(),
             )
             .await?;

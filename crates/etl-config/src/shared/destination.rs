@@ -2,12 +2,18 @@ use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
+use super::DestinationTypeCompatibilityMode;
+
 const fn default_connection_pool_size() -> usize {
     DestinationConfig::DEFAULT_CONNECTION_POOL_SIZE
 }
 
 const fn default_ducklake_pool_size() -> u32 {
     DestinationConfig::DEFAULT_DUCKLAKE_POOL_SIZE
+}
+
+const fn default_destination_type_compatibility_mode() -> DestinationTypeCompatibilityMode {
+    DestinationTypeCompatibilityMode::Lossy
 }
 
 /// Configuration for supported ETL data destinations.
@@ -47,6 +53,9 @@ pub enum DestinationConfig {
         /// consumes more resources.
         #[serde(default = "default_connection_pool_size")]
         connection_pool_size: usize,
+        /// Type compatibility behavior for BigQuery materialization.
+        #[serde(default = "default_destination_type_compatibility_mode")]
+        type_compatibility: DestinationTypeCompatibilityMode,
     },
     #[serde(rename = "clickhouse")]
     ClickHouse {
@@ -243,6 +252,12 @@ pub enum DestinationConfigWithoutSecrets {
         /// consumes more resources.
         #[serde(default = "default_connection_pool_size")]
         connection_pool_size: usize,
+        /// Type compatibility behavior for BigQuery materialization.
+        #[serde(
+            default = "default_destination_type_compatibility_mode",
+            skip_serializing_if = "DestinationTypeCompatibilityMode::is_lossy"
+        )]
+        type_compatibility: DestinationTypeCompatibilityMode,
     },
     #[serde(rename = "clickhouse")]
     ClickHouse {
@@ -293,11 +308,13 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
                 service_account_key: _,
                 max_staleness_mins,
                 connection_pool_size,
+                type_compatibility,
             } => DestinationConfigWithoutSecrets::BigQuery {
                 project_id,
                 dataset_id,
                 max_staleness_mins,
                 connection_pool_size,
+                type_compatibility,
             },
             DestinationConfig::ClickHouse { url, user, database, .. } => {
                 DestinationConfigWithoutSecrets::ClickHouse { url, user, database }
@@ -333,5 +350,64 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
                 expire_snapshots_older_than,
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn big_query_type_compatibility_defaults_to_lossy() {
+        let json = r#"{
+            "big_query": {
+                "project_id": "project-id",
+                "dataset_id": "dataset-id",
+                "service_account_key": "service-account-key",
+                "max_staleness_mins": null
+            }
+        }"#;
+
+        let config: DestinationConfig = serde_json::from_str(json).unwrap();
+
+        let DestinationConfig::BigQuery { type_compatibility, .. } = config else {
+            panic!("Expected BigQuery destination config");
+        };
+        assert_eq!(type_compatibility, DestinationTypeCompatibilityMode::Lossy);
+    }
+
+    #[test]
+    fn big_query_type_compatibility_deserializes_mode() {
+        let json = r#"{
+            "big_query": {
+                "project_id": "project-id",
+                "dataset_id": "dataset-id",
+                "service_account_key": "service-account-key",
+                "max_staleness_mins": null,
+                "type_compatibility": "lossless"
+            }
+        }"#;
+
+        let config: DestinationConfig = serde_json::from_str(json).unwrap();
+
+        let DestinationConfig::BigQuery { type_compatibility, .. } = config else {
+            panic!("Expected BigQuery destination config");
+        };
+        assert_eq!(type_compatibility, DestinationTypeCompatibilityMode::Lossless);
+    }
+
+    #[test]
+    fn big_query_without_secrets_skips_default_type_compatibility() {
+        let config = DestinationConfigWithoutSecrets::BigQuery {
+            project_id: "project-id".to_owned(),
+            dataset_id: "dataset-id".to_owned(),
+            max_staleness_mins: None,
+            connection_pool_size: DestinationConfig::DEFAULT_CONNECTION_POOL_SIZE,
+            type_compatibility: DestinationTypeCompatibilityMode::Lossy,
+        };
+
+        let value = serde_json::to_value(config).unwrap();
+
+        assert!(value["big_query"].get("type_compatibility").is_none());
     }
 }

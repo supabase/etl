@@ -1,4 +1,5 @@
 mod bool;
+pub mod compatibility;
 mod event;
 mod hex;
 mod numeric;

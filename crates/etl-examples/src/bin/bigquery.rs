@@ -39,10 +39,11 @@ use etl::{
         BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PgConnectionConfig,
         PipelineConfig, TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
     },
+    destination::DestinationTypeCompatibility,
     pipeline::Pipeline,
     store::PostgresStore,
 };
-use etl_destinations::bigquery::BigQueryDestination;
+use etl_destinations::bigquery::{BigQueryDestination, BigQueryDestinationOptions};
 use tokio::signal;
 use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -207,13 +208,17 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
 
     // Initialize BigQuery destination with service account authentication
     // Tables will be automatically created to match Postgres schema
+    let bigquery_options = BigQueryDestinationOptions::new(
+        args.bq_args.bq_dataset_id,
+        None,
+        DestinationTypeCompatibility::default(),
+        pipeline_config.id,
+    );
     let bigquery_destination = BigQueryDestination::new_with_key_path(
         args.bq_args.bq_project_id,
-        args.bq_args.bq_dataset_id,
         &args.bq_args.bq_sa_key_file,
-        None,
         1,
-        pipeline_config.id,
+        bigquery_options,
         store.clone(),
     )
     .await?;
