@@ -466,4 +466,63 @@ mod tests {
 
         assert_eq!(sql, "INSERT INTO \"table\"\"name\" FORMAT RowBinary");
     }
+
+    #[test]
+    fn client_budget_adds_epsilon_to_server_timeout() {
+        let mut config = ClickHouseClientConfig::default();
+        config.client_timeout_epsilon = Duration::from_secs(3);
+        assert_eq!(config.client_budget(Duration::from_secs(10)), Duration::from_secs(13));
+        assert_eq!(config.client_budget(Duration::ZERO), Duration::from_secs(3));
+    }
+
+    #[test]
+    fn timeout_op_display_matches_error_messages() {
+        assert_eq!(TimeoutOp::Probe.to_string(), "probe");
+        assert_eq!(TimeoutOp::SchemaQuery.to_string(), "schema query");
+        assert_eq!(TimeoutOp::Ddl.to_string(), "DDL");
+        assert_eq!(TimeoutOp::Insert.to_string(), "insert");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn timeout_call_returns_destination_timeout_on_deadline() {
+        // A future that never resolves; tokio's paused clock advances virtual
+        // time when all tasks are stalled, so the timeout fires immediately
+        // in real wall-clock terms.
+        let never = std::future::pending::<Result<(), clickhouse::error::Error>>();
+        let err = timeout_call(TimeoutOp::Probe, Duration::from_secs(1), never).await.unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::DestinationTimeout);
+        assert!(
+            err.detail().is_some_and(|d| d.contains("probe") && d.contains("timed out")),
+            "unexpected detail: {:?}",
+            err.detail()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn timeout_call_propagates_inner_error() {
+        let fut = async { Err::<(), _>(clickhouse::error::Error::NotEnoughData) };
+        let err =
+            timeout_call(TimeoutOp::SchemaQuery, Duration::from_secs(1), fut).await.unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::DestinationQueryFailed);
+        assert!(
+            err.detail().is_some_and(|d| d.contains("schema query") && d.contains("failed")),
+            "unexpected detail: {:?}",
+            err.detail()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn timeout_call_passes_through_success() {
+        let fut = async { Ok::<u32, clickhouse::error::Error>(42) };
+        let value = timeout_call(TimeoutOp::Insert, Duration::from_secs(1), fut).await.unwrap();
+        assert_eq!(value, 42);
+    }
+
+    #[test]
+    fn timeout_op_failed_kind_per_bucket() {
+        assert_eq!(TimeoutOp::Probe.failed_kind(), ErrorKind::DestinationConnectionFailed);
+        assert_eq!(TimeoutOp::SchemaQuery.failed_kind(), ErrorKind::DestinationQueryFailed);
+        assert_eq!(TimeoutOp::Ddl.failed_kind(), ErrorKind::DestinationQueryFailed);
+        assert_eq!(TimeoutOp::Insert.failed_kind(), ErrorKind::DestinationAtomicBatchRetryable);
+    }
 }
