@@ -2,47 +2,18 @@ use std::sync::Arc;
 
 use etl::types::{Cell, ColumnSchema, TableRow, Type};
 use etl_destinations::snowflake::{
-    AuthManager, CdcMeta, CdcOperation, Config, Error, HttpExchanger, OffsetToken,
-    RestStreamClient, RowBatch, RowBatchBuilder, SqlClient, StreamClient,
-    test_utils::{load_test_config, load_test_private_key_path},
+    AuthManager, CdcMeta, CdcOperation, Config, HttpExchanger, OffsetToken, RestStreamClient,
+    RowBatch, RowBatchBuilder, SqlClient, StreamClient,
+    test_utils::{load_test_config, query_rows},
 };
-use futures::FutureExt;
+use tokio::time::Duration;
 
-/// Poll channel_status until the channel's offset_token is Some, up to
-/// `max_attempts` polls with `interval` between each. Returns the committed
-/// offset token or None if it never appeared.
-///
-/// Normally, Snowflake commits data it received in some 20-30s, up to 90s (in
-/// observed tests).
-async fn poll_committed_offset(
-    stream: &RestStreamClient<AuthManager<HttpExchanger>>,
-    config: &Config,
-    table: &str,
-    channel: &str,
-    interval: std::time::Duration,
-    max_attempts: usize,
-) -> Option<OffsetToken> {
-    for _ in 0..max_attempts {
-        tokio::time::sleep(interval).await;
-        let status = stream
-            .channel_status(&config.database, &config.schema, table, channel)
-            .await
-            .expect("channel_status failed");
-        if status.offset_token.is_some() {
-            return status.offset_token;
-        }
-    }
-    None
-}
+use super::common::{build_auth, poll_stream_offset, with_table_cleanup};
 
 fn build_clients(
     config: &Config,
 ) -> (RestStreamClient<AuthManager<HttpExchanger>>, SqlClient<AuthManager<HttpExchanger>>) {
-    let key_path = load_test_private_key_path();
-    let auth = Arc::new(
-        AuthManager::new(config, key_path.to_str().unwrap(), None)
-            .expect("AuthManager creation failed"),
-    );
+    let auth = build_auth();
     let stream = RestStreamClient::new(
         config.account_url.clone(),
         Arc::clone(&auth),
@@ -58,26 +29,6 @@ fn build_batch(cols: &[ColumnSchema], rows: &[TableRow], offset: &OffsetToken) -
         builder.push_row(cols, row, CdcMeta::new(CdcOperation::Insert, "0"), offset).unwrap();
     }
     builder.finish().unwrap().into_iter().next().unwrap()
-}
-
-/// Run `test_fn`, with clean up `tables` regardless of success or failure.
-async fn with_table_cleanup<F, Fut>(
-    sql: &SqlClient<AuthManager<HttpExchanger>>,
-    tables: &[&str],
-    test_fn: F,
-) where
-    F: FnOnce() -> Fut,
-    Fut: std::future::Future<Output = ()>,
-{
-    let result = std::panic::AssertUnwindSafe(test_fn()).catch_unwind().await;
-
-    for table in tables {
-        let _ = sql.drop_table(table).await;
-    }
-
-    if let Err(e) = result {
-        std::panic::resume_unwind(e);
-    }
 }
 
 #[tokio::test]
@@ -134,11 +85,12 @@ async fn channel_open_insert_status_drop() {
         );
 
         // Poll status until offset is committed.
-        let committed = poll_committed_offset(
+        let committed = poll_stream_offset(
             &stream,
             &config,
             &table,
             &channel,
+            &offset,
             std::time::Duration::from_secs(5),
             18,
         )
@@ -197,11 +149,12 @@ async fn channel_reopen_preserves_offset() {
             .expect("insert_rows failed");
 
         // Poll until offset is committed.
-        let committed = poll_committed_offset(
+        let committed = poll_stream_offset(
             &stream,
             &config,
             &table,
             &channel,
+            &offset,
             std::time::Duration::from_secs(5),
             18,
         )
@@ -238,16 +191,50 @@ async fn continuation_token() {
             .await
             .expect("create table failed");
 
+        let fqn = format!("\"{}\".\"{}\".\"{table}\"", config.database, config.schema);
+
+        async fn verify(
+            stream: &RestStreamClient<AuthManager<HttpExchanger>>,
+            sql: &SqlClient<AuthManager<HttpExchanger>>,
+            config: &Config,
+            table: &str,
+            channel: &str,
+            fqn: &str,
+            expected_offset: &OffsetToken,
+            expected_rows: usize,
+        ) {
+            let committed = poll_stream_offset(
+                stream,
+                config,
+                table,
+                channel,
+                expected_offset,
+                Duration::from_secs(5),
+                18,
+            )
+            .await;
+            assert_eq!(
+                committed,
+                Some(expected_offset.clone()),
+                "expected offset not committed within timeout"
+            );
+            let rows = query_rows(sql, &format!("SELECT * FROM {fqn} ORDER BY \"id\""))
+                .await
+                .expect("query_rows failed");
+            assert_eq!(rows.len(), expected_rows, "unexpected row count: {rows:?}");
+        }
+
         let resp = stream
             .open_channel(&config.database, &config.schema, &table, &channel)
             .await
             .expect("open_channel failed");
 
-        // Batch 1
         let cols = [
             ColumnSchema::new("id".into(), Type::INT4, -1, 1, None, true),
             ColumnSchema::new("name".into(), Type::TEXT, -1, 2, None, true),
         ];
+
+        // Batch 1
         let offset1: OffsetToken = "0000000000000001/0000000000000000".parse().unwrap();
         let batch1 = build_batch(
             &cols,
@@ -266,7 +253,9 @@ async fn continuation_token() {
             .await
             .expect("insert batch 1 failed");
 
-        // Batch 2, uses continuation_token from batch 1.
+        verify(&stream, &sql, &config, &table, &channel, &fqn, &offset1, 1).await;
+
+        // Batch 2: uses continuation_token from batch 1.
         let offset2: OffsetToken = "0000000000000001/0000000000000001".parse().unwrap();
         let batch2 = build_batch(
             &cols,
@@ -289,6 +278,8 @@ async fn continuation_token() {
             insert1.continuation_token, insert2.continuation_token,
             "continuation_token must advance after each batch"
         );
+        // 2 rows expected, offset2 must be committed.
+        verify(&stream, &sql, &config, &table, &channel, &fqn, &offset2, 2).await;
 
         // Batch 3: use STALE token from batch 1 (already consumed by batch 2).
         let offset3: OffsetToken = "0000000000000001/0000000000000002".parse().unwrap();
@@ -297,7 +288,7 @@ async fn continuation_token() {
             &[TableRow::new(vec![Cell::I32(3), Cell::String("Charlie".into())])],
             &offset3,
         );
-        let result = stream
+        let insert3 = stream
             .insert_rows(
                 &config.database,
                 &config.schema,
@@ -306,12 +297,35 @@ async fn continuation_token() {
                 &batch3,
                 &insert1.continuation_token,
             )
-            .await;
-        let err = result.expect_err("stale continuation_token should be rejected");
-        assert!(
-            matches!(err, Error::Snowpipe { status_code: 4, .. }),
-            "expected Snowpipe NotFound (code 4), got: {err}"
+            .await
+            .expect("insert with stale token should not error");
+
+        // Same continuation token returned.
+        assert_eq!(
+            insert3.continuation_token, insert2.continuation_token,
+            "stale token should not advance the sequencer"
         );
+        // Still 2 rows, offset token is not advanced to offset3.
+        verify(&stream, &sql, &config, &table, &channel, &fqn, &offset2, 2).await;
+
+        // Retry batch 3 with the CORRECT token, data commits, offset is updated.
+        let insert3_retry = stream
+            .insert_rows(
+                &config.database,
+                &config.schema,
+                &table,
+                &channel,
+                &batch3,
+                &insert2.continuation_token,
+            )
+            .await
+            .expect("insert batch 3 with correct token failed");
+
+        assert_ne!(
+            insert3_retry.continuation_token, insert2.continuation_token,
+            "correct token should advance the sequencer"
+        );
+        verify(&stream, &sql, &config, &table, &channel, &fqn, &offset3, 3).await;
 
         // Cleanup
         let _ = stream.drop_channel(&config.database, &config.schema, &table, &channel).await;
