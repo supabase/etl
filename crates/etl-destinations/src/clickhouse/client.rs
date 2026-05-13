@@ -28,12 +28,12 @@ fn secs_string(d: Duration) -> String {
 }
 
 /// Classifies a ClickHouse client call so error mapping is centralised: each
-/// op chooses how a server-returned failure and a client-side deadline map
-/// onto [`ErrorKind`].
+/// op chooses how a server-returned failure maps onto [`ErrorKind`].
+/// Client-side deadlines always map to [`ErrorKind::DestinationTimeout`].
 #[derive(Copy, Clone)]
 pub(crate) enum TimeoutOp {
-    /// Connectivity probe (`SELECT 1`).
-    Probe,
+    /// Connectivity check (`SELECT 1`).
+    ConnectivityCheck,
     /// Schema lookup against `system.columns`.
     SchemaQuery,
     /// DDL: CREATE / ALTER / DROP / RENAME / TRUNCATE.
@@ -47,22 +47,17 @@ impl TimeoutOp {
     /// `clickhouse::error::Error`.
     fn failed_kind(self) -> ErrorKind {
         match self {
-            TimeoutOp::Probe => ErrorKind::DestinationConnectionFailed,
+            TimeoutOp::ConnectivityCheck => ErrorKind::DestinationConnectionFailed,
             TimeoutOp::SchemaQuery | TimeoutOp::Ddl => ErrorKind::DestinationQueryFailed,
             TimeoutOp::Insert => ErrorKind::DestinationAtomicBatchRetryable,
         }
-    }
-
-    /// Error kind used when the client-side `tokio::time::timeout` fires.
-    fn timeout_kind(self) -> ErrorKind {
-        ErrorKind::DestinationTimeout
     }
 }
 
 impl fmt::Display for TimeoutOp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = match self {
-            TimeoutOp::Probe => "probe",
+            TimeoutOp::ConnectivityCheck => "connectivity check",
             TimeoutOp::SchemaQuery => "schema query",
             TimeoutOp::Ddl => "DDL",
             TimeoutOp::Insert => "insert",
@@ -87,7 +82,7 @@ where
             source: err
         )),
         Err(_) => Err(etl_error!(
-            op.timeout_kind(),
+            ErrorKind::DestinationTimeout,
             "ClickHouse call timed out",
             format!("ClickHouse {op} timed out after {budget:?}")
         )),
@@ -239,8 +234,12 @@ impl ClickHouseClient {
     /// `etl-api` validators) can treat the two destinations uniformly.
     pub async fn validate_connectivity(&self) -> EtlResult<()> {
         let budget = self.config.client_budget(self.config.connectivity_check_timeout);
-        timeout_call(TimeoutOp::Probe, budget, self.inner.query("SELECT 1").fetch_one::<u8>())
-            .await?;
+        timeout_call(
+            TimeoutOp::ConnectivityCheck,
+            budget,
+            self.inner.query("SELECT 1").fetch_one::<u8>(),
+        )
+        .await?;
         Ok(())
     }
 
@@ -477,7 +476,7 @@ mod tests {
 
     #[test]
     fn timeout_op_display_matches_error_messages() {
-        assert_eq!(TimeoutOp::Probe.to_string(), "probe");
+        assert_eq!(TimeoutOp::ConnectivityCheck.to_string(), "connectivity check");
         assert_eq!(TimeoutOp::SchemaQuery.to_string(), "schema query");
         assert_eq!(TimeoutOp::Ddl.to_string(), "DDL");
         assert_eq!(TimeoutOp::Insert.to_string(), "insert");
@@ -489,10 +488,13 @@ mod tests {
         // time when all tasks are stalled, so the timeout fires immediately
         // in real wall-clock terms.
         let never = std::future::pending::<Result<(), clickhouse::error::Error>>();
-        let err = timeout_call(TimeoutOp::Probe, Duration::from_secs(1), never).await.unwrap_err();
+        let err = timeout_call(TimeoutOp::ConnectivityCheck, Duration::from_secs(1), never)
+            .await
+            .unwrap_err();
         assert_eq!(err.kind(), ErrorKind::DestinationTimeout);
         assert!(
-            err.detail().is_some_and(|d| d.contains("probe") && d.contains("timed out")),
+            err.detail()
+                .is_some_and(|d| d.contains("connectivity check") && d.contains("timed out")),
             "unexpected detail: {:?}",
             err.detail()
         );
@@ -520,7 +522,10 @@ mod tests {
 
     #[test]
     fn timeout_op_failed_kind_per_bucket() {
-        assert_eq!(TimeoutOp::Probe.failed_kind(), ErrorKind::DestinationConnectionFailed);
+        assert_eq!(
+            TimeoutOp::ConnectivityCheck.failed_kind(),
+            ErrorKind::DestinationConnectionFailed
+        );
         assert_eq!(TimeoutOp::SchemaQuery.failed_kind(), ErrorKind::DestinationQueryFailed);
         assert_eq!(TimeoutOp::Ddl.failed_kind(), ErrorKind::DestinationQueryFailed);
         assert_eq!(TimeoutOp::Insert.failed_kind(), ErrorKind::DestinationAtomicBatchRetryable);
