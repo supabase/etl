@@ -8,6 +8,7 @@ use etl::{
 use url::Url;
 
 use crate::clickhouse::{
+    core::ClickHouseClientConfig,
     encoding::{ClickHouseValue, encode_to_row_binary},
     metrics::{ETL_CLICKHOUSE_DDL_DURATION_SECONDS, ETL_CLICKHOUSE_INSERT_DURATION_SECONDS},
     schema::{clickhouse_column_type, quote_identifier},
@@ -113,6 +114,7 @@ impl DdlKind {
 #[derive(Clone)]
 pub struct ClickHouseClient {
     inner: Arc<Client>,
+    config: ClickHouseClientConfig,
 }
 
 impl ClickHouseClient {
@@ -125,6 +127,7 @@ impl ClickHouseClient {
         user: impl Into<String>,
         password: Option<String>,
         database: impl Into<String>,
+        config: ClickHouseClientConfig,
     ) -> Self {
         let mut client =
             Client::default().with_url(url.to_string()).with_user(user).with_database(database);
@@ -133,7 +136,7 @@ impl ClickHouseClient {
             client = client.with_password(pw);
         }
 
-        Self { inner: Arc::new(client) }
+        Self { inner: Arc::new(client), config }
     }
 
     /// Verifies that the ClickHouse server is reachable.
