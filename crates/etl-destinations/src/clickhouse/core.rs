@@ -203,7 +203,7 @@ impl ClickHouseClientConfig {
     /// Default slack between server-side and client-side budgets.
     pub const DEFAULT_CLIENT_TIMEOUT_EPSILON: Duration = Duration::from_secs(4);
 
-    /// Server-side budget for `op`: the corresponding field of this config.
+    /// Server-side budget for `op`.
     pub(crate) fn server_budget(&self, op: ClickHouseOperationKind) -> Duration {
         match op {
             ClickHouseOperationKind::ConnectivityCheck => self.connectivity_check_timeout,
@@ -235,14 +235,8 @@ impl Default for ClickHouseClientConfig {
 /// Categories of ClickHouse client calls.
 ///
 /// Enables the following:
-/// - selecting the server-side budget from [`ClickHouseClientConfig`],
-/// - mapping an inner `clickhouse::error::Error` onto the appropriate
-///   [`ErrorKind`] (`DestinationConnectionFailed` / `DestinationQueryFailed` /
-///   `DestinationAtomicBatchRetryable`),
-/// - producing the op name interpolated into error messages via `Display`.
-///
-/// Client-side deadlines always surface as
-/// [`ErrorKind::DestinationTimeout`], independent of the op.
+/// - selecting the corresponding server-side budget,
+/// - mapping a generic clickhouse error onto the appropriate [`ErrorKind`].
 #[derive(Copy, Clone)]
 pub(crate) enum ClickHouseOperationKind {
     /// Connectivity check (`SELECT 1`).

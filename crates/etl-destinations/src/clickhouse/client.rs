@@ -27,8 +27,8 @@ fn secs_string(d: Duration) -> String {
 }
 
 /// Runs `fut` under `tokio::time::timeout` using the client budget for `op`
-/// from `config`, and maps the three outcomes onto typed [`EtlResult`]s
-/// using `op` for kind selection and the human-readable description.
+/// from `config`. Inner ClickHouse errors map onto `op.failed_kind()`;
+/// client-side deadlines map onto [`ErrorKind::DestinationTimeout`].
 async fn timeout_call<T, F>(
     op: ClickHouseOperationKind,
     config: &ClickHouseClientConfig,
