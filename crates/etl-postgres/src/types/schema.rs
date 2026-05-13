@@ -882,6 +882,32 @@ impl ReplicatedTableSchema {
         SizedIterator::new(inner, self.primary_key_column_count)
     }
 
+    /// Returns whether every source primary-key column is replicated.
+    ///
+    /// Destinations that match rows by the source primary key need this check
+    /// in addition to runtime identity checks, because replicated primary-key
+    /// iterators intentionally expose only the replicated subset.
+    pub fn all_primary_key_columns_replicated(&self) -> bool {
+        self.unreplicated_primary_key_column_schemas().next().is_none()
+    }
+
+    /// Returns source primary-key columns omitted from replication.
+    pub fn unreplicated_primary_key_column_schemas(
+        &self,
+    ) -> impl Iterator<Item = &ColumnSchema> + Clone + '_ {
+        self.table_schema
+            .column_schemas
+            .iter()
+            .zip(self.replication_mask.as_slice().iter())
+            .filter_map(|(column_schema, &replicated)| {
+                if column_schema.primary_key() && replicated == 0 {
+                    Some(column_schema)
+                } else {
+                    None
+                }
+            })
+    }
+
     /// Computes the diff between this schema (old) and another schema (new).
     ///
     /// Only consider replicated columns. Uses ordinal positions to track
@@ -1202,6 +1228,41 @@ mod tests {
 
         assert_eq!(replicated_table_schema.identity_type(), IdentityType::Missing);
         assert!(!replicated_table_schema.identity_matches_primary_key());
+    }
+
+    #[test]
+    fn all_primary_key_columns_replicated_returns_true_for_complete_primary_key() {
+        let schema = Arc::new(create_test_table_schema());
+        let replication_mask = ReplicationMask::all(&schema);
+        let replicated_table_schema = ReplicatedTableSchema::from_mask(schema, replication_mask);
+
+        assert!(replicated_table_schema.all_primary_key_columns_replicated());
+        assert_eq!(replicated_table_schema.unreplicated_primary_key_column_schemas().count(), 0);
+    }
+
+    #[test]
+    fn all_primary_key_columns_replicated_returns_false_for_partial_primary_key() {
+        let schema = Arc::new(TableSchema::new(
+            TableId::new(123),
+            TableName::new("public".to_owned(), "test_table".to_owned()),
+            vec![
+                ColumnSchema::new("tenant_id".to_owned(), Type::INT4, -1, 1, Some(1), false),
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 2, Some(2), false),
+                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 3, None, true),
+            ],
+        ));
+        let replication_mask = ReplicationMask::from_bytes(vec![0, 1, 1]);
+        let identity_mask = IdentityMask::from_bytes(vec![0, 1, 0]);
+        let replicated_table_schema =
+            ReplicatedTableSchema::from_masks(schema, replication_mask, identity_mask);
+
+        let omitted_columns = replicated_table_schema
+            .unreplicated_primary_key_column_schemas()
+            .map(|column_schema| column_schema.name.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(!replicated_table_schema.all_primary_key_columns_replicated());
+        assert_eq!(omitted_columns, ["tenant_id"]);
     }
 
     #[test]
