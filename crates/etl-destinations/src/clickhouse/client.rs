@@ -185,12 +185,6 @@ impl ClickHouseClient {
             client = client.with_password(pw);
         }
 
-        // Server-side transport timeouts. These bound the time the server is
-        // willing to spend on the connection itself. `max_execution_time` and
-        // `lock_acquire_timeout` are intentionally not set here: they are
-        // DDL-specific and would otherwise leak into the connectivity check
-        // and schema query, which expect much tighter budgets. DDL and
-        // TRUNCATE apply them via per-call `.with_option(...)` overrides.
         client = client
             .with_option("connect_timeout", &secs_string(config.connectivity_check_timeout))
             .with_option("http_connection_timeout", &secs_string(config.connectivity_check_timeout))
