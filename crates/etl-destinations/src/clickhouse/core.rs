@@ -234,9 +234,9 @@ impl Default for ClickHouseClientConfig {
 
 /// Categories of ClickHouse client calls.
 ///
-/// Enables the following:
-/// - selecting the corresponding server-side budget,
-/// - mapping a generic clickhouse error onto the appropriate [`ErrorKind`].
+/// Used to:
+/// - select the corresponding server-side budget,
+/// - map a generic clickhouse error onto the appropriate [`ErrorKind`].
 #[derive(Copy, Clone)]
 pub(crate) enum ClickHouseOperationKind {
     /// Connectivity check (`SELECT 1`).
