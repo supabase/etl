@@ -319,14 +319,15 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
         database: &str,
         schema: &str,
         table: &str,
-        channels: &[String],
-    ) -> Result<Vec<ChannelStatusResponse>> {
+        channel: &str,
+    ) -> Result<ChannelStatusResponse> {
         let host = self.get_or_discover_host().await?;
         let url = channel_status_url(host, database, schema, table);
 
         let auth = Arc::clone(&self.auth);
         let http = self.http.clone();
-        let request_body = BulkStatusRequest { channel_names: channels };
+        let channel_names = vec![channel.to_string()];
+        let request_body = BulkStatusRequest { channel_names: &channel_names };
 
         retry_with_backoff(
             SNOWPIPE_RETRY_POLICY,
@@ -369,9 +370,10 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
                             Error::Encoding(format!("failed to parse channel_status response: {e}"))
                         })?;
 
-                    Ok(response
+                    response
                         .channel_statuses
                         .into_iter()
+                        .next()
                         .map(|(name, ch)| {
                             Ok(ChannelStatusResponse {
                                 channel: name,
@@ -382,7 +384,9 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
                                     .transpose()?,
                             })
                         })
-                        .collect::<Result<Vec<_>>>()?)
+                        .unwrap_or_else(|| {
+                            Err(Error::Channel("channel not found in status response".into()))
+                        })
                 }
             },
         )
