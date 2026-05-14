@@ -534,6 +534,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn timeout_call_inner_error_includes_context() {
+        use std::error::Error as _;
         let config = ClickHouseClientConfig::default();
         let fut = async { Err::<(), _>(clickhouse::error::Error::NotEnoughData) };
         let err = timeout_call(ClickHouseOperationKind::Insert, &config, Some("table: users"), fut)
@@ -545,6 +546,7 @@ mod tests {
             "unexpected detail: {:?}",
             err.detail()
         );
+        assert!(err.source().is_some(), "expected inner clickhouse error to be attached");
     }
 
     #[test]
