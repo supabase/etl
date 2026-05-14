@@ -8,12 +8,6 @@ rust-version.workspace = true
 repository.workspace = true
 homepage.workspace = true
 
-[features]
-default = []
-bigquery = ["etl-destinations/bigquery"]
-clickhouse = ["etl-destinations/clickhouse"]
-ducklake = ["etl-destinations/ducklake"]
-
 [[bin]]
 name = "bigquery"
 path = "src/bin/bigquery.rs"
@@ -28,6 +22,12 @@ required-features = ["clickhouse"]
 name = "ducklake"
 path = "src/bin/ducklake.rs"
 required-features = ["ducklake"]
+
+[features]
+default = []
+bigquery = ["etl-destinations/bigquery"]
+clickhouse = ["etl-destinations/clickhouse"]
+ducklake = ["etl-destinations/ducklake"]
 
 [dependencies]
 
