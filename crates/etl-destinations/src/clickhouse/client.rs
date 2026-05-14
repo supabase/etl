@@ -220,9 +220,6 @@ impl ClickHouseClient {
     pub(crate) async fn execute_ddl(&self, kind: DdlKind, sql: &str) -> EtlResult<()> {
         let ddl_start = Instant::now();
         let ddl_secs = floor_secs(self.config.ddl_timeout);
-        // `max_execution_time` and `lock_acquire_timeout` are applied per-call
-        // so the connectivity check and schema query do not inherit the (much
-        // larger) DDL budget.
         let query = self
             .inner
             .query(sql)
