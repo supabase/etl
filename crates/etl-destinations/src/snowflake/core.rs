@@ -30,9 +30,6 @@ use crate::{
     table_name::try_stringify_table_name,
 };
 
-/// Configured destination using HTTP-based token exchange.
-pub type DefaultSnowflakeDestination<S> = SnowflakeDestination<S, AuthManager<HttpExchanger>>;
-
 type EventIter = std::iter::Peekable<std::vec::IntoIter<Event>>;
 
 /// Postgres replication to Snowflake via Snowpipe Streaming.
@@ -40,7 +37,11 @@ type EventIter = std::iter::Peekable<std::vec::IntoIter<Event>>;
 /// Thin adapter between the ETL [`Destination`] trait and [`SnowflakeClient`].
 /// Translates replication events into client operations and manages the state
 /// store bookkeeping.
-pub struct SnowflakeDestination<S, T: TokenProvider, C: StreamClient = RestStreamClient<T>> {
+pub struct SnowflakeDestination<
+    S,
+    T: TokenProvider = AuthManager<HttpExchanger>,
+    C: StreamClient = RestStreamClient<T>,
+> {
     client: SnowflakeClient<T, C>,
     store: S,
     tasks: TaskSet,
@@ -98,7 +99,7 @@ where
     ///
     /// All rows are stamped as inserts with a zero offset since the table
     /// starts empty.
-    pub async fn write_table_rows_inner(
+    pub async fn write_table_rows(
         &self,
         schema: &ReplicatedTableSchema,
         rows: Vec<TableRow>,
@@ -457,7 +458,7 @@ where
         table_rows: Vec<TableRow>,
         async_result: WriteTableRowsResult<()>,
     ) -> EtlResult<()> {
-        let result = self.write_table_rows_inner(replicated_table_schema, table_rows).await;
+        let result = self.write_table_rows(replicated_table_schema, table_rows).await;
         async_result.send(result);
         Ok(())
     }
