@@ -21,9 +21,8 @@ use crate::clickhouse::{
 /// Formats a `Duration` as a whole-seconds string for ClickHouse
 /// `.with_option(...)` settings, floored at `"1"`. ClickHouse interprets `"0"`
 /// as "no timeout" for `http_*_timeout`, `max_execution_time`, and
-/// `lock_acquire_timeout`; flooring at 1 second avoids accidentally disabling a
-/// server-side bound when an operator passes `Duration::ZERO` or any sub-second
-/// value.
+/// `lock_acquire_timeout`; the floor prevents `Duration::ZERO` or any
+/// sub-second value from accidentally disabling the bound.
 fn floor_secs(d: Duration) -> String {
     d.as_secs().max(1).to_string()
 }
