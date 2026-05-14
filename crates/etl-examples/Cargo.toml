@@ -8,19 +8,32 @@ rust-version.workspace = true
 repository.workspace = true
 homepage.workspace = true
 
+[features]
+default = []
+bigquery = ["etl-destinations/bigquery"]
+clickhouse = ["etl-destinations/clickhouse"]
+ducklake = ["etl-destinations/ducklake"]
+
 [[bin]]
 name = "bigquery"
 path = "src/bin/bigquery.rs"
+required-features = ["bigquery"]
+
+[[bin]]
+name = "clickhouse"
+path = "src/bin/clickhouse.rs"
+required-features = ["clickhouse"]
 
 [[bin]]
 name = "ducklake"
 path = "src/bin/ducklake.rs"
+required-features = ["ducklake"]
 
 [dependencies]
 
 clap = { workspace = true, default-features = true, features = ["std", "derive"] }
 etl = { workspace = true }
-etl-destinations = { workspace = true, features = ["bigquery", "clickhouse", "ducklake"] }
+etl-destinations = { workspace = true }
 etl-telemetry = { workspace = true }
 k8s-openapi = { workspace = true, features = ["latest"] }
 rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
