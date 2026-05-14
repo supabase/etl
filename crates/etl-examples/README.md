@@ -13,10 +13,7 @@ Postgres to various destinations using the ETL pipeline.
 
 ## Building and running
 
-Each binary is feature-gated so you only compile the dependencies you need.
-Some destinations (e.g. `ducklake`) pull in heavy native dependencies that can
-take several minutes to compile — there's no reason to pay that cost when you
-only want to try BigQuery.
+Each binary is feature-gated so you only compile the dependencies you need. Some destinations (e.g. `ducklake`) pull in heavy native dependencies that can take several minutes to compile, and there's no reason to pay that cost when you only want to try BigQuery.
 
 ### Single example
 
