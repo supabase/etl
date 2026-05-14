@@ -9,6 +9,7 @@ use std::{
 use pg_escape::quote_identifier;
 use thiserror::Error;
 use tokio_postgres::types::{FromSql, PgLsn, ToSql, Type};
+use tracing::warn;
 
 /// Errors that can occur during schema operations.
 #[derive(Debug, Error)]
@@ -654,8 +655,8 @@ pub struct ReplicatedTableSchema {
     replication_mask: ReplicationMask,
     /// Cached number of replicated columns.
     replicated_column_count: usize,
-    /// A bitmask where 1 indicates the column at that index is part of the row
-    /// identity used by logical replication.
+    /// A bitmask where 1 indicates the column at that index is a replicated
+    /// row identity column used by logical replication.
     identity_mask: IdentityMask,
     /// Cached number of replicated identity columns.
     identity_column_count: usize,
@@ -670,8 +671,15 @@ impl ReplicatedTableSchema {
     /// masks, inferring the identity type from the mask shape.
     ///
     /// Both masks are expressed in full table-schema width. The identity mask
-    /// must therefore align with the same column order as the replication
-    /// mask.
+    /// must be a subset of the replication mask because row-event decoding can
+    /// only consume key columns that PostgreSQL includes in the relation
+    /// payload.
+    ///
+    /// ETL stores runtime identity, not raw source catalog identity. Initial
+    /// copy follows streaming relation-message semantics by marking only
+    /// replicated columns as identity columns. Update/delete replication relies
+    /// on PostgreSQL validating that the source identity is covered;
+    /// insert-only publications do not need identity data.
     ///
     /// This constructor infers the semantic identity type from the table
     /// schema and supplied masks, and caches the derived column counts needed
@@ -696,13 +704,20 @@ impl ReplicatedTableSchema {
             "identity mask length must match column count"
         );
 
-        for (&replicated, &identity) in
-            replication_mask.as_slice().iter().zip(identity_mask.as_slice().iter())
+        for ((column_schema, &replicated), &identity) in table_schema
+            .column_schemas
+            .iter()
+            .zip(replication_mask.as_slice().iter())
+            .zip(identity_mask.as_slice().iter())
         {
-            debug_assert!(
-                identity == 0 || replicated == 1,
-                "identity mask must be a subset of the replication mask"
-            );
+            if identity == 1 && replicated == 0 {
+                warn!(
+                    table_id = %table_schema.id,
+                    table_name = %table_schema.name,
+                    column_name = %column_schema.name,
+                    "replica identity column is not replicated"
+                );
+            }
         }
 
         // We pre-compute counts to avoid computing them each time since they are needed
@@ -735,16 +750,16 @@ impl ReplicatedTableSchema {
     /// Creates a [`ReplicatedTableSchema`] from a schema and a pre-computed
     /// replication mask.
     ///
-    /// The identity mask is derived from primary-key membership. This is a
-    /// convenient fallback for code paths that only need replicated columns or
-    /// when the source schema and identity are known to match primary-key
-    /// semantics.
+    /// The identity mask is derived from replicated primary-key membership.
+    /// This is a convenient fallback for code paths that only need replicated
+    /// columns or when the source schema and identity are known to match
+    /// primary-key semantics.
     pub fn from_mask(table_schema: Arc<TableSchema>, replication_mask: ReplicationMask) -> Self {
         let identity_mask = Self::primary_key_identity_mask(&table_schema, &replication_mask);
         Self::from_masks(table_schema, replication_mask, identity_mask)
     }
 
-    /// Creates a [`ReplicatedTableSchema`] where all columns are replicated. .
+    /// Creates a [`ReplicatedTableSchema`] where all columns are replicated.
     pub fn all(table_schema: Arc<TableSchema>) -> Self {
         let replication_mask = ReplicationMask::all(&table_schema);
         Self::from_mask(table_schema, replication_mask)
@@ -787,7 +802,7 @@ impl ReplicatedTableSchema {
     /// here if the chosen index resolves to the same current columns as the
     /// primary key.
     ///
-    /// This comparison is structural over the runtime schema masks, not a
+    /// This comparison is structural over the runtime schema identity, not a
     /// direct comparison of PostgreSQL identity modes or index OIDs. Because
     /// ETL tracks DDL/schema changes, that gives the intended notion of
     /// primary-key equivalence across schema evolution.
@@ -829,6 +844,9 @@ impl ReplicatedTableSchema {
     pub fn identity_column_schemas(
         &self,
     ) -> impl ExactSizeIterator<Item = &ColumnSchema> + Clone + '_ {
+        // Key tuples from PostgreSQL should only use columns present in the
+        // relation payload. Check both masks here so tuple decoding only sees
+        // columns that are both identity columns and actually replicated.
         let inner = self
             .table_schema
             .column_schemas
@@ -862,6 +880,32 @@ impl ReplicatedTableSchema {
             });
 
         SizedIterator::new(inner, self.primary_key_column_count)
+    }
+
+    /// Returns whether every source primary-key column is replicated.
+    ///
+    /// Destinations that match rows by the source primary key need this check
+    /// in addition to runtime identity checks, because replicated primary-key
+    /// iterators intentionally expose only the replicated subset.
+    pub fn all_primary_key_columns_replicated(&self) -> bool {
+        self.unreplicated_primary_key_column_schemas().next().is_none()
+    }
+
+    /// Returns source primary-key columns omitted from replication.
+    pub fn unreplicated_primary_key_column_schemas(
+        &self,
+    ) -> impl Iterator<Item = &ColumnSchema> + Clone + '_ {
+        self.table_schema
+            .column_schemas
+            .iter()
+            .zip(self.replication_mask.as_slice().iter())
+            .filter_map(|(column_schema, &replicated)| {
+                if column_schema.primary_key() && replicated == 0 {
+                    Some(column_schema)
+                } else {
+                    None
+                }
+            })
     }
 
     /// Computes the diff between this schema (old) and another schema (new).
@@ -1184,6 +1228,41 @@ mod tests {
 
         assert_eq!(replicated_table_schema.identity_type(), IdentityType::Missing);
         assert!(!replicated_table_schema.identity_matches_primary_key());
+    }
+
+    #[test]
+    fn all_primary_key_columns_replicated_returns_true_for_complete_primary_key() {
+        let schema = Arc::new(create_test_table_schema());
+        let replication_mask = ReplicationMask::all(&schema);
+        let replicated_table_schema = ReplicatedTableSchema::from_mask(schema, replication_mask);
+
+        assert!(replicated_table_schema.all_primary_key_columns_replicated());
+        assert_eq!(replicated_table_schema.unreplicated_primary_key_column_schemas().count(), 0);
+    }
+
+    #[test]
+    fn all_primary_key_columns_replicated_returns_false_for_partial_primary_key() {
+        let schema = Arc::new(TableSchema::new(
+            TableId::new(123),
+            TableName::new("public".to_owned(), "test_table".to_owned()),
+            vec![
+                ColumnSchema::new("tenant_id".to_owned(), Type::INT4, -1, 1, Some(1), false),
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 2, Some(2), false),
+                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 3, None, true),
+            ],
+        ));
+        let replication_mask = ReplicationMask::from_bytes(vec![0, 1, 1]);
+        let identity_mask = IdentityMask::from_bytes(vec![0, 1, 0]);
+        let replicated_table_schema =
+            ReplicatedTableSchema::from_masks(schema, replication_mask, identity_mask);
+
+        let omitted_columns = replicated_table_schema
+            .unreplicated_primary_key_column_schemas()
+            .map(|column_schema| column_schema.name.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(!replicated_table_schema.all_primary_key_columns_replicated());
+        assert_eq!(omitted_columns, ["tenant_id"]);
     }
 
     #[test]

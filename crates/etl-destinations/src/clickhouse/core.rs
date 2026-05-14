@@ -874,6 +874,23 @@ where
 fn validate_replica_identity_for_clickhouse(
     replicated_table_schema: &ReplicatedTableSchema,
 ) -> EtlResult<()> {
+    if !replicated_table_schema.all_primary_key_columns_replicated() {
+        let omitted_columns = replicated_table_schema
+            .unreplicated_primary_key_column_schemas()
+            .map(|column_schema| column_schema.name.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        return Err(etl_error!(
+            ErrorKind::SourceSchemaError,
+            "ClickHouse requires all source primary-key columns to be replicated",
+            format!(
+                "Table '{}' omits source primary-key columns from replication: {}",
+                replicated_table_schema.name(),
+                omitted_columns
+            )
+        ));
+    }
+
     match replicated_table_schema.identity_type() {
         IdentityType::PrimaryKey | IdentityType::Full => Ok(()),
         identity_type => Err(etl_error!(
@@ -1059,6 +1076,22 @@ mod tests {
         ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask)
     }
 
+    fn replicated_schema_with_partial_primary_key() -> ReplicatedTableSchema {
+        let table_schema = Arc::new(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_owned(), "users".to_owned()),
+            vec![
+                ColumnSchema::new("tenant_id".to_owned(), Type::INT4, -1, 1, Some(1), false),
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 2, Some(2), false),
+                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 3, None, true),
+            ],
+        ));
+        let replication_mask = ReplicationMask::from_bytes(vec![0, 1, 1]);
+        let identity_mask = IdentityMask::from_bytes(vec![0, 1, 0]);
+
+        ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask)
+    }
+
     #[test]
     fn validate_replica_identity_for_clickhouse_accepts_primary_key() {
         validate_replica_identity_for_clickhouse(&replicated_schema(IdentityType::PrimaryKey))
@@ -1085,6 +1118,15 @@ mod tests {
             validate_replica_identity_for_clickhouse(&replicated_schema(IdentityType::Missing))
                 .unwrap_err();
         assert_eq!(err.kind(), ErrorKind::SourceSchemaError);
+    }
+
+    #[test]
+    fn validate_replica_identity_for_clickhouse_rejects_partial_primary_key() {
+        let err =
+            validate_replica_identity_for_clickhouse(&replicated_schema_with_partial_primary_key())
+                .unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::SourceSchemaError);
+        assert!(err.to_string().contains("tenant_id"));
     }
 
     #[test]
