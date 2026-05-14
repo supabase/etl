@@ -24,7 +24,7 @@ use crate::clickhouse::{
 /// `lock_acquire_timeout`; flooring at 1 second avoids accidentally disabling a
 /// server-side bound when an operator passes `Duration::ZERO` or any sub-second
 /// value.
-fn secs_string(d: Duration) -> String {
+fn floor_secs(d: Duration) -> String {
     d.as_secs().max(1).to_string()
 }
 
@@ -48,6 +48,7 @@ where
             None => format!("{op} {what}"),
         }
     }
+
     let budget = config.client_budget(op);
     match tokio::time::timeout(budget, fut).await {
         Ok(Ok(value)) => Ok(value),
@@ -188,10 +189,10 @@ impl ClickHouseClient {
         }
 
         client = client
-            .with_option("connect_timeout", secs_string(config.connectivity_check_timeout))
-            .with_option("http_connection_timeout", secs_string(config.connectivity_check_timeout))
-            .with_option("http_send_timeout", secs_string(config.insert_timeout))
-            .with_option("http_receive_timeout", secs_string(config.insert_timeout));
+            .with_option("connect_timeout", floor_secs(config.connectivity_check_timeout))
+            .with_option("http_connection_timeout", floor_secs(config.connectivity_check_timeout))
+            .with_option("http_send_timeout", floor_secs(config.insert_timeout))
+            .with_option("http_receive_timeout", floor_secs(config.insert_timeout));
 
         Self { inner: Arc::new(client), config }
     }
@@ -218,7 +219,7 @@ impl ClickHouseClient {
     /// histogram labelled with the DDL `kind` and `table_name`.
     pub(crate) async fn execute_ddl(&self, kind: DdlKind, sql: &str) -> EtlResult<()> {
         let ddl_start = Instant::now();
-        let ddl_secs = secs_string(self.config.ddl_timeout);
+        let ddl_secs = floor_secs(self.config.ddl_timeout);
         // `max_execution_time` and `lock_acquire_timeout` are applied per-call
         // so the connectivity check and schema query do not inherit the (much
         // larger) DDL budget.
@@ -242,7 +243,7 @@ impl ClickHouseClient {
         &self,
         table_name: &str,
     ) -> EtlResult<Vec<ClickHouseTableColumn>> {
-        let schema_secs = secs_string(self.config.schema_query_timeout);
+        let schema_secs = floor_secs(self.config.schema_query_timeout);
         let query = self
             .inner
             .query(
@@ -303,7 +304,7 @@ impl ClickHouseClient {
 
     /// Executes `TRUNCATE TABLE IF EXISTS` for the supplied table.
     pub(crate) async fn truncate_table(&self, table_name: &str) -> EtlResult<()> {
-        let ddl_secs = secs_string(self.config.ddl_timeout);
+        let ddl_secs = floor_secs(self.config.ddl_timeout);
         let query = self
             .inner
             .query(&build_truncate_table_sql(table_name))
@@ -590,19 +591,19 @@ mod tests {
     }
 
     #[test]
-    fn secs_string_floors_at_one_second() {
+    fn floor_secs_floors_at_one_second() {
         // Whole seconds at or above 1 pass through unchanged.
-        assert_eq!(secs_string(Duration::from_secs(1)), "1");
-        assert_eq!(secs_string(Duration::from_secs(5)), "5");
-        assert_eq!(secs_string(Duration::from_secs(60)), "60");
+        assert_eq!(floor_secs(Duration::from_secs(1)), "1");
+        assert_eq!(floor_secs(Duration::from_secs(5)), "5");
+        assert_eq!(floor_secs(Duration::from_secs(60)), "60");
         // ZERO is floored to 1 to avoid disabling the server-side timeout.
-        assert_eq!(secs_string(Duration::ZERO), "1");
+        assert_eq!(floor_secs(Duration::ZERO), "1");
         // Sub-second values are floored to 1 (would otherwise truncate to 0).
-        assert_eq!(secs_string(Duration::from_nanos(1)), "1");
-        assert_eq!(secs_string(Duration::from_millis(500)), "1");
-        assert_eq!(secs_string(Duration::from_millis(999)), "1");
+        assert_eq!(floor_secs(Duration::from_nanos(1)), "1");
+        assert_eq!(floor_secs(Duration::from_millis(500)), "1");
+        assert_eq!(floor_secs(Duration::from_millis(999)), "1");
         // Fractional seconds beyond 1s truncate to whole seconds (Duration::as_secs).
-        assert_eq!(secs_string(Duration::from_millis(1500)), "1");
-        assert_eq!(secs_string(Duration::from_millis(2999)), "2");
+        assert_eq!(floor_secs(Duration::from_millis(1500)), "1");
+        assert_eq!(floor_secs(Duration::from_millis(2999)), "2");
     }
 }
