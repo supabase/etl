@@ -532,6 +532,21 @@ mod tests {
         assert_eq!(value, 42);
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn timeout_call_inner_error_includes_context() {
+        let config = ClickHouseClientConfig::default();
+        let fut = async { Err::<(), _>(clickhouse::error::Error::NotEnoughData) };
+        let err = timeout_call(ClickHouseOperationKind::Insert, &config, Some("table: users"), fut)
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::DestinationAtomicBatchRetryable);
+        assert!(
+            err.detail().is_some_and(|d| d.contains("insert failed") && d.contains("table: users")),
+            "unexpected detail: {:?}",
+            err.detail()
+        );
+    }
+
     #[test]
     fn server_budget_per_operation_kind() {
         let config = ClickHouseClientConfig::default();
