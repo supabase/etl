@@ -188,10 +188,10 @@ impl ClickHouseClient {
         }
 
         client = client
-            .with_option("connect_timeout", &secs_string(config.connectivity_check_timeout))
-            .with_option("http_connection_timeout", &secs_string(config.connectivity_check_timeout))
-            .with_option("http_send_timeout", &secs_string(config.insert_timeout))
-            .with_option("http_receive_timeout", &secs_string(config.insert_timeout));
+            .with_option("connect_timeout", secs_string(config.connectivity_check_timeout))
+            .with_option("http_connection_timeout", secs_string(config.connectivity_check_timeout))
+            .with_option("http_send_timeout", secs_string(config.insert_timeout))
+            .with_option("http_receive_timeout", secs_string(config.insert_timeout));
 
         Self { inner: Arc::new(client), config }
     }
@@ -453,15 +453,21 @@ mod tests {
 
     #[test]
     fn client_budget_adds_epsilon_to_server_budget() {
-        let mut config = ClickHouseClientConfig::default();
-        config.connectivity_check_timeout = Duration::from_secs(10);
-        config.client_timeout_epsilon = Duration::from_secs(3);
+        let config = ClickHouseClientConfig {
+            connectivity_check_timeout: Duration::from_secs(10),
+            client_timeout_epsilon: Duration::from_secs(3),
+            ..Default::default()
+        };
         assert_eq!(
             config.client_budget(ClickHouseOperationKind::ConnectivityCheck),
             Duration::from_secs(13)
         );
 
-        config.connectivity_check_timeout = Duration::ZERO;
+        let config = ClickHouseClientConfig {
+            connectivity_check_timeout: Duration::ZERO,
+            client_timeout_epsilon: Duration::from_secs(3),
+            ..Default::default()
+        };
         assert_eq!(
             config.client_budget(ClickHouseOperationKind::ConnectivityCheck),
             Duration::from_secs(3)
