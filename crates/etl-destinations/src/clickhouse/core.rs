@@ -179,13 +179,13 @@ pub struct ClickHouseClientConfig {
     /// Server-side budget for the connectivity check (`SELECT 1`).
     pub connectivity_check_timeout: Duration,
     /// Server-side budget for schema lookups (`system.columns`).
-    pub schema_query_server_timeout: Duration,
+    pub schema_query_timeout: Duration,
     /// Server-side budget for DDL (CREATE / ALTER / DROP / RENAME / TRUNCATE).
-    pub ddl_server_timeout: Duration,
+    pub ddl_timeout: Duration,
     /// Server-side budget per INSERT statement. Wraps `insert.end().await`,
     /// which is the only awaited network step inside `insert_rows`; each
     /// flushed chunk therefore gets its own deadline.
-    pub insert_server_timeout: Duration,
+    pub insert_timeout: Duration,
     /// Slack added to the server-side budget to derive the client-side
     /// `tokio::time::timeout`.
     pub client_timeout_epsilon: Duration,
@@ -195,11 +195,11 @@ impl ClickHouseClientConfig {
     /// Default server-side budget for the connectivity check.
     pub const DEFAULT_CONNECTIVITY_CHECK_TIMEOUT: Duration = Duration::from_secs(8);
     /// Default server-side budget for schema lookups.
-    pub const DEFAULT_SCHEMA_QUERY_SERVER_TIMEOUT: Duration = Duration::from_secs(16);
+    pub const DEFAULT_SCHEMA_QUERY_TIMEOUT: Duration = Duration::from_secs(16);
     /// Default server-side budget for DDL.
-    pub const DEFAULT_DDL_SERVER_TIMEOUT: Duration = Duration::from_secs(128);
+    pub const DEFAULT_DDL_TIMEOUT: Duration = Duration::from_secs(128);
     /// Default server-side budget per INSERT statement.
-    pub const DEFAULT_INSERT_SERVER_TIMEOUT: Duration = Duration::from_secs(256);
+    pub const DEFAULT_INSERT_TIMEOUT: Duration = Duration::from_secs(256);
     /// Default slack between server-side and client-side budgets.
     pub const DEFAULT_CLIENT_TIMEOUT_EPSILON: Duration = Duration::from_secs(4);
 
@@ -207,9 +207,9 @@ impl ClickHouseClientConfig {
     pub(crate) fn server_budget(&self, op: ClickHouseOperationKind) -> Duration {
         match op {
             ClickHouseOperationKind::ConnectivityCheck => self.connectivity_check_timeout,
-            ClickHouseOperationKind::SchemaQuery => self.schema_query_server_timeout,
-            ClickHouseOperationKind::Ddl => self.ddl_server_timeout,
-            ClickHouseOperationKind::Insert => self.insert_server_timeout,
+            ClickHouseOperationKind::SchemaQuery => self.schema_query_timeout,
+            ClickHouseOperationKind::Ddl => self.ddl_timeout,
+            ClickHouseOperationKind::Insert => self.insert_timeout,
         }
     }
 
@@ -224,9 +224,9 @@ impl Default for ClickHouseClientConfig {
     fn default() -> Self {
         Self {
             connectivity_check_timeout: Self::DEFAULT_CONNECTIVITY_CHECK_TIMEOUT,
-            schema_query_server_timeout: Self::DEFAULT_SCHEMA_QUERY_SERVER_TIMEOUT,
-            ddl_server_timeout: Self::DEFAULT_DDL_SERVER_TIMEOUT,
-            insert_server_timeout: Self::DEFAULT_INSERT_SERVER_TIMEOUT,
+            schema_query_timeout: Self::DEFAULT_SCHEMA_QUERY_TIMEOUT,
+            ddl_timeout: Self::DEFAULT_DDL_TIMEOUT,
+            insert_timeout: Self::DEFAULT_INSERT_TIMEOUT,
             client_timeout_epsilon: Self::DEFAULT_CLIENT_TIMEOUT_EPSILON,
         }
     }

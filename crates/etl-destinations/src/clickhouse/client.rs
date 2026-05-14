@@ -42,8 +42,8 @@ where
 {
     fn detail(op: ClickHouseOperationKind, what: &str, context: Option<&str>) -> String {
         match context {
-            Some(c) => format!("ClickHouse {op} {what}; {c}"),
-            None => format!("ClickHouse {op} {what}"),
+            Some(c) => format!("{op} {what}; {c}"),
+            None => format!("{op} {what}"),
         }
     }
     let budget = config.client_budget(op);
@@ -188,8 +188,8 @@ impl ClickHouseClient {
         client = client
             .with_option("connect_timeout", &secs_string(config.connectivity_check_timeout))
             .with_option("http_connection_timeout", &secs_string(config.connectivity_check_timeout))
-            .with_option("http_send_timeout", &secs_string(config.insert_server_timeout))
-            .with_option("http_receive_timeout", &secs_string(config.insert_server_timeout));
+            .with_option("http_send_timeout", &secs_string(config.insert_timeout))
+            .with_option("http_receive_timeout", &secs_string(config.insert_timeout));
 
         Self { inner: Arc::new(client), config }
     }
@@ -216,7 +216,7 @@ impl ClickHouseClient {
     /// histogram labelled with the DDL `kind` and `table_name`.
     pub(crate) async fn execute_ddl(&self, kind: DdlKind, sql: &str) -> EtlResult<()> {
         let ddl_start = Instant::now();
-        let ddl_secs = secs_string(self.config.ddl_server_timeout);
+        let ddl_secs = secs_string(self.config.ddl_timeout);
         // `max_execution_time` and `lock_acquire_timeout` are applied per-call
         // so the connectivity check and schema query do not inherit the (much
         // larger) DDL budget.
@@ -240,7 +240,7 @@ impl ClickHouseClient {
         &self,
         table_name: &str,
     ) -> EtlResult<Vec<ClickHouseTableColumn>> {
-        let schema_secs = secs_string(self.config.schema_query_server_timeout);
+        let schema_secs = secs_string(self.config.schema_query_timeout);
         let query = self
             .inner
             .query(
@@ -301,7 +301,7 @@ impl ClickHouseClient {
 
     /// Executes `TRUNCATE TABLE IF EXISTS` for the supplied table.
     pub(crate) async fn truncate_table(&self, table_name: &str) -> EtlResult<()> {
-        let ddl_secs = secs_string(self.config.ddl_server_timeout);
+        let ddl_secs = secs_string(self.config.ddl_timeout);
         let query = self
             .inner
             .query(&build_truncate_table_sql(table_name))
@@ -541,13 +541,10 @@ mod tests {
         );
         assert_eq!(
             config.server_budget(ClickHouseOperationKind::SchemaQuery),
-            config.schema_query_server_timeout
+            config.schema_query_timeout
         );
-        assert_eq!(config.server_budget(ClickHouseOperationKind::Ddl), config.ddl_server_timeout);
-        assert_eq!(
-            config.server_budget(ClickHouseOperationKind::Insert),
-            config.insert_server_timeout
-        );
+        assert_eq!(config.server_budget(ClickHouseOperationKind::Ddl), config.ddl_timeout);
+        assert_eq!(config.server_budget(ClickHouseOperationKind::Insert), config.insert_timeout);
     }
 
     #[test]
