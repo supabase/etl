@@ -449,6 +449,14 @@ mod tests {
         assert_eq!(sql, "INSERT INTO \"table\"\"name\" FORMAT RowBinary");
     }
 
+    /// # GIVEN
+    /// A config with a custom server budget and epsilon.
+    ///
+    /// # WHEN
+    /// `client_budget(op)` is queried.
+    ///
+    /// # THEN
+    /// It returns `server_budget(op) + client_timeout_epsilon`.
     #[test]
     fn client_budget_adds_epsilon_to_server_budget() {
         let config = ClickHouseClientConfig {
@@ -472,6 +480,15 @@ mod tests {
         );
     }
 
+    /// # GIVEN
+    /// Each `ClickHouseOperationKind` variant.
+    ///
+    /// # WHEN
+    /// `Display` is invoked.
+    ///
+    /// # THEN
+    /// It produces the human-readable op name interpolated into error
+    /// messages by `timeout_call`.
     #[test]
     fn operation_kind_display_matches_error_messages() {
         assert_eq!(ClickHouseOperationKind::ConnectivityCheck.to_string(), "connectivity check");
@@ -480,6 +497,15 @@ mod tests {
         assert_eq!(ClickHouseOperationKind::Insert.to_string(), "insert");
     }
 
+    /// # GIVEN
+    /// A future that never resolves and a config with a finite budget.
+    ///
+    /// # WHEN
+    /// `timeout_call` is awaited under paused time.
+    ///
+    /// # THEN
+    /// It returns an `EtlError` with kind `DestinationTimeout` and a
+    /// detail that mentions the op and "timed out".
     #[tokio::test(start_paused = true)]
     async fn timeout_call_returns_destination_timeout_on_deadline() {
         // A future that never resolves; tokio's paused clock advances virtual
@@ -499,6 +525,14 @@ mod tests {
         );
     }
 
+    /// # GIVEN
+    /// A never-resolving future and `Some(context)`.
+    ///
+    /// # WHEN
+    /// `timeout_call`'s deadline fires.
+    ///
+    /// # THEN
+    /// The error detail contains the context string.
     #[tokio::test(start_paused = true)]
     async fn timeout_call_appends_context_to_detail() {
         let config = ClickHouseClientConfig::default();
@@ -514,6 +548,16 @@ mod tests {
         );
     }
 
+    /// # GIVEN
+    /// A future that returns a `clickhouse::error::Error` before the
+    /// deadline.
+    ///
+    /// # WHEN
+    /// `timeout_call` is awaited with no context.
+    ///
+    /// # THEN
+    /// It returns an `EtlError` with the op's `failed_kind` and a detail
+    /// that mentions the op and "failed".
     #[tokio::test(start_paused = true)]
     async fn timeout_call_propagates_inner_error() {
         let config = ClickHouseClientConfig::default();
@@ -529,6 +573,14 @@ mod tests {
         );
     }
 
+    /// # GIVEN
+    /// A future that resolves to `Ok` before the deadline.
+    ///
+    /// # WHEN
+    /// `timeout_call` is awaited.
+    ///
+    /// # THEN
+    /// It returns the inner `Ok` value unchanged.
     #[tokio::test(start_paused = true)]
     async fn timeout_call_passes_through_success() {
         let config = ClickHouseClientConfig::default();
@@ -538,6 +590,16 @@ mod tests {
         assert_eq!(value, 42);
     }
 
+    /// # GIVEN
+    /// A future that returns a `clickhouse::error::Error` and
+    /// `Some(context)`.
+    ///
+    /// # WHEN
+    /// `timeout_call` is awaited.
+    ///
+    /// # THEN
+    /// The error has the op's `failed_kind`, the detail contains the
+    /// context, and the inner clickhouse error is attached as `source`.
     #[tokio::test(start_paused = true)]
     async fn timeout_call_inner_error_includes_context() {
         use std::error::Error as _;
@@ -555,6 +617,14 @@ mod tests {
         assert!(err.source().is_some(), "expected inner clickhouse error to be attached");
     }
 
+    /// # GIVEN
+    /// A default `ClickHouseClientConfig`.
+    ///
+    /// # WHEN
+    /// `server_budget(op)` is queried for each variant.
+    ///
+    /// # THEN
+    /// Each variant returns the corresponding config field.
     #[test]
     fn server_budget_per_operation_kind() {
         let config = ClickHouseClientConfig::default();
@@ -570,6 +640,15 @@ mod tests {
         assert_eq!(config.server_budget(ClickHouseOperationKind::Insert), config.insert_timeout);
     }
 
+    /// # GIVEN
+    /// Each `ClickHouseOperationKind` variant.
+    ///
+    /// # WHEN
+    /// `failed_kind` is queried.
+    ///
+    /// # THEN
+    /// Each variant maps to the `ErrorKind` that drives the appropriate
+    /// retry policy for that bucket.
     #[test]
     fn operation_kind_failed_kind_per_bucket() {
         assert_eq!(
@@ -587,6 +666,15 @@ mod tests {
         );
     }
 
+    /// # GIVEN
+    /// Various `Duration` values: whole, sub-second, zero, fractional.
+    ///
+    /// # WHEN
+    /// `floor_secs` is called.
+    ///
+    /// # THEN
+    /// It returns a whole-seconds string with a floor of `"1"` (so
+    /// `Duration::ZERO` and sub-second values do not collapse to `"0"`).
     #[test]
     fn floor_secs_floors_at_one_second() {
         // Whole seconds at or above 1 pass through unchanged.
