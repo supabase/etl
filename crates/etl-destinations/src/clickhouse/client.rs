@@ -18,12 +18,14 @@ use crate::clickhouse::{
     schema::{clickhouse_column_type, quote_identifier},
 };
 
-/// Formats a `Duration` as a whole-seconds string, suitable for ClickHouse
-/// settings passed via `.with_option(...)`. Sub-second precision is rounded
-/// up to a 1s floor so a `Duration::from_millis(500)` does not become `"0"`.
+/// Formats a `Duration` as a whole-seconds string for ClickHouse
+/// `.with_option(...)` settings, floored at `"1"`. ClickHouse interprets `"0"`
+/// as "no timeout" for `http_*_timeout`, `max_execution_time`, and
+/// `lock_acquire_timeout`; flooring at 1 second avoids accidentally disabling a
+/// server-side bound when an operator passes `Duration::ZERO` or any sub-second
+/// value.
 fn secs_string(d: Duration) -> String {
-    let secs = d.as_secs().max(u64::from(d.subsec_nanos() > 0));
-    secs.to_string()
+    d.as_secs().max(1).to_string()
 }
 
 /// Runs `fut` under `tokio::time::timeout` using the client budget for `op`
@@ -582,17 +584,15 @@ mod tests {
     }
 
     #[test]
-    fn secs_string_rounds_subseconds_up() {
-        // Whole seconds pass through unchanged.
+    fn secs_string_floors_at_one_second() {
+        // Whole seconds at or above 1 pass through unchanged.
+        assert_eq!(secs_string(Duration::from_secs(1)), "1");
         assert_eq!(secs_string(Duration::from_secs(5)), "5");
         assert_eq!(secs_string(Duration::from_secs(60)), "60");
-        // Zero is preserved: in ClickHouse settings "0" usually means "no
-        // timeout", which is the right thing to propagate for a deliberate
-        // override.
-        assert_eq!(secs_string(Duration::ZERO), "0");
-        // Sub-second values round up to a 1s floor so they don't collapse to
-        // "0" and disable the setting unintentionally.
-        assert_eq!(secs_string(Duration::from_millis(1)), "1");
+        // ZERO is floored to 1 to avoid disabling the server-side timeout.
+        assert_eq!(secs_string(Duration::ZERO), "1");
+        // Sub-second values are floored to 1 (would otherwise truncate to 0).
+        assert_eq!(secs_string(Duration::from_nanos(1)), "1");
         assert_eq!(secs_string(Duration::from_millis(500)), "1");
         assert_eq!(secs_string(Duration::from_millis(999)), "1");
         // Fractional seconds beyond 1s truncate to whole seconds (Duration::as_secs).
