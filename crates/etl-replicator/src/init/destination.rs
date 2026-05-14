@@ -2,7 +2,7 @@ use etl::{destination::Destination, store::both::postgres::PostgresStore};
 use etl_config::shared::{DestinationConfig, IcebergConfig};
 use etl_destinations::{
     bigquery::BigQueryDestination, clickhouse::ClickHouseDestination,
-    ducklake::DuckLakeDestination, iceberg::IcebergDestination,
+    ducklake::DuckLakeDestination, iceberg::IcebergDestination, snowflake::SnowflakeDestination,
 };
 
 use crate::error_reporting::ErrorReportingStateStore;
@@ -19,6 +19,9 @@ pub(crate) fn destination_name(destination_config: &DestinationConfig) -> &'stat
         DestinationConfig::Ducklake { .. } => DuckLakeDestination::<ReportingPostgresStore>::name(),
         DestinationConfig::ClickHouse { .. } => {
             ClickHouseDestination::<ReportingPostgresStore>::name()
+        }
+        DestinationConfig::Snowflake { .. } => {
+            SnowflakeDestination::<ReportingPostgresStore>::name()
         }
     }
 }
