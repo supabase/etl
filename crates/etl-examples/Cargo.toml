@@ -12,16 +12,19 @@ homepage.workspace = true
 name = "bigquery"
 path = "src/bin/bigquery.rs"
 required-features = ["bigquery"]
+test = false
 
 [[bin]]
 name = "clickhouse"
 path = "src/bin/clickhouse.rs"
 required-features = ["clickhouse"]
+test = false
 
 [[bin]]
 name = "ducklake"
 path = "src/bin/ducklake.rs"
 required-features = ["ducklake"]
+test = false
 
 [features]
 default = []
