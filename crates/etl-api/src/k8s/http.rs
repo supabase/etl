@@ -93,6 +93,8 @@ pub const TRUSTED_ROOT_CERT_CONFIG_MAP_NAME: &str = "trusted-root-certs-config";
 pub const TRUSTED_ROOT_CERT_KEY_NAME: &str = "trusted_root_certs";
 /// Label used to identify replicator pods.
 const REPLICATOR_APP_LABEL: &str = "etl-replicator-app";
+/// Label used to identify DuckLake maintenance resources.
+const DUCKLAKE_MAINTENANCE_APP_LABEL: &str = "etl-ducklake-maintenance-app";
 /// ServiceAccount used by replicator pods for runtime coordination.
 const REPLICATOR_SERVICE_ACCOUNT_NAME: &str = "etl-replicator";
 /// DuckLake maintenance CRD group.
@@ -922,7 +924,7 @@ fn create_ducklake_maintenance_json(
         "namespace": DATA_PLANE_NAMESPACE,
         "labels": {
           "etl.supabase.com/app-name": replicator_app_name,
-          "etl.supabase.com/app-type": REPLICATOR_APP_LABEL,
+          "etl.supabase.com/app-type": DUCKLAKE_MAINTENANCE_APP_LABEL,
         }
       },
       "spec": {
@@ -1681,6 +1683,41 @@ mod tests {
         assert_json_snapshot!(config_map_json);
 
         let _config_map: ConfigMap = serde_json::from_value(config_map_json).unwrap();
+    }
+
+    #[test]
+    fn test_create_ducklake_maintenance_json() {
+        let prefix = create_k8s_object_prefix(TENANT_ID, 42);
+        let name = create_ducklake_maintenance_name(&prefix);
+
+        let ducklake_maintenance_json = create_ducklake_maintenance_json(
+            &prefix,
+            &name,
+            DuckLakeMaintenanceResourceConfig {
+                tenant_id: TENANT_ID.to_owned(),
+                pipeline_id: 24,
+                replicator_id: 42,
+                image: "supabase/replicator:1.2.3".to_owned(),
+                policy: DuckLakeMaintenanceConfig {
+                    min_interval_seconds: 3600,
+                    max_pause_seconds: 2700,
+                    min_inlined_bytes: 10_000_000,
+                    max_compacted_files: 32,
+                    max_tables_per_run: 8,
+                    target_file_size: "10MB".to_owned(),
+                    delete_threshold: 0.5,
+                    min_active_data_files: 40,
+                    cpu_request_millicores: 1000,
+                    memory_request_mib: 1024,
+                    active_deadline_seconds: 1800,
+                },
+            },
+        );
+
+        assert_snapshot!(serde_json::to_string_pretty(&ducklake_maintenance_json).unwrap());
+
+        let _ducklake_maintenance: DynamicObject =
+            serde_json::from_value(ducklake_maintenance_json).unwrap();
     }
 
     #[test]
