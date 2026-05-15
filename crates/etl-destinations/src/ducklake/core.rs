@@ -60,7 +60,7 @@ use crate::{
             maintenance_target_file_size_sql, resolve_expire_snapshots_older_than,
             validate_expire_snapshots_older_than_sql,
         },
-        external_maintenance::{ExternalMaintenanceOperations, run_external_maintenance_watcher},
+        external_maintenance::ExternalMaintenanceOperations,
         inline_size::DuckLakePendingInlineSizeSampler,
         metrics::{
             DuckLakeMetricsSampler, ETL_DUCKLAKE_POOL_SIZE, query_catalog_maintenance_metrics,
@@ -575,18 +575,25 @@ where
             )?
             .into(),
         );
-        let watcher_destination = destination.clone();
-        destination
-            .tasks
-            .spawn(async move {
-                if let Err(error) = run_external_maintenance_watcher(watcher_destination).await {
-                    warn!(
-                        error = %error,
-                        "ducklake external maintenance watcher exited"
-                    );
-                }
-            })
-            .await;
+        #[cfg(feature = "ducklake-kubernetes")]
+        {
+            use crate::ducklake::external_maintenance::run_kubernetes_external_maintenance_watcher;
+
+            let watcher_destination = destination.clone();
+            destination
+                .tasks
+                .spawn(async move {
+                    if let Err(error) =
+                        run_kubernetes_external_maintenance_watcher(watcher_destination).await
+                    {
+                        warn!(
+                            error = %error,
+                            "ducklake external maintenance watcher exited"
+                        );
+                    }
+                })
+                .await;
+        }
 
         Ok(destination)
     }
@@ -1296,6 +1303,11 @@ where
             }
         }
 
+        if operations.rewrite_data_files {
+            operations.merge_adjacent_files = true;
+            operations.cleanup_old_files = true;
+        }
+
         Ok(operations)
     }
 
@@ -1477,9 +1489,9 @@ mod tests {
     use super::*;
     use crate::ducklake::{
         config::catalog_conninfo_from_url,
-        maintenance_runner::flush_table_inlined_data,
         metrics::{query_catalog_maintenance_metrics, query_table_storage_metrics},
     };
+    use etl_maintenance::ducklake::flush_table_inlined_data;
 
     const POSTGRES_SCANNER_EXTENSION_FILE: &str = "postgres_scanner.duckdb_extension";
 

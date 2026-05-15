@@ -1878,6 +1878,7 @@ dependencies = [
  "etl",
  "etl-config",
  "etl-destinations",
+ "etl-maintenance",
  "etl-postgres",
  "etl-telemetry",
  "insta",
@@ -1949,6 +1950,7 @@ dependencies = [
  "clickhouse",
  "duckdb",
  "etl",
+ "etl-maintenance",
  "etl-postgres",
  "etl-telemetry",
  "futures",
@@ -1957,7 +1959,6 @@ dependencies = [
  "iceberg",
  "iceberg-catalog-rest",
  "k8s-openapi",
- "kube",
  "metrics",
  "parking_lot",
  "parquet",
@@ -1997,6 +1998,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "etl-maintenance"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "duckdb",
+ "etl",
+ "etl-telemetry",
+ "k8s-openapi",
+ "kube",
+ "metrics",
+ "pg_escape",
+ "r2d2",
+ "regex",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "tokio",
+ "tokio-postgres",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "etl-postgres"
 version = "0.1.0"
 dependencies = [
@@ -2020,6 +2046,7 @@ dependencies = [
  "etl",
  "etl-config",
  "etl-destinations",
+ "etl-maintenance",
  "etl-telemetry",
  "k8s-openapi",
  "metrics",

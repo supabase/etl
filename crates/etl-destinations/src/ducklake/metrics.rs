@@ -85,7 +85,6 @@ pub(crate) const SUB_BATCH_KIND_LABEL: &str = "sub_batch_kind";
 pub(crate) const PREPARED_ROWS_KIND_LABEL: &str = "prepared_rows_kind";
 pub(crate) const DELETE_ORIGIN_LABEL: &str = "delete_origin";
 pub(crate) const RETRY_SCOPE_LABEL: &str = "retry_scope";
-pub(crate) const RESULT_LABEL: &str = "result";
 pub(crate) const MAINTENANCE_OPERATION_LABEL: &str = "operation";
 pub(crate) const MAINTENANCE_REASON_LABEL: &str = "reason";
 pub(crate) const MAINTENANCE_OUTCOME_LABEL: &str = "outcome";
