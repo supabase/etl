@@ -34,7 +34,8 @@ use crate::{
     },
     feature_flags::{FeatureFlagsClient, get_max_pipelines_per_tenant},
     k8s::{
-        K8sClient, K8sError, PodStatus, TrustedRootCertsCache, TrustedRootCertsError,
+        DestinationType, K8sClient, K8sError, PodStatus, TrustedRootCertsCache,
+        TrustedRootCertsError,
         core::{
             create_k8s_object_prefix, create_or_update_pipeline_resources_in_k8s,
             delete_pipeline_resources_in_k8s, is_replicator_active, is_replicator_pod_stopped,
@@ -1361,9 +1362,14 @@ pub(crate) async fn update_pipeline_version(
         .ok_or(PipelineError::ReplicatorNotFound(pipeline_id))?;
     }
 
-    // If the images have equal name, we don't care about their id from the K8S
-    // perspective, so we won't update any resources.
-    if target_image.name == current_image.name {
+    let destination_type = DestinationType::from(&destination.config);
+    let image_name_unchanged = target_image.name == current_image.name;
+
+    // If the images have equal name, non-DuckLake pipelines do not need any
+    // K8s reconciliation. DuckLake pipelines still reconcile because the
+    // external maintenance CR may be missing for pipelines created before that
+    // resource existed.
+    if image_name_unchanged && !matches!(destination_type, DestinationType::Ducklake) {
         txn.commit().await?;
 
         return Ok(HttpResponse::Ok().finish());

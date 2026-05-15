@@ -23,7 +23,9 @@ use crate::support::{
     k8s_client::MockK8sState,
     mocks::{
         create_default_image, create_image_with_name,
-        destinations::create_destination,
+        destinations::{
+            create_destination, create_destination_with_config, new_ducklake_destination_config,
+        },
         pipelines::{create_pipeline_with_config, new_pipeline_config, updated_pipeline_config},
         sources::create_source,
         tenants::{create_tenant, create_tenant_with_id_and_name},
@@ -852,6 +854,43 @@ async fn pipeline_version_can_be_updated() {
 
     // Assert
     assert!(response.status().is_success());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pipeline_version_update_reconciles_ducklake_maintenance_when_image_name_is_unchanged() {
+    init_test_tracing();
+    // Arrange
+    let k8s_state = MockK8sState::default();
+    let app = spawn_test_app_with_k8s_state(None, k8s_state.clone()).await;
+    let default_image_id =
+        create_image_with_name(&app, "supabase/replicator:1.3.0".to_owned(), true).await;
+    let tenant_id = create_tenant(&app).await;
+    let source_id = create_source(&app, &tenant_id).await;
+    let destination_id = create_destination_with_config(
+        &app,
+        &tenant_id,
+        "DuckLake Destination".to_owned(),
+        new_ducklake_destination_config(),
+    )
+    .await;
+
+    let pipeline_id = create_pipeline_with_config(
+        &app,
+        &tenant_id,
+        source_id,
+        destination_id,
+        new_pipeline_config(),
+    )
+    .await;
+    let maintenance_calls_before_update = k8s_state.ducklake_maintenance_create_calls();
+
+    // Act
+    let update_request = UpdatePipelineVersionRequest { version_id: default_image_id };
+    let response = app.update_pipeline_version(&tenant_id, pipeline_id, &update_request).await;
+
+    // Assert
+    assert!(response.status().is_success());
+    assert_eq!(k8s_state.ducklake_maintenance_create_calls(), maintenance_calls_before_update + 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -3,8 +3,9 @@ mod client;
 mod config;
 mod core;
 mod encoding;
+mod external_maintenance;
 mod inline_size;
-mod maintenance;
+mod maintenance_runner;
 mod metrics;
 mod schema;
 
@@ -18,10 +19,12 @@ pub(super) type DuckLakeTableName = String;
 ///
 /// This applies to every DuckDB connection in the destination pool so small
 /// writes inline into the DuckLake metadata first and can later be
-/// materialized to Parquet by the background maintenance worker.
+/// materialized to Parquet by an external maintenance job.
 const ATTACH_DATA_INLINING_ROW_LIMIT: u64 = 10_000;
 
-pub use core::{DuckLakeDestination, table_name_to_ducklake_table_name};
+pub use core::{
+    DuckLakeDestination, DuckLakeExternalMaintenancePause, table_name_to_ducklake_table_name,
+};
 #[cfg(feature = "test-utils")]
 pub use core::{
     arm_pause_next_streaming_write_for_tests, release_paused_streaming_write_for_tests,
@@ -35,3 +38,8 @@ pub use batches::{
     reset_ducklake_test_hooks,
 };
 pub use config::S3Config;
+pub use maintenance_runner::{
+    CleanupOldFilesMaintenanceConfig, DuckLakeMaintenanceConfig, DuckLakeMaintenanceOutcome,
+    ExpireSnapshotsMaintenanceConfig, InlineFlushMaintenanceConfig,
+    MergeAdjacentFilesMaintenanceConfig, RewriteDataFilesMaintenanceConfig, run_maintenance_once,
+};

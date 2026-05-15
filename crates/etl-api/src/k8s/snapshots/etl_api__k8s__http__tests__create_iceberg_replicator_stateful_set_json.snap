@@ -117,6 +117,7 @@ expression: stateful_set_json
         ],
         "initContainers": [],
         "nodeSelector": {},
+        "serviceAccountName": "etl-replicator",
         "terminationGracePeriodSeconds": 300,
         "tolerations": [
           {

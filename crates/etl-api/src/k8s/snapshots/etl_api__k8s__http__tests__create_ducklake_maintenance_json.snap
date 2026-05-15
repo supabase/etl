@@ -1,0 +1,65 @@
+---
+source: crates/etl-api/src/k8s/http.rs
+expression: "serde_json::to_string_pretty(&ducklake_maintenance_json).unwrap()"
+---
+{
+  "apiVersion": "etl.supabase.com/v1alpha1",
+  "kind": "DuckLakeMaintenance",
+  "metadata": {
+    "labels": {
+      "etl.supabase.com/app-name": "abcdefghijklmnopqrst-42-replicator-app",
+      "etl.supabase.com/app-type": "etl-ducklake-maintenance-app"
+    },
+    "name": "abcdefghijklmnopqrst-42",
+    "namespace": "etl-data-plane"
+  },
+  "spec": {
+    "jobTemplate": {
+      "activeDeadlineSeconds": 1800,
+      "backoffLimit": 1,
+      "cpuRequestMillicores": 1000,
+      "image": "supabase/replicator:1.2.3",
+      "memoryRequestMiB": 1024,
+      "ttlSecondsAfterFinished": 86400
+    },
+    "operations": {
+      "cleanupOldFiles": {
+        "enabled": true
+      },
+      "expireSnapshots": {
+        "enabled": false
+      },
+      "inlineFlush": {
+        "enabled": true,
+        "minInlinedBytes": 10000000
+      },
+      "mergeAdjacentFiles": {
+        "enabled": true,
+        "maxCompactedFiles": 32,
+        "maxTablesPerRun": 8,
+        "targetFileSize": "10MB"
+      },
+      "rewriteDataFiles": {
+        "deleteThreshold": 0.5,
+        "enabled": true,
+        "maxTablesPerRun": 8
+      }
+    },
+    "pause": {
+      "maxDurationSeconds": 2700
+    },
+    "pipelineRef": {
+      "pipelineId": 24,
+      "replicatorId": 42,
+      "tenantId": "abcdefghijklmnopqrst"
+    },
+    "runtimeRefs": {
+      "configMapName": "abcdefghijklmnopqrst-42-replicator-config",
+      "ducklakeSecretName": "abcdefghijklmnopqrst-42-ducklake",
+      "postgresSecretName": "abcdefghijklmnopqrst-42-postgres-password"
+    },
+    "schedule": {
+      "minIntervalSeconds": 3600
+    }
+  }
+}

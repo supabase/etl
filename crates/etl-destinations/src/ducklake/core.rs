@@ -1,12 +1,11 @@
 #[cfg(feature = "test-utils")]
 use std::sync::atomic::AtomicUsize;
+#[cfg(test)]
+use std::time::Duration;
 use std::{
     collections::{HashMap, HashSet},
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-    time::Duration,
+    sync::{Arc, atomic::AtomicBool},
+    time::Instant,
 };
 
 use etl::{
@@ -27,14 +26,17 @@ use etl::{
 use metrics::gauge;
 use parking_lot::Mutex;
 use pg_escape::quote_identifier;
-use sqlx::{PgPool, postgres::PgPoolOptions};
+use sqlx::{AssertSqlSafe, PgPool, postgres::PgPoolOptions};
 #[cfg(feature = "test-utils")]
 use tokio::sync::oneshot;
 use tokio::{
-    sync::{OwnedRwLockReadGuard, OwnedSemaphorePermit, RwLock, Semaphore, TryAcquireError},
+    sync::{
+        OwnedRwLockReadGuard, OwnedRwLockWriteGuard, OwnedSemaphorePermit, RwLock, Semaphore,
+        TryAcquireError,
+    },
     task::JoinSet,
 };
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use url::Url;
 
 use crate::{
@@ -58,14 +60,11 @@ use crate::{
             maintenance_target_file_size_sql, resolve_expire_snapshots_older_than,
             validate_expire_snapshots_older_than_sql,
         },
+        external_maintenance::{ExternalMaintenanceOperations, run_external_maintenance_watcher},
         inline_size::DuckLakePendingInlineSizeSampler,
-        maintenance::{
-            DuckLakeMaintenanceWorker, PendingInlineFlushRequests, TableMaintenanceNotification,
-            TableWriteActivity, send_maintenance_notification, spawn_ducklake_maintenance_worker,
-            table_write_slot,
-        },
         metrics::{
-            DuckLakeMetricsSampler, ETL_DUCKLAKE_POOL_SIZE, register_metrics,
+            DuckLakeMetricsSampler, ETL_DUCKLAKE_POOL_SIZE, query_catalog_maintenance_metrics,
+            query_table_storage_metrics, register_metrics,
             resolve_ducklake_metadata_schema_blocking, spawn_ducklake_metrics_sampler,
         },
         schema::build_create_table_sql_ducklake,
@@ -104,6 +103,14 @@ pub(super) fn is_create_table_conflict(error: &duckdb::Error, table_name: &str) 
         && message.contains(&format!(r#"attempting to create table "{table_name}""#))
 }
 
+/// Parses `expire_snapshots_older_than` into seconds for cheap metadata-only
+/// trigger sampling.
+fn expire_snapshots_retention_seconds(value: &str) -> Option<i64> {
+    humantime::parse_duration(value)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_secs()).ok())
+}
+
 // ── destination
 // ───────────────────────────────────────────────────────────────
 
@@ -123,12 +130,14 @@ pub struct DuckLakeDestination<S> {
     manager: Arc<DuckLakeConnectionManager>,
     pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
     blocking_slots: Arc<Semaphore>,
-    /// Shared gate that keeps exclusive background maintenance from overlapping
+    /// Shared gate that keeps external maintenance pauses from overlapping
     /// active foreground or table-scoped mutations.
     checkpoint_gate: Arc<RwLock<()>>,
     tasks: TaskSet,
-    maintenance_worker: Arc<Option<DuckLakeMaintenanceWorker>>,
     metrics_sampler: Arc<Option<DuckLakeMetricsSampler>>,
+    metadata_schema: Arc<str>,
+    expire_snapshots_older_than: Arc<str>,
+    metadata_pg_pool: PgPool,
     table_creation_slots: Arc<Semaphore>,
     table_write_slots: Arc<Mutex<HashMap<DuckLakeTableName, Arc<Semaphore>>>>,
     store: S,
@@ -139,12 +148,22 @@ pub struct DuckLakeDestination<S> {
     applied_batches_table_created: Arc<AtomicBool>,
     /// Cache tracking whether the ETL streaming progress table already exists.
     streaming_progress_table_created: Arc<AtomicBool>,
-    /// Signals that one or more inline flushes should run before the next safe
-    /// ingest point.
-    inline_flush_requested: Arc<AtomicBool>,
-    /// Tracks which tables need a requested inline flush before ingestion
-    /// resumes.
-    inline_flush_requests: Arc<PendingInlineFlushRequests>,
+}
+
+/// Held by an external DuckLake maintenance coordinator while foreground
+/// mutations must be quiesced.
+pub struct DuckLakeExternalMaintenancePause {
+    _guard: OwnedRwLockWriteGuard<()>,
+}
+
+/// Returns the table-local semaphore shared by concurrent foreground writes.
+fn table_write_slot(
+    table_write_slots: &Arc<Mutex<HashMap<DuckLakeTableName, Arc<Semaphore>>>>,
+    table_name: &str,
+) -> Arc<Semaphore> {
+    let mut slots = table_write_slots.lock();
+    let slot = slots.entry(table_name.to_owned()).or_insert_with(|| Arc::new(Semaphore::new(1)));
+    Arc::clone(slot)
 }
 
 impl<S> Destination for DuckLakeDestination<S>
@@ -162,7 +181,6 @@ where
             "ducklake shutdown requested, interrupted active duckdb connections"
         );
         self.tasks.shutdown().await?;
-        self.shutdown_maintenance_worker().await?;
         self.shutdown_metrics_sampler().await?;
 
         Ok(())
@@ -468,12 +486,8 @@ where
         let blocking_slots = Arc::new(Semaphore::new(pool_size as usize));
 
         // `target_file_size` is a catalog-wide DuckLake option consumed during
-        // compaction. Apply it once on the write pool before the maintenance
-        // pool starts warming, so the maintenance worker does not need to
-        // mutate the catalog from a separate RW DuckDB instance during its
-        // background warm-up. Two RW instances ATTACHing the same catalog file
-        // and racing a catalog write against concurrent user writes caused
-        // lost commits.
+        // compaction. Apply it once on the write pool so foreground writes and
+        // external maintenance jobs use the same configured catalog option.
         let target_file_size_sql =
             maintenance_target_file_size_sql(Some(maintenance_target_file_size.as_ref()));
         run_duckdb_blocking(
@@ -529,74 +543,50 @@ where
                 .await?
             }
         };
+        let metadata_schema = Arc::<str>::from(metadata_schema);
         let metadata_pg_pool = build_ducklake_metadata_pg_pool(&catalog_url)?;
-        let pending_inline_size_sampler = Some(DuckLakePendingInlineSizeSampler::new(
-            metadata_schema.clone(),
-            metadata_pg_pool.clone(),
-        ));
         let created_tables = Arc::default();
         let checkpoint_gate = Arc::new(RwLock::new(()));
-        let inline_flush_requested = Arc::new(AtomicBool::new(false));
-        let inline_flush_requests = Arc::new(PendingInlineFlushRequests::default());
         let mut destination = Self {
             manager: Arc::clone(&manager),
             pool: Arc::clone(&pool),
             blocking_slots: Arc::clone(&blocking_slots),
             checkpoint_gate: Arc::clone(&checkpoint_gate),
             tasks: TaskSet::new(),
-            maintenance_worker: Arc::new(None),
             metrics_sampler: Arc::new(None),
+            metadata_schema: Arc::clone(&metadata_schema),
+            expire_snapshots_older_than: Arc::clone(&expire_snapshots_older_than),
+            metadata_pg_pool: metadata_pg_pool.clone(),
             table_creation_slots: Arc::new(Semaphore::new(1)),
             table_write_slots: Arc::default(),
             store,
             created_tables: Arc::clone(&created_tables),
             applied_batches_table_created: Arc::default(),
             streaming_progress_table_created: Arc::default(),
-            inline_flush_requested: Arc::clone(&inline_flush_requested),
-            inline_flush_requests: Arc::clone(&inline_flush_requests),
         };
         gauge!(ETL_DUCKLAKE_POOL_SIZE).set(pool_size as f64);
         destination.ensure_applied_batches_table_exists().await?;
         destination.ensure_streaming_progress_table_exists().await?;
-        destination.maintenance_worker = Arc::new(
-            spawn_ducklake_maintenance_worker(
-                DuckLakeConnectionManager {
-                    setup_plan: Arc::clone(&setup_plan),
-                    disable_extension_autoload,
-                    interrupt_registry: manager.interrupt_registry(),
-                    #[cfg(feature = "test-utils")]
-                    open_count: Arc::new(AtomicUsize::new(0)),
-                },
-                Arc::clone(&checkpoint_gate),
-                Arc::clone(&destination.table_write_slots),
-                Arc::clone(&inline_flush_requested),
-                Arc::clone(&inline_flush_requests),
-                pending_inline_size_sampler,
-                Arc::clone(&expire_snapshots_older_than),
-            )?
-            .into(),
-        );
         destination.metrics_sampler = Arc::new(
             spawn_ducklake_metrics_sampler(
-                metadata_schema,
-                metadata_pg_pool,
+                metadata_schema.to_string(),
+                metadata_pg_pool.clone(),
                 Arc::clone(&created_tables),
-                destination
-                    .maintenance_worker
-                    .as_ref()
-                    .as_ref()
-                    .ok_or_else(|| {
-                        etl_error!(
-                            ErrorKind::DestinationError,
-                            "DuckLake initialization failed",
-                            "Maintenance worker should exist before metrics sampler"
-                        )
-                    })?
-                    .notification_tx
-                    .clone(),
             )?
             .into(),
         );
+        let watcher_destination = destination.clone();
+        destination
+            .tasks
+            .spawn(async move {
+                if let Err(error) = run_external_maintenance_watcher(watcher_destination).await {
+                    warn!(
+                        error = %error,
+                        "ducklake external maintenance watcher exited"
+                    );
+                }
+            })
+            .await;
 
         Ok(destination)
     }
@@ -683,8 +673,8 @@ where
     /// Copy batches are recorded in the replay marker table so a retry after an
     /// ambiguous post-commit failure can detect already applied rows.
     ///
-    /// Small copy batches may stay inlined until maintenance requests a safe
-    /// materialization after we emit the maintenance notification.
+    /// Small copy batches may stay inlined until external maintenance
+    /// materializes them during a coordinated pause.
     async fn write_table_rows_inner(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
@@ -696,14 +686,6 @@ where
             return Ok(());
         }
 
-        if let Err(error) = self.maybe_run_requested_inline_flush().await {
-            tracing::error!(
-                table = %table_name,
-                error = %error,
-                "ducklake inline flush failed"
-            );
-        }
-
         // Copy batches for the same table must still serialize so concurrent
         // callers do not race each other inside DuckDB.
         self.ensure_applied_batches_table_exists().await?;
@@ -711,17 +693,12 @@ where
         let _checkpoint_guard = self.acquire_mutation_guard().await;
         let prepared_batch =
             prepare_copy_table_batch(replicated_table_schema, table_name, table_rows)?;
-        let table_name = prepared_batch.table_name().to_owned();
         apply_table_batch_with_retry(
             Arc::clone(&self.pool),
             Arc::clone(&self.blocking_slots),
             prepared_batch,
         )
         .await?;
-        self.notify_background_maintenance(TableMaintenanceNotification::WriteActivity(
-            TableWriteActivity { table_name },
-        ))
-        .await;
 
         Ok(())
     }
@@ -736,12 +713,6 @@ where
     /// streaming replay watermark so retries can safely detect already
     /// committed work.
     async fn write_events_inner(&self, events: Vec<Event>) -> EtlResult<()> {
-        if let Err(error) = self.maybe_run_requested_inline_flush().await {
-            tracing::error!(
-                error = %error,
-                "ducklake inline flush failed"
-            );
-        }
         let mut event_iter = events.into_iter().peekable();
 
         while event_iter.peek().is_some() {
@@ -876,20 +847,24 @@ where
                     let pool = Arc::clone(&self.pool);
                     let blocking_slots = Arc::clone(&self.blocking_slots);
                     let destination_table_name = table_name.clone();
-                    let maintenance_worker = Arc::clone(&self.maintenance_worker);
 
                     join_set.spawn(async move {
                         let _table_write_permit = table_write_permit;
                         let checkpoint_wait_started = tokio::time::Instant::now();
+                        info!(
+                            table = %destination_table_name,
+                            "ducklake waiting for checkpoint gate before streaming write: table={}",
+                            destination_table_name
+                        );
                         let _checkpoint_guard = checkpoint_gate.read_owned().await;
                         let checkpoint_wait = checkpoint_wait_started.elapsed();
-                        if checkpoint_wait > Duration::from_secs(1) {
-                            info!(
-                                table = %destination_table_name,
-                                checkpoint_wait_ms = checkpoint_wait.as_millis() as u64,
-                                "ducklake waited for checkpoint gate before streaming write"
-                            );
-                        }
+                        info!(
+                            table = %destination_table_name,
+                            checkpoint_wait_ms = checkpoint_wait.as_millis() as u64,
+                            "ducklake acquired checkpoint gate before streaming write: table={}, checkpoint_wait_ms={}",
+                            destination_table_name,
+                            checkpoint_wait.as_millis()
+                        );
                         let last_sequence_key =
                             read_table_streaming_progress_sequence_key_blocking(
                                 Arc::clone(&pool),
@@ -902,7 +877,8 @@ where
                         if pending_mutations.is_empty() {
                             debug!(
                                 table = %destination_table_name,
-                                "ducklake streaming mutation replay skipped, no pending events"
+                                "ducklake streaming mutation replay skipped, no pending events: table={}",
+                                destination_table_name
                             );
                             return Ok::<(), etl::error::EtlError>(());
                         }
@@ -911,15 +887,12 @@ where
                             table = %destination_table_name,
                             pending_mutation_count = pending_mutations.len(),
                             is_first_streaming_batch,
-                            "ducklake applying streaming mutations"
+                            "ducklake applying streaming mutations: table={}, pending_mutation_count={}, is_first_streaming_batch={}",
+                            destination_table_name,
+                            pending_mutations.len(),
+                            is_first_streaming_batch
                         );
 
-                        let maintenance_notification =
-                            maintenance_worker.as_ref().as_ref().map(|_| {
-                                TableMaintenanceNotification::WriteActivity(TableWriteActivity {
-                                    table_name: destination_table_name.clone(),
-                                })
-                            });
                         let prepared_batches = prepare_mutation_table_batches(
                             &replicated_table_schema,
                             destination_table_name.clone(),
@@ -930,14 +903,10 @@ where
                         info!(
                             table = %destination_table_name,
                             is_first_streaming_batch,
-                            "ducklake applied streaming mutations"
+                            "ducklake applied streaming mutations: table={}, is_first_streaming_batch={}",
+                            destination_table_name,
+                            is_first_streaming_batch
                         );
-                        if let (Some(worker), Some(notification)) =
-                            (maintenance_worker.as_ref(), maintenance_notification)
-                        {
-                            send_maintenance_notification(&worker.notification_tx, notification)
-                                .await;
-                        }
                         Ok::<(), etl::error::EtlError>(())
                     });
                 }
@@ -985,7 +954,21 @@ where
                     let blocking_slots = Arc::clone(&self.blocking_slots);
                     join_set.spawn(async move {
                         let _table_write_permit = table_write_permit;
+                        let checkpoint_wait_started = tokio::time::Instant::now();
+                        info!(
+                            table = %table_name,
+                            "ducklake waiting for checkpoint gate before streaming truncate: table={}",
+                            table_name
+                        );
                         let _checkpoint_guard = checkpoint_gate.read_owned().await;
+                        let checkpoint_wait = checkpoint_wait_started.elapsed();
+                        info!(
+                            table = %table_name,
+                            checkpoint_wait_ms = checkpoint_wait.as_millis() as u64,
+                            "ducklake acquired checkpoint gate before streaming truncate: table={}, checkpoint_wait_ms={}",
+                            table_name,
+                            checkpoint_wait.as_millis()
+                        );
                         let last_sequence_key =
                             read_table_streaming_progress_sequence_key_blocking(
                                 Arc::clone(&pool),
@@ -998,11 +981,19 @@ where
                         if pending_truncates.is_empty() {
                             debug!(
                                 table = %table_name,
-                                "ducklake streaming truncate replay skipped, no pending events"
+                                "ducklake streaming truncate replay skipped, no pending events: table={}",
+                                table_name
                             );
                             return Ok(());
                         }
 
+                        info!(
+                            table = %table_name,
+                            pending_truncate_count = pending_truncates.len(),
+                            "ducklake applying streaming truncates: table={}, pending_truncate_count={}",
+                            table_name,
+                            pending_truncates.len()
+                        );
                         let prepared_batch =
                             prepare_truncate_table_batch(table_name, pending_truncates);
                         apply_table_batch_with_retry(pool, blocking_slots, prepared_batch).await
@@ -1039,7 +1030,9 @@ where
         info!(
             table_id = %table_id,
             table = %table_name,
-            "ducklake destination table cache miss, ensuring table exists"
+            "ducklake destination table cache miss, ensuring table exists: table_id={}, table={}",
+            table_id,
+            table_name
         );
 
         let _table_creation_permit =
@@ -1161,14 +1154,19 @@ where
             Err(TryAcquireError::NoPermits) => {
                 info!(
                     table = %table_name,
-                    "ducklake waiting for table write slot"
+                    "ducklake waiting for table write slot: table={}",
+                    table_name
                 );
+                let started = Instant::now();
                 let permit = table_slot.acquire_owned().await.map_err(|_| {
                     etl_error!(ErrorKind::InvalidState, "DuckLake table write semaphore closed")
                 })?;
                 info!(
                     table = %table_name,
-                    "ducklake acquired table write slot after wait"
+                    wait_ms = started.elapsed().as_millis() as u64,
+                    "ducklake acquired table write slot after wait: table={}, wait_ms={}",
+                    table_name,
+                    started.elapsed().as_millis()
                 );
                 Ok(permit)
             }
@@ -1181,25 +1179,145 @@ where
     /// Acquires shared mutation access so exclusive background maintenance
     /// cannot start in the middle of a foreground write sequence.
     async fn acquire_mutation_guard(&self) -> OwnedRwLockReadGuard<()> {
-        Arc::clone(&self.checkpoint_gate).read_owned().await
+        let started = Instant::now();
+        info!(
+            metadata_schema = %self.metadata_schema,
+            "ducklake waiting for shared mutation guard: metadata_schema={}",
+            self.metadata_schema
+        );
+        let guard = Arc::clone(&self.checkpoint_gate).read_owned().await;
+        info!(
+            metadata_schema = %self.metadata_schema,
+            wait_ms = started.elapsed().as_millis() as u64,
+            "ducklake acquired shared mutation guard: metadata_schema={}, wait_ms={}",
+            self.metadata_schema,
+            started.elapsed().as_millis()
+        );
+        guard
     }
 
-    /// Runs requested inline flushes before foreground ingestion begins when
-    /// safe.
-    async fn maybe_run_requested_inline_flush(&self) -> EtlResult<()> {
-        if !self.inline_flush_requested.load(Ordering::Acquire) {
-            return Ok(());
+    /// Acquires exclusive DuckLake mutation access for an external maintenance
+    /// run. While this guard is held, new foreground writes and in-process
+    /// background maintenance operations wait before mutating the catalog.
+    pub async fn acquire_external_maintenance_pause(&self) -> DuckLakeExternalMaintenancePause {
+        let started = Instant::now();
+        info!(
+            metadata_schema = %self.metadata_schema,
+            "ducklake waiting for exclusive external maintenance mutation guard: metadata_schema={}",
+            self.metadata_schema
+        );
+        let guard = Arc::clone(&self.checkpoint_gate).write_owned().await;
+        info!(
+            metadata_schema = %self.metadata_schema,
+            wait_ms = started.elapsed().as_millis() as u64,
+            "ducklake acquired exclusive external maintenance mutation guard: metadata_schema={}, wait_ms={}",
+            self.metadata_schema,
+            started.elapsed().as_millis()
+        );
+        DuckLakeExternalMaintenancePause { _guard: guard }
+    }
+
+    /// Samples catalog state and returns which externally coordinated
+    /// maintenance operations should be requested now.
+    pub(super) async fn sample_external_maintenance_operations(
+        &self,
+        inline_flush_min_inlined_bytes: u64,
+        rewrite_data_files_min_active_data_files: i64,
+    ) -> EtlResult<ExternalMaintenanceOperations> {
+        let table_names = self.list_active_ducklake_tables().await?;
+        let inline_sampler = DuckLakePendingInlineSizeSampler::new(
+            self.metadata_schema.to_string(),
+            self.metadata_pg_pool.clone(),
+        );
+        let mut operations = ExternalMaintenanceOperations::default();
+        let catalog_metrics = query_catalog_maintenance_metrics(
+            &self.metadata_pg_pool,
+            self.metadata_schema.as_ref(),
+        )
+        .await?;
+
+        match expire_snapshots_retention_seconds(self.expire_snapshots_older_than.as_ref()) {
+            Some(retention_seconds) => {
+                operations.expire_snapshots = catalog_metrics.snapshots_total > 1
+                    && catalog_metrics.oldest_snapshot_age_seconds >= retention_seconds;
+                debug!(
+                    metadata_schema = %self.metadata_schema,
+                    expire_snapshots_older_than = %self.expire_snapshots_older_than,
+                    retention_seconds,
+                    snapshots_total = catalog_metrics.snapshots_total,
+                    oldest_snapshot_age_seconds = catalog_metrics.oldest_snapshot_age_seconds,
+                    expire_snapshots = operations.expire_snapshots,
+                    "ducklake sampled expire snapshots trigger: metadata_schema={}, \
+                     expire_snapshots_older_than={}, retention_seconds={}, snapshots_total={}, \
+                     oldest_snapshot_age_seconds={}, expire_snapshots={}",
+                    self.metadata_schema,
+                    self.expire_snapshots_older_than,
+                    retention_seconds,
+                    catalog_metrics.snapshots_total,
+                    catalog_metrics.oldest_snapshot_age_seconds,
+                    operations.expire_snapshots
+                );
+            }
+            None => {
+                warn!(
+                    metadata_schema = %self.metadata_schema,
+                    expire_snapshots_older_than = %self.expire_snapshots_older_than,
+                    "ducklake could not parse expire_snapshots_older_than for external maintenance \
+                     trigger sampling: metadata_schema={}, expire_snapshots_older_than={}",
+                    self.metadata_schema,
+                    self.expire_snapshots_older_than
+                );
+            }
         }
 
-        crate::ducklake::maintenance::maybe_run_requested_inline_flush(
-            Arc::clone(&self.pool),
-            Arc::clone(&self.checkpoint_gate),
-            Arc::clone(&self.blocking_slots),
-            self.inline_flush_requested.as_ref(),
-            self.inline_flush_requests.as_ref(),
-            self.maintenance_worker.as_ref().as_ref().map(|worker| worker.notification_tx.clone()),
-        )
-        .await
+        for table_name in table_names {
+            if table_name.starts_with("__etl_") {
+                continue;
+            }
+
+            if !operations.inline_flush {
+                let sizes = inline_sampler.sample_table(&table_name).await?;
+                operations.inline_flush = sizes.inlined_bytes >= inline_flush_min_inlined_bytes;
+            }
+
+            if !operations.rewrite_data_files {
+                let metrics = query_table_storage_metrics(
+                    &self.metadata_pg_pool,
+                    self.metadata_schema.as_ref(),
+                    &table_name,
+                )
+                .await?;
+                operations.rewrite_data_files =
+                    metrics.active_data_files > rewrite_data_files_min_active_data_files;
+            }
+
+            if operations.inline_flush && operations.rewrite_data_files {
+                break;
+            }
+        }
+
+        Ok(operations)
+    }
+
+    /// Lists active DuckLake table names from the metadata catalog.
+    async fn list_active_ducklake_tables(&self) -> EtlResult<Vec<String>> {
+        let sql = format!(
+            "SELECT table_name FROM {}.{} WHERE end_snapshot IS NULL ORDER BY table_name",
+            quote_identifier(self.metadata_schema.as_ref()),
+            quote_identifier("ducklake_table")
+        );
+        let rows: Vec<(String,)> = sqlx::query_as(AssertSqlSafe(sql))
+            .fetch_all(&self.metadata_pg_pool)
+            .await
+            .map_err(|source| {
+                etl_error!(
+                    ErrorKind::DestinationQueryFailed,
+                    "DuckLake table list query failed",
+                    format!("metadata_schema={}", self.metadata_schema.as_ref()),
+                    source: source
+                )
+            })?;
+        Ok(rows.into_iter().map(|(table_name,)| table_name).collect())
     }
 
     /// Runs one DuckDB operation on Tokio's blocking pool after acquiring a
@@ -1222,27 +1340,6 @@ where
         .await
     }
 
-    /// Stops the background DuckLake maintenance worker.
-    async fn shutdown_maintenance_worker(&self) -> EtlResult<()> {
-        if let Some(maintenance_worker) = &*self.maintenance_worker {
-            let _ = maintenance_worker.shutdown_tx.send(());
-            let handle = maintenance_worker.handle.lock().take();
-            if let Some(handle) = handle {
-                handle.abort();
-                if let Err(err) = handle.await
-                    && !err.is_cancelled()
-                {
-                    return Err(etl_error!(
-                        ErrorKind::ApplyWorkerPanic,
-                        "DuckLake maintenance worker task panicked"
-                    ));
-                }
-            }
-        }
-
-        Ok(())
-    }
-
     /// Stops the background DuckLake metrics sampler.
     async fn shutdown_metrics_sampler(&self) -> EtlResult<()> {
         if let Some(metrics_sampler) = &*self.metrics_sampler {
@@ -1255,7 +1352,7 @@ where
                 {
                     return Err(etl_error!(
                         ErrorKind::ApplyWorkerPanic,
-                        "DuckLake maintenance worker task panicked"
+                        "DuckLake metrics sampler task panicked"
                     ));
                 }
             }
@@ -1263,14 +1360,6 @@ where
 
         Ok(())
     }
-
-    /// Sends one background-maintenance notification to the maintenance worker.
-    async fn notify_background_maintenance(&self, notification: TableMaintenanceNotification) {
-        if let Some(maintenance_worker) = &*self.maintenance_worker {
-            send_maintenance_notification(&maintenance_worker.notification_tx, notification).await;
-        }
-    }
-
     /// Returns how many DuckDB connections have been initialized for tests.
     #[cfg(feature = "test-utils")]
     pub fn connection_open_count_for_tests(&self) -> usize {
@@ -1388,11 +1477,18 @@ mod tests {
     use super::*;
     use crate::ducklake::{
         config::catalog_conninfo_from_url,
-        maintenance::flush_table_inlined_data,
+        maintenance_runner::flush_table_inlined_data,
         metrics::{query_catalog_maintenance_metrics, query_table_storage_metrics},
     };
 
     const POSTGRES_SCANNER_EXTENSION_FILE: &str = "postgres_scanner.duckdb_extension";
+
+    #[test]
+    fn expire_snapshots_retention_seconds_uses_humantime_duration_syntax() {
+        assert_eq!(expire_snapshots_retention_seconds("7 days"), Some(604_800));
+        assert_eq!(expire_snapshots_retention_seconds("2h 30min"), Some(9_000));
+        assert_eq!(expire_snapshots_retention_seconds("bad interval"), None);
+    }
 
     fn make_schema(table_id: u32, schema: &str, table: &str) -> TableSchema {
         TableSchema::new(

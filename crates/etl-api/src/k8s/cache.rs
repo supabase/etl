@@ -126,13 +126,12 @@ mod tests {
     use std::collections::BTreeMap;
 
     use async_trait::async_trait;
-    use etl_config::Environment;
     use k8s_openapi::api::core::v1::ConfigMap;
 
     use super::*;
-    use crate::{
-        configs::log::LogLevel,
-        k8s::{DestinationType, PodStatus, ReplicatorConfigMapFile},
+    use crate::k8s::{
+        DuckLakeMaintenanceResourceConfig, PodStatus, ReplicatorConfigMapFile,
+        ReplicatorStatefulSetConfig,
     };
 
     struct MockK8sClient {
@@ -228,17 +227,24 @@ mod tests {
 
         async fn create_or_update_replicator_stateful_set(
             &self,
-            _prefix: &str,
-            _replicator_image: &str,
-            _environment: Environment,
-            _replicator_resources: Option<&crate::configs::pipeline::ReplicatorResourcesConfig>,
-            _destination_type: DestinationType,
-            _log_level: LogLevel,
+            _config: ReplicatorStatefulSetConfig,
         ) -> Result<(), K8sError> {
             Ok(())
         }
 
         async fn delete_replicator_stateful_set(&self, _prefix: &str) -> Result<(), K8sError> {
+            Ok(())
+        }
+
+        async fn create_or_update_ducklake_maintenance(
+            &self,
+            _prefix: &str,
+            _config: DuckLakeMaintenanceResourceConfig,
+        ) -> Result<(), K8sError> {
+            Ok(())
+        }
+
+        async fn delete_ducklake_maintenance(&self, _prefix: &str) -> Result<(), K8sError> {
             Ok(())
         }
 
