@@ -1,5 +1,4 @@
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
 use etl::{
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
@@ -154,13 +153,9 @@ impl ExternalMaintenanceStore for PostgresExternalMaintenanceStore {
                     sqlx_error(error, "Failed to decode external maintenance operation history")
                 })?
                 .0,
-            last_completed_at: row
-                .try_get::<Option<String>, _>("last_completed_at")
-                .map_err(|error| {
-                    sqlx_error(error, "Failed to decode external maintenance completed timestamp")
-                })?
-                .and_then(|value| DateTime::parse_from_rfc3339(&value).ok())
-                .map(|time| time.with_timezone(&Utc)),
+            last_completed_at: row.try_get("last_completed_at").map_err(|error| {
+                sqlx_error(error, "Failed to decode external maintenance completed timestamp")
+            })?,
             operation_policy: row
                 .try_get::<Json<ExternalMaintenanceOperationPolicy>, _>("operation_policy")
                 .map_err(|error| {

@@ -134,7 +134,7 @@ pub enum PipelineError {
     InvalidPipelineRequest(String),
 
     #[error("Maintenance materialization failed: {0}")]
-    MaintenanceMaterialization(#[from] crate::maintenance::MaintenanceMaterializationError),
+    MaintenanceMaterialization(#[from] etl_maintenance::MaintenanceMaterializationError),
 }
 
 impl From<PipelinesDbError> for PipelineError {

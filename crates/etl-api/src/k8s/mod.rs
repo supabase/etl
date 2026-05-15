@@ -16,6 +16,8 @@ mod base;
 pub mod cache;
 pub mod core;
 pub mod http;
+mod maintenance;
 
 pub use base::*;
 pub use cache::{TrustedRootCertsCache, TrustedRootCertsError};
+pub use maintenance::{KubernetesMaintenanceMaterializer, ducklake_maintenance_policy_from_config};

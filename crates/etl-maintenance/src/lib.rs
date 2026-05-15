@@ -1,6 +1,7 @@
 //! External maintenance coordination and runners for ETL.
 
 mod coordination;
+mod materialization;
 
 #[cfg(feature = "ducklake")]
 pub mod ducklake;
@@ -14,4 +15,9 @@ pub use coordination::{
     ExternalMaintenanceReplicatorStatus, ExternalMaintenanceRequestOutcome, ExternalMaintenanceRun,
     ExternalMaintenanceState, ExternalMaintenanceStore, ExternalMaintenanceWatcherConfig,
     PostgresExternalMaintenanceStore,
+};
+pub use materialization::{
+    DisabledMaintenanceMaterializer, DuckLakeMaintenanceMaterialization, DuckLakeMaintenancePolicy,
+    MaintenanceIdentity, MaintenanceMaterializationError, MaintenanceMaterializer,
+    MaintenanceMaterializerKind, MaintenanceRuntimeRefs, PostgresMaintenanceMaterializer,
 };

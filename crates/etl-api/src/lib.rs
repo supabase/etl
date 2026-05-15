@@ -4,7 +4,6 @@ pub mod configs;
 pub mod data;
 pub mod feature_flags;
 pub mod k8s;
-pub mod maintenance;
 pub mod routes;
 pub mod sentry_scrubbing;
 pub mod span_builder;

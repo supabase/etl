@@ -2,6 +2,10 @@ use etl_config::{
     Environment,
     shared::{ReplicatorConfigWithoutSecrets, SupabaseConfigWithoutSecrets, TlsConfig},
 };
+use etl_maintenance::{
+    DuckLakeMaintenanceMaterialization, MaintenanceIdentity, MaintenanceMaterializationError,
+    MaintenanceMaterializer, MaintenanceRuntimeRefs,
+};
 use secrecy::ExposeSecret;
 use thiserror::Error;
 
@@ -19,12 +23,9 @@ use crate::{
         sources::Source,
     },
     k8s::{
-        DestinationType, K8sClient, K8sError, PodStatus, ReplicatorConfigMapFile,
-        ReplicatorStatefulSetConfig,
-    },
-    maintenance::{
-        DuckLakeMaintenanceMaterialization, KubernetesMaintenanceMaterializer, MaintenanceIdentity,
-        MaintenanceMaterializationError, MaintenanceMaterializer, MaintenanceRuntimeRefs,
+        DestinationType, K8sClient, K8sError, KubernetesMaintenanceMaterializer, PodStatus,
+        ReplicatorConfigMapFile, ReplicatorStatefulSetConfig,
+        ducklake_maintenance_policy_from_config,
     },
 };
 
@@ -443,7 +444,7 @@ async fn create_or_update_ducklake_maintenance(
         return Ok(());
     }
 
-    let policy = ducklake_maintenance.unwrap_or_default();
+    let policy = ducklake_maintenance_policy_from_config(ducklake_maintenance.unwrap_or_default());
     materializer
         .reconcile_ducklake_maintenance(DuckLakeMaintenanceMaterialization {
             identity,

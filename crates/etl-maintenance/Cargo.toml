@@ -36,7 +36,8 @@ r2d2 = { workspace = true, optional = true }
 regex = { workspace = true, optional = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true, optional = true, features = ["arbitrary_precision", "std"] }
-sqlx = { workspace = true, features = ["runtime-tokio", "tls-rustls", "postgres", "migrate"] }
+sqlx = { workspace = true, features = ["runtime-tokio", "tls-rustls", "postgres", "migrate", "chrono"] }
+thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync", "time"] }
 tokio-postgres = { workspace = true, optional = true }
 tracing = { workspace = true, default-features = true }
