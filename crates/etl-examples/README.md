@@ -5,11 +5,33 @@ Postgres to various destinations using the ETL pipeline.
 
 ## Available Examples
 
-| Example | Binary | Destination | Status |
-|---------|--------|-------------|--------|
-| [BigQuery](#bigquery) | `bigquery` | Google BigQuery (cloud data warehouse) | Stable |
-| [ClickHouse](#clickhouse-setup) | `clickhouse` | ClickHouse (column-oriented OLAP database) | In progress |
-| [DuckLake](#ducklake) | `ducklake` | DuckLake (open data lake format) | In progress |
+| Example                         | Binary       | Feature      | Destination                                | Status      |
+| ------------------------------- | ------------ | ------------ | ------------------------------------------ | ----------- |
+| [BigQuery](#bigquery)           | `bigquery`   | `bigquery`   | Google BigQuery (cloud data warehouse)     | Stable      |
+| [ClickHouse](#clickhouse-setup) | `clickhouse` | `clickhouse` | ClickHouse (column-oriented OLAP database) | In progress |
+| [DuckLake](#ducklake)           | `ducklake`   | `ducklake`   | DuckLake (open data lake format)           | In progress |
+
+## Building and running
+
+Each binary is feature-gated so you only compile the dependencies you need. Some destinations (e.g. `ducklake`) pull in heavy native dependencies that can take several minutes to compile, and there's no reason to pay that cost when you only want to try BigQuery.
+
+### Single example
+
+```bash
+# Build
+cargo build --bin bigquery -p etl-examples --features bigquery
+
+# Run
+cargo run --bin bigquery -p etl-examples --features bigquery -- [flags]
+```
+
+Replace `bigquery` with `clickhouse` or `ducklake` as needed.
+
+### All examples
+
+```bash
+cargo build -p etl-examples --all-features
+```
 
 ---
 
@@ -46,10 +68,10 @@ Replicates a Postgres publication into a **DuckLake** data lake.
 
 DuckLake separates storage into two components:
 
-| Component | Role | Example |
-|-----------|------|---------|
-| **Catalog** | Metadata (tables, snapshots, stats) | PostgreSQL database |
-| **Data** | Row data as Parquet files | Local directory or S3 / S3-compatible object storage |
+| Component   | Role                                | Example                                              |
+| ----------- | ----------------------------------- | ---------------------------------------------------- |
+| **Catalog** | Metadata (tables, snapshots, stats) | PostgreSQL database                                  |
+| **Data**    | Row data as Parquet files           | Local directory or S3 / S3-compatible object storage |
 
 The destination loads the required DuckDB extensions before attaching the lake.
 Each batch of rows is committed as a single Parquet snapshot so the lake stays
@@ -64,9 +86,9 @@ consistent and queryable at all times.
 3. Every Postgres table becomes a DuckLake table. The name is derived from the
    source schema and table name:
 
-   | Postgres | DuckLake |
-   |----------|----------|
-   | `public.orders` | `public_orders` |
+   | Postgres           | DuckLake            |
+   | ------------------ | ------------------- |
+   | `public.orders`    | `public_orders`     |
    | `my_schema.events` | `my__schema_events` |
 
 ### Prerequisites
@@ -82,7 +104,7 @@ consistent and queryable at all times.
 ### Run (local data)
 
 ```bash
-cargo run --bin ducklake -p etl-examples -- \
+cargo run --bin ducklake -p etl-examples --features ducklake -- \
     --db-host localhost \
     --db-port 5432 \
     --db-name mydb \
@@ -110,7 +132,7 @@ for table table1, table2;
 Then run the ClickHouse example:
 
 ```bash
-cargo run -p etl-examples --bin clickhouse -- \
+cargo run -p etl-examples --bin clickhouse --features clickhouse -- \
         --db-host localhost \
         --db-port 5432 \
         --db-name postgres \
@@ -141,7 +163,7 @@ This is a fuller local example that also enables a dedicated DuckDB log dump on
 shutdown:
 
 ```bash
-cargo run --bin ducklake -p etl-examples -- \
+cargo run --bin ducklake -p etl-examples --features ducklake -- \
     --db-host postgres.etl-data-plane.svc.cluster.local \
     --db-port 5432 \
     --db-name mydb \
@@ -174,7 +196,7 @@ DuckDB extensions into the repository and point the destination at them:
 ```bash
 ./scripts/vendor_duckdb_extensions.sh
 ETL_DUCKDB_EXTENSION_ROOT="$(pwd)/vendor/duckdb/extensions" \
-  cargo run --bin ducklake -p etl-examples -- [flags]
+  cargo run --bin ducklake -p etl-examples --features ducklake -- [flags]
 ```
 
 If `ETL_DUCKDB_EXTENSION_ROOT` is unset, the destination also checks the
@@ -185,7 +207,7 @@ images do not need the env var because they already ship vendored extensions at
 ### Run (S3 / S3-compatible data)
 
 ```bash
-cargo run --bin ducklake -p etl-examples -- \
+cargo run --bin ducklake -p etl-examples --features ducklake -- \
     --db-host <pg-host> \
     --db-port <pg-port> \
     --db-name <pg-database> \
@@ -207,28 +229,28 @@ connection setup.
 
 ### All flags
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--db-host` | *(required)* | Postgres host |
-| `--db-port` | `5432` | Postgres port |
-| `--db-name` | *(required)* | Postgres database name |
-| `--db-username` | *(required)* | Postgres user (must have REPLICATION) |
-| `--db-password` | — | Postgres password (omit for trust auth) |
-| `--catalog-url` | *(required)* | DuckLake catalog URL (`postgres://...` or `file://...`) |
-| `--data-path` | *(required)* | Local path / `file://` URL or `s3://` URI for Parquet files |
-| `--pool-size` | `4` | DuckDB connection pool size |
-| `--max-batch-fill-duration-ms` | `5000` | Max time to wait before flushing a batch |
-| `--max-table-sync-workers` | `4` | Concurrent workers during initial copy |
-| `--publication` | *(required)* | Postgres publication name |
-| `--s3-access-key-id` | — | S3 access key ID (required for private S3 buckets) |
-| `--s3-secret-access-key` | — | S3 secret access key |
-| `--s3-region` | `us-east-1` | S3 region |
-| `--s3-endpoint` | — | Custom S3 endpoint, e.g. `127.0.0.1:5000/s3` for Supabase Storage |
-| `--s3-url-style` | `path` | URL style: `path` (MinIO/Supabase) or `vhost` (AWS) |
-| `--s3-use-ssl` | `false` | Enable TLS for the S3 connection |
-| `--metadata-schema` | — | Postgres schema for DuckLake metadata tables (e.g. `ducklake`) |
-| `--duckdb-log-storage-path` | — | Enables DuckDB file-backed logging for each DuckDB connection |
-| `--duckdb-log-dump-path` | — | CSV file written from `duckdb_logs` during graceful shutdown |
+| Flag                           | Default      | Description                                                       |
+| ------------------------------ | ------------ | ----------------------------------------------------------------- |
+| `--db-host`                    | _(required)_ | Postgres host                                                     |
+| `--db-port`                    | `5432`       | Postgres port                                                     |
+| `--db-name`                    | _(required)_ | Postgres database name                                            |
+| `--db-username`                | _(required)_ | Postgres user (must have REPLICATION)                             |
+| `--db-password`                | —            | Postgres password (omit for trust auth)                           |
+| `--catalog-url`                | _(required)_ | DuckLake catalog URL (`postgres://...` or `file://...`)           |
+| `--data-path`                  | _(required)_ | Local path / `file://` URL or `s3://` URI for Parquet files       |
+| `--pool-size`                  | `4`          | DuckDB connection pool size                                       |
+| `--max-batch-fill-duration-ms` | `5000`       | Max time to wait before flushing a batch                          |
+| `--max-table-sync-workers`     | `4`          | Concurrent workers during initial copy                            |
+| `--publication`                | _(required)_ | Postgres publication name                                         |
+| `--s3-access-key-id`           | —            | S3 access key ID (required for private S3 buckets)                |
+| `--s3-secret-access-key`       | —            | S3 secret access key                                              |
+| `--s3-region`                  | `us-east-1`  | S3 region                                                         |
+| `--s3-endpoint`                | —            | Custom S3 endpoint, e.g. `127.0.0.1:5000/s3` for Supabase Storage |
+| `--s3-url-style`               | `path`       | URL style: `path` (MinIO/Supabase) or `vhost` (AWS)               |
+| `--s3-use-ssl`                 | `false`      | Enable TLS for the S3 connection                                  |
+| `--metadata-schema`            | —            | Postgres schema for DuckLake metadata tables (e.g. `ducklake`)    |
+| `--duckdb-log-storage-path`    | —            | Enables DuckDB file-backed logging for each DuckDB connection     |
+| `--duckdb-log-dump-path`       | —            | CSV file written from `duckdb_logs` during graceful shutdown      |
 
 ### Query the replicated data
 
@@ -248,7 +270,7 @@ duckdb :memory: -c "
 ### Verbose logging
 
 ```bash
-RUST_LOG=debug cargo run --bin ducklake -p etl-examples -- [flags]
+RUST_LOG=debug cargo run --bin ducklake -p etl-examples --features ducklake -- [flags]
 ```
 
 ---
@@ -269,7 +291,7 @@ Replicates a Postgres publication to a Google BigQuery dataset.
 ### Run
 
 ```bash
-cargo run --bin bigquery -p etl-examples -- \
+cargo run --bin bigquery -p etl-examples --features bigquery -- \
     --db-host localhost \
     --db-port 5432 \
     --db-name postgres \
@@ -283,16 +305,16 @@ cargo run --bin bigquery -p etl-examples -- \
 
 ### All flags
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--db-host` | *(required)* | Postgres host |
-| `--db-port` | *(required)* | Postgres port |
-| `--db-name` | *(required)* | Postgres database name |
-| `--db-username` | *(required)* | Postgres user |
-| `--db-password` | — | Postgres password |
-| `--bq-sa-key-file` | *(required)* | Path to GCP service account key JSON |
-| `--bq-project-id` | *(required)* | GCP project ID |
-| `--bq-dataset-id` | *(required)* | BigQuery dataset ID |
-| `--max-batch-fill-duration-ms` | `5000` | Max time to wait before flushing a batch |
-| `--max-table-sync-workers` | `4` | Concurrent workers during initial copy |
-| `--publication` | *(required)* | Postgres publication name |
+| Flag                           | Default      | Description                              |
+| ------------------------------ | ------------ | ---------------------------------------- |
+| `--db-host`                    | _(required)_ | Postgres host                            |
+| `--db-port`                    | _(required)_ | Postgres port                            |
+| `--db-name`                    | _(required)_ | Postgres database name                   |
+| `--db-username`                | _(required)_ | Postgres user                            |
+| `--db-password`                | —            | Postgres password                        |
+| `--bq-sa-key-file`             | _(required)_ | Path to GCP service account key JSON     |
+| `--bq-project-id`              | _(required)_ | GCP project ID                           |
+| `--bq-dataset-id`              | _(required)_ | BigQuery dataset ID                      |
+| `--max-batch-fill-duration-ms` | `5000`       | Max time to wait before flushing a batch |
+| `--max-table-sync-workers`     | `4`          | Concurrent workers during initial copy   |
+| `--publication`                | _(required)_ | Postgres publication name                |
