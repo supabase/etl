@@ -5,11 +5,6 @@ use tokio_postgres::types::PgLsn;
 
 use crate::types::TableId;
 
-/// Converts a [`TableId`] into the matching SQLx OID wrapper.
-fn table_id_to_sqlx(table_id: TableId) -> SqlxTableId {
-    SqlxTableId(table_id.into_inner())
-}
-
 /// Parses a `pg_lsn` string returned by SQLx.
 fn parse_lsn(lsn: &str) -> sqlx::Result<PgLsn> {
     PgLsn::from_str(lsn).map_err(|_| {
@@ -41,7 +36,7 @@ where
         )
         .bind(pipeline_id)
         .bind(worker_type)
-        .bind(table_id_to_sqlx(table_id))
+        .bind(SqlxTableId(table_id.into_inner()))
         .fetch_optional(executor)
         .await?
     } else {
@@ -100,7 +95,7 @@ where
         )
         .bind(pipeline_id)
         .bind(worker_type)
-        .bind(table_id_to_sqlx(table_id))
+        .bind(SqlxTableId(table_id.into_inner()))
         .bind(flush_lsn)
         .fetch_one(executor)
         .await?
@@ -155,7 +150,7 @@ where
         )
         .bind(pipeline_id)
         .bind(worker_type)
-        .bind(table_id_to_sqlx(table_id))
+        .bind(SqlxTableId(table_id.into_inner()))
         .execute(executor)
         .await?
     } else {
