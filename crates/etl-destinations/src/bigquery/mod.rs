@@ -5,6 +5,7 @@ mod encoding;
 mod metrics;
 #[cfg(feature = "test-utils")]
 pub mod test_utils;
+mod value;
 
 #[cfg(feature = "test-utils")]
 pub use core::table_name_to_bigquery_table_id;

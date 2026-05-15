@@ -1,30 +1,7 @@
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use uuid::Uuid;
 
-use crate::{
-    bail,
-    conversions::PgNumeric,
-    error::{ErrorKind, EtlError},
-};
-
-macro_rules! convert_array_variant {
-    ($variant:ident, $vec:expr) => {
-        if $vec.iter().any(|v| v.is_none()) {
-            let element_count = $vec.len();
-            let null_count = $vec.iter().filter(|v| v.is_none()).count();
-            bail!(
-                ErrorKind::NullValuesNotSupportedInArrayInDestination,
-                "NULL values in arrays not supported in this destination",
-                format!(
-                    "Array contains {null_count} NULL values across {element_count} elements, \
-                     which are not supported in this destination"
-                )
-            )
-        } else {
-            Ok(ArrayCellNonOptional::$variant($vec.into_iter().flatten().collect()))
-        }
-    };
-}
+use crate::conversions::PgNumeric;
 
 /// Represents a single database cell value with support for Postgres types.
 ///
@@ -67,8 +44,6 @@ pub enum Cell {
     TimestampTz(DateTime<Utc>),
     /// UUID (Universally Unique Identifier)
     Uuid(Uuid),
-    /// JSON data as parsed value
-    Json(serde_json::Value),
     /// Raw byte data
     Bytes(Vec<u8>),
     /// Array of values with nullable elements
@@ -93,7 +68,6 @@ impl Cell {
             Cell::Timestamp(t) => *t = NaiveDateTime::default(),
             Cell::TimestampTz(t) => *t = DateTime::<Utc>::default(),
             Cell::Uuid(u) => *u = Uuid::default(),
-            Cell::Json(j) => *j = serde_json::Value::default(),
             Cell::U32(u) => *u = 0,
             Cell::Bytes(b) => b.clear(),
             Cell::Array(vec) => {
@@ -108,10 +82,6 @@ impl Cell {
 /// [`ArrayCell`] handles Postgres array types where individual elements can be
 /// NULL. Each variant corresponds to a Postgres array type and maintains the
 /// nullable nature of array elements as they exist in the source database.
-///
-/// This type is used internally during data conversion and can be converted to
-/// [`ArrayCellNonOptional`] for destinations that don't support nullable array
-/// elements.
 #[derive(Debug, PartialEq, Clone)]
 pub enum ArrayCell {
     /// Array of nullable boolean values
@@ -142,8 +112,6 @@ pub enum ArrayCell {
     TimestampTz(Vec<Option<DateTime<Utc>>>),
     /// Array of nullable UUIDs
     Uuid(Vec<Option<Uuid>>),
-    /// Array of nullable JSON values
-    Json(Vec<Option<serde_json::Value>>),
     /// Array of nullable byte arrays
     Bytes(Vec<Option<Vec<u8>>>),
 }
@@ -166,177 +134,7 @@ impl ArrayCell {
             ArrayCell::Timestamp(vec) => vec.clear(),
             ArrayCell::TimestampTz(vec) => vec.clear(),
             ArrayCell::Uuid(vec) => vec.clear(),
-            ArrayCell::Json(vec) => vec.clear(),
             ArrayCell::Bytes(vec) => vec.clear(),
-        }
-    }
-}
-
-/// Represents a database cell value with non-nullable array elements.
-///
-/// [`CellNonOptional`] is a variant of [`Cell`] designed for destinations that
-/// do not support NULL values within arrays. The conversion from [`Cell`] to
-/// [`CellNonOptional`] will fail if any array contains NULL elements.
-///
-/// This type is typically used when writing to destinations like BigQuery that
-/// require all array elements to be non-null.
-#[derive(Debug, PartialEq)]
-#[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
-pub enum CellNonOptional {
-    Null,
-    Bool(bool),
-    String(String),
-    I16(i16),
-    I32(i32),
-    U32(u32),
-    I64(i64),
-    F32(f32),
-    F64(f64),
-    Numeric(PgNumeric),
-    Date(NaiveDate),
-    Time(NaiveTime),
-    Timestamp(NaiveDateTime),
-    TimestampTz(DateTime<Utc>),
-    Uuid(Uuid),
-    Json(serde_json::Value),
-    Bytes(Vec<u8>),
-    Array(ArrayCellNonOptional),
-}
-
-impl TryFrom<Cell> for CellNonOptional {
-    type Error = EtlError;
-
-    fn try_from(cell: Cell) -> Result<Self, Self::Error> {
-        match cell {
-            Cell::Null => Ok(CellNonOptional::Null),
-            Cell::Bool(val) => Ok(CellNonOptional::Bool(val)),
-            Cell::String(val) => Ok(CellNonOptional::String(val)),
-            Cell::I16(val) => Ok(CellNonOptional::I16(val)),
-            Cell::I32(val) => Ok(CellNonOptional::I32(val)),
-            Cell::U32(val) => Ok(CellNonOptional::U32(val)),
-            Cell::I64(val) => Ok(CellNonOptional::I64(val)),
-            Cell::F32(val) => Ok(CellNonOptional::F32(val)),
-            Cell::F64(val) => Ok(CellNonOptional::F64(val)),
-            Cell::Numeric(val) => Ok(CellNonOptional::Numeric(val)),
-            Cell::Date(val) => Ok(CellNonOptional::Date(val)),
-            Cell::Time(val) => Ok(CellNonOptional::Time(val)),
-            Cell::Timestamp(val) => Ok(CellNonOptional::Timestamp(val)),
-            Cell::TimestampTz(val) => Ok(CellNonOptional::TimestampTz(val)),
-            Cell::Uuid(val) => Ok(CellNonOptional::Uuid(val)),
-            Cell::Json(val) => Ok(CellNonOptional::Json(val)),
-            Cell::Bytes(val) => Ok(CellNonOptional::Bytes(val)),
-            Cell::Array(array_cell) => {
-                let array_cell_non_optional = ArrayCellNonOptional::try_from(array_cell)?;
-                Ok(CellNonOptional::Array(array_cell_non_optional))
-            }
-        }
-    }
-}
-
-impl CellNonOptional {
-    /// Clears the cell value to its default state.
-    pub fn clear(&mut self) {
-        match self {
-            CellNonOptional::Null => {}
-            CellNonOptional::Bool(b) => *b = false,
-            CellNonOptional::String(s) => s.clear(),
-            CellNonOptional::I16(i) => *i = 0,
-            CellNonOptional::I32(i) => *i = 0,
-            CellNonOptional::I64(i) => *i = 0,
-            CellNonOptional::F32(i) => *i = 0.,
-            CellNonOptional::F64(i) => *i = 0.,
-            CellNonOptional::Numeric(n) => *n = PgNumeric::default(),
-            CellNonOptional::Date(t) => *t = NaiveDate::default(),
-            CellNonOptional::Time(t) => *t = NaiveTime::default(),
-            CellNonOptional::Timestamp(t) => *t = NaiveDateTime::default(),
-            CellNonOptional::TimestampTz(t) => *t = DateTime::<Utc>::default(),
-            CellNonOptional::Uuid(u) => *u = Uuid::default(),
-            CellNonOptional::Json(j) => *j = serde_json::Value::default(),
-            CellNonOptional::U32(u) => *u = 0,
-            CellNonOptional::Bytes(b) => b.clear(),
-            CellNonOptional::Array(vec) => {
-                vec.clear();
-            }
-        }
-    }
-}
-
-/// Represents array data with non-nullable elements.
-///
-/// [`ArrayCellNonOptional`] is the non-nullable counterpart to [`ArrayCell`].
-/// It is used for destinations that do not support NULL values within arrays.
-/// The conversion from [`ArrayCell`] will fail with
-/// [`ErrorKind::NullValuesNotSupportedInArrayInDestination`] if any element is
-/// NULL.
-///
-/// Each variant corresponds to a Postgres array type with guaranteed non-null
-/// elements.
-#[derive(Debug, PartialEq)]
-#[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
-pub enum ArrayCellNonOptional {
-    Bool(Vec<bool>),
-    String(Vec<String>),
-    I16(Vec<i16>),
-    I32(Vec<i32>),
-    U32(Vec<u32>),
-    I64(Vec<i64>),
-    F32(Vec<f32>),
-    F64(Vec<f64>),
-    Numeric(Vec<PgNumeric>),
-    Date(Vec<NaiveDate>),
-    Time(Vec<NaiveTime>),
-    Timestamp(Vec<NaiveDateTime>),
-    TimestampTz(Vec<DateTime<Utc>>),
-    Uuid(Vec<Uuid>),
-    Json(Vec<serde_json::Value>),
-    Bytes(Vec<Vec<u8>>),
-}
-
-impl TryFrom<ArrayCell> for ArrayCellNonOptional {
-    type Error = EtlError;
-
-    fn try_from(array_cell: ArrayCell) -> Result<Self, Self::Error> {
-        match array_cell {
-            ArrayCell::Bool(vec) => convert_array_variant!(Bool, vec),
-            ArrayCell::String(vec) => convert_array_variant!(String, vec),
-            ArrayCell::I16(vec) => convert_array_variant!(I16, vec),
-            ArrayCell::I32(vec) => convert_array_variant!(I32, vec),
-            ArrayCell::U32(vec) => convert_array_variant!(U32, vec),
-            ArrayCell::I64(vec) => convert_array_variant!(I64, vec),
-            ArrayCell::F32(vec) => convert_array_variant!(F32, vec),
-            ArrayCell::F64(vec) => convert_array_variant!(F64, vec),
-            ArrayCell::Numeric(vec) => convert_array_variant!(Numeric, vec),
-            ArrayCell::Date(vec) => convert_array_variant!(Date, vec),
-            ArrayCell::Time(vec) => convert_array_variant!(Time, vec),
-            ArrayCell::Timestamp(vec) => convert_array_variant!(Timestamp, vec),
-            ArrayCell::TimestampTz(vec) => convert_array_variant!(TimestampTz, vec),
-            ArrayCell::Uuid(vec) => convert_array_variant!(Uuid, vec),
-            ArrayCell::Json(vec) => convert_array_variant!(Json, vec),
-            ArrayCell::Bytes(vec) => convert_array_variant!(Bytes, vec),
-        }
-    }
-}
-
-impl ArrayCellNonOptional {
-    /// Clears all elements from the array while preserving the variant type.
-    fn clear(&mut self) {
-        match self {
-            ArrayCellNonOptional::Bool(vec) => vec.clear(),
-            ArrayCellNonOptional::String(vec) => vec.clear(),
-            ArrayCellNonOptional::I16(vec) => vec.clear(),
-            ArrayCellNonOptional::I32(vec) => vec.clear(),
-            ArrayCellNonOptional::U32(vec) => vec.clear(),
-            ArrayCellNonOptional::I64(vec) => vec.clear(),
-            ArrayCellNonOptional::F32(vec) => vec.clear(),
-            ArrayCellNonOptional::F64(vec) => vec.clear(),
-            ArrayCellNonOptional::Numeric(vec) => vec.clear(),
-            ArrayCellNonOptional::Date(vec) => vec.clear(),
-            ArrayCellNonOptional::Time(vec) => vec.clear(),
-            ArrayCellNonOptional::Timestamp(vec) => vec.clear(),
-            ArrayCellNonOptional::TimestampTz(vec) => vec.clear(),
-            ArrayCellNonOptional::Uuid(vec) => vec.clear(),
-            ArrayCellNonOptional::Json(vec) => vec.clear(),
-            ArrayCellNonOptional::Bytes(vec) => vec.clear(),
         }
     }
 }
@@ -344,63 +142,6 @@ impl ArrayCellNonOptional {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn cell_try_from_to_cell_non_optional() {
-        // Test successful conversions
-        let cell = Cell::I32(42);
-        let non_opt = CellNonOptional::try_from(cell).unwrap();
-        assert_eq!(non_opt, CellNonOptional::I32(42));
-
-        let cell = Cell::String("test".to_owned());
-        let non_opt = CellNonOptional::try_from(cell).unwrap();
-        assert_eq!(non_opt, CellNonOptional::String("test".to_owned()));
-
-        let cell = Cell::Null;
-        let non_opt = CellNonOptional::try_from(cell).unwrap();
-        assert_eq!(non_opt, CellNonOptional::Null);
-    }
-
-    #[test]
-    fn cell_try_from_array_conversion() {
-        let array_cell = ArrayCell::I32(vec![Some(1), Some(2), Some(3)]);
-        let cell = Cell::Array(array_cell);
-
-        let non_opt = CellNonOptional::try_from(cell).unwrap();
-        if let CellNonOptional::Array(ArrayCellNonOptional::I32(vec)) = non_opt {
-            assert_eq!(vec, vec![1, 2, 3]);
-        } else {
-            panic!("Expected non-optional i32 array");
-        }
-    }
-
-    #[test]
-    fn array_cell_try_from_with_nulls() {
-        let array_cell =
-            ArrayCell::String(vec![Some("test".to_owned()), None, Some("hello".to_owned())]);
-
-        let result = ArrayCellNonOptional::try_from(array_cell);
-        assert!(result.is_err());
-
-        let error = result.unwrap_err();
-        assert!(
-            error.to_string().contains("NULL values in arrays not supported in this destination")
-        );
-        assert!(!error.to_string().contains("test"));
-        assert!(!error.to_string().contains("hello"));
-    }
-
-    #[test]
-    fn array_cell_try_from_without_nulls() {
-        let array_cell = ArrayCell::I32(vec![Some(1), Some(2), Some(3)]);
-
-        let result = ArrayCellNonOptional::try_from(array_cell).unwrap();
-        if let ArrayCellNonOptional::I32(vec) = result {
-            assert_eq!(vec, vec![1, 2, 3]);
-        } else {
-            panic!("Expected i32 array");
-        }
-    }
 
     #[test]
     fn cell_types_equality() {
@@ -424,30 +165,5 @@ mod tests {
         let array_cell = Cell::Array(ArrayCell::I32(vec![Some(1), None, Some(3)]));
         let cloned_array = array_cell.clone();
         assert_eq!(array_cell, cloned_array);
-    }
-
-    #[test]
-    fn complex_array_conversions() {
-        // Test complex array type conversions
-        let mixed_types = vec![
-            ArrayCell::Bool(vec![Some(true), Some(false)]),
-            ArrayCell::String(vec![Some("hello".to_owned()), Some("world".to_owned())]),
-            ArrayCell::I32(vec![Some(1), Some(2), Some(3)]),
-        ];
-
-        for array_cell in mixed_types {
-            let cell = Cell::Array(array_cell);
-
-            // Test that we can convert to CellNonOptional if no nulls are present
-            let non_opt_result = CellNonOptional::try_from(cell);
-
-            // Some will succeed (Bool, String, I32 without nulls, Null)
-            // Others may fail if they contain nulls
-            if let Ok(non_opt) = non_opt_result {
-                // Test that clear works on the result
-                let mut non_opt_clone = non_opt.clone();
-                non_opt_clone.clear();
-            }
-        }
     }
 }

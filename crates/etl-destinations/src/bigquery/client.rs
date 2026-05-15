@@ -1413,12 +1413,11 @@ impl BigQueryClient {
         let mut number = 1;
 
         for column_schema in replicated_table_schema.column_schemas() {
-            let typ = Self::postgres_to_bigquery_storage_write_type(
-                &column_schema.typ,
-                type_compatibility,
-            )?;
+            let compatible_type =
+                BigQueryCompatibility::compatible_type(&column_schema.typ, type_compatibility)?;
+            let typ = Self::bigquery_storage_write_type(&compatible_type);
 
-            let mode = if is_array_type(&column_schema.typ) {
+            let mode = if is_array_type(&compatible_type) {
                 ColumnMode::Repeated
             } else if use_cdc_sequence_column {
                 // CDC delete rows can omit non-key columns, so the writer
@@ -1460,14 +1459,9 @@ impl BigQueryClient {
         Ok(TableDescriptor { field_descriptors })
     }
 
-    /// Converts Postgres data types to BigQuery Storage Write API types.
-    fn postgres_to_bigquery_storage_write_type(
-        typ: &Type,
-        type_compatibility: DestinationTypeCompatibility,
-    ) -> EtlResult<ColumnType> {
-        let typ = BigQueryCompatibility::compatible_type(typ, type_compatibility)?;
-
-        let column_type = match typ {
+    /// Converts a destination-compatible type to a Storage Write API type.
+    fn bigquery_storage_write_type(typ: &Type) -> ColumnType {
+        match *typ {
             Type::BOOL => ColumnType::Bool,
             Type::CHAR | Type::BPCHAR | Type::VARCHAR | Type::NAME | Type::TEXT => {
                 ColumnType::String
@@ -1511,9 +1505,7 @@ impl BigQueryClient {
             Type::OID_ARRAY => ColumnType::Int64,
             Type::BYTEA_ARRAY => ColumnType::Bytes,
             _ => ColumnType::String,
-        };
-
-        Ok(column_type)
+        }
     }
 }
 
@@ -1621,42 +1613,21 @@ mod tests {
 
     #[test]
     fn postgres_to_bigquery_type_array_types() {
-        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::BOOL_ARRAY), "array<bool>");
-        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::TEXT_ARRAY), "array<string>");
-        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::INT2_ARRAY), "array<int64>");
-        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::INT4_ARRAY), "array<int64>");
-        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::INT8_ARRAY), "array<int64>");
-        assert_eq!(
-            BigQueryClient::postgres_to_bigquery_type(&Type::FLOAT4_ARRAY),
-            "array<float64>"
-        );
-        assert_eq!(
-            BigQueryClient::postgres_to_bigquery_type(&Type::FLOAT8_ARRAY),
-            "array<float64>"
-        );
-        assert_eq!(
-            BigQueryClient::postgres_to_bigquery_type(&Type::NUMERIC_ARRAY),
-            "array<bignumeric>"
-        );
-        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::MONEY_ARRAY), "array<string>");
-        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::OID_ARRAY), "array<int64>");
-        assert_eq!(
-            BigQueryClient::postgres_to_bigquery_type(&Type::TIMESTAMP_ARRAY),
-            "array<datetime>"
-        );
-        assert_eq!(
-            BigQueryClient::postgres_to_bigquery_type(&Type::TIMESTAMPTZ_ARRAY),
-            "array<timestamp>"
-        );
-        assert_eq!(
-            BigQueryClient::postgres_to_bigquery_type(&Type::INTERVAL_ARRAY),
-            "array<string>"
-        );
-        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::INET_ARRAY), "array<string>");
-        assert_eq!(
-            BigQueryClient::postgres_to_bigquery_type(&Type::INT4_RANGE_ARRAY),
-            "array<string>"
-        );
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::BOOL_ARRAY), "string");
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::TEXT_ARRAY), "string");
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::INT2_ARRAY), "string");
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::INT4_ARRAY), "string");
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::INT8_ARRAY), "string");
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::FLOAT4_ARRAY), "string");
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::FLOAT8_ARRAY), "string");
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::NUMERIC_ARRAY), "string");
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::MONEY_ARRAY), "string");
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::OID_ARRAY), "string");
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::TIMESTAMP_ARRAY), "string");
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::TIMESTAMPTZ_ARRAY), "string");
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::INTERVAL_ARRAY), "string");
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::INET_ARRAY), "string");
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::INT4_RANGE_ARRAY), "string");
     }
 
     #[test]
@@ -1672,11 +1643,11 @@ mod tests {
         );
         assert_eq!(
             bigquery_type_with_compatibility(&Type::NUMERIC_ARRAY, type_compatibility),
-            "array<string>"
+            "string"
         );
         assert_eq!(
             bigquery_type_with_compatibility(&Type::JSON_ARRAY, type_compatibility),
-            "array<string>"
+            "string"
         );
         assert_eq!(bigquery_type_with_compatibility(&Type::INT8, type_compatibility), "int64");
     }
@@ -1711,7 +1682,7 @@ mod tests {
         assert_eq!(bigquery_type_with_compatibility(&Type::UUID, type_compatibility), "string");
         assert_eq!(
             bigquery_type_with_compatibility(&Type::INTERVAL_ARRAY, type_compatibility),
-            "array<string>"
+            "string"
         );
         assert_eq!(bigquery_type_with_compatibility(&Type::JSON, type_compatibility), "json");
     }
@@ -1751,7 +1722,7 @@ mod tests {
             DestinationTypeCompatibility::lossless(),
         )
         .expect("json array column spec");
-        assert_eq!(json_array_spec, "`payloads` array<string>");
+        assert_eq!(json_array_spec, "`payloads` string");
 
         let timestamp_column = test_column("created_at", Type::TIMESTAMPTZ, 3, true, None);
         let timestamp_spec = BigQueryClient::column_spec(
@@ -1935,6 +1906,23 @@ mod tests {
         assert!(matches!(descriptor.field_descriptors[0].mode, ColumnMode::Required));
         assert!(matches!(descriptor.field_descriptors[1].mode, ColumnMode::Nullable));
         assert_eq!(descriptor.field_descriptors.len(), 3);
+    }
+
+    #[test]
+    fn column_schemas_to_table_descriptor_uses_compatible_array_mode() {
+        let columns = vec![test_column("values", Type::INT4_ARRAY, 1, true, None)];
+        let schema = test_replicated_schema(columns);
+
+        let descriptor = BigQueryClient::column_schemas_to_table_descriptor(
+            &schema,
+            true,
+            DestinationTypeCompatibility::lossy(),
+        )
+        .expect("table descriptor");
+
+        assert_eq!(descriptor.field_descriptors[0].name, "values");
+        assert!(matches!(descriptor.field_descriptors[0].typ, ColumnType::String));
+        assert!(matches!(descriptor.field_descriptors[0].mode, ColumnMode::Nullable));
     }
 
     #[test]

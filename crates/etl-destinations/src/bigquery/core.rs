@@ -19,7 +19,7 @@ use etl::{
     store::{schema::SchemaStore, state::StateStore},
     types::{
         Cell, Event, EventSequenceKey, IdentityType, OldTableRow, PipelineId,
-        ReplicatedTableSchema, SchemaDiff, TableId, TableName, TableRow, UpdatedTableRow,
+        ReplicatedTableSchema, SchemaDiff, TableId, TableName, TableRow, Type, UpdatedTableRow,
     },
 };
 use gcp_bigquery_client::storage::{MAX_BATCH_SIZE_BYTES, TableDescriptor};
@@ -532,10 +532,7 @@ where
         let table_rows = table_rows
             .into_iter()
             .map(|table_row| {
-                BigQueryTableRow::try_from_with_type_compatibility(
-                    table_row,
-                    self.type_compatibility,
-                )
+                bigquery_table_row(replicated_table_schema, table_row, self.type_compatibility)
             })
             .collect::<EtlResult<Vec<BigQueryTableRow>>>()?;
 
@@ -827,7 +824,8 @@ where
                         let entry = table_id_to_data.entry(table_id).or_insert_with(|| {
                             (insert.replicated_table_schema.clone(), Vec::new())
                         });
-                        entry.1.push(BigQueryTableRow::try_from_with_type_compatibility(
+                        entry.1.push(bigquery_table_row(
+                            &insert.replicated_table_schema,
                             insert.table_row,
                             self.type_compatibility,
                         )?);
@@ -1224,8 +1222,54 @@ fn bigquery_sequence_key(sequence_key: EventSequenceKey, internal_ordinal: u64) 
     format!("{sequence_key}/{internal_ordinal:016x}")
 }
 
+/// Builds a typed BigQuery row from a full source row plus destination metadata
+/// cells.
+fn bigquery_table_row(
+    replicated_table_schema: &ReplicatedTableSchema,
+    table_row: TableRow,
+    type_compatibility: DestinationTypeCompatibility,
+) -> EtlResult<BigQueryTableRow> {
+    let source_column_count = replicated_table_schema.column_schemas().len();
+    let values = table_row.into_values();
+    if values.len() < source_column_count {
+        bail!(
+            ErrorKind::InvalidState,
+            "BigQuery row has fewer cells than the replicated schema",
+            format!(
+                "Expected at least {} values for table '{}', got {}",
+                source_column_count,
+                replicated_table_schema.name(),
+                values.len()
+            )
+        );
+    }
+
+    let mut tagged_cells = Vec::with_capacity(values.len());
+    let mut values = values.into_iter();
+    for (index, column_schema) in replicated_table_schema.column_schemas().enumerate() {
+        let Some(value) = values.next() else {
+            bail!(
+                ErrorKind::InvalidState,
+                "BigQuery row ended before all source columns were read",
+                format!("Table '{}' row shape is inconsistent", replicated_table_schema.name())
+            );
+        };
+        tagged_cells.push((index + 1, Some(&column_schema.typ), value));
+    }
+
+    for (offset, value) in values.enumerate() {
+        tagged_cells.push((source_column_count + offset + 1, None::<&Type>, value));
+    }
+
+    BigQueryTableRow::try_from_typed_tagged_cells_with_type_compatibility(
+        tagged_cells,
+        type_compatibility,
+    )
+}
+
 /// Builds a BigQuery CDC upsert row.
 fn bigquery_upsert_row(
+    replicated_table_schema: &ReplicatedTableSchema,
     mut table_row: TableRow,
     sequence_key: String,
     type_compatibility: DestinationTypeCompatibility,
@@ -1233,7 +1277,7 @@ fn bigquery_upsert_row(
     table_row.values_mut().push(BigQueryOperationType::Upsert.into_cell());
     table_row.values_mut().push(Cell::String(sequence_key));
 
-    BigQueryTableRow::try_from_with_type_compatibility(table_row, type_compatibility)
+    bigquery_table_row(replicated_table_schema, table_row, type_compatibility)
 }
 
 /// Builds one or two BigQuery CDC rows for an update.
@@ -1285,6 +1329,7 @@ fn bigquery_update_rows(
         BIGQUERY_SEQUENCE_ORDINAL_FIRST
     };
     rows.push(bigquery_upsert_row(
+        replicated_table_schema,
         new_table_row,
         bigquery_sequence_key(sequence_key, upsert_ordinal),
         type_compatibility,
@@ -1398,7 +1443,7 @@ fn bigquery_primary_key_changed(
 fn bigquery_primary_key_tagged_cells_from_old_row(
     replicated_table_schema: &ReplicatedTableSchema,
     old_table_row: OldTableRow,
-) -> EtlResult<Vec<(usize, Cell)>> {
+) -> EtlResult<Vec<(usize, Option<&Type>, Cell)>> {
     match old_table_row {
         OldTableRow::Full(row) => {
             let column_count = replicated_table_schema.column_schemas().len();
@@ -1422,7 +1467,7 @@ fn bigquery_primary_key_tagged_cells_from_old_row(
                 replicated_table_schema.column_schemas().zip(row.into_values()).enumerate()
             {
                 if column_schema.primary_key() {
-                    tagged_cells.push((column_index + 1, value));
+                    tagged_cells.push((column_index + 1, Some(&column_schema.typ), value));
                 }
             }
 
@@ -1480,7 +1525,7 @@ fn bigquery_primary_key_tagged_cells_from_old_row(
                         );
                     };
 
-                    tagged_cells.push((column_index + 1, value));
+                    tagged_cells.push((column_index + 1, Some(&column_schema.typ), value));
                 }
             }
 
@@ -1510,10 +1555,14 @@ fn bigquery_delete_row(
     let source_column_count = replicated_table_schema.column_schemas().len();
     let mut tagged_cells =
         bigquery_primary_key_tagged_cells_from_old_row(replicated_table_schema, old_table_row)?;
-    tagged_cells.push((source_column_count + 1, BigQueryOperationType::Delete.into_cell()));
-    tagged_cells.push((source_column_count + 2, Cell::String(sequence_key)));
+    tagged_cells.push((
+        source_column_count + 1,
+        None::<&Type>,
+        BigQueryOperationType::Delete.into_cell(),
+    ));
+    tagged_cells.push((source_column_count + 2, None::<&Type>, Cell::String(sequence_key)));
 
-    BigQueryTableRow::try_from_tagged_cells_with_type_compatibility(
+    BigQueryTableRow::try_from_typed_tagged_cells_with_type_compatibility(
         tagged_cells,
         type_compatibility,
     )
@@ -1601,6 +1650,7 @@ mod tests {
     use prost::Message;
 
     use super::*;
+    use crate::bigquery::value::BigQueryCell;
 
     fn replicated_schema(identity_type: IdentityType) -> ReplicatedTableSchema {
         let table_schema = Arc::new(TableSchema::new(
@@ -2114,9 +2164,9 @@ mod tests {
         assert_eq!(
             row.debug_cells(),
             vec![
-                (1, Cell::I32(42)),
-                (4, Cell::String("DELETE".to_owned())),
-                (5, Cell::String("lsn:1".to_owned())),
+                (1, BigQueryCell::Int32(42)),
+                (4, BigQueryCell::String("DELETE".to_owned())),
+                (5, BigQueryCell::String("lsn:1".to_owned())),
             ]
         );
     }
@@ -2139,18 +2189,28 @@ mod tests {
         assert_eq!(
             rows[0].debug_cells(),
             vec![
-                (1, Cell::I32(1)),
-                (3, Cell::String("DELETE".to_owned())),
-                (4, Cell::String("0000000000000001/0000000000000000/0000000000000000".to_owned(),),),
+                (1, BigQueryCell::Int32(1)),
+                (3, BigQueryCell::String("DELETE".to_owned())),
+                (
+                    4,
+                    BigQueryCell::String(
+                        "0000000000000001/0000000000000000/0000000000000000".to_owned(),
+                    ),
+                ),
             ]
         );
         assert_eq!(
             rows[1].debug_cells(),
             vec![
-                (1, Cell::I32(2)),
-                (2, Cell::String("updated".to_owned())),
-                (3, Cell::String("UPSERT".to_owned())),
-                (4, Cell::String("0000000000000001/0000000000000000/0000000000000001".to_owned(),),),
+                (1, BigQueryCell::Int32(2)),
+                (2, BigQueryCell::String("updated".to_owned())),
+                (3, BigQueryCell::String("UPSERT".to_owned())),
+                (
+                    4,
+                    BigQueryCell::String(
+                        "0000000000000001/0000000000000000/0000000000000001".to_owned(),
+                    ),
+                ),
             ]
         );
     }
@@ -2173,10 +2233,15 @@ mod tests {
         assert_eq!(
             rows[0].debug_cells(),
             vec![
-                (1, Cell::I32(1)),
-                (2, Cell::String("updated".to_owned())),
-                (3, Cell::String("UPSERT".to_owned())),
-                (4, Cell::String("0000000000000001/0000000000000000/0000000000000000".to_owned(),),),
+                (1, BigQueryCell::Int32(1)),
+                (2, BigQueryCell::String("updated".to_owned())),
+                (3, BigQueryCell::String("UPSERT".to_owned())),
+                (
+                    4,
+                    BigQueryCell::String(
+                        "0000000000000001/0000000000000000/0000000000000000".to_owned(),
+                    ),
+                ),
             ]
         );
     }
@@ -2202,18 +2267,28 @@ mod tests {
         assert_eq!(
             rows[0].debug_cells(),
             vec![
-                (1, Cell::I32(1)),
-                (3, Cell::String("DELETE".to_owned())),
-                (4, Cell::String("0000000000000001/0000000000000000/0000000000000000".to_owned(),),),
+                (1, BigQueryCell::Int32(1)),
+                (3, BigQueryCell::String("DELETE".to_owned())),
+                (
+                    4,
+                    BigQueryCell::String(
+                        "0000000000000001/0000000000000000/0000000000000000".to_owned(),
+                    ),
+                ),
             ]
         );
         assert_eq!(
             rows[1].debug_cells(),
             vec![
-                (1, Cell::I32(2)),
-                (2, Cell::String("updated".to_owned())),
-                (3, Cell::String("UPSERT".to_owned())),
-                (4, Cell::String("0000000000000001/0000000000000000/0000000000000001".to_owned(),),),
+                (1, BigQueryCell::Int32(2)),
+                (2, BigQueryCell::String("updated".to_owned())),
+                (3, BigQueryCell::String("UPSERT".to_owned())),
+                (
+                    4,
+                    BigQueryCell::String(
+                        "0000000000000001/0000000000000000/0000000000000001".to_owned(),
+                    ),
+                ),
             ]
         );
     }

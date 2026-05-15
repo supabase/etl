@@ -79,38 +79,53 @@ pub(crate) fn parse_cell_from_postgres_text(typ: &Type, str: &str) -> EtlResult<
             ArrayCell::Bytes,
         ),
         Type::DATE => {
-            let val = NaiveDate::parse_from_str(str, DATE_FORMAT)?;
-            Ok(Cell::Date(val))
+            let value =
+                parse_temporal_or_raw(str, |value| NaiveDate::parse_from_str(value, DATE_FORMAT))?;
+            Ok(value.map_or_else(|| Cell::String(str.to_owned()), Cell::Date))
         }
         Type::DATE_ARRAY => parse_cell_from_postgres_text_array(
             str,
             |str| Ok(Some(NaiveDate::parse_from_str(str, DATE_FORMAT)?)),
             ArrayCell::Date,
-        ),
+        )
+        .or_else(|_| parse_text_array(str)),
         Type::TIME => {
-            let val = NaiveTime::parse_from_str(str, TIME_FORMAT)?;
-            Ok(Cell::Time(val))
+            let value =
+                parse_temporal_or_raw(str, |value| NaiveTime::parse_from_str(value, TIME_FORMAT))?;
+            Ok(value.map_or_else(|| Cell::String(str.to_owned()), Cell::Time))
         }
         Type::TIME_ARRAY => parse_cell_from_postgres_text_array(
             str,
             |str| Ok(Some(NaiveTime::parse_from_str(str, TIME_FORMAT)?)),
             ArrayCell::Time,
-        ),
+        )
+        .or_else(|_| parse_text_array(str)),
         Type::TIMESTAMP => {
-            let val = NaiveDateTime::parse_from_str(str, TIMESTAMP_FORMAT)?;
-            Ok(Cell::Timestamp(val))
+            let value = parse_temporal_or_raw(str, |value| {
+                NaiveDateTime::parse_from_str(value, TIMESTAMP_FORMAT)
+            })?;
+            Ok(value.map_or_else(|| Cell::String(str.to_owned()), Cell::Timestamp))
         }
         Type::TIMESTAMP_ARRAY => parse_cell_from_postgres_text_array(
             str,
             |str| Ok(Some(NaiveDateTime::parse_from_str(str, TIMESTAMP_FORMAT)?)),
             ArrayCell::Timestamp,
-        ),
+        )
+        .or_else(|_| parse_text_array(str)),
         Type::TIMESTAMPTZ => {
             // PostgreSQL can render UTC offsets either as `+00` or `+00:00`,
             // so we accept both text formats here.
             let val = match DateTime::<FixedOffset>::parse_from_str(str, TIMESTAMPTZ_FORMAT_HHMM) {
                 Ok(val) => val,
-                Err(_) => DateTime::<FixedOffset>::parse_from_str(str, TIMESTAMPTZ_FORMAT_HH_MM)?,
+                Err(_) => {
+                    match DateTime::<FixedOffset>::parse_from_str(str, TIMESTAMPTZ_FORMAT_HH_MM) {
+                        Ok(val) => val,
+                        Err(error) if may_be_postgres_temporal_outside_rust_domain(str) => {
+                            return Ok(Cell::String(str.to_owned()));
+                        }
+                        Err(error) => return Err(error.into()),
+                    }
+                }
             };
             Ok(Cell::TimestampTz(val.into()))
         }
@@ -135,7 +150,8 @@ pub(crate) fn parse_cell_from_postgres_text(typ: &Type, str: &str) -> EtlResult<
                         ))
                     },
                     ArrayCell::TimestampTz,
-                ),
+                )
+                .or_else(|_| parse_text_array(str)),
             }
         }
         Type::UUID => {
@@ -148,13 +164,16 @@ pub(crate) fn parse_cell_from_postgres_text(typ: &Type, str: &str) -> EtlResult<
             ArrayCell::Uuid,
         ),
         Type::JSON | Type::JSONB => {
-            let val = serde_json::from_str(str)?;
-            Ok(Cell::Json(val))
+            let _: serde_json::Value = serde_json::from_str(str)?;
+            Ok(Cell::String(str.to_owned()))
         }
         Type::JSON_ARRAY | Type::JSONB_ARRAY => parse_cell_from_postgres_text_array(
             str,
-            |str| Ok(Some(serde_json::from_str(str)?)),
-            ArrayCell::Json,
+            |str| {
+                let _: serde_json::Value = serde_json::from_str(str)?;
+                Ok(Some(str.to_owned()))
+            },
+            ArrayCell::String,
         ),
         Type::OID => {
             let val: u32 = str.parse()?;
@@ -246,6 +265,36 @@ where
     }
 
     Ok(Cell::Array(m(res)))
+}
+
+/// Parses a text array preserving element text.
+fn parse_text_array(str: &str) -> EtlResult<Cell> {
+    parse_cell_from_postgres_text_array(str, |str| Ok(Some(str.to_owned())), ArrayCell::String)
+}
+
+/// Parses a temporal value or preserves valid PostgreSQL temporal text that
+/// does not fit Rust's temporal domain.
+fn parse_temporal_or_raw<T, E>(
+    value: &str,
+    parse: impl FnOnce(&str) -> Result<T, E>,
+) -> Result<Option<T>, E> {
+    match parse(value) {
+        Ok(value) => Ok(Some(value)),
+        Err(error) if may_be_postgres_temporal_outside_rust_domain(value) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// Returns whether a temporal text value can be valid PostgreSQL while not
+/// fitting Rust's temporal parser.
+fn may_be_postgres_temporal_outside_rust_domain(value: &str) -> bool {
+    matches!(value, "infinity" | "-infinity")
+        || value.starts_with("24:")
+        || value.ends_with(" BC")
+        || value
+            .split_once('-')
+            .and_then(|(year, _)| year.parse::<i32>().ok())
+            .is_some_and(|year| !(1..=9999).contains(&year))
 }
 
 #[cfg(test)]
@@ -608,15 +657,14 @@ mod tests {
     fn try_from_str_json() {
         let json_str = r#"{"key": "value", "number": 42}"#;
         let cell = parse_cell_from_postgres_text(&Type::JSON, json_str).unwrap();
-        if let Cell::Json(json) = cell {
-            assert_eq!(json["key"], "value");
-            assert_eq!(json["number"], 42);
+        if let Cell::String(json) = cell {
+            assert_eq!(json, json_str);
         } else {
-            panic!("Expected Json cell");
+            panic!("Expected string cell");
         }
 
         let cell = parse_cell_from_postgres_text(&Type::JSONB, json_str).unwrap();
-        assert!(matches!(cell, Cell::Json(_)));
+        assert_eq!(cell, Cell::String(json_str.to_owned()));
 
         assert!(parse_cell_from_postgres_text(&Type::JSON, "invalid json").is_err());
     }
@@ -625,14 +673,14 @@ mod tests {
     fn try_from_str_json_accepts_wide_number_literals() {
         let json_str = r#"{"value":1e309}"#;
         let cell = parse_cell_from_postgres_text(&Type::JSON, json_str).unwrap();
-        if let Cell::Json(json) = cell {
-            assert_eq!(json.to_string(), r#"{"value":1e+309}"#);
+        if let Cell::String(json) = cell {
+            assert_eq!(json, json_str);
         } else {
-            panic!("Expected Json cell");
+            panic!("Expected string cell");
         }
 
         let cell = parse_cell_from_postgres_text(&Type::JSONB, json_str).unwrap();
-        assert!(matches!(cell, Cell::Json(_)));
+        assert_eq!(cell, Cell::String(json_str.to_owned()));
     }
 
     #[test]

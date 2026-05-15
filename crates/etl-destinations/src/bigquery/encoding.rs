@@ -1,21 +1,21 @@
 use etl::{
     compatibility::DestinationTypeCompatibility,
     error::EtlError,
-    types::{
-        ArrayCell, Cell, DATE_FORMAT, TIME_FORMAT, TIMESTAMP_FORMAT, TIMESTAMPTZ_FORMAT_HH_MM,
-        TableRow,
-    },
+    types::{Cell, TableRow, Type},
 };
 use prost::bytes;
 
-use crate::bigquery::compatibility::BigQueryCompatibility;
+use crate::bigquery::{
+    compatibility::BigQueryCompatibility,
+    value::{BigQueryArrayCell, BigQueryCell},
+};
 
 /// Protocol buffer wrapper for a BigQuery table row.
 ///
 /// Compatibility conversion happens before this wrapper is built, so encoding
 /// can assume array elements are valid for BigQuery.
 #[derive(Debug)]
-pub(super) struct BigQueryTableRow(Vec<(u32, Cell)>);
+pub(super) struct BigQueryTableRow(Vec<(u32, BigQueryCell)>);
 
 impl TryFrom<TableRow> for BigQueryTableRow {
     type Error = EtlError;
@@ -37,27 +37,27 @@ impl BigQueryTableRow {
         type_compatibility: DestinationTypeCompatibility,
     ) -> Result<Self, EtlError> {
         let checker = BigQueryCompatibility::checker(type_compatibility);
-        let value = checker.get_compatible_table_row(value)?;
-        let cells = value
-            .into_values()
+        let cells = checker
+            .get_compatible_cells(value.into_values())?
             .into_iter()
             .enumerate()
-            .map(|(index, cell)| ((index + 1) as u32, cell))
+            .map(|(index, cell)| ((index + 1) as u32, cell.into_cell()))
             .collect();
 
         Ok(BigQueryTableRow(cells))
     }
 
-    /// Converts tagged cells into a BigQuery row with a compatibility policy.
-    pub(super) fn try_from_tagged_cells_with_type_compatibility(
-        tagged_cells: impl IntoIterator<Item = (usize, Cell)>,
+    /// Converts typed tagged cells into a BigQuery row with a compatibility
+    /// policy.
+    pub(super) fn try_from_typed_tagged_cells_with_type_compatibility<'a>(
+        tagged_cells: impl IntoIterator<Item = (usize, Option<&'a Type>, Cell)>,
         type_compatibility: DestinationTypeCompatibility,
     ) -> Result<Self, EtlError> {
         let checker = BigQueryCompatibility::checker(type_compatibility);
         let cells = checker
-            .get_compatible_tagged_cells(tagged_cells)?
+            .get_compatible_cells(tagged_cells)?
             .into_iter()
-            .map(|(index, cell)| (index as u32, cell))
+            .map(|(index, _, cell)| (index as u32, cell.into_cell()))
             .collect();
 
         Ok(BigQueryTableRow(cells))
@@ -65,7 +65,7 @@ impl BigQueryTableRow {
 
     /// Returns the tagged cells for assertions in tests.
     #[cfg(test)]
-    pub(super) fn debug_cells(&self) -> &[(u32, Cell)] {
+    pub(super) fn debug_cells(&self) -> &[(u32, BigQueryCell)] {
         &self.0
     }
 }
@@ -123,323 +123,80 @@ impl prost::Message for BigQueryTableRow {
     }
 }
 
-/// Encodes a single [`Cell`] into Protocol Buffer format using the specified
-/// tag.
-///
-/// Each cell type is encoded using the appropriate prost encoding method.
-/// Temporal types and UUIDs are formatted as strings, while numeric types use
-/// their native encoding. Null cells produce no encoded output.
-fn cell_encode_prost(cell: &Cell, tag: u32, buf: &mut impl bytes::BufMut) {
+/// Encodes a single [`BigQueryCell`] into Protocol Buffer format.
+fn cell_encode_prost(cell: &BigQueryCell, tag: u32, buf: &mut impl bytes::BufMut) {
     match cell {
-        Cell::Null => {}
-        Cell::Bool(b) => {
-            prost::encoding::bool::encode(tag, b, buf);
-        }
-        Cell::String(s) => {
-            prost::encoding::string::encode(tag, s, buf);
-        }
-        Cell::I16(i) => {
-            let val = *i as i32;
-            prost::encoding::int32::encode(tag, &val, buf);
-        }
-        Cell::I32(i) => {
-            prost::encoding::int32::encode(tag, i, buf);
-        }
-        Cell::I64(i) => {
-            prost::encoding::int64::encode(tag, i, buf);
-        }
-        Cell::F32(i) => {
-            prost::encoding::float::encode(tag, i, buf);
-        }
-        Cell::F64(i) => {
-            prost::encoding::double::encode(tag, i, buf);
-        }
-        Cell::Numeric(n) => {
-            let s = n.to_string();
-            prost::encoding::string::encode(tag, &s, buf);
-        }
-        Cell::Date(t) => {
-            let s = t.format(DATE_FORMAT).to_string();
-            prost::encoding::string::encode(tag, &s, buf);
-        }
-        Cell::Time(t) => {
-            let s = t.format(TIME_FORMAT).to_string();
-            prost::encoding::string::encode(tag, &s, buf);
-        }
-        Cell::Timestamp(t) => {
-            let s = t.format(TIMESTAMP_FORMAT).to_string();
-            prost::encoding::string::encode(tag, &s, buf);
-        }
-        Cell::TimestampTz(t) => {
-            let s = t.format(TIMESTAMPTZ_FORMAT_HH_MM).to_string();
-            prost::encoding::string::encode(tag, &s, buf);
-        }
-        Cell::Uuid(u) => {
-            let s = u.to_string();
-            prost::encoding::string::encode(tag, &s, buf);
-        }
-        Cell::Json(j) => {
-            let s = j.to_string();
-            prost::encoding::string::encode(tag, &s, buf);
-        }
-        Cell::U32(i) => {
-            let val = i64::from(*i);
-            prost::encoding::int64::encode(tag, &val, buf);
-        }
-        Cell::Bytes(b) => {
-            prost::encoding::bytes::encode(tag, b, buf);
-        }
-        Cell::Array(a) => {
-            array_cell_encode_prost(a, tag, buf);
-        }
+        BigQueryCell::Null => {}
+        BigQueryCell::Bool(value) => prost::encoding::bool::encode(tag, value, buf),
+        BigQueryCell::String(value) => prost::encoding::string::encode(tag, value, buf),
+        BigQueryCell::Int32(value) => prost::encoding::int32::encode(tag, value, buf),
+        BigQueryCell::Int64(value) => prost::encoding::int64::encode(tag, value, buf),
+        BigQueryCell::Float32(value) => prost::encoding::float::encode(tag, value, buf),
+        BigQueryCell::Float64(value) => prost::encoding::double::encode(tag, value, buf),
+        BigQueryCell::Bytes(value) => prost::encoding::bytes::encode(tag, value, buf),
+        BigQueryCell::Array(value) => array_cell_encode_prost(value, tag, buf),
     }
 }
 
-/// Calculates the encoded length in bytes for a single [`Cell`] with the
-/// specified tag.
-///
-/// Returns the number of bytes that would be produced when encoding this cell
-/// in Protocol Buffer format. Null cells return zero length, while other types
-/// calculate their encoded size using the corresponding prost length functions.
-fn cell_encode_len_prost(cell: &Cell, tag: u32) -> usize {
+/// Calculates the encoded length for a single [`BigQueryCell`].
+fn cell_encode_len_prost(cell: &BigQueryCell, tag: u32) -> usize {
     match cell {
-        Cell::Null => 0,
-        Cell::Bool(b) => prost::encoding::bool::encoded_len(tag, b),
-        Cell::String(s) => prost::encoding::string::encoded_len(tag, s),
-        Cell::I16(i) => {
-            let val = *i as i32;
-            prost::encoding::int32::encoded_len(tag, &val)
-        }
-        Cell::I32(i) => prost::encoding::int32::encoded_len(tag, i),
-        Cell::I64(i) => prost::encoding::int64::encoded_len(tag, i),
-        Cell::F32(i) => prost::encoding::float::encoded_len(tag, i),
-        Cell::F64(i) => prost::encoding::double::encoded_len(tag, i),
-        Cell::Numeric(n) => {
-            let s = n.to_string();
-            prost::encoding::string::encoded_len(tag, &s)
-        }
-        Cell::Date(t) => {
-            let s = t.format(DATE_FORMAT).to_string();
-            prost::encoding::string::encoded_len(tag, &s)
-        }
-        Cell::Time(t) => {
-            let s = t.format(TIME_FORMAT).to_string();
-            prost::encoding::string::encoded_len(tag, &s)
-        }
-        Cell::Timestamp(t) => {
-            let s = t.format(TIMESTAMP_FORMAT).to_string();
-            prost::encoding::string::encoded_len(tag, &s)
-        }
-        Cell::TimestampTz(t) => {
-            let s = t.format(TIMESTAMPTZ_FORMAT_HH_MM).to_string();
-            prost::encoding::string::encoded_len(tag, &s)
-        }
-        Cell::Uuid(u) => {
-            let s = u.to_string();
-            prost::encoding::string::encoded_len(tag, &s)
-        }
-        Cell::Json(j) => {
-            let s = j.to_string();
-            prost::encoding::string::encoded_len(tag, &s)
-        }
-        Cell::U32(i) => {
-            let val = i64::from(*i);
-            prost::encoding::int64::encoded_len(tag, &val)
-        }
-        Cell::Bytes(b) => prost::encoding::bytes::encoded_len(tag, b),
-        Cell::Array(a) => array_cell_encoded_len_prost(a, tag),
+        BigQueryCell::Null => 0,
+        BigQueryCell::Bool(value) => prost::encoding::bool::encoded_len(tag, value),
+        BigQueryCell::String(value) => prost::encoding::string::encoded_len(tag, value),
+        BigQueryCell::Int32(value) => prost::encoding::int32::encoded_len(tag, value),
+        BigQueryCell::Int64(value) => prost::encoding::int64::encoded_len(tag, value),
+        BigQueryCell::Float32(value) => prost::encoding::float::encoded_len(tag, value),
+        BigQueryCell::Float64(value) => prost::encoding::double::encoded_len(tag, value),
+        BigQueryCell::Bytes(value) => prost::encoding::bytes::encoded_len(tag, value),
+        BigQueryCell::Array(value) => array_cell_encoded_len_prost(value, tag),
     }
 }
 
-/// Encodes an [`ArrayCell`] into Protocol Buffer format using the specified
-/// tag.
-///
-/// Array cells are encoded using either packed encoding for numeric types or
-/// repeated encoding for string-based types. Temporal arrays are converted to
-/// string arrays with appropriate formatting before encoding.
-fn array_cell_encode_prost(array_cell: &ArrayCell, tag: u32, buf: &mut impl bytes::BufMut) {
+/// Encodes a [`BigQueryArrayCell`] into Protocol Buffer format.
+fn array_cell_encode_prost(array_cell: &BigQueryArrayCell, tag: u32, buf: &mut impl bytes::BufMut) {
     match array_cell {
-        ArrayCell::Bool(vec) => {
-            let values = required_array_values(vec);
-            prost::encoding::bool::encode_packed(tag, &values, buf);
+        BigQueryArrayCell::Bool(values) => prost::encoding::bool::encode_packed(tag, values, buf),
+        BigQueryArrayCell::String(values) => {
+            prost::encoding::string::encode_repeated(tag, values, buf);
         }
-        ArrayCell::String(vec) => {
-            let values = required_array_values(vec);
-            prost::encoding::string::encode_repeated(tag, &values, buf);
+        BigQueryArrayCell::Int32(values) => {
+            prost::encoding::int32::encode_packed(tag, values, buf);
         }
-        ArrayCell::I16(vec) => {
-            let values: Vec<i32> = required_array_values(vec).into_iter().map(i32::from).collect();
-            prost::encoding::int32::encode_packed(tag, &values, buf);
+        BigQueryArrayCell::Int64(values) => {
+            prost::encoding::int64::encode_packed(tag, values, buf);
         }
-        ArrayCell::I32(vec) => {
-            let values = required_array_values(vec);
-            prost::encoding::int32::encode_packed(tag, &values, buf);
+        BigQueryArrayCell::Float32(values) => {
+            prost::encoding::float::encode_packed(tag, values, buf);
         }
-        ArrayCell::U32(vec) => {
-            let values: Vec<i64> = required_array_values(vec).into_iter().map(i64::from).collect();
-            prost::encoding::int64::encode_packed(tag, &values, buf);
+        BigQueryArrayCell::Float64(values) => {
+            prost::encoding::double::encode_packed(tag, values, buf);
         }
-        ArrayCell::I64(vec) => {
-            let values = required_array_values(vec);
-            prost::encoding::int64::encode_packed(tag, &values, buf);
-        }
-        ArrayCell::F32(vec) => {
-            let values = required_array_values(vec);
-            prost::encoding::float::encode_packed(tag, &values, buf);
-        }
-        ArrayCell::F64(vec) => {
-            let values = required_array_values(vec);
-            prost::encoding::double::encode_packed(tag, &values, buf);
-        }
-        ArrayCell::Numeric(vec) => {
-            let values: Vec<String> =
-                required_array_values(vec).into_iter().map(|value| value.to_string()).collect();
-            prost::encoding::string::encode_repeated(tag, &values, buf);
-        }
-        ArrayCell::Date(vec) => {
-            let values: Vec<String> = required_array_values(vec)
-                .into_iter()
-                .map(|v| v.format(DATE_FORMAT).to_string())
-                .collect();
-            prost::encoding::string::encode_repeated(tag, &values, buf);
-        }
-        ArrayCell::Time(vec) => {
-            let values: Vec<String> = required_array_values(vec)
-                .into_iter()
-                .map(|v| v.format(TIME_FORMAT).to_string())
-                .collect();
-            prost::encoding::string::encode_repeated(tag, &values, buf);
-        }
-        ArrayCell::Timestamp(vec) => {
-            let values: Vec<String> = required_array_values(vec)
-                .into_iter()
-                .map(|v| v.format(TIMESTAMP_FORMAT).to_string())
-                .collect();
-            prost::encoding::string::encode_repeated(tag, &values, buf);
-        }
-        ArrayCell::TimestampTz(vec) => {
-            let values: Vec<String> = required_array_values(vec)
-                .into_iter()
-                .map(|v| v.format(TIMESTAMPTZ_FORMAT_HH_MM).to_string())
-                .collect();
-            prost::encoding::string::encode_repeated(tag, &values, buf);
-        }
-        ArrayCell::Uuid(vec) => {
-            let values: Vec<String> =
-                required_array_values(vec).into_iter().map(|value| value.to_string()).collect();
-            prost::encoding::string::encode_repeated(tag, &values, buf);
-        }
-        ArrayCell::Json(vec) => {
-            let values: Vec<String> =
-                required_array_values(vec).into_iter().map(|value| value.to_string()).collect();
-            prost::encoding::string::encode_repeated(tag, &values, buf);
-        }
-        ArrayCell::Bytes(vec) => {
-            let values = required_array_values(vec);
-            prost::encoding::bytes::encode_repeated(tag, &values, buf);
+        BigQueryArrayCell::Bytes(values) => {
+            prost::encoding::bytes::encode_repeated(tag, values, buf);
         }
     }
 }
 
-/// Calculates the encoded length in bytes for an [`ArrayCell`] with the
-/// specified tag.
-///
-/// Returns the number of bytes that would be produced when encoding this array
-/// cell in Protocol Buffer format. Uses packed length calculation for numeric
-/// arrays and repeated length calculation for string-based arrays.
-fn array_cell_encoded_len_prost(array_cell: &ArrayCell, tag: u32) -> usize {
+/// Calculates the encoded length for a [`BigQueryArrayCell`].
+fn array_cell_encoded_len_prost(array_cell: &BigQueryArrayCell, tag: u32) -> usize {
     match array_cell {
-        ArrayCell::Bool(vec) => {
-            let values = required_array_values(vec);
-            prost::encoding::bool::encoded_len_packed(tag, &values)
+        BigQueryArrayCell::Bool(values) => prost::encoding::bool::encoded_len_packed(tag, values),
+        BigQueryArrayCell::String(values) => {
+            prost::encoding::string::encoded_len_repeated(tag, values)
         }
-        ArrayCell::String(vec) => {
-            let values = required_array_values(vec);
-            prost::encoding::string::encoded_len_repeated(tag, &values)
+        BigQueryArrayCell::Int32(values) => prost::encoding::int32::encoded_len_packed(tag, values),
+        BigQueryArrayCell::Int64(values) => prost::encoding::int64::encoded_len_packed(tag, values),
+        BigQueryArrayCell::Float32(values) => {
+            prost::encoding::float::encoded_len_packed(tag, values)
         }
-        ArrayCell::I16(vec) => {
-            let values: Vec<i32> = required_array_values(vec).into_iter().map(i32::from).collect();
-            prost::encoding::int32::encoded_len_packed(tag, &values)
+        BigQueryArrayCell::Float64(values) => {
+            prost::encoding::double::encoded_len_packed(tag, values)
         }
-        ArrayCell::I32(vec) => {
-            let values = required_array_values(vec);
-            prost::encoding::int32::encoded_len_packed(tag, &values)
-        }
-        ArrayCell::U32(vec) => {
-            let values: Vec<i64> = required_array_values(vec).into_iter().map(i64::from).collect();
-            prost::encoding::int64::encoded_len_packed(tag, &values)
-        }
-        ArrayCell::I64(vec) => {
-            let values = required_array_values(vec);
-            prost::encoding::int64::encoded_len_packed(tag, &values)
-        }
-        ArrayCell::F32(vec) => {
-            let values = required_array_values(vec);
-            prost::encoding::float::encoded_len_packed(tag, &values)
-        }
-        ArrayCell::F64(vec) => {
-            let values = required_array_values(vec);
-            prost::encoding::double::encoded_len_packed(tag, &values)
-        }
-        ArrayCell::Numeric(vec) => {
-            let values: Vec<String> =
-                required_array_values(vec).into_iter().map(|value| value.to_string()).collect();
-            prost::encoding::string::encoded_len_repeated(tag, &values)
-        }
-        ArrayCell::Date(vec) => {
-            let values: Vec<String> = required_array_values(vec)
-                .into_iter()
-                .map(|v| v.format(DATE_FORMAT).to_string())
-                .collect();
-            prost::encoding::string::encoded_len_repeated(tag, &values)
-        }
-        ArrayCell::Time(vec) => {
-            let values: Vec<String> = required_array_values(vec)
-                .into_iter()
-                .map(|v| v.format(TIME_FORMAT).to_string())
-                .collect();
-            prost::encoding::string::encoded_len_repeated(tag, &values)
-        }
-        ArrayCell::Timestamp(vec) => {
-            let values: Vec<String> = required_array_values(vec)
-                .into_iter()
-                .map(|v| v.format(TIMESTAMP_FORMAT).to_string())
-                .collect();
-            prost::encoding::string::encoded_len_repeated(tag, &values)
-        }
-        ArrayCell::TimestampTz(vec) => {
-            let values: Vec<String> = required_array_values(vec)
-                .into_iter()
-                .map(|v| v.format(TIMESTAMPTZ_FORMAT_HH_MM).to_string())
-                .collect();
-            prost::encoding::string::encoded_len_repeated(tag, &values)
-        }
-        ArrayCell::Uuid(vec) => {
-            let values: Vec<String> =
-                required_array_values(vec).into_iter().map(|value| value.to_string()).collect();
-            prost::encoding::string::encoded_len_repeated(tag, &values)
-        }
-        ArrayCell::Json(vec) => {
-            let values: Vec<String> =
-                required_array_values(vec).into_iter().map(|value| value.to_string()).collect();
-            prost::encoding::string::encoded_len_repeated(tag, &values)
-        }
-        ArrayCell::Bytes(vec) => {
-            let values = required_array_values(vec);
-            prost::encoding::bytes::encoded_len_repeated(tag, &values)
+        BigQueryArrayCell::Bytes(values) => {
+            prost::encoding::bytes::encoded_len_repeated(tag, values)
         }
     }
-}
-
-/// Returns array values after compatibility validation has removed `NULL`s.
-fn required_array_values<T: Clone>(values: &[Option<T>]) -> Vec<T> {
-    values
-        .iter()
-        .map(|value| {
-            debug_assert!(value.is_some(), "BigQuery compatibility rejects null array elements");
-            value.clone().expect("BigQuery compatibility rejects null array elements")
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -497,11 +254,8 @@ mod tests {
 
     #[test]
     fn bigquery_table_row_try_from_rejects_json_number_outside_float_domain() {
-        let json = serde_json::from_str(r#"{"value":1e309}"#).unwrap();
-        let table_row = TableRow::new(vec![Cell::Json(json)]);
-
-        let result = BigQueryTableRow::try_from_with_type_compatibility(
-            table_row,
+        let result = BigQueryTableRow::try_from_typed_tagged_cells_with_type_compatibility(
+            [(1, Some(&Type::JSON), Cell::String(r#"{"value":1e309}"#.to_owned()))],
             DestinationTypeCompatibility::strict(),
         );
         assert!(result.is_err());
@@ -509,11 +263,8 @@ mod tests {
 
     #[test]
     fn bigquery_table_row_try_from_rejects_json_integer_precision_loss() {
-        let json = serde_json::from_str(r#"{"value":18446744073709551616}"#).unwrap();
-        let table_row = TableRow::new(vec![Cell::Json(json)]);
-
-        let result = BigQueryTableRow::try_from_with_type_compatibility(
-            table_row,
+        let result = BigQueryTableRow::try_from_typed_tagged_cells_with_type_compatibility(
+            [(1, Some(&Type::JSON), Cell::String(r#"{"value":18446744073709551616}"#.to_owned()))],
             DestinationTypeCompatibility::strict(),
         );
         assert!(result.is_err());
@@ -521,16 +272,21 @@ mod tests {
 
     #[test]
     fn bigquery_table_row_try_from_lossless_accepts_string_materialized_values() {
-        let json = serde_json::from_str(r#"{"value":18446744073709551616}"#).unwrap();
-        let table_row = TableRow::new(vec![
-            Cell::Json(json),
-            Cell::Numeric(
-                PgNumeric::from_str("0.000000000000000000000000000000000000001").unwrap(),
-            ),
-        ]);
-
-        let result = BigQueryTableRow::try_from_with_type_compatibility(
-            table_row,
+        let result = BigQueryTableRow::try_from_typed_tagged_cells_with_type_compatibility(
+            [
+                (
+                    1,
+                    Some(&Type::JSON),
+                    Cell::String(r#"{"value":18446744073709551616}"#.to_owned()),
+                ),
+                (
+                    2,
+                    Some(&Type::NUMERIC),
+                    Cell::Numeric(
+                        PgNumeric::from_str("0.000000000000000000000000000000000000001").unwrap(),
+                    ),
+                ),
+            ],
             DestinationTypeCompatibility::lossless(),
         );
         assert!(result.is_ok());
@@ -658,15 +414,24 @@ mod tests {
 
     #[test]
     fn bigquery_table_row_try_from_uses_default_lossy_compatibility() {
-        let table_row = TableRow::new(vec![
-            Cell::Numeric(
-                PgNumeric::from_str("0.000000000000000000000000000000000000001").unwrap(),
-            ),
-            Cell::Json(serde_json::from_str(r#"{"value":18446744073709551616}"#).unwrap()),
-            Cell::F64(-0.0),
-        ]);
-
-        let result = BigQueryTableRow::try_from(table_row);
+        let result = BigQueryTableRow::try_from_typed_tagged_cells_with_type_compatibility(
+            [
+                (
+                    1,
+                    Some(&Type::NUMERIC),
+                    Cell::Numeric(
+                        PgNumeric::from_str("0.000000000000000000000000000000000000001").unwrap(),
+                    ),
+                ),
+                (
+                    2,
+                    Some(&Type::JSON),
+                    Cell::String(r#"{"value":18446744073709551616}"#.to_owned()),
+                ),
+                (3, Some(&Type::FLOAT8), Cell::F64(-0.0)),
+            ],
+            DestinationTypeCompatibility::default(),
+        );
 
         assert!(result.is_ok());
     }

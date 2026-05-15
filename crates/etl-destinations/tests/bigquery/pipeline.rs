@@ -4,7 +4,6 @@ use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use etl::{
     config::BatchConfig,
     destination::DestinationTypeCompatibility,
-    error::ErrorKind,
     state::table::{TableReplicationPhase, TableReplicationPhaseType},
     store::state::StateStore,
     test_utils::{
@@ -1696,76 +1695,26 @@ async fn table_array_with_null_values() {
 
     table_sync_done_notification.notified().await;
 
-    // Insert array with null value
-    database
-        .client
-        .as_ref()
-        .unwrap()
+    let event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 3)]).await;
+
+    // BigQuery cannot preserve NULL repeated fields or NULL repeated-field
+    // elements, so the default lossy mode stores arrays as scalar strings.
+    let client = database.client.as_ref().unwrap();
+    let quoted_table_name = table_name.as_quoted_identifier();
+    client
+        .execute(&format!("insert into {quoted_table_name} (int_array) values (null)"), &[])
+        .await
+        .unwrap();
+    client
         .execute(
-            &format!(
-                "insert into {} (int_array) values (array[1, null])",
-                table_name.as_quoted_identifier()
-            ),
+            &format!("insert into {quoted_table_name} (int_array) values (array[]::int4[])"),
             &[],
         )
         .await
         .unwrap();
-
-    // We sleep to wait for the event to be processed. This is not ideal, but if we
-    // wanted to do this better, we would have to also implement error handling
-    // within the apply worker to write in the state store.
-    sleep(Duration::from_secs(5)).await;
-
-    // Wait for the pipeline expecting an error to be returned.
-    let err = pipeline.shutdown_and_wait().await.err().unwrap();
-    assert_eq!(err.kinds().len(), 1);
-    assert_eq!(err.kinds()[0], ErrorKind::NullValuesNotSupportedInArrayInDestination);
-
-    // Reset and try with valid array (no nulls)
-    database
-        .client
-        .as_ref()
-        .unwrap()
-        .execute(&format!("delete from {} where true", table_name.as_quoted_identifier()), &[])
-        .await
-        .unwrap();
-
-    // We have to reset the state of the table and copy it from scratch, otherwise
-    // the CDC will contain the inserts and deletes, failing again.
-    store.reset_table_state(table_id).await.unwrap();
-
-    // We also clear the events so that it's more idiomatic to wait for them, since
-    // we don't have the prior insert.
-    destination.clear_events().await;
-
-    // We recreate the pipeline and try again.
-    let mut pipeline = create_pipeline(
-        &database.config,
-        pipeline_id,
-        publication_name,
-        store.clone(),
-        destination.clone(),
-    );
-
-    let table_sync_done_notification =
-        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
-
-    pipeline.start().await.unwrap();
-
-    table_sync_done_notification.notified().await;
-
-    let event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
-
-    // Insert array without null values
-    database
-        .client
-        .as_ref()
-        .unwrap()
+    client
         .execute(
-            &format!(
-                "insert into {} (int_array) values (array[1, 2, 3])",
-                table_name.as_quoted_identifier()
-            ),
+            &format!("insert into {quoted_table_name} (int_array) values (array[1, null])"),
             &[],
         )
         .await
@@ -1775,19 +1724,29 @@ async fn table_array_with_null_values() {
 
     pipeline.shutdown_and_wait().await.unwrap();
 
-    // Verify the valid array was successfully replicated to BigQuery
+    let destination_schema =
+        bigquery_database.query_table_schema(table_name.clone()).await.unwrap();
+    let int_array_type = destination_schema
+        .columns()
+        .iter()
+        .find(|column| column.column_name == "int_array")
+        .map(|column| column.data_type.as_str());
+    assert_eq!(int_array_type, Some("STRING"));
+
     let table_rows = bigquery_database.query_table(table_name.clone()).await.unwrap();
+    assert_eq!(table_rows.len(), 3);
 
-    // Check that there is only the valid row in BigQuery
-    assert_eq!(table_rows.len(), 1);
+    let mut replicated_arrays = table_rows
+        .into_iter()
+        .map(|row| {
+            let columns = row.columns.expect("row should contain columns");
+            assert_eq!(columns.len(), 2);
+            columns[1].value.as_ref().and_then(|value| value.as_str().map(str::to_owned))
+        })
+        .collect::<Vec<_>>();
+    replicated_arrays.sort();
 
-    // Check that the int array contains 3 elements, meaning it must be the second
-    // insert with all NON-NULL values
-    let row = &table_rows[0];
-    if let Some(columns) = &row.columns {
-        assert_eq!(columns.len(), 2);
-        assert_eq!(columns[1].value.clone().unwrap().as_array().unwrap().len(), 3);
-    }
+    assert_eq!(replicated_arrays, vec![None, Some("{1,NULL}".to_owned()), Some("{}".to_owned())]);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -2169,15 +2128,13 @@ async fn table_type_compatibility_modes_handle_same_risky_data() {
             for column_name in ["numeric_value", "json_value"] {
                 assert_eq!(column_type(column_name), Some("STRING"), "{column_name}");
             }
-
-            for column_name in ["numeric_array", "json_array"] {
-                assert_eq!(column_type(column_name), Some("ARRAY<STRING>"), "{column_name}");
-            }
         } else {
             assert_eq!(column_type("numeric_value"), Some("BIGNUMERIC"));
             assert_eq!(column_type("json_value"), Some("JSON"));
-            assert_eq!(column_type("numeric_array"), Some("ARRAY<BIGNUMERIC>"));
-            assert_eq!(column_type("json_array"), Some("ARRAY<JSON>"));
+        }
+
+        for column_name in ["numeric_array", "json_array"] {
+            assert_eq!(column_type(column_name), Some("STRING"), "{column_name}");
         }
 
         let destination_rows = bigquery_database.query_table(table_name).await.unwrap();

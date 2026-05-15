@@ -866,7 +866,7 @@ fn default_cell(typ: &Type) -> Cell {
         Type::TIMESTAMP_ARRAY => Cell::Array(ArrayCell::Timestamp(Vec::new())),
         Type::TIMESTAMPTZ_ARRAY => Cell::Array(ArrayCell::TimestampTz(Vec::new())),
         Type::UUID_ARRAY => Cell::Array(ArrayCell::Uuid(Vec::new())),
-        Type::JSON_ARRAY | Type::JSONB_ARRAY => Cell::Array(ArrayCell::Json(Vec::new())),
+        Type::JSON_ARRAY | Type::JSONB_ARRAY => Cell::Array(ArrayCell::String(Vec::new())),
         Type::BYTEA_ARRAY => Cell::Array(ArrayCell::Bytes(Vec::new())),
         _ if is_array_type(typ) => Cell::Array(ArrayCell::String(Vec::new())),
         _ => Cell::String(String::new()),

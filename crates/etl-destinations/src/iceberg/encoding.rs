@@ -352,7 +352,6 @@ fn cell_to_string(cell: &Cell) -> Option<String> {
         Cell::Timestamp(_) => None,
         Cell::TimestampTz(_) => None,
         Cell::Uuid(_) => None,
-        Cell::Json(j) => Some(j.to_string()),
         Cell::Bytes(_) => None,
         Cell::Array(_) => None,
     }
@@ -568,15 +567,6 @@ fn build_string_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef)
                     for item in vec {
                         match item {
                             Some(n) => list_builder.values().append_value(n.to_string()),
-                            None => list_builder.values().append_null(),
-                        }
-                    }
-                    list_builder.append(true);
-                }
-                ArrayCell::Json(vec) => {
-                    for item in vec {
-                        match item {
-                            Some(j) => list_builder.values().append_value(j.to_string()),
                             None => list_builder.values().append_null(),
                         }
                     }
@@ -943,14 +933,6 @@ fn append_array_cell_as_strings(
                 }
             }
         }
-        ArrayCell::Json(vec) => {
-            for item in vec {
-                match item {
-                    Some(j) => list_builder.values().append_value(j.to_string()),
-                    None => list_builder.values().append_null(),
-                }
-            }
-        }
         ArrayCell::Bytes(vec) => {
             for _ in vec {
                 list_builder.values().append_null();
@@ -1107,9 +1089,9 @@ mod tests {
         let test_uuid = Uuid::new_v4();
         assert_eq!(cell_to_string(&Cell::Uuid(test_uuid)), None);
 
-        // Test JSON
-        let json_val = serde_json::json!({"key": "value"});
-        assert_eq!(cell_to_string(&Cell::Json(json_val.clone())), Some(json_val.to_string()));
+        // Test JSON.
+        let json = r#"{"key":"value"}"#.to_owned();
+        assert_eq!(cell_to_string(&Cell::String(json.clone())), Some(json));
 
         // Test bytes (Base64 encoded)
         let test_bytes = vec![72, 101, 108, 108, 111];
@@ -1566,7 +1548,7 @@ mod tests {
         let rows = vec![
             TableRow::new(vec![
                 Cell::I32(42),
-                Cell::Json(serde_json::json!({"key": "value", "number": 123})),
+                Cell::String(r#"{"key":"value","number":123}"#.to_owned()),
             ]),
             TableRow::new(vec![Cell::I32(100), Cell::Null]),
         ];
@@ -1931,9 +1913,9 @@ mod tests {
                 Some("-6789".parse::<PgNumeric>().unwrap()),
                 None,
             ]))]),
-            TableRow::new(vec![Cell::Array(ArrayCell::Json(vec![
-                Some(serde_json::json!({"key": "value"})),
-                Some(serde_json::json!([1, 2, 3])),
+            TableRow::new(vec![Cell::Array(ArrayCell::String(vec![
+                Some(r#"{"key":"value"}"#.to_owned()),
+                Some("[1,2,3]".to_owned()),
                 None,
             ]))]),
             TableRow::new(vec![Cell::Array(ArrayCell::String(vec![]))]), // Empty array,
@@ -2370,8 +2352,8 @@ mod tests {
                 Some("123.45".parse::<PgNumeric>().unwrap()),
                 None,
             ]))]),
-            TableRow::new(vec![Cell::Array(ArrayCell::Json(vec![
-                Some(serde_json::json!({"key": "value"})),
+            TableRow::new(vec![Cell::Array(ArrayCell::String(vec![
+                Some(r#"{"key":"value"}"#.to_owned()),
                 None,
             ]))]),
             TableRow::new(vec![Cell::Array(ArrayCell::Bytes(vec![Some(vec![1, 2, 3]), None]))]),
@@ -2580,7 +2562,7 @@ mod tests {
                 1, // 1 null
             ),
             (
-                ArrayCell::Json(vec![Some(serde_json::json!({"key": "value"})), None]),
+                ArrayCell::String(vec![Some(r#"{"key":"value"}"#.to_owned()), None]),
                 vec![r#"{"key":"value"}"#],
                 1, // 1 null
             ),

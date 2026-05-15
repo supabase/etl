@@ -52,9 +52,7 @@ fn parse_naive_datetime_cell(table_cell: TableCell) -> Option<NaiveDateTime> {
 
 /// Parses a BigQuery table cell as TIMESTAMP.
 fn parse_timestamp_cell(table_cell: TableCell) -> Option<DateTime<Utc>> {
-    table_cell
-        .value
-        .and_then(|value| value.as_str().and_then(|value| parse_unix_timestamp_str(value)))
+    table_cell.value.and_then(|value| value.as_str().and_then(parse_unix_timestamp_str))
 }
 
 /// Parses a BigQuery repeated field.

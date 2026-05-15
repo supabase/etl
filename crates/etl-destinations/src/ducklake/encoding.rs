@@ -73,7 +73,6 @@ fn cell_to_sql_literal(cell: Cell) -> String {
             format!("TIMESTAMPTZ '{}'", dt.format("%Y-%m-%d %H:%M:%S%.6f%:z"))
         }
         Cell::Uuid(u) => format!("CAST({} AS UUID)", quote_literal(&u.to_string())),
-        Cell::Json(j) => format!("CAST({} AS JSON)", quote_literal(&j.to_string())),
         Cell::Bytes(b) => format!("from_hex('{}')", encode_hex(&b)),
         Cell::Array(arr) => array_cell_to_sql_literal(arr),
     }
@@ -97,7 +96,6 @@ fn cell_to_owned(cell: &Cell) -> Cell {
         Cell::Timestamp(value) => Cell::Timestamp(*value),
         Cell::TimestampTz(value) => Cell::TimestampTz(*value),
         Cell::Uuid(value) => Cell::Uuid(*value),
-        Cell::Json(value) => Cell::Json(value.clone()),
         Cell::Bytes(value) => Cell::Bytes(value.clone()),
         Cell::Array(value) => Cell::Array(array_cell_to_owned(value)),
     }
@@ -120,7 +118,6 @@ fn array_cell_to_owned(cell: &ArrayCell) -> ArrayCell {
         ArrayCell::Timestamp(values) => ArrayCell::Timestamp(values.clone()),
         ArrayCell::TimestampTz(values) => ArrayCell::TimestampTz(values.clone()),
         ArrayCell::Uuid(values) => ArrayCell::Uuid(values.clone()),
-        ArrayCell::Json(values) => ArrayCell::Json(values.clone()),
         ArrayCell::Bytes(values) => ArrayCell::Bytes(values.clone()),
     }
 }
@@ -216,15 +213,6 @@ fn array_cell_to_sql_literal(arr: ArrayCell) -> String {
                 )
             })
             .collect(),
-        ArrayCell::Json(v) => v
-            .into_iter()
-            .map(|o| {
-                o.map_or_else(
-                    || "NULL".to_owned(),
-                    |value| format!("CAST({} AS JSON)", quote_literal(&value.to_string())),
-                )
-            })
-            .collect(),
         ArrayCell::Bytes(v) => v
             .into_iter()
             .map(|o| {
@@ -300,8 +288,6 @@ fn cell_to_value(cell: Cell) -> Value {
         Cell::TimestampTz(dt) => Value::Timestamp(TimeUnit::Microsecond, dt.timestamp_micros()),
         // UUID stored as text; DuckDB casts VARCHAR → UUID automatically.
         Cell::Uuid(u) => Value::Text(u.to_string()),
-        // JSON serialised as text.
-        Cell::Json(j) => Value::Text(j.to_string()),
         Cell::Bytes(b) => Value::Blob(b),
         Cell::Array(arr) => array_cell_to_value(arr),
     }
@@ -366,9 +352,6 @@ fn array_cell_to_value(arr: ArrayCell) -> Value {
         ArrayCell::Uuid(v) => {
             v.into_iter().map(|o| o.map_or(Value::Null, |u| Value::Text(u.to_string()))).collect()
         }
-        ArrayCell::Json(v) => {
-            v.into_iter().map(|o| o.map_or(Value::Null, |j| Value::Text(j.to_string()))).collect()
-        }
         ArrayCell::Bytes(v) => v.into_iter().map(|o| o.map_or(Value::Null, Value::Blob)).collect(),
     };
     Value::List(values)
@@ -398,11 +381,8 @@ mod tests {
             "[1, NULL, 3]"
         );
         assert_eq!(
-            array_cell_to_sql_literal(ArrayCell::Json(vec![
-                Some(serde_json::json!({"a": 1})),
-                None,
-            ])),
-            "[CAST('{\"a\":1}' AS JSON), NULL]"
+            array_cell_to_sql_literal(ArrayCell::String(vec![Some(r#"{"a":1}"#.to_owned()), None])),
+            "['{\"a\":1}', NULL]"
         );
     }
 

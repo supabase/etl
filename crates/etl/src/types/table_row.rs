@@ -311,7 +311,6 @@ fn estimate_cell_allocated_bytes(cell: &Cell) -> usize {
         Cell::Numeric(value) => estimated_pg_numeric_allocated_bytes(value),
         Cell::String(value) => value.capacity(),
         Cell::Bytes(value) => value.capacity(),
-        Cell::Json(value) => estimate_json_allocated_bytes(value),
         Cell::Array(value) => estimate_array_allocated_bytes(value),
     }
 }
@@ -325,38 +324,6 @@ fn estimated_pg_numeric_allocated_bytes(value: &PgNumeric) -> usize {
             "pg_numeric.digits_capacity_mul_i16_size",
         ),
         PgNumeric::NaN | PgNumeric::PositiveInfinity | PgNumeric::NegativeInfinity => 0,
-    }
-}
-
-/// Returns an estimate of additional heap bytes owned by a JSON value.
-fn estimate_json_allocated_bytes(value: &serde_json::Value) -> usize {
-    match value {
-        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => 0,
-        serde_json::Value::String(value) => value.capacity(),
-        serde_json::Value::Array(values) => {
-            let mut total = checked_mul_or_saturating(
-                values.capacity(),
-                size_of::<serde_json::Value>(),
-                "json.array_capacity_mul_value_size",
-            );
-            for value in values {
-                total = checked_add_or_saturating(
-                    total,
-                    estimate_json_allocated_bytes(value),
-                    "json.add_nested_value_bytes",
-                );
-            }
-            total
-        }
-        serde_json::Value::Object(values) => values.iter().fold(0usize, |acc, (key, value)| {
-            let with_key =
-                checked_add_or_saturating(acc, key.capacity(), "json.object_add_key_capacity");
-            checked_add_or_saturating(
-                with_key,
-                estimate_json_allocated_bytes(value),
-                "json.object_add_nested_value_bytes",
-            )
-        }),
     }
 }
 
@@ -449,21 +416,6 @@ fn estimate_array_allocated_bytes(value: &ArrayCell) -> usize {
                     total,
                     value.capacity(),
                     "array.string_add_element_capacity",
-                );
-            }
-            total
-        }
-        ArrayCell::Json(values) => {
-            let mut total = checked_mul_or_saturating(
-                values.capacity(),
-                size_of::<Option<serde_json::Value>>(),
-                "array.json_capacity_mul_option_size",
-            );
-            for value in values.iter().flatten() {
-                total = checked_add_or_saturating(
-                    total,
-                    estimate_json_allocated_bytes(value),
-                    "array.json_add_element_heap_bytes",
                 );
             }
             total

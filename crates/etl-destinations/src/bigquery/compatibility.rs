@@ -3,15 +3,17 @@ use std::str::FromStr;
 use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use etl::{
     compatibility::{
-        CellCompatibilityResult, CompatibilityChecker, CompatibilityRules,
+        CellCompatibilityResult, CompatibilityChecker, CompatibilityRules, CellCarrier,
         DestinationTypeCompatibility, DestinationTypeCompatibilityMode, TypeCompatibilityResult,
     },
     error::{ErrorKind, EtlResult},
     types::{
         ArrayCell, Cell, DATE_FORMAT, PgNumeric, TIME_FORMAT, TIMESTAMP_FORMAT,
-        TIMESTAMPTZ_FORMAT_HH_MM, Type,
+        TIMESTAMPTZ_FORMAT_HH_MM, Type, is_json_type, is_temporal_type,
     },
 };
+
+use crate::bigquery::value::{BigQueryArrayCell, BigQueryCell};
 
 /// Maximum number of fractional digits in BigQuery `BIGNUMERIC`.
 const BIGQUERY_BIGNUMERIC_MAX_SCALE: usize = 38;
@@ -23,6 +25,9 @@ const BIGQUERY_BIGNUMERIC_MIN: &str =
     "-578960446186580977117854925043439539266.34992332820282019728792003956564819968";
 /// Maximum nesting depth for a BigQuery `JSON` value.
 const BIGQUERY_JSON_MAX_NESTING_DEPTH: usize = 500;
+
+/// BigQuery cell compatibility result.
+type BqCellCompatibilityResult = CellCompatibilityResult<BigQueryCell>;
 
 /// BigQuery compatibility implementation.
 #[derive(Debug, Clone, Copy, Default)]
@@ -46,6 +51,8 @@ impl BigQueryCompatibility {
 }
 
 impl CompatibilityRules for BigQueryCompatibility {
+    type CompatibleCell = BigQueryCell;
+
     fn get_compatible_type(
         &self,
         typ: &Type,
@@ -77,9 +84,26 @@ impl CompatibilityRules for BigQueryCompatibility {
 
     fn get_compatible_cell(
         &self,
+        typ: &Type,
         cell: Cell,
         compatibility: DestinationTypeCompatibility,
-    ) -> CellCompatibilityResult {
+    ) -> BqCellCompatibilityResult {
+        if etl::types::is_array_type(typ) {
+            return array_typed_cell(typ, cell, compatibility);
+        }
+
+        if is_temporal_type(typ)
+            && let Cell::String(value) = cell
+        {
+            return temporal_string_cell(typ, value, compatibility);
+        }
+
+        if is_json_type(typ)
+            && let Cell::String(value) = cell
+        {
+            return json_string_cell(typ, value, compatibility);
+        }
+
         if let Cell::Array(array) = &cell
             && let Some(result) = validate_array_has_no_nulls(array)
         {
@@ -87,9 +111,9 @@ impl CompatibilityRules for BigQueryCompatibility {
         }
 
         match compatibility.mode() {
-            DestinationTypeCompatibilityMode::Strict => strict_cell(cell),
-            DestinationTypeCompatibilityMode::Lossless => lossless_cell(cell),
-            DestinationTypeCompatibilityMode::Lossy => lossy_cell(cell),
+            DestinationTypeCompatibilityMode::Strict => strict_cell(typ, cell),
+            DestinationTypeCompatibilityMode::Lossless => lossless_cell(typ, cell),
+            DestinationTypeCompatibilityMode::Lossy => lossy_cell(typ, cell),
         }
     }
 }
@@ -144,6 +168,10 @@ fn has_strict_bigquery_native_type(typ: &Type) -> bool {
 /// Returns whether lossless mode should materialize the source type as
 /// `STRING`.
 fn materializes_as_bigquery_string_for_lossless(typ: &Type) -> bool {
+    if etl::types::is_array_type(typ) {
+        return true;
+    }
+
     if !has_strict_bigquery_native_type(typ) {
         return true;
     }
@@ -159,88 +187,291 @@ fn materializes_as_bigquery_string_for_lossless(typ: &Type) -> bool {
             | Type::TIMESTAMPTZ
             | Type::JSON
             | Type::JSONB
-            | Type::FLOAT4_ARRAY
-            | Type::FLOAT8_ARRAY
-            | Type::NUMERIC_ARRAY
-            | Type::DATE_ARRAY
-            | Type::TIME_ARRAY
-            | Type::TIMESTAMP_ARRAY
-            | Type::TIMESTAMPTZ_ARRAY
-            | Type::JSON_ARRAY
-            | Type::JSONB_ARRAY
     )
 }
 
 /// Returns whether lossy mode should materialize a non-native type as `STRING`.
 fn materializes_as_bigquery_string_for_lossy(typ: &Type) -> bool {
-    !has_strict_bigquery_native_type(typ)
+    etl::types::is_array_type(typ) || !has_strict_bigquery_native_type(typ)
 }
 
-/// Returns `TEXT` or `TEXT[]` for a source type.
-fn string_type_for_source_type(typ: &Type) -> Type {
-    if etl::types::is_array_type(typ) { Type::TEXT_ARRAY } else { Type::TEXT }
+/// Returns the scalar string storage type for a source type.
+fn string_type_for_source_type(_typ: &Type) -> Type {
+    Type::TEXT
+}
+
+/// Applies BigQuery compatibility for a cell known to come from an array
+/// column.
+fn array_typed_cell(
+    typ: &Type,
+    cell: Cell,
+    compatibility: DestinationTypeCompatibility,
+) -> BqCellCompatibilityResult {
+    match compatibility.mode() {
+        DestinationTypeCompatibilityMode::Strict => match cell {
+            Cell::Null => invalid(
+                ErrorKind::UnsupportedValueInDestination,
+                "NULL arrays cannot be preserved by BigQuery repeated fields",
+            ),
+            Cell::Array(array) => {
+                if let Some(result) = validate_array_has_no_nulls(&array) {
+                    result
+                } else {
+                    strict_cell(typ, Cell::Array(array))
+                }
+            }
+            cell => strict_cell(typ, cell),
+        },
+        DestinationTypeCompatibilityMode::Lossless | DestinationTypeCompatibilityMode::Lossy => {
+            match cell {
+                Cell::Array(array) => {
+                    type_changed(Type::TEXT, BigQueryCell::string(format_array(array)))
+                }
+                Cell::Null => type_changed(Type::TEXT, BigQueryCell::Null),
+                cell => type_changed(Type::TEXT, BigQueryCell::from_native_cell(cell)),
+            }
+        }
+    }
+}
+
+/// Applies BigQuery compatibility for temporal text that could not be parsed
+/// into Rust's temporal domain.
+fn temporal_string_cell(
+    typ: &Type,
+    value: String,
+    compatibility: DestinationTypeCompatibility,
+) -> BqCellCompatibilityResult {
+    match compatibility.mode() {
+        DestinationTypeCompatibilityMode::Strict => invalid(
+            ErrorKind::UnsupportedValueInDestination,
+            format!("Temporal value '{value}' cannot be stored exactly in BigQuery"),
+        ),
+        DestinationTypeCompatibilityMode::Lossless => {
+            type_changed(Type::TEXT, BigQueryCell::string(value))
+        }
+        DestinationTypeCompatibilityMode::Lossy => {
+            let value = match *typ {
+                Type::DATE => lossy_raw_date(&value),
+                Type::TIME => lossy_raw_time(&value),
+                Type::TIMESTAMP => lossy_raw_timestamp(&value),
+                Type::TIMESTAMPTZ => lossy_raw_timestamptz(&value),
+                _ => None,
+            };
+
+            match value {
+                Some(value) => value_changed(typ.clone(), BigQueryCell::string(value)),
+                None => invalid(
+                    ErrorKind::UnsupportedValueInDestination,
+                    "Temporal text cannot be normalized to BigQuery",
+                ),
+            }
+        }
+    }
+}
+
+/// Normalizes raw date text to the BigQuery date domain.
+fn lossy_raw_date(value: &str) -> Option<String> {
+    Some(if temporal_text_is_negative(value) {
+        format_date(bigquery_min_date())
+    } else {
+        format_date(bigquery_max_date())
+    })
+}
+
+/// Normalizes raw time text to the BigQuery time domain.
+fn lossy_raw_time(value: &str) -> Option<String> {
+    if value.starts_with("24:") { Some("23:59:59.999999".to_owned()) } else { None }
+}
+
+/// Normalizes raw timestamp text to the BigQuery timestamp domain.
+fn lossy_raw_timestamp(value: &str) -> Option<String> {
+    Some(if temporal_text_is_negative(value) {
+        format_timestamp(bigquery_min_timestamp())
+    } else {
+        format_timestamp(bigquery_max_timestamp())
+    })
+}
+
+/// Normalizes raw timestamp-with-time-zone text to the BigQuery timestamp
+/// domain.
+fn lossy_raw_timestamptz(value: &str) -> Option<String> {
+    Some(if temporal_text_is_negative(value) {
+        format_timestamptz(bigquery_min_timestamptz())
+    } else {
+        format_timestamptz(bigquery_max_timestamptz())
+    })
+}
+
+/// Returns whether raw temporal text is below BigQuery's lower bound.
+fn temporal_text_is_negative(value: &str) -> bool {
+    value.starts_with('-') || value.ends_with(" BC")
+}
+
+/// Applies BigQuery compatibility for raw JSON text.
+fn json_string_cell(
+    typ: &Type,
+    value: String,
+    compatibility: DestinationTypeCompatibility,
+) -> BqCellCompatibilityResult {
+    match compatibility.mode() {
+        DestinationTypeCompatibilityMode::Lossless => {
+            type_changed(Type::TEXT, BigQueryCell::string(value))
+        }
+        DestinationTypeCompatibilityMode::Strict => match serde_json::from_str(&value) {
+            Ok(value_json) => {
+                if let Some(result) = validate_strict_json(&value_json) {
+                    result
+                } else {
+                    unchanged(typ.clone(), BigQueryCell::string(value))
+                }
+            }
+            Err(error) => invalid(
+                ErrorKind::UnsupportedValueInDestination,
+                format!("JSON text is not valid for BigQuery: {error}"),
+            ),
+        },
+        DestinationTypeCompatibilityMode::Lossy => match serde_json::from_str(&value) {
+            Ok(value_json) => {
+                if let Err(reason) = validate_bigquery_json_depth(&value_json) {
+                    invalid(ErrorKind::UnsupportedValueInDestination, reason)
+                } else {
+                    let normalized = normalize_bigquery_json_lossy(value_json);
+                    value_changed(typ.clone(), BigQueryCell::string(normalized.to_string()))
+                }
+            }
+            Err(error) => invalid(
+                ErrorKind::UnsupportedValueInDestination,
+                format!("JSON text is not valid for BigQuery: {error}"),
+            ),
+        },
+    }
+}
+
+/// Formats an array as a scalar string that preserves `NULL` elements.
+fn format_array(array: ArrayCell) -> String {
+    match array {
+        ArrayCell::Bool(values) => format_array_values(values, |value| value.to_string()),
+        ArrayCell::String(values) => format_array_values(values, |value| value),
+        ArrayCell::I16(values) => format_array_values(values, |value| value.to_string()),
+        ArrayCell::I32(values) => format_array_values(values, |value| value.to_string()),
+        ArrayCell::U32(values) => format_array_values(values, |value| value.to_string()),
+        ArrayCell::I64(values) => format_array_values(values, |value| value.to_string()),
+        ArrayCell::F32(values) => format_array_values(values, |value| value.to_string()),
+        ArrayCell::F64(values) => format_array_values(values, |value| value.to_string()),
+        ArrayCell::Numeric(values) => format_array_values(values, |value| value.to_string()),
+        ArrayCell::Date(values) => format_array_values(values, format_date),
+        ArrayCell::Time(values) => format_array_values(values, format_time),
+        ArrayCell::Timestamp(values) => format_array_values(values, format_timestamp),
+        ArrayCell::TimestampTz(values) => format_array_values(values, format_timestamptz),
+        ArrayCell::Uuid(values) => format_array_values(values, |value| value.to_string()),
+        ArrayCell::Bytes(values) => {
+            format_array_values(values, |value| format!("\\x{}", encode_hex(&value)))
+        }
+    }
+}
+
+/// Formats nullable array elements as a PostgreSQL-style array literal.
+fn format_array_values<T>(
+    values: Vec<Option<T>>,
+    mut format_value: impl FnMut(T) -> String,
+) -> String {
+    let values = values
+        .into_iter()
+        .map(|value| match value {
+            Some(value) => quote_array_value(&format_value(value)),
+            None => "NULL".to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+
+    format!("{{{values}}}")
+}
+
+/// Quotes one array element when needed for PostgreSQL-style array text.
+fn quote_array_value(value: &str) -> String {
+    if value.is_empty()
+        || value.eq_ignore_ascii_case("NULL")
+        || value.chars().any(|ch| matches!(ch, '"' | '\\' | '{' | '}' | ',') || ch.is_whitespace())
+    {
+        let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+        format!("\"{escaped}\"")
+    } else {
+        value.to_owned()
+    }
+}
+
+/// Lowercase hex-encodes `bytes`.
+fn encode_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+
+    for byte in bytes {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+
+    encoded
 }
 
 /// Applies strict BigQuery value compatibility.
-fn strict_cell(cell: Cell) -> CellCompatibilityResult {
+fn strict_cell(typ: &Type, cell: Cell) -> BqCellCompatibilityResult {
     if let Some(result) = validate_strict_cell(&cell) {
         return result;
     }
 
-    CellCompatibilityResult::Unchanged(cell)
+    unchanged(typ.clone(), BigQueryCell::from_native_cell(cell))
 }
 
 /// Applies lossless BigQuery value compatibility.
-fn lossless_cell(cell: Cell) -> CellCompatibilityResult {
+fn lossless_cell(typ: &Type, cell: Cell) -> BqCellCompatibilityResult {
     match cell {
-        Cell::F32(value) => CellCompatibilityResult::TypeChanged(Cell::String(value.to_string())),
-        Cell::F64(value) => CellCompatibilityResult::TypeChanged(Cell::String(value.to_string())),
-        Cell::Numeric(value) => {
-            CellCompatibilityResult::TypeChanged(Cell::String(value.to_string()))
-        }
-        Cell::Date(value) => CellCompatibilityResult::TypeChanged(Cell::String(format_date(value))),
-        Cell::Time(value) => CellCompatibilityResult::TypeChanged(Cell::String(format_time(value))),
+        Cell::F32(value) => type_changed(Type::TEXT, BigQueryCell::string(value.to_string())),
+        Cell::F64(value) => type_changed(Type::TEXT, BigQueryCell::string(value.to_string())),
+        Cell::Numeric(value) => type_changed(Type::TEXT, BigQueryCell::string(value.to_string())),
+        Cell::Date(value) => type_changed(Type::TEXT, BigQueryCell::string(format_date(value))),
+        Cell::Time(value) => type_changed(Type::TEXT, BigQueryCell::string(format_time(value))),
         Cell::Timestamp(value) => {
-            CellCompatibilityResult::TypeChanged(Cell::String(format_timestamp(value)))
+            type_changed(Type::TEXT, BigQueryCell::string(format_timestamp(value)))
         }
         Cell::TimestampTz(value) => {
-            CellCompatibilityResult::TypeChanged(Cell::String(format_timestamptz(value)))
+            type_changed(Type::TEXT, BigQueryCell::string(format_timestamptz(value)))
         }
-        Cell::Uuid(value) => CellCompatibilityResult::TypeChanged(Cell::String(value.to_string())),
-        Cell::Json(value) => CellCompatibilityResult::TypeChanged(Cell::String(value.to_string())),
+        Cell::Uuid(value) => type_changed(Type::TEXT, BigQueryCell::string(value.to_string())),
         Cell::Array(array) => lossless_array_cell(array),
-        cell => CellCompatibilityResult::Unchanged(cell),
+        cell => unchanged(typ.clone(), BigQueryCell::from_native_cell(cell)),
     }
 }
 
 /// Applies lossy BigQuery value compatibility.
-fn lossy_cell(cell: Cell) -> CellCompatibilityResult {
+fn lossy_cell(typ: &Type, cell: Cell) -> BqCellCompatibilityResult {
     match cell {
         Cell::F32(value) if value == 0.0 && value.is_sign_negative() => {
-            CellCompatibilityResult::ValueChanged(Cell::F32(0.0))
+            value_changed(typ.clone(), BigQueryCell::Float32(0.0))
         }
         Cell::F64(value) if value == 0.0 && value.is_sign_negative() => {
-            CellCompatibilityResult::ValueChanged(Cell::F64(0.0))
+            value_changed(typ.clone(), BigQueryCell::Float64(0.0))
         }
         Cell::Numeric(value) => lossy_numeric_cell(value),
-        Cell::Date(value) => {
-            CellCompatibilityResult::ValueChanged(Cell::Date(clamp_bigquery_date(value)))
-        }
-        Cell::Timestamp(value) => {
-            CellCompatibilityResult::ValueChanged(Cell::Timestamp(clamp_bigquery_timestamp(value)))
-        }
-        Cell::TimestampTz(value) => CellCompatibilityResult::ValueChanged(Cell::TimestampTz(
-            clamp_bigquery_timestamptz(value),
-        )),
-        Cell::Uuid(value) => CellCompatibilityResult::TypeChanged(Cell::String(value.to_string())),
-        Cell::Json(value) => lossy_json_cell(value),
+        Cell::Date(value) => value_changed(
+            typ.clone(),
+            BigQueryCell::string(format_date(clamp_bigquery_date(value))),
+        ),
+        Cell::Timestamp(value) => value_changed(
+            typ.clone(),
+            BigQueryCell::string(format_timestamp(clamp_bigquery_timestamp(value))),
+        ),
+        Cell::TimestampTz(value) => value_changed(
+            typ.clone(),
+            BigQueryCell::string(format_timestamptz(clamp_bigquery_timestamptz(value))),
+        ),
+        Cell::Uuid(value) => type_changed(Type::TEXT, BigQueryCell::string(value.to_string())),
         Cell::Array(array) => lossy_array_cell(array),
-        cell => CellCompatibilityResult::Unchanged(cell),
+        cell => unchanged(typ.clone(), BigQueryCell::from_native_cell(cell)),
     }
 }
 
 /// Applies lossless BigQuery array compatibility.
-fn lossless_array_cell(array: ArrayCell) -> CellCompatibilityResult {
+fn lossless_array_cell(array: ArrayCell) -> BqCellCompatibilityResult {
     match array {
         ArrayCell::F32(values) => string_array(values, |value| value.to_string()),
         ArrayCell::F64(values) => string_array(values, |value| value.to_string()),
@@ -250,13 +481,12 @@ fn lossless_array_cell(array: ArrayCell) -> CellCompatibilityResult {
         ArrayCell::Timestamp(values) => string_array(values, format_timestamp),
         ArrayCell::TimestampTz(values) => string_array(values, format_timestamptz),
         ArrayCell::Uuid(values) => string_array(values, |value| value.to_string()),
-        ArrayCell::Json(values) => string_array(values, |value| value.to_string()),
-        array => CellCompatibilityResult::Unchanged(Cell::Array(array)),
+        array => unchanged(Type::TEXT, BigQueryCell::from_native_cell(Cell::Array(array))),
     }
 }
 
 /// Applies lossy BigQuery array compatibility.
-fn lossy_array_cell(array: ArrayCell) -> CellCompatibilityResult {
+fn lossy_array_cell(array: ArrayCell) -> BqCellCompatibilityResult {
     match array {
         ArrayCell::F32(values) => value_array(
             values,
@@ -281,8 +511,7 @@ fn lossy_array_cell(array: ArrayCell) -> CellCompatibilityResult {
             value_array(values, clamp_bigquery_timestamptz, ArrayCell::TimestampTz)
         }
         ArrayCell::Uuid(values) => string_array(values, |value| value.to_string()),
-        ArrayCell::Json(values) => lossy_json_array_cell(values),
-        array => CellCompatibilityResult::Unchanged(Cell::Array(array)),
+        array => unchanged(Type::TEXT, BigQueryCell::from_native_cell(Cell::Array(array))),
     }
 }
 
@@ -290,10 +519,14 @@ fn lossy_array_cell(array: ArrayCell) -> CellCompatibilityResult {
 fn string_array<T>(
     values: Vec<Option<T>>,
     mut convert: impl FnMut(T) -> String,
-) -> CellCompatibilityResult {
-    CellCompatibilityResult::TypeChanged(Cell::Array(ArrayCell::String(
-        values.into_iter().map(|value| value.map(&mut convert)).collect(),
-    )))
+) -> BqCellCompatibilityResult {
+    let values = values
+        .into_iter()
+        .map(|value| {
+            value.map(&mut convert).expect("BigQuery compatibility rejects null array elements")
+        })
+        .collect();
+    type_changed(Type::TEXT, BigQueryCell::Array(BigQueryArrayCell::String(values)))
 }
 
 /// Converts an optional array while preserving the array variant.
@@ -301,22 +534,25 @@ fn value_array<T>(
     values: Vec<Option<T>>,
     mut convert: impl FnMut(T) -> T,
     wrap: impl FnOnce(Vec<Option<T>>) -> ArrayCell,
-) -> CellCompatibilityResult {
-    CellCompatibilityResult::ValueChanged(Cell::Array(wrap(
-        values.into_iter().map(|value| value.map(&mut convert)).collect(),
-    )))
+) -> BqCellCompatibilityResult {
+    value_changed(
+        Type::TEXT,
+        BigQueryCell::from_native_cell(Cell::Array(wrap(
+            values.into_iter().map(|value| value.map(&mut convert)).collect(),
+        ))),
+    )
 }
 
 /// Applies lossy BigQuery compatibility to a numeric value.
-fn lossy_numeric_cell(value: PgNumeric) -> CellCompatibilityResult {
+fn lossy_numeric_cell(value: PgNumeric) -> BqCellCompatibilityResult {
     match lossy_bigquery_numeric(value) {
-        Ok(value) => CellCompatibilityResult::ValueChanged(Cell::Numeric(value)),
+        Ok(value) => value_changed(Type::NUMERIC, BigQueryCell::string(value.to_string())),
         Err(reason) => invalid(ErrorKind::UnsupportedValueInDestination, reason),
     }
 }
 
 /// Applies lossy BigQuery compatibility to a numeric array.
-fn lossy_numeric_array_cell(values: Vec<Option<PgNumeric>>) -> CellCompatibilityResult {
+fn lossy_numeric_array_cell(values: Vec<Option<PgNumeric>>) -> BqCellCompatibilityResult {
     let values = values
         .into_iter()
         .enumerate()
@@ -329,46 +565,16 @@ fn lossy_numeric_array_cell(values: Vec<Option<PgNumeric>>) -> CellCompatibility
         .collect::<Result<Vec<_>, _>>();
 
     match values {
-        Ok(values) => {
-            CellCompatibilityResult::ValueChanged(Cell::Array(ArrayCell::Numeric(values)))
-        }
-        Err(reason) => invalid(ErrorKind::UnsupportedValueInDestination, reason),
-    }
-}
-
-/// Applies lossy BigQuery compatibility to a JSON value.
-fn lossy_json_cell(value: serde_json::Value) -> CellCompatibilityResult {
-    if let Err(reason) = validate_bigquery_json_depth(&value) {
-        return invalid(ErrorKind::UnsupportedValueInDestination, reason);
-    }
-
-    CellCompatibilityResult::ValueChanged(Cell::Json(normalize_bigquery_json_lossy(value)))
-}
-
-/// Applies lossy BigQuery compatibility to a JSON array.
-fn lossy_json_array_cell(values: Vec<Option<serde_json::Value>>) -> CellCompatibilityResult {
-    let values = values
-        .into_iter()
-        .enumerate()
-        .map(|(index, value)| {
-            value
-                .map(|value| {
-                    validate_bigquery_json_depth(&value)
-                        .map(|()| normalize_bigquery_json_lossy(value))
-                })
-                .transpose()
-                .map_err(|reason| format!("Element at index {index}: {reason}"))
-        })
-        .collect::<Result<Vec<_>, _>>();
-
-    match values {
-        Ok(values) => CellCompatibilityResult::ValueChanged(Cell::Array(ArrayCell::Json(values))),
+        Ok(values) => value_changed(
+            Type::TEXT,
+            BigQueryCell::from_native_cell(Cell::Array(ArrayCell::Numeric(values))),
+        ),
         Err(reason) => invalid(ErrorKind::UnsupportedValueInDestination, reason),
     }
 }
 
 /// Returns a strict compatibility failure when a cell is unsafe for BigQuery.
-fn validate_strict_cell(cell: &Cell) -> Option<CellCompatibilityResult> {
+fn validate_strict_cell(cell: &Cell) -> Option<BqCellCompatibilityResult> {
     match cell {
         Cell::F32(value) if *value == 0.0 && value.is_sign_negative() => {
             Some(invalid_negative_zero())
@@ -385,14 +591,13 @@ fn validate_strict_cell(cell: &Cell) -> Option<CellCompatibilityResult> {
             Some(invalid_timestamp_range())
         }
         Cell::Uuid(_) => Some(invalid_non_native_value("UUID")),
-        Cell::Json(value) => validate_strict_json(value),
         Cell::Array(array) => validate_strict_array(array),
         _ => None,
     }
 }
 
 /// Returns a strict compatibility failure when an array is unsafe for BigQuery.
-fn validate_strict_array(array: &ArrayCell) -> Option<CellCompatibilityResult> {
+fn validate_strict_array(array: &ArrayCell) -> Option<BqCellCompatibilityResult> {
     match array {
         ArrayCell::F32(values) => validate_strict_array_values(values, |value| {
             (*value == 0.0 && value.is_sign_negative()).then(invalid_negative_zero)
@@ -413,7 +618,6 @@ fn validate_strict_array(array: &ArrayCell) -> Option<CellCompatibilityResult> {
         ArrayCell::Uuid(values) => {
             validate_strict_array_values(values, |_| Some(invalid_non_native_value("UUID")))
         }
-        ArrayCell::Json(values) => validate_strict_array_values(values, validate_strict_json),
         _ => None,
     }
 }
@@ -421,8 +625,8 @@ fn validate_strict_array(array: &ArrayCell) -> Option<CellCompatibilityResult> {
 /// Validates strict compatibility for optional array elements.
 fn validate_strict_array_values<T>(
     values: &[Option<T>],
-    validate: impl Fn(&T) -> Option<CellCompatibilityResult>,
-) -> Option<CellCompatibilityResult> {
+    validate: impl Fn(&T) -> Option<BqCellCompatibilityResult>,
+) -> Option<BqCellCompatibilityResult> {
     for (index, value) in values.iter().enumerate() {
         if let Some(value) = value
             && let Some(result) = validate(value)
@@ -435,7 +639,10 @@ fn validate_strict_array_values<T>(
 }
 
 /// Adds array element context to a compatibility failure.
-fn prefix_array_error(index: usize, result: CellCompatibilityResult) -> CellCompatibilityResult {
+fn prefix_array_error(
+    index: usize,
+    result: BqCellCompatibilityResult,
+) -> BqCellCompatibilityResult {
     match result {
         CellCompatibilityResult::Invalid { kind, reason } => {
             invalid(kind, format!("Element at index {index}: {reason}"))
@@ -445,7 +652,7 @@ fn prefix_array_error(index: usize, result: CellCompatibilityResult) -> CellComp
 }
 
 /// Validates strict BigQuery compatibility for a numeric value.
-fn validate_strict_numeric(value: &PgNumeric) -> Option<CellCompatibilityResult> {
+fn validate_strict_numeric(value: &PgNumeric) -> Option<BqCellCompatibilityResult> {
     match value {
         PgNumeric::NaN => Some(invalid(
             ErrorKind::UnsupportedValueInDestination,
@@ -475,7 +682,7 @@ fn validate_strict_numeric(value: &PgNumeric) -> Option<CellCompatibilityResult>
 }
 
 /// Validates strict BigQuery compatibility for JSON.
-fn validate_strict_json(value: &serde_json::Value) -> Option<CellCompatibilityResult> {
+fn validate_strict_json(value: &serde_json::Value) -> Option<BqCellCompatibilityResult> {
     if let Err(reason) = validate_bigquery_json_depth(value) {
         return Some(invalid(ErrorKind::UnsupportedValueInDestination, reason));
     }
@@ -529,7 +736,7 @@ fn validate_bigquery_json_depth(value: &serde_json::Value) -> Result<(), String>
 }
 
 /// Validates strict BigQuery compatibility for a JSON number.
-fn validate_strict_json_number(number: &serde_json::Number) -> Option<CellCompatibilityResult> {
+fn validate_strict_json_number(number: &serde_json::Number) -> Option<BqCellCompatibilityResult> {
     let number = number.as_str();
     if is_json_integer_literal(number) {
         let integer_outside_exact_domain = if number.starts_with('-') {
@@ -613,7 +820,7 @@ fn normalize_bigquery_json_number_lossy(number: serde_json::Number) -> serde_jso
 }
 
 /// Returns a strict compatibility failure for negative zero.
-fn invalid_negative_zero() -> CellCompatibilityResult {
+fn invalid_negative_zero() -> BqCellCompatibilityResult {
     invalid(
         ErrorKind::UnsupportedValueInDestination,
         "Negative zero cannot be stored in BigQuery tables",
@@ -621,7 +828,7 @@ fn invalid_negative_zero() -> CellCompatibilityResult {
 }
 
 /// Returns a strict compatibility failure for a date outside BigQuery's range.
-fn invalid_date_range() -> CellCompatibilityResult {
+fn invalid_date_range() -> BqCellCompatibilityResult {
     invalid(
         ErrorKind::UnsupportedValueInDestination,
         "Date value is outside BigQuery's supported range 0001-01-01..=9999-12-31",
@@ -630,7 +837,7 @@ fn invalid_date_range() -> CellCompatibilityResult {
 
 /// Returns a strict compatibility failure for a timestamp outside BigQuery's
 /// range.
-fn invalid_timestamp_range() -> CellCompatibilityResult {
+fn invalid_timestamp_range() -> BqCellCompatibilityResult {
     invalid(
         ErrorKind::UnsupportedValueInDestination,
         "Timestamp value is outside BigQuery's supported range 0001-01-01..=9999-12-31",
@@ -638,20 +845,35 @@ fn invalid_timestamp_range() -> CellCompatibilityResult {
 }
 
 /// Returns a strict compatibility failure for a value without a native type.
-fn invalid_non_native_value(type_name: &str) -> CellCompatibilityResult {
+fn invalid_non_native_value(type_name: &str) -> BqCellCompatibilityResult {
     invalid(
         ErrorKind::UnsupportedValueInDestination,
         format!("{type_name} has no strict native BigQuery representation"),
     )
 }
 
+/// Returns an unchanged compatible cell.
+fn unchanged(typ: Type, cell: BigQueryCell) -> BqCellCompatibilityResult {
+    CellCompatibilityResult::Unchanged(CellCarrier::new(typ, cell))
+}
+
+/// Returns a value-changed compatible cell.
+fn value_changed(typ: Type, cell: BigQueryCell) -> BqCellCompatibilityResult {
+    CellCompatibilityResult::ValueChanged(CellCarrier::new(typ, cell))
+}
+
+/// Returns a type-changed compatible cell.
+fn type_changed(typ: Type, cell: BigQueryCell) -> BqCellCompatibilityResult {
+    CellCompatibilityResult::TypeChanged(CellCarrier::new(typ, cell))
+}
+
 /// Returns an invalid compatibility result.
-fn invalid(kind: ErrorKind, reason: impl Into<String>) -> CellCompatibilityResult {
+fn invalid(kind: ErrorKind, reason: impl Into<String>) -> BqCellCompatibilityResult {
     CellCompatibilityResult::Invalid { kind, reason: reason.into() }
 }
 
 /// Returns a null-array compatibility failure, if any element is null.
-fn validate_array_has_no_nulls(array: &ArrayCell) -> Option<CellCompatibilityResult> {
+fn validate_array_has_no_nulls(array: &ArrayCell) -> Option<BqCellCompatibilityResult> {
     let (element_count, null_count) = array_counts(array);
     if null_count == 0 {
         return None;
@@ -689,7 +911,6 @@ fn array_counts(array: &ArrayCell) -> (usize, usize) {
         ArrayCell::Timestamp(values) => counts!(values),
         ArrayCell::TimestampTz(values) => counts!(values),
         ArrayCell::Uuid(values) => counts!(values),
-        ArrayCell::Json(values) => counts!(values),
         ArrayCell::Bytes(values) => counts!(values),
     }
 }
@@ -957,8 +1178,8 @@ mod tests {
         for typ in [Type::NUMERIC_ARRAY, Type::JSON_ARRAY, Type::TIMESTAMPTZ_ARRAY] {
             assert_eq!(
                 BigQueryCompatibility::compatible_type(&typ, compatibility)
-                    .expect("risky array type should map to text array"),
-                Type::TEXT_ARRAY
+                    .expect("array type should map to scalar text"),
+                Type::TEXT
             );
         }
     }
@@ -1020,8 +1241,8 @@ mod tests {
         for typ in [Type::UUID_ARRAY, Type::MONEY_ARRAY, Type::INET_ARRAY, Type::INT4_RANGE_ARRAY] {
             assert_eq!(
                 BigQueryCompatibility::compatible_type(&typ, compatibility)
-                    .expect("non-native array type should map to text array"),
-                Type::TEXT_ARRAY
+                    .expect("non-native array type should map to scalar text"),
+                Type::TEXT
             );
         }
     }
@@ -1029,30 +1250,35 @@ mod tests {
     #[test]
     fn strict_lossless_and_lossy_handle_risky_values() {
         let cases = [
-            Cell::Numeric(
-                PgNumeric::from_str("0.000000000000000000000000000000000000001").unwrap(),
+            (
+                Type::NUMERIC,
+                Cell::Numeric(
+                    PgNumeric::from_str("0.000000000000000000000000000000000000001").unwrap(),
+                ),
             ),
-            Cell::Numeric(PgNumeric::PositiveInfinity),
-            Cell::Json(serde_json::from_str(r#"{"value":18446744073709551616}"#).unwrap()),
-            Cell::Json(serde_json::from_str(r#"{"value":1e309}"#).unwrap()),
-            Cell::F64(-0.0),
-            Cell::Date(NaiveDate::from_ymd_opt(0, 12, 31).unwrap()),
+            (Type::NUMERIC, Cell::Numeric(PgNumeric::PositiveInfinity)),
+            (Type::JSON, Cell::String(r#"{"value":18446744073709551616}"#.to_owned())),
+            (Type::JSON, Cell::String(r#"{"value":1e309}"#.to_owned())),
+            (Type::FLOAT8, Cell::F64(-0.0)),
+            (Type::DATE, Cell::Date(NaiveDate::from_ymd_opt(0, 12, 31).unwrap())),
         ];
 
-        for cell in cases {
+        for (typ, cell) in cases {
             assert!(
                 checker(DestinationTypeCompatibility::strict())
-                    .get_compatible_cell(cell.clone())
+                    .get_compatible_cell(&typ, cell.clone())
                     .is_err()
             );
             assert!(matches!(
                 checker(DestinationTypeCompatibility::lossless())
-                    .get_compatible_cell(cell.clone())
+                    .get_compatible_cell(&typ, cell.clone())
                     .unwrap(),
-                Cell::String(_)
+                compatible if matches!(compatible.cell, BigQueryCell::String(_))
             ));
             assert!(
-                checker(DestinationTypeCompatibility::lossy()).get_compatible_cell(cell).is_ok()
+                checker(DestinationTypeCompatibility::lossy())
+                    .get_compatible_cell(&typ, cell)
+                    .is_ok()
             );
         }
     }
@@ -1063,20 +1289,22 @@ mod tests {
 
         assert!(
             checker(DestinationTypeCompatibility::strict())
-                .get_compatible_cell(Cell::Uuid(uuid))
+                .get_compatible_cell(&Type::UUID, Cell::Uuid(uuid))
                 .is_err()
         );
         assert_eq!(
             checker(DestinationTypeCompatibility::lossless())
-                .get_compatible_cell(Cell::Uuid(uuid))
-                .unwrap(),
-            Cell::String(uuid.to_string())
+                .get_compatible_cell(&Type::UUID, Cell::Uuid(uuid))
+                .unwrap()
+                .cell,
+            BigQueryCell::String(uuid.to_string())
         );
         assert_eq!(
             checker(DestinationTypeCompatibility::lossy())
-                .get_compatible_cell(Cell::Uuid(uuid))
-                .unwrap(),
-            Cell::String(uuid.to_string())
+                .get_compatible_cell(&Type::UUID, Cell::Uuid(uuid))
+                .unwrap()
+                .cell,
+            BigQueryCell::String(uuid.to_string())
         );
     }
 
@@ -1087,18 +1315,22 @@ mod tests {
 
         assert!(
             checker(DestinationTypeCompatibility::strict())
-                .get_compatible_cell(cell.clone())
+                .get_compatible_cell(&Type::UUID_ARRAY, cell.clone())
                 .is_err()
         );
         assert_eq!(
             checker(DestinationTypeCompatibility::lossless())
-                .get_compatible_cell(cell.clone())
-                .unwrap(),
-            Cell::Array(ArrayCell::String(vec![Some(uuid.to_string())]))
+                .get_compatible_cell(&Type::UUID_ARRAY, cell.clone())
+                .unwrap()
+                .cell,
+            BigQueryCell::String(format!("{{{uuid}}}"))
         );
         assert_eq!(
-            checker(DestinationTypeCompatibility::lossy()).get_compatible_cell(cell).unwrap(),
-            Cell::Array(ArrayCell::String(vec![Some(uuid.to_string())]))
+            checker(DestinationTypeCompatibility::lossy())
+                .get_compatible_cell(&Type::UUID_ARRAY, cell)
+                .unwrap()
+                .cell,
+            BigQueryCell::String(format!("{{{uuid}}}"))
         );
     }
 
@@ -1122,29 +1354,38 @@ mod tests {
 
     #[test]
     fn json_depth_exceeding_bigquery_limit_is_rejected_unless_lossless() {
-        let cell = Cell::Json(nested_json(BIGQUERY_JSON_MAX_NESTING_DEPTH + 1));
+        let cell = Cell::String(nested_json(BIGQUERY_JSON_MAX_NESTING_DEPTH + 1).to_string());
 
         assert!(
             checker(DestinationTypeCompatibility::strict())
-                .get_compatible_cell(cell.clone())
+                .get_compatible_cell(&Type::JSON, cell.clone())
                 .is_err()
         );
         assert!(matches!(
             checker(DestinationTypeCompatibility::lossless())
-                .get_compatible_cell(cell.clone())
+                .get_compatible_cell(&Type::JSON, cell.clone())
                 .unwrap(),
-            Cell::String(_)
+            compatible if matches!(compatible.cell, BigQueryCell::String(_))
         ));
-        assert!(checker(DestinationTypeCompatibility::lossy()).get_compatible_cell(cell).is_err());
+        assert!(
+            checker(DestinationTypeCompatibility::lossy())
+                .get_compatible_cell(&Type::JSON, cell)
+                .is_err()
+        );
     }
 
     #[test]
     fn lossy_json_clamps_numbers_to_bigquery_float_domain() {
-        let cell = Cell::Json(serde_json::from_str(r#"{"value":1e309}"#).unwrap());
-        let result =
-            checker(DestinationTypeCompatibility::lossy()).get_compatible_cell(cell).unwrap();
+        let cell = Cell::String(r#"{"value":1e309}"#.to_owned());
+        let result = checker(DestinationTypeCompatibility::lossy())
+            .get_compatible_cell(&Type::JSON, cell)
+            .unwrap()
+            .cell;
 
-        let Cell::Json(serde_json::Value::Object(values)) = result else {
+        let BigQueryCell::String(value) = result else {
+            panic!("Expected JSON object");
+        };
+        let serde_json::Value::Object(values) = serde_json::from_str(&value).unwrap() else {
             panic!("Expected JSON object");
         };
         let value = values.get("value").and_then(serde_json::Value::as_f64).unwrap();
@@ -1152,29 +1393,53 @@ mod tests {
     }
 
     #[test]
-    fn arrays_reject_null_elements_in_all_modes() {
-        for compatibility in [
-            DestinationTypeCompatibility::strict(),
-            DestinationTypeCompatibility::lossless(),
-            DestinationTypeCompatibility::lossy(),
-        ] {
-            let result = checker(compatibility)
-                .get_compatible_cell(Cell::Array(ArrayCell::I32(vec![Some(1), None])));
-            assert!(result.is_err());
-            assert_eq!(
-                result.unwrap_err().kind(),
-                ErrorKind::NullValuesNotSupportedInArrayInDestination
-            );
-        }
+    fn typed_arrays_fail_strict_and_stringify_lossless_and_lossy_null_elements() {
+        let cell = Cell::Array(ArrayCell::I32(vec![Some(1), None]));
+
+        let result = checker(DestinationTypeCompatibility::strict())
+            .get_compatible_cell(&Type::INT4_ARRAY, cell.clone());
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().kind(),
+            ErrorKind::NullValuesNotSupportedInArrayInDestination
+        );
+
+        assert_eq!(
+            checker(DestinationTypeCompatibility::lossless())
+                .get_compatible_cell(&Type::INT4_ARRAY, cell.clone())
+                .unwrap()
+                .cell,
+            BigQueryCell::String("{1,NULL}".to_owned())
+        );
+        assert_eq!(
+            checker(DestinationTypeCompatibility::lossy())
+                .get_compatible_cell(&Type::INT4_ARRAY, cell)
+                .unwrap()
+                .cell,
+            BigQueryCell::String("{1,NULL}".to_owned())
+        );
     }
 
     #[test]
-    fn lossless_array_values_become_string_arrays() {
+    fn typed_lossless_array_values_become_scalar_strings() {
         let cell =
             Cell::Array(ArrayCell::Numeric(vec![Some(PgNumeric::from_str("1.23").unwrap())]));
-        let result =
-            checker(DestinationTypeCompatibility::lossless()).get_compatible_cell(cell).unwrap();
+        let result = checker(DestinationTypeCompatibility::lossless())
+            .get_compatible_cell(&Type::NUMERIC_ARRAY, cell)
+            .unwrap()
+            .cell;
 
-        assert_eq!(result, Cell::Array(ArrayCell::String(vec![Some("1.23".to_owned())])));
+        assert_eq!(result, BigQueryCell::String("{1.23}".to_owned()));
+    }
+
+    #[test]
+    fn strict_rejects_null_array_cells() {
+        let result = checker(DestinationTypeCompatibility::strict())
+            .get_compatible_cell(&Type::INT4_ARRAY, Cell::Null);
+
+        assert!(matches!(
+            result,
+            Err(err) if err.kind() == ErrorKind::UnsupportedValueInDestination
+        ));
     }
 }

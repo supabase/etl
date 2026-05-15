@@ -63,7 +63,6 @@ pub(crate) fn cell_to_clickhouse_value(cell: Cell) -> EtlResult<ClickHouseValue>
         Cell::Timestamp(dt) => ClickHouseValue::DateTime64(dt.and_utc().timestamp_micros()),
         Cell::TimestampTz(dt) => ClickHouseValue::DateTime64(dt.timestamp_micros()),
         Cell::Uuid(u) => ClickHouseValue::Uuid(*u.as_bytes()),
-        Cell::Json(j) => ClickHouseValue::String(j.to_string()),
         Cell::Bytes(b) => ClickHouseValue::String(bytes_to_hex(&b)),
         Cell::String(s) => ClickHouseValue::String(s),
         Cell::Array(array_cell) => {
@@ -98,7 +97,6 @@ fn array_cell_to_clickhouse_values(array_cell: ArrayCell) -> EtlResult<Vec<Click
             map_array(v, |dt| ClickHouseValue::DateTime64(dt.timestamp_micros()))
         }
         ArrayCell::Uuid(v) => map_array(v, |u| ClickHouseValue::Uuid(*u.as_bytes())),
-        ArrayCell::Json(v) => map_array(v, |j| ClickHouseValue::String(j.to_string())),
         ArrayCell::Bytes(v) => map_array(v, |b| ClickHouseValue::String(bytes_to_hex(&b))),
     })
 }

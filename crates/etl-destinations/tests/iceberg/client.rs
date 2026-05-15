@@ -646,13 +646,13 @@ async fn insert_nullable_array() {
                 )),
             ])), /* timestamptz_array_col */
             Cell::Array(ArrayCell::Uuid(vec![Some(Uuid::new_v4()), Some(Uuid::new_v4())])), /* uuid_array_col */
-            Cell::Array(ArrayCell::Json(vec![
-                Some(serde_json::json!({"key1": "value1"})),
-                Some(serde_json::json!({"key2": "value2"})),
+            Cell::Array(ArrayCell::String(vec![
+                Some(r#"{"key1":"value1"}"#.to_owned()),
+                Some(r#"{"key2":"value2"}"#.to_owned()),
             ])), /* json_array_col */
-            Cell::Array(ArrayCell::Json(vec![
-                Some(serde_json::json!({"keyb1": "valueb1"})),
-                Some(serde_json::json!({"keyb2": "valueb2"})),
+            Cell::Array(ArrayCell::String(vec![
+                Some(r#"{"keyb1":"valueb1"}"#.to_owned()),
+                Some(r#"{"keyb2":"valueb2"}"#.to_owned()),
             ])), /* jsonb_array_col */
             Cell::Array(ArrayCell::U32(vec![Some(1001), Some(1002)])), // oid_array_col
             Cell::Array(ArrayCell::Bytes(vec![
@@ -709,12 +709,12 @@ async fn insert_nullable_array() {
 
     // json_array_col (index 18) and jsonb_array_col (index 19): JSON arrays map to
     // String in Iceberg
-    if let Cell::Array(ArrayCell::Json(vec)) = &values[18] {
+    if let Cell::Array(ArrayCell::String(vec)) = &values[18] {
         let converted: Vec<Option<String>> =
             vec.iter().map(|opt| opt.as_ref().map(ToString::to_string)).collect();
         values[18] = Cell::Array(ArrayCell::String(converted));
     }
-    if let Cell::Array(ArrayCell::Json(vec)) = &values[19] {
+    if let Cell::Array(ArrayCell::String(vec)) = &values[19] {
         let converted: Vec<Option<String>> =
             vec.iter().map(|opt| opt.as_ref().map(ToString::to_string)).collect();
         values[19] = Cell::Array(ArrayCell::String(converted));
@@ -851,13 +851,13 @@ async fn insert_non_nullable_array() {
             )),
         ])), // timestamptz_array_col
         Cell::Array(ArrayCell::Uuid(vec![Some(Uuid::new_v4()), Some(Uuid::new_v4())])), /* uuid_array_col */
-        Cell::Array(ArrayCell::Json(vec![
-            Some(serde_json::json!({"key1": "value1"})),
-            Some(serde_json::json!({"key2": "value2"})),
+        Cell::Array(ArrayCell::String(vec![
+            Some(r#"{"key1":"value1"}"#.to_owned()),
+            Some(r#"{"key2":"value2"}"#.to_owned()),
         ])), /* json_array_col */
-        Cell::Array(ArrayCell::Json(vec![
-            Some(serde_json::json!({"keyb1": "valueb1"})),
-            Some(serde_json::json!({"keyb2": "valueb2"})),
+        Cell::Array(ArrayCell::String(vec![
+            Some(r#"{"keyb1":"valueb1"}"#.to_owned()),
+            Some(r#"{"keyb2":"valueb2"}"#.to_owned()),
         ])), /* jsonb_array_col */
         Cell::Array(ArrayCell::U32(vec![Some(1001), Some(1002)])), // oid_array_col
         Cell::Array(ArrayCell::Bytes(vec![
@@ -889,12 +889,12 @@ async fn insert_non_nullable_array() {
 
     // json_array_col (index 18) and jsonb_array_col (index 19): JSON arrays map to
     // String in Iceberg
-    if let Cell::Array(ArrayCell::Json(vec)) = &values[18] {
+    if let Cell::Array(ArrayCell::String(vec)) = &values[18] {
         let converted: Vec<Option<String>> =
             vec.iter().map(|opt| opt.as_ref().map(ToString::to_string)).collect();
         values[18] = Cell::Array(ArrayCell::String(converted));
     }
-    if let Cell::Array(ArrayCell::Json(vec)) = &values[19] {
+    if let Cell::Array(ArrayCell::String(vec)) = &values[19] {
         let converted: Vec<Option<String>> =
             vec.iter().map(|opt| opt.as_ref().map(ToString::to_string)).collect();
         values[19] = Cell::Array(ArrayCell::String(converted));

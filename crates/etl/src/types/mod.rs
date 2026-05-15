@@ -11,7 +11,7 @@ mod sized;
 mod table_row;
 
 // Re-exports.
-pub use cell::{ArrayCell, ArrayCellNonOptional, Cell, CellNonOptional};
+pub use cell::{ArrayCell, Cell};
 pub use etl_postgres::types::*;
 pub use event::{
     BeginEvent, CommitEvent, DeleteEvent, Event, EventSequenceKey, EventType, InsertEvent,
