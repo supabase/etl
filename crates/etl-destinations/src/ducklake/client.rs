@@ -44,8 +44,6 @@ static POSTGRES_PASSWORD_REGEX: LazyLock<Regex> = LazyLock::new(|| {
 
 /// Timeout applied to each foreground DuckLake blocking operation.
 pub(super) const FOREGROUND_QUERY_TIMEOUT: Duration = Duration::from_secs(3 * 60);
-/// Timeout applied to each maintenance DuckLake blocking operation.
-pub(super) const MAINTENANCE_QUERY_TIMEOUT: Duration = Duration::from_secs(3 * 60);
 /// Extra time allowed for a timed-out DuckDB operation to return after
 /// interrupt() has been called. If the operation is still stuck after this,
 /// the process is no longer safe to keep running.
@@ -71,21 +69,18 @@ fn remaining_ms_until(deadline: Instant) -> u64 {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum DuckDbBlockingOperationKind {
     Foreground,
-    Maintenance,
 }
 
 impl DuckDbBlockingOperationKind {
     fn as_str(self) -> &'static str {
         match self {
             Self::Foreground => "foreground",
-            Self::Maintenance => "maintenance",
         }
     }
 
     pub(super) fn timeout(self) -> Duration {
         match self {
             Self::Foreground => FOREGROUND_QUERY_TIMEOUT,
-            Self::Maintenance => MAINTENANCE_QUERY_TIMEOUT,
         }
     }
 }
@@ -1262,7 +1257,6 @@ mod tests {
     #[test]
     fn duckdb_blocking_operation_kind_timeouts() {
         assert_eq!(DuckDbBlockingOperationKind::Foreground.timeout(), FOREGROUND_QUERY_TIMEOUT);
-        assert_eq!(DuckDbBlockingOperationKind::Maintenance.timeout(), MAINTENANCE_QUERY_TIMEOUT);
     }
 
     #[tokio::test]

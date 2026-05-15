@@ -19,8 +19,12 @@ use crate::{
         sources::Source,
     },
     k8s::{
-        DestinationType, DuckLakeMaintenanceResourceConfig, K8sClient, K8sError, PodStatus,
-        ReplicatorConfigMapFile, ReplicatorStatefulSetConfig,
+        DestinationType, K8sClient, K8sError, PodStatus, ReplicatorConfigMapFile,
+        ReplicatorStatefulSetConfig,
+    },
+    maintenance::{
+        DuckLakeMaintenanceMaterialization, KubernetesMaintenanceMaterializer, MaintenanceIdentity,
+        MaintenanceMaterializationError, MaintenanceMaterializer, MaintenanceRuntimeRefs,
     },
 };
 
@@ -35,6 +39,9 @@ pub enum K8sCoreError {
 
     #[error("Could not load app environment")]
     MissingEnvironment,
+
+    #[error("Maintenance materialization failed: {0}")]
+    MaintenanceMaterialization(#[from] MaintenanceMaterializationError),
 }
 
 /// Secret types required by different destination configurations.
@@ -132,13 +139,17 @@ pub async fn create_or_update_pipeline_resources_in_k8s(
     let replicator_image = image.name;
     let ducklake_maintenance_for_replicator = matches!(destination_type, DestinationType::Ducklake)
         .then(|| ducklake_maintenance.clone().unwrap_or_default());
+    let maintenance_identity = MaintenanceIdentity {
+        tenant_id: tenant_id.to_owned(),
+        pipeline_id: pipeline.id,
+        replicator_id: replicator.id,
+        resource_prefix: prefix.clone(),
+    };
+    let maintenance_materializer = KubernetesMaintenanceMaterializer::new(k8s_client);
 
     create_or_update_ducklake_maintenance(
-        k8s_client,
-        &prefix,
-        tenant_id,
-        pipeline.id,
-        replicator.id,
+        &maintenance_materializer,
+        maintenance_identity,
         &replicator_image,
         destination_type,
         ducklake_maintenance,
@@ -420,34 +431,25 @@ async fn create_or_update_replicator_stateful_set(
 }
 
 /// Creates, updates, or deletes the DuckLake maintenance CR.
-#[allow(clippy::too_many_arguments)]
 async fn create_or_update_ducklake_maintenance(
-    k8s_client: &dyn K8sClient,
-    prefix: &str,
-    tenant_id: &str,
-    pipeline_id: i64,
-    replicator_id: i64,
+    materializer: &dyn MaintenanceMaterializer,
+    identity: MaintenanceIdentity,
     replicator_image: &str,
     destination_type: DestinationType,
     ducklake_maintenance: Option<crate::configs::pipeline::DuckLakeMaintenanceConfig>,
 ) -> Result<(), K8sCoreError> {
     if !matches!(destination_type, DestinationType::Ducklake) {
-        k8s_client.delete_ducklake_maintenance(prefix).await?;
+        materializer.delete_ducklake_maintenance(identity).await?;
         return Ok(());
     }
 
     let policy = ducklake_maintenance.unwrap_or_default();
-    k8s_client
-        .create_or_update_ducklake_maintenance(
-            prefix,
-            DuckLakeMaintenanceResourceConfig {
-                tenant_id: tenant_id.to_owned(),
-                pipeline_id,
-                replicator_id,
-                image: replicator_image.to_owned(),
-                policy,
-            },
-        )
+    materializer
+        .reconcile_ducklake_maintenance(DuckLakeMaintenanceMaterialization {
+            identity,
+            policy,
+            runtime_refs: MaintenanceRuntimeRefs { replicator_image: replicator_image.to_owned() },
+        })
         .await?;
 
     Ok(())
@@ -509,7 +511,10 @@ mod tests {
     use super::*;
     use crate::{
         configs::{destination::StoredDestinationConfig, source::StoredSourceConfig},
-        k8s::{K8sClient, K8sError, PodStatus, ReplicatorConfigMapFile},
+        k8s::{
+            DuckLakeMaintenanceResourceConfig, K8sClient, K8sError, PodStatus,
+            ReplicatorConfigMapFile,
+        },
     };
 
     #[derive(Debug, Clone)]

@@ -15,14 +15,16 @@ doctest = false
 [features]
 ducklake = [
     "dep:duckdb",
+    "dep:etl-maintenance",
+    "etl-maintenance/ducklake",
     "dep:humantime",
     "dep:metrics",
-    "dep:kube",
     "dep:parking_lot",
     "dep:pg_escape",
     "dep:r2d2",
     "dep:rand",
     "dep:regex",
+    "dep:serde",
     "dep:serde_json",
     "dep:sqlx",
     "dep:tokio-postgres",
@@ -30,6 +32,7 @@ ducklake = [
     "dep:tokio",
     "dep:url",
 ]
+ducklake-kubernetes = ["ducklake", "etl-maintenance/kubernetes"]
 bigquery = [
     "dep:gcp-bigquery-client",
     "dep:serde_json",
@@ -73,16 +76,16 @@ test-utils = ["dep:uuid"]
 
 arrow = { workspace = true, optional = true }
 async-trait = { workspace = true, optional = true }
-chrono = { workspace = true }
+chrono = { workspace = true, features = ["serde"] }
 clickhouse = { workspace = true, optional = true, features = ["inserter", "lz4", "rustls-tls"] }
 duckdb = { workspace = true, optional = true, features = ["bundled", "json", "parquet", "r2d2"] }
 etl = { workspace = true }
+etl-maintenance = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
 gcp-bigquery-client = { workspace = true, optional = true, features = ["rust-tls", "aws-lc-rs"] }
 humantime = { workspace = true, optional = true }
 iceberg = { workspace = true, optional = true }
 iceberg-catalog-rest = { workspace = true, optional = true }
-kube = { workspace = true, optional = true, features = ["client", "rustls-tls"] }
 metrics = { workspace = true, optional = true }
 parking_lot = { workspace = true, optional = true }
 parquet = { workspace = true, optional = true, features = ["async", "arrow"] }
