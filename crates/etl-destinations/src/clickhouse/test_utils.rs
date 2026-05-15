@@ -6,7 +6,7 @@ use tokio::runtime::Handle;
 use url::Url;
 use uuid::Uuid;
 
-use crate::clickhouse::{ClickHouseDestination, ClickHouseInserterConfig};
+use crate::clickhouse::{ClickHouseClientConfig, ClickHouseDestination, ClickHouseInserterConfig};
 
 /// ClickHouse HTTP URL (e.g. `http://localhost:8123`).
 pub const CLICKHOUSE_URL_ENV: &str = "TESTS_CLICKHOUSE_URL";
@@ -140,6 +140,7 @@ impl ClickHouseTestDatabase {
             self.password.clone(),
             &self.database,
             config,
+            ClickHouseClientConfig::default(),
             store,
         )
         .expect("Failed to create ClickHouseDestination for test")
