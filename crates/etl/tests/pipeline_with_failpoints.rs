@@ -1391,8 +1391,15 @@ async fn table_schema_replication_masks_are_consistent_after_restart() {
     // Clear up the events.
     destination.clear_events().await;
 
-    // Restart the pipeline - Postgres will resend the data since we don't track
-    // progress exactly.
+    // Remove the failpoint now that run 1 has shut down. Run 1 never acked
+    // progress, so the slot still holds all of run 1's WAL for replay; we no
+    // longer need to suppress acks in run 2 (and doing so risks
+    // wal_sender_timeout firing under slow CI and duplicating events, which
+    // would break the exact-count match in wait_for_events_count below).
+    fail::remove(SEND_STATUS_UPDATE_FP);
+
+    // Restart the pipeline -- Postgres will resend the data since we don't
+    // track progress exactly.
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
