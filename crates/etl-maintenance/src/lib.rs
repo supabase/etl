@@ -5,6 +5,8 @@ mod coordination;
 #[cfg(feature = "ducklake")]
 pub mod ducklake;
 
+#[cfg(feature = "kubernetes")]
+pub use coordination::KubernetesExternalMaintenanceStore;
 pub use coordination::{
     ExternalMaintenanceOperationHistory, ExternalMaintenanceOperationPolicy,
     ExternalMaintenanceOperationRequest, ExternalMaintenanceOperationRun,
@@ -13,6 +15,3 @@ pub use coordination::{
     ExternalMaintenanceState, ExternalMaintenanceStore, ExternalMaintenanceWatcherConfig,
     PostgresExternalMaintenanceStore,
 };
-
-#[cfg(feature = "kubernetes")]
-pub use coordination::KubernetesExternalMaintenanceStore;

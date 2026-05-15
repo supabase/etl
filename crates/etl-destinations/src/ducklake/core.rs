@@ -1492,7 +1492,6 @@ mod tests {
         config::catalog_conninfo_from_url,
         metrics::{query_catalog_maintenance_metrics, query_table_storage_metrics},
     };
-    use etl_maintenance::ducklake::flush_table_inlined_data;
 
     const POSTGRES_SCANNER_EXTENSION_FILE: &str = "postgres_scanner.duckdb_extension";
 
