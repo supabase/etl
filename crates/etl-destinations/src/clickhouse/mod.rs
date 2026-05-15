@@ -6,6 +6,6 @@ mod schema;
 #[cfg(feature = "test-utils")]
 pub mod test_utils;
 
-pub use core::{ClickHouseDestination, ClickHouseInserterConfig};
+pub use core::{ClickHouseClientConfig, ClickHouseDestination, ClickHouseInserterConfig};
 
 pub use client::ClickHouseClient;

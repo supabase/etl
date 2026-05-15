@@ -7,7 +7,7 @@ use etl::store::both::memory::MemoryStore;
 use etl_config::{SerializableSecretString, parse_ducklake_url};
 use etl_destinations::{
     bigquery::BigQueryClient,
-    clickhouse::ClickHouseClient,
+    clickhouse::{ClickHouseClient, ClickHouseClientConfig},
     ducklake::{DuckLakeDestination, S3Config as DucklakeS3Config},
     iceberg::{IcebergClient, S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_SECRET_ACCESS_KEY},
 };
@@ -663,6 +663,7 @@ impl Validator for ClickHouseValidator {
             self.user.clone(),
             self.password.as_ref().map(|password| password.expose_secret().to_owned()),
             self.database.clone(),
+            ClickHouseClientConfig::default(),
         );
         match client.validate_connectivity().await {
             Ok(_) => Ok(Vec::new()),

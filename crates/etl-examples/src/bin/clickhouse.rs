@@ -47,7 +47,9 @@ use etl::{
     pipeline::Pipeline,
     store::PostgresStore,
 };
-use etl_destinations::clickhouse::{ClickHouseDestination, ClickHouseInserterConfig};
+use etl_destinations::clickhouse::{
+    ClickHouseClientConfig, ClickHouseDestination, ClickHouseInserterConfig,
+};
 use tokio::signal;
 use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -207,6 +209,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         args.clickhouse_args.clickhouse_password,
         args.clickhouse_args.clickhouse_database,
         ClickHouseInserterConfig::default(),
+        ClickHouseClientConfig::default(),
         store.clone(),
     )?;
 

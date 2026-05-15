@@ -91,6 +91,7 @@ impl TableReplicationError {
             // Errors that can be retried automatically
             ErrorKind::SourceConnectionFailed
             | ErrorKind::DestinationConnectionFailed
+            | ErrorKind::DestinationTimeout
             | ErrorKind::SourceOperationCanceled
             | ErrorKind::SourceDatabaseShutdown
             | ErrorKind::SourceLockTimeout

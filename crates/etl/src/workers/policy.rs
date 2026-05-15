@@ -51,6 +51,7 @@ pub(crate) fn build_error_handling_policy(error: &EtlError) -> ErrorHandlingPoli
         ErrorKind::SourceConnectionFailed
         | ErrorKind::DestinationConnectionFailed
         | ErrorKind::DestinationAtomicBatchRetryable
+        | ErrorKind::DestinationTimeout
         | ErrorKind::SourceDatabaseShutdown
         | ErrorKind::SourceDatabaseInRecovery => {
             ErrorHandlingPolicy::new(RetryDirective::Timed, None)

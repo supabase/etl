@@ -88,6 +88,7 @@ pub enum ErrorKind {
     DestinationQueryFailed,
     DestinationAtomicBatchRetryable,
     SourceLockTimeout,
+    DestinationTimeout,
     SourceOperationCanceled,
 
     // Schema Errors

@@ -12,7 +12,7 @@ use etl::{
     types::{EventType, PipelineId},
 };
 use etl_destinations::clickhouse::{
-    ClickHouseInserterConfig,
+    ClickHouseClientConfig, ClickHouseInserterConfig,
     client::ClickHouseClient,
     test_utils::{
         get_clickhouse_password, get_clickhouse_url, get_clickhouse_user, setup_clickhouse_database,
@@ -1802,6 +1802,7 @@ async fn validate_connectivity_succeeds_against_running_clickhouse() {
         get_clickhouse_user(),
         get_clickhouse_password(),
         "default",
+        ClickHouseClientConfig::default(),
     );
     assert!(client.validate_connectivity().await.is_ok());
 }
@@ -1821,6 +1822,7 @@ async fn validate_connectivity_fails_against_unreachable_clickhouse() {
         "nobody",
         None::<String>,
         "default",
+        ClickHouseClientConfig::default(),
     );
     assert!(client.validate_connectivity().await.is_err());
 }
