@@ -230,8 +230,11 @@ pub(crate) async fn update_publication(
     let publication = Publication { name: publication_name, tables: publication.tables };
     data::publications::update_publication(&publication, &source_pool).await?;
 
+    // RFC 9745 §2.1 requires the Deprecation field to be an sf-date.
+    // The value is the Unix timestamp for 2026-05-15 00:00 UTC, the date
+    // this deprecation took effect.
     Ok(HttpResponse::Ok()
-        .insert_header(("Deprecation", "true"))
+        .insert_header(("Deprecation", "@1778803200"))
         .insert_header((
             "Link",
             "<https://github.com/supabase/etl/issues/459>; rel=\"deprecation\"",
