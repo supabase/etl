@@ -15,12 +15,15 @@ doctest = false
 [features]
 ducklake = [
     "dep:duckdb",
+    "dep:humantime",
     "dep:metrics",
+    "dep:kube",
     "dep:parking_lot",
     "dep:pg_escape",
     "dep:r2d2",
     "dep:rand",
     "dep:regex",
+    "dep:serde_json",
     "dep:sqlx",
     "dep:tokio-postgres",
     "dep:tracing",
@@ -76,8 +79,10 @@ duckdb = { workspace = true, optional = true, features = ["bundled", "json", "pa
 etl = { workspace = true }
 futures = { workspace = true, optional = true }
 gcp-bigquery-client = { workspace = true, optional = true, features = ["rust-tls", "aws-lc-rs"] }
+humantime = { workspace = true, optional = true }
 iceberg = { workspace = true, optional = true }
 iceberg-catalog-rest = { workspace = true, optional = true }
+kube = { workspace = true, optional = true, features = ["client", "rustls-tls"] }
 metrics = { workspace = true, optional = true }
 parking_lot = { workspace = true, optional = true }
 parquet = { workspace = true, optional = true, features = ["async", "arrow"] }
@@ -106,6 +111,7 @@ etl = { workspace = true, features = ["test-utils"] }
 etl-postgres = { workspace = true, features = ["test-utils", "tokio"] }
 etl-telemetry = { workspace = true }
 futures = { workspace = true }
+k8s-openapi = { workspace = true, features = ["latest"] }
 rand = { workspace = true, features = ["thread_rng"] }
 rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
 serde = { workspace = true, features = ["derive"] }

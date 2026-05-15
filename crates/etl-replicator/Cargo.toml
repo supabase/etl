@@ -13,11 +13,13 @@ egress = ["etl/egress", "etl-destinations/egress"]
 
 [dependencies]
 
+chrono = { workspace = true }
 configcat = { workspace = true }
 etl = { workspace = true }
 etl-config = { workspace = true, features = ["supabase"] }
 etl-destinations = { workspace = true, features = ["bigquery", "clickhouse", "ducklake", "iceberg"] }
 etl-telemetry = { workspace = true }
+k8s-openapi = { workspace = true, features = ["latest"] }
 metrics = { workspace = true }
 reqwest = { workspace = true, features = ["rustls-tls", "json"] }
 rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
@@ -29,6 +31,7 @@ sqlx = { workspace = true, features = ["runtime-tokio", "tls-rustls", "postgres"
 
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
 tracing = { workspace = true, default-features = true }
+tracing-subscriber = { workspace = true, features = ["ansi", "env-filter", "fmt"] }
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemalloc-ctl = { workspace = true }

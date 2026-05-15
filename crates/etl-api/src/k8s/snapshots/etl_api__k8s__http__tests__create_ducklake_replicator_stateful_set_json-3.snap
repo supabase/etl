@@ -179,6 +179,7 @@ expression: stateful_set_json
         "nodeSelector": {
           "etl.supabase.com/node-role": "workloads"
         },
+        "serviceAccountName": "etl-replicator",
         "terminationGracePeriodSeconds": 300,
         "tolerations": [
           {

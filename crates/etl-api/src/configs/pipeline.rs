@@ -60,6 +60,112 @@ impl ReplicatorResourcesConfig {
     }
 }
 
+/// DuckLake maintenance controller settings for one pipeline.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct DuckLakeMaintenanceConfig {
+    /// Minimum time between maintenance runs, in seconds.
+    #[schema(example = 3600)]
+    #[serde(default = "default_ducklake_maintenance_min_interval_seconds")]
+    pub min_interval_seconds: u64,
+    /// Maximum time replication may be paused for one maintenance run, in
+    /// seconds.
+    #[schema(example = 2700)]
+    #[serde(default = "default_ducklake_maintenance_max_pause_seconds")]
+    pub max_pause_seconds: u64,
+    /// Minimum inlined bytes required before inline flush runs.
+    #[schema(example = 10000000)]
+    #[serde(default = "default_ducklake_maintenance_min_inlined_bytes")]
+    pub min_inlined_bytes: u64,
+    /// Maximum number of adjacent files compacted by one merge operation.
+    #[schema(example = 32)]
+    #[serde(default = "default_ducklake_maintenance_max_compacted_files")]
+    pub max_compacted_files: u32,
+    /// Maximum number of tables processed by each operation in one run.
+    #[schema(example = 8)]
+    #[serde(default = "default_ducklake_maintenance_max_tables_per_run")]
+    pub max_tables_per_run: u32,
+    /// DuckLake target file size used for compaction.
+    #[schema(example = "10MB")]
+    #[serde(default = "default_ducklake_maintenance_target_file_size")]
+    pub target_file_size: String,
+    /// Deleted-row fraction that triggers data file rewrite.
+    #[schema(example = 0.5)]
+    #[serde(default = "default_ducklake_maintenance_delete_threshold")]
+    pub delete_threshold: f64,
+    /// Minimum active data files required before data file rewrite runs.
+    #[schema(example = 40)]
+    #[serde(default = "default_ducklake_maintenance_min_active_data_files")]
+    pub min_active_data_files: i64,
+    /// CPU request for maintenance jobs, in millicores.
+    #[schema(example = 1000)]
+    #[serde(default = "default_ducklake_maintenance_cpu_request_millicores")]
+    pub cpu_request_millicores: u32,
+    /// Memory request for maintenance jobs, in MiB.
+    #[schema(example = 1024)]
+    #[serde(default = "default_ducklake_maintenance_memory_request_mib")]
+    pub memory_request_mib: u32,
+    /// Maximum runtime for one maintenance job, in seconds.
+    #[schema(example = 1800)]
+    #[serde(default = "default_ducklake_maintenance_active_deadline_seconds")]
+    pub active_deadline_seconds: i64,
+}
+
+impl Default for DuckLakeMaintenanceConfig {
+    fn default() -> Self {
+        Self {
+            min_interval_seconds: default_ducklake_maintenance_min_interval_seconds(),
+            max_pause_seconds: default_ducklake_maintenance_max_pause_seconds(),
+            min_inlined_bytes: default_ducklake_maintenance_min_inlined_bytes(),
+            max_compacted_files: default_ducklake_maintenance_max_compacted_files(),
+            max_tables_per_run: default_ducklake_maintenance_max_tables_per_run(),
+            target_file_size: default_ducklake_maintenance_target_file_size(),
+            delete_threshold: default_ducklake_maintenance_delete_threshold(),
+            min_active_data_files: default_ducklake_maintenance_min_active_data_files(),
+            cpu_request_millicores: default_ducklake_maintenance_cpu_request_millicores(),
+            memory_request_mib: default_ducklake_maintenance_memory_request_mib(),
+            active_deadline_seconds: default_ducklake_maintenance_active_deadline_seconds(),
+        }
+    }
+}
+
+impl DuckLakeMaintenanceConfig {
+    /// Validates maintenance controller settings.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.min_interval_seconds == 0 {
+            return Err("ducklake maintenance min interval must be greater than 0".to_owned());
+        }
+        if self.max_pause_seconds == 0 {
+            return Err("ducklake maintenance max pause must be greater than 0".to_owned());
+        }
+        if self.max_compacted_files == 0 {
+            return Err(
+                "ducklake maintenance max compacted files must be greater than 0".to_owned()
+            );
+        }
+        if self.max_tables_per_run == 0 {
+            return Err("ducklake maintenance max tables per run must be greater than 0".to_owned());
+        }
+        if !(0.0..=1.0).contains(&self.delete_threshold) {
+            return Err("ducklake maintenance delete threshold must be between 0 and 1".to_owned());
+        }
+        if self.min_active_data_files < 0 {
+            return Err("ducklake maintenance min active data files must be greater than or \
+                        equal to 0"
+                .to_owned());
+        }
+        if self.cpu_request_millicores == 0 {
+            return Err("ducklake maintenance cpu request must be greater than 0".to_owned());
+        }
+        if self.memory_request_mib == 0 {
+            return Err("ducklake maintenance memory request must be greater than 0".to_owned());
+        }
+        if self.active_deadline_seconds <= 0 {
+            return Err("ducklake maintenance active deadline must be greater than 0".to_owned());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct FullApiPipelineConfig {
     #[schema(example = "my_publication")]
@@ -90,6 +196,8 @@ pub struct FullApiPipelineConfig {
     pub invalidated_slot_behavior: Option<InvalidatedSlotBehavior>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub replicator_resources: Option<ReplicatorResourcesConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ducklake_maintenance: Option<DuckLakeMaintenanceConfig>,
     pub log_level: Option<LogLevel>,
 }
 
@@ -98,6 +206,9 @@ impl FullApiPipelineConfig {
     pub fn validate(&self) -> Result<(), String> {
         if let Some(replicator_resources) = &self.replicator_resources {
             replicator_resources.validate()?;
+        }
+        if let Some(ducklake_maintenance) = &self.ducklake_maintenance {
+            ducklake_maintenance.validate()?;
         }
 
         Ok(())
@@ -118,6 +229,7 @@ impl From<StoredPipelineConfig> for FullApiPipelineConfig {
             table_sync_copy: Some(value.table_sync_copy),
             invalidated_slot_behavior: Some(value.invalidated_slot_behavior),
             replicator_resources: value.replicator_resources,
+            ducklake_maintenance: value.ducklake_maintenance,
             log_level: value.log_level,
         }
     }
@@ -146,6 +258,8 @@ pub struct StoredPipelineConfig {
     pub invalidated_slot_behavior: InvalidatedSlotBehavior,
     #[serde(default)]
     pub replicator_resources: Option<ReplicatorResourcesConfig>,
+    #[serde(default)]
+    pub ducklake_maintenance: Option<DuckLakeMaintenanceConfig>,
     pub log_level: Option<LogLevel>,
 }
 
@@ -200,9 +314,54 @@ impl From<FullApiPipelineConfig> for StoredPipelineConfig {
             table_sync_copy: value.table_sync_copy.unwrap_or_default(),
             invalidated_slot_behavior: value.invalidated_slot_behavior.unwrap_or_default(),
             replicator_resources: value.replicator_resources,
+            ducklake_maintenance: value.ducklake_maintenance,
             log_level: value.log_level,
         }
     }
+}
+
+fn default_ducklake_maintenance_min_interval_seconds() -> u64 {
+    3600
+}
+
+fn default_ducklake_maintenance_max_pause_seconds() -> u64 {
+    2700
+}
+
+fn default_ducklake_maintenance_min_inlined_bytes() -> u64 {
+    10_000_000
+}
+
+fn default_ducklake_maintenance_max_compacted_files() -> u32 {
+    32
+}
+
+fn default_ducklake_maintenance_max_tables_per_run() -> u32 {
+    8
+}
+
+fn default_ducklake_maintenance_target_file_size() -> String {
+    "10MB".to_owned()
+}
+
+fn default_ducklake_maintenance_delete_threshold() -> f64 {
+    0.5
+}
+
+fn default_ducklake_maintenance_min_active_data_files() -> i64 {
+    40
+}
+
+fn default_ducklake_maintenance_cpu_request_millicores() -> u32 {
+    1000
+}
+
+fn default_ducklake_maintenance_memory_request_mib() -> u32 {
+    1024
+}
+
+fn default_ducklake_maintenance_active_deadline_seconds() -> i64 {
+    1800
 }
 
 #[cfg(test)]
@@ -234,6 +393,7 @@ mod tests {
                 cpu_request_millicores: Some(500),
                 memory_request_mib: Some(2000),
             }),
+            ducklake_maintenance: None,
             log_level: None,
             invalidated_slot_behavior: InvalidatedSlotBehavior::Error,
         };
@@ -271,6 +431,7 @@ mod tests {
                 cpu_request_millicores: Some(500),
                 memory_request_mib: Some(2000),
             }),
+            ducklake_maintenance: None,
             log_level: Some(LogLevel::Debug),
         };
 
@@ -294,6 +455,7 @@ mod tests {
             table_sync_copy: None,
             invalidated_slot_behavior: None,
             replicator_resources: None,
+            ducklake_maintenance: None,
             log_level: None,
         };
 
@@ -344,6 +506,7 @@ mod tests {
                 cpu_request_millicores: Some(500),
                 memory_request_mib: Some(2000),
             }),
+            ducklake_maintenance: None,
             log_level: None,
             invalidated_slot_behavior: InvalidatedSlotBehavior::Error,
         };
