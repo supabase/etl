@@ -1,7 +1,7 @@
 mod client;
-mod compatibility;
 mod core;
 mod encoding;
+mod materialization;
 mod metrics;
 #[cfg(feature = "test-utils")]
 pub mod test_utils;

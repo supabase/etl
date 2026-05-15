@@ -34,8 +34,9 @@ use crate::{
     bigquery::{
         BigQueryDatasetId, BigQueryTableId,
         client::{BigQueryClient, BigQueryOperationType},
-        encoding::BigQueryTableRow,
+        materialization::{BigQueryMaterialization, BigQueryMaterializer},
         metrics::{ETL_BQ_APPEND_BATCHES_BATCH_SIZE, register_metrics},
+        value::BigQueryTableRow,
     },
     table_name::try_stringify_table_name,
 };
@@ -179,7 +180,7 @@ pub struct BigQueryDestinationOptions {
     dataset_id: BigQueryDatasetId,
     /// Maximum staleness in minutes for BigQuery CDC reads.
     max_staleness_mins: Option<u16>,
-    /// Type compatibility policy used for BigQuery materialization.
+    /// Type compatibility policy used by BigQuery materialization.
     type_compatibility: DestinationTypeCompatibility,
     /// ETL pipeline identifier.
     pipeline_id: PipelineId,
@@ -212,7 +213,7 @@ pub struct BigQueryDestination<S> {
     dataset_id: BigQueryDatasetId,
     max_staleness_mins: Option<u16>,
     pipeline_id: PipelineId,
-    type_compatibility: DestinationTypeCompatibility,
+    materializer: BigQueryMaterializer,
     state_store: S,
     inner: Arc<Mutex<Inner>>,
     tasks: TaskSet,
@@ -337,7 +338,7 @@ where
             dataset_id: options.dataset_id,
             max_staleness_mins: options.max_staleness_mins,
             pipeline_id: options.pipeline_id,
-            type_compatibility: options.type_compatibility,
+            materializer: BigQueryMaterialization::materializer(options.type_compatibility),
             state_store,
             inner: Arc::new(Mutex::new(Inner::new())),
             tasks: TaskSet::new(),
@@ -397,12 +398,12 @@ where
             self.state_store.store_destination_table_metadata(table_id, metadata.clone()).await?;
 
             self.client
-                .create_table_if_missing_with_type_compatibility(
+                .create_table_if_missing(
                     &self.dataset_id,
                     &sequenced_bigquery_table_id.to_string(),
                     replicated_table_schema,
                     self.max_staleness_mins,
-                    self.type_compatibility,
+                    &self.materializer,
                 )
                 .await?;
 
@@ -440,7 +441,7 @@ where
         let table_descriptor = BigQueryClient::column_schemas_to_table_descriptor(
             replicated_table_schema,
             use_cdc_sequence_column,
-            self.type_compatibility,
+            &self.materializer,
         )?;
 
         Ok((sequenced_bigquery_table_id, table_descriptor))
@@ -532,7 +533,7 @@ where
         let table_rows = table_rows
             .into_iter()
             .map(|table_row| {
-                bigquery_table_row(replicated_table_schema, table_row, self.type_compatibility)
+                bigquery_table_row(replicated_table_schema, table_row, &self.materializer)
             })
             .collect::<EtlResult<Vec<BigQueryTableRow>>>()?;
 
@@ -744,11 +745,11 @@ where
         // Apply column additions first (safest operation).
         for column in &diff.columns_to_add {
             self.client
-                .add_column_with_type_compatibility(
+                .add_column(
                     &self.dataset_id,
                     &bigquery_table_id.to_string(),
                     column,
-                    self.type_compatibility,
+                    &self.materializer,
                 )
                 .await?;
         }
@@ -827,7 +828,7 @@ where
                         entry.1.push(bigquery_table_row(
                             &insert.replicated_table_schema,
                             insert.table_row,
-                            self.type_compatibility,
+                            &self.materializer,
                         )?);
                     }
                     Event::Update(update) => {
@@ -857,7 +858,7 @@ where
                             table_row,
                             update.old_table_row,
                             sequence_key,
-                            self.type_compatibility,
+                            &self.materializer,
                         )?);
                     }
                     Event::Delete(delete) => {
@@ -887,7 +888,7 @@ where
                             &delete.replicated_table_schema,
                             old_table_row,
                             sequence_key,
-                            self.type_compatibility,
+                            &self.materializer,
                         )?);
                     }
                     event => {
@@ -1019,12 +1020,12 @@ where
             // We unconditionally replace the table if it's there because here we know that
             // we need the table to be empty given the truncation.
             self.client
-                .create_or_replace_table_with_type_compatibility(
+                .create_or_replace_table(
                     &self.dataset_id,
                     &next_sequenced_bigquery_table_id.to_string(),
                     &replicated_table_schema,
                     self.max_staleness_mins,
-                    self.type_compatibility,
+                    &self.materializer,
                 )
                 .await?;
             Self::add_to_created_tables_cache(&mut inner, &next_sequenced_bigquery_table_id);
@@ -1227,7 +1228,7 @@ fn bigquery_sequence_key(sequence_key: EventSequenceKey, internal_ordinal: u64) 
 fn bigquery_table_row(
     replicated_table_schema: &ReplicatedTableSchema,
     table_row: TableRow,
-    type_compatibility: DestinationTypeCompatibility,
+    materializer: &BigQueryMaterializer,
 ) -> EtlResult<BigQueryTableRow> {
     let source_column_count = replicated_table_schema.column_schemas().len();
     let values = table_row.into_values();
@@ -1254,17 +1255,14 @@ fn bigquery_table_row(
                 format!("Table '{}' row shape is inconsistent", replicated_table_schema.name())
             );
         };
-        tagged_cells.push((index + 1, Some(&column_schema.typ), value));
+        tagged_cells.push((index + 1, column_schema.typ.clone(), value));
     }
 
     for (offset, value) in values.enumerate() {
-        tagged_cells.push((source_column_count + offset + 1, None::<&Type>, value));
+        tagged_cells.push((source_column_count + offset + 1, Type::TEXT, value));
     }
 
-    BigQueryTableRow::try_from_typed_tagged_cells_with_type_compatibility(
-        tagged_cells,
-        type_compatibility,
-    )
+    BigQueryTableRow::try_from_typed_tagged_cells(tagged_cells, materializer)
 }
 
 /// Builds a BigQuery CDC upsert row.
@@ -1272,12 +1270,12 @@ fn bigquery_upsert_row(
     replicated_table_schema: &ReplicatedTableSchema,
     mut table_row: TableRow,
     sequence_key: String,
-    type_compatibility: DestinationTypeCompatibility,
+    materializer: &BigQueryMaterializer,
 ) -> EtlResult<BigQueryTableRow> {
     table_row.values_mut().push(BigQueryOperationType::Upsert.into_cell());
     table_row.values_mut().push(Cell::String(sequence_key));
 
-    bigquery_table_row(replicated_table_schema, table_row, type_compatibility)
+    bigquery_table_row(replicated_table_schema, table_row, materializer)
 }
 
 /// Builds one or two BigQuery CDC rows for an update.
@@ -1290,7 +1288,7 @@ fn bigquery_update_rows(
     new_table_row: TableRow,
     old_table_row: Option<OldTableRow>,
     sequence_key: EventSequenceKey,
-    type_compatibility: DestinationTypeCompatibility,
+    materializer: &BigQueryMaterializer,
 ) -> EtlResult<Vec<BigQueryTableRow>> {
     let primary_key_changed = match old_table_row.as_ref() {
         // PostgreSQL omits the old-side image only when the publisher
@@ -1320,7 +1318,7 @@ fn bigquery_update_rows(
             replicated_table_schema,
             old_table_row,
             bigquery_sequence_key(sequence_key, BIGQUERY_SEQUENCE_ORDINAL_FIRST),
-            type_compatibility,
+            materializer,
         )?);
     }
     let upsert_ordinal = if primary_key_changed {
@@ -1332,7 +1330,7 @@ fn bigquery_update_rows(
         replicated_table_schema,
         new_table_row,
         bigquery_sequence_key(sequence_key, upsert_ordinal),
-        type_compatibility,
+        materializer,
     )?);
 
     Ok(rows)
@@ -1443,7 +1441,7 @@ fn bigquery_primary_key_changed(
 fn bigquery_primary_key_tagged_cells_from_old_row(
     replicated_table_schema: &ReplicatedTableSchema,
     old_table_row: OldTableRow,
-) -> EtlResult<Vec<(usize, Option<&Type>, Cell)>> {
+) -> EtlResult<Vec<(usize, Type, Cell)>> {
     match old_table_row {
         OldTableRow::Full(row) => {
             let column_count = replicated_table_schema.column_schemas().len();
@@ -1467,7 +1465,7 @@ fn bigquery_primary_key_tagged_cells_from_old_row(
                 replicated_table_schema.column_schemas().zip(row.into_values()).enumerate()
             {
                 if column_schema.primary_key() {
-                    tagged_cells.push((column_index + 1, Some(&column_schema.typ), value));
+                    tagged_cells.push((column_index + 1, column_schema.typ.clone(), value));
                 }
             }
 
@@ -1525,7 +1523,7 @@ fn bigquery_primary_key_tagged_cells_from_old_row(
                         );
                     };
 
-                    tagged_cells.push((column_index + 1, Some(&column_schema.typ), value));
+                    tagged_cells.push((column_index + 1, column_schema.typ.clone(), value));
                 }
             }
 
@@ -1550,22 +1548,19 @@ fn bigquery_delete_row(
     replicated_table_schema: &ReplicatedTableSchema,
     old_table_row: OldTableRow,
     sequence_key: String,
-    type_compatibility: DestinationTypeCompatibility,
+    materializer: &BigQueryMaterializer,
 ) -> EtlResult<BigQueryTableRow> {
     let source_column_count = replicated_table_schema.column_schemas().len();
     let mut tagged_cells =
         bigquery_primary_key_tagged_cells_from_old_row(replicated_table_schema, old_table_row)?;
     tagged_cells.push((
         source_column_count + 1,
-        None::<&Type>,
+        Type::TEXT,
         BigQueryOperationType::Delete.into_cell(),
     ));
-    tagged_cells.push((source_column_count + 2, None::<&Type>, Cell::String(sequence_key)));
+    tagged_cells.push((source_column_count + 2, Type::TEXT, Cell::String(sequence_key)));
 
-    BigQueryTableRow::try_from_typed_tagged_cells_with_type_compatibility(
-        tagged_cells,
-        type_compatibility,
-    )
+    BigQueryTableRow::try_from_typed_tagged_cells(tagged_cells, materializer)
 }
 
 /// Calculates the optimal number of batches for table copy operations.
@@ -1651,6 +1646,19 @@ mod tests {
 
     use super::*;
     use crate::bigquery::value::BigQueryCell;
+
+    /// Returns a strict BigQuery materializer for tests.
+    fn strict_materializer() -> BigQueryMaterializer {
+        BigQueryMaterialization::materializer(DestinationTypeCompatibility::strict())
+    }
+
+    fn bigquery_text_row(value: impl Into<String>) -> BigQueryTableRow {
+        BigQueryTableRow::try_from_typed_cells(
+            [(Type::TEXT, Cell::String(value.into()))],
+            &BigQueryMaterialization::materializer(DestinationTypeCompatibility::default()),
+        )
+        .unwrap()
+    }
 
     fn replicated_schema(identity_type: IdentityType) -> ReplicatedTableSchema {
         let table_schema = Arc::new(TableSchema::new(
@@ -2036,10 +2044,7 @@ mod tests {
     #[test]
     fn calculate_target_batches_single_small_row() {
         // Create a single row with one small string value
-        let rows = vec![
-            BigQueryTableRow::try_from(TableRow::new(vec![Cell::String("test".to_owned())]))
-                .unwrap(),
-        ];
+        let rows = vec![bigquery_text_row("test")];
         let result = calculate_target_batches_for_table_copy(&rows).unwrap();
         assert_eq!(result, 1);
     }
@@ -2047,12 +2052,8 @@ mod tests {
     #[test]
     fn calculate_target_batches_many_small_rows() {
         // Create many rows with small values (estimated ~50 bytes each when encoded)
-        let rows: Vec<BigQueryTableRow> = (0..100_000)
-            .map(|i| {
-                BigQueryTableRow::try_from(TableRow::new(vec![Cell::String(format!("value_{i}"))]))
-                    .unwrap()
-            })
-            .collect();
+        let rows: Vec<BigQueryTableRow> =
+            (0..100_000).map(|i| bigquery_text_row(format!("value_{i}"))).collect();
 
         let result = calculate_target_batches_for_table_copy(&rows).unwrap();
         assert_eq!(result, 1);
@@ -2062,12 +2063,8 @@ mod tests {
     fn calculate_target_batches_large_rows() {
         // Create rows with large string values (each ~1MB)
         let large_string = "x".repeat(1024 * 1024); // 1MB string
-        let rows: Vec<BigQueryTableRow> = (0..50)
-            .map(|_| {
-                BigQueryTableRow::try_from(TableRow::new(vec![Cell::String(large_string.clone())]))
-                    .unwrap()
-            })
-            .collect();
+        let rows: Vec<BigQueryTableRow> =
+            (0..50).map(|_| bigquery_text_row(large_string.clone())).collect();
 
         let result = calculate_target_batches_for_table_copy(&rows).unwrap();
         assert_eq!(result, 7);
@@ -2077,9 +2074,7 @@ mod tests {
     fn calculate_target_batches_very_large_single_row() {
         // Create a row larger than max batch size (>10MB)
         let huge_string = "x".repeat(15 * 1024 * 1024); // 15MB string
-        let rows = vec![
-            BigQueryTableRow::try_from(TableRow::new(vec![Cell::String(huge_string)])).unwrap(),
-        ];
+        let rows = vec![bigquery_text_row(huge_string)];
 
         let result = calculate_target_batches_for_table_copy(&rows).unwrap();
         // Even though the row is too large, we should still get 1 batch
@@ -2108,7 +2103,7 @@ mod tests {
             &replicated_table_schema,
             OldTableRow::Key(TableRow::new(vec![Cell::I32(42)])),
             "lsn:1".to_owned(),
-            DestinationTypeCompatibility::strict(),
+            &strict_materializer(),
         )
         .unwrap();
 
@@ -2157,7 +2152,7 @@ mod tests {
                 Cell::I32(7),
             ])),
             "lsn:1".to_owned(),
-            DestinationTypeCompatibility::strict(),
+            &strict_materializer(),
         )
         .unwrap();
 
@@ -2181,7 +2176,7 @@ mod tests {
             TableRow::new(vec![Cell::I32(2), Cell::String("updated".to_owned())]),
             Some(OldTableRow::Key(TableRow::new(vec![Cell::I32(1)]))),
             sequence_key,
-            DestinationTypeCompatibility::strict(),
+            &strict_materializer(),
         )
         .unwrap();
 
@@ -2225,7 +2220,7 @@ mod tests {
             TableRow::new(vec![Cell::I32(1), Cell::String("updated".to_owned())]),
             Some(OldTableRow::Key(TableRow::new(vec![Cell::I32(1)]))),
             sequence_key,
-            DestinationTypeCompatibility::strict(),
+            &strict_materializer(),
         )
         .unwrap();
 
@@ -2259,7 +2254,7 @@ mod tests {
                 Cell::String("before".to_owned()),
             ]))),
             sequence_key,
-            DestinationTypeCompatibility::strict(),
+            &strict_materializer(),
         )
         .unwrap();
 

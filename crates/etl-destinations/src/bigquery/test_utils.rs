@@ -311,7 +311,7 @@ impl BigQueryDatabase {
     where
         S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
     {
-        self.build_destination_with_type_compatibility(
+        self.build_destination_with_compatibility(
             pipeline_id,
             schema_store,
             DestinationTypeCompatibility::default(),
@@ -321,7 +321,7 @@ impl BigQueryDatabase {
 
     /// Creates a [`BigQueryDestination`] with a custom type compatibility
     /// policy.
-    pub async fn build_destination_with_type_compatibility<S>(
+    pub async fn build_destination_with_compatibility<S>(
         &self,
         pipeline_id: PipelineId,
         schema_store: S,

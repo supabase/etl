@@ -1,74 +1,6 @@
-use etl::{
-    compatibility::DestinationTypeCompatibility,
-    error::EtlError,
-    types::{Cell, TableRow, Type},
-};
 use prost::bytes;
 
-use crate::bigquery::{
-    compatibility::BigQueryCompatibility,
-    value::{BigQueryArrayCell, BigQueryCell},
-};
-
-/// Protocol buffer wrapper for a BigQuery table row.
-///
-/// Compatibility conversion happens before this wrapper is built, so encoding
-/// can assume array elements are valid for BigQuery.
-#[derive(Debug)]
-pub(super) struct BigQueryTableRow(Vec<(u32, BigQueryCell)>);
-
-impl TryFrom<TableRow> for BigQueryTableRow {
-    type Error = EtlError;
-
-    /// Converts a [`TableRow`] to a [`BigQueryTableRow`] using default BigQuery
-    /// compatibility.
-    fn try_from(value: TableRow) -> Result<Self, Self::Error> {
-        BigQueryTableRow::try_from_with_type_compatibility(
-            value,
-            DestinationTypeCompatibility::default(),
-        )
-    }
-}
-
-impl BigQueryTableRow {
-    /// Converts a [`TableRow`] into a BigQuery row using the provided policy.
-    pub(super) fn try_from_with_type_compatibility(
-        value: TableRow,
-        type_compatibility: DestinationTypeCompatibility,
-    ) -> Result<Self, EtlError> {
-        let checker = BigQueryCompatibility::checker(type_compatibility);
-        let cells = checker
-            .get_compatible_cells(value.into_values())?
-            .into_iter()
-            .enumerate()
-            .map(|(index, cell)| ((index + 1) as u32, cell.into_cell()))
-            .collect();
-
-        Ok(BigQueryTableRow(cells))
-    }
-
-    /// Converts typed tagged cells into a BigQuery row with a compatibility
-    /// policy.
-    pub(super) fn try_from_typed_tagged_cells_with_type_compatibility<'a>(
-        tagged_cells: impl IntoIterator<Item = (usize, Option<&'a Type>, Cell)>,
-        type_compatibility: DestinationTypeCompatibility,
-    ) -> Result<Self, EtlError> {
-        let checker = BigQueryCompatibility::checker(type_compatibility);
-        let cells = checker
-            .get_compatible_cells(tagged_cells)?
-            .into_iter()
-            .map(|(index, _, cell)| (index as u32, cell.into_cell()))
-            .collect();
-
-        Ok(BigQueryTableRow(cells))
-    }
-
-    /// Returns the tagged cells for assertions in tests.
-    #[cfg(test)]
-    pub(super) fn debug_cells(&self) -> &[(u32, BigQueryCell)] {
-        &self.0
-    }
-}
+use crate::bigquery::value::{BigQueryArrayCell, BigQueryCell, BigQueryTableRow};
 
 impl prost::Message for BigQueryTableRow {
     /// Encodes the table row into the provided buffer using Protocol Buffer
@@ -80,7 +12,7 @@ impl prost::Message for BigQueryTableRow {
     where
         Self: Sized,
     {
-        for (tag, cell) in &self.0 {
+        for (tag, cell) in self.cells() {
             cell_encode_prost(cell, *tag, buf);
         }
     }
@@ -108,7 +40,7 @@ impl prost::Message for BigQueryTableRow {
     /// determine the total serialized size.
     fn encoded_len(&self) -> usize {
         let mut len = 0;
-        for (tag, cell) in &self.0 {
+        for (tag, cell) in self.cells() {
             len += cell_encode_len_prost(cell, *tag);
         }
 
@@ -117,7 +49,7 @@ impl prost::Message for BigQueryTableRow {
 
     /// Clears all cell values in the table row by calling clear on each cell.
     fn clear(&mut self) {
-        for (_, cell) in &mut self.0 {
+        for (_, cell) in self.cells_mut() {
             cell.clear();
         }
     }
@@ -205,23 +137,31 @@ mod tests {
 
     use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
     use etl::{
-        error::ErrorKind,
-        types::{Cell, PgNumeric},
+        error::{ErrorKind, EtlError},
+        materialization::DestinationTypeCompatibility,
+        types::{Cell, PgNumeric, Type},
     };
 
     use super::*;
+    use crate::bigquery::materialization::BigQueryMaterialization;
+
+    fn typed_row(
+        cells: impl IntoIterator<Item = (Type, Cell)>,
+        compatibility: DestinationTypeCompatibility,
+    ) -> Result<BigQueryTableRow, EtlError> {
+        let materializer = BigQueryMaterialization::materializer(compatibility);
+        BigQueryTableRow::try_from_typed_cells(cells, &materializer)
+    }
 
     #[test]
     fn bigquery_table_row_try_from_valid() {
-        let table_row = TableRow::new(vec![
-            Cell::I32(42),
-            Cell::String("test".to_owned()),
-            Cell::Bool(true),
-            Cell::Null,
-        ]);
-
-        let result = BigQueryTableRow::try_from_with_type_compatibility(
-            table_row,
+        let result = typed_row(
+            [
+                (Type::INT4, Cell::I32(42)),
+                (Type::TEXT, Cell::String("test".to_owned())),
+                (Type::BOOL, Cell::Bool(true)),
+                (Type::TEXT, Cell::Null),
+            ],
             DestinationTypeCompatibility::strict(),
         );
         assert!(result.is_ok());
@@ -229,10 +169,8 @@ mod tests {
 
     #[test]
     fn bigquery_table_row_try_from_rejects_numeric_nan() {
-        let table_row = TableRow::new(vec![Cell::I32(42), Cell::Numeric(PgNumeric::NaN)]);
-
-        let result = BigQueryTableRow::try_from_with_type_compatibility(
-            table_row,
+        let result = typed_row(
+            [(Type::INT4, Cell::I32(42)), (Type::NUMERIC, Cell::Numeric(PgNumeric::NaN))],
             DestinationTypeCompatibility::strict(),
         );
         assert!(result.is_err());
@@ -240,13 +178,11 @@ mod tests {
 
     #[test]
     fn bigquery_table_row_try_from_rejects_numeric_infinity() {
-        let table_row = TableRow::new(vec![
-            Cell::String("valid".to_owned()),
-            Cell::Numeric(PgNumeric::PositiveInfinity),
-        ]);
-
-        let result = BigQueryTableRow::try_from_with_type_compatibility(
-            table_row,
+        let result = typed_row(
+            [
+                (Type::TEXT, Cell::String("valid".to_owned())),
+                (Type::NUMERIC, Cell::Numeric(PgNumeric::PositiveInfinity)),
+            ],
             DestinationTypeCompatibility::strict(),
         );
         assert!(result.is_err());
@@ -254,52 +190,46 @@ mod tests {
 
     #[test]
     fn bigquery_table_row_try_from_rejects_json_number_outside_float_domain() {
-        let result = BigQueryTableRow::try_from_typed_tagged_cells_with_type_compatibility(
-            [(1, Some(&Type::JSON), Cell::String(r#"{"value":1e309}"#.to_owned()))],
-            DestinationTypeCompatibility::strict(),
+        let result = BigQueryTableRow::try_from_typed_tagged_cells(
+            [(1, Type::JSON, Cell::String(r#"{"value":1e309}"#.to_owned()))],
+            &BigQueryMaterialization::materializer(DestinationTypeCompatibility::strict()),
         );
         assert!(result.is_err());
     }
 
     #[test]
     fn bigquery_table_row_try_from_rejects_json_integer_precision_loss() {
-        let result = BigQueryTableRow::try_from_typed_tagged_cells_with_type_compatibility(
-            [(1, Some(&Type::JSON), Cell::String(r#"{"value":18446744073709551616}"#.to_owned()))],
-            DestinationTypeCompatibility::strict(),
+        let result = BigQueryTableRow::try_from_typed_tagged_cells(
+            [(1, Type::JSON, Cell::String(r#"{"value":18446744073709551616}"#.to_owned()))],
+            &BigQueryMaterialization::materializer(DestinationTypeCompatibility::strict()),
         );
         assert!(result.is_err());
     }
 
     #[test]
     fn bigquery_table_row_try_from_lossless_accepts_string_materialized_values() {
-        let result = BigQueryTableRow::try_from_typed_tagged_cells_with_type_compatibility(
+        let result = BigQueryTableRow::try_from_typed_tagged_cells(
             [
-                (
-                    1,
-                    Some(&Type::JSON),
-                    Cell::String(r#"{"value":18446744073709551616}"#.to_owned()),
-                ),
+                (1, Type::JSON, Cell::String(r#"{"value":18446744073709551616}"#.to_owned())),
                 (
                     2,
-                    Some(&Type::NUMERIC),
+                    Type::NUMERIC,
                     Cell::Numeric(
                         PgNumeric::from_str("0.000000000000000000000000000000000000001").unwrap(),
                     ),
                 ),
             ],
-            DestinationTypeCompatibility::lossless(),
+            &BigQueryMaterialization::materializer(DestinationTypeCompatibility::lossless()),
         );
         assert!(result.is_ok());
     }
 
     #[test]
     fn bigquery_table_row_try_from_rejects_date_outside_bigquery_domain() {
-        let invalid_date = NaiveDate::from_ymd_opt(1, 1, 1).unwrap().pred_opt().unwrap(); // Date before year 1
+        let invalid_date = NaiveDate::from_ymd_opt(1, 1, 1).unwrap().pred_opt().unwrap();
 
-        let table_row = TableRow::new(vec![Cell::Date(invalid_date)]);
-
-        let result = BigQueryTableRow::try_from_with_type_compatibility(
-            table_row,
+        let result = typed_row(
+            [(Type::DATE, Cell::Date(invalid_date))],
             DestinationTypeCompatibility::strict(),
         );
         assert!(result.is_err());
@@ -308,16 +238,14 @@ mod tests {
     #[test]
     fn bigquery_table_row_try_from_array_with_nulls() {
         let array_with_nulls = etl::types::ArrayCell::I32(vec![Some(1), None, Some(3)]);
-        let table_row = TableRow::new(vec![Cell::Array(array_with_nulls)]);
-
-        let result = BigQueryTableRow::try_from_with_type_compatibility(
-            table_row,
+        let result = typed_row(
+            [(Type::INT4_ARRAY, Cell::Array(array_with_nulls))],
             DestinationTypeCompatibility::strict(),
         );
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert_eq!(err.kind(), ErrorKind::NullValuesNotSupportedInArrayInDestination);
-        assert!(err.detail().unwrap().contains("Cell at index 0 failed compatibility"));
+        assert!(err.detail().unwrap().contains("Cell at index 0 failed materialization"));
     }
 
     #[test]
@@ -328,10 +256,8 @@ mod tests {
             Some(PgNumeric::from_str("789.012").unwrap()),
         ]);
 
-        let table_row = TableRow::new(vec![Cell::Array(array_with_rounding_risk)]);
-
-        let result = BigQueryTableRow::try_from_with_type_compatibility(
-            table_row,
+        let result = typed_row(
+            [(Type::NUMERIC_ARRAY, Cell::Array(array_with_rounding_risk))],
             DestinationTypeCompatibility::strict(),
         );
         assert!(result.is_err());
@@ -344,14 +270,12 @@ mod tests {
     #[test]
     fn bigquery_table_row_try_from_valid_array() {
         let valid_array = etl::types::ArrayCell::I32(vec![Some(1), Some(2), Some(3)]);
-        let table_row = TableRow::new(vec![
-            Cell::String("prefix".to_owned()),
-            Cell::Array(valid_array),
-            Cell::String("suffix".to_owned()),
-        ]);
-
-        let result = BigQueryTableRow::try_from_with_type_compatibility(
-            table_row,
+        let result = typed_row(
+            [
+                (Type::TEXT, Cell::String("prefix".to_owned())),
+                (Type::INT4_ARRAY, Cell::Array(valid_array)),
+                (Type::TEXT, Cell::String("suffix".to_owned())),
+            ],
             DestinationTypeCompatibility::strict(),
         );
         assert!(result.is_ok());
@@ -359,17 +283,21 @@ mod tests {
 
     #[test]
     fn bigquery_table_row_try_from_multiple_errors_first_wins() {
-        let table_row = TableRow::new(vec![
-            Cell::Numeric(
-                PgNumeric::from_str("0.000000000000000000000000000000000000001").unwrap(),
-            ),
-            Cell::Array(etl::types::ArrayCell::Numeric(vec![Some(
-                PgNumeric::from_str("0.000000000000000000000000000000000000002").unwrap(),
-            )])),
-        ]);
-
-        let result = BigQueryTableRow::try_from_with_type_compatibility(
-            table_row,
+        let result = typed_row(
+            [
+                (
+                    Type::NUMERIC,
+                    Cell::Numeric(
+                        PgNumeric::from_str("0.000000000000000000000000000000000000001").unwrap(),
+                    ),
+                ),
+                (
+                    Type::NUMERIC_ARRAY,
+                    Cell::Array(etl::types::ArrayCell::Numeric(vec![Some(
+                        PgNumeric::from_str("0.000000000000000000000000000000000000002").unwrap(),
+                    )])),
+                ),
+            ],
             DestinationTypeCompatibility::strict(),
         );
         assert!(result.is_err());
@@ -385,13 +313,14 @@ mod tests {
         let valid_time = NaiveTime::from_hms_opt(12, 30, 45).unwrap();
         let valid_datetime = NaiveDateTime::new(valid_date, valid_time);
 
-        let table_row = TableRow::new(vec![
-            Cell::Date(valid_date),
-            Cell::Time(valid_time),
-            Cell::Timestamp(valid_datetime),
-        ]);
-
-        let result = BigQueryTableRow::try_from(table_row);
+        let result = typed_row(
+            [
+                (Type::DATE, Cell::Date(valid_date)),
+                (Type::TIME, Cell::Time(valid_time)),
+                (Type::TIMESTAMP, Cell::Timestamp(valid_datetime)),
+            ],
+            DestinationTypeCompatibility::default(),
+        );
         assert!(result.is_ok());
     }
 
@@ -400,10 +329,8 @@ mod tests {
         let over_scale_numeric =
             PgNumeric::from_str("0.000000000000000000000000000000000000001").unwrap();
 
-        let table_row = TableRow::new(vec![Cell::Numeric(over_scale_numeric)]);
-
-        let result = BigQueryTableRow::try_from_with_type_compatibility(
-            table_row,
+        let result = typed_row(
+            [(Type::NUMERIC, Cell::Numeric(over_scale_numeric))],
             DestinationTypeCompatibility::strict(),
         );
         assert!(result.is_err());
@@ -413,24 +340,20 @@ mod tests {
     }
 
     #[test]
-    fn bigquery_table_row_try_from_uses_default_lossy_compatibility() {
-        let result = BigQueryTableRow::try_from_typed_tagged_cells_with_type_compatibility(
+    fn bigquery_table_row_try_from_uses_default_lossy_materialization() {
+        let result = BigQueryTableRow::try_from_typed_tagged_cells(
             [
                 (
                     1,
-                    Some(&Type::NUMERIC),
+                    Type::NUMERIC,
                     Cell::Numeric(
                         PgNumeric::from_str("0.000000000000000000000000000000000000001").unwrap(),
                     ),
                 ),
-                (
-                    2,
-                    Some(&Type::JSON),
-                    Cell::String(r#"{"value":18446744073709551616}"#.to_owned()),
-                ),
-                (3, Some(&Type::FLOAT8), Cell::F64(-0.0)),
+                (2, Type::JSON, Cell::String(r#"{"value":18446744073709551616}"#.to_owned())),
+                (3, Type::FLOAT8, Cell::F64(-0.0)),
             ],
-            DestinationTypeCompatibility::default(),
+            &BigQueryMaterialization::materializer(DestinationTypeCompatibility::default()),
         );
 
         assert!(result.is_ok());

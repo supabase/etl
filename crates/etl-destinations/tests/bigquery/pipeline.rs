@@ -155,7 +155,7 @@ async fn table_copy_and_streaming_with_restart() {
     // Rebuild the destination for the restart so the test exercises state/schema
     // recovery instead of relying on a reused, previously shut-down wrapper.
     let raw_destination = bigquery_database
-        .build_destination_with_type_compatibility(
+        .build_destination_with_compatibility(
             pipeline_id,
             store.clone(),
             DestinationTypeCompatibility::strict(),
@@ -1885,7 +1885,7 @@ async fn table_validation_out_of_bounds_values() {
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
     let raw_destination = bigquery_database
-        .build_destination_with_type_compatibility(
+        .build_destination_with_compatibility(
             pipeline_id,
             store.clone(),
             DestinationTypeCompatibility::strict(),
@@ -2037,11 +2037,7 @@ async fn table_type_compatibility_modes_handle_same_risky_data() {
         let store = NotifyingStore::new();
         let pipeline_id: PipelineId = random();
         let raw_destination = bigquery_database
-            .build_destination_with_type_compatibility(
-                pipeline_id,
-                store.clone(),
-                type_compatibility,
-            )
+            .build_destination_with_compatibility(pipeline_id, store.clone(), type_compatibility)
             .await;
         let destination = TestDestinationWrapper::wrap(raw_destination);
 
