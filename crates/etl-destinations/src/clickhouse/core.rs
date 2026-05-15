@@ -203,8 +203,8 @@ impl ClickHouseClientConfig {
     /// Default slack between server-side and client-side budgets.
     pub const DEFAULT_CLIENT_TIMEOUT_EPSILON: Duration = Duration::from_secs(4);
 
-    /// Server-side budget for `op`.
-    pub(crate) fn server_budget(&self, op: ClickHouseOperationKind) -> Duration {
+    /// Server-side timeout for `op`.
+    pub(crate) fn server_timeout_for(&self, op: ClickHouseOperationKind) -> Duration {
         match op {
             ClickHouseOperationKind::ConnectivityCheck => self.connectivity_check_timeout,
             ClickHouseOperationKind::SchemaQuery => self.schema_query_timeout,
@@ -213,10 +213,10 @@ impl ClickHouseClientConfig {
         }
     }
 
-    /// Client-side `tokio::time::timeout` budget for `op`: server budget
-    /// plus `client_timeout_epsilon`.
-    pub(crate) fn client_budget(&self, op: ClickHouseOperationKind) -> Duration {
-        self.server_budget(op) + self.client_timeout_epsilon
+    /// Client-side `tokio::time::timeout` for `op`:
+    /// `server_timeout_for(op) + client_timeout_epsilon`.
+    pub(crate) fn client_timeout_for(&self, op: ClickHouseOperationKind) -> Duration {
+        self.server_timeout_for(op) + self.client_timeout_epsilon
     }
 }
 

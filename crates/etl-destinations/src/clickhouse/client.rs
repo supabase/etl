@@ -27,8 +27,8 @@ fn floor_secs(d: Duration) -> String {
     d.as_secs().max(1).to_string()
 }
 
-/// Runs `fut` under `tokio::time::timeout` using the client budget for `op`
-/// from `config`. Inner ClickHouse errors map onto `op.failed_kind()`;
+/// Runs `fut` under `tokio::time::timeout` using the client-side timeout for
+/// `op` from `config`. Inner ClickHouse errors map onto `op.failed_kind()`;
 /// client-side deadlines map onto [`ErrorKind::DestinationTimeout`].
 /// `context`, when present, is appended to the error detail (e.g.
 /// `"table: foo"`) so call-site-specific diagnostic info is preserved.
@@ -48,8 +48,8 @@ where
         }
     }
 
-    let budget = config.client_budget(op);
-    match tokio::time::timeout(budget, fut).await {
+    let client_timeout = config.client_timeout_for(op);
+    match tokio::time::timeout(client_timeout, fut).await {
         Ok(Ok(value)) => Ok(value),
         Ok(Err(err)) => Err(etl_error!(
             op.failed_kind(),
@@ -60,7 +60,7 @@ where
         Err(_) => Err(etl_error!(
             ErrorKind::DestinationTimeout,
             "ClickHouse call timed out",
-            detail(op, &format!("timed out after {budget:?}"), context)
+            detail(op, &format!("timed out after {client_timeout:?}"), context)
         )),
     }
 }
@@ -453,22 +453,22 @@ mod tests {
     }
 
     /// # GIVEN
-    /// A config with a custom server budget and epsilon.
+    /// A config with a custom server timeout and epsilon.
     ///
     /// # WHEN
-    /// `client_budget(op)` is queried.
+    /// `client_timeout_for(op)` is queried.
     ///
     /// # THEN
-    /// It returns `server_budget(op) + client_timeout_epsilon`.
+    /// It returns `server_timeout_for(op) + client_timeout_epsilon`.
     #[test]
-    fn client_budget_adds_epsilon_to_server_budget() {
+    fn client_timeout_adds_epsilon_to_server_timeout() {
         let config = ClickHouseClientConfig {
             connectivity_check_timeout: Duration::from_secs(10),
             client_timeout_epsilon: Duration::from_secs(3),
             ..Default::default()
         };
         assert_eq!(
-            config.client_budget(ClickHouseOperationKind::ConnectivityCheck),
+            config.client_timeout_for(ClickHouseOperationKind::ConnectivityCheck),
             Duration::from_secs(13)
         );
 
@@ -478,7 +478,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            config.client_budget(ClickHouseOperationKind::ConnectivityCheck),
+            config.client_timeout_for(ClickHouseOperationKind::ConnectivityCheck),
             Duration::from_secs(3)
         );
     }
@@ -624,23 +624,26 @@ mod tests {
     /// A default `ClickHouseClientConfig`.
     ///
     /// # WHEN
-    /// `server_budget(op)` is queried for each variant.
+    /// `server_timeout_for(op)` is queried for each variant.
     ///
     /// # THEN
     /// Each variant returns the corresponding config field.
     #[test]
-    fn server_budget_per_operation_kind() {
+    fn server_timeout_per_operation_kind() {
         let config = ClickHouseClientConfig::default();
         assert_eq!(
-            config.server_budget(ClickHouseOperationKind::ConnectivityCheck),
+            config.server_timeout_for(ClickHouseOperationKind::ConnectivityCheck),
             config.connectivity_check_timeout
         );
         assert_eq!(
-            config.server_budget(ClickHouseOperationKind::SchemaQuery),
+            config.server_timeout_for(ClickHouseOperationKind::SchemaQuery),
             config.schema_query_timeout
         );
-        assert_eq!(config.server_budget(ClickHouseOperationKind::Ddl), config.ddl_timeout);
-        assert_eq!(config.server_budget(ClickHouseOperationKind::Insert), config.insert_timeout);
+        assert_eq!(config.server_timeout_for(ClickHouseOperationKind::Ddl), config.ddl_timeout);
+        assert_eq!(
+            config.server_timeout_for(ClickHouseOperationKind::Insert),
+            config.insert_timeout
+        );
     }
 
     /// # GIVEN
