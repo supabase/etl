@@ -186,8 +186,12 @@ pub(crate) async fn read_publication(
 }
 
 #[utoipa::path(
-    summary = "Update a publication",
-    description = "Replaces the publication's table list on the given source.",
+    summary = "Update a publication (deprecated)",
+    description = "Replaces the publication's table list on the given source.\n\n\
+        **Deprecated**: This endpoint uses `POST` for full replacement, which is \
+        semantically misleading because the request appears additive but actually \
+        replaces the entire table list. A replacement is being designed. See \
+        https://github.com/supabase/etl/issues/459.",
     tag = "Publications",
     request_body = UpdatePublicationRequest,
     params(
@@ -226,7 +230,13 @@ pub(crate) async fn update_publication(
     let publication = Publication { name: publication_name, tables: publication.tables };
     data::publications::update_publication(&publication, &source_pool).await?;
 
-    Ok(HttpResponse::Ok().finish())
+    Ok(HttpResponse::Ok()
+        .insert_header(("Deprecation", "true"))
+        .insert_header((
+            "Link",
+            "<https://github.com/supabase/etl/issues/459>; rel=\"deprecation\"",
+        ))
+        .finish())
 }
 
 #[utoipa::path(
