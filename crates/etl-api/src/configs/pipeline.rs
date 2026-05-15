@@ -63,36 +63,48 @@ impl ReplicatorResourcesConfig {
 /// DuckLake maintenance controller settings for one pipeline.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
 pub struct DuckLakeMaintenanceConfig {
+    /// Minimum time between maintenance runs, in seconds.
     #[schema(example = 3600)]
     #[serde(default = "default_ducklake_maintenance_min_interval_seconds")]
     pub min_interval_seconds: u64,
+    /// Maximum time replication may be paused for one maintenance run, in
+    /// seconds.
     #[schema(example = 2700)]
     #[serde(default = "default_ducklake_maintenance_max_pause_seconds")]
     pub max_pause_seconds: u64,
+    /// Minimum inlined bytes required before inline flush runs.
     #[schema(example = 10000000)]
     #[serde(default = "default_ducklake_maintenance_min_inlined_bytes")]
     pub min_inlined_bytes: u64,
+    /// Maximum number of adjacent files compacted by one merge operation.
     #[schema(example = 32)]
     #[serde(default = "default_ducklake_maintenance_max_compacted_files")]
     pub max_compacted_files: u32,
+    /// Maximum number of tables processed by each operation in one run.
     #[schema(example = 8)]
     #[serde(default = "default_ducklake_maintenance_max_tables_per_run")]
     pub max_tables_per_run: u32,
+    /// DuckLake target file size used for compaction.
     #[schema(example = "10MB")]
     #[serde(default = "default_ducklake_maintenance_target_file_size")]
     pub target_file_size: String,
+    /// Deleted-row fraction that triggers data file rewrite.
     #[schema(example = 0.5)]
     #[serde(default = "default_ducklake_maintenance_delete_threshold")]
     pub delete_threshold: f64,
+    /// Minimum active data files required before data file rewrite runs.
     #[schema(example = 40)]
     #[serde(default = "default_ducklake_maintenance_min_active_data_files")]
     pub min_active_data_files: i64,
+    /// CPU request for maintenance jobs, in millicores.
     #[schema(example = 1000)]
     #[serde(default = "default_ducklake_maintenance_cpu_request_millicores")]
     pub cpu_request_millicores: u32,
+    /// Memory request for maintenance jobs, in MiB.
     #[schema(example = 1024)]
     #[serde(default = "default_ducklake_maintenance_memory_request_mib")]
     pub memory_request_mib: u32,
+    /// Maximum runtime for one maintenance job, in seconds.
     #[schema(example = 1800)]
     #[serde(default = "default_ducklake_maintenance_active_deadline_seconds")]
     pub active_deadline_seconds: i64,
