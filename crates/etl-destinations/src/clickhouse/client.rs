@@ -203,11 +203,15 @@ impl ClickHouseClient {
     /// destination's `validate_connectivity` so callers (notably the
     /// `etl-api` validators) can treat the two destinations uniformly.
     pub async fn validate_connectivity(&self) -> EtlResult<()> {
+        let query = self
+            .inner
+            .query("SELECT 1")
+            .with_option("max_execution_time", floor_secs(self.config.connectivity_check_timeout));
         timeout_call(
             ClickHouseOperationKind::ConnectivityCheck,
             &self.config,
             None,
-            self.inner.query("SELECT 1").fetch_one::<u8>(),
+            query.fetch_one::<u8>(),
         )
         .await?;
         Ok(())
