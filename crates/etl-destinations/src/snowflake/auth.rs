@@ -1,11 +1,8 @@
 use std::{future::Future, time::Duration};
 
+use aws_lc_rs::{encoding::AsDer, signature::KeyPair as _};
 use base64::{Engine as _, engine::general_purpose as base64_engine};
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
-use rsa::{
-    pkcs1::{DecodeRsaPrivateKey, EncodeRsaPrivateKey},
-    pkcs8::{DecodePrivateKey, EncodePublicKey},
-};
 use secrecy::ExposeSecret as _;
 use sha2::Digest as _;
 use tokio::{sync::Mutex, time::Instant};
@@ -134,33 +131,23 @@ impl<E: TokenExchanger> AuthManager<E> {
         passphrase: Option<&secrecy::SecretString>,
         exchanger: E,
     ) -> Result<Self> {
-        let pem = std::fs::read_to_string(private_key_path)
+        let pem_text = std::fs::read_to_string(private_key_path)
             .map_err(|e| Error::Config(format!("failed to read private key file: {e}")))?;
 
-        // Try encrypted PKCS#8 first, then plain PKCS#8, then PKCS#1.
-        let private_key = if let Some(pass) = passphrase {
-            rsa::RsaPrivateKey::from_pkcs8_encrypted_pem(&pem, pass.expose_secret())
-                .map_err(|e| Error::Auth(format!("failed to parse encrypted private key: {e}")))?
-        } else {
-            rsa::RsaPrivateKey::from_pkcs8_pem(&pem)
-                .or_else(|_| rsa::RsaPrivateKey::from_pkcs1_pem(&pem))
-                .map_err(|e| Error::Auth(format!("failed to parse private key: {e}")))?
-        };
+        let (pkcs1_der, key_pair) = decode_and_load_rsa_key(&pem_text, passphrase)?;
 
         // Snowflake identifies keys by SHA-256(DER-encoded public key).
-        let public_key = rsa::RsaPublicKey::from(&private_key);
-        let der = public_key
-            .to_public_key_der()
-            .map_err(|e| Error::Auth(format!("failed to encode public key to DER: {e}")))?;
-        let hash = sha2::Sha256::digest(der.as_bytes());
+        let pub_der = key_pair
+            .public_key()
+            .as_der()
+            .map_err(|_| Error::Auth("failed to encode public key to DER".into()))?;
+        let hash = sha2::Sha256::digest(pub_der.as_ref());
         let b64 = base64_engine::STANDARD.encode(hash);
         let key_fingerprint = format!("SHA256:{b64}");
 
-        // jsonwebtoken requires PKCS#1 DER for RSA signing.
-        let pkcs1_der = private_key
-            .to_pkcs1_der()
-            .map_err(|e| Error::Auth(format!("failed to convert key to PKCS1 DER: {e}")))?;
-        let encoding_key = EncodingKey::from_rsa_der(pkcs1_der.as_bytes());
+        // jsonwebtoken's aws_lc_rs backend passes these bytes to
+        // RsaKeyPair::from_der(), which expects PKCS#1 (raw RSA) DER.
+        let encoding_key = EncodingKey::from_rsa_der(&pkcs1_der);
 
         Ok(Self {
             account_url: config.account_url.clone(),
@@ -224,6 +211,44 @@ impl<E: TokenExchanger> TokenProvider for AuthManager<E> {
     async fn invalidate_token(&self) {
         *self.cached_token.lock().await = None;
     }
+}
+
+/// Decode a PEM-encoded RSA private key, returning the PKCS#1 DER bytes
+/// (for jsonwebtoken) and a loaded `KeyPair` (for fingerprint derivation).
+///
+/// Supports encrypted PKCS#8, plain PKCS#8, and PKCS#1 PEM formats.
+fn decode_and_load_rsa_key(
+    pem_text: &str,
+    passphrase: Option<&secrecy::SecretString>,
+) -> Result<(Vec<u8>, aws_lc_rs::rsa::KeyPair)> {
+    use pkcs8::der::{Decode as _, SecretDocument};
+
+    let der_bytes = if let Some(pass) = passphrase {
+        let (_, doc) = SecretDocument::from_pem(pem_text)
+            .map_err(|e| Error::Auth(format!("failed to parse encrypted PEM: {e}")))?;
+        let enc = pkcs8::EncryptedPrivateKeyInfoRef::try_from(doc.as_bytes())
+            .map_err(|e| Error::Auth(format!("failed to parse encrypted key: {e}")))?;
+        enc.decrypt(pass.expose_secret())
+            .map_err(|e| Error::Auth(format!("failed to decrypt private key: {e}")))?
+            .as_bytes()
+            .to_vec()
+    } else {
+        let (_, doc) = SecretDocument::from_pem(pem_text)
+            .map_err(|e| Error::Auth(format!("failed to parse private key PEM: {e}")))?;
+        doc.as_bytes().to_vec()
+    };
+
+    // Try PKCS#8: extract the inner RSA key for jsonwebtoken, load via from_pkcs8.
+    if let Ok(pki) = pkcs8::PrivateKeyInfoRef::from_der(&der_bytes) {
+        let key_pair = aws_lc_rs::rsa::KeyPair::from_pkcs8(&der_bytes)
+            .map_err(|e| Error::Auth(format!("failed to load RSA key: {e}")))?;
+        return Ok((pki.private_key.as_bytes().to_vec(), key_pair));
+    }
+
+    // Raw PKCS#1 DER: use directly.
+    let key_pair = aws_lc_rs::rsa::KeyPair::from_der(&der_bytes)
+        .map_err(|e| Error::Auth(format!("failed to load RSA key: {e}")))?;
+    Ok((der_bytes, key_pair))
 }
 
 /// Extract `exp` from a raw JWT (RFC 7519) and convert to monotonic Instant.

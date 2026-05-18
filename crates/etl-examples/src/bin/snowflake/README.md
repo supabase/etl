@@ -34,7 +34,7 @@ psql -h localhost -p 5430 -U postgres -c "CREATE DATABASE etl_bench;"
 ### 3. Seed 1M rows
 
 ```bash
-cargo run -p etl-examples --bin snowflake-loadgen -- seed \
+cargo run -p etl-examples --features snowflake --bin snowflake-loadgen -- seed \
   --db-url postgres://postgres:postgres@localhost:5430/etl_bench \
   --rows 1000000
 ```
@@ -61,7 +61,7 @@ Then load them: `source .env`
 Snowflake args are picked up from `BENCH_SNOWFLAKE_*` env vars automatically:
 
 ```bash
-cargo run -p etl-examples --bin snowflake -- \
+cargo run -p etl-examples --features snowflake --bin snowflake -- \
   --db-host localhost \
   --db-port 5430 \
   --db-name etl_bench \
@@ -75,7 +75,7 @@ The terminal dashboard shows table copy progress and throughput in real-time.
 ### 6. Start CDC load generator (separate terminal)
 
 ```bash
-cargo run -p etl-examples --bin snowflake-loadgen -- generate \
+cargo run -p etl-examples --features snowflake --bin snowflake-loadgen -- generate \
   --db-url postgres://postgres:postgres@localhost:5430/etl_bench \
   --rate 5000 \
   --mix 40/40/20 \
