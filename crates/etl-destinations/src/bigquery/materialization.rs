@@ -85,11 +85,11 @@ impl MaterializationRules for BigQueryMaterialization {
 
     fn materialize_cell<M>(
         &self,
-        cell_carrier: TypedCell<Type, Cell, M>,
+        typed_cell: TypedCell<Type, Cell, M>,
         compatibility: DestinationTypeCompatibility,
     ) -> BigQueryCellMaterializationResult<M> {
-        let typ = cell_carrier.typ().clone();
-        let (cell, metadata) = cell_carrier.into_parts();
+        let typ = typed_cell.typ().clone();
+        let (cell, metadata) = typed_cell.into_parts();
         with_metadata(bigquery_materialized_cell(&typ, cell, compatibility), metadata)
     }
 }
@@ -1583,8 +1583,8 @@ mod tests {
         BigQueryMaterialization::materializer(compatibility)
     }
 
-    /// Returns a typed cell carrier for tests.
-    fn carrier(typ: Type, cell: Cell) -> TypedCell<Type, Cell, ()> {
+    /// Returns a typed cell for tests.
+    fn typed_cell(typ: Type, cell: Cell) -> TypedCell<Type, Cell, ()> {
         TypedCell::new(typ, cell, ())
     }
 
@@ -1595,8 +1595,8 @@ mod tests {
         cell: Cell,
     ) -> EtlResult<BigQueryCell> {
         materializer(compatibility)
-            .materialize_cell(carrier(typ, cell))
-            .map(|carrier| carrier.into_parts().0)
+            .materialize_cell(typed_cell(typ, cell))
+            .map(|typed_cell| typed_cell.into_parts().0)
     }
 
     /// Returns the materialized type and cell for tests.
@@ -1605,8 +1605,8 @@ mod tests {
         typ: Type,
         cell: Cell,
     ) -> EtlResult<(BigQueryType, BigQueryCell)> {
-        materializer(compatibility).materialize_cell(carrier(typ, cell)).map(|carrier| {
-            let (typ, cell, ()) = carrier.into_components();
+        materializer(compatibility).materialize_cell(typed_cell(typ, cell)).map(|typed_cell| {
+            let (typ, cell, ()) = typed_cell.into_components();
             (typ, cell)
         })
     }
@@ -1776,7 +1776,7 @@ mod tests {
         for (typ, cell) in cases {
             assert!(
                 materializer(DestinationTypeCompatibility::strict())
-                    .materialize_cell(carrier(typ.clone(), cell.clone()))
+                    .materialize_cell(typed_cell(typ.clone(), cell.clone()))
                     .is_err()
             );
             assert!(matches!(
@@ -1790,7 +1790,7 @@ mod tests {
             ));
             assert!(
                 materializer(DestinationTypeCompatibility::lossy())
-                    .materialize_cell(carrier(typ, cell))
+                    .materialize_cell(typed_cell(typ, cell))
                     .is_ok()
             );
         }
@@ -1802,7 +1802,7 @@ mod tests {
 
         assert!(
             materializer(DestinationTypeCompatibility::strict())
-                .materialize_cell(carrier(Type::UUID, Cell::Uuid(uuid)))
+                .materialize_cell(typed_cell(Type::UUID, Cell::Uuid(uuid)))
                 .is_err()
         );
         assert_eq!(
@@ -1828,7 +1828,7 @@ mod tests {
 
         assert!(
             materializer(DestinationTypeCompatibility::strict())
-                .materialize_cell(carrier(Type::UUID_ARRAY, cell.clone()))
+                .materialize_cell(typed_cell(Type::UUID_ARRAY, cell.clone()))
                 .is_err()
         );
         assert_eq!(
@@ -1871,7 +1871,7 @@ mod tests {
 
         assert!(
             materializer(DestinationTypeCompatibility::strict())
-                .materialize_cell(carrier(Type::JSON, cell.clone()))
+                .materialize_cell(typed_cell(Type::JSON, cell.clone()))
                 .is_err()
         );
         assert!(matches!(
@@ -1881,7 +1881,7 @@ mod tests {
         ));
         assert!(
             materializer(DestinationTypeCompatibility::lossy())
-                .materialize_cell(carrier(Type::JSON, cell))
+                .materialize_cell(typed_cell(Type::JSON, cell))
                 .is_err()
         );
     }
@@ -1891,7 +1891,7 @@ mod tests {
         let cell = Cell::String(r#"{"outer":{"value":1,"value":2}}"#.to_owned());
 
         let result = materializer(DestinationTypeCompatibility::strict())
-            .materialize_cell(carrier(Type::JSON, cell.clone()));
+            .materialize_cell(typed_cell(Type::JSON, cell.clone()));
         assert!(matches!(
             result,
             Err(err) if err.kind() == ErrorKind::UnsupportedValueInDestination
@@ -1937,7 +1937,7 @@ mod tests {
         )]));
 
         let result = materializer(DestinationTypeCompatibility::strict())
-            .materialize_cell(carrier(Type::JSON_ARRAY, cell));
+            .materialize_cell(typed_cell(Type::JSON_ARRAY, cell));
 
         assert!(matches!(
             result,
@@ -1964,7 +1964,7 @@ mod tests {
         ]));
 
         let result = materializer(DestinationTypeCompatibility::strict())
-            .materialize_cell(carrier(Type::DATE_ARRAY, cell));
+            .materialize_cell(typed_cell(Type::DATE_ARRAY, cell));
 
         assert!(matches!(
             result,
@@ -1979,7 +1979,7 @@ mod tests {
 
         assert!(
             materializer(DestinationTypeCompatibility::strict())
-                .materialize_cell(carrier(Type::DATE, cell.clone()))
+                .materialize_cell(typed_cell(Type::DATE, cell.clone()))
                 .is_err()
         );
         assert_eq!(
@@ -2008,7 +2008,7 @@ mod tests {
         let cell = Cell::Array(ArrayCell::I32(vec![Some(1), None]));
 
         let result = materializer(DestinationTypeCompatibility::strict())
-            .materialize_cell(carrier(Type::INT4_ARRAY, cell.clone()));
+            .materialize_cell(typed_cell(Type::INT4_ARRAY, cell.clone()));
         assert!(result.is_err());
         assert_eq!(
             result.unwrap_err().kind(),
@@ -2045,7 +2045,7 @@ mod tests {
     #[test]
     fn strict_rejects_null_array_cells() {
         let result = materializer(DestinationTypeCompatibility::strict())
-            .materialize_cell(carrier(Type::INT4_ARRAY, Cell::Null));
+            .materialize_cell(typed_cell(Type::INT4_ARRAY, Cell::Null));
 
         assert!(matches!(
             result,

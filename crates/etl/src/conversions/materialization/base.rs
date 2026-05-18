@@ -97,7 +97,7 @@ pub trait MaterializationRules {
     /// input cell's type under the same materialization policy.
     fn materialize_cell<M>(
         &self,
-        cell_carrier: TypedCell<Type, Cell, M>,
+        typed_cell: TypedCell<Type, Cell, M>,
         compatibility: DestinationTypeCompatibility,
     ) -> CellMaterializationResult<Self::MaterializedType, Self::MaterializedCell, M>;
 }
@@ -148,31 +148,31 @@ where
     /// Returns the destination materialized cell or an [`EtlError`].
     pub fn materialize_cell<M>(
         &self,
-        cell_carrier: TypedCell<Type, Cell, M>,
+        typed_cell: TypedCell<Type, Cell, M>,
     ) -> EtlResult<MaterializedCell<C, M>> {
-        self.materialize_cell_with_type(cell_carrier)
+        self.materialize_cell_with_type(typed_cell)
     }
 
     /// Returns destination materialized cells.
     pub fn materialize_cells<M>(
         &self,
-        cell_carriers: impl IntoIterator<Item = TypedCell<Type, Cell, M>>,
+        typed_cells: impl IntoIterator<Item = TypedCell<Type, Cell, M>>,
     ) -> EtlResult<Vec<MaterializedCell<C, M>>> {
-        cell_carriers
+        typed_cells
             .into_iter()
             .enumerate()
-            .map(|(index, cell_carrier)| self.materialize_cell_at_index(cell_carrier, index))
+            .map(|(index, typed_cell)| self.materialize_cell_at_index(typed_cell, index))
             .collect()
     }
 
     /// Returns the destination materialized cell and validates its type.
     fn materialize_cell_with_type<M>(
         &self,
-        cell_carrier: TypedCell<Type, Cell, M>,
+        typed_cell: TypedCell<Type, Cell, M>,
     ) -> EtlResult<MaterializedCell<C, M>> {
-        let source_type = cell_carrier.typ().clone();
+        let source_type = typed_cell.typ().clone();
         let materialized_type = self.materialize_type(&source_type)?;
-        match self.rules.materialize_cell(cell_carrier, self.type_compatibility) {
+        match self.rules.materialize_cell(typed_cell, self.type_compatibility) {
             CellMaterializationResult::Unchanged(cell) => self.validate_and_log_materialized_cell(
                 &source_type,
                 &materialized_type,
@@ -229,10 +229,10 @@ where
     /// Returns a destination materialized cell with index context on failures.
     fn materialize_cell_at_index<M>(
         &self,
-        cell_carrier: TypedCell<Type, Cell, M>,
+        typed_cell: TypedCell<Type, Cell, M>,
         index: usize,
     ) -> EtlResult<MaterializedCell<C, M>> {
-        self.materialize_cell_with_type(cell_carrier).map_err(|error| {
+        self.materialize_cell_with_type(typed_cell).map_err(|error| {
             let kind = error.kind();
             let detail = error.detail().map_or_else(
                 || format!("Cell at index {index} failed materialization"),
