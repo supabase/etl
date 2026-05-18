@@ -333,10 +333,11 @@ async fn run_generate(args: GenerateArgs) -> Result<(), Box<dyn Error>> {
         }
 
         if let Some(d) = deadline
-            && start.elapsed() >= d {
-                eprintln!("Duration reached, stopping.");
-                break;
-            }
+            && start.elapsed() >= d
+        {
+            eprintln!("Duration reached, stopping.");
+            break;
+        }
 
         // Build a batch of operations as a single SQL string
         let mut stmts: Vec<String> = Vec::with_capacity(batch_size);

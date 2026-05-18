@@ -204,8 +204,7 @@ pub fn parse_prometheus_metric_sum(text: &str, metric_name: &str) -> Option<f64>
     for line in text.lines() {
         if let Some(rest) = line.strip_prefix(metric_name)
             && (rest.starts_with(' ') || rest.starts_with('{'))
-            && let Some(val) =
-                rest.split_whitespace().last().and_then(|v| v.parse::<f64>().ok())
+            && let Some(val) = rest.split_whitespace().last().and_then(|v| v.parse::<f64>().ok())
         {
             total += val;
             found = true;
@@ -225,9 +224,9 @@ pub fn parse_prometheus_metric_with_label(
     let mut found = false;
     for line in text.lines() {
         if let Some(rest) = line.strip_prefix(metric_name)
-            && rest.starts_with('{') && rest.contains(&needle)
-            && let Some(val) =
-                rest.split_whitespace().last().and_then(|v| v.parse::<f64>().ok())
+            && rest.starts_with('{')
+            && rest.contains(&needle)
+            && let Some(val) = rest.split_whitespace().last().and_then(|v| v.parse::<f64>().ok())
         {
             total += val;
             found = true;
