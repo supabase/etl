@@ -234,7 +234,7 @@ impl Serialize for ArrayCellSerializer<'_> {
             ArrayCell::TimestampTz(v) => {
                 serialize_array_with(v, ser, |dt| CollectStr(dt.format(TIMESTAMPTZ_FORMAT_HH_MM)))
             }
-            ArrayCell::Uuid(v) => serialize_array_with(v, ser, |u| CollectStr(u)),
+            ArrayCell::Uuid(v) => serialize_array_with(v, ser, CollectStr),
             ArrayCell::Bytes(v) => serialize_array_with(v, ser, |b| CollectStr(HexDisplay(b))),
         }
     }
@@ -287,7 +287,7 @@ mod tests {
     use super::*;
 
     fn col(name: &str) -> ColumnSchema {
-        ColumnSchema::new(name.to_string(), Type::TEXT, -1, 1, None, true)
+        ColumnSchema::new(name.to_owned(), Type::TEXT, -1, 1, None, true)
     }
 
     fn push_single_cell(cell: Cell) -> std::result::Result<Value, Error> {

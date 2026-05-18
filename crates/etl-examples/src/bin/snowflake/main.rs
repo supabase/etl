@@ -212,7 +212,10 @@ async fn run() -> Result<(), Box<dyn Error>> {
 
         // Periodic refresh (every 2s)
         if last_refresh.elapsed() >= Duration::from_secs(2) {
-            let metrics_text = metrics_handle.as_ref().map(|h| h.render()).unwrap_or_default();
+            let metrics_text = match metrics_handle.as_ref() {
+                Some(h) => h.render(),
+                None => String::new(),
+            };
 
             // Refresh table name map (picks up newly discovered tables)
             let new_names = state::build_table_name_map(&store).await;
@@ -243,155 +246,143 @@ async fn run() -> Result<(), Box<dyn Error>> {
         }
 
         // Handle input
-        if crossterm::event::poll(Duration::from_millis(100))? {
-            if let Event::Key(key) = crossterm::event::read()? {
-                // If help is open, any key closes it
-                {
-                    let mut dash = dashboard.lock().unwrap();
-                    if dash.show_help {
-                        dash.show_help = false;
-                        continue;
-                    }
+        if crossterm::event::poll(Duration::from_millis(100))?
+            && let Event::Key(key) = crossterm::event::read()?
+        {
+            // If help is open, any key closes it
+            {
+                let mut dash = dashboard.lock().unwrap();
+                if dash.show_help {
+                    dash.show_help = false;
+                    continue;
+                }
+            }
+
+            match key.code {
+                // Quit
+                KeyCode::F(10) | KeyCode::Char('q') => {
+                    info!("quit requested, shutting down...");
+                    pipeline.shutdown();
+                    break;
                 }
 
-                match key.code {
-                    // Quit
-                    KeyCode::F(10) | KeyCode::Char('q') => {
-                        info!("quit requested, shutting down...");
-                        pipeline.shutdown();
-                        break;
-                    }
+                // Help
+                KeyCode::F(1) | KeyCode::Char('?') => {
+                    dashboard.lock().unwrap().show_help = true;
+                }
 
-                    // Help
-                    KeyCode::F(1) | KeyCode::Char('?') => {
-                        dashboard.lock().unwrap().show_help = true;
-                    }
+                // Table navigation
+                KeyCode::Char('j') | KeyCode::Down => {
+                    dashboard.lock().unwrap().select_next();
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    dashboard.lock().unwrap().select_prev();
+                }
 
-                    // Table navigation
-                    KeyCode::Char('j') | KeyCode::Down => {
-                        dashboard.lock().unwrap().select_next();
-                    }
-                    KeyCode::Char('k') | KeyCode::Up => {
-                        dashboard.lock().unwrap().select_prev();
-                    }
+                // Log scrolling
+                KeyCode::Char('J') => {
+                    let mut dash = dashboard.lock().unwrap();
+                    dash.log_scroll = dash.log_scroll.saturating_add(3);
+                }
+                KeyCode::Char('K') => {
+                    let mut dash = dashboard.lock().unwrap();
+                    dash.log_scroll = dash.log_scroll.saturating_sub(3);
+                }
+                KeyCode::PageUp => {
+                    let mut dash = dashboard.lock().unwrap();
+                    dash.log_scroll = dash.log_scroll.saturating_add(page_size);
+                }
+                KeyCode::PageDown => {
+                    let mut dash = dashboard.lock().unwrap();
+                    dash.log_scroll = dash.log_scroll.saturating_sub(page_size);
+                }
 
-                    // Log scrolling
-                    KeyCode::Char('J') => {
-                        let mut dash = dashboard.lock().unwrap();
-                        dash.log_scroll = dash.log_scroll.saturating_add(3);
-                    }
-                    KeyCode::Char('K') => {
-                        let mut dash = dashboard.lock().unwrap();
-                        dash.log_scroll = dash.log_scroll.saturating_sub(3);
-                    }
-                    KeyCode::PageUp => {
-                        let mut dash = dashboard.lock().unwrap();
-                        dash.log_scroll = dash.log_scroll.saturating_add(page_size);
-                    }
-                    KeyCode::PageDown => {
-                        let mut dash = dashboard.lock().unwrap();
-                        dash.log_scroll = dash.log_scroll.saturating_sub(page_size);
-                    }
+                // F2: Reset selected table
+                KeyCode::F(2) => {
+                    let (table_id, table_name) = {
+                        let dash = dashboard.lock().unwrap();
+                        match dash.selected_table_info() {
+                            Some(t) => (t.table_id, t.destination_name.clone()),
+                            None => continue,
+                        }
+                    };
 
-                    // F2: Reset selected table
-                    KeyCode::F(2) => {
-                        let (table_id, table_name) = {
-                            let dash = dashboard.lock().unwrap();
-                            match dash.selected_table_info() {
-                                Some(t) => (t.table_id, t.destination_name.clone()),
-                                None => continue,
-                            }
-                        };
+                    info!("F2: resetting table {}, stopping pipeline...", table_name);
+                    dashboard.lock().unwrap().set_status(format!("Resetting {table_name}..."));
 
-                        info!("F2: resetting table {}, stopping pipeline...", table_name);
-                        dashboard.lock().unwrap().set_status(format!("Resetting {table_name}..."));
+                    // Stop pipeline
+                    pipeline.shutdown();
+                    pipeline.wait().await?;
+                    dashboard.lock().unwrap().pipeline_running = false;
+                    dashboard.lock().unwrap().phase = GlobalPhase::Stopped;
 
-                        // Stop pipeline
-                        pipeline.shutdown();
-                        pipeline.wait().await?;
-                        dashboard.lock().unwrap().pipeline_running = false;
-                        dashboard.lock().unwrap().phase = GlobalPhase::Stopped;
-
-                        // Reset table state
-                        commands::reset_table(
-                            table_id,
-                            &table_name,
-                            &store,
-                            &destination,
-                            &dashboard,
-                        )
+                    // Reset table state
+                    commands::reset_table(table_id, &table_name, &store, &destination, &dashboard)
                         .await;
 
-                        // Restart pipeline
-                        info!("restarting pipeline after reset...");
-                        let client = Client::new(config.clone(), Arc::clone(&auth), pipeline_id);
-                        destination = Destination::new(client, store.clone());
-                        pipeline = Pipeline::new(
-                            pipeline_config.clone(),
-                            store.clone(),
-                            destination.clone(),
-                        );
-                        pipeline.start().await?;
-                        dashboard.lock().unwrap().pipeline_running = true;
+                    // Restart pipeline
+                    info!("restarting pipeline after reset...");
+                    let client = Client::new(config.clone(), Arc::clone(&auth), pipeline_id);
+                    destination = Destination::new(client, store.clone());
+                    pipeline =
+                        Pipeline::new(pipeline_config.clone(), store.clone(), destination.clone());
+                    pipeline.start().await?;
+                    dashboard.lock().unwrap().pipeline_running = true;
 
-                        info!("pipeline restarted after table reset");
-                        dashboard
-                            .lock()
-                            .unwrap()
-                            .set_status(format!("{table_name} reset complete, pipeline restarted"));
-                    }
-
-                    // F3: Restart pipeline
-                    KeyCode::F(3) => {
-                        info!("F3: restarting pipeline...");
-                        dashboard.lock().unwrap().set_status("Restarting pipeline...".to_owned());
-
-                        // Stop
-                        pipeline.shutdown();
-                        pipeline.wait().await?;
-                        dashboard.lock().unwrap().pipeline_running = false;
-                        dashboard.lock().unwrap().phase = GlobalPhase::Stopped;
-
-                        // Restart
-                        let client = Client::new(config.clone(), Arc::clone(&auth), pipeline_id);
-                        destination = Destination::new(client, store.clone());
-                        pipeline = Pipeline::new(
-                            pipeline_config.clone(),
-                            store.clone(),
-                            destination.clone(),
-                        );
-                        pipeline.start().await?;
-                        dashboard.lock().unwrap().pipeline_running = true;
-
-                        info!("pipeline restarted");
-                        dashboard.lock().unwrap().set_status("Pipeline restarted".to_owned());
-                    }
-
-                    // F4: Cycle log level filter
-                    KeyCode::F(4) => {
-                        let mut dash = dashboard.lock().unwrap();
-                        dash.log_level_filter = dash.log_level_filter.next();
-                        let label = dash.log_level_filter.label();
-                        dash.set_status(format!("Log filter: {label}"));
-                    }
-
-                    // F5: Sync Snowflake offsets
-                    KeyCode::F(5) => {
-                        info!("F5: syncing Snowflake offsets...");
-                        dashboard
-                            .lock()
-                            .unwrap()
-                            .set_status("Querying Snowflake offsets...".to_owned());
-
-                        state::fetch_snowflake_offsets(&dashboard, &destination).await;
-                        last_offset_fetch = Instant::now();
-
-                        dashboard.lock().unwrap().set_status("Snowflake offsets synced".to_owned());
-                        info!("Snowflake offset sync complete");
-                    }
-
-                    _ => {}
+                    info!("pipeline restarted after table reset");
+                    dashboard
+                        .lock()
+                        .unwrap()
+                        .set_status(format!("{table_name} reset complete, pipeline restarted"));
                 }
+
+                // F3: Restart pipeline
+                KeyCode::F(3) => {
+                    info!("F3: restarting pipeline...");
+                    dashboard.lock().unwrap().set_status("Restarting pipeline...".to_owned());
+
+                    // Stop
+                    pipeline.shutdown();
+                    pipeline.wait().await?;
+                    dashboard.lock().unwrap().pipeline_running = false;
+                    dashboard.lock().unwrap().phase = GlobalPhase::Stopped;
+
+                    // Restart
+                    let client = Client::new(config.clone(), Arc::clone(&auth), pipeline_id);
+                    destination = Destination::new(client, store.clone());
+                    pipeline =
+                        Pipeline::new(pipeline_config.clone(), store.clone(), destination.clone());
+                    pipeline.start().await?;
+                    dashboard.lock().unwrap().pipeline_running = true;
+
+                    info!("pipeline restarted");
+                    dashboard.lock().unwrap().set_status("Pipeline restarted".to_owned());
+                }
+
+                // F4: Cycle log level filter
+                KeyCode::F(4) => {
+                    let mut dash = dashboard.lock().unwrap();
+                    dash.log_level_filter = dash.log_level_filter.next();
+                    let label = dash.log_level_filter.label();
+                    dash.set_status(format!("Log filter: {label}"));
+                }
+
+                // F5: Sync Snowflake offsets
+                KeyCode::F(5) => {
+                    info!("F5: syncing Snowflake offsets...");
+                    dashboard
+                        .lock()
+                        .unwrap()
+                        .set_status("Querying Snowflake offsets...".to_owned());
+
+                    state::fetch_snowflake_offsets(&dashboard, &destination).await;
+                    last_offset_fetch = Instant::now();
+
+                    dashboard.lock().unwrap().set_status("Snowflake offsets synced".to_owned());
+                    info!("Snowflake offset sync complete");
+                }
+
+                _ => {}
             }
         }
     }

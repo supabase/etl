@@ -80,10 +80,10 @@ async fn poll_and_query_rows(
 fn make_table_schema(table_id: u32, schema: &str, table: &str) -> TableSchema {
     TableSchema::new(
         TableId::new(table_id),
-        TableName::new(schema.to_string(), table.to_string()),
+        TableName::new(schema.to_owned(), table.to_owned()),
         vec![
-            ColumnSchema::new("id".to_string(), Type::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("name".to_string(), Type::TEXT, -1, 2, None, true),
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
+            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true),
         ],
     )
 }
@@ -293,10 +293,10 @@ async fn schema_evolution_add_column() {
 
     let initial_schema = TableSchema::new(
         table_id,
-        TableName::new("public".to_string(), src_table.clone()),
+        TableName::new("public".to_owned(), src_table.clone()),
         vec![
-            ColumnSchema::new("id".to_string(), Type::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("name".to_string(), Type::TEXT, -1, 2, None, true),
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
+            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true),
         ],
     );
     let initial_replicated = ReplicatedTableSchema::all(Arc::new(initial_schema.clone()));
@@ -304,11 +304,11 @@ async fn schema_evolution_add_column() {
     let new_snapshot_id = SnapshotId::new(PgLsn::from(100u64));
     let evolved_schema = TableSchema::with_snapshot_id(
         table_id,
-        TableName::new("public".to_string(), src_table.clone()),
+        TableName::new("public".to_owned(), src_table.clone()),
         vec![
-            ColumnSchema::new("id".to_string(), Type::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("name".to_string(), Type::TEXT, -1, 2, None, true),
-            ColumnSchema::new("email".to_string(), Type::TEXT, -1, 3, None, true),
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
+            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true),
+            ColumnSchema::new("email".to_owned(), Type::TEXT, -1, 3, None, true),
         ],
         new_snapshot_id,
     );

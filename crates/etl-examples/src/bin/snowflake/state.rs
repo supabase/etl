@@ -183,10 +183,10 @@ impl DashboardState {
     }
 
     pub fn clear_stale_status(&mut self) {
-        if let Some((_, at)) = &self.status_message {
-            if at.elapsed() > Duration::from_secs(10) {
-                self.status_message = None;
-            }
+        if let Some((_, at)) = &self.status_message
+            && at.elapsed() > Duration::from_secs(10)
+        {
+            self.status_message = None;
         }
     }
 }
@@ -202,15 +202,13 @@ pub fn parse_prometheus_metric_sum(text: &str, metric_name: &str) -> Option<f64>
     let mut total = 0.0;
     let mut found = false;
     for line in text.lines() {
-        if let Some(rest) = line.strip_prefix(metric_name) {
-            if rest.starts_with(' ') || rest.starts_with('{') {
-                if let Some(val) =
-                    rest.split_whitespace().last().and_then(|v| v.parse::<f64>().ok())
-                {
-                    total += val;
-                    found = true;
-                }
-            }
+        if let Some(rest) = line.strip_prefix(metric_name)
+            && (rest.starts_with(' ') || rest.starts_with('{'))
+            && let Some(val) =
+                rest.split_whitespace().last().and_then(|v| v.parse::<f64>().ok())
+        {
+            total += val;
+            found = true;
         }
     }
     found.then_some(total)
@@ -226,15 +224,13 @@ pub fn parse_prometheus_metric_with_label(
     let mut total = 0.0;
     let mut found = false;
     for line in text.lines() {
-        if let Some(rest) = line.strip_prefix(metric_name) {
-            if rest.starts_with('{') && rest.contains(&needle) {
-                if let Some(val) =
-                    rest.split_whitespace().last().and_then(|v| v.parse::<f64>().ok())
-                {
-                    total += val;
-                    found = true;
-                }
-            }
+        if let Some(rest) = line.strip_prefix(metric_name)
+            && rest.starts_with('{') && rest.contains(&needle)
+            && let Some(val) =
+                rest.split_whitespace().last().and_then(|v| v.parse::<f64>().ok())
+        {
+            total += val;
+            found = true;
         }
     }
     found.then_some(total)

@@ -11,6 +11,8 @@ use crate::snowflake::{
     streaming::{ChannelHandle, OffsetToken, RestStreamClient, RowBatch, StreamClient},
 };
 
+type ChannelMap<C> = Arc<RwLock<HashMap<TableId, Arc<Mutex<ChannelHandle<C>>>>>>;
+
 /// Snowflake API client.
 ///
 /// Unifies the SQL REST API (DDL) and the Snowpipe Streaming API (channel
@@ -21,7 +23,7 @@ pub struct Client<T: TokenProvider, C: StreamClient = RestStreamClient<T>> {
     database: String,
     schema: String,
     pipeline_id: PipelineId,
-    channels: Arc<RwLock<HashMap<TableId, Arc<Mutex<ChannelHandle<C>>>>>>,
+    channels: ChannelMap<C>,
 }
 
 impl<T: TokenProvider, C: StreamClient> Clone for Client<T, C> {

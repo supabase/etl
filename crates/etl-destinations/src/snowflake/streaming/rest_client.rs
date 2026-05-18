@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::{string::String, sync::Arc, time::Duration};
 
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -68,8 +68,7 @@ impl<T: TokenProvider> RestStreamClient<T> {
                 // Actual server returns plain text (even with Accept: application/json).
                 // Docs say JSON: https://docs.snowflake.com/en/user-guide/snowpipe-streaming/snowpipe-streaming-high-performance-rest-api#get-hostname
                 let hostname = serde_json::from_str::<HostnameResponse>(&body_text)
-                    .map(|r| r.hostname)
-                    .unwrap_or_else(|_| body_text.trim().to_string());
+                    .map_or_else(|_| body_text.trim().to_owned(), |r| r.hostname);
 
                 if hostname.is_empty() {
                     return Err(Error::Channel(
@@ -87,13 +86,13 @@ impl<T: TokenProvider> RestStreamClient<T> {
                 Ok(host)
             })
             .await
-            .map(|s| s.as_str())
+            .map(String::as_str)
     }
 }
 
 impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
     async fn discover_ingest_host(&self) -> Result<String> {
-        self.get_or_discover_host().await.map(|s| s.to_string())
+        self.get_or_discover_host().await.map(ToOwned::to_owned)
     }
 
     async fn open_channel(
@@ -155,13 +154,13 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
                             Error::Encoding(format!("failed to parse open_channel response: {e}"))
                         })?;
 
-                    if let Some(ref status) = response.channel_status {
-                        if let Some(ref code) = status.channel_status_code {
-                            let is_ok = code == "SUCCESS" || code == "ACTIVE" || code == "0";
-                            if !is_ok {
-                                let msg = format!("open_channel returned status {code}: {body}");
-                                return Err(Error::Snowpipe { status_code: 1, message: msg });
-                            }
+                    if let Some(ref status) = response.channel_status
+                        && let Some(ref code) = status.channel_status_code
+                    {
+                        let is_ok = code == "SUCCESS" || code == "ACTIVE" || code == "0";
+                        if !is_ok {
+                            let msg = format!("open_channel returned status {code}: {body}");
+                            return Err(Error::Snowpipe { status_code: 1, message: msg });
                         }
                     }
 
@@ -194,8 +193,8 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
 
         let compressed = batch.bytes().to_vec();
         let query_params = [
-            ("continuationToken", continuation_token.to_string()),
-            ("offsetToken", batch.offset().as_ref().to_string()),
+            ("continuationToken", continuation_token.to_owned()),
+            ("offsetToken", batch.offset().as_ref().to_owned()),
         ];
 
         let auth = Arc::clone(&self.auth);
@@ -245,13 +244,13 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
                             warn!("received 401 from Snowpipe Streaming API, invalidating token");
                             auth.invalidate_token().await;
                         }
-                        if let Ok(err_resp) = serde_json::from_str::<SnowpipeErrorResponse>(&body) {
-                            if let Some(code) = err_resp.status_code {
-                                if code == 3 {
-                                    auth.invalidate_token().await;
-                                }
-                                return Err(Error::Snowpipe { status_code: code, message: body });
+                        if let Ok(err_resp) = serde_json::from_str::<SnowpipeErrorResponse>(&body)
+                            && let Some(code) = err_resp.status_code
+                        {
+                            if code == 3 {
+                                auth.invalidate_token().await;
                             }
+                            return Err(Error::Snowpipe { status_code: code, message: body });
                         }
                         return Err(Error::HttpStatus { status, body });
                     }
@@ -338,7 +337,7 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
 
         let auth = Arc::clone(&self.auth);
         let http = self.http.clone();
-        let channel_names = vec![channel.to_string()];
+        let channel_names = vec![channel.to_owned()];
         let request_body = BulkStatusRequest { channel_names: &channel_names };
 
         retry_with_backoff(
@@ -386,11 +385,9 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
                             Error::Encoding(format!("failed to parse channel_status response: {e}"))
                         })?;
 
-                    response
-                        .channel_statuses
-                        .into_iter()
-                        .next()
-                        .map(|(name, ch)| {
+                    response.channel_statuses.into_iter().next().map_or_else(
+                        || Err(Error::Channel("channel not found in status response".into())),
+                        |(name, ch)| {
                             Ok(ChannelStatusResponse {
                                 channel: name,
                                 status_code: ch.channel_status_code.unwrap_or_default(),
@@ -399,10 +396,8 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
                                     .map(|s| s.parse::<OffsetToken>())
                                     .transpose()?,
                             })
-                        })
-                        .unwrap_or_else(|| {
-                            Err(Error::Channel("channel not found in status response".into()))
-                        })
+                        },
+                    )
                 }
             },
         )
@@ -586,7 +581,7 @@ mod tests {
             .unwrap();
 
         let batches = builder.finish().unwrap();
-        let batch = batches.iter().next().unwrap();
+        let batch = batches.first().unwrap();
         assert!(batch.size() > 0);
 
         let decompressed = zstd::decode_all(batch.bytes()).unwrap();

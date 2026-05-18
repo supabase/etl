@@ -93,13 +93,13 @@ fn parse_duration(s: &str) -> Result<std::time::Duration, Box<dyn Error>> {
         let hours: u64 = stripped.parse()?;
         return Ok(std::time::Duration::from_secs(hours * 3600));
     }
-    Err(format!("invalid duration '{}': expected format like '300s', '5m', or '2h'", s).into())
+    Err(format!("invalid duration '{s}': expected format like '300s', '5m', or '2h'").into())
 }
 
 fn parse_mix(s: &str) -> Result<(u32, u32, u32), Box<dyn Error>> {
     let parts: Vec<&str> = s.split('/').collect();
     if parts.len() != 3 {
-        return Err(format!("invalid mix '{}': expected format like '40/40/20'", s).into());
+        return Err(format!("invalid mix '{s}': expected format like '40/40/20'").into());
     }
     let insert: u32 = parts[0].parse()?;
     let update: u32 = parts[1].parse()?;
@@ -120,14 +120,14 @@ async fn seed(client: &tokio_postgres::Client, rows: u64) -> Result<(), Box<dyn 
     let user_batch = 5000u64;
     let mut users_inserted = 0u64;
 
-    eprintln!("Seeding {} users...", user_count);
+    eprintln!("Seeding {user_count} users...");
     while users_inserted < user_count {
         let batch = user_batch.min(user_count - users_inserted);
         let mut values = Vec::with_capacity(batch as usize);
         for i in 0..batch {
             let n = users_inserted + i;
             let name = format!("User {n}");
-            let email = format!("user{}@example.com", n);
+            let email = format!("user{n}@example.com");
             values.push(format!("('{name}', '{email}', now())"));
         }
         let sql = format!(
@@ -137,7 +137,7 @@ async fn seed(client: &tokio_postgres::Client, rows: u64) -> Result<(), Box<dyn 
         client.execute(&sql, &[]).await?;
         users_inserted += batch;
     }
-    eprintln!("  users done: {}", users_inserted);
+    eprintln!("  users done: {users_inserted}");
 
     // Get user ID range
     let row = client.query_one("SELECT MIN(id), MAX(id) FROM bench.users", &[]).await?;
@@ -149,7 +149,7 @@ async fn seed(client: &tokio_postgres::Client, rows: u64) -> Result<(), Box<dyn 
     let mut orders_inserted = 0u64;
     let statuses = &["pending", "completed", "cancelled", "refunded"];
 
-    eprintln!("Seeding {} orders...", rows);
+    eprintln!("Seeding {rows} orders...");
     while orders_inserted < rows {
         let batch = order_batch.min(rows - orders_inserted);
         let mut values = Vec::with_capacity(batch as usize);
@@ -165,8 +165,8 @@ async fn seed(client: &tokio_postgres::Client, rows: u64) -> Result<(), Box<dyn 
         );
         client.execute(&sql, &[]).await?;
         orders_inserted += batch;
-        if orders_inserted % 10_000 == 0 || orders_inserted == rows {
-            eprintln!("  orders {}/{}", orders_inserted, rows);
+        if orders_inserted.is_multiple_of(10_000) || orders_inserted == rows {
+            eprintln!("  orders {orders_inserted}/{rows}");
         }
     }
 
@@ -174,7 +174,7 @@ async fn seed(client: &tokio_postgres::Client, rows: u64) -> Result<(), Box<dyn 
     let event_batch = 5000u64;
     let mut events_inserted = 0u64;
 
-    eprintln!("Seeding {} events...", rows);
+    eprintln!("Seeding {rows} events...");
     while events_inserted < rows {
         let batch = event_batch.min(rows - events_inserted);
         let mut values = Vec::with_capacity(batch as usize);
@@ -198,8 +198,8 @@ async fn seed(client: &tokio_postgres::Client, rows: u64) -> Result<(), Box<dyn 
         );
         client.execute(&sql, &[]).await?;
         events_inserted += batch;
-        if events_inserted % 10_000 == 0 || events_inserted == rows {
-            eprintln!("  events {}/{}", events_inserted, rows);
+        if events_inserted.is_multiple_of(10_000) || events_inserted == rows {
+            eprintln!("  events {events_inserted}/{rows}");
         }
     }
 
@@ -318,7 +318,7 @@ async fn run_generate(args: GenerateArgs) -> Result<(), Box<dyn Error>> {
         args.mix,
         match deadline {
             Some(d) => format!(", duration: {}s", d.as_secs()),
-            None => ", running until ctrl-c".to_string(),
+            None => ", running until ctrl-c".to_owned(),
         }
     );
 
@@ -332,12 +332,11 @@ async fn run_generate(args: GenerateArgs) -> Result<(), Box<dyn Error>> {
             _ = ticker.tick() => {}
         }
 
-        if let Some(d) = deadline {
-            if start.elapsed() >= d {
+        if let Some(d) = deadline
+            && start.elapsed() >= d {
                 eprintln!("Duration reached, stopping.");
                 break;
             }
-        }
 
         // Build a batch of operations as a single SQL string
         let mut stmts: Vec<String> = Vec::with_capacity(batch_size);

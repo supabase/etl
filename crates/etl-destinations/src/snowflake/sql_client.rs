@@ -270,7 +270,7 @@ impl<T: TokenProvider> SqlClient<T> {
         loop {
             if tokio::time::Instant::now() >= deadline {
                 return Err(Error::Sql {
-                    statement_handle: Some(statement_handle.to_string()),
+                    statement_handle: Some(statement_handle.to_owned()),
                     message: format!(
                         "statement did not complete within {}s",
                         POLL_TIMEOUT.as_secs()
