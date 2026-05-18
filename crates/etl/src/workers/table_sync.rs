@@ -773,7 +773,6 @@ where
             state_store: self.store.clone(),
         });
 
-        let cleanup_store = self.store.clone();
         let _apply_loop_stream_guard = self.batch_budget.register_stream_load(1);
         let apply_loop_result = ApplyLoop::start(
             self.pipeline_id,
@@ -799,7 +798,7 @@ where
 
                 // Catchup has completed, so cleanup failures should not turn a
                 // completed table sync into a replication failure.
-                if let Err(err) = self.cleanup_resources(replication_client, cleanup_store).await {
+                if let Err(err) = self.cleanup_resources(replication_client, self.store.clone()).await {
                     warn!(
                         table_id = self.table_id.0,
                         error = %err,
