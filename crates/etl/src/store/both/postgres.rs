@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 
-use etl_postgres::replication::{destination_metadata, schema, state};
+use etl_postgres::replication::{destination_metadata, progress, schema, state};
 use metrics::gauge;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use tokio::sync::Mutex;
@@ -17,6 +17,7 @@ use crate::{
     etl_error,
     metrics::{ETL_TABLES_TOTAL, PHASE_LABEL},
     migrations,
+    replication::WorkerType,
     state::{
         destination_metadata::{
             AppliedDestinationTableMetadata, DestinationTableMetadata, DestinationTableSchemaStatus,
@@ -28,7 +29,7 @@ use crate::{
         schema::{SchemaStore, TableSchemaRetention, TableSchemaSnapshots},
         state::{DestinationTablesMetadata, StateStore, TableReplicationStates},
     },
-    types::{PipelineId, ReplicationMask, SnapshotId, TableId, TableSchema},
+    types::{PgLsn, PipelineId, ReplicationMask, SnapshotId, TableId, TableSchema},
 };
 
 /// Maximum number of connections in the pool.
@@ -314,6 +315,64 @@ impl StateStore for PostgresStore {
         emit_table_metrics(&inner.phase_counts);
 
         Ok(restored_phase)
+    }
+
+    async fn get_replication_progress(&self, worker_type: WorkerType) -> EtlResult<Option<PgLsn>> {
+        progress::get_replication_progress(
+            &self.pool,
+            self.pipeline_id as i64,
+            worker_type.as_str(),
+            worker_type.progress_table_id(),
+        )
+        .await
+        .map_err(|err| {
+            etl_error!(
+                ErrorKind::SourceQueryFailed,
+                "Replication progress loading failed",
+                source: err
+            )
+        })
+    }
+
+    async fn upsert_replication_progress(
+        &self,
+        worker_type: WorkerType,
+        flush_lsn: PgLsn,
+    ) -> EtlResult<PgLsn> {
+        progress::upsert_replication_progress(
+            &self.pool,
+            self.pipeline_id as i64,
+            worker_type.as_str(),
+            worker_type.progress_table_id(),
+            flush_lsn,
+        )
+        .await
+        .map_err(|err| {
+            etl_error!(
+                ErrorKind::SourceQueryFailed,
+                "Replication progress storage failed",
+                source: err
+            )
+        })
+    }
+
+    async fn delete_replication_progress(&self, worker_type: WorkerType) -> EtlResult<()> {
+        progress::delete_replication_progress(
+            &self.pool,
+            self.pipeline_id as i64,
+            worker_type.as_str(),
+            worker_type.progress_table_id(),
+        )
+        .await
+        .map_err(|err| {
+            etl_error!(
+                ErrorKind::SourceQueryFailed,
+                "Replication progress deletion failed",
+                source: err
+            )
+        })?;
+
+        Ok(())
     }
 
     /// Retrieves destination table metadata for a specific table from cache.
@@ -609,6 +668,20 @@ impl CleanupStore for PostgresStore {
 
         state::delete_replication_state_for_table(&mut *tx, self.pipeline_id as i64, table_id)
             .await?;
+
+        progress::delete_replication_progress_for_table(
+            &mut *tx,
+            self.pipeline_id as i64,
+            table_id,
+        )
+        .await
+        .map_err(|err| {
+            etl_error!(
+                ErrorKind::SourceQueryFailed,
+                "Replication progress deletion failed",
+                source: err
+            )
+        })?;
 
         tx.commit().await?;
 

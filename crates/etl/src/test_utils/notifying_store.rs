@@ -10,6 +10,7 @@ use tokio::sync::{Notify, RwLock};
 use crate::{
     error::{ErrorKind, EtlResult},
     etl_error,
+    replication::WorkerType,
     state::{
         destination_metadata::{AppliedDestinationTableMetadata, DestinationTableMetadata},
         table::{TableReplicationPhase, TableReplicationPhaseType},
@@ -20,6 +21,7 @@ use crate::{
         state::{DestinationTablesMetadata, StateStore, TableReplicationStates},
     },
     test_utils::notify::TimedNotify,
+    types::PgLsn,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -42,6 +44,7 @@ struct Inner {
     table_state_history: HashMap<TableId, Vec<TableReplicationPhase>>,
     table_schemas: Arc<TableSchemaSnapshots>,
     destination_tables_metadata: DestinationTablesMetadata,
+    replication_progress: HashMap<WorkerType, PgLsn>,
     table_state_type_conditions: Vec<TableStateTypeCondition>,
     table_state_conditions: Vec<TableStateCondition>,
     table_schema_count_conditions: Vec<TableSchemaCountCondition>,
@@ -113,6 +116,7 @@ impl NotifyingStore {
             table_state_history: HashMap::new(),
             table_schemas: Arc::new(TableSchemaSnapshots::default()),
             destination_tables_metadata: Arc::new(BTreeMap::new()),
+            replication_progress: HashMap::new(),
             table_state_type_conditions: Vec::new(),
             table_state_conditions: Vec::new(),
             table_schema_count_conditions: Vec::new(),
@@ -327,6 +331,38 @@ impl StateStore for NotifyingStore {
         Ok(previous_state)
     }
 
+    async fn get_replication_progress(&self, worker_type: WorkerType) -> EtlResult<Option<PgLsn>> {
+        let inner = self.inner.read().await;
+
+        Ok(inner.replication_progress.get(&worker_type).copied())
+    }
+
+    async fn upsert_replication_progress(
+        &self,
+        worker_type: WorkerType,
+        flush_lsn: PgLsn,
+    ) -> EtlResult<PgLsn> {
+        let mut inner = self.inner.write().await;
+        let stored_lsn = inner
+            .replication_progress
+            .entry(worker_type)
+            .and_modify(|stored_lsn| {
+                if flush_lsn > *stored_lsn {
+                    *stored_lsn = flush_lsn;
+                }
+            })
+            .or_insert(flush_lsn);
+
+        Ok(*stored_lsn)
+    }
+
+    async fn delete_replication_progress(&self, worker_type: WorkerType) -> EtlResult<()> {
+        let mut inner = self.inner.write().await;
+        inner.replication_progress.remove(&worker_type);
+
+        Ok(())
+    }
+
     async fn get_destination_table_metadata(
         &self,
         table_id: TableId,
@@ -423,6 +459,7 @@ impl CleanupStore for NotifyingStore {
         inner.table_state_history.remove(&table_id);
         Arc::make_mut(&mut inner.table_schemas).remove_table(table_id);
         Arc::make_mut(&mut inner.destination_tables_metadata).remove(&table_id);
+        inner.replication_progress.remove(&WorkerType::TableSync { table_id });
 
         Ok(())
     }

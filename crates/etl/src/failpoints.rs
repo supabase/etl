@@ -15,6 +15,7 @@ pub const START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP: &str =
     "start_table_sync.before_data_sync_slot_creation_fp";
 pub const START_TABLE_SYNC_DURING_DATA_SYNC_FP: &str = "start_table_sync.during_data_sync_fp";
 pub const SEND_STATUS_UPDATE_FP: &str = "send_status_update_fp";
+pub const STORE_REPLICATION_PROGRESS_FP: &str = "store_replication_progress_fp";
 pub const FORCE_SCHEMA_CLEANUP_FP: &str = "force_schema_cleanup_fp";
 
 /// Executes a configurable failpoint for testing error scenarios.

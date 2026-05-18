@@ -8,6 +8,7 @@ use tokio::sync::Mutex;
 use crate::{
     error::{ErrorKind, EtlResult},
     etl_error,
+    replication::WorkerType,
     state::{
         destination_metadata::{AppliedDestinationTableMetadata, DestinationTableMetadata},
         table::TableReplicationPhase,
@@ -17,7 +18,7 @@ use crate::{
         schema::{SchemaStore, TableSchemaRetention, TableSchemaSnapshots},
         state::{DestinationTablesMetadata, StateStore, TableReplicationStates},
     },
-    types::{SnapshotId, TableId, TableSchema},
+    types::{PgLsn, SnapshotId, TableId, TableSchema},
 };
 
 /// Inner state of [`MemoryStore`]
@@ -36,6 +37,8 @@ struct Inner {
     table_schemas: Arc<TableSchemaSnapshots>,
     /// Cached destination table metadata indexed by table ID.
     destination_tables_metadata: DestinationTablesMetadata,
+    /// Durable replication progress indexed by worker type and optional table.
+    replication_progress: HashMap<WorkerType, PgLsn>,
 }
 
 /// In-memory storage for ETL pipeline state and schema information.
@@ -65,6 +68,7 @@ impl MemoryStore {
             table_state_history: HashMap::new(),
             table_schemas: Arc::new(TableSchemaSnapshots::default()),
             destination_tables_metadata: Arc::new(BTreeMap::new()),
+            replication_progress: HashMap::new(),
         };
 
         Self { inner: Arc::new(Mutex::new(inner)) }
@@ -144,6 +148,38 @@ impl StateStore for MemoryStore {
         Arc::make_mut(&mut inner.table_replication_states).insert(table_id, previous_state.clone());
 
         Ok(previous_state)
+    }
+
+    async fn get_replication_progress(&self, worker_type: WorkerType) -> EtlResult<Option<PgLsn>> {
+        let inner = self.inner.lock().await;
+
+        Ok(inner.replication_progress.get(&worker_type).copied())
+    }
+
+    async fn upsert_replication_progress(
+        &self,
+        worker_type: WorkerType,
+        flush_lsn: PgLsn,
+    ) -> EtlResult<PgLsn> {
+        let mut inner = self.inner.lock().await;
+        let stored_lsn = inner
+            .replication_progress
+            .entry(worker_type)
+            .and_modify(|stored_lsn| {
+                if flush_lsn > *stored_lsn {
+                    *stored_lsn = flush_lsn;
+                }
+            })
+            .or_insert(flush_lsn);
+
+        Ok(*stored_lsn)
+    }
+
+    async fn delete_replication_progress(&self, worker_type: WorkerType) -> EtlResult<()> {
+        let mut inner = self.inner.lock().await;
+        inner.replication_progress.remove(&worker_type);
+
+        Ok(())
     }
 
     async fn get_destination_table_metadata(
@@ -241,6 +277,7 @@ impl CleanupStore for MemoryStore {
         // Remove all schema versions for this table.
         Arc::make_mut(&mut inner.table_schemas).remove_table(table_id);
         Arc::make_mut(&mut inner.destination_tables_metadata).remove(&table_id);
+        inner.replication_progress.remove(&WorkerType::TableSync { table_id });
 
         Ok(())
     }

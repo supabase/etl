@@ -4,6 +4,7 @@ use etl::{
     failpoints::{
         FORCE_SCHEMA_CLEANUP_FP, SEND_STATUS_UPDATE_FP,
         START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP, START_TABLE_SYNC_DURING_DATA_SYNC_FP,
+        STORE_REPLICATION_PROGRESS_FP,
     },
     state::table::{RetryPolicy, TableReplicationPhase, TableReplicationPhaseType},
     store::state::StateStore,
@@ -406,6 +407,7 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
  {
     let _scenario = FailScenario::setup();
     fail::cfg(SEND_STATUS_UPDATE_FP, "return").unwrap();
+    fail::cfg(STORE_REPLICATION_PROGRESS_FP, "return").unwrap();
 
     init_test_tracing();
 
@@ -560,6 +562,7 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
  {
     let _scenario = FailScenario::setup();
     fail::cfg(SEND_STATUS_UPDATE_FP, "return").unwrap();
+    fail::cfg(STORE_REPLICATION_PROGRESS_FP, "return").unwrap();
 
     init_test_tracing();
 
@@ -699,6 +702,7 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
  {
     let _scenario = FailScenario::setup();
     fail::cfg(SEND_STATUS_UPDATE_FP, "return").unwrap();
+    fail::cfg(STORE_REPLICATION_PROGRESS_FP, "return").unwrap();
 
     init_test_tracing();
 
@@ -840,6 +844,7 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
  {
     let _scenario = FailScenario::setup();
     fail::cfg(SEND_STATUS_UPDATE_FP, "return").unwrap();
+    fail::cfg(STORE_REPLICATION_PROGRESS_FP, "return").unwrap();
 
     init_test_tracing();
 
@@ -966,6 +971,7 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
 async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_initial_ddl() {
     let _scenario = FailScenario::setup();
     fail::cfg(SEND_STATUS_UPDATE_FP, "return").unwrap();
+    fail::cfg(STORE_REPLICATION_PROGRESS_FP, "return").unwrap();
 
     init_test_tracing();
 
@@ -1171,6 +1177,7 @@ async fn schema_snapshots_are_pruned_after_confirmed_progress() {
 async fn table_schema_replication_masks_are_consistent_after_restart() {
     let _scenario = FailScenario::setup();
     fail::cfg(SEND_STATUS_UPDATE_FP, "return").unwrap();
+    fail::cfg(STORE_REPLICATION_PROGRESS_FP, "return").unwrap();
 
     init_test_tracing();
     let database = spawn_source_database().await;
