@@ -79,18 +79,18 @@ fn clickhouse_type_expects_nullable_marker(type_name: &str) -> bool {
 }
 
 /// Returns expected ClickHouse column names for a replicated schema under
-/// the given engine. Trailing columns differ by engine (see
-/// `trailing_cdc_column_names`).
+/// the given engine: user columns in source order, then the engine's
+/// trailing CDC columns.
 fn expected_clickhouse_column_names(
     schema: &ReplicatedTableSchema,
     engine: ClickHouseEngine,
 ) -> Vec<String> {
-    let mut names: Vec<String> =
-        schema.column_schemas().map(|column| column.name.clone()).collect();
-    for trailing in trailing_cdc_column_names(engine) {
-        names.push((*trailing).to_owned());
-    }
-    names
+    schema
+        .column_schemas()
+        .map(|c| c.name.as_str())
+        .chain(trailing_cdc_column_names(engine).iter().copied())
+        .map(str::to_owned)
+        .collect()
 }
 
 /// Derives RowBinary nullable flags from the actual ClickHouse table schema.
@@ -368,7 +368,7 @@ where
         );
         self.store.store_destination_table_metadata(table_id, metadata.clone()).await?;
 
-        self.issue_create_table_ddl(clickhouse_table_name, schema).await?;
+        self.issue_create_table_stmt(clickhouse_table_name, schema).await?;
 
         self.store.store_destination_table_metadata(table_id, metadata.to_applied()).await?;
 
@@ -378,7 +378,7 @@ where
     /// Issues the engine-correct `CREATE TABLE`, and under RMT also the
     /// companion `CREATE VIEW "<table>__current"`. Both statements are
     /// `IF NOT EXISTS`, so retries on the recovery path are idempotent.
-    async fn issue_create_table_ddl(
+    async fn issue_create_table_stmt(
         &self,
         clickhouse_table_name: &str,
         schema: &ReplicatedTableSchema,
@@ -503,7 +503,7 @@ where
                 self.apply_schema_diff(clickhouse_table_name, &diff, &old_schema).await?;
             }
             None => {
-                self.issue_create_table_ddl(clickhouse_table_name, schema).await?;
+                self.issue_create_table_stmt(clickhouse_table_name, schema).await?;
             }
         }
 

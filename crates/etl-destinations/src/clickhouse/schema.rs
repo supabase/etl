@@ -5,13 +5,13 @@ use etl::{
 };
 use etl_config::shared::ClickHouseEngine;
 
-/// MergeTree CDC operation column.
+/// (For MergeTree engine) CDC operation column.
 pub(crate) const CDC_OPERATION_COLUMN_NAME: &str = "cdc_operation";
-/// MergeTree CDC LSN column (commit_lsn).
+/// (For MergeTree engine) CDC LSN column (commit_lsn).
 pub(crate) const CDC_LSN_COLUMN_NAME: &str = "cdc_lsn";
-/// ReplacingMergeTree version column (start_lsn).
+/// (For ReplacingMergeTree engine) version column (start_lsn).
 pub(crate) const ETL_LSN_COLUMN_NAME: &str = "_etl_lsn";
-/// ReplacingMergeTree tombstone column.
+/// (For ReplacingMergeTree engine) tombstone column.
 pub(crate) const ETL_DELETED_COLUMN_NAME: &str = "_etl_deleted";
 /// Suffix for the auto-generated current-state view over RMT tables.
 pub(crate) const CURRENT_VIEW_SUFFIX: &str = "__current";
@@ -160,6 +160,7 @@ where
 
     let mut pk_columns: Vec<&ColumnSchema> =
         columns.iter().copied().filter(|c| c.primary_key_ordinal_position.is_some()).collect();
+
     if pk_columns.is_empty() {
         return Err(etl_error!(
             ErrorKind::SourceSchemaError,
@@ -171,6 +172,7 @@ where
             )
         ));
     }
+
     pk_columns.sort_by_key(|c| c.primary_key_ordinal_position);
 
     let mut cols = Vec::with_capacity(columns.len() + 2);
@@ -185,6 +187,7 @@ where
     let quoted_table_name = quote_identifier(table_name);
     let order_by =
         pk_columns.iter().map(|c| quote_identifier(&c.name)).collect::<Vec<_>>().join(", ");
+
     Ok(format!(
         "CREATE TABLE IF NOT EXISTS {quoted_table_name} (\n{col_defs}\n) ENGINE = \
          ReplacingMergeTree({lsn}, {del})\nORDER BY ({order_by})",
