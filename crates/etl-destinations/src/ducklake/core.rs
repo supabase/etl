@@ -156,6 +156,42 @@ pub struct DuckLakeExternalMaintenancePause {
     _guard: OwnedRwLockWriteGuard<()>,
 }
 
+/// Runtime backend used for DuckLake external maintenance coordination.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DuckLakeMaintenanceMode {
+    #[default]
+    Disabled,
+    Kubernetes,
+    Postgres,
+}
+
+/// Runtime configuration for DuckLake external maintenance coordination.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DuckLakeExternalMaintenanceConfig {
+    pub mode: DuckLakeMaintenanceMode,
+    pub pipeline_id: u64,
+}
+
+impl DuckLakeExternalMaintenanceConfig {
+    pub const fn disabled() -> Self {
+        Self { mode: DuckLakeMaintenanceMode::Disabled, pipeline_id: 0 }
+    }
+
+    pub const fn kubernetes(pipeline_id: u64) -> Self {
+        Self { mode: DuckLakeMaintenanceMode::Kubernetes, pipeline_id }
+    }
+
+    pub const fn postgres(pipeline_id: u64) -> Self {
+        Self { mode: DuckLakeMaintenanceMode::Postgres, pipeline_id }
+    }
+}
+
+impl Default for DuckLakeExternalMaintenanceConfig {
+    fn default() -> Self {
+        Self::disabled()
+    }
+}
+
 /// Returns the table-local semaphore shared by concurrent foreground writes.
 fn table_write_slot(
     table_write_slots: &Arc<Mutex<HashMap<DuckLakeTableName, Arc<Semaphore>>>>,
@@ -434,6 +470,36 @@ where
         expire_snapshots_older_than: Option<String>,
         store: S,
     ) -> EtlResult<Self> {
+        Self::new_with_external_maintenance(
+            catalog_url,
+            data_path,
+            pool_size,
+            s3,
+            metadata_schema,
+            duckdb_memory_cache_limit,
+            maintenance_target_file_size,
+            expire_snapshots_older_than,
+            DuckLakeExternalMaintenanceConfig::default(),
+            store,
+        )
+        .await
+    }
+
+    /// Creates a new DuckLake destination with explicit external maintenance
+    /// runtime configuration.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn new_with_external_maintenance(
+        catalog_url: Url,
+        data_path: Url,
+        pool_size: u32,
+        s3: Option<S3Config>,
+        metadata_schema: Option<String>,
+        duckdb_memory_cache_limit: Option<String>,
+        maintenance_target_file_size: Option<String>,
+        expire_snapshots_older_than: Option<String>,
+        external_maintenance: DuckLakeExternalMaintenanceConfig,
+        store: S,
+    ) -> EtlResult<Self> {
         register_metrics();
 
         if !matches!(catalog_url.scheme(), "postgres" | "postgresql") {
@@ -575,24 +641,52 @@ where
             )?
             .into(),
         );
-        #[cfg(feature = "ducklake-kubernetes")]
-        {
-            use crate::ducklake::external_maintenance::run_kubernetes_external_maintenance_watcher;
+        match external_maintenance.mode {
+            DuckLakeMaintenanceMode::Disabled => {
+                info!("ducklake external maintenance watcher disabled by configuration");
+            }
+            DuckLakeMaintenanceMode::Kubernetes => {
+                use crate::ducklake::external_maintenance::run_kubernetes_external_maintenance_watcher;
 
-            let watcher_destination = destination.clone();
-            destination
-                .tasks
-                .spawn(async move {
-                    if let Err(error) =
-                        run_kubernetes_external_maintenance_watcher(watcher_destination).await
-                    {
-                        warn!(
-                            error = %error,
-                            "ducklake external maintenance watcher exited"
-                        );
-                    }
-                })
-                .await;
+                let watcher_destination = destination.clone();
+                destination
+                    .tasks
+                    .spawn(async move {
+                        if let Err(error) =
+                            run_kubernetes_external_maintenance_watcher(watcher_destination).await
+                        {
+                            warn!(
+                                error = %error,
+                                "ducklake external maintenance watcher exited"
+                            );
+                        }
+                    })
+                    .await;
+            }
+            DuckLakeMaintenanceMode::Postgres => {
+                use crate::ducklake::external_maintenance::run_postgres_external_maintenance_watcher;
+
+                let watcher_destination = destination.clone();
+                let maintenance_pool = metadata_pg_pool.clone();
+                let pipeline_id = external_maintenance.pipeline_id as i64;
+                destination
+                    .tasks
+                    .spawn(async move {
+                        if let Err(error) = run_postgres_external_maintenance_watcher(
+                            watcher_destination,
+                            pipeline_id,
+                            maintenance_pool,
+                        )
+                        .await
+                        {
+                            warn!(
+                                error = %error,
+                                "ducklake external maintenance watcher exited"
+                            );
+                        }
+                    })
+                    .await;
+            }
         }
 
         Ok(destination)

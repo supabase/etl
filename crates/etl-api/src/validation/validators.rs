@@ -952,6 +952,7 @@ impl Validator for DestinationValidator {
                 duckdb_memory_cache_limit,
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
+                maintenance_mode: _,
             } => {
                 let validator = DucklakeValidator::new(
                     catalog_url.clone(),

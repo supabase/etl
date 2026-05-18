@@ -14,14 +14,15 @@ doctest = false
 default = []
 ducklake = [
     "dep:duckdb",
+    "dep:kube",
     "dep:metrics",
     "dep:pg_escape",
     "dep:r2d2",
     "dep:regex",
+    "dep:serde_json",
     "dep:tokio-postgres",
     "dep:url",
 ]
-kubernetes = ["dep:kube", "dep:serde_json"]
 test-utils = []
 
 [dependencies]

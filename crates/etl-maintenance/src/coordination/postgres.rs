@@ -12,8 +12,8 @@ use super::{
     ExternalMaintenanceState, ExternalMaintenanceStore,
 };
 
-const CREATE_MIGRATION_SCHEMA_SQL: &str = "CREATE SCHEMA IF NOT EXISTS etl_maintenance;";
-const SET_MIGRATION_SEARCH_PATH_SQL: &str = "SET search_path = etl_maintenance, public;";
+const CREATE_MIGRATION_SCHEMA_SQL: &str = "CREATE SCHEMA IF NOT EXISTS etl;";
+const SET_MIGRATION_SEARCH_PATH_SQL: &str = "SET search_path = etl, public;";
 
 fn sqlx_error(error: sqlx::Error, message: &'static str) -> EtlError {
     etl_error!(ErrorKind::SourceQueryFailed, message, source: error)
@@ -69,7 +69,7 @@ impl PostgresExternalMaintenanceStore {
         let policy = Json(policy);
         sqlx::query(
             r#"
-            INSERT INTO etl_external_maintenance_state (pipeline_id, operation_policy)
+            INSERT INTO etl.etl_external_maintenance_state (pipeline_id, operation_policy)
             VALUES ($1, $2)
             ON CONFLICT (pipeline_id)
             DO UPDATE SET operation_policy = EXCLUDED.operation_policy, updated_at = now()
@@ -84,9 +84,32 @@ impl PostgresExternalMaintenanceStore {
         Ok(())
     }
 
+    /// Ensures state exists for one pipeline without replacing an existing
+    /// operation policy.
+    pub async fn ensure_pipeline_state_if_missing(
+        &self,
+        policy: ExternalMaintenanceOperationPolicy,
+    ) -> EtlResult<()> {
+        let policy = Json(policy);
+        sqlx::query(
+            r#"
+            INSERT INTO etl.etl_external_maintenance_state (pipeline_id, operation_policy)
+            VALUES ($1, $2)
+            ON CONFLICT (pipeline_id) DO NOTHING
+            "#,
+        )
+        .bind(self.pipeline_id)
+        .bind(policy)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| sqlx_error(error, "Failed to insert external maintenance state"))?;
+
+        Ok(())
+    }
+
     /// Deletes state for one pipeline.
     pub async fn delete_pipeline_state(&self) -> EtlResult<()> {
-        sqlx::query("DELETE FROM etl_external_maintenance_state WHERE pipeline_id = $1")
+        sqlx::query("DELETE FROM etl.etl_external_maintenance_state WHERE pipeline_id = $1")
             .bind(self.pipeline_id)
             .execute(&self.pool)
             .await
@@ -109,7 +132,7 @@ impl ExternalMaintenanceStore for PostgresExternalMaintenanceStore {
                 last_successful_operations,
                 last_completed_at,
                 operation_policy
-            FROM etl_external_maintenance_state
+            FROM etl.etl_external_maintenance_state
             WHERE pipeline_id = $1
             "#,
         )
@@ -177,7 +200,7 @@ impl ExternalMaintenanceStore for PostgresExternalMaintenanceStore {
         let Some(row) = sqlx::query(
             r#"
             SELECT active_run, operation_request
-            FROM etl_external_maintenance_state
+            FROM etl.etl_external_maintenance_state
             WHERE pipeline_id = $1
             FOR UPDATE
             "#,
@@ -233,7 +256,7 @@ impl ExternalMaintenanceStore for PostgresExternalMaintenanceStore {
 
         sqlx::query(
             r#"
-            UPDATE etl_external_maintenance_state
+            UPDATE etl.etl_external_maintenance_state
             SET operation_request = $2, updated_at = now()
             WHERE pipeline_id = $1
             "#,
@@ -257,7 +280,7 @@ impl ExternalMaintenanceStore for PostgresExternalMaintenanceStore {
     ) -> EtlResult<()> {
         sqlx::query(
             r#"
-            UPDATE etl_external_maintenance_state
+            UPDATE etl.etl_external_maintenance_state
             SET replicator = $2, updated_at = now()
             WHERE pipeline_id = $1
             "#,
@@ -274,7 +297,7 @@ impl ExternalMaintenanceStore for PostgresExternalMaintenanceStore {
     async fn clear_replicator_status(&self) -> EtlResult<()> {
         sqlx::query(
             r#"
-            UPDATE etl_external_maintenance_state
+            UPDATE etl.etl_external_maintenance_state
             SET replicator = NULL, updated_at = now()
             WHERE pipeline_id = $1
             "#,

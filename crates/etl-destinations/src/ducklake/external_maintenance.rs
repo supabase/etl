@@ -5,7 +5,6 @@ use etl::{
     error::EtlResult,
     store::{schema::SchemaStore, state::StateStore},
 };
-#[cfg(feature = "ducklake-kubernetes")]
 pub use etl_maintenance::KubernetesExternalMaintenanceStore;
 pub use etl_maintenance::{
     ExternalMaintenanceOperationHistory, ExternalMaintenanceOperationPolicy,
@@ -16,6 +15,7 @@ pub use etl_maintenance::{
     PostgresExternalMaintenanceStore,
 };
 use metrics::{counter, histogram};
+use sqlx::PgPool;
 use tokio::time;
 use tracing::{debug, info, warn};
 
@@ -43,7 +43,6 @@ struct HeldPause {
     _pause: DuckLakeExternalMaintenancePause,
 }
 
-#[cfg(feature = "ducklake-kubernetes")]
 pub(super) async fn run_kubernetes_external_maintenance_watcher<S>(
     destination: DuckLakeDestination<S>,
 ) -> EtlResult<()>
@@ -56,6 +55,27 @@ where
         info!("ducklake Kubernetes external maintenance watcher disabled because CR env is absent");
         return Ok(());
     };
+
+    run_external_maintenance_watcher(destination, store, config).await
+}
+
+pub(super) async fn run_postgres_external_maintenance_watcher<S>(
+    destination: DuckLakeDestination<S>,
+    pipeline_id: i64,
+    pool: PgPool,
+) -> EtlResult<()>
+where
+    S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
+{
+    let config = ExternalMaintenanceWatcherConfig::from_env();
+    let store = PostgresExternalMaintenanceStore::new(pipeline_id, pool);
+    store.ensure_schema().await?;
+    store.ensure_pipeline_state_if_missing(ExternalMaintenanceOperationPolicy::default()).await?;
+
+    info!(
+        pipeline_id,
+        "ducklake Postgres external maintenance watcher configured: pipeline_id={}", pipeline_id
+    );
 
     run_external_maintenance_watcher(destination, store, config).await
 }

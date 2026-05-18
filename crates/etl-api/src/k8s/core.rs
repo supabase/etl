@@ -1,6 +1,9 @@
 use etl_config::{
     Environment,
-    shared::{ReplicatorConfigWithoutSecrets, SupabaseConfigWithoutSecrets, TlsConfig},
+    shared::{
+        DuckLakeMaintenanceMode, ReplicatorConfigWithoutSecrets, SupabaseConfigWithoutSecrets,
+        TlsConfig,
+    },
 };
 use etl_maintenance::{
     DuckLakeMaintenanceMaterialization, MaintenanceIdentity, MaintenanceMaterializationError,
@@ -114,6 +117,10 @@ pub async fn create_or_update_pipeline_resources_in_k8s(
     let environment = Environment::load().map_err(|_| K8sCoreError::MissingEnvironment)?;
 
     let destination_type = (&destination.config).into();
+    let ducklake_maintenance_mode = match &destination.config {
+        StoredDestinationConfig::Ducklake { maintenance_mode, .. } => Some(*maintenance_mode),
+        _ => None,
+    };
 
     let supabase_config = SupabaseConfigWithoutSecrets {
         project_ref: tenant_id.to_owned(),
@@ -138,8 +145,9 @@ pub async fn create_or_update_pipeline_resources_in_k8s(
     create_or_update_dynamic_replicator_secrets(k8s_client, &prefix, secrets).await?;
     create_or_update_replicator_config(k8s_client, &prefix, replicator_config, environment).await?;
     let replicator_image = image.name;
-    let ducklake_maintenance_for_replicator = matches!(destination_type, DestinationType::Ducklake)
-        .then(|| ducklake_maintenance.clone().unwrap_or_default());
+    let ducklake_maintenance_for_kubernetes =
+        matches!(ducklake_maintenance_mode, Some(DuckLakeMaintenanceMode::Kubernetes))
+            .then(|| ducklake_maintenance.clone().unwrap_or_default());
     let maintenance_identity = MaintenanceIdentity {
         tenant_id: tenant_id.to_owned(),
         pipeline_id: pipeline.id,
@@ -153,7 +161,7 @@ pub async fn create_or_update_pipeline_resources_in_k8s(
         maintenance_identity,
         &replicator_image,
         destination_type,
-        ducklake_maintenance,
+        ducklake_maintenance_for_kubernetes.clone(),
     )
     .await?;
     create_or_update_replicator_stateful_set(
@@ -164,7 +172,7 @@ pub async fn create_or_update_pipeline_resources_in_k8s(
             environment,
             replicator_resources,
             destination_type,
-            ducklake_maintenance: ducklake_maintenance_for_replicator,
+            ducklake_maintenance: ducklake_maintenance_for_kubernetes,
             log_level,
         },
     )
@@ -439,12 +447,17 @@ async fn create_or_update_ducklake_maintenance(
     destination_type: DestinationType,
     ducklake_maintenance: Option<crate::configs::pipeline::DuckLakeMaintenanceConfig>,
 ) -> Result<(), K8sCoreError> {
+    let Some(ducklake_maintenance) = ducklake_maintenance else {
+        materializer.delete_ducklake_maintenance(identity).await?;
+        return Ok(());
+    };
+
     if !matches!(destination_type, DestinationType::Ducklake) {
         materializer.delete_ducklake_maintenance(identity).await?;
         return Ok(());
     }
 
-    let policy = ducklake_maintenance_policy_from_config(ducklake_maintenance.unwrap_or_default());
+    let policy = ducklake_maintenance_policy_from_config(ducklake_maintenance);
     materializer
         .reconcile_ducklake_maintenance(DuckLakeMaintenanceMaterialization {
             identity,
@@ -678,6 +691,51 @@ mod tests {
         }
     }
 
+    fn maintenance_identity() -> MaintenanceIdentity {
+        MaintenanceIdentity {
+            tenant_id: "tenant-42".to_owned(),
+            pipeline_id: 123,
+            replicator_id: 456,
+            resource_prefix: "tenant-42-456".to_owned(),
+        }
+    }
+
+    #[tokio::test]
+    async fn ducklake_maintenance_is_deleted_when_config_is_absent() {
+        let client = RecordingK8sClient::default();
+        let materializer = KubernetesMaintenanceMaterializer::new(&client);
+
+        create_or_update_ducklake_maintenance(
+            &materializer,
+            maintenance_identity(),
+            "etl-replicator:test",
+            DestinationType::Ducklake,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(client.calls(), vec!["delete-ducklake-maintenance:tenant-42-456"]);
+    }
+
+    #[tokio::test]
+    async fn ducklake_maintenance_is_created_for_ducklake_config() {
+        let client = RecordingK8sClient::default();
+        let materializer = KubernetesMaintenanceMaterializer::new(&client);
+
+        create_or_update_ducklake_maintenance(
+            &materializer,
+            maintenance_identity(),
+            "etl-replicator:test",
+            DestinationType::Ducklake,
+            Some(crate::configs::pipeline::DuckLakeMaintenanceConfig::default()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(client.calls(), vec!["ducklake-maintenance:tenant-42-456"]);
+    }
+
     #[tokio::test]
     async fn failed_pod_is_considered_active_for_deletion_guards() {
         let client = RecordingK8sClient { pod_status: PodStatus::Failed, ..Default::default() };
@@ -753,6 +811,7 @@ mod tests {
             duckdb_memory_cache_limit: None,
             maintenance_target_file_size: None,
             expire_snapshots_older_than: None,
+            maintenance_mode: DuckLakeMaintenanceMode::Kubernetes,
         };
 
         let secrets = build_secrets_from_configs(&source_config, &destination_config);
@@ -793,6 +852,7 @@ mod tests {
             duckdb_memory_cache_limit: None,
             maintenance_target_file_size: None,
             expire_snapshots_older_than: None,
+            maintenance_mode: DuckLakeMaintenanceMode::Kubernetes,
         };
 
         let secrets = build_secrets_from_configs(&source_config, &destination_config);

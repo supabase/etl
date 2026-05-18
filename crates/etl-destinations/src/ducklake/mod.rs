@@ -22,7 +22,8 @@ pub(super) type DuckLakeTableName = String;
 const ATTACH_DATA_INLINING_ROW_LIMIT: u64 = 10_000;
 
 pub use core::{
-    DuckLakeDestination, DuckLakeExternalMaintenancePause, table_name_to_ducklake_table_name,
+    DuckLakeDestination, DuckLakeExternalMaintenanceConfig, DuckLakeExternalMaintenancePause,
+    DuckLakeMaintenanceMode, table_name_to_ducklake_table_name,
 };
 #[cfg(feature = "test-utils")]
 pub use core::{

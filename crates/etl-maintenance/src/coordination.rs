@@ -294,8 +294,7 @@ impl Default for ExternalMaintenanceWatcherConfig {
 }
 
 impl ExternalMaintenanceWatcherConfig {
-    /// Builds watcher config from the Kubernetes-compatible environment.
-    #[cfg(feature = "kubernetes")]
+    /// Builds watcher config from environment variables.
     pub fn from_env() -> Self {
         const POLL_SECONDS_ENV: &str = "ETL_DUCKLAKE_MAINTENANCE_POLL_SECONDS";
         const INLINE_FLUSH_MIN_INLINED_BYTES_ENV: &str =
@@ -337,13 +336,12 @@ mod postgres;
 
 pub use postgres::PostgresExternalMaintenanceStore;
 
-#[cfg(feature = "kubernetes")]
+#[cfg(feature = "ducklake")]
 mod kubernetes;
 
-#[cfg(feature = "kubernetes")]
+#[cfg(feature = "ducklake")]
 pub use kubernetes::KubernetesExternalMaintenanceStore;
 
-#[cfg(feature = "kubernetes")]
 fn env_u64(name: &str) -> Option<u64> {
     std::env::var(name).ok().and_then(|value| value.parse::<u64>().ok())
 }

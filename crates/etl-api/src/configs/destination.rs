@@ -1,6 +1,6 @@
 use etl_config::{
     SerializableSecretString,
-    shared::{DestinationConfig, IcebergConfig},
+    shared::{DestinationConfig, DuckLakeMaintenanceMode, IcebergConfig},
 };
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
@@ -141,6 +141,9 @@ pub enum FullApiDestinationConfig {
             deserialize_with = "crate::utils::trim_option_string"
         )]
         expire_snapshots_older_than: Option<String>,
+        #[schema(example = "kubernetes")]
+        #[serde(default)]
+        maintenance_mode: DuckLakeMaintenanceMode,
     },
 }
 
@@ -215,6 +218,7 @@ impl From<StoredDestinationConfig> for FullApiDestinationConfig {
                 duckdb_memory_cache_limit,
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
+                maintenance_mode,
             } => Self::Ducklake {
                 catalog_url,
                 data_path,
@@ -229,6 +233,7 @@ impl From<StoredDestinationConfig> for FullApiDestinationConfig {
                 duckdb_memory_cache_limit,
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
+                maintenance_mode,
             },
         }
     }
@@ -266,6 +271,7 @@ pub enum StoredDestinationConfig {
         duckdb_memory_cache_limit: Option<String>,
         maintenance_target_file_size: Option<String>,
         expire_snapshots_older_than: Option<String>,
+        maintenance_mode: DuckLakeMaintenanceMode,
     },
 }
 
@@ -343,6 +349,7 @@ impl StoredDestinationConfig {
                 duckdb_memory_cache_limit,
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
+                maintenance_mode,
             } => DestinationConfig::Ducklake {
                 catalog_url,
                 data_path,
@@ -357,6 +364,7 @@ impl StoredDestinationConfig {
                 duckdb_memory_cache_limit,
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
+                maintenance_mode,
             },
         }
     }
@@ -434,6 +442,7 @@ impl From<FullApiDestinationConfig> for StoredDestinationConfig {
                 duckdb_memory_cache_limit,
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
+                maintenance_mode,
             } => Self::Ducklake {
                 catalog_url,
                 data_path,
@@ -448,6 +457,7 @@ impl From<FullApiDestinationConfig> for StoredDestinationConfig {
                 duckdb_memory_cache_limit,
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
+                maintenance_mode,
             },
         }
     }
@@ -559,6 +569,7 @@ impl Encrypt<EncryptedStoredDestinationConfig> for StoredDestinationConfig {
                 duckdb_memory_cache_limit,
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
+                maintenance_mode,
             } => {
                 let s3_access_key_id = s3_access_key_id
                     .map(|value| encrypt_text(value.expose_secret().to_owned(), encryption_key))
@@ -581,6 +592,7 @@ impl Encrypt<EncryptedStoredDestinationConfig> for StoredDestinationConfig {
                     duckdb_memory_cache_limit,
                     maintenance_target_file_size,
                     expire_snapshots_older_than,
+                    maintenance_mode,
                 })
             }
         }
@@ -623,6 +635,8 @@ pub enum EncryptedStoredDestinationConfig {
         duckdb_memory_cache_limit: Option<String>,
         maintenance_target_file_size: Option<String>,
         expire_snapshots_older_than: Option<String>,
+        #[serde(default)]
+        maintenance_mode: DuckLakeMaintenanceMode,
     },
 }
 
@@ -743,6 +757,7 @@ impl Decrypt<StoredDestinationConfig> for EncryptedStoredDestinationConfig {
                 duckdb_memory_cache_limit,
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
+                maintenance_mode,
             } => Ok(StoredDestinationConfig::Ducklake {
                 catalog_url,
                 data_path,
@@ -765,6 +780,7 @@ impl Decrypt<StoredDestinationConfig> for EncryptedStoredDestinationConfig {
                 duckdb_memory_cache_limit,
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
+                maintenance_mode,
             }),
         }
     }
@@ -1343,6 +1359,7 @@ mod tests {
             duckdb_memory_cache_limit: Some("50MB".to_owned()),
             maintenance_target_file_size: Some("10MB".to_owned()),
             expire_snapshots_older_than: Some("7 days".to_owned()),
+            maintenance_mode: DuckLakeMaintenanceMode::Kubernetes,
         };
 
         let key = EncryptionKey { id: 1, key: generate_random_key::<32>().unwrap() };
@@ -1366,6 +1383,7 @@ mod tests {
                     duckdb_memory_cache_limit: memory1,
                     maintenance_target_file_size: target1,
                     expire_snapshots_older_than: expire1,
+                    maintenance_mode: mode1,
                 },
                 StoredDestinationConfig::Ducklake {
                     catalog_url: c2,
@@ -1381,6 +1399,7 @@ mod tests {
                     duckdb_memory_cache_limit: memory2,
                     maintenance_target_file_size: target2,
                     expire_snapshots_older_than: expire2,
+                    maintenance_mode: mode2,
                 },
             ) => {
                 assert_eq!(c1, c2);
@@ -1402,8 +1421,46 @@ mod tests {
                 assert_eq!(memory1, memory2);
                 assert_eq!(target1, target2);
                 assert_eq!(expire1, expire2);
+                assert_eq!(mode1, mode2);
             }
             _ => panic!("Config types don't match"),
+        }
+    }
+
+    #[test]
+    fn encrypted_stored_destination_config_ducklake_defaults_maintenance_mode() {
+        let config: EncryptedStoredDestinationConfig = serde_json::from_value(serde_json::json!({
+            "ducklake": {
+                "catalog_url": "postgres://user:pass@localhost:5432/ducklake_catalog",
+                "data_path": "s3://bucket/path",
+                "pool_size": 8
+            }
+        }))
+        .unwrap();
+
+        match config {
+            EncryptedStoredDestinationConfig::Ducklake { maintenance_mode, .. } => {
+                assert_eq!(maintenance_mode, DuckLakeMaintenanceMode::Disabled);
+            }
+            _ => panic!("Config type doesn't match"),
+        }
+    }
+
+    #[test]
+    fn full_api_destination_config_ducklake_defaults_maintenance_mode() {
+        let config: FullApiDestinationConfig = serde_json::from_value(serde_json::json!({
+            "ducklake": {
+                "catalog_url": "postgres://user:pass@localhost:5432/ducklake_catalog",
+                "data_path": "s3://bucket/path"
+            }
+        }))
+        .unwrap();
+
+        match config {
+            FullApiDestinationConfig::Ducklake { maintenance_mode, .. } => {
+                assert_eq!(maintenance_mode, DuckLakeMaintenanceMode::Disabled);
+            }
+            _ => panic!("Config type doesn't match"),
         }
     }
 
@@ -1423,6 +1480,7 @@ mod tests {
             duckdb_memory_cache_limit: None,
             maintenance_target_file_size: None,
             expire_snapshots_older_than: None,
+            maintenance_mode: DuckLakeMaintenanceMode::Kubernetes,
         };
 
         let stored: StoredDestinationConfig = full_config.clone().into();
@@ -1480,6 +1538,7 @@ mod tests {
             duckdb_memory_cache_limit: Some("50MB".to_owned()),
             maintenance_target_file_size: Some("10MB".to_owned()),
             expire_snapshots_older_than: Some("7 days".to_owned()),
+            maintenance_mode: DuckLakeMaintenanceMode::Kubernetes,
         };
 
         assert_json_snapshot!(full_config);
@@ -1502,6 +1561,7 @@ mod tests {
                     duckdb_memory_cache_limit: memory1,
                     maintenance_target_file_size: target1,
                     expire_snapshots_older_than: expire1,
+                    maintenance_mode: mode1,
                 },
                 FullApiDestinationConfig::Ducklake {
                     catalog_url: c2,
@@ -1517,6 +1577,7 @@ mod tests {
                     duckdb_memory_cache_limit: memory2,
                     maintenance_target_file_size: target2,
                     expire_snapshots_older_than: expire2,
+                    maintenance_mode: mode2,
                 },
             ) => {
                 assert_eq!(c1, &c2);
@@ -1538,6 +1599,7 @@ mod tests {
                 assert_eq!(memory1, &memory2);
                 assert_eq!(target1, &target2);
                 assert_eq!(expire1, &expire2);
+                assert_eq!(mode1, &mode2);
             }
             _ => panic!("Deserialization failed or variant mismatch"),
         }

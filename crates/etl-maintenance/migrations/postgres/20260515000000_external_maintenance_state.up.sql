@@ -1,4 +1,4 @@
-CREATE TABLE IF NOT EXISTS public.etl_external_maintenance_state (
+CREATE TABLE IF NOT EXISTS etl.etl_external_maintenance_state (
     pipeline_id BIGINT PRIMARY KEY,
     active_run JSONB,
     pause_request JSONB,

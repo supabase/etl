@@ -32,7 +32,6 @@ ducklake = [
     "dep:tokio",
     "dep:url",
 ]
-ducklake-kubernetes = ["ducklake", "etl-maintenance/kubernetes"]
 bigquery = [
     "dep:gcp-bigquery-client",
     "dep:serde_json",
