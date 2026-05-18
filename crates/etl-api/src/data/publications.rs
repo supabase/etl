@@ -152,3 +152,53 @@ pub async fn read_all_publications(pool: &PgPool) -> Result<Vec<Publication>, Pu
 
     Ok(publications)
 }
+
+pub async fn add_tables_to_publication(
+    publication: &Publication,
+    pool: &PgPool,
+) -> Result<(), PublicationsDbError> {
+    let mut query = String::new();
+    let quoted_publication_name = quote_identifier(&publication.name);
+    query.push_str("alter publication ");
+    query.push_str(&quoted_publication_name);
+    query.push_str(" add table only ");
+
+    for (i, table) in publication.tables.iter().enumerate() {
+        let quoted_schema = quote_identifier(&table.schema);
+        let quoted_name = quote_identifier(&table.name);
+        query.push_str(&quoted_schema);
+        query.push('.');
+        query.push_str(&quoted_name);
+
+        if i < publication.tables.len() - 1 {
+            query.push(',');
+        }
+    }
+    sqlx::query(AssertSqlSafe(query)).execute(pool).await?;
+    Ok(())
+}
+
+pub async fn drop_tables_from_publication(
+    publication: &Publication,
+    pool: &PgPool,
+) -> Result<(), PublicationsDbError> {
+    let mut query = String::new();
+    let quoted_publication_name = quote_identifier(&publication.name);
+    query.push_str("alter publication ");
+    query.push_str(&quoted_publication_name);
+    query.push_str(" drop table only ");
+
+    for (i, table) in publication.tables.iter().enumerate() {
+        let quoted_schema = quote_identifier(&table.schema);
+        let quoted_name = quote_identifier(&table.name);
+        query.push_str(&quoted_schema);
+        query.push('.');
+        query.push_str(&quoted_name);
+        if i < publication.tables.len() - 1 {
+            query.push(',');
+        }
+    }
+
+    sqlx::query(AssertSqlSafe(query)).execute(pool).await?;
+    Ok(())
+}
