@@ -2,6 +2,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use etl::{
     error::{EtlError, EtlResult},
+    replication::WorkerType,
     state::{
         destination_metadata::{AppliedDestinationTableMetadata, DestinationTableMetadata},
         table::TableReplicationPhase,
@@ -11,7 +12,7 @@ use etl::{
         schema::{SchemaStore, TableSchemaRetention},
         state::{StateStore, TableReplicationStates},
     },
-    types::{SnapshotId, TableId, TableSchema},
+    types::{PgLsn, SnapshotId, TableId, TableSchema},
 };
 use tracing::info;
 
@@ -119,6 +120,22 @@ where
         table_id: TableId,
     ) -> EtlResult<TableReplicationPhase> {
         self.inner.rollback_table_replication_state(table_id).await
+    }
+
+    async fn get_replication_progress(&self, worker_type: WorkerType) -> EtlResult<Option<PgLsn>> {
+        self.inner.get_replication_progress(worker_type).await
+    }
+
+    async fn upsert_replication_progress(
+        &self,
+        worker_type: WorkerType,
+        flush_lsn: PgLsn,
+    ) -> EtlResult<PgLsn> {
+        self.inner.upsert_replication_progress(worker_type, flush_lsn).await
+    }
+
+    async fn delete_replication_progress(&self, worker_type: WorkerType) -> EtlResult<()> {
+        self.inner.delete_replication_progress(worker_type).await
     }
 
     async fn get_destination_table_metadata(
