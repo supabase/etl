@@ -71,7 +71,8 @@ snowflake = [
     "dep:jsonwebtoken",
     "dep:metrics",
     "dep:reqwest",
-    "dep:rsa",
+    "dep:aws-lc-rs",
+    "dep:pkcs8",
     "dep:secrecy",
     "dep:serde",
     "dep:serde_json",
@@ -90,6 +91,7 @@ test-utils = ["dep:uuid"]
 
 arrow = { workspace = true, optional = true }
 async-trait = { workspace = true, optional = true }
+aws-lc-rs = { workspace = true, optional = true }
 base64 = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
 chrono = { workspace = true }
@@ -108,12 +110,12 @@ metrics = { workspace = true, optional = true }
 parking_lot = { workspace = true, optional = true }
 parquet = { workspace = true, optional = true, features = ["async", "arrow"] }
 pg_escape = { workspace = true, optional = true }
+pkcs8 = { workspace = true, optional = true }
 prost = { workspace = true, optional = true }
 r2d2 = { workspace = true, optional = true }
 rand = { workspace = true, optional = true, features = ["thread_rng"] }
 regex = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true, features = ["json", "rustls-tls"] }
-rsa = { workspace = true, optional = true, features = ["pem", "pkcs5"] }
 secrecy = { workspace = true, optional = true }
 serde = { workspace = true, optional = true, features = ["derive"] }
 serde_json = { workspace = true, optional = true, features = ["arbitrary_precision", "std"] }
