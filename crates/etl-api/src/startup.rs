@@ -60,7 +60,8 @@ use crate::{
             publications::{
                 CreatePublicationRequest, UpdatePublicationRequest, add_tables_to_publication,
                 create_publication, delete_publication, drop_tables_from_publication,
-                read_all_publications, read_publication, update_publication,
+                read_all_publications, read_publication, set_publication_tables,
+                update_publication,
             },
             read_all_sources, read_source,
             tables::read_table_names,
@@ -328,6 +329,7 @@ pub fn run(
         crate::routes::sources::publications::read_all_publications,
         crate::routes::sources::publications::add_tables_to_publication,
         crate::routes::sources::publications::drop_tables_from_publication,
+        crate::routes::sources::publications::set_publication_tables,
         crate::routes::sources::tables::read_table_names,
         crate::routes::destinations::create_destination,
         crate::routes::destinations::read_destination,
@@ -426,6 +428,7 @@ pub fn run(
                             .service(read_all_publications)
                             .service(add_tables_to_publication)
                             .service(drop_tables_from_publication)
+                            .service(set_publication_tables)
                             // tenants_sources
                             .service(create_tenant_and_source)
                             // destinations-pipelines
