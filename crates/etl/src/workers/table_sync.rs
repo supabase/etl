@@ -20,7 +20,7 @@ use crate::{
     metrics::{ERROR_TYPE_LABEL, ETL_WORKER_ERRORS_TOTAL, WORKER_TYPE_LABEL},
     replication::{
         ApplyLoop, ApplyLoopResult, SharedTableCache, TableSyncResult, TableSyncWorkerContext,
-        WorkerContext, client::PgReplicationClient, start_table_sync,
+        WorkerContext, WorkerType, client::PgReplicationClient, start_table_sync,
     },
     state::table::{
         RetryPolicy, TableReplicationError, TableReplicationPhase, TableReplicationPhaseType,
@@ -767,22 +767,23 @@ where
             }
         };
 
-        let _apply_loop_stream_guard = self.batch_budget.register_stream_load(1);
         let worker_context = WorkerContext::TableSync(TableSyncWorkerContext {
             table_id: self.table_id,
             table_sync_worker_state: state,
             state_store: self.store.clone(),
         });
+
+        let _apply_loop_stream_guard = self.batch_budget.register_stream_load(1);
         let apply_loop_result = ApplyLoop::start(
             self.pipeline_id,
             start_lsn,
-            self.config,
+            Arc::clone(&self.config),
             replication_client.clone(),
-            self.store,
-            self.destination,
-            self.shared_table_cache,
+            self.store.clone(),
+            self.destination.clone(),
+            self.shared_table_cache.clone(),
             worker_context,
-            self.shutdown_rx,
+            self.shutdown_rx.clone(),
             self.memory_monitor.clone(),
             self.batch_budget.clone(),
         )
@@ -795,17 +796,17 @@ where
                     "table sync apply loop completed successfully, deleting slot"
                 );
 
-                // We delete the replication slot used by this table sync worker.
-                //
-                // Note that if the deletion fails, the slot will remain in the database and
-                // will not be removed later, so manual intervention will be
-                // required. The reason for not implementing an automatic
-                // cleanup mechanism is that it would introduce performance overhead,
-                // and we expect this call to fail only rarely.
-                let slot_name: String =
-                    EtlReplicationSlot::for_table_sync_worker(self.pipeline_id, self.table_id)
-                        .try_into()?;
-                replication_client.delete_slot_if_exists(&slot_name).await?;
+                // Catchup has completed, so cleanup failures should not turn a
+                // completed table sync into a replication failure.
+                if let Err(err) =
+                    self.cleanup_resources(replication_client, self.store.clone()).await
+                {
+                    warn!(
+                        table_id = self.table_id.0,
+                        error = %err,
+                        "failed to clean up table sync resources after completion"
+                    );
+                }
 
                 Ok(TableSyncWorkerResult::Completed)
             }
@@ -815,5 +816,31 @@ where
                 Ok(TableSyncWorkerResult::Shutdown)
             }
         }
+    }
+
+    /// Cleans up resources owned by this table sync worker.
+    ///
+    /// Once the table sync apply loop completes, its durable progress row is no
+    /// longer needed for resume and the replication slot should be removed so
+    /// it stops retaining WAL.
+    ///
+    /// Progress is deleted first so a slot deletion failure leaves only a stale
+    /// slot behind. That can retain WAL and may require manual cleanup, but it
+    /// does not leave stale progress for a completed table sync worker.
+    async fn cleanup_resources(
+        &self,
+        replication_client: PgReplicationClient,
+        store: S,
+    ) -> EtlResult<()> {
+        store
+            .delete_replication_progress(WorkerType::TableSync { table_id: self.table_id })
+            .await?;
+
+        let slot_name: String =
+            EtlReplicationSlot::for_table_sync_worker(self.pipeline_id, self.table_id)
+                .try_into()?;
+        replication_client.delete_slot_if_exists(&slot_name).await?;
+
+        Ok(())
     }
 }
