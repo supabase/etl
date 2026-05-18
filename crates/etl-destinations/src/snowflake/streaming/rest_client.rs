@@ -143,6 +143,10 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
                     let body = resp.text().await.unwrap_or_default();
 
                     if status != 200 {
+                        if status == 401 {
+                            warn!("received 401 from Snowpipe Streaming API, invalidating token");
+                            auth.invalidate_token().await;
+                        }
                         return Err(Error::HttpStatus { status, body });
                     }
 
@@ -237,6 +241,10 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
                     let body = resp.text().await.unwrap_or_default();
 
                     if status != 200 {
+                        if status == 401 {
+                            warn!("received 401 from Snowpipe Streaming API, invalidating token");
+                            auth.invalidate_token().await;
+                        }
                         if let Ok(err_resp) = serde_json::from_str::<SnowpipeErrorResponse>(&body) {
                             if let Some(code) = err_resp.status_code {
                                 if code == 3 {
@@ -304,6 +312,10 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
                     let status = resp.status().as_u16();
                     if status != 200 {
                         let body = resp.text().await.unwrap_or_default();
+                        if status == 401 {
+                            warn!("received 401 from Snowpipe Streaming API, invalidating token");
+                            auth.invalidate_token().await;
+                        }
                         return Err(Error::HttpStatus { status, body });
                     }
                     Ok(())
@@ -362,6 +374,10 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
                     let body_text = resp.text().await.unwrap_or_default();
 
                     if status != 200 {
+                        if status == 401 {
+                            warn!("received 401 from Snowpipe Streaming API, invalidating token");
+                            auth.invalidate_token().await;
+                        }
                         return Err(Error::HttpStatus { status, body: body_text });
                     }
 
@@ -428,7 +444,7 @@ fn should_retry(error: &Error) -> RetryDecision {
         },
         Error::HttpTransport(_) => RetryDecision::Retry,
         Error::HttpStatus { status, .. } => match *status {
-            408 | 429 => RetryDecision::Retry,
+            401 | 408 | 429 => RetryDecision::Retry,
             s if s >= 500 => RetryDecision::Retry,
             _ => RetryDecision::Stop,
         },
@@ -514,6 +530,7 @@ mod tests {
         assert_eq!(should_retry(&http(500)), RetryDecision::Retry);
         assert_eq!(should_retry(&http(429)), RetryDecision::Retry);
         assert_eq!(should_retry(&http(408)), RetryDecision::Retry);
+        assert_eq!(should_retry(&http(401)), RetryDecision::Retry);
         assert_eq!(should_retry(&http(400)), RetryDecision::Stop);
 
         assert_eq!(should_retry(&Error::Auth("expired".into())), RetryDecision::Stop);
