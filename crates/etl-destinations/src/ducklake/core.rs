@@ -52,8 +52,8 @@ use crate::{
             retain_truncates_after_sequence_key,
         },
         client::{
-            DuckDbBlockingOperationKind, DuckLakeConnectionManager, DuckLakeInterruptRegistry,
-            build_warm_ducklake_pool, format_query_error_detail, run_duckdb_blocking,
+            DuckLakeConnectionManager, DuckLakeInterruptRegistry, build_warm_ducklake_pool,
+            format_query_error_detail, run_duckdb_blocking,
         },
         config::{
             MAINTENANCE_TARGET_FILE_SIZE, build_setup_plan, current_duckdb_extension_strategy,
@@ -559,7 +559,6 @@ where
         run_duckdb_blocking(
             Arc::clone(&pool),
             Arc::clone(&blocking_slots),
-            DuckDbBlockingOperationKind::Foreground,
             move |conn| -> EtlResult<()> {
                 conn.execute_batch(&target_file_size_sql).map_err(|error| {
                     etl_error!(
@@ -578,7 +577,6 @@ where
         run_duckdb_blocking(
             Arc::clone(&pool),
             Arc::clone(&blocking_slots),
-            DuckDbBlockingOperationKind::Foreground,
             move |conn| -> EtlResult<()> {
                 conn.query_row(&expire_snapshots_validation_sql, [], |_row| Ok(())).map_err(
                     |source| {
@@ -603,7 +601,6 @@ where
                 run_duckdb_blocking(
                     Arc::clone(&pool),
                     Arc::clone(&blocking_slots),
-                    DuckDbBlockingOperationKind::Foreground,
                     resolve_ducklake_metadata_schema_blocking,
                 )
                 .await?
@@ -702,66 +699,63 @@ where
         self.ensure_applied_batches_table_exists().await?;
         self.ensure_streaming_progress_table_exists().await?;
         let _checkpoint_guard = self.acquire_mutation_guard().await;
-        self.run_duckdb_blocking(
-            DuckDbBlockingOperationKind::Foreground,
-            move |conn| -> EtlResult<()> {
-                conn.execute_batch("BEGIN TRANSACTION").map_err(|e| {
+        self.run_duckdb_blocking(move |conn| -> EtlResult<()> {
+            conn.execute_batch("BEGIN TRANSACTION").map_err(|e| {
+                etl_error!(
+                    ErrorKind::DestinationQueryFailed,
+                    "DuckLake BEGIN TRANSACTION failed",
+                    source: e
+                )
+            })?;
+
+            let result = (|| -> EtlResult<()> {
+                let truncate_table_sql =
+                    format!(r#"TRUNCATE TABLE {LAKE_CATALOG}."{table_name}";"#);
+                conn.execute_batch(&truncate_table_sql).map_err(|e| {
                     etl_error!(
                         ErrorKind::DestinationQueryFailed,
-                        "DuckLake BEGIN TRANSACTION failed",
+                        "DuckLake TRUNCATE TABLE failed",
+                        format_query_error_detail(&truncate_table_sql),
                         source: e
                     )
                 })?;
 
-                let result = (|| -> EtlResult<()> {
-                    let truncate_table_sql =
-                        format!(r#"TRUNCATE TABLE {LAKE_CATALOG}."{table_name}";"#);
-                    conn.execute_batch(&truncate_table_sql).map_err(|e| {
-                        etl_error!(
-                            ErrorKind::DestinationQueryFailed,
-                            "DuckLake TRUNCATE TABLE failed",
-                            format_query_error_detail(&truncate_table_sql),
-                            source: e
-                        )
-                    })?;
+                clear_applied_batch_markers_for_kind(
+                    conn,
+                    &table_name,
+                    DuckLakeTableBatchKind::Copy,
+                )?;
+                clear_applied_batch_markers_for_kind(
+                    conn,
+                    &table_name,
+                    DuckLakeTableBatchKind::Mutation,
+                )?;
+                clear_applied_batch_markers_for_kind(
+                    conn,
+                    &table_name,
+                    DuckLakeTableBatchKind::Truncate,
+                )?;
+                clear_table_streaming_progress(conn, &table_name)?;
+                Ok(())
+            })();
 
-                    clear_applied_batch_markers_for_kind(
-                        conn,
-                        &table_name,
-                        DuckLakeTableBatchKind::Copy,
-                    )?;
-                    clear_applied_batch_markers_for_kind(
-                        conn,
-                        &table_name,
-                        DuckLakeTableBatchKind::Mutation,
-                    )?;
-                    clear_applied_batch_markers_for_kind(
-                        conn,
-                        &table_name,
-                        DuckLakeTableBatchKind::Truncate,
-                    )?;
-                    clear_table_streaming_progress(conn, &table_name)?;
-                    Ok(())
-                })();
-
-                match result {
-                    Ok(()) => conn.execute_batch("COMMIT").map_err(|e| {
-                        etl_error!(
-                            ErrorKind::DestinationQueryFailed,
-                            "DuckLake COMMIT failed",
-                            source: e
-                        )
-                    }),
-                    Err(error) => {
-                        let err = conn.execute_batch("ROLLBACK");
-                        if let Err(err) = err {
-                            tracing::error!(error = %err, "error rollback");
-                        }
-                        Err(error)
+            match result {
+                Ok(()) => conn.execute_batch("COMMIT").map_err(|e| {
+                    etl_error!(
+                        ErrorKind::DestinationQueryFailed,
+                        "DuckLake COMMIT failed",
+                        source: e
+                    )
+                }),
+                Err(error) => {
+                    let err = conn.execute_batch("ROLLBACK");
+                    if let Err(err) = err {
+                        tracing::error!(error = %err, "error rollback");
                     }
+                    Err(error)
                 }
-            },
-        )
+            }
+        })
         .await
     }
 
@@ -1173,7 +1167,6 @@ where
         run_duckdb_blocking(
             Arc::clone(&self.pool),
             Arc::clone(&self.blocking_slots),
-            DuckDbBlockingOperationKind::Foreground,
             move |conn| -> EtlResult<()> {
                 debug!(
                     table = %table_name_clone,
@@ -1428,22 +1421,13 @@ where
 
     /// Runs one DuckDB operation on Tokio's blocking pool after acquiring a
     /// permit that matches the configured DuckDB concurrency limit.
-    async fn run_duckdb_blocking<R, F>(
-        &self,
-        operation_kind: DuckDbBlockingOperationKind,
-        operation: F,
-    ) -> EtlResult<R>
+    async fn run_duckdb_blocking<R, F>(&self, operation: F) -> EtlResult<R>
     where
         R: Send + 'static,
         F: FnOnce(&duckdb::Connection) -> EtlResult<R> + Send + 'static,
     {
-        run_duckdb_blocking(
-            Arc::clone(&self.pool),
-            Arc::clone(&self.blocking_slots),
-            operation_kind,
-            operation,
-        )
-        .await
+        run_duckdb_blocking(Arc::clone(&self.pool), Arc::clone(&self.blocking_slots), operation)
+            .await
     }
 
     /// Stops the background DuckLake metrics sampler.
@@ -1480,12 +1464,9 @@ async fn read_table_streaming_progress_sequence_key_blocking(
     blocking_slots: Arc<Semaphore>,
     table_name: DuckLakeTableName,
 ) -> EtlResult<Option<EventSequenceKey>> {
-    run_duckdb_blocking(
-        pool,
-        blocking_slots,
-        DuckDbBlockingOperationKind::Foreground,
-        move |conn| read_table_streaming_progress_sequence_key(conn, &table_name),
-    )
+    run_duckdb_blocking(pool, blocking_slots, move |conn| {
+        read_table_streaming_progress_sequence_key(conn, &table_name)
+    })
     .await
 }
 
