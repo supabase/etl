@@ -77,6 +77,12 @@ pub struct RowBatchBuilder {
     batches: Vec<RowBatch>,
 }
 
+impl Default for RowBatchBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RowBatchBuilder {
     pub fn new() -> Self {
         Self {
@@ -193,7 +199,7 @@ mod tests {
     use crate::snowflake::encoding::{CdcMeta, CdcOperation};
 
     fn col(name: &str) -> ColumnSchema {
-        ColumnSchema::new(name.to_string(), Type::TEXT, -1, 1, None, true)
+        ColumnSchema::new(name.to_owned(), Type::TEXT, -1, 1, None, true)
     }
 
     fn incompressible_string(len: usize, seed: u64) -> String {
@@ -223,7 +229,7 @@ mod tests {
         let batches = builder.finish().unwrap();
         assert_eq!(batches.len(), 1);
 
-        let batch = &batches.iter().next().unwrap();
+        let batch = &batches.first().unwrap();
         assert_eq!(batch.row_count(), 10);
         assert!(batch.size() > 0);
         assert!(batch.size() <= MAX_COMPRESSED_BYTES);
@@ -262,7 +268,7 @@ mod tests {
         let batches = builder.finish().unwrap();
         assert!(batches.len() > 1, "expected multiple batches, got {}", batches.len());
 
-        for batch in batches.iter() {
+        for batch in &batches {
             assert!(
                 batch.size() <= MAX_COMPRESSED_BYTES,
                 "batch exceeds hard limit: {}",
@@ -307,6 +313,6 @@ mod tests {
 
         let batches = builder.finish().unwrap();
         assert_eq!(batches.len(), 1);
-        assert_eq!(batches.iter().next().unwrap().offset().as_ref(), offsets[1]);
+        assert_eq!(batches.first().unwrap().offset().as_ref(), offsets[1]);
     }
 }

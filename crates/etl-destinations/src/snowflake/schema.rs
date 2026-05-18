@@ -74,7 +74,7 @@ mod tests {
     use super::*;
 
     fn col(name: &str) -> ColumnSchema {
-        ColumnSchema::new(name.to_string(), Type::INT4, -1, 1, None, true)
+        ColumnSchema::new(name.to_owned(), Type::INT4, -1, 1, None, true)
     }
 
     #[test]
@@ -146,8 +146,8 @@ mod tests {
     #[test]
     fn build_column_defs_output() {
         let columns = vec![
-            ColumnSchema::new("id".to_string(), Type::INT4, -1, 1, None, true),
-            ColumnSchema::new("created_at".to_string(), Type::TIMESTAMPTZ, -1, 2, None, true),
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, None, true),
+            ColumnSchema::new("created_at".to_owned(), Type::TIMESTAMPTZ, -1, 2, None, true),
         ];
         let defs = build_column_defs(&columns);
         assert_eq!(

@@ -193,6 +193,7 @@ async fn continuation_token() {
 
         let fqn = format!("\"{}\".\"{}\".\"{table}\"", config.database, config.schema);
 
+        #[allow(clippy::too_many_arguments)]
         async fn verify(
             stream: &RestStreamClient<AuthManager<HttpExchanger>>,
             sql: &SqlClient<AuthManager<HttpExchanger>>,

@@ -225,7 +225,7 @@ where
         let offset = OffsetToken::new(e.commit_lsn, e.tx_ordinal);
         builders
             .entry(table_id)
-            .or_insert_with(RowBatchBuilder::new)
+            .or_default()
             .push_row(
                 cols,
                 &e.table_row,
@@ -261,7 +261,7 @@ where
         let offset = OffsetToken::new(e.commit_lsn, e.tx_ordinal);
         builders
             .entry(table_id)
-            .or_insert_with(RowBatchBuilder::new)
+            .or_default()
             .push_row(cols, &full_row, CdcMeta::new(CdcOperation::Update, offset.as_ref()), &offset)
             .map_err(EtlError::from)
     }
@@ -282,7 +282,7 @@ where
                 let cols = &column_cache[&table_id];
                 builders
                     .entry(table_id)
-                    .or_insert_with(RowBatchBuilder::new)
+                    .or_default()
                     .push_row(
                         cols,
                         &row,
@@ -298,7 +298,7 @@ where
                     e.replicated_table_schema.identity_column_schemas().cloned().collect();
                 builders
                     .entry(table_id)
-                    .or_insert_with(RowBatchBuilder::new)
+                    .or_default()
                     .push_row(
                         &identity_cols,
                         &key_row,

@@ -34,23 +34,23 @@ impl Config {
 
         Self {
             account_url,
-            account_id: account_id.to_string(),
-            username: username.to_string(),
-            database: database.to_string(),
-            schema: schema.to_string(),
+            account_id: account_id.to_owned(),
+            username: username.to_owned(),
+            database: database.to_owned(),
+            schema: schema.to_owned(),
             role: None,
         }
     }
 
     /// Override the derived URL (useful for private-link or local testing).
     pub fn with_account_url(mut self, url: &str) -> Self {
-        self.account_url = url.to_string();
+        self.account_url = url.to_owned();
         self
     }
 
     /// Set the role to assume after connecting.
     pub fn with_role(mut self, role: &str) -> Self {
-        self.role = Some(role.to_string());
+        self.role = Some(role.to_owned());
         self
     }
 }

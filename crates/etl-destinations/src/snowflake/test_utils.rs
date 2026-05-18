@@ -30,8 +30,8 @@ pub fn load_test_config() -> Config {
     let username = std::env::var(SNOWFLAKE_USER_ENV)
         .unwrap_or_else(|_| panic!("{SNOWFLAKE_USER_ENV} must be set"));
     let database =
-        std::env::var(SNOWFLAKE_DATABASE_ENV).unwrap_or_else(|_| DEFAULT_DATABASE.to_string());
-    let schema = std::env::var(SNOWFLAKE_SCHEMA_ENV).unwrap_or_else(|_| DEFAULT_SCHEMA.to_string());
+        std::env::var(SNOWFLAKE_DATABASE_ENV).unwrap_or_else(|_| DEFAULT_DATABASE.to_owned());
+    let schema = std::env::var(SNOWFLAKE_SCHEMA_ENV).unwrap_or_else(|_| DEFAULT_SCHEMA.to_owned());
 
     let mut config = Config::new(&account_id, &username, &database, &schema);
     if let Ok(role) = std::env::var(SNOWFLAKE_ROLE_ENV) {

@@ -188,10 +188,10 @@ impl<E: TokenExchanger> TokenProvider for AuthManager<E> {
     async fn get_token(&self) -> Result<String> {
         let mut cached = self.cached_token.lock().await;
 
-        if let Some(ref token) = *cached {
-            if token.expires_at > Instant::now() + TOKEN_REFRESH_BUFFER {
-                return Ok(token.access_token.clone());
-            }
+        if let Some(ref token) = *cached
+            && token.expires_at > Instant::now() + TOKEN_REFRESH_BUFFER
+        {
+            return Ok(token.access_token.clone());
         }
 
         tracing::debug!("refreshing Snowflake scoped token");
@@ -286,7 +286,7 @@ mod tests {
     impl TokenExchanger for TestExchanger {
         async fn exchange(&self, _account_url: &str, _jwt: &str) -> Result<ScopedToken> {
             Ok(ScopedToken {
-                access_token: "fresh-token-from-exchange".to_string(),
+                access_token: "fresh-token-from-exchange".to_owned(),
                 expires_at: Instant::now() + Duration::from_secs(3600),
             })
         }
@@ -380,7 +380,7 @@ mod tests {
     #[tokio::test]
     async fn token_cache_hit() {
         let manager = make_test_manager();
-        manager.inject_token_for_test("cached-token-123".to_string(), Duration::from_secs(120));
+        manager.inject_token_for_test("cached-token-123".to_owned(), Duration::from_secs(120));
 
         // A non-expired token should be returned directly from cache.
         let token = manager.get_token().await.expect("get_token");
@@ -392,7 +392,7 @@ mod tests {
         let manager = make_test_manager();
 
         // Inject a token with 30s TTL, which is below the 60s refresh buffer.
-        manager.inject_token_for_test("stale-token".to_string(), Duration::from_secs(30));
+        manager.inject_token_for_test("stale-token".to_owned(), Duration::from_secs(30));
 
         // get_token should detect the stale cache and call the exchanger.
         let token = manager.get_token().await.expect("get_token");
