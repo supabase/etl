@@ -119,12 +119,22 @@ impl ClickHouseTestDatabase {
     where
         S: StateStore + SchemaStore + Send + Sync,
     {
+        self.build_destination_with_engine(store, etl_config::shared::ClickHouseEngine::default())
+            .await
+    }
+
+    /// Builds a [`ClickHouseDestination`] for the given engine.
+    pub async fn build_destination_with_engine<S>(
+        &self,
+        store: S,
+        engine: etl_config::shared::ClickHouseEngine,
+    ) -> ClickHouseDestination<S>
+    where
+        S: StateStore + SchemaStore + Send + Sync,
+    {
         self.build_destination_with_config(
             store,
-            ClickHouseInserterConfig {
-                max_bytes_per_insert: 100 * 1024 * 1024,
-                ..Default::default()
-            },
+            ClickHouseInserterConfig { max_bytes_per_insert: 100 * 1024 * 1024, engine },
         )
         .await
     }
@@ -175,13 +185,14 @@ impl ClickHouseTestDatabase {
     }
 
     /// Returns the column names of a ClickHouse table in position order,
-    /// excluding the CDC columns (`cdc_operation`, `cdc_lsn`).
+    /// excluding both engines' trailing CDC columns.
     pub async fn column_names(&self, table_name: &str) -> Vec<String> {
         self.column_types(table_name).await.into_iter().map(|(name, _)| name).collect()
     }
 
     /// Returns the column names and ClickHouse type strings in position order,
-    /// excluding the CDC columns (`cdc_operation`, `cdc_lsn`).
+    /// excluding both engines' trailing CDC columns (`cdc_operation`,
+    /// `cdc_lsn`, `_etl_lsn`, `_etl_deleted`).
     pub async fn column_types(&self, table_name: &str) -> Vec<(String, String)> {
         #[derive(clickhouse::Row, serde::Deserialize)]
         struct Col {
@@ -191,7 +202,8 @@ impl ClickHouseTestDatabase {
         self.db_client
             .query(
                 "SELECT name, type AS type_name FROM system.columns WHERE database = ? AND table \
-                 = ? AND name NOT IN ('cdc_operation', 'cdc_lsn') ORDER BY position",
+                 = ? AND name NOT IN ('cdc_operation', 'cdc_lsn', '_etl_lsn', '_etl_deleted') \
+                 ORDER BY position",
             )
             .bind(&self.database)
             .bind(table_name)
