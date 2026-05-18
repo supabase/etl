@@ -235,13 +235,14 @@ fn temporal_out_of_range_bound(value: &str) -> Option<PgTemporalBound> {
 
 /// Parses Postgres array literal syntax into a typed [`ArrayCell`].
 ///
-/// This function handles Postgres's array format with curly braces, comma
-/// separation, and proper quoting. It supports null values (unquoted "null"),
-/// escaped characters within quoted strings, and delegates element parsing
-/// to the provided closure.
+/// This function handles Postgres's one-dimensional array format with curly
+/// braces, comma separation, and proper quoting. It supports null values
+/// (unquoted "null"), escaped characters within quoted strings, and delegates
+/// element parsing to the provided closure.
 ///
 /// The parser correctly handles quote escaping, comma separation within quotes,
-/// and distinguishes between null values and the string "null".
+/// and distinguishes between null values and the string "null". It rejects
+/// multidimensional arrays instead of flattening their nested structure.
 fn parse_cell_from_postgres_text_array<P, M, T>(str: &str, mut parse: P, m: M) -> EtlResult<Cell>
 where
     P: FnMut(&str) -> EtlResult<Option<T>>,
@@ -249,6 +250,10 @@ where
 {
     if str.len() < 2 {
         bail!(ErrorKind::ConversionError, "Array input too short");
+    }
+
+    if str.starts_with('[') {
+        bail!(ErrorKind::ConversionError, "Array inputs with explicit bounds are not supported");
     }
 
     if !str.starts_with('{') || !str.ends_with('}') {
@@ -281,6 +286,12 @@ where
                     '\\' => in_escape = true,
                     ',' if !in_quotes => {
                         break;
+                    }
+                    '{' | '}' if !in_quotes => {
+                        bail!(
+                            ErrorKind::ConversionError,
+                            "Multidimensional arrays are not supported"
+                        );
                     }
                     c => {
                         val_str.push(c);
@@ -846,6 +857,15 @@ mod tests {
         assert!(parse_cell_from_postgres_text(&Type::INT4_ARRAY, "{").is_err());
         assert!(parse_cell_from_postgres_text(&Type::INT4_ARRAY, "}").is_err());
         assert!(parse_cell_from_postgres_text(&Type::INT4_ARRAY, "").is_err());
+    }
+
+    #[test]
+    fn parse_array_rejects_unsupported_shapes() {
+        assert!(parse_cell_from_postgres_text(&Type::TEXT_ARRAY, "{{a,b},{c,d}}").is_err());
+        assert!(parse_cell_from_postgres_text(&Type::INT4_ARRAY, "[2:3]={1,2}").is_err());
+
+        let cell = parse_cell_from_postgres_text(&Type::TEXT_ARRAY, r#"{"{literal}"}"#).unwrap();
+        assert_eq!(cell, Cell::Array(ArrayCell::String(vec![Some("{literal}".to_owned())])));
     }
 
     #[test]

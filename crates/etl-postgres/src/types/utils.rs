@@ -2,10 +2,21 @@ use tokio_postgres::types::{Kind, PgLsn, Type};
 
 /// Converts a Postgres type OID to a [`Type`] instance.
 ///
-/// Returns a properly constructed [`Type`] for the given OID, or return TEXT
-/// type as fallback if the OID lookup fails.
-pub fn convert_type_oid_to_type(type_oid: u32) -> Type {
+/// Unknown OIDs are intentionally represented as [`Type::TEXT`]. The source
+/// schema message can contain richer type metadata, but row conversion is
+/// driven by the [`Type`] stored in [`crate::types::ColumnSchema`]. This
+/// fallback makes table copy and streaming parse the source value through
+/// PostgreSQL's text output and create a destination string column.
+pub fn convert_type_oid_to_type_or_text(type_oid: u32) -> Type {
     Type::from_oid(type_oid).unwrap_or(Type::TEXT)
+}
+
+/// Converts a Postgres type OID to a [`Type`] instance.
+///
+/// Prefer [`convert_type_oid_to_type_or_text`] at call sites that rely on the
+/// string fallback for unknown OIDs.
+pub fn convert_type_oid_to_type(type_oid: u32) -> Type {
+    convert_type_oid_to_type_or_text(type_oid)
 }
 
 /// Returns whether the Postgres type is an array type.
@@ -52,6 +63,17 @@ pub fn generate_sequence_number(start_lsn: PgLsn, commit_lsn: PgLsn) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn convert_type_oid_to_type_or_text_preserves_known_type() {
+        assert_eq!(convert_type_oid_to_type_or_text(Type::INT4.oid()), Type::INT4);
+    }
+
+    #[test]
+    fn convert_type_oid_to_type_or_text_defaults_unknown_oid_to_text() {
+        assert_eq!(convert_type_oid_to_type_or_text(u32::MAX), Type::TEXT);
+    }
+
     #[test]
     fn is_array_type_fn() {
         // array types

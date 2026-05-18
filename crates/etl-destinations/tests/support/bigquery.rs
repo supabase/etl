@@ -55,6 +55,11 @@ fn parse_timestamp_cell(table_cell: TableCell) -> Option<DateTime<Utc>> {
     table_cell.value.and_then(|value| value.as_str().and_then(parse_unix_timestamp_str))
 }
 
+/// Parses a PostgreSQL-style TIMESTAMPTZ string.
+fn parse_postgres_timestamptz_str(value: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S%.f%:z").ok().map(|value| value.into())
+}
+
 /// Parses a BigQuery repeated field.
 fn parse_array_cell<T>(table_cell: TableCell) -> Option<Vec<T>>
 where
@@ -62,91 +67,233 @@ where
     <T as FromStr>::Err: fmt::Debug,
 {
     table_cell.value.and_then(|value| {
-        value.as_array().map(|items| {
-            items
-                .iter()
-                .filter_map(|item| {
-                    item.as_object()
-                        .and_then(|object| object.get("v"))
-                        .and_then(|value| value.as_str())
-                        .and_then(|value| value.parse::<T>().ok())
-                })
-                .collect()
-        })
+        value
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| {
+                        item.as_object()
+                            .and_then(|object| object.get("v"))
+                            .and_then(|value| value.as_str())
+                            .and_then(|value| value.parse::<T>().ok())
+                    })
+                    .collect()
+            })
+            .or_else(|| value.as_str().and_then(parse_stringified_array_cell))
     })
 }
 
 /// Parses a BigQuery repeated JSON field.
 fn parse_json_array(table_cell: TableCell) -> Option<Vec<serde_json::Value>> {
     table_cell.value.and_then(|value| {
-        value.as_array().map(|items| {
-            items
-                .iter()
-                .filter_map(|item| {
-                    item.as_object()
-                        .and_then(|object| object.get("v"))
-                        .and_then(|value| value.as_str())
-                        .and_then(|value| serde_json::from_str(value).ok())
+        value
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| {
+                        item.as_object()
+                            .and_then(|object| object.get("v"))
+                            .and_then(|value| value.as_str())
+                            .and_then(|value| serde_json::from_str(value).ok())
+                    })
+                    .collect()
+            })
+            .or_else(|| {
+                value.as_str().and_then(|value| {
+                    parse_stringified_array_items(value).map(|items| {
+                        items
+                            .into_iter()
+                            .filter_map(|item| {
+                                item.and_then(|value| serde_json::from_str(&value).ok())
+                            })
+                            .collect()
+                    })
                 })
-                .collect()
-        })
+            })
     })
 }
 
 /// Parses a BigQuery repeated TIMESTAMP field.
 fn parse_timestamp_array(table_cell: TableCell) -> Option<Vec<DateTime<Utc>>> {
     table_cell.value.and_then(|value| {
-        value.as_array().map(|items| {
-            items
-                .iter()
-                .filter_map(|item| {
-                    item.as_object()
-                        .and_then(|object| object.get("v"))
-                        .and_then(|value| value.as_str())
-                        .and_then(parse_unix_timestamp_str)
+        value
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| {
+                        item.as_object()
+                            .and_then(|object| object.get("v"))
+                            .and_then(|value| value.as_str())
+                            .and_then(parse_unix_timestamp_str)
+                    })
+                    .collect()
+            })
+            .or_else(|| {
+                value.as_str().and_then(|value| {
+                    parse_stringified_array_items(value).map(|items| {
+                        items
+                            .into_iter()
+                            .filter_map(|item| {
+                                item.and_then(|value| parse_postgres_timestamptz_str(&value))
+                            })
+                            .collect()
+                    })
                 })
-                .collect()
-        })
+            })
     })
 }
 
 /// Parses a BigQuery repeated DATETIME field.
 fn parse_naive_datetime_array(table_cell: TableCell) -> Option<Vec<NaiveDateTime>> {
     table_cell.value.and_then(|value| {
-        value.as_array().map(|items| {
-            items
-                .iter()
-                .filter_map(|item| {
-                    item.as_object()
-                        .and_then(|object| object.get("v"))
-                        .and_then(|value| value.as_str())
-                        .and_then(|value| {
-                            parse_naive_datetime_str(value).or_else(|| {
-                                parse_unix_timestamp_str(value)
-                                    .map(|timestamp| timestamp.naive_utc())
+        value
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| {
+                        item.as_object()
+                            .and_then(|object| object.get("v"))
+                            .and_then(|value| value.as_str())
+                            .and_then(|value| {
+                                parse_naive_datetime_str(value).or_else(|| {
+                                    parse_unix_timestamp_str(value)
+                                        .map(|timestamp| timestamp.naive_utc())
+                                })
                             })
-                        })
+                    })
+                    .collect()
+            })
+            .or_else(|| {
+                value.as_str().and_then(|value| {
+                    parse_stringified_array_items(value).map(|items| {
+                        items
+                            .into_iter()
+                            .filter_map(|item| {
+                                item.and_then(|value| parse_naive_datetime_str(&value))
+                            })
+                            .collect()
+                    })
                 })
-                .collect()
-        })
+            })
     })
 }
 
 /// Parses a BigQuery repeated BYTES field.
 fn parse_bytes_array(table_cell: TableCell) -> Option<Vec<Vec<u8>>> {
     table_cell.value.and_then(|value| {
-        value.as_array().map(|items| {
-            items
-                .iter()
-                .filter_map(|item| {
-                    item.as_object()
-                        .and_then(|object| object.get("v"))
-                        .and_then(|value| value.as_str())
-                        .and_then(|value| BASE64_STANDARD.decode(value).ok())
+        value
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| {
+                        item.as_object()
+                            .and_then(|object| object.get("v"))
+                            .and_then(|value| value.as_str())
+                            .and_then(|value| BASE64_STANDARD.decode(value).ok())
+                    })
+                    .collect()
+            })
+            .or_else(|| {
+                value.as_str().and_then(|value| {
+                    parse_stringified_array_items(value).map(|items| {
+                        items
+                            .into_iter()
+                            .filter_map(|item| item.and_then(|value| parse_hex_bytea(&value)))
+                            .collect()
+                    })
                 })
-                .collect()
-        })
+            })
     })
+}
+
+/// Parses a scalar string containing PostgreSQL-style array text.
+fn parse_stringified_array_cell<T>(value: &str) -> Option<Vec<T>>
+where
+    T: FromStr,
+    <T as FromStr>::Err: fmt::Debug,
+{
+    parse_stringified_array_items(value)?
+        .into_iter()
+        .map(|item| item.and_then(|value| value.parse::<T>().ok()))
+        .collect()
+}
+
+/// Parses the array text emitted by default lossy BigQuery materialization.
+fn parse_stringified_array_items(value: &str) -> Option<Vec<Option<String>>> {
+    if value.len() < 2 || !value.starts_with('{') || !value.ends_with('}') {
+        return None;
+    }
+
+    let mut items = Vec::new();
+    let value = &value[1..value.len() - 1];
+    if value.is_empty() {
+        return Some(items);
+    }
+
+    let mut item = String::new();
+    let mut in_quotes = false;
+    let mut in_escape = false;
+    let mut quoted = false;
+
+    for ch in value.chars() {
+        if in_escape {
+            item.push(ch);
+            in_escape = false;
+            continue;
+        }
+
+        match ch {
+            '"' => {
+                if !in_quotes {
+                    quoted = true;
+                }
+                in_quotes = !in_quotes;
+            }
+            '\\' => {
+                in_escape = true;
+            }
+            ',' if !in_quotes => {
+                items.push(parse_stringified_array_item(&item, quoted));
+                item.clear();
+                quoted = false;
+            }
+            ch => item.push(ch),
+        }
+    }
+
+    if in_quotes || in_escape {
+        return None;
+    }
+
+    items.push(parse_stringified_array_item(&item, quoted));
+    Some(items)
+}
+
+/// Parses one PostgreSQL-style array element.
+fn parse_stringified_array_item(value: &str, quoted: bool) -> Option<String> {
+    if !quoted && value.eq_ignore_ascii_case("NULL") { None } else { Some(value.to_owned()) }
+}
+
+/// Parses a PostgreSQL hex bytea literal.
+fn parse_hex_bytea(value: &str) -> Option<Vec<u8>> {
+    let value = value.strip_prefix("\\x")?;
+    if value.len() % 2 != 0 {
+        return None;
+    }
+
+    value
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|chunk| {
+            let hex = std::str::from_utf8(chunk).ok()?;
+            u8::from_str_radix(hex, 16).ok()
+        })
+        .collect()
 }
 
 #[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -416,6 +563,29 @@ pub(crate) struct NullableColsArray {
 }
 
 impl NullableColsArray {
+    pub(crate) fn all_null(id: i32) -> Self {
+        Self {
+            id,
+            b_arr: None,
+            t_arr: None,
+            i2_arr: None,
+            i4_arr: None,
+            i8_arr: None,
+            f4_arr: None,
+            f8_arr: None,
+            n_arr: None,
+            by_arr: None,
+            d_arr: None,
+            ti_arr: None,
+            ts_arr: None,
+            tstz_arr: None,
+            u_arr: None,
+            j_arr: None,
+            jb_arr: None,
+            o_arr: None,
+        }
+    }
+
     pub(crate) fn all_empty(id: i32) -> Self {
         Self {
             id,

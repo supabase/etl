@@ -1030,9 +1030,9 @@ async fn table_nullable_array_columns() {
 
     let table_rows = bigquery_database.query_table(table_name.clone()).await.unwrap();
     let parsed_table_rows = parse_bigquery_table_rows::<NullableColsArray>(table_rows);
-    // null arrays are returned as empty arrays by big query: See this section:
-    // https://cloud.google.com/bigquery/docs/reference/standard-sql/data-types#array_nulls
-    assert_eq!(parsed_table_rows, vec![NullableColsArray::all_empty(1),]);
+    // Default lossy materialization stores arrays as scalar strings so source
+    // NULL arrays remain NULL instead of becoming BigQuery empty arrays.
+    assert_eq!(parsed_table_rows, vec![NullableColsArray::all_null(1),]);
 
     // update with array values
     let event_notify = destination.wait_for_events_count(vec![(EventType::Update, 1)]).await;
