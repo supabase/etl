@@ -1142,6 +1142,7 @@ async fn intermediate_flush_preserves_all_rows() {
         ClickHouseInserterConfig {
             // 1 byte -- forces a new INSERT after every row.
             max_bytes_per_insert: 1,
+            ..Default::default()
         },
     );
 

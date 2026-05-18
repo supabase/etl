@@ -10,6 +10,20 @@ const fn default_ducklake_pool_size() -> u32 {
     DestinationConfig::DEFAULT_DUCKLAKE_POOL_SIZE
 }
 
+/// Table engine used by the ClickHouse destination when creating replicated
+/// tables.
+///
+/// `ReplacingMergeTree` (default) gives current-state reads via `FINAL` and
+/// reclaims deleted rows on `OPTIMIZE ... FINAL CLEANUP`. `MergeTree` is an
+/// append-only event-log layout retained for PK-less source tables.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ClickHouseEngine {
+    MergeTree,
+    #[default]
+    ReplacingMergeTree,
+}
+
 /// Configuration for supported ETL data destinations.
 ///
 /// Specifies the destination type and its associated configuration parameters.
@@ -58,6 +72,11 @@ pub enum DestinationConfig {
         password: Option<SecretString>,
         /// ClickHouse target database
         database: String,
+        /// Table engine used for replicated tables. Defaults to
+        /// `ReplacingMergeTree`; set to `merge_tree` for the append-only
+        /// event-log layout.
+        #[serde(default)]
+        engine: ClickHouseEngine,
     },
     Iceberg {
         #[serde(flatten)]
@@ -252,6 +271,11 @@ pub enum DestinationConfigWithoutSecrets {
         user: String,
         /// ClickHouse target database
         database: String,
+        /// Table engine used for replicated tables. Defaults to
+        /// `ReplacingMergeTree`; set to `merge_tree` for the append-only
+        /// event-log layout.
+        #[serde(default)]
+        engine: ClickHouseEngine,
     },
     Iceberg {
         #[serde(flatten)]
@@ -299,8 +323,8 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
                 max_staleness_mins,
                 connection_pool_size,
             },
-            DestinationConfig::ClickHouse { url, user, database, .. } => {
-                DestinationConfigWithoutSecrets::ClickHouse { url, user, database }
+            DestinationConfig::ClickHouse { url, user, password: _, database, engine } => {
+                DestinationConfigWithoutSecrets::ClickHouse { url, user, database, engine }
             }
             DestinationConfig::Iceberg { config } => {
                 DestinationConfigWithoutSecrets::Iceberg { config: config.into() }

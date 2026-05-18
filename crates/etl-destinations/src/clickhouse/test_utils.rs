@@ -120,7 +120,10 @@ impl ClickHouseTestDatabase {
     {
         self.build_destination_with_config(
             store,
-            ClickHouseInserterConfig { max_bytes_per_insert: 100 * 1024 * 1024 },
+            ClickHouseInserterConfig {
+                max_bytes_per_insert: 100 * 1024 * 1024,
+                ..Default::default()
+            },
         )
     }
 

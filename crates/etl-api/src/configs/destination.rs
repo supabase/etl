@@ -290,6 +290,7 @@ impl StoredDestinationConfig {
                 user,
                 password: password.map(Into::into),
                 database,
+                engine: Default::default(),
             },
             Self::Iceberg { config } => match config {
                 StoredIcebergConfig::Supabase {

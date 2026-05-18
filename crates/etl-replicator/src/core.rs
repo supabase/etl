@@ -190,13 +190,13 @@ pub(crate) async fn start_replicator_with_config(
             let pipeline = Pipeline::new(replicator_config.pipeline, state_store, destination);
             start_pipeline(pipeline).await?;
         }
-        DestinationConfig::ClickHouse { url, user, password, database } => {
+        DestinationConfig::ClickHouse { url, user, password, database, engine } => {
             let destination = ClickHouseDestination::new(
                 url.clone(),
                 user,
                 password.as_ref().map(|p| p.expose_secret().to_owned()),
                 database,
-                ClickHouseInserterConfig::default(),
+                ClickHouseInserterConfig { engine: *engine, ..Default::default() },
                 ClickHouseClientConfig::default(),
                 state_store.clone(),
             )?;

@@ -14,6 +14,7 @@ use etl::{
         TableRow, Type, UpdatedTableRow, is_array_type,
     },
 };
+use etl_config::shared::ClickHouseEngine;
 use parking_lot::RwLock;
 use tokio::task::JoinSet;
 use tracing::{debug, info, warn};
@@ -153,6 +154,8 @@ pub struct ClickHouseInserterConfig {
     /// because incoming and outgoing buffers can both be near-full at once;
     /// could be made tunable later if needed.
     pub max_bytes_per_insert: u64,
+    /// Table engine used when creating replicated tables on ClickHouse.
+    pub engine: ClickHouseEngine,
 }
 
 impl ClickHouseInserterConfig {
@@ -166,7 +169,10 @@ impl ClickHouseInserterConfig {
 
 impl Default for ClickHouseInserterConfig {
     fn default() -> Self {
-        Self { max_bytes_per_insert: Self::DEFAULT_MAX_BYTES_PER_INSERT }
+        Self {
+            max_bytes_per_insert: Self::DEFAULT_MAX_BYTES_PER_INSERT,
+            engine: ClickHouseEngine::default(),
+        }
     }
 }
 
