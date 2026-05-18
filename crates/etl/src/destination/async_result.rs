@@ -58,6 +58,10 @@ pub(crate) struct DispatchMetrics {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ApplyLoopAsyncResultMetadata {
     /// Commit end LSN associated with the dispatched batch, if any.
+    ///
+    /// After the destination acknowledges the batch, this becomes the durable
+    /// progress boundary that status updates report as both `flush_lsn` and
+    /// `apply_lsn`.
     pub commit_end_lsn: Option<PgLsn>,
     /// Dispatch-time metrics for the batch.
     pub metrics: DispatchMetrics,

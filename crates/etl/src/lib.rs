@@ -41,9 +41,9 @@
 //! metadata are stored. These stores are critical to a pipeline's operation, as
 //! they allow it to be safely paused and resumed.
 //!
-//! The [`store::state::StateStore`] trait handles both table replication states
-//! and destination table metadata, providing a single interface for all
-//! state-related storage operations.
+//! The [`store::state::StateStore`] trait handles table replication states,
+//! durable replication progress, and destination table metadata, providing a
+//! single interface for all state-related storage operations.
 //!
 //! **Note:** To pause and resume a pipeline after the process is stopped, it
 //! must be able to persist data durably. The crate itself provides no

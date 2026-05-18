@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use etl::{
     error::ErrorKind,
     etl_error,
+    replication::WorkerType,
     state::{
         destination_metadata::DestinationTableMetadata,
         table::{RetryPolicy, TableReplicationPhase},
@@ -217,6 +218,54 @@ async fn state_store_load_states() {
     assert_eq!(states.len(), 2);
     assert_eq!(states.get(&table_id1), Some(&init_phase));
     assert_eq!(states.get(&table_id2), Some(&data_sync_phase));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn state_store_replication_progress_is_monotonic() {
+    init_test_tracing();
+
+    let database = spawn_source_database().await;
+    let pipeline_id = 1;
+    let table_id = TableId::new(12345);
+
+    let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
+    let apply_worker = WorkerType::Apply;
+    let table_sync_worker = WorkerType::TableSync { table_id };
+
+    assert_eq!(store.get_replication_progress(apply_worker).await.unwrap(), None);
+
+    let first_lsn = PgLsn::from(100u64);
+    let stale_lsn = PgLsn::from(90u64);
+    let later_lsn = PgLsn::from(120u64);
+
+    assert_eq!(
+        store.upsert_replication_progress(apply_worker, first_lsn).await.unwrap(),
+        first_lsn
+    );
+    assert_eq!(
+        store.upsert_replication_progress(apply_worker, stale_lsn).await.unwrap(),
+        first_lsn
+    );
+    assert_eq!(
+        store.upsert_replication_progress(apply_worker, later_lsn).await.unwrap(),
+        later_lsn
+    );
+    assert_eq!(store.get_replication_progress(apply_worker).await.unwrap(), Some(later_lsn));
+
+    let table_sync_lsn = PgLsn::from(75u64);
+    assert_eq!(
+        store.upsert_replication_progress(table_sync_worker, table_sync_lsn).await.unwrap(),
+        table_sync_lsn
+    );
+    assert_eq!(
+        store.get_replication_progress(table_sync_worker).await.unwrap(),
+        Some(table_sync_lsn)
+    );
+    assert_eq!(store.get_replication_progress(apply_worker).await.unwrap(), Some(later_lsn));
+
+    store.delete_replication_progress(table_sync_worker).await.unwrap();
+    assert_eq!(store.get_replication_progress(table_sync_worker).await.unwrap(), None);
+    assert_eq!(store.get_replication_progress(apply_worker).await.unwrap(), Some(later_lsn));
 }
 
 #[tokio::test(flavor = "multi_thread")]

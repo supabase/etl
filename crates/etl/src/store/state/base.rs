@@ -2,11 +2,12 @@ use std::{collections::BTreeMap, future::Future, sync::Arc};
 
 use crate::{
     error::EtlResult,
+    replication::WorkerType,
     state::{
         destination_metadata::{AppliedDestinationTableMetadata, DestinationTableMetadata},
         table::TableReplicationPhase,
     },
-    types::TableId,
+    types::{PgLsn, TableId},
 };
 
 /// Arc-wrapped dictionary of table replication states.
@@ -15,11 +16,12 @@ pub type TableReplicationStates = Arc<BTreeMap<TableId, TableReplicationPhase>>;
 /// Arc-wrapped dictionary of destination table metadata.
 pub(crate) type DestinationTablesMetadata = Arc<BTreeMap<TableId, DestinationTableMetadata>>;
 
-/// Trait for storing and retrieving table replication state and destination
-/// metadata.
+/// Trait for storing and retrieving replication state, durable replication
+/// progress, and destination metadata.
 ///
 /// [`StateStore`] implementations are responsible for defining how table
-/// replication states and destination table metadata are stored and retrieved.
+/// replication states, replication progress, and destination table metadata are
+/// stored and retrieved.
 ///
 /// Implementations should ensure thread-safety and handle concurrent access to
 /// the data.
@@ -75,6 +77,31 @@ pub trait StateStore {
         &self,
         table_id: TableId,
     ) -> impl Future<Output = EtlResult<TableReplicationPhase>> + Send;
+
+    /// Returns the durable flush LSN for a replication worker, if one has been
+    /// stored.
+    fn get_replication_progress(
+        &self,
+        worker_type: WorkerType,
+    ) -> impl Future<Output = EtlResult<Option<PgLsn>>> + Send;
+
+    /// Monotonically upserts the durable flush LSN for a replication worker.
+    ///
+    /// Implementations must never move stored progress backward. The returned
+    /// value is the LSN stored after applying the monotonic update.
+    fn upsert_replication_progress(
+        &self,
+        worker_type: WorkerType,
+        flush_lsn: PgLsn,
+    ) -> impl Future<Output = EtlResult<PgLsn>> + Send;
+
+    /// Deletes durable replication progress for a replication worker.
+    ///
+    /// This is used when the worker's slot lineage is intentionally reset.
+    fn delete_replication_progress(
+        &self,
+        worker_type: WorkerType,
+    ) -> impl Future<Output = EtlResult<()>> + Send;
 
     /// Returns destination table metadata for a specific table from the cache.
     ///

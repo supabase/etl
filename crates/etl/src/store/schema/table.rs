@@ -8,18 +8,14 @@ use crate::types::{PgLsn, SnapshotId, TableId, TableSchema};
 /// Per-table schema cleanup retention boundary.
 ///
 /// Retention can be bounded by a stored schema snapshot that the destination
-/// still needs, or by the replication slot's current confirmed flush LSN. Both
-/// are LSN values, but the variant records why that boundary was chosen.
-///
-/// A confirmed-flush boundary is PostgreSQL's current slot state, not
-/// necessarily a slot value saved to disk.
+/// still needs, or by ETL-owned durable replication progress. Both are LSN
+/// values, but the variant records why that boundary was chosen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TableSchemaRetention {
     /// Retain schemas according to a destination-useful schema snapshot.
     SnapshotId(SnapshotId),
-    /// Retain schemas according to the replication slot's current confirmed
-    /// flush LSN.
-    ConfirmedFlushLsn(PgLsn),
+    /// Retain schemas according to ETL-owned durable replication progress.
+    DurableFlushLsn(PgLsn),
 }
 
 impl TableSchemaRetention {
@@ -27,7 +23,7 @@ impl TableSchemaRetention {
     pub fn to_lsn(self) -> PgLsn {
         match self {
             Self::SnapshotId(snapshot_id) => snapshot_id.into(),
-            Self::ConfirmedFlushLsn(lsn) => lsn,
+            Self::DurableFlushLsn(lsn) => lsn,
         }
     }
 }
@@ -246,7 +242,7 @@ mod tests {
 
         let removed = snapshots.prune(&HashMap::from([
             (table_id, TableSchemaRetention::SnapshotId(SnapshotId::from(250))),
-            (other_table_id, TableSchemaRetention::ConfirmedFlushLsn(SnapshotId::from(150).into())),
+            (other_table_id, TableSchemaRetention::DurableFlushLsn(SnapshotId::from(150).into())),
         ]));
 
         assert_eq!(removed, 3);
