@@ -1041,7 +1041,8 @@ fn append_array_cell_as_strings(
 mod tests {
     use arrow::array::Array;
     use etl::types::{
-        ArrayCell, DATE_FORMAT, TIME_FORMAT, TIMESTAMP_FORMAT, TIMESTAMPTZ_FORMAT_HH_MM,
+        ArrayCell, DATE_FORMAT, PgDate, PgTimestamp, TIME_FORMAT, TIMESTAMP_FORMAT,
+        TIMESTAMPTZ_FORMAT_HH_MM,
     };
 
     use super::*;
@@ -1110,6 +1111,10 @@ mod tests {
 
         assert_eq!(cell_to_date32(&Cell::Date((test_date).into())), Some(expected_days));
         assert_eq!(cell_to_date32(&Cell::Date((UNIX_EPOCH).into())), Some(0));
+        assert_eq!(
+            cell_to_date32(&Cell::Date((NaiveDate::from_ymd_opt(1969, 12, 31).unwrap()).into())),
+            Some(-1)
+        );
         assert_eq!(cell_to_date32(&Cell::Null), None);
         assert_eq!(cell_to_date32(&Cell::String("2023-05-15".to_owned())), None);
     }
@@ -1678,6 +1683,34 @@ mod tests {
     }
 
     #[test]
+    fn rows_to_record_batch_rejects_postgres_date_sentinel() {
+        use arrow::datatypes::{Field, Schema};
+
+        let rows = vec![TableRow::new(vec![Cell::Date(PgDate::PosInfinity)])];
+        let schema = Schema::new(vec![Field::new("date_col", DataType::Date32, false)]);
+
+        let error = rows_to_record_batch(&rows, schema).unwrap_err();
+
+        assert!(error.to_string().contains("cannot be represented in Iceberg"));
+    }
+
+    #[test]
+    fn rows_to_record_batch_rejects_postgres_timestamp_sentinel() {
+        use arrow::datatypes::{Field, Schema};
+
+        let rows = vec![TableRow::new(vec![Cell::Timestamp(PgTimestamp::NegInfinity)])];
+        let schema = Schema::new(vec![Field::new(
+            "ts_col",
+            DataType::Timestamp(TimeUnit::Microsecond, None),
+            false,
+        )]);
+
+        let error = rows_to_record_batch(&rows, schema).unwrap_err();
+
+        assert!(error.to_string().contains("cannot be represented in Iceberg"));
+    }
+
+    #[test]
     fn rows_to_record_batch_schema_mismatch_length() {
         use arrow::datatypes::{Field, Schema};
 
@@ -2138,8 +2171,8 @@ mod tests {
                 None,
             ]))]),
             TableRow::new(vec![Cell::Array(ArrayCell::Date(vec![Some((test_date_3).into())]))]),
-            TableRow::new(vec![Cell::Array(ArrayCell::Date((vec![]).into()))]), // Empty array,
-            TableRow::new(vec![Cell::Null]),                                    // Null cell,
+            TableRow::new(vec![Cell::Array(ArrayCell::Date(vec![]))]), // Empty array,
+            TableRow::new(vec![Cell::Null]),                           // Null cell,
         ];
 
         let array_ref = build_date32_list_array(&rows, 0, field_ref);
@@ -2200,8 +2233,8 @@ mod tests {
                 None,
             ]))]),
             TableRow::new(vec![Cell::Array(ArrayCell::Time(vec![Some((test_time_3).into())]))]),
-            TableRow::new(vec![Cell::Array(ArrayCell::Time((vec![]).into()))]), // Empty array,
-            TableRow::new(vec![Cell::Null]),                                    // Null cell,
+            TableRow::new(vec![Cell::Array(ArrayCell::Time(vec![]))]), // Empty array,
+            TableRow::new(vec![Cell::Null]),                           // Null cell,
         ];
 
         let array_ref = build_time64_list_array(&rows, 0, field_ref);
@@ -2264,8 +2297,8 @@ mod tests {
                 None,
             ]))]),
             TableRow::new(vec![Cell::Array(ArrayCell::Timestamp(vec![Some((test_ts_3).into())]))]),
-            TableRow::new(vec![Cell::Array(ArrayCell::Timestamp((vec![]).into()))]), /* Empty array, */
-            TableRow::new(vec![Cell::Null]),                                         // Null cell,
+            TableRow::new(vec![Cell::Array(ArrayCell::Timestamp(vec![]))]), /* Empty array, */
+            TableRow::new(vec![Cell::Null]),                                // Null cell,
         ];
 
         let array_ref = build_timestamp_list_array(&rows, 0, field_ref);
@@ -2325,8 +2358,8 @@ mod tests {
             TableRow::new(vec![Cell::Array(ArrayCell::TimestampTz(vec![Some(
                 (test_ts_3).into(),
             )]))]),
-            TableRow::new(vec![Cell::Array(ArrayCell::TimestampTz((vec![]).into()))]), /* Empty array, */
-            TableRow::new(vec![Cell::Null]), // Null cell,
+            TableRow::new(vec![Cell::Array(ArrayCell::TimestampTz(vec![]))]), /* Empty array, */
+            TableRow::new(vec![Cell::Null]),                                  // Null cell,
         ];
 
         let array_ref = build_timestamptz_list_array(&rows, 0, field_ref);
@@ -2799,9 +2832,9 @@ mod tests {
                 Cell::I32(2),
                 Cell::Array(ArrayCell::Bool(vec![])), // Empty array
                 Cell::Array(ArrayCell::I32(vec![Some(100)])),
-                Cell::Null,                                    // Null array
-                Cell::Array(ArrayCell::Uuid(vec![None])),      // Array with null element
-                Cell::Array(ArrayCell::Date((vec![]).into())), // Empty date array
+                Cell::Null,                               // Null array
+                Cell::Array(ArrayCell::Uuid(vec![None])), // Array with null element
+                Cell::Array(ArrayCell::Date(vec![])),     // Empty date array
             ]),
         ];
 

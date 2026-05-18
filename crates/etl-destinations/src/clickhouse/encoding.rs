@@ -1,4 +1,4 @@
-use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
+use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use etl::{
     error::{ErrorKind, EtlResult},
     etl_error,
@@ -61,10 +61,10 @@ pub(crate) fn cell_to_clickhouse_value(cell: Cell) -> EtlResult<ClickHouseValue>
         Cell::Date(d) => ClickHouseValue::Date32(date_to_date32_days(finite_date(d)?)?),
         Cell::Time(t) => ClickHouseValue::String(t.to_string()),
         Cell::Timestamp(dt) => {
-            ClickHouseValue::DateTime64(finite_timestamp(dt)?.and_utc().timestamp_micros())
+            ClickHouseValue::DateTime64(timestamp_to_datetime64_micros(finite_timestamp(dt)?)?)
         }
         Cell::TimestampTz(dt) => {
-            ClickHouseValue::DateTime64(finite_timestamptz(dt)?.timestamp_micros())
+            ClickHouseValue::DateTime64(timestamptz_to_datetime64_micros(finite_timestamptz(dt)?)?)
         }
         Cell::Uuid(u) => ClickHouseValue::Uuid(*u.as_bytes()),
         Cell::Bytes(b) => ClickHouseValue::String(bytes_to_hex(&b)),
@@ -95,10 +95,12 @@ fn array_cell_to_clickhouse_values(array_cell: ArrayCell) -> EtlResult<Vec<Click
         })?,
         ArrayCell::Time(v) => map_array(v, |t| ClickHouseValue::String(t.to_string())),
         ArrayCell::Timestamp(v) => try_map_array(v, |dt| {
-            Ok(ClickHouseValue::DateTime64(finite_timestamp(dt)?.and_utc().timestamp_micros()))
+            Ok(ClickHouseValue::DateTime64(timestamp_to_datetime64_micros(finite_timestamp(dt)?)?))
         })?,
         ArrayCell::TimestampTz(v) => try_map_array(v, |dt| {
-            Ok(ClickHouseValue::DateTime64(finite_timestamptz(dt)?.timestamp_micros()))
+            Ok(ClickHouseValue::DateTime64(timestamptz_to_datetime64_micros(finite_timestamptz(
+                dt,
+            )?)?))
         })?,
         ArrayCell::Uuid(v) => map_array(v, |u| ClickHouseValue::Uuid(*u.as_bytes())),
         ArrayCell::Bytes(v) => map_array(v, |b| ClickHouseValue::String(bytes_to_hex(&b))),
@@ -151,6 +153,29 @@ fn date_to_date32_days(d: NaiveDate) -> EtlResult<i32> {
     Ok(d.signed_duration_since(unix_epoch()).num_days() as i32)
 }
 
+/// Converts a naive timestamp to a ClickHouse `DateTime64(6)` microsecond
+/// count.
+fn timestamp_to_datetime64_micros(dt: NaiveDateTime) -> EtlResult<i64> {
+    if dt < datetime64_min() || dt > datetime64_max() {
+        return Err(etl_error!(
+            ErrorKind::ConversionError,
+            "Timestamp out of ClickHouse DateTime64 range",
+            format!(
+                "{dt} is outside the supported range {}..={}",
+                datetime64_min(),
+                datetime64_max()
+            )
+        ));
+    }
+
+    Ok(dt.and_utc().timestamp_micros())
+}
+
+/// Converts a UTC timestamp to a ClickHouse `DateTime64(6)` microsecond count.
+fn timestamptz_to_datetime64_micros(dt: DateTime<Utc>) -> EtlResult<i64> {
+    timestamp_to_datetime64_micros(dt.naive_utc())
+}
+
 /// Returns the finite date, rejecting PostgreSQL-only temporal sentinels.
 fn finite_date(value: PgDate) -> EtlResult<NaiveDate> {
     value.as_finite().ok_or_else(|| {
@@ -199,6 +224,14 @@ fn date32_min() -> NaiveDate {
 
 fn date32_max() -> NaiveDate {
     NaiveDate::from_ymd_opt(2299, 12, 31).expect("valid date")
+}
+
+fn datetime64_min() -> NaiveDateTime {
+    date32_min().and_time(NaiveTime::from_hms_micro_opt(0, 0, 0, 0).expect("valid time"))
+}
+
+fn datetime64_max() -> NaiveDateTime {
+    date32_max().and_time(NaiveTime::from_hms_micro_opt(23, 59, 59, 999_999).expect("valid time"))
 }
 
 /// Lowercase hex-encodes `bytes` into a fresh `String`.
@@ -391,6 +424,46 @@ mod tests {
             cell_to_clickhouse_value(Cell::Timestamp(epoch.into())).unwrap(),
             ClickHouseValue::DateTime64(0)
         ));
+    }
+
+    #[test]
+    fn cell_to_clickhouse_value_timestamp_boundaries() {
+        let min = datetime64_min();
+        assert!(matches!(
+            cell_to_clickhouse_value(Cell::Timestamp(min.into())).unwrap(),
+            ClickHouseValue::DateTime64(_)
+        ));
+
+        let max = datetime64_max();
+        assert!(matches!(
+            cell_to_clickhouse_value(Cell::Timestamp(max.into())).unwrap(),
+            ClickHouseValue::DateTime64(_)
+        ));
+
+        let too_old = NaiveDate::from_ymd_opt(1899, 12, 31)
+            .unwrap()
+            .and_hms_micro_opt(23, 59, 59, 999_999)
+            .unwrap();
+        assert!(cell_to_clickhouse_value(Cell::Timestamp(too_old.into())).is_err());
+
+        let too_new =
+            NaiveDate::from_ymd_opt(2300, 1, 1).unwrap().and_hms_micro_opt(0, 0, 0, 0).unwrap();
+        assert!(cell_to_clickhouse_value(Cell::Timestamp(too_new.into())).is_err());
+    }
+
+    #[test]
+    fn cell_to_clickhouse_value_timestamptz_boundaries() {
+        let min = DateTime::<Utc>::from_naive_utc_and_offset(datetime64_min(), Utc);
+        assert!(matches!(
+            cell_to_clickhouse_value(Cell::TimestampTz(min.into())).unwrap(),
+            ClickHouseValue::DateTime64(_)
+        ));
+
+        let too_new = DateTime::<Utc>::from_naive_utc_and_offset(
+            NaiveDate::from_ymd_opt(2300, 1, 1).unwrap().and_hms_micro_opt(0, 0, 0, 0).unwrap(),
+            Utc,
+        );
+        assert!(cell_to_clickhouse_value(Cell::TimestampTz(too_new.into())).is_err());
     }
 
     #[test]

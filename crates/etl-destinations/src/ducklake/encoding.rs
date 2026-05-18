@@ -358,6 +358,8 @@ fn array_cell_to_value(arr: ArrayCell) -> Value {
 
 #[cfg(test)]
 mod tests {
+    use chrono::{DateTime, Utc};
+
     use super::*;
 
     #[test]
@@ -371,6 +373,39 @@ mod tests {
         assert_eq!(cell_to_value(Cell::I32(42)), Value::Int(42));
         assert_eq!(cell_to_value(Cell::I64(-1)), Value::BigInt(-1));
         assert_eq!(cell_to_value(Cell::F64(3.46)), Value::Double(3.46));
+    }
+
+    #[test]
+    fn cell_to_value_date_uses_duckdb_epoch_days() {
+        let pre_epoch = NaiveDate::from_ymd_opt(1969, 12, 31).unwrap();
+        assert_eq!(cell_to_value(Cell::Date(pre_epoch.into())), Value::Date32(-1));
+
+        let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+        assert_eq!(cell_to_value(Cell::Date(epoch.into())), Value::Date32(0));
+    }
+
+    #[test]
+    fn cell_to_value_timestamptz_uses_unix_epoch_microseconds() {
+        let timestamp = DateTime::<Utc>::from_timestamp(1, 500_000_000).unwrap();
+
+        assert_eq!(
+            cell_to_value(Cell::TimestampTz(timestamp.into())),
+            Value::Timestamp(TimeUnit::Microsecond, 1_500_000)
+        );
+    }
+
+    #[test]
+    fn sql_literals_preserve_duckdb_temporal_special_values() {
+        assert_eq!(cell_to_sql_literal(Cell::Date(PgDate::PosInfinity)), "DATE 'infinity'");
+        assert_eq!(cell_to_sql_literal(Cell::Date(PgDate::NegInfinity)), "DATE '-infinity'");
+        assert_eq!(
+            cell_to_sql_literal(Cell::Timestamp(PgTimestamp::PosInfinity)),
+            "TIMESTAMP 'infinity'"
+        );
+        assert_eq!(
+            cell_to_sql_literal(Cell::TimestampTz(PgTimestampTz::NegInfinity)),
+            "TIMESTAMPTZ '-infinity'"
+        );
     }
 
     #[test]

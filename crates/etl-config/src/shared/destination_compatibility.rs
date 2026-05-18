@@ -71,21 +71,15 @@ pub enum DestinationTypeCompatibilityMode {
     Strict,
     /// Materialize risky source types using exact destination representations.
     Lossless,
-    /// Allow the destination to apply its native lossy conversion behavior.
+    /// Allow destination-compatible coercions for values that do not fit
+    /// exactly.
+    ///
+    /// This is the default because CDC pipelines often need compatible source
+    /// and destination types to keep flowing when the destination can
+    /// accept an approximate representation, such as rounding a value to
+    /// the destination's supported precision.
     #[default]
     Lossy,
-}
-
-impl DestinationTypeCompatibilityMode {
-    /// Returns whether the mode preserves destination-native strict behavior.
-    pub const fn is_strict(&self) -> bool {
-        matches!(self, Self::Strict)
-    }
-
-    /// Returns whether the mode allows lossy destination conversion behavior.
-    pub const fn is_lossy(&self) -> bool {
-        matches!(self, Self::Lossy)
-    }
 }
 
 #[cfg(test)]

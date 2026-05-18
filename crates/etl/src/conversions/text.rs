@@ -203,13 +203,15 @@ fn parse_postgres_timestamptz(value: &str) -> EtlResult<PgTimestampTz> {
 
 /// Returns whether PostgreSQL time text represents `24:00:00`.
 fn is_postgres_twenty_four_hour_time(value: &str) -> bool {
-    value == "24:00:00"
-        || value == "24:00:00.0"
-        || value == "24:00:00.00"
-        || value == "24:00:00.000"
-        || value == "24:00:00.0000"
-        || value == "24:00:00.00000"
-        || value == "24:00:00.000000"
+    if value == "24:00:00" {
+        return true;
+    }
+
+    let Some(fraction) = value.strip_prefix("24:00:00.") else {
+        return false;
+    };
+
+    !fraction.is_empty() && fraction.len() <= 6 && fraction.bytes().all(|byte| byte == b'0')
 }
 
 /// Builds an out-of-range temporal wrapper from PostgreSQL text.
@@ -649,6 +651,12 @@ mod tests {
             parse_cell_from_postgres_text(&Type::TIME, "24:00:00").unwrap(),
             Cell::Time(PgTime::TwentyFourHour)
         );
+        assert_eq!(
+            parse_cell_from_postgres_text(&Type::TIME, "24:00:00.000000").unwrap(),
+            Cell::Time(PgTime::TwentyFourHour)
+        );
+        assert!(parse_cell_from_postgres_text(&Type::TIME, "24:00:00.000001").is_err());
+        assert!(parse_cell_from_postgres_text(&Type::TIME, "24:00:00.0000000").is_err());
     }
 
     #[test]

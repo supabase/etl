@@ -1,6 +1,5 @@
 mod client;
 mod core;
-mod encoding;
 mod materialization;
 mod metrics;
 #[cfg(feature = "test-utils")]

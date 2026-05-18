@@ -1979,19 +1979,11 @@ async fn table_type_compatibility_modes_handle_same_risky_data() {
     init_test_tracing();
     install_crypto_provider();
 
-    for type_compatibility in [
-        DestinationTypeCompatibility::strict(),
-        DestinationTypeCompatibility::lossless(),
-        DestinationTypeCompatibility::lossy(),
+    for (mode_name, type_compatibility, expected_phase) in [
+        ("strict", DestinationTypeCompatibility::strict(), TableReplicationPhaseType::Errored),
+        ("lossless", DestinationTypeCompatibility::lossless(), TableReplicationPhaseType::Ready),
+        ("lossy", DestinationTypeCompatibility::lossy(), TableReplicationPhaseType::Ready),
     ] {
-        let mode_name = if type_compatibility.is_strict() {
-            "strict"
-        } else if type_compatibility.is_lossless() {
-            "lossless"
-        } else {
-            "lossy"
-        };
-
         let database = spawn_source_database().await;
         let bigquery_database = setup_bigquery_database().await;
 
@@ -2055,29 +2047,38 @@ async fn table_type_compatibility_modes_handle_same_risky_data() {
             destination,
         );
 
-        let table_ready =
-            store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
-        let table_errored =
-            store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Errored).await;
+        let unexpected_phase = match expected_phase {
+            TableReplicationPhaseType::Errored => TableReplicationPhaseType::Ready,
+            TableReplicationPhaseType::Ready => TableReplicationPhaseType::Errored,
+            phase => unreachable!("unexpected compatibility test phase: {phase:?}"),
+        };
+        let table_reached_outcome = store
+            .notify_on_table_state(table_id, move |state| {
+                let state_type = state.as_type();
+                state_type == expected_phase || state_type == unexpected_phase
+            })
+            .await;
 
         pipeline.start().await.unwrap();
 
-        if type_compatibility.is_strict() {
-            let table_state = tokio::select! {
-                _ = table_errored.notified() => {
-                    store.get_table_replication_state(table_id).await.unwrap()
-                }
-                _ = table_ready.notified() => {
-                    store.get_table_replication_state(table_id).await.unwrap()
-                }
-                _ = sleep(Duration::from_secs(180)) => {
-                    store.get_table_replication_state(table_id).await.unwrap()
-                }
-            };
+        tokio::select! {
+            _ = table_reached_outcome.notified() => {}
+            _ = sleep(Duration::from_secs(180)) => {
+                let table_state = store.get_table_replication_state(table_id).await.unwrap();
+                pipeline.shutdown_and_wait().await.unwrap();
+                panic!("timed out waiting for {mode_name} table outcome: {table_state:?}");
+            }
+        }
+        let table_state = store
+            .get_table_replication_state(table_id)
+            .await
+            .unwrap()
+            .expect("table replication state should exist");
 
-            pipeline.shutdown_and_wait().await.unwrap();
+        pipeline.shutdown_and_wait().await.unwrap();
 
-            let Some(TableReplicationPhase::Errored { reason, .. }) = table_state else {
+        if expected_phase == TableReplicationPhaseType::Errored {
+            let TableReplicationPhase::Errored { reason, .. } = table_state else {
                 panic!("strict table replication should have errored: {table_state:?}");
             };
 
@@ -2095,20 +2096,9 @@ async fn table_type_compatibility_modes_handle_same_risky_data() {
             continue;
         }
 
-        tokio::select! {
-            _ = table_ready.notified() => {}
-            _ = table_errored.notified() => {
-                let table_state = store.get_table_replication_state(table_id).await.unwrap();
-                pipeline.shutdown_and_wait().await.unwrap();
-                panic!("{mode_name} table replication errored: {table_state:?}");
-            }
-            _ = sleep(Duration::from_secs(180)) => {
-                let table_state = store.get_table_replication_state(table_id).await.unwrap();
-                pipeline.shutdown_and_wait().await.unwrap();
-                panic!("timed out waiting for {mode_name} table readiness: {table_state:?}");
-            }
+        if table_state.as_type() != TableReplicationPhaseType::Ready {
+            panic!("{mode_name} table replication should be ready: {table_state:?}");
         }
-        pipeline.shutdown_and_wait().await.unwrap();
 
         let destination_schema =
             bigquery_database.query_table_schema(table_name.clone()).await.unwrap();

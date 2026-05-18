@@ -253,10 +253,7 @@ pub enum DestinationConfigWithoutSecrets {
         #[serde(default = "default_connection_pool_size")]
         connection_pool_size: usize,
         /// Type compatibility behavior for BigQuery materialization.
-        #[serde(
-            default = "default_destination_type_compatibility_mode",
-            skip_serializing_if = "DestinationTypeCompatibilityMode::is_lossy"
-        )]
+        #[serde(default = "default_destination_type_compatibility_mode")]
         type_compatibility: DestinationTypeCompatibilityMode,
     },
     #[serde(rename = "clickhouse")]
@@ -397,7 +394,7 @@ mod tests {
     }
 
     #[test]
-    fn big_query_without_secrets_skips_default_type_compatibility() {
+    fn big_query_without_secrets_serializes_default_type_compatibility() {
         let config = DestinationConfigWithoutSecrets::BigQuery {
             project_id: "project-id".to_owned(),
             dataset_id: "dataset-id".to_owned(),
@@ -408,6 +405,6 @@ mod tests {
 
         let value = serde_json::to_value(config).unwrap();
 
-        assert!(value["big_query"].get("type_compatibility").is_none());
+        assert_eq!(value["big_query"]["type_compatibility"], "lossy");
     }
 }

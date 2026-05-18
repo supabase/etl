@@ -330,7 +330,7 @@ fn estimated_pg_numeric_allocated_bytes(value: &PgNumeric) -> usize {
 /// Returns an estimate of additional heap bytes owned by a [`PgDate`].
 fn estimated_pg_date_allocated_bytes(value: &PgDate) -> usize {
     match value {
-        PgDate::OutOfRange(value) => value.text().len(),
+        PgDate::OutOfRange(value) => value.text_capacity(),
         PgDate::Finite(_) | PgDate::PosInfinity | PgDate::NegInfinity => 0,
     }
 }
@@ -338,7 +338,7 @@ fn estimated_pg_date_allocated_bytes(value: &PgDate) -> usize {
 /// Returns an estimate of additional heap bytes owned by a [`PgTimestamp`].
 fn estimated_pg_timestamp_allocated_bytes(value: &PgTimestamp) -> usize {
     match value {
-        PgTimestamp::OutOfRange(value) => value.text().len(),
+        PgTimestamp::OutOfRange(value) => value.text_capacity(),
         PgTimestamp::Finite(_) | PgTimestamp::PosInfinity | PgTimestamp::NegInfinity => 0,
     }
 }
@@ -346,7 +346,7 @@ fn estimated_pg_timestamp_allocated_bytes(value: &PgTimestamp) -> usize {
 /// Returns an estimate of additional heap bytes owned by a [`PgTimestampTz`].
 fn estimated_pg_timestamptz_allocated_bytes(value: &PgTimestampTz) -> usize {
     match value {
-        PgTimestampTz::OutOfRange(value) => value.text().len(),
+        PgTimestampTz::OutOfRange(value) => value.text_capacity(),
         PgTimestampTz::Finite(_) | PgTimestampTz::PosInfinity | PgTimestampTz::NegInfinity => 0,
     }
 }
@@ -356,8 +356,19 @@ fn estimate_temporal_array_allocated_bytes<T>(
     values: &Vec<Option<T>>,
     element_size: usize,
     capacity_metric: &'static str,
+    element_heap_metric: &'static str,
+    estimate_element_allocated_bytes: impl Fn(&T) -> usize,
 ) -> usize {
-    checked_mul_or_saturating(values.capacity(), element_size, capacity_metric)
+    let mut total = checked_mul_or_saturating(values.capacity(), element_size, capacity_metric);
+    for value in values.iter().flatten() {
+        total = checked_add_or_saturating(
+            total,
+            estimate_element_allocated_bytes(value),
+            element_heap_metric,
+        );
+    }
+
+    total
 }
 
 /// Returns an estimate of additional heap bytes owned by an [`ArrayCell`].
@@ -417,6 +428,8 @@ fn estimate_array_allocated_bytes(value: &ArrayCell) -> usize {
             values,
             size_of::<Option<crate::types::PgDate>>(),
             "array.date_capacity_mul_option_size",
+            "array.date_add_element_heap_bytes",
+            estimated_pg_date_allocated_bytes,
         ),
         ArrayCell::Time(values) => checked_mul_or_saturating(
             values.capacity(),
@@ -427,11 +440,15 @@ fn estimate_array_allocated_bytes(value: &ArrayCell) -> usize {
             values,
             size_of::<Option<crate::types::PgTimestamp>>(),
             "array.timestamp_capacity_mul_option_size",
+            "array.timestamp_add_element_heap_bytes",
+            estimated_pg_timestamp_allocated_bytes,
         ),
         ArrayCell::TimestampTz(values) => estimate_temporal_array_allocated_bytes(
             values,
             size_of::<Option<crate::types::PgTimestampTz>>(),
             "array.timestamptz_capacity_mul_option_size",
+            "array.timestamptz_add_element_heap_bytes",
+            estimated_pg_timestamptz_allocated_bytes,
         ),
         ArrayCell::Uuid(values) => checked_mul_or_saturating(
             values.capacity(),
@@ -495,5 +512,88 @@ fn checked_mul_or_saturating(left: usize, right: usize, context: &'static str) -
 
             usize::MAX
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{PgTemporalBound, PgTemporalOutOfRange};
+
+    const OUT_OF_RANGE_TEXT: &str = "100000000-01-01";
+    const OUT_OF_RANGE_TEXT_CAPACITY: usize = 64;
+
+    fn out_of_range_temporal() -> PgTemporalOutOfRange {
+        let mut text = String::with_capacity(OUT_OF_RANGE_TEXT_CAPACITY);
+        text.push_str(OUT_OF_RANGE_TEXT);
+
+        PgTemporalOutOfRange::new(text, PgTemporalBound::Upper)
+    }
+
+    #[test]
+    fn temporal_out_of_range_estimates_text_capacity() {
+        assert_eq!(
+            estimated_pg_date_allocated_bytes(&PgDate::OutOfRange(out_of_range_temporal())),
+            OUT_OF_RANGE_TEXT_CAPACITY
+        );
+        assert_eq!(
+            estimated_pg_timestamp_allocated_bytes(&PgTimestamp::OutOfRange(
+                out_of_range_temporal()
+            )),
+            OUT_OF_RANGE_TEXT_CAPACITY
+        );
+        assert_eq!(
+            estimated_pg_timestamptz_allocated_bytes(&PgTimestampTz::OutOfRange(
+                out_of_range_temporal()
+            )),
+            OUT_OF_RANGE_TEXT_CAPACITY
+        );
+    }
+
+    #[test]
+    fn temporal_array_estimation_includes_out_of_range_text_capacity() {
+        let mut dates = Vec::with_capacity(4);
+        dates.push(Some(PgDate::OutOfRange(out_of_range_temporal())));
+        dates.push(Some(PgDate::PosInfinity));
+        dates.push(None);
+        assert_eq!(
+            estimate_array_allocated_bytes(&ArrayCell::Date(dates)),
+            4 * size_of::<Option<PgDate>>() + OUT_OF_RANGE_TEXT_CAPACITY
+        );
+
+        let mut timestamps = Vec::with_capacity(3);
+        timestamps.push(Some(PgTimestamp::OutOfRange(out_of_range_temporal())));
+        timestamps.push(None);
+        assert_eq!(
+            estimate_array_allocated_bytes(&ArrayCell::Timestamp(timestamps)),
+            3 * size_of::<Option<PgTimestamp>>() + OUT_OF_RANGE_TEXT_CAPACITY
+        );
+
+        let mut timestamptzs = Vec::with_capacity(2);
+        timestamptzs.push(Some(PgTimestampTz::OutOfRange(out_of_range_temporal())));
+        assert_eq!(
+            estimate_array_allocated_bytes(&ArrayCell::TimestampTz(timestamptzs)),
+            2 * size_of::<Option<PgTimestampTz>>() + OUT_OF_RANGE_TEXT_CAPACITY
+        );
+    }
+
+    #[test]
+    fn table_row_size_hint_includes_temporal_array_heap_bytes() {
+        let mut dates = Vec::with_capacity(4);
+        dates.push(Some(PgDate::OutOfRange(out_of_range_temporal())));
+        dates.push(None);
+
+        let mut cells = Vec::with_capacity(2);
+        cells.push(Cell::Array(ArrayCell::Date(dates)));
+
+        let row = TableRow::new(cells);
+
+        assert_eq!(
+            row.size_hint(),
+            size_of::<TableRow>()
+                + 2 * size_of::<Cell>()
+                + 4 * size_of::<Option<PgDate>>()
+                + OUT_OF_RANGE_TEXT_CAPACITY
+        );
     }
 }

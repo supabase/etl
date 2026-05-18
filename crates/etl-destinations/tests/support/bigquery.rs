@@ -57,7 +57,7 @@ fn parse_timestamp_cell(table_cell: TableCell) -> Option<DateTime<Utc>> {
 
 /// Parses a PostgreSQL-style TIMESTAMPTZ string.
 fn parse_postgres_timestamptz_str(value: &str) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S%.f%:z").ok().map(|value| value.into())
+    DateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S%.f%:z").ok().map(std::convert::Into::into)
 }
 
 /// Parses a BigQuery repeated field.

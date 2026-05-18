@@ -23,6 +23,11 @@ impl PgTemporalOutOfRange {
         &self.text
     }
 
+    /// Returns the allocated capacity of the original text representation.
+    pub fn text_capacity(&self) -> usize {
+        self.text.capacity()
+    }
+
     /// Returns the relative bound represented by the value.
     pub fn bound(&self) -> PgTemporalBound {
         self.bound
