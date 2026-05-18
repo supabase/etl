@@ -3,10 +3,7 @@ use std::collections::HashMap;
 use etl::{
     bail,
     concurrency::TaskSet,
-    destination::{
-        Destination,
-        async_result::{TruncateTableResult, WriteEventsResult, WriteTableRowsResult},
-    },
+    destination::async_result::{TruncateTableResult, WriteEventsResult, WriteTableRowsResult},
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
     state::destination_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus},
@@ -20,8 +17,8 @@ use tracing::{info, warn};
 
 use crate::{
     snowflake::{
+        Client,
         auth::{AuthManager, HttpExchanger, TokenProvider},
-        client::SnowflakeClient,
         encoding::{CdcMeta, CdcOperation},
         metrics::register_metrics,
         schema,
@@ -34,33 +31,33 @@ type EventIter = std::iter::Peekable<std::vec::IntoIter<Event>>;
 
 /// Postgres replication to Snowflake via Snowpipe Streaming.
 ///
-/// Thin adapter between the ETL [`Destination`] trait and [`SnowflakeClient`].
-/// Translates replication events into client operations and manages the state
-/// store bookkeeping.
-pub struct SnowflakeDestination<
+/// Thin adapter between the ETL [`etl::destination::Destination`] trait and
+/// [`Client`]. Translates replication events into client operations and manages
+/// the state store bookkeeping.
+pub struct Destination<
     S,
     T: TokenProvider = AuthManager<HttpExchanger>,
     C: StreamClient = RestStreamClient<T>,
 > {
-    client: SnowflakeClient<T, C>,
+    client: Client<T, C>,
     store: S,
     tasks: TaskSet,
 }
 
-impl<S: Clone, T: TokenProvider, C: StreamClient> Clone for SnowflakeDestination<S, T, C> {
+impl<S: Clone, T: TokenProvider, C: StreamClient> Clone for Destination<S, T, C> {
     fn clone(&self) -> Self {
         Self { client: self.client.clone(), store: self.store.clone(), tasks: self.tasks.clone() }
     }
 }
 
-impl<S, T, C> SnowflakeDestination<S, T, C>
+impl<S, T, C> Destination<S, T, C>
 where
     S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
     T: TokenProvider + 'static,
     C: StreamClient,
 {
     /// Create a new destination.
-    pub fn new(client: SnowflakeClient<T, C>, store: S) -> Self {
+    pub fn new(client: Client<T, C>, store: S) -> Self {
         register_metrics();
         Self { client, store, tasks: TaskSet::new() }
     }
@@ -422,7 +419,7 @@ where
     }
 }
 
-impl<S, T, C> Destination for SnowflakeDestination<S, T, C>
+impl<S, T, C> etl::destination::Destination for Destination<S, T, C>
 where
     S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
     T: TokenProvider + 'static,

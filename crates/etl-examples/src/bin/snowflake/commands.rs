@@ -5,7 +5,7 @@ use etl::{
     store::{PostgresStore, StateStore},
     types::TableId,
 };
-use etl_destinations::snowflake::SnowflakeDestination;
+use etl_destinations::snowflake;
 use tracing::{error, info};
 
 use crate::state::DashboardState;
@@ -16,7 +16,7 @@ pub async fn reset_table(
     table_id: TableId,
     table_name: &str,
     store: &PostgresStore,
-    destination: &SnowflakeDestination<PostgresStore>,
+    destination: &snowflake::Destination<PostgresStore>,
     dashboard: &Arc<Mutex<DashboardState>>,
 ) {
     info!(table = %table_name, "resetting table: truncating Snowflake data and resetting state");
@@ -50,7 +50,7 @@ pub async fn reset_table(
 #[allow(dead_code)]
 pub async fn reset_all_tables(
     store: &PostgresStore,
-    destination: &SnowflakeDestination<PostgresStore>,
+    destination: &snowflake::Destination<PostgresStore>,
     dashboard: &Arc<Mutex<DashboardState>>,
 ) {
     let tables: Vec<(TableId, String)> = {

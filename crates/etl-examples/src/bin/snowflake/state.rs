@@ -9,7 +9,7 @@ use etl::{
     store::{PostgresStore, StateStore},
     types::TableId,
 };
-use etl_destinations::snowflake::{OffsetToken, SnowflakeDestination};
+use etl_destinations::snowflake::{Destination, OffsetToken};
 
 /// Per-table information displayed in the table list and detail panel.
 #[derive(Clone)]
@@ -428,7 +428,7 @@ pub async fn build_table_name_map(store: &PostgresStore) -> BTreeMap<TableId, St
 /// Fetch Snowflake committed offsets for all tables.
 pub async fn fetch_snowflake_offsets(
     dashboard: &Arc<Mutex<DashboardState>>,
-    destination: &SnowflakeDestination<PostgresStore>,
+    destination: &Destination<PostgresStore>,
 ) {
     let table_ids: Vec<TableId> = {
         let dash = dashboard.lock().unwrap();

@@ -30,9 +30,7 @@ use etl::{
     store::PostgresStore,
     types::TableId,
 };
-use etl_destinations::snowflake::{
-    AuthManager, Config as SnowflakeConfig, SnowflakeClient, SnowflakeDestination,
-};
+use etl_destinations::snowflake::{AuthManager, Client, Config, Destination};
 use etl_telemetry::metrics::init_metrics_handle;
 use secrecy::SecretString;
 use tracing::{error, info};
@@ -150,25 +148,22 @@ async fn run() -> Result<(), Box<dyn Error>> {
         max_copy_connections_per_table: PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE,
     };
 
-    let sf_args = args.sf_args.clone();
+    let args = args.sf_args.clone();
     let passphrase: Option<SecretString> =
-        sf_args.snowflake_private_key_passphrase.map(SecretString::from);
+        args.snowflake_private_key_passphrase.map(SecretString::from);
 
-    let mut sf_config = SnowflakeConfig::new(
-        &sf_args.snowflake_account,
-        &sf_args.snowflake_user,
-        &sf_args.snowflake_database,
-        &sf_args.snowflake_schema,
+    let mut config = Config::new(
+        &args.snowflake_account,
+        &args.snowflake_user,
+        &args.snowflake_database,
+        &args.snowflake_schema,
     );
-    if let Some(ref role) = sf_args.snowflake_role {
-        sf_config = sf_config.with_role(role);
+    if let Some(ref role) = args.snowflake_role {
+        config = config.with_role(role);
     }
 
-    let auth = Arc::new(AuthManager::new(
-        &sf_config,
-        &sf_args.snowflake_private_key_path,
-        passphrase.as_ref(),
-    )?);
+    let auth =
+        Arc::new(AuthManager::new(&config, &args.snowflake_private_key_path, passphrase.as_ref())?);
 
     let store = PostgresStore::new(pipeline_id, pg_config.clone()).await?;
 
@@ -178,8 +173,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let mut table_names = state::build_table_name_map(&store).await;
 
     // Start pipeline
-    let client = SnowflakeClient::new(sf_config.clone(), Arc::clone(&auth), pipeline_id);
-    let mut destination = SnowflakeDestination::new(client, store.clone());
+    let client = Client::new(config.clone(), Arc::clone(&auth), pipeline_id);
+    let mut destination = Destination::new(client, store.clone());
     let mut pipeline = Pipeline::new(pipeline_config.clone(), store.clone(), destination.clone());
 
     info!("starting Snowflake CDC pipeline...");
@@ -329,9 +324,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
 
                         // Restart pipeline
                         info!("restarting pipeline after reset...");
-                        let client =
-                            SnowflakeClient::new(sf_config.clone(), Arc::clone(&auth), pipeline_id);
-                        destination = SnowflakeDestination::new(client, store.clone());
+                        let client = Client::new(config.clone(), Arc::clone(&auth), pipeline_id);
+                        destination = Destination::new(client, store.clone());
                         pipeline = Pipeline::new(
                             pipeline_config.clone(),
                             store.clone(),
@@ -359,9 +353,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
                         dashboard.lock().unwrap().phase = GlobalPhase::Stopped;
 
                         // Restart
-                        let client =
-                            SnowflakeClient::new(sf_config.clone(), Arc::clone(&auth), pipeline_id);
-                        destination = SnowflakeDestination::new(client, store.clone());
+                        let client = Client::new(config.clone(), Arc::clone(&auth), pipeline_id);
+                        destination = Destination::new(client, store.clone());
                         pipeline = Pipeline::new(
                             pipeline_config.clone(),
                             store.clone(),

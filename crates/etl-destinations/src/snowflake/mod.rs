@@ -12,10 +12,10 @@ mod streaming;
 #[cfg(feature = "test-utils")]
 pub mod test_utils;
 
-pub use core::SnowflakeDestination;
+pub use core::Destination;
 
 pub use auth::{AuthManager, HttpExchanger, TokenExchanger, TokenProvider};
-pub use client::SnowflakeClient;
+pub use client::Client;
 pub use config::Config;
 pub use encoding::{CdcMeta, CdcOperation};
 pub use error::{Error, Result};
