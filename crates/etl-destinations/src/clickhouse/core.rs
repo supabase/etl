@@ -417,6 +417,34 @@ where
         Ok(())
     }
 
+    /// Hard-errors if a pre-existing ClickHouse table uses a different engine
+    /// than the pipeline is configured for. A no-op if the table is absent
+    /// (the create flow will then run); the engine string comparison covers
+    /// both the configured-RMT-vs-existing-MT and the reverse case.
+    async fn ensure_engine_matches(&self, clickhouse_table_name: &str) -> EtlResult<()> {
+        let configured = self.inserter_config.engine;
+        let configured_name = engine_to_clickhouse_name(configured);
+
+        let Some(existing) = self.client.table_engine(clickhouse_table_name).await? else {
+            return Ok(());
+        };
+
+        if existing == configured_name {
+            return Ok(());
+        }
+
+        Err(etl_error!(
+            ErrorKind::ConfigError,
+            "ClickHouse table engine mismatch",
+            format!(
+                "Table '{clickhouse_table_name}' was previously created with engine '{existing}', \
+                 but the pipeline is configured for engine '{configured_name}'. Either drop the \
+                 destination table and re-sync, or reconfigure the pipeline's `engine` to match \
+                 the existing table."
+            )
+        ))
+    }
+
     /// Issues the engine-correct `CREATE TABLE`, and under RMT also the
     /// companion `CREATE VIEW "<table>__current"`. Both statements are
     /// `IF NOT EXISTS`, so retries on the recovery path are idempotent.
@@ -452,6 +480,12 @@ where
         if let Some(flags) = self.table_cache.read().get(&clickhouse_table_name).cloned() {
             return Ok((clickhouse_table_name, flags));
         }
+
+        // Engine-mismatch detection runs before any DDL or metadata mutation:
+        // a pre-existing table created under a different engine must hard-fail
+        // here, not silently get an idempotent CREATE TABLE IF NOT EXISTS that
+        // would then mis-align RowBinary on insert.
+        self.ensure_engine_matches(&clickhouse_table_name).await?;
 
         let table_id = schema.id();
         match self.store.get_destination_table_metadata(table_id).await? {
@@ -735,6 +769,13 @@ where
             return Ok(());
         }
 
+        // RMT uses the PK as its `ORDER BY` / dedup key. Dropping or renaming
+        // a PK column would silently break dedup correctness, so reject the
+        // diff before any ALTER is issued.
+        if matches!(self.inserter_config.engine, ClickHouseEngine::ReplacingMergeTree) {
+            reject_pk_alters_under_rmt(clickhouse_table_name, diff, current_schema)?;
+        }
+
         // Track the last user column name for AFTER placement. New columns
         // are inserted after this column, and each added column becomes the
         // new anchor for the next. `None` (no user columns in the current
@@ -943,6 +984,61 @@ where
 
         Ok(())
     }
+}
+
+/// The ClickHouse `system.tables.engine` string for each engine variant.
+fn engine_to_clickhouse_name(engine: ClickHouseEngine) -> &'static str {
+    match engine {
+        ClickHouseEngine::MergeTree => "MergeTree",
+        ClickHouseEngine::ReplacingMergeTree => "ReplacingMergeTree",
+    }
+}
+
+/// Rejects schema diffs that would drop or rename a PK column on an RMT
+/// table. RMT's `ORDER BY` is the source PK, so altering it under us would
+/// silently break dedup; we error before the ALTER reaches ClickHouse.
+fn reject_pk_alters_under_rmt(
+    clickhouse_table_name: &str,
+    diff: &SchemaDiff,
+    current_schema: &ReplicatedTableSchema,
+) -> EtlResult<()> {
+    for column in &diff.columns_to_remove {
+        if column.primary_key_ordinal_position.is_some() {
+            return Err(etl_error!(
+                ErrorKind::SourceSchemaError,
+                "ReplacingMergeTree does not support dropping a primary-key column",
+                format!(
+                    "Table '{clickhouse_table_name}': DROP COLUMN '{name}' would change the RMT \
+                     ORDER BY / dedup key. Switch this table to `engine: merge_tree` or restore \
+                     the column on the source.",
+                    name = column.name
+                )
+            ));
+        }
+    }
+
+    for rename in &diff.columns_to_rename {
+        let was_pk = current_schema
+            .column_schemas()
+            .find(|c| c.name == rename.old_name)
+            .map(|c| c.primary_key_ordinal_position.is_some())
+            .unwrap_or(false);
+        if was_pk {
+            return Err(etl_error!(
+                ErrorKind::SourceSchemaError,
+                "ReplacingMergeTree does not support renaming a primary-key column",
+                format!(
+                    "Table '{clickhouse_table_name}': RENAME COLUMN '{old}' -> '{new}' would \
+                     change the RMT ORDER BY / dedup key. Switch this table to `engine: \
+                     merge_tree` or revert the rename on the source.",
+                    old = rename.old_name,
+                    new = rename.new_name
+                )
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 /// Verifies that the configured engine is supported on the given server
@@ -1307,6 +1403,106 @@ mod tests {
     fn ensure_engine_supported_accepts_rmt_on_supported_server() {
         ensure_engine_supported(ClickHouseEngine::ReplacingMergeTree, (23, 5)).unwrap();
         ensure_engine_supported(ClickHouseEngine::ReplacingMergeTree, (24, 1)).unwrap();
+    }
+
+    /// Schema with composite PK `(tenant_id, id)` plus a non-PK `value`
+    /// column. Used by the PK-ALTER-guard tests.
+    fn replicated_schema_for_pk_alters() -> ReplicatedTableSchema {
+        let table_schema = Arc::new(TableSchema::new(
+            TableId::new(7),
+            TableName::new("public".to_owned(), "rmt_alter".to_owned()),
+            vec![
+                ColumnSchema::new("tenant_id".to_owned(), Type::INT4, -1, 1, Some(1), false),
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 2, Some(2), false),
+                ColumnSchema::new("value".to_owned(), Type::TEXT, -1, 3, None, true),
+            ],
+        ));
+        let replication_mask = ReplicationMask::all(&table_schema);
+        let identity_mask = IdentityMask::from_bytes(vec![1, 1, 0]);
+        ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask)
+    }
+
+    #[test]
+    fn reject_pk_alters_under_rmt_allows_non_pk_drop() {
+        // --- GIVEN: a diff that drops the non-PK `value` column ---
+        let schema = replicated_schema_for_pk_alters();
+        let diff = SchemaDiff {
+            columns_to_add: Vec::new(),
+            columns_to_remove: vec![ColumnSchema::new(
+                "value".to_owned(),
+                Type::TEXT,
+                -1,
+                3,
+                None,
+                true,
+            )],
+            columns_to_rename: Vec::new(),
+        };
+        // --- WHEN/THEN: guard passes ---
+        reject_pk_alters_under_rmt("public_rmt__alter", &diff, &schema).unwrap();
+    }
+
+    #[test]
+    fn reject_pk_alters_under_rmt_rejects_pk_drop() {
+        // --- GIVEN: a diff that drops the PK column `tenant_id` ---
+        let schema = replicated_schema_for_pk_alters();
+        let diff = SchemaDiff {
+            columns_to_add: Vec::new(),
+            columns_to_remove: vec![ColumnSchema::new(
+                "tenant_id".to_owned(),
+                Type::INT4,
+                -1,
+                1,
+                Some(1),
+                false,
+            )],
+            columns_to_rename: Vec::new(),
+        };
+        // --- WHEN: validating ---
+        let err = reject_pk_alters_under_rmt("public_rmt__alter", &diff, &schema).unwrap_err();
+        // --- THEN: rejected with SourceSchemaError naming the column ---
+        assert_eq!(err.kind(), ErrorKind::SourceSchemaError);
+        assert!(err.to_string().contains("tenant_id"), "error must name the PK column: {err}");
+    }
+
+    #[test]
+    fn reject_pk_alters_under_rmt_allows_non_pk_rename() {
+        // --- GIVEN: a rename of the non-PK `value` column ---
+        let schema = replicated_schema_for_pk_alters();
+        let diff = SchemaDiff {
+            columns_to_add: Vec::new(),
+            columns_to_remove: Vec::new(),
+            columns_to_rename: vec![etl::types::ColumnRename {
+                old_name: "value".to_owned(),
+                new_name: "payload".to_owned(),
+                ordinal_position: 3,
+            }],
+        };
+        // --- WHEN/THEN: guard passes ---
+        reject_pk_alters_under_rmt("public_rmt__alter", &diff, &schema).unwrap();
+    }
+
+    #[test]
+    fn reject_pk_alters_under_rmt_rejects_pk_rename() {
+        // --- GIVEN: a rename of the PK column `id` ---
+        let schema = replicated_schema_for_pk_alters();
+        let diff = SchemaDiff {
+            columns_to_add: Vec::new(),
+            columns_to_remove: Vec::new(),
+            columns_to_rename: vec![etl::types::ColumnRename {
+                old_name: "id".to_owned(),
+                new_name: "row_id".to_owned(),
+                ordinal_position: 2,
+            }],
+        };
+        // --- WHEN: validating ---
+        let err = reject_pk_alters_under_rmt("public_rmt__alter", &diff, &schema).unwrap_err();
+        // --- THEN: rejected with SourceSchemaError naming the rename ---
+        assert_eq!(err.kind(), ErrorKind::SourceSchemaError);
+        assert!(
+            err.to_string().contains("'id'") && err.to_string().contains("'row_id'"),
+            "error must name old + new names: {err}"
+        );
     }
 
     #[test]

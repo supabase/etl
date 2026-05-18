@@ -264,6 +264,29 @@ impl ClickHouseClient {
         result
     }
 
+    /// Returns the ClickHouse engine name for a table, or `None` if the table
+    /// does not exist in the current database.
+    pub(crate) async fn table_engine(&self, table_name: &str) -> EtlResult<Option<String>> {
+        let rows: Vec<String> = self
+            .inner
+            .query(
+                "SELECT engine FROM system.tables WHERE database = currentDatabase() AND name = ?",
+            )
+            .bind(table_name)
+            .fetch_all::<String>()
+            .await
+            .map_err(|err| {
+                etl_error!(
+                    ErrorKind::Unknown,
+                    "ClickHouse engine lookup failed",
+                    format!("table: {table_name}"),
+                    source: err
+                )
+            })?;
+
+        Ok(rows.into_iter().next())
+    }
+
     /// Returns ClickHouse columns for a table in position order.
     pub(crate) async fn table_columns(
         &self,

@@ -643,3 +643,120 @@ async fn rmt_optimize_cleanup_physically_removes_tombstoned_row() {
         }
     }
 }
+
+/// Engine mismatch (MT -> RMT): a table already created under MergeTree must
+/// hard-fail when a second pipeline tries to write to it under
+/// ReplacingMergeTree.
+#[tokio::test(flavor = "multi_thread")]
+async fn engine_mismatch_existing_mt_then_rmt_pipeline() {
+    engine_mismatch_runs(ClickHouseEngine::MergeTree, ClickHouseEngine::ReplacingMergeTree).await;
+}
+
+/// Engine mismatch (RMT -> MT): the reverse direction must also hard-fail.
+#[tokio::test(flavor = "multi_thread")]
+async fn engine_mismatch_existing_rmt_then_mt_pipeline() {
+    engine_mismatch_runs(ClickHouseEngine::ReplacingMergeTree, ClickHouseEngine::MergeTree).await;
+}
+
+/// Drives the engine-mismatch flow: pipeline A creates the table under
+/// `first`, shuts down; pipeline B tries to use the same ClickHouse database
+/// under `second` and the table goes Errored with an engine-mismatch reason.
+async fn engine_mismatch_runs(first: ClickHouseEngine, second: ClickHouseEngine) {
+    init_test_tracing();
+    install_crypto_provider();
+
+    // --- GIVEN: a source table replicated under engine `first` ---
+    let database = spawn_source_database().await;
+    let table_name = test_table_name("engine_mismatch");
+
+    let table_id = database
+        .create_table(table_name.clone(), true, &[("value", "text not null")])
+        .await
+        .expect("Failed to create engine_mismatch table");
+
+    let publication_name = "test_pub_engine_mismatch";
+    database
+        .create_publication(publication_name, std::slice::from_ref(&table_name))
+        .await
+        .expect("Failed to create publication");
+
+    database
+        .run_sql(&format!(
+            "INSERT INTO {} (value) VALUES ('first_run')",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .expect("Failed to insert seed row");
+
+    let clickhouse_db = setup_clickhouse_database().await;
+
+    // First pipeline run: creates the CH table under `first` and shuts down.
+    {
+        let store = NotifyingStore::new();
+        let pipeline_id: PipelineId = random();
+        let destination = clickhouse_db.build_destination_with_engine(store.clone(), first).await;
+        let table_ready =
+            store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
+        let mut pipeline = create_pipeline(
+            &database.config,
+            pipeline_id,
+            publication_name.to_owned(),
+            store,
+            destination,
+        );
+        pipeline.start().await.unwrap();
+        table_ready.notified().await;
+        pipeline.shutdown_and_wait().await.unwrap();
+    }
+
+    // --- WHEN: a second pipeline configures the OTHER engine for the same
+    // destination database ---
+    let store = NotifyingStore::new();
+    let pipeline_id: PipelineId = random();
+    let destination = clickhouse_db.build_destination_with_engine(store.clone(), second).await;
+    let table_errored =
+        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Errored).await;
+
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name.to_owned(),
+        store.clone(),
+        destination,
+    );
+    pipeline.start().await.unwrap();
+    table_errored.notified().await;
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // --- THEN: the Errored phase reason names the engine mismatch ---
+    let phase = store
+        .get_table_replication_state(table_id)
+        .await
+        .expect("state store should return the table's phase")
+        .expect("table should have a recorded replication phase");
+    let reason = match phase {
+        TableReplicationPhase::Errored { reason, .. } => reason,
+        other => panic!("expected Errored phase, got {other:?}"),
+    };
+    assert!(
+        reason.contains("engine mismatch") || reason.contains("engine"),
+        "Errored reason should mention the engine mismatch, got: {reason}"
+    );
+    let first_name = engine_clickhouse_name(first);
+    let second_name = engine_clickhouse_name(second);
+    assert!(
+        reason.contains(first_name),
+        "Errored reason should name the existing engine `{first_name}`: {reason}"
+    );
+    assert!(
+        reason.contains(second_name),
+        "Errored reason should name the configured engine `{second_name}`: {reason}"
+    );
+}
+
+fn engine_clickhouse_name(engine: ClickHouseEngine) -> &'static str {
+    match engine {
+        ClickHouseEngine::MergeTree => "MergeTree",
+        ClickHouseEngine::ReplacingMergeTree => "ReplacingMergeTree",
+    }
+}
