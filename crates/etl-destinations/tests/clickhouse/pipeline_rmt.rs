@@ -4,7 +4,8 @@
 //! source rejection, and composite PK ORDER BY.
 
 use etl::{
-    state::table::TableReplicationPhaseType,
+    state::table::{TableReplicationPhase, TableReplicationPhaseType},
+    store::state::StateStore,
     test_utils::{
         database::{spawn_source_database, test_table_name},
         notifying_store::NotifyingStore,
@@ -29,9 +30,8 @@ struct IdValueRow {
 }
 
 #[derive(clickhouse::Row, serde::Deserialize, Debug)]
-#[allow(dead_code)]
-struct IdRow {
-    id: i64,
+struct CountRow {
+    count: u64,
 }
 
 /// RMT: source table must have a primary key. `ensure_table_exists` rejects
@@ -79,15 +79,29 @@ async fn rmt_rejects_pkless_source_table() {
         &database.config,
         pipeline_id,
         publication_name.to_owned(),
-        store,
+        store.clone(),
         destination,
     );
 
     pipeline.start().await.unwrap();
     table_errored.notified().await;
-
-    // --- THEN: the table is marked Errored (PK-less rejection bubbled up) ---
     pipeline.shutdown_and_wait().await.unwrap();
+
+    // --- THEN: the Errored phase reason names the PK-less rejection ---
+    let phase = store
+        .get_table_replication_state(table_id)
+        .await
+        .expect("state store should return the table's phase")
+        .expect("table should have a recorded replication phase");
+    match phase {
+        TableReplicationPhase::Errored { reason, .. } => {
+            assert!(
+                reason.contains("primary key"),
+                "Errored reason should mention the PK requirement, got: {reason}"
+            );
+        }
+        other => panic!("expected Errored phase, got {other:?}"),
+    }
 }
 
 /// RMT: a same-transaction INSERT followed by an UPDATE of the same PK
@@ -267,7 +281,7 @@ async fn rmt_same_lsn_tx_delete_then_insert_keeps_insert() {
 
     pipeline.shutdown_and_wait().await.unwrap();
 
-    // --- THEN: the post-INSERT row wins ---
+    // --- THEN: current state shows the re-inserted row, not the tombstone ---
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].id, 1);
     assert_eq!(rows[0].value, "recreated");
@@ -613,11 +627,11 @@ async fn rmt_optimize_cleanup_physically_removes_tombstoned_row() {
     // FINAL-based spine assertions and skip the physical-removal check.
     match optimize_result {
         Ok(()) => {
-            let raw_rows: Vec<IdRow> =
-                clickhouse_db.query("SELECT id FROM \"test_rmt__cleanup\" ORDER BY id").await;
-            assert!(
-                raw_rows.is_empty(),
-                "OPTIMIZE FINAL CLEANUP should have removed the tombstoned row; found {raw_rows:?}"
+            let counts: Vec<CountRow> =
+                clickhouse_db.query("SELECT count() AS count FROM \"test_rmt__cleanup\"").await;
+            assert_eq!(
+                counts[0].count, 0,
+                "OPTIMIZE FINAL CLEANUP should have physically removed the tombstoned row"
             );
         }
         Err(err) => {

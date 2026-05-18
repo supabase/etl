@@ -20,9 +20,10 @@ use rand::random;
 
 use crate::support::clickhouse::install_crypto_provider;
 
-/// MT event-log row: includes CDC metadata.
+/// MT event-log row: includes CDC metadata. All three operations in this
+/// test target the same source row, so `id` is asserted on alongside the
+/// CDC columns.
 #[derive(clickhouse::Row, serde::Deserialize, Debug)]
-#[allow(dead_code)]
 struct EventLogRow {
     id: i64,
     value: String,
@@ -120,17 +121,20 @@ async fn sequential_transactions_preserve_commit_order_merge_tree() {
 
     pipeline.shutdown_and_wait().await.unwrap();
 
-    // --- THEN: three rows with strictly increasing LSNs ---
+    // --- THEN: three rows on id=1 with strictly increasing LSNs ---
     assert_eq!(rows.len(), 3, "expected INSERT + two UPDATEs");
 
+    assert_eq!(rows[0].id, 1);
     assert_eq!(rows[0].value, "original");
     assert_eq!(rows[0].cdc_operation, "INSERT");
     assert_eq!(rows[0].cdc_lsn, 0);
 
+    assert_eq!(rows[1].id, 1);
     assert_eq!(rows[1].value, "update_a");
     assert_eq!(rows[1].cdc_operation, "UPDATE");
     assert!(rows[1].cdc_lsn > 0);
 
+    assert_eq!(rows[2].id, 1);
     assert_eq!(rows[2].value, "update_b");
     assert_eq!(rows[2].cdc_operation, "UPDATE");
     assert!(rows[2].cdc_lsn > rows[1].cdc_lsn, "update_b must have a higher LSN than update_a");
