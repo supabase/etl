@@ -22,6 +22,7 @@ use etl_destinations::{
         DestinationNamespace, IcebergClient, IcebergDestination, S3_ACCESS_KEY_ID, S3_ENDPOINT,
         S3_SECRET_ACCESS_KEY,
     },
+    snowflake::{AuthManager, Config as SnowflakeConfig, SnowflakeClient, SnowflakeDestination},
 };
 use secrecy::ExposeSecret;
 use tokio::signal::unix::{SignalKind, signal};
