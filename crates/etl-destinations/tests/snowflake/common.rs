@@ -55,9 +55,10 @@ where
     for _ in 0..max_attempts {
         tokio::time::sleep(interval).await;
         if let Ok(Some(offset)) = destination.committed_offset(table_id).await
-            && &offset == expected {
-                return Some(offset);
-            }
+            && &offset == expected
+        {
+            return Some(offset);
+        }
     }
     None
 }
