@@ -1953,8 +1953,11 @@ dependencies = [
  "etl-telemetry",
  "futures",
  "gcp-bigquery-client",
+ "humantime",
  "iceberg",
  "iceberg-catalog-rest",
+ "k8s-openapi",
+ "kube",
  "metrics",
  "parking_lot",
  "parquet",
@@ -1984,6 +1987,8 @@ dependencies = [
  "clap",
  "etl",
  "etl-destinations",
+ "etl-telemetry",
+ "k8s-openapi",
  "rustls",
  "tokio",
  "tracing",
@@ -2010,11 +2015,13 @@ dependencies = [
 name = "etl-replicator"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "configcat",
  "etl",
  "etl-config",
  "etl-destinations",
  "etl-telemetry",
+ "k8s-openapi",
  "metrics",
  "reqwest",
  "rustls",
@@ -2027,6 +2034,7 @@ dependencies = [
  "tikv-jemallocator",
  "tokio",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -2691,6 +2699,12 @@ name = "httpdate"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
+
+[[package]]
+name = "humantime"
+version = "2.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "135b12329e5e3ce057a9f972339ea52bc954fe1e9358ef27f95e89716fbc5424"
 
 [[package]]
 name = "hyper"
@@ -4060,15 +4074,14 @@ dependencies = [
 
 [[package]]
 name = "openssl"
-version = "0.10.78"
+version = "0.10.79"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f38c4372413cdaaf3cc79dd92d29d7d9f5ab09b51b10dded508fb90bb70b9222"
+checksum = "bf0b434746ee2832f4f0baf10137e1cabb18cbe6912c69e2e33263c45250f542"
 dependencies = [
  "bitflags",
  "cfg-if",
  "foreign-types",
  "libc",
- "once_cell",
  "openssl-macros",
  "openssl-sys",
 ]
@@ -4098,9 +4111,9 @@ checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
 
 [[package]]
 name = "openssl-sys"
-version = "0.9.114"
+version = "0.9.115"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "13ce1245cd07fcc4cfdb438f7507b0c7e4f3849a69fd84d52374c66d83741bb6"
+checksum = "158fe5b292746440aa6e7a7e690e55aeb72d41505e2804c23c6973ad0e9c9781"
 dependencies = [
  "cc",
  "libc",

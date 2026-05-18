@@ -70,6 +70,7 @@ fn create_pipeline_config(publication_name: &str) -> FullApiPipelineConfig {
         batch: Some(BatchConfig {
             max_fill_ms: BatchConfig::DEFAULT_MAX_FILL_MS,
             memory_budget_ratio: BatchConfig::DEFAULT_MEMORY_BUDGET_RATIO,
+            max_bytes: BatchConfig::DEFAULT_MAX_BYTES,
         }),
         log_level: None,
         table_error_retry_delay_ms: None,
@@ -81,6 +82,7 @@ fn create_pipeline_config(publication_name: &str) -> FullApiPipelineConfig {
         table_sync_copy: None,
         invalidated_slot_behavior: None,
         replicator_resources: None,
+        ducklake_maintenance: None,
     }
 }
 

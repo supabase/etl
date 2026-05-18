@@ -39,6 +39,14 @@ pub struct BatchConfig {
     #[serde(default = "default_memory_budget_ratio")]
     #[cfg_attr(feature = "utoipa", schema(example = 0.2))]
     pub memory_budget_ratio: f32,
+    /// Maximum preferred byte size for one source batch per active stream.
+    ///
+    /// This is a ceiling, not a target. The runtime still chooses the smaller
+    /// value between this limit and the memory-ratio budget computed from
+    /// [`Self::memory_budget_ratio`].
+    #[serde(default = "default_batch_max_bytes")]
+    #[cfg_attr(feature = "utoipa", schema(example = 8388608))]
+    pub max_bytes: usize,
 }
 
 impl BatchConfig {
@@ -52,6 +60,13 @@ impl BatchConfig {
     /// memory.
     pub const DEFAULT_MEMORY_BUDGET_RATIO: f32 = 0.2;
 
+    /// Default maximum preferred source batch size in bytes.
+    ///
+    /// The 8 MiB cap bounds a single stream's burst before reactive memory
+    /// backpressure can observe new allocations, while still fitting thousands
+    /// of typical CDC rows and staying near common streaming request limits.
+    pub const DEFAULT_MAX_BYTES: usize = 8 * 1024 * 1024;
+
     /// Validates batch configuration settings.
     ///
     /// Ensures memory budget ratio is in range.
@@ -60,6 +75,13 @@ impl BatchConfig {
             return Err(ValidationError::InvalidFieldValue {
                 field: "batch.memory_budget_ratio".to_owned(),
                 constraint: "must be in the (0.0, 1.0] interval".to_owned(),
+            });
+        }
+
+        if self.max_bytes == 0 {
+            return Err(ValidationError::InvalidFieldValue {
+                field: "batch.max_bytes".to_owned(),
+                constraint: "must be greater than 0".to_owned(),
             });
         }
 
@@ -72,6 +94,7 @@ impl Default for BatchConfig {
         Self {
             max_fill_ms: default_batch_max_fill_ms(),
             memory_budget_ratio: default_memory_budget_ratio(),
+            max_bytes: default_batch_max_bytes(),
         }
     }
 }
@@ -82,6 +105,10 @@ const fn default_batch_max_fill_ms() -> u64 {
 
 const fn default_memory_budget_ratio() -> f32 {
     BatchConfig::DEFAULT_MEMORY_BUDGET_RATIO
+}
+
+const fn default_batch_max_bytes() -> usize {
+    BatchConfig::DEFAULT_MAX_BYTES
 }
 
 /// Behavior when the main replication slot is found to be invalidated.
@@ -429,6 +456,35 @@ impl From<PipelineConfig> for PipelineConfigWithoutSecrets {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn batch_config_deserializes_without_max_bytes() {
+        let json = r#"{"max_fill_ms":5000,"memory_budget_ratio":0.2}"#;
+        let config: BatchConfig = serde_json::from_str(json).unwrap();
+
+        assert_eq!(config.max_fill_ms, 5000);
+        assert_eq!(config.memory_budget_ratio, 0.2);
+        assert_eq!(config.max_bytes, BatchConfig::DEFAULT_MAX_BYTES);
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn batch_config_deserializes_with_max_bytes() {
+        let json = r#"{"max_fill_ms":5000,"memory_budget_ratio":0.2,"max_bytes":4194304}"#;
+        let config: BatchConfig = serde_json::from_str(json).unwrap();
+
+        assert_eq!(config.max_bytes, 4 * 1024 * 1024);
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn batch_config_deserialization_ignores_unknown_fields() {
+        let json = r#"{"max_fill_ms":5000,"memory_budget_ratio":0.2,"max_bytes":4194304,"future_field":true}"#;
+        let config: BatchConfig = serde_json::from_str(json).unwrap();
+
+        assert_eq!(config.max_bytes, 4 * 1024 * 1024);
+        config.validate().unwrap();
+    }
 
     #[test]
     fn table_sync_copy_serialization_skip_all() {

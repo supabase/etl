@@ -424,44 +424,50 @@ mod tests {
     }
 
     #[test]
-    fn bigquery_table_row_try_from_invalid_numeric_nan() {
+    fn bigquery_table_row_try_from_delegates_numeric_nan_validation_to_bigquery() {
         let table_row = TableRow::new(vec![Cell::I32(42), Cell::Numeric(PgNumeric::NaN)]);
 
         let result = BigQueryTableRow::try_from(table_row);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::UnsupportedValueInDestination);
-        assert!(err.detail().unwrap().contains("Cell at index 1"));
-        assert!(err.detail().unwrap().contains("NaN cannot be stored in BigQuery"));
+        assert!(result.is_ok());
     }
 
     #[test]
-    fn bigquery_table_row_try_from_invalid_numeric_infinity() {
+    fn bigquery_table_row_try_from_delegates_numeric_infinity_validation_to_bigquery() {
         let table_row = TableRow::new(vec![
             Cell::String("valid".to_owned()),
             Cell::Numeric(PgNumeric::PositiveInfinity),
         ]);
 
         let result = BigQueryTableRow::try_from(table_row);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::UnsupportedValueInDestination);
-        assert!(err.detail().unwrap().contains("Cell at index 1"));
-        assert!(err.detail().unwrap().contains("Infinity cannot be stored in BigQuery"));
+        assert!(result.is_ok());
     }
 
     #[test]
-    fn bigquery_table_row_try_from_invalid_date() {
+    fn bigquery_table_row_try_from_delegates_json_number_validation_to_bigquery() {
+        let json = serde_json::from_str(r#"{"value":1e309}"#).unwrap();
+        let table_row = TableRow::new(vec![Cell::Json(json)]);
+
+        let result = BigQueryTableRow::try_from(table_row);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn bigquery_table_row_try_from_rejects_json_integer_precision_loss() {
+        let json = serde_json::from_str(r#"{"value":18446744073709551616}"#).unwrap();
+        let table_row = TableRow::new(vec![Cell::Json(json)]);
+
+        let result = BigQueryTableRow::try_from(table_row);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn bigquery_table_row_try_from_delegates_date_domain_validation_to_bigquery() {
         let invalid_date = NaiveDate::from_ymd_opt(1, 1, 1).unwrap().pred_opt().unwrap(); // Date before year 1
 
         let table_row = TableRow::new(vec![Cell::Date(invalid_date)]);
 
         let result = BigQueryTableRow::try_from(table_row);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::UnsupportedValueInDestination);
-        assert!(err.detail().unwrap().contains("Cell at index 0"));
-        assert!(err.detail().unwrap().contains("before BigQuery's minimum"));
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -477,14 +483,14 @@ mod tests {
     }
 
     #[test]
-    fn bigquery_table_row_try_from_array_with_invalid_elements() {
-        let array_with_invalid_numeric = etl::types::ArrayCell::Numeric(vec![
+    fn bigquery_table_row_try_from_array_with_numeric_rounding_risk() {
+        let array_with_rounding_risk = etl::types::ArrayCell::Numeric(vec![
             Some(PgNumeric::from_str("123.456").unwrap()),
-            Some(PgNumeric::NaN),
+            Some(PgNumeric::from_str("0.000000000000000000000000000000000000001").unwrap()),
             Some(PgNumeric::from_str("789.012").unwrap()),
         ]);
 
-        let table_row = TableRow::new(vec![Cell::Array(array_with_invalid_numeric)]);
+        let table_row = TableRow::new(vec![Cell::Array(array_with_rounding_risk)]);
 
         let result = BigQueryTableRow::try_from(table_row);
         assert!(result.is_err());
@@ -510,9 +516,12 @@ mod tests {
     #[test]
     fn bigquery_table_row_try_from_multiple_errors_first_wins() {
         let table_row = TableRow::new(vec![
-            Cell::Numeric(PgNumeric::NaN), // First invalid cell
-            Cell::Numeric(PgNumeric::PositiveInfinity), /* Second invalid cell (should not be
-                                            * reached) */
+            Cell::Numeric(
+                PgNumeric::from_str("0.000000000000000000000000000000000000001").unwrap(),
+            ),
+            Cell::Array(etl::types::ArrayCell::Numeric(vec![Some(
+                PgNumeric::from_str("0.000000000000000000000000000000000000002").unwrap(),
+            )])),
         ]);
 
         let result = BigQueryTableRow::try_from(table_row);
@@ -520,7 +529,7 @@ mod tests {
         let err = result.unwrap_err();
         assert_eq!(err.kind(), ErrorKind::UnsupportedValueInDestination);
         assert!(err.detail().unwrap().contains("Cell at index 0")); // Should fail on first cell
-        assert!(err.detail().unwrap().contains("NaN"));
+        assert!(err.detail().unwrap().contains("would be rounded by BigQuery"));
     }
 
     #[test]
@@ -540,18 +549,16 @@ mod tests {
     }
 
     #[test]
-    fn bigquery_table_row_try_from_oversized_numeric_fails() {
-        // Create a numeric value that exceeds BigQuery's limits
-        let oversized_numeric = PgNumeric::from_str(
-            "123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890"
-        ).unwrap(); // This has way more than 76 digits
+    fn bigquery_table_row_try_from_numeric_rounding_risk_fails() {
+        let over_scale_numeric =
+            PgNumeric::from_str("0.000000000000000000000000000000000000001").unwrap();
 
-        let table_row = TableRow::new(vec![Cell::Numeric(oversized_numeric)]);
+        let table_row = TableRow::new(vec![Cell::Numeric(over_scale_numeric)]);
 
         let result = BigQueryTableRow::try_from(table_row);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert_eq!(err.kind(), ErrorKind::UnsupportedValueInDestination);
-        assert!(err.detail().unwrap().contains("exceeds BigQuery's BIGNUMERIC limits"));
+        assert!(err.detail().unwrap().contains("would be rounded by BigQuery"));
     }
 }

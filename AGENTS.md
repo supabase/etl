@@ -51,6 +51,11 @@
   not run expensive checks reflexively for unrelated documentation, YAML-only, or
   similarly low-risk edits; in those cases, run the smallest relevant validation
   instead and report what actually ran.
+- Add local destination value validation only when it prevents silent data
+  corruption, such as rounding, truncation, clamping, coercion, or another
+  semantic change that the destination would accept. If the destination rejects
+  an unsupported value with an error, prefer delegating that check to the
+  destination instead of duplicating expensive validation in the write path.
 
 ## Rust Style
 - This section is only for project-specific judgment that is not already covered by rustfmt, rustc, or Clippy.

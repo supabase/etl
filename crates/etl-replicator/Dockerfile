@@ -30,7 +30,7 @@ FROM chef AS planner
 COPY . .
 # xtask is a local dev tool and must not be part of the Docker build.
 # Remove it from the workspace so cargo-chef / cargo metadata ignores it.
-RUN sed -i '/"crates\\/xtask"/d' Cargo.toml && rm -rf crates/xtask
+RUN sed -i '\#"crates/xtask"#d' Cargo.toml && rm -rf crates/xtask
 RUN cargo chef prepare --recipe-path recipe.json
 
 # Build dependencies.
@@ -62,11 +62,11 @@ RUN RUSTFLAGS="-C panic=abort -C link-arg=-fuse-ld=lld" cargo chef cook --releas
 # ENABLE_EGRESS: set to "true" to enable egress metrics logging.
 ARG ENABLE_EGRESS="false"
 COPY . .
-RUN sed -i '/"crates\\/xtask"/d' Cargo.toml && rm -rf crates/xtask
+RUN sed -i '\#"crates/xtask"#d' Cargo.toml && rm -rf crates/xtask
 RUN FEATURES=""; \
     if [ "$ENABLE_EGRESS" = "true" ]; then FEATURES="--features egress"; fi && \
     RUSTFLAGS="-C panic=abort -C link-arg=-fuse-ld=lld" cargo build --release -p etl-replicator $FEATURES && \
-    strip target/release/etl-replicator
+    strip target/release/etl-replicator target/release/etl-ducklake-maintenance
 
 # Runtime stage with distroless for security.
 FROM gcr.io/distroless/cc-debian12:nonroot
@@ -81,6 +81,7 @@ USER nonroot:nonroot
 
 # Copy binary; configuration must be provided at runtime via mounted volume or environment overrides.
 COPY --from=builder /app/target/release/etl-replicator ./etl-replicator
+COPY --from=builder /app/target/release/etl-ducklake-maintenance ./etl-ducklake-maintenance
 COPY --from=duckdb-extensions /duckdb_extensions ./duckdb_extensions
 
 # Use exec form for proper signal handling.

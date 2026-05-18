@@ -69,6 +69,27 @@ pub(crate) mod destinations {
         }
     }
 
+    /// Returns a default DuckLake destination config.
+    pub(crate) fn new_ducklake_destination_config() -> FullApiDestinationConfig {
+        FullApiDestinationConfig::Ducklake {
+            catalog_url: "postgres://postgres:postgres@localhost:5432/postgres".to_owned(),
+            data_path: "s3://ducklake/".to_owned(),
+            pool_size: Some(1),
+            s3_access_key_id: Some(SerializableSecretString::from("access-key-id".to_owned())),
+            s3_secret_access_key: Some(SerializableSecretString::from(
+                "secret-access-key".to_owned(),
+            )),
+            s3_region: Some("us-east-1".to_owned()),
+            s3_endpoint: Some("localhost:9000".to_owned()),
+            s3_url_style: Some("path".to_owned()),
+            s3_use_ssl: Some(false),
+            metadata_schema: Some("ducklake".to_owned()),
+            duckdb_memory_cache_limit: None,
+            maintenance_target_file_size: Some("10MB".to_owned()),
+            expire_snapshots_older_than: Some("7 days".to_owned()),
+        }
+    }
+
     /// Returns a default Iceberg Supabase destination config.
     pub(crate) fn new_iceberg_supabase_destination_config() -> FullApiDestinationConfig {
         use etl_api::configs::destination::FullApiIcebergConfig;
@@ -237,7 +258,11 @@ pub(crate) mod pipelines {
     pub(crate) fn new_pipeline_config() -> FullApiPipelineConfig {
         FullApiPipelineConfig {
             publication_name: "publication".to_owned(),
-            batch: Some(BatchConfig { max_fill_ms: 5, memory_budget_ratio: 0.2 }),
+            batch: Some(BatchConfig {
+                max_fill_ms: 5,
+                memory_budget_ratio: 0.2,
+                max_bytes: 8 * 1024 * 1024,
+            }),
             table_error_retry_delay_ms: Some(10000),
             table_error_retry_max_attempts: Some(5),
             max_table_sync_workers: Some(2),
@@ -247,6 +272,7 @@ pub(crate) mod pipelines {
             table_sync_copy: Some(TableSyncCopyConfig::IncludeAllTables),
             invalidated_slot_behavior: None,
             replicator_resources: None,
+            ducklake_maintenance: None,
             log_level: Some(LogLevel::Info),
         }
     }
@@ -255,7 +281,11 @@ pub(crate) mod pipelines {
     pub(crate) fn updated_pipeline_config() -> FullApiPipelineConfig {
         FullApiPipelineConfig {
             publication_name: "updated_publication".to_owned(),
-            batch: Some(BatchConfig { max_fill_ms: 10, memory_budget_ratio: 0.2 }),
+            batch: Some(BatchConfig {
+                max_fill_ms: 10,
+                memory_budget_ratio: 0.2,
+                max_bytes: 8 * 1024 * 1024,
+            }),
             table_error_retry_delay_ms: Some(20000),
             table_error_retry_max_attempts: Some(10),
             max_table_sync_workers: Some(4),
@@ -265,6 +295,7 @@ pub(crate) mod pipelines {
             table_sync_copy: Some(TableSyncCopyConfig::IncludeAllTables),
             invalidated_slot_behavior: None,
             replicator_resources: None,
+            ducklake_maintenance: None,
             log_level: Some(LogLevel::Info),
         }
     }

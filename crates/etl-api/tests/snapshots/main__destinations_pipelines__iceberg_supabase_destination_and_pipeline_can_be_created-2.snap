@@ -8,6 +8,7 @@ FullApiPipelineConfig {
         BatchConfig {
             max_fill_ms: 5,
             memory_budget_ratio: 0.2,
+            max_bytes: 8388608,
         },
     ),
     table_error_retry_delay_ms: Some(
@@ -38,6 +39,7 @@ FullApiPipelineConfig {
         Error,
     ),
     replicator_resources: None,
+    ducklake_maintenance: None,
     log_level: Some(
         Info,
     ),

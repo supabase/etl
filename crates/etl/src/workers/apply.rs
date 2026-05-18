@@ -110,6 +110,7 @@ impl<S, D> ApplyWorker<S, D> {
             pipeline_id,
             memory_monitor.clone(),
             config.batch.memory_budget_ratio,
+            config.batch.max_bytes,
         );
 
         Self {

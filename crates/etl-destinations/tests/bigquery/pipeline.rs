@@ -650,7 +650,7 @@ async fn table_truncate_with_batching() {
         destination.clone(),
         // We use a batch size > 1, so that we can make sure that interleaved truncate statements
         // work well with multiple batches of events.
-        BatchConfig { max_fill_ms: 1000, memory_budget_ratio: 0.2 },
+        BatchConfig { max_fill_ms: 1000, memory_budget_ratio: 0.2, max_bytes: 8 * 1024 * 1024 },
     );
 
     // Register notifications for table copy completion.
@@ -1802,6 +1802,12 @@ async fn table_validation_out_of_bounds_values() {
         .await
         .unwrap();
 
+    let infinite_numeric_table = test_table_name("infinite_numeric");
+    let infinite_numeric_table_id = database
+        .create_table(infinite_numeric_table.clone(), true, &[("infinite_numeric", "numeric")])
+        .await
+        .unwrap();
+
     let old_date_table = test_table_name("old_date");
     let old_date_table_id = database
         .create_table(old_date_table.clone(), true, &[("test_date", "date")])
@@ -1811,6 +1817,16 @@ async fn table_validation_out_of_bounds_values() {
     let nan_array_table = test_table_name("nan_array");
     let nan_array_table_id = database
         .create_table(nan_array_table.clone(), true, &[("numeric_array", "numeric[]")])
+        .await
+        .unwrap();
+
+    let wide_json_table = test_table_name("wide_json");
+    let wide_json_table_id =
+        database.create_table(wide_json_table.clone(), true, &[("payload", "json")]).await.unwrap();
+
+    let imprecise_json_integer_table = test_table_name("imprecise_json_integer");
+    let imprecise_json_integer_table_id = database
+        .create_table(imprecise_json_integer_table.clone(), true, &[("payload", "json")])
         .await
         .unwrap();
 
@@ -1824,6 +1840,20 @@ async fn table_validation_out_of_bounds_values() {
                 "insert into {} (huge_numeric) values ({})",
                 huge_numeric_table.as_quoted_identifier(),
                 "'123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890'"
+            ),
+            &[],
+        )
+        .await
+        .unwrap();
+
+    database
+        .client
+        .as_ref()
+        .unwrap()
+        .execute(
+            &format!(
+                "insert into {} (infinite_numeric) values ('Infinity'::numeric)",
+                infinite_numeric_table.as_quoted_identifier()
             ),
             &[],
         )
@@ -1858,6 +1888,34 @@ async fn table_validation_out_of_bounds_values() {
         .await
         .unwrap();
 
+    database
+        .client
+        .as_ref()
+        .unwrap()
+        .execute(
+            &format!(
+                "insert into {} (payload) values ('{{\"value\":1e309}}'::json)",
+                wide_json_table.as_quoted_identifier()
+            ),
+            &[],
+        )
+        .await
+        .unwrap();
+
+    database
+        .client
+        .as_ref()
+        .unwrap()
+        .execute(
+            &format!(
+                "insert into {} (payload) values ('{{\"value\":18446744073709551616}}'::json)",
+                imprecise_json_integer_table.as_quoted_identifier()
+            ),
+            &[],
+        )
+        .await
+        .unwrap();
+
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
     let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
@@ -1867,7 +1925,14 @@ async fn table_validation_out_of_bounds_values() {
     database
         .create_publication(
             &publication_name,
-            &[huge_numeric_table, old_date_table, nan_array_table],
+            &[
+                huge_numeric_table,
+                infinite_numeric_table,
+                old_date_table,
+                nan_array_table,
+                wide_json_table,
+                imprecise_json_integer_table,
+            ],
         )
         .await
         .expect("Failed to create publication");
@@ -1885,6 +1950,10 @@ async fn table_validation_out_of_bounds_values() {
         .notify_on_table_state_type(huge_numeric_table_id, TableReplicationPhaseType::Errored)
         .await;
 
+    let infinite_numeric_error_notify = store
+        .notify_on_table_state_type(infinite_numeric_table_id, TableReplicationPhaseType::Errored)
+        .await;
+
     let old_date_error_notify = store
         .notify_on_table_state_type(old_date_table_id, TableReplicationPhaseType::Errored)
         .await;
@@ -1893,16 +1962,37 @@ async fn table_validation_out_of_bounds_values() {
         .notify_on_table_state_type(nan_array_table_id, TableReplicationPhaseType::Errored)
         .await;
 
+    let wide_json_error_notify = store
+        .notify_on_table_state_type(wide_json_table_id, TableReplicationPhaseType::Errored)
+        .await;
+
+    let imprecise_json_integer_error_notify = store
+        .notify_on_table_state_type(
+            imprecise_json_integer_table_id,
+            TableReplicationPhaseType::Errored,
+        )
+        .await;
+
     pipeline.start().await.unwrap();
 
     // Wait for all tables to enter errored state
     huge_numeric_error_notify.notified().await;
+    infinite_numeric_error_notify.notified().await;
     old_date_error_notify.notified().await;
     nan_array_error_notify.notified().await;
+    wide_json_error_notify.notified().await;
+    imprecise_json_integer_error_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
-    for table_id in [huge_numeric_table_id, old_date_table_id, nan_array_table_id] {
+    for table_id in [
+        huge_numeric_table_id,
+        infinite_numeric_table_id,
+        old_date_table_id,
+        nan_array_table_id,
+        wide_json_table_id,
+        imprecise_json_integer_table_id,
+    ] {
         let table_state = store.get_table_replication_state(table_id).await.unwrap().unwrap();
         assert!(matches!(table_state, TableReplicationPhase::Errored { .. }));
     }

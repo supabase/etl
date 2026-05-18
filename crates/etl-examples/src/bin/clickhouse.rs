@@ -47,7 +47,9 @@ use etl::{
     pipeline::Pipeline,
     store::PostgresStore,
 };
-use etl_destinations::clickhouse::{ClickHouseDestination, ClickHouseInserterConfig};
+use etl_destinations::clickhouse::{
+    ClickHouseClientConfig, ClickHouseDestination, ClickHouseInserterConfig,
+};
 use tokio::signal;
 use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -186,7 +188,8 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         pg_connection: pg_connection_config,
         batch: BatchConfig {
             max_fill_ms: args.clickhouse_args.max_batch_fill_duration_ms,
-            memory_budget_ratio: BatchConfig::DEFAULT_MEMORY_BUDGET_RATIO,
+            memory_budget_ratio: 0.2,
+            max_bytes: 8 * 1024 * 1024,
         },
         table_error_retry_delay_ms: 10000,
         table_error_retry_max_attempts: 5,
@@ -206,6 +209,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         args.clickhouse_args.clickhouse_password,
         args.clickhouse_args.clickhouse_database,
         ClickHouseInserterConfig::default(),
+        ClickHouseClientConfig::default(),
         store.clone(),
     )?;
 
