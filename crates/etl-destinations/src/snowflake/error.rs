@@ -8,7 +8,7 @@ pub enum Error {
     #[error("HTTP status {status}: {body}")]
     HttpStatus { status: u16, body: String },
 
-    #[error("authentication error: {0}")]
+    #[error("Authentication error: {0}")]
     Auth(String),
 
     #[error("SQL error{}: {message}", statement_handle.as_ref().map(|h| format!(" (handle {h})")).unwrap_or_default())]
@@ -17,13 +17,13 @@ pub enum Error {
     #[error("Snowpipe error (code {status_code}): {message}")]
     Snowpipe { status_code: u32, message: String },
 
-    #[error("channel error: {0}")]
+    #[error("Channel error: {0}")]
     Channel(String),
 
-    #[error("encoding error: {0}")]
+    #[error("Encoding error: {0}")]
     Encoding(String),
 
-    #[error("configuration error: {0}")]
+    #[error("Configuration error: {0}")]
     Config(String),
 }
 
