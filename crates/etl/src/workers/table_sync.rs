@@ -20,7 +20,7 @@ use crate::{
     metrics::{ERROR_TYPE_LABEL, ETL_WORKER_ERRORS_TOTAL, WORKER_TYPE_LABEL},
     replication::{
         ApplyLoop, ApplyLoopResult, SharedTableCache, TableSyncResult, TableSyncWorkerContext,
-        WorkerContext, client::PgReplicationClient, start_table_sync,
+        WorkerContext, WorkerType, client::PgReplicationClient, start_table_sync,
     },
     state::table::{
         RetryPolicy, TableReplicationError, TableReplicationPhase, TableReplicationPhaseType,
@@ -767,12 +767,13 @@ where
             }
         };
 
-        let _apply_loop_stream_guard = self.batch_budget.register_stream_load(1);
         let worker_context = WorkerContext::TableSync(TableSyncWorkerContext {
             table_id: self.table_id,
             table_sync_worker_state: state,
             state_store: self.store.clone(),
         });
+
+        let _apply_loop_stream_guard = self.batch_budget.register_stream_load(1);
         let apply_loop_result = ApplyLoop::start(
             self.pipeline_id,
             start_lsn,
@@ -795,17 +796,17 @@ where
                     "table sync apply loop completed successfully, deleting slot"
                 );
 
-                // We delete the replication slot used by this table sync worker.
+                // We delete the replication slot and repication progress that were used by this
+                // worker.
                 //
-                // Note that if the deletion fails, the slot will remain in the database and
-                // will not be removed later, so manual intervention will be
-                // required. The reason for not implementing an automatic
-                // cleanup mechanism is that it would introduce performance overhead,
-                // and we expect this call to fail only rarely.
-                let slot_name: String =
-                    EtlReplicationSlot::for_table_sync_worker(self.pipeline_id, self.table_id)
-                        .try_into()?;
-                replication_client.delete_slot_if_exists(&slot_name).await?;
+                // We purposefully catch and log the error since failure to delete it's not a
+                // reason to fail the worker.
+                if let Err(err) = self.cleanup_resources(replication_client, self.store.clone()) {
+                    error!(
+                        table_id = self.table_id.0,
+                        "failed to cleanup resources after table sync worker completion"
+                    );
+                }
 
                 Ok(TableSyncWorkerResult::Completed)
             }
@@ -815,5 +816,24 @@ where
                 Ok(TableSyncWorkerResult::Shutdown)
             }
         }
+    }
+
+    /// Clean up the resources that were used by this table sync worker.
+    ///
+    /// The resources to clean up include:
+    /// - Replication slot
+    /// - Replication progress
+    async fn cleanup_resources(
+        &self,
+        replication_client: PgReplicationClient,
+        store: S,
+    ) -> EtlResult<()> {
+        let slot_name: String =
+            EtlReplicationSlot::for_table_sync_worker(self.pipeline_id, self.table_id)
+                .try_into()?;
+        replication_client.delete_slot_if_exists(&slot_name).await?;
+        store
+            .delete_replication_progress(WorkerType::TableSync { table_id: self.table_id })
+            .await?;
     }
 }

@@ -279,7 +279,6 @@ where
     async fn run_apply_worker(self) -> EtlResult<()> {
         let replication_client =
             PgReplicationClient::connect(self.config.pg_connection.clone()).await?;
-        let _apply_loop_stream_guard = self.batch_budget.register_stream_load(1);
 
         let start_lsn = get_start_lsn(
             self.pipeline_id,
@@ -302,6 +301,7 @@ where
             batch_budget: self.batch_budget.clone(),
         });
 
+        let _apply_loop_stream_guard = self.batch_budget.register_stream_load(1);
         let apply_loop_result = ApplyLoop::start(
             self.pipeline_id,
             start_lsn,
