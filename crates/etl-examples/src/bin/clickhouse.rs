@@ -201,8 +201,6 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         max_copy_connections_per_table: PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE,
     };
 
-    // Initialize the ClickHouse destination.
-    // Tables are created automatically as append-only MergeTree tables.
     let clickhouse_destination = ClickHouseDestination::new(
         Url::parse(&args.clickhouse_args.clickhouse_url)?,
         args.clickhouse_args.clickhouse_user,
@@ -212,6 +210,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         ClickHouseClientConfig::default(),
         store.clone(),
     )?;
+    clickhouse_destination.validate_engine_support().await?;
 
     let mut pipeline = Pipeline::new(pipeline_config, store, clickhouse_destination);
 

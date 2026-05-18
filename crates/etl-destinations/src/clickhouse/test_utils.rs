@@ -113,8 +113,9 @@ impl ClickHouseTestDatabase {
 
     /// Builds a [`ClickHouseDestination`] scoped to this test database with
     /// default inserter config (100 MiB per INSERT -- large enough that tests
-    /// never hit an intermediate flush).
-    pub fn build_destination<S>(&self, store: S) -> ClickHouseDestination<S>
+    /// never hit an intermediate flush). Validates engine support eagerly so
+    /// tests fail fast on engine/version mismatch.
+    pub async fn build_destination<S>(&self, store: S) -> ClickHouseDestination<S>
     where
         S: StateStore + SchemaStore + Send + Sync,
     {
@@ -125,11 +126,13 @@ impl ClickHouseTestDatabase {
                 ..Default::default()
             },
         )
+        .await
     }
 
     /// Builds a [`ClickHouseDestination`] scoped to this test database with
-    /// a caller-supplied [`ClickHouseInserterConfig`].
-    pub fn build_destination_with_config<S>(
+    /// a caller-supplied [`ClickHouseInserterConfig`]. Validates engine support
+    /// eagerly so tests fail fast on engine/version mismatch.
+    pub async fn build_destination_with_config<S>(
         &self,
         store: S,
         config: ClickHouseInserterConfig,
@@ -137,7 +140,7 @@ impl ClickHouseTestDatabase {
     where
         S: StateStore + SchemaStore + Send + Sync,
     {
-        ClickHouseDestination::new(
+        let destination = ClickHouseDestination::new(
             self.url.clone(),
             &self.user,
             self.password.clone(),
@@ -146,7 +149,12 @@ impl ClickHouseTestDatabase {
             ClickHouseClientConfig::default(),
             store,
         )
-        .expect("Failed to create ClickHouseDestination for test")
+        .expect("Failed to create ClickHouseDestination for test");
+        destination
+            .validate_engine_support()
+            .await
+            .expect("ClickHouse engine support check failed in test setup");
+        destination
     }
 
     /// Fetches all rows from a ClickHouse table using the given SQL query.

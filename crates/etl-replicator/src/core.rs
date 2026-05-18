@@ -200,6 +200,7 @@ pub(crate) async fn start_replicator_with_config(
                 ClickHouseClientConfig::default(),
                 state_store.clone(),
             )?;
+            destination.validate_engine_support().await?;
 
             let pipeline = Pipeline::new(replicator_config.pipeline, state_store, destination);
             start_pipeline(pipeline).await?;

@@ -58,19 +58,48 @@ impl std::fmt::Display for CdcOperation {
 
 /// A row pending insertion with its CDC metadata.
 struct PendingRow {
-    /// CDC op kind, written into the `cdc_operation` column.
+    /// CDC op kind. Drives both the MergeTree `cdc_operation` string and the
+    /// ReplacingMergeTree `_etl_deleted` tombstone flag.
     operation: CdcOperation,
-    /// Commit LSN of the source transaction, written into `cdc_lsn`.
-    lsn: PgLsn,
-    /// User column values in source schema order. The two CDC columns
-    /// (`cdc_operation`, `cdc_lsn`) are appended at encode time and are
-    /// not present here.
+    /// Transaction commit LSN. Written to the MergeTree `cdc_lsn` column so
+    /// event-log consumers can group events by transaction.
+    commit_lsn: PgLsn,
+    /// Per-event start LSN, globally monotonic across all events. Written to
+    /// the ReplacingMergeTree `_etl_lsn` (version) column so multi-event
+    /// same-commit transactions tie-break correctly under `FINAL`.
+    start_lsn: PgLsn,
+    /// User column values in source schema order. The trailing CDC columns
+    /// are appended at encode time and are not present here.
     cells: Vec<Cell>,
 }
 
 /// Converts a Postgres LSN into the ClickHouse CDC LSN value.
 fn cdc_lsn_to_clickhouse_value(lsn: PgLsn) -> ClickHouseValue {
     ClickHouseValue::UInt64(u64::from(lsn))
+}
+
+/// Appends the trailing engine-specific CDC columns to the row encoding.
+///
+/// MergeTree: `cdc_operation` (String), `cdc_lsn` (UInt64 commit LSN).
+/// ReplacingMergeTree: `_etl_lsn` (UInt64 start LSN, used as version),
+/// `_etl_deleted` (UInt8 tombstone flag).
+fn append_cdc_columns(
+    values: &mut Vec<ClickHouseValue>,
+    operation: CdcOperation,
+    commit_lsn: PgLsn,
+    start_lsn: PgLsn,
+    engine: ClickHouseEngine,
+) {
+    match engine {
+        ClickHouseEngine::MergeTree => {
+            values.push(ClickHouseValue::String(operation.to_string()));
+            values.push(cdc_lsn_to_clickhouse_value(commit_lsn));
+        }
+        ClickHouseEngine::ReplacingMergeTree => {
+            values.push(ClickHouseValue::UInt64(u64::from(start_lsn)));
+            values.push(ClickHouseValue::UInt8(matches!(operation, CdcOperation::Delete) as u8));
+        }
+    }
 }
 
 /// Returns true if the ClickHouse type has an outer Nullable wrapper.
@@ -289,8 +318,10 @@ impl std::fmt::Display for ClickHouseOperationKind {
 
 /// CDC-capable ClickHouse destination that replicates Postgres tables.
 ///
-/// Uses append-only MergeTree tables with two CDC columns (`cdc_operation`,
-/// `cdc_lsn`) appended to each row. Rows are encoded as RowBinary and sent via
+/// Supports two engines, selected per pipeline via `ClickHouseInserterConfig`:
+/// `MergeTree` (append-only with `cdc_operation`/`cdc_lsn`) and
+/// `ReplacingMergeTree` (current-state with `_etl_lsn` version and
+/// `_etl_deleted` tombstone). Rows are encoded as RowBinary and sent via
 /// `INSERT INTO "table" FORMAT RowBinary` -- no column-name header required.
 #[derive(Clone)]
 pub struct ClickHouseDestination<S> {
@@ -311,6 +342,10 @@ pub struct ClickHouseDestination<S> {
     /// async `tokio::sync::RwLock` would be needless overhead.
     table_cache: Arc<RwLock<HashMap<String, Arc<[bool]>>>>,
 }
+
+/// Minimum ClickHouse server version that supports `ReplacingMergeTree` with
+/// the `(version, is_deleted)` argument pair used by this destination.
+pub(crate) const MIN_REPLACING_MERGE_TREE_VERSION: (u32, u32) = (23, 5);
 
 impl<S> ClickHouseDestination<S>
 where
@@ -336,6 +371,13 @@ where
             store: Arc::new(store),
             table_cache: Arc::new(RwLock::new(HashMap::new())),
         })
+    }
+
+    /// Probes the server version and rejects unsupported engine/version pairs.
+    /// Currently the only gate: RMT requires CH >= 23.5.
+    pub async fn validate_engine_support(&self) -> EtlResult<()> {
+        let server_version = self.client.server_version().await?;
+        ensure_engine_supported(self.inserter_config.engine, server_version)
     }
 
     /// Creates a ClickHouse table for a never-before-seen `table_id`,
@@ -404,7 +446,7 @@ where
         &self,
         schema: &ReplicatedTableSchema,
     ) -> EtlResult<(String, Arc<[bool]>)> {
-        validate_replica_identity_for_clickhouse(schema)?;
+        validate_replica_identity_for_clickhouse(schema, self.inserter_config.engine)?;
         let clickhouse_table_name = try_stringify_table_name(schema.name())?;
 
         if let Some(flags) = self.table_cache.read().get(&clickhouse_table_name).cloned() {
@@ -523,6 +565,7 @@ where
     ) -> EtlResult<()> {
         let (clickhouse_table_name, nullable_flags) = self.ensure_table_exists(schema).await?;
 
+        let engine = self.inserter_config.engine;
         let rows: Vec<Vec<ClickHouseValue>> = table_rows
             .into_iter()
             .map(|table_row| {
@@ -531,10 +574,16 @@ where
                     .into_iter()
                     .map(cell_to_clickhouse_value)
                     .collect::<EtlResult<_>>()?;
-                // CDC columns: initial-copy rows are tagged as INSERT with LSN 0
-                // (sentinel meaning "this row pre-dates the streaming cursor").
-                values.push(ClickHouseValue::String(CdcOperation::Insert.to_string()));
-                values.push(cdc_lsn_to_clickhouse_value(PgLsn::from(0)));
+                // Initial-copy rows are tagged as INSERT with LSN 0 (sentinel meaning
+                // "this row pre-dates the streaming cursor"). For RMT, any streaming
+                // event then wins on FINAL since start_lsn > 0.
+                append_cdc_columns(
+                    &mut values,
+                    CdcOperation::Insert,
+                    PgLsn::from(0),
+                    PgLsn::from(0),
+                    engine,
+                );
                 Ok(values)
             })
             .collect::<EtlResult<_>>()?;
@@ -553,7 +602,7 @@ where
     /// Handles a schema change event (Relation) by computing the diff and
     /// applying ALTER TABLE statements.
     async fn handle_relation_event(&self, new_schema: &ReplicatedTableSchema) -> EtlResult<()> {
-        validate_replica_identity_for_clickhouse(new_schema)?;
+        validate_replica_identity_for_clickhouse(new_schema, self.inserter_config.engine)?;
 
         let table_id = new_schema.id();
         let new_snapshot_id = new_schema.inner().snapshot_id;
@@ -743,7 +792,8 @@ where
                             .or_insert_with(|| (insert.replicated_table_schema, Vec::new()));
                         entry.1.push(PendingRow {
                             operation: CdcOperation::Insert,
-                            lsn: insert.commit_lsn,
+                            commit_lsn: insert.commit_lsn,
+                            start_lsn: insert.start_lsn,
                             cells: insert.table_row.into_values(),
                         });
                     }
@@ -769,7 +819,8 @@ where
                             .or_insert_with(|| (update.replicated_table_schema, Vec::new()));
                         entry.1.push(PendingRow {
                             operation: CdcOperation::Update,
-                            lsn: update.commit_lsn,
+                            commit_lsn: update.commit_lsn,
+                            start_lsn: update.start_lsn,
                             cells: table_row.into_values(),
                         });
                     }
@@ -790,7 +841,8 @@ where
                             .or_insert_with(|| (delete.replicated_table_schema, Vec::new()));
                         entry.1.push(PendingRow {
                             operation: CdcOperation::Delete,
-                            lsn: delete.commit_lsn,
+                            commit_lsn: delete.commit_lsn,
+                            start_lsn: delete.start_lsn,
                             cells: old_row.into_values(),
                         });
                     }
@@ -853,6 +905,7 @@ where
         }
 
         let mut join_set: JoinSet<EtlResult<()>> = JoinSet::new();
+        let engine = self.inserter_config.engine;
         for (clickhouse_table_name, nullable_flags, rows) in prepared {
             let client = self.client.clone();
             let max_bytes = self.inserter_config.max_bytes_per_insert;
@@ -860,13 +913,12 @@ where
             join_set.spawn(async move {
                 let rows: Vec<Vec<ClickHouseValue>> = rows
                     .into_iter()
-                    .map(|PendingRow { operation, lsn, cells }| {
+                    .map(|PendingRow { operation, commit_lsn, start_lsn, cells }| {
                         let mut values: Vec<ClickHouseValue> = cells
                             .into_iter()
                             .map(cell_to_clickhouse_value)
                             .collect::<EtlResult<_>>()?;
-                        values.push(ClickHouseValue::String(operation.to_string()));
-                        values.push(cdc_lsn_to_clickhouse_value(lsn));
+                        append_cdc_columns(&mut values, operation, commit_lsn, start_lsn, engine);
                         Ok(values)
                     })
                     .collect::<EtlResult<_>>()?;
@@ -893,16 +945,43 @@ where
     }
 }
 
-/// Rejects replica identities the ClickHouse destination cannot represent.
+/// Verifies that the configured engine is supported on the given server
+/// version. RMT requires CH >= 23.5 because earlier versions do not accept
+/// the `(version, is_deleted)` argument pair on `ReplacingMergeTree`.
+fn ensure_engine_supported(engine: ClickHouseEngine, server_version: (u32, u32)) -> EtlResult<()> {
+    if matches!(engine, ClickHouseEngine::ReplacingMergeTree)
+        && server_version < MIN_REPLACING_MERGE_TREE_VERSION
+    {
+        let (min_major, min_minor) = MIN_REPLACING_MERGE_TREE_VERSION;
+        let (major, minor) = server_version;
+        return Err(etl_error!(
+            ErrorKind::ConfigError,
+            "ClickHouse server version is too old for ReplacingMergeTree",
+            format!(
+                "Detected ClickHouse {major}.{minor}; engine `replacing_merge_tree` requires \
+                 {min_major}.{min_minor} or newer. Upgrade ClickHouse or set `engine: merge_tree`."
+            )
+        ));
+    }
+    Ok(())
+}
+
+/// Rejects replica identities and schemas the ClickHouse destination cannot
+/// represent for the configured engine.
 ///
-/// `expand_key_row` assumes the key-only old-row image carries primary-key
-/// values, so the row identity must match the primary key. `Full` is also
-/// fine because it bypasses `expand_key_row` entirely. `AlternativeKey`
-/// (a non-PK unique index) and `Missing` would either land identity values
-/// in the wrong PK slots or leave us without enough data to write a
-/// well-formed tombstone.
+/// Common to both engines: `expand_key_row` assumes the key-only old-row image
+/// carries primary-key values, so the row identity must match the primary key.
+/// `Full` is also fine because it bypasses `expand_key_row` entirely.
+/// `AlternativeKey` (a non-PK unique index) and `Missing` would either land
+/// identity values in the wrong PK slots or leave us without enough data to
+/// write a well-formed tombstone.
+///
+/// RMT-only: the source table must have a primary key. RMT uses the PK as
+/// `ORDER BY`, which is also the dedup key; without a PK there is nothing to
+/// merge on.
 fn validate_replica_identity_for_clickhouse(
     replicated_table_schema: &ReplicatedTableSchema,
+    engine: ClickHouseEngine,
 ) -> EtlResult<()> {
     if !replicated_table_schema.all_primary_key_columns_replicated() {
         let omitted_columns = replicated_table_schema
@@ -917,6 +996,20 @@ fn validate_replica_identity_for_clickhouse(
                 "Table '{}' omits source primary-key columns from replication: {}",
                 replicated_table_schema.name(),
                 omitted_columns
+            )
+        ));
+    }
+
+    if matches!(engine, ClickHouseEngine::ReplacingMergeTree)
+        && replicated_table_schema.primary_key_column_schemas().next().is_none()
+    {
+        return Err(etl_error!(
+            ErrorKind::SourceSchemaError,
+            "ClickHouse ReplacingMergeTree requires a primary key",
+            format!(
+                "Table '{}' has no primary-key columns; set `engine: merge_tree` or define a PK \
+                 on the source table.",
+                replicated_table_schema.name()
             )
         ));
     }
@@ -1125,39 +1218,93 @@ mod tests {
 
     #[test]
     fn validate_replica_identity_for_clickhouse_accepts_primary_key() {
-        validate_replica_identity_for_clickhouse(&replicated_schema(IdentityType::PrimaryKey))
-            .unwrap();
+        validate_replica_identity_for_clickhouse(
+            &replicated_schema(IdentityType::PrimaryKey),
+            ClickHouseEngine::MergeTree,
+        )
+        .unwrap();
     }
 
     #[test]
     fn validate_replica_identity_for_clickhouse_accepts_full() {
-        validate_replica_identity_for_clickhouse(&replicated_schema(IdentityType::Full)).unwrap();
+        validate_replica_identity_for_clickhouse(
+            &replicated_schema(IdentityType::Full),
+            ClickHouseEngine::MergeTree,
+        )
+        .unwrap();
     }
 
     #[test]
     fn validate_replica_identity_for_clickhouse_rejects_alternative_key() {
-        let err = validate_replica_identity_for_clickhouse(&replicated_schema(
-            IdentityType::AlternativeKey,
-        ))
+        let err = validate_replica_identity_for_clickhouse(
+            &replicated_schema(IdentityType::AlternativeKey),
+            ClickHouseEngine::MergeTree,
+        )
         .unwrap_err();
         assert_eq!(err.kind(), ErrorKind::SourceSchemaError);
     }
 
     #[test]
     fn validate_replica_identity_for_clickhouse_rejects_missing() {
-        let err =
-            validate_replica_identity_for_clickhouse(&replicated_schema(IdentityType::Missing))
-                .unwrap_err();
+        let err = validate_replica_identity_for_clickhouse(
+            &replicated_schema(IdentityType::Missing),
+            ClickHouseEngine::MergeTree,
+        )
+        .unwrap_err();
         assert_eq!(err.kind(), ErrorKind::SourceSchemaError);
     }
 
     #[test]
     fn validate_replica_identity_for_clickhouse_rejects_partial_primary_key() {
-        let err =
-            validate_replica_identity_for_clickhouse(&replicated_schema_with_partial_primary_key())
-                .unwrap_err();
+        let err = validate_replica_identity_for_clickhouse(
+            &replicated_schema_with_partial_primary_key(),
+            ClickHouseEngine::MergeTree,
+        )
+        .unwrap_err();
         assert_eq!(err.kind(), ErrorKind::SourceSchemaError);
         assert!(err.to_string().contains("tenant_id"));
+    }
+
+    #[test]
+    fn validate_replica_identity_for_clickhouse_rejects_pkless_schema_under_rmt() {
+        // --- GIVEN: a PK-less schema and engine = ReplacingMergeTree ---
+        let table_schema = Arc::new(TableSchema::new(
+            TableId::new(2),
+            TableName::new("public".to_owned(), "events".to_owned()),
+            vec![ColumnSchema::new("value".to_owned(), Type::TEXT, -1, 1, None, true)],
+        ));
+        let replication_mask = ReplicationMask::all(&table_schema);
+        let identity_mask = IdentityMask::from_bytes(vec![1]);
+        let schema =
+            ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask);
+
+        // --- WHEN: validating under RMT ---
+        let err =
+            validate_replica_identity_for_clickhouse(&schema, ClickHouseEngine::ReplacingMergeTree)
+                .unwrap_err();
+
+        // --- THEN: rejected with SourceSchemaError ---
+        assert_eq!(err.kind(), ErrorKind::SourceSchemaError);
+    }
+
+    #[test]
+    fn ensure_engine_supported_rejects_rmt_on_old_server() {
+        // --- GIVEN: server below the RMT minimum ---
+        let err =
+            ensure_engine_supported(ClickHouseEngine::ReplacingMergeTree, (23, 4)).unwrap_err();
+        // --- THEN: surfaced as a config error ---
+        assert_eq!(err.kind(), ErrorKind::ConfigError);
+    }
+
+    #[test]
+    fn ensure_engine_supported_accepts_mt_on_any_server() {
+        ensure_engine_supported(ClickHouseEngine::MergeTree, (20, 0)).unwrap();
+    }
+
+    #[test]
+    fn ensure_engine_supported_accepts_rmt_on_supported_server() {
+        ensure_engine_supported(ClickHouseEngine::ReplacingMergeTree, (23, 5)).unwrap();
+        ensure_engine_supported(ClickHouseEngine::ReplacingMergeTree, (24, 1)).unwrap();
     }
 
     #[test]

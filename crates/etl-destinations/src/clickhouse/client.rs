@@ -219,6 +219,30 @@ impl ClickHouseClient {
         Ok(())
     }
 
+    /// Returns the major/minor version pair from `SELECT version()`.
+    ///
+    /// Trailing components (patch, build) are ignored. Used at destination
+    /// construction to gate engine-specific feature requirements (e.g. RMT
+    /// needs >= 23.5).
+    pub(crate) async fn server_version(&self) -> EtlResult<(u32, u32)> {
+        let raw = self.inner.query("SELECT version()").fetch_one::<String>().await.map_err(
+            |err| etl_error!(ErrorKind::Unknown, "ClickHouse version query failed", source: err),
+        )?;
+
+        let mut parts = raw.split('.');
+        let major = parts.next().and_then(|s| s.parse::<u32>().ok());
+        let minor = parts.next().and_then(|s| s.parse::<u32>().ok());
+
+        match (major, minor) {
+            (Some(major), Some(minor)) => Ok((major, minor)),
+            _ => Err(etl_error!(
+                ErrorKind::Unknown,
+                "Unable to parse ClickHouse server version",
+                format!("server returned '{raw}'")
+            )),
+        }
+    }
+
     /// Executes a DDL statement (e.g. `CREATE TABLE IF NOT EXISTS …`) and
     /// records its duration in the `etl_clickhouse_ddl_duration_seconds`
     /// histogram labelled with the DDL `kind` and `table_name`.
