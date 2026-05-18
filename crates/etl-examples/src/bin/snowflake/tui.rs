@@ -183,7 +183,8 @@ fn render_global_stats(frame: &mut ratatui::Frame, area: Rect, state: &Dashboard
             .filled_style(Style::default().fg(gauge_color))
             .ratio(ratio)
             .label(gauge_label)
-            .line_set(symbols::line::THICK),
+            .filled_symbol(symbols::line::THICK.horizontal)
+            .unfilled_symbol(symbols::line::NORMAL.horizontal),
         sub[2],
     );
 }
