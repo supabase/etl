@@ -708,7 +708,8 @@ struct ManagedDuckLakeConnection {
     broken: bool,
 }
 
-/// Async watchdog that interrupts one timed maintenance query when its deadline expires.
+/// Async watchdog that interrupts one timed maintenance query when its deadline
+/// expires.
 struct DuckDbMaintenanceWatchdog {
     timeout: Duration,
     timed_out: Arc<AtomicBool>,
@@ -887,8 +888,8 @@ impl DuckDbMaintenanceWatchdog {
         } else {
             warn!(
                 operation_kind = DUCKDB_MAINTENANCE_OPERATION_KIND,
-                "ducklake maintenance query watchdog interrupt handle publish skipped because sender \
-                 is gone: operation_kind={}",
+                "ducklake maintenance query watchdog interrupt handle publish skipped because \
+                 sender is gone: operation_kind={}",
                 DUCKDB_MAINTENANCE_OPERATION_KIND
             );
         }
@@ -1047,38 +1048,37 @@ impl DuckDbMaintenanceExecutor {
             remaining_ms_until(deadline),
             blocking_slots.available_permits()
         );
-        let permit = match tokio::time::timeout_at(
-            deadline,
-            Arc::clone(&blocking_slots).acquire_owned(),
-        )
-        .await
-        {
-            Ok(Ok(permit)) => permit,
-            Ok(Err(_)) => {
-                tracing::error!(
-                    operation_kind = DUCKDB_MAINTENANCE_OPERATION_KIND,
-                    "ducklake maintenance blocking operation semaphore closed: operation_kind={}",
-                    DUCKDB_MAINTENANCE_OPERATION_KIND
-                );
-                return Err(etl_error!(
-                    ErrorKind::ApplyWorkerPanic,
-                    "DuckLake maintenance blocking slot acquisition failed"
-                ));
-            }
-            Err(_) => {
-                warn!(
-                    operation_kind = DUCKDB_MAINTENANCE_OPERATION_KIND,
-                    timeout_ms = timeout.as_millis() as u64,
-                    slot_wait_ms = slot_wait_started.elapsed().as_millis() as u64,
-                    "ducklake maintenance blocking operation timed out waiting for semaphore slot: \
-                     operation_kind={}, timeout_ms={}, slot_wait_ms={}",
-                    DUCKDB_MAINTENANCE_OPERATION_KIND,
-                    timeout.as_millis(),
-                    slot_wait_started.elapsed().as_millis()
-                );
-                return Err(duckdb_maintenance_timeout_error(timeout, "slot_wait"));
-            }
-        };
+        let permit =
+            match tokio::time::timeout_at(deadline, Arc::clone(&blocking_slots).acquire_owned())
+                .await
+            {
+                Ok(Ok(permit)) => permit,
+                Ok(Err(_)) => {
+                    tracing::error!(
+                        operation_kind = DUCKDB_MAINTENANCE_OPERATION_KIND,
+                        "ducklake maintenance blocking operation semaphore closed: \
+                         operation_kind={}",
+                        DUCKDB_MAINTENANCE_OPERATION_KIND
+                    );
+                    return Err(etl_error!(
+                        ErrorKind::ApplyWorkerPanic,
+                        "DuckLake maintenance blocking slot acquisition failed"
+                    ));
+                }
+                Err(_) => {
+                    warn!(
+                        operation_kind = DUCKDB_MAINTENANCE_OPERATION_KIND,
+                        timeout_ms = timeout.as_millis() as u64,
+                        slot_wait_ms = slot_wait_started.elapsed().as_millis() as u64,
+                        "ducklake maintenance blocking operation timed out waiting for semaphore \
+                         slot: operation_kind={}, timeout_ms={}, slot_wait_ms={}",
+                        DUCKDB_MAINTENANCE_OPERATION_KIND,
+                        timeout.as_millis(),
+                        slot_wait_started.elapsed().as_millis()
+                    );
+                    return Err(duckdb_maintenance_timeout_error(timeout, "slot_wait"));
+                }
+            };
         trace!(
             wait_ms = slot_wait_started.elapsed().as_millis() as u64,
             "wait for ducklake maintenance blocking slot"

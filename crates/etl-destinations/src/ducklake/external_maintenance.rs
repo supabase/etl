@@ -5,14 +5,13 @@ use etl::{
     error::EtlResult,
     store::{schema::SchemaStore, state::StateStore},
 };
-pub use etl_maintenance::KubernetesExternalMaintenanceStore;
 pub use etl_maintenance::{
     ExternalMaintenanceOperationHistory, ExternalMaintenanceOperationPolicy,
     ExternalMaintenanceOperationRequest, ExternalMaintenanceOperationRun,
     ExternalMaintenanceOperations, ExternalMaintenancePause, ExternalMaintenanceReplicatorState,
     ExternalMaintenanceReplicatorStatus, ExternalMaintenanceRequestOutcome, ExternalMaintenanceRun,
     ExternalMaintenanceState, ExternalMaintenanceStore, ExternalMaintenanceWatcherConfig,
-    PostgresExternalMaintenanceStore,
+    KubernetesExternalMaintenanceStore, PostgresExternalMaintenanceStore,
 };
 use metrics::{counter, histogram};
 use sqlx::PgPool;
