@@ -773,17 +773,18 @@ where
             state_store: self.store.clone(),
         });
 
+        let cleanup_store = self.store.clone();
         let _apply_loop_stream_guard = self.batch_budget.register_stream_load(1);
         let apply_loop_result = ApplyLoop::start(
             self.pipeline_id,
             start_lsn,
-            self.config,
+            Arc::clone(&self.config),
             replication_client.clone(),
-            self.store,
-            self.destination,
-            self.shared_table_cache,
+            self.store.clone(),
+            self.destination.clone(),
+            self.shared_table_cache.clone(),
             worker_context,
-            self.shutdown_rx,
+            self.shutdown_rx.clone(),
             self.memory_monitor.clone(),
             self.batch_budget.clone(),
         )
@@ -796,15 +797,13 @@ where
                     "table sync apply loop completed successfully, deleting slot"
                 );
 
-                // We delete the replication slot and repication progress that were used by this
-                // worker.
-                //
-                // We purposefully catch and log the error since failure to delete it's not a
-                // reason to fail the worker.
-                if let Err(err) = self.cleanup_resources(replication_client, self.store.clone()) {
-                    error!(
+                // Catchup has completed, so cleanup failures should not turn a
+                // completed table sync into a replication failure.
+                if let Err(err) = self.cleanup_resources(replication_client, cleanup_store).await {
+                    warn!(
                         table_id = self.table_id.0,
-                        "failed to cleanup resources after table sync worker completion"
+                        error = %err,
+                        "failed to clean up table sync resources after completion"
                     );
                 }
 
@@ -818,22 +817,29 @@ where
         }
     }
 
-    /// Clean up the resources that were used by this table sync worker.
+    /// Cleans up resources owned by this table sync worker.
     ///
-    /// The resources to clean up include:
-    /// - Replication slot
-    /// - Replication progress
+    /// Once the table sync apply loop completes, its durable progress row is no
+    /// longer needed for resume and the replication slot should be removed so
+    /// it stops retaining WAL.
+    ///
+    /// Progress is deleted first so a slot deletion failure leaves only a stale
+    /// slot behind. That can retain WAL and may require manual cleanup, but it
+    /// does not leave stale progress for a completed table sync worker.
     async fn cleanup_resources(
         &self,
         replication_client: PgReplicationClient,
         store: S,
     ) -> EtlResult<()> {
+        store
+            .delete_replication_progress(WorkerType::TableSync { table_id: self.table_id })
+            .await?;
+
         let slot_name: String =
             EtlReplicationSlot::for_table_sync_worker(self.pipeline_id, self.table_id)
                 .try_into()?;
         replication_client.delete_slot_if_exists(&slot_name).await?;
-        store
-            .delete_replication_progress(WorkerType::TableSync { table_id: self.table_id })
-            .await?;
+
+        Ok(())
     }
 }
