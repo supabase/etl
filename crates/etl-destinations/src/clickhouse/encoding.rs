@@ -22,8 +22,7 @@ pub(crate) enum ClickHouseValue {
     Int16(i16),
     Int32(i32),
     Int64(i64),
-    /// Unsigned 8-bit integer, used for the RMT `_etl_deleted` tombstone
-    /// column.
+    /// Unsigned 8-bit integer, used for the RMT `_etl_deleted` tombstone.
     UInt8(u8),
     UInt32(u32),
     /// Unsigned 64-bit integer, used for CDC LSN metadata.

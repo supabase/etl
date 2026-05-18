@@ -954,6 +954,7 @@ fn ensure_engine_supported(engine: ClickHouseEngine, server_version: (u32, u32))
     {
         let (min_major, min_minor) = MIN_REPLACING_MERGE_TREE_VERSION;
         let (major, minor) = server_version;
+
         return Err(etl_error!(
             ErrorKind::ConfigError,
             "ClickHouse server version is too old for ReplacingMergeTree",
@@ -963,6 +964,7 @@ fn ensure_engine_supported(engine: ClickHouseEngine, server_version: (u32, u32))
             )
         ));
     }
+
     Ok(())
 }
 
