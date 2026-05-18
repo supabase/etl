@@ -25,7 +25,7 @@ use crate::{
         client::{ClickHouseClient, ClickHouseTableColumn, DdlKind},
         encoding::{ClickHouseValue, cell_to_clickhouse_value},
         metrics::register_metrics,
-        schema::{CDC_LSN_COLUMN_NAME, CDC_OPERATION_COLUMN_NAME, build_create_table_sql},
+        schema::{create_current_view_sql, create_table_sql, trailing_cdc_column_names},
     },
     table_name::try_stringify_table_name,
 };
@@ -78,12 +78,18 @@ fn clickhouse_type_expects_nullable_marker(type_name: &str) -> bool {
     type_name.starts_with("Nullable(")
 }
 
-/// Returns expected ClickHouse column names for a replicated schema.
-fn expected_clickhouse_column_names(schema: &ReplicatedTableSchema) -> Vec<String> {
+/// Returns expected ClickHouse column names for a replicated schema under
+/// the given engine. Trailing columns differ by engine (see
+/// `trailing_cdc_column_names`).
+fn expected_clickhouse_column_names(
+    schema: &ReplicatedTableSchema,
+    engine: ClickHouseEngine,
+) -> Vec<String> {
     let mut names: Vec<String> =
         schema.column_schemas().map(|column| column.name.clone()).collect();
-    names.push(CDC_OPERATION_COLUMN_NAME.to_owned());
-    names.push(CDC_LSN_COLUMN_NAME.to_owned());
+    for trailing in trailing_cdc_column_names(engine) {
+        names.push((*trailing).to_owned());
+    }
     names
 }
 
@@ -362,11 +368,29 @@ where
         );
         self.store.store_destination_table_metadata(table_id, metadata.clone()).await?;
 
-        let ddl = build_create_table_sql(clickhouse_table_name, schema.column_schemas());
-        self.client.execute_ddl(DdlKind::CreateTable, &ddl).await?;
+        self.issue_create_table_ddl(clickhouse_table_name, schema).await?;
 
         self.store.store_destination_table_metadata(table_id, metadata.to_applied()).await?;
 
+        Ok(())
+    }
+
+    /// Issues the engine-correct `CREATE TABLE`, and under RMT also the
+    /// companion `CREATE VIEW "<table>__current"`. Both statements are
+    /// `IF NOT EXISTS`, so retries on the recovery path are idempotent.
+    async fn issue_create_table_ddl(
+        &self,
+        clickhouse_table_name: &str,
+        schema: &ReplicatedTableSchema,
+    ) -> EtlResult<()> {
+        let engine = self.inserter_config.engine;
+        let ddl = create_table_sql(engine, clickhouse_table_name, schema.column_schemas())?;
+        self.client.execute_ddl(DdlKind::CreateTable, &ddl).await?;
+
+        if matches!(engine, ClickHouseEngine::ReplacingMergeTree) {
+            let view_ddl = create_current_view_sql(clickhouse_table_name, schema.column_schemas());
+            self.client.execute_ddl(DdlKind::CreateView, &view_ddl).await?;
+        }
         Ok(())
     }
 
@@ -421,7 +445,8 @@ where
         // `Nullable(T)` even when the Postgres column is `NOT NULL`, so RowBinary must
         // include the nullable marker byte ClickHouse expects.
         let actual_columns = self.client.table_columns(&clickhouse_table_name).await?;
-        let expected_column_names = expected_clickhouse_column_names(schema);
+        let expected_column_names =
+            expected_clickhouse_column_names(schema, self.inserter_config.engine);
         let nullable_flags = nullable_flags_from_clickhouse_columns(
             &clickhouse_table_name,
             &expected_column_names,
@@ -478,8 +503,7 @@ where
                 self.apply_schema_diff(clickhouse_table_name, &diff, &old_schema).await?;
             }
             None => {
-                let ddl = build_create_table_sql(clickhouse_table_name, schema.column_schemas());
-                self.client.execute_ddl(DdlKind::CreateTable, &ddl).await?;
+                self.issue_create_table_ddl(clickhouse_table_name, schema).await?;
             }
         }
 
@@ -1058,6 +1082,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::clickhouse::schema::{CDC_LSN_COLUMN_NAME, CDC_OPERATION_COLUMN_NAME};
 
     fn clickhouse_column(name: &str, type_name: &str) -> ClickHouseTableColumn {
         ClickHouseTableColumn { name: name.to_owned(), type_name: type_name.to_owned() }

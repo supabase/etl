@@ -142,6 +142,7 @@ fn build_insert_rows_sql(table_name: &str) -> String {
 #[derive(Copy, Clone)]
 pub(crate) enum DdlKind {
     CreateTable,
+    CreateView,
     AddColumn,
     DropColumn,
     RenameColumn,
@@ -151,6 +152,7 @@ impl DdlKind {
     fn as_label(self) -> &'static str {
         match self {
             DdlKind::CreateTable => "create_table",
+            DdlKind::CreateView => "create_view",
             DdlKind::AddColumn => "add_column",
             DdlKind::DropColumn => "drop_column",
             DdlKind::RenameColumn => "rename_column",
