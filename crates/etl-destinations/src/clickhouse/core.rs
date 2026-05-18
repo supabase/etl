@@ -832,9 +832,15 @@ fn default_cell(typ: &Type) -> Cell {
         Type::OID => Cell::U32(0),
         Type::FLOAT4 => Cell::F32(0.0),
         Type::FLOAT8 => Cell::F64(0.0),
-        Type::DATE => Cell::Date(chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap()),
-        Type::TIMESTAMP => Cell::Timestamp(chrono::DateTime::UNIX_EPOCH.naive_utc()),
-        Type::TIMESTAMPTZ => Cell::TimestampTz(chrono::DateTime::UNIX_EPOCH),
+        Type::DATE => Cell::Date(etl::types::PgDate::Finite(
+            chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap(),
+        )),
+        Type::TIMESTAMP => Cell::Timestamp(etl::types::PgTimestamp::Finite(
+            chrono::DateTime::UNIX_EPOCH.naive_utc(),
+        )),
+        Type::TIMESTAMPTZ => {
+            Cell::TimestampTz(etl::types::PgTimestampTz::Finite(chrono::DateTime::UNIX_EPOCH))
+        }
         Type::UUID => Cell::Uuid(uuid::Uuid::nil()),
         Type::CHAR
         | Type::BPCHAR

@@ -2164,7 +2164,7 @@ async fn type_mapping_round_trip() {
                 Cell::String("hello".to_owned()),
                 Cell::F64(PI),
                 Cell::Bool(true),
-                Cell::Date(NaiveDate::from_ymd_opt(2024, 6, 15).unwrap()),
+                Cell::Date(NaiveDate::from_ymd_opt(2024, 6, 15).unwrap().into()),
             ])],
         )
         .await

@@ -1,7 +1,9 @@
-use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use uuid::Uuid;
 
-use crate::conversions::PgNumeric;
+use crate::{
+    conversions::PgNumeric,
+    types::temporal::{PgDate, PgTime, PgTimestamp, PgTimestampTz},
+};
 
 /// Represents a single database cell value with support for Postgres types.
 ///
@@ -34,14 +36,14 @@ pub enum Cell {
     F64(f64),
     /// Postgres NUMERIC/DECIMAL type with arbitrary precision
     Numeric(PgNumeric),
-    /// Date without time information
-    Date(NaiveDate),
-    /// Time without date information
-    Time(NaiveTime),
-    /// Timestamp without timezone information
-    Timestamp(NaiveDateTime),
-    /// Timestamp with timezone information in UTC
-    TimestampTz(DateTime<Utc>),
+    /// Postgres date without time information.
+    Date(PgDate),
+    /// Postgres time without date information.
+    Time(PgTime),
+    /// Postgres timestamp without timezone information.
+    Timestamp(PgTimestamp),
+    /// Postgres timestamp with timezone information in UTC.
+    TimestampTz(PgTimestampTz),
     /// UUID (Universally Unique Identifier)
     Uuid(Uuid),
     /// Raw byte data
@@ -63,10 +65,10 @@ impl Cell {
             Cell::F32(i) => *i = 0.,
             Cell::F64(i) => *i = 0.,
             Cell::Numeric(n) => *n = PgNumeric::default(),
-            Cell::Date(t) => *t = NaiveDate::default(),
-            Cell::Time(t) => *t = NaiveTime::default(),
-            Cell::Timestamp(t) => *t = NaiveDateTime::default(),
-            Cell::TimestampTz(t) => *t = DateTime::<Utc>::default(),
+            Cell::Date(t) => *t = PgDate::default(),
+            Cell::Time(t) => *t = PgTime::default(),
+            Cell::Timestamp(t) => *t = PgTimestamp::default(),
+            Cell::TimestampTz(t) => *t = PgTimestampTz::default(),
             Cell::Uuid(u) => *u = Uuid::default(),
             Cell::U32(u) => *u = 0,
             Cell::Bytes(b) => b.clear(),
@@ -102,14 +104,14 @@ pub enum ArrayCell {
     F64(Vec<Option<f64>>),
     /// Array of nullable Postgres numeric values
     Numeric(Vec<Option<PgNumeric>>),
-    /// Array of nullable dates
-    Date(Vec<Option<NaiveDate>>),
-    /// Array of nullable times
-    Time(Vec<Option<NaiveTime>>),
-    /// Array of nullable timestamps
-    Timestamp(Vec<Option<NaiveDateTime>>),
-    /// Array of nullable timestamps with timezone
-    TimestampTz(Vec<Option<DateTime<Utc>>>),
+    /// Array of nullable Postgres dates.
+    Date(Vec<Option<PgDate>>),
+    /// Array of nullable Postgres times.
+    Time(Vec<Option<PgTime>>),
+    /// Array of nullable Postgres timestamps.
+    Timestamp(Vec<Option<PgTimestamp>>),
+    /// Array of nullable Postgres timestamps with timezone.
+    TimestampTz(Vec<Option<PgTimestampTz>>),
     /// Array of nullable UUIDs
     Uuid(Vec<Option<Uuid>>),
     /// Array of nullable byte arrays

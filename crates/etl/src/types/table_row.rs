@@ -3,7 +3,7 @@ use std::mem::size_of;
 use tracing::warn;
 
 use crate::types::{
-    PgNumeric, SizeHint,
+    PgDate, PgNumeric, PgTimestamp, PgTimestampTz, SizeHint,
     cell::{ArrayCell, Cell},
 };
 
@@ -303,11 +303,11 @@ fn estimate_cell_allocated_bytes(cell: &Cell) -> usize {
         | Cell::I64(_)
         | Cell::F32(_)
         | Cell::F64(_)
-        | Cell::Date(_)
         | Cell::Time(_)
-        | Cell::Timestamp(_)
-        | Cell::TimestampTz(_)
         | Cell::Uuid(_) => 0,
+        Cell::Date(value) => estimated_pg_date_allocated_bytes(value),
+        Cell::Timestamp(value) => estimated_pg_timestamp_allocated_bytes(value),
+        Cell::TimestampTz(value) => estimated_pg_timestamptz_allocated_bytes(value),
         Cell::Numeric(value) => estimated_pg_numeric_allocated_bytes(value),
         Cell::String(value) => value.capacity(),
         Cell::Bytes(value) => value.capacity(),
@@ -325,6 +325,39 @@ fn estimated_pg_numeric_allocated_bytes(value: &PgNumeric) -> usize {
         ),
         PgNumeric::NaN | PgNumeric::PositiveInfinity | PgNumeric::NegativeInfinity => 0,
     }
+}
+
+/// Returns an estimate of additional heap bytes owned by a [`PgDate`].
+fn estimated_pg_date_allocated_bytes(value: &PgDate) -> usize {
+    match value {
+        PgDate::OutOfRange(value) => value.text().len(),
+        PgDate::Finite(_) | PgDate::PosInfinity | PgDate::NegInfinity => 0,
+    }
+}
+
+/// Returns an estimate of additional heap bytes owned by a [`PgTimestamp`].
+fn estimated_pg_timestamp_allocated_bytes(value: &PgTimestamp) -> usize {
+    match value {
+        PgTimestamp::OutOfRange(value) => value.text().len(),
+        PgTimestamp::Finite(_) | PgTimestamp::PosInfinity | PgTimestamp::NegInfinity => 0,
+    }
+}
+
+/// Returns an estimate of additional heap bytes owned by a [`PgTimestampTz`].
+fn estimated_pg_timestamptz_allocated_bytes(value: &PgTimestampTz) -> usize {
+    match value {
+        PgTimestampTz::OutOfRange(value) => value.text().len(),
+        PgTimestampTz::Finite(_) | PgTimestampTz::PosInfinity | PgTimestampTz::NegInfinity => 0,
+    }
+}
+
+/// Returns an estimate of additional heap bytes owned by temporal arrays.
+fn estimate_temporal_array_allocated_bytes<T>(
+    values: &Vec<Option<T>>,
+    element_size: usize,
+    capacity_metric: &'static str,
+) -> usize {
+    checked_mul_or_saturating(values.capacity(), element_size, capacity_metric)
 }
 
 /// Returns an estimate of additional heap bytes owned by an [`ArrayCell`].
@@ -380,24 +413,24 @@ fn estimate_array_allocated_bytes(value: &ArrayCell) -> usize {
             }
             total
         }
-        ArrayCell::Date(values) => checked_mul_or_saturating(
-            values.capacity(),
-            size_of::<Option<chrono::NaiveDate>>(),
+        ArrayCell::Date(values) => estimate_temporal_array_allocated_bytes(
+            values,
+            size_of::<Option<crate::types::PgDate>>(),
             "array.date_capacity_mul_option_size",
         ),
         ArrayCell::Time(values) => checked_mul_or_saturating(
             values.capacity(),
-            size_of::<Option<chrono::NaiveTime>>(),
+            size_of::<Option<crate::types::PgTime>>(),
             "array.time_capacity_mul_option_size",
         ),
-        ArrayCell::Timestamp(values) => checked_mul_or_saturating(
-            values.capacity(),
-            size_of::<Option<chrono::NaiveDateTime>>(),
+        ArrayCell::Timestamp(values) => estimate_temporal_array_allocated_bytes(
+            values,
+            size_of::<Option<crate::types::PgTimestamp>>(),
             "array.timestamp_capacity_mul_option_size",
         ),
-        ArrayCell::TimestampTz(values) => checked_mul_or_saturating(
-            values.capacity(),
-            size_of::<Option<chrono::DateTime<chrono::Utc>>>(),
+        ArrayCell::TimestampTz(values) => estimate_temporal_array_allocated_bytes(
+            values,
+            size_of::<Option<crate::types::PgTimestampTz>>(),
             "array.timestamptz_capacity_mul_option_size",
         ),
         ArrayCell::Uuid(values) => checked_mul_or_saturating(

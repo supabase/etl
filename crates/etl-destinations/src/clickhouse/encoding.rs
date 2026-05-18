@@ -1,8 +1,8 @@
-use chrono::NaiveDate;
+use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 use etl::{
     error::{ErrorKind, EtlResult},
     etl_error,
-    types::{ArrayCell, Cell},
+    types::{ArrayCell, Cell, PgDate, PgTimestamp, PgTimestampTz},
 };
 
 // RowBinary bytes are written directly via `Client::insert_formatted_with`,
@@ -58,10 +58,14 @@ pub(crate) fn cell_to_clickhouse_value(cell: Cell) -> EtlResult<ClickHouseValue>
         Cell::F32(v) => ClickHouseValue::Float32(v),
         Cell::F64(v) => ClickHouseValue::Float64(v),
         Cell::Numeric(n) => ClickHouseValue::String(n.to_string()),
-        Cell::Date(d) => ClickHouseValue::Date32(date_to_date32_days(d)?),
+        Cell::Date(d) => ClickHouseValue::Date32(date_to_date32_days(finite_date(d)?)?),
         Cell::Time(t) => ClickHouseValue::String(t.to_string()),
-        Cell::Timestamp(dt) => ClickHouseValue::DateTime64(dt.and_utc().timestamp_micros()),
-        Cell::TimestampTz(dt) => ClickHouseValue::DateTime64(dt.timestamp_micros()),
+        Cell::Timestamp(dt) => {
+            ClickHouseValue::DateTime64(finite_timestamp(dt)?.and_utc().timestamp_micros())
+        }
+        Cell::TimestampTz(dt) => {
+            ClickHouseValue::DateTime64(finite_timestamptz(dt)?.timestamp_micros())
+        }
         Cell::Uuid(u) => ClickHouseValue::Uuid(*u.as_bytes()),
         Cell::Bytes(b) => ClickHouseValue::String(bytes_to_hex(&b)),
         Cell::String(s) => ClickHouseValue::String(s),
@@ -86,16 +90,16 @@ fn array_cell_to_clickhouse_values(array_cell: ArrayCell) -> EtlResult<Vec<Click
         ArrayCell::F32(v) => map_array(v, ClickHouseValue::Float32),
         ArrayCell::F64(v) => map_array(v, ClickHouseValue::Float64),
         ArrayCell::Numeric(v) => map_array(v, |n| ClickHouseValue::String(n.to_string())),
-        ArrayCell::Date(v) => {
-            try_map_array(v, |d| Ok(ClickHouseValue::Date32(date_to_date32_days(d)?)))?
-        }
+        ArrayCell::Date(v) => try_map_array(v, |d| {
+            Ok(ClickHouseValue::Date32(date_to_date32_days(finite_date(d)?)?))
+        })?,
         ArrayCell::Time(v) => map_array(v, |t| ClickHouseValue::String(t.to_string())),
-        ArrayCell::Timestamp(v) => {
-            map_array(v, |dt| ClickHouseValue::DateTime64(dt.and_utc().timestamp_micros()))
-        }
-        ArrayCell::TimestampTz(v) => {
-            map_array(v, |dt| ClickHouseValue::DateTime64(dt.timestamp_micros()))
-        }
+        ArrayCell::Timestamp(v) => try_map_array(v, |dt| {
+            Ok(ClickHouseValue::DateTime64(finite_timestamp(dt)?.and_utc().timestamp_micros()))
+        })?,
+        ArrayCell::TimestampTz(v) => try_map_array(v, |dt| {
+            Ok(ClickHouseValue::DateTime64(finite_timestamptz(dt)?.timestamp_micros()))
+        })?,
         ArrayCell::Uuid(v) => map_array(v, |u| ClickHouseValue::Uuid(*u.as_bytes())),
         ArrayCell::Bytes(v) => map_array(v, |b| ClickHouseValue::String(bytes_to_hex(&b))),
     })
@@ -145,6 +149,44 @@ fn date_to_date32_days(d: NaiveDate) -> EtlResult<i32> {
     }
     // The bounds check above guarantees the day count fits in i32.
     Ok(d.signed_duration_since(unix_epoch()).num_days() as i32)
+}
+
+/// Returns the finite date, rejecting PostgreSQL-only temporal sentinels.
+fn finite_date(value: PgDate) -> EtlResult<NaiveDate> {
+    value.as_finite().ok_or_else(|| {
+        etl_error!(
+            ErrorKind::ConversionError,
+            "Date cannot be represented in ClickHouse",
+            format!("PostgreSQL date value {value} has no finite ClickHouse Date32 encoding")
+        )
+    })
+}
+
+/// Returns the finite timestamp, rejecting PostgreSQL-only temporal sentinels.
+fn finite_timestamp(value: PgTimestamp) -> EtlResult<NaiveDateTime> {
+    value.as_finite().ok_or_else(|| {
+        etl_error!(
+            ErrorKind::ConversionError,
+            "Timestamp cannot be represented in ClickHouse",
+            format!(
+                "PostgreSQL timestamp value {value} has no finite ClickHouse DateTime64 encoding"
+            )
+        )
+    })
+}
+
+/// Returns the finite timestamptz, rejecting PostgreSQL-only temporal
+/// sentinels.
+fn finite_timestamptz(value: PgTimestampTz) -> EtlResult<DateTime<Utc>> {
+    value.as_finite().ok_or_else(|| {
+        etl_error!(
+            ErrorKind::ConversionError,
+            "Timestamp with time zone cannot be represented in ClickHouse",
+            format!(
+                "PostgreSQL timestamptz value {value} has no finite ClickHouse DateTime64 encoding"
+            )
+        )
+    })
 }
 
 fn unix_epoch() -> NaiveDate {
@@ -314,13 +356,13 @@ mod tests {
     fn cell_to_clickhouse_value_date() {
         let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
         assert!(matches!(
-            cell_to_clickhouse_value(Cell::Date(epoch)).unwrap(),
+            cell_to_clickhouse_value(Cell::Date(epoch.into())).unwrap(),
             ClickHouseValue::Date32(0)
         ));
 
         let day1 = NaiveDate::from_ymd_opt(1970, 1, 2).unwrap();
         assert!(matches!(
-            cell_to_clickhouse_value(Cell::Date(day1)).unwrap(),
+            cell_to_clickhouse_value(Cell::Date(day1.into())).unwrap(),
             ClickHouseValue::Date32(1)
         ));
 
@@ -328,7 +370,7 @@ mod tests {
         // than being silently clamped to the epoch.
         let pre_epoch = NaiveDate::from_ymd_opt(1969, 12, 31).unwrap();
         assert!(matches!(
-            cell_to_clickhouse_value(Cell::Date(pre_epoch)).unwrap(),
+            cell_to_clickhouse_value(Cell::Date(pre_epoch.into())).unwrap(),
             ClickHouseValue::Date32(-1)
         ));
     }
@@ -336,17 +378,17 @@ mod tests {
     #[test]
     fn cell_to_clickhouse_value_date_out_of_range_errors() {
         let too_old = NaiveDate::from_ymd_opt(1899, 12, 31).unwrap();
-        assert!(cell_to_clickhouse_value(Cell::Date(too_old)).is_err());
+        assert!(cell_to_clickhouse_value(Cell::Date(too_old.into())).is_err());
 
         let too_new = NaiveDate::from_ymd_opt(2300, 1, 1).unwrap();
-        assert!(cell_to_clickhouse_value(Cell::Date(too_new)).is_err());
+        assert!(cell_to_clickhouse_value(Cell::Date(too_new.into())).is_err());
     }
 
     #[test]
     fn cell_to_clickhouse_value_timestamp() {
         let epoch = chrono::DateTime::from_timestamp(0, 0).unwrap().naive_utc();
         assert!(matches!(
-            cell_to_clickhouse_value(Cell::Timestamp(epoch)).unwrap(),
+            cell_to_clickhouse_value(Cell::Timestamp(epoch.into())).unwrap(),
             ClickHouseValue::DateTime64(0)
         ));
     }

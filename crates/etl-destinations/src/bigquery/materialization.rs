@@ -1,6 +1,6 @@
 use std::{collections::HashSet, fmt, str::FromStr};
 
-use chrono::{DateTime, Datelike, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use etl::{
     error::ErrorKind,
     materialization::{
@@ -9,8 +9,8 @@ use etl::{
         TypedCell,
     },
     types::{
-        ArrayCell, Cell, DATE_FORMAT, PgNumeric, TIME_FORMAT, TIMESTAMP_FORMAT,
-        TIMESTAMPTZ_FORMAT_HH_MM, TIMESTAMPTZ_FORMAT_HHMM, Type, is_array_type,
+        ArrayCell, Cell, PgDate, PgNumeric, PgTemporalBound, PgTime, PgTimestamp, PgTimestampTz,
+        Type, is_array_type,
     },
 };
 use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
@@ -105,15 +105,6 @@ fn bigquery_materialized_cell(
     }
 
     let cell = match (typ, cell) {
-        (
-            &Type::DATE | &Type::TIME | &Type::TIMESTAMP | &Type::TIMESTAMPTZ,
-            Cell::String(value),
-        ) => {
-            // The Postgres text parser preserves temporal text when the value
-            // is valid for Postgres but outside chrono's native domain, such
-            // as infinities, BC dates, very large years, or `24:00:00`.
-            return temporal_string_cell(typ, value, compatibility);
-        }
         (&Type::JSON | &Type::JSONB, Cell::String(value)) => {
             return json_string_cell(typ, value, compatibility);
         }
@@ -242,20 +233,6 @@ fn array_typed_cell(
     }
 }
 
-/// Applies BigQuery materialization for temporal text that could not be parsed
-/// into Rust's temporal domain.
-fn temporal_string_cell(
-    typ: &Type,
-    value: String,
-    compatibility: DestinationTypeCompatibility,
-) -> BigQueryCellMaterializationResult {
-    match compatibility.mode() {
-        DestinationTypeCompatibilityMode::Strict => strict_temporal_text(value),
-        DestinationTypeCompatibilityMode::Lossless => lossless_temporal_text(value),
-        DestinationTypeCompatibilityMode::Lossy => lossy_temporal_text(typ, value),
-    }
-}
-
 /// Applies BigQuery materialization for raw JSON text.
 fn json_string_cell(
     typ: &Type,
@@ -296,14 +273,6 @@ fn strict_source_array_cell(typ: &Type, cell: Cell) -> BigQueryCellMaterializati
     }
 }
 
-/// Rejects raw temporal text that cannot be stored exactly in BigQuery.
-fn strict_temporal_text(value: String) -> BigQueryCellMaterializationResult {
-    invalid(
-        ErrorKind::UnsupportedValueInDestination,
-        format!("Temporal value '{value}' cannot be stored exactly in BigQuery"),
-    )
-}
-
 /// Applies strict materialization to raw JSON text.
 fn strict_json_text(typ: &Type, value: String) -> BigQueryCellMaterializationResult {
     match parse_json_text_without_duplicate_keys(&value) {
@@ -331,16 +300,16 @@ fn lossless_cell(typ: &Type, cell: Cell) -> BigQueryCellMaterializationResult {
             type_changed(BigQueryType::String, BigQueryCell::string(value.to_string()))
         }
         Cell::Date(value) => {
-            type_changed(BigQueryType::String, BigQueryCell::string(format_date(value)))
+            type_changed(BigQueryType::String, BigQueryCell::string(value.to_string()))
         }
         Cell::Time(value) => {
-            type_changed(BigQueryType::String, BigQueryCell::string(format_time(value)))
+            type_changed(BigQueryType::String, BigQueryCell::string(value.to_string()))
         }
         Cell::Timestamp(value) => {
-            type_changed(BigQueryType::String, BigQueryCell::string(format_timestamp(value)))
+            type_changed(BigQueryType::String, BigQueryCell::string(value.to_string()))
         }
         Cell::TimestampTz(value) => {
-            type_changed(BigQueryType::String, BigQueryCell::string(format_timestamptz(value)))
+            type_changed(BigQueryType::String, BigQueryCell::string(value.to_string()))
         }
         Cell::Uuid(value) => {
             type_changed(BigQueryType::String, BigQueryCell::string(value.to_string()))
@@ -364,11 +333,6 @@ fn lossless_source_array_cell(cell: Cell) -> BigQueryCellMaterializationResult {
     }
 }
 
-/// Preserves raw temporal text exactly.
-fn lossless_temporal_text(value: String) -> BigQueryCellMaterializationResult {
-    type_changed(BigQueryType::String, BigQueryCell::string(value))
-}
-
 /// Preserves raw JSON text exactly.
 fn lossless_json_text(value: String) -> BigQueryCellMaterializationResult {
     type_changed(BigQueryType::String, BigQueryCell::string(value))
@@ -380,10 +344,10 @@ fn lossless_array_cell(array: ArrayCell) -> BigQueryCellMaterializationResult {
         ArrayCell::F32(values) => string_array(values, |value| value.to_string()),
         ArrayCell::F64(values) => string_array(values, |value| value.to_string()),
         ArrayCell::Numeric(values) => string_array(values, |value| value.to_string()),
-        ArrayCell::Date(values) => string_array(values, format_date),
-        ArrayCell::Time(values) => string_array(values, format_time),
-        ArrayCell::Timestamp(values) => string_array(values, format_timestamp),
-        ArrayCell::TimestampTz(values) => string_array(values, format_timestamptz),
+        ArrayCell::Date(values) => string_array(values, |value| value.to_string()),
+        ArrayCell::Time(values) => string_array(values, |value| value.to_string()),
+        ArrayCell::Timestamp(values) => string_array(values, |value| value.to_string()),
+        ArrayCell::TimestampTz(values) => string_array(values, |value| value.to_string()),
         ArrayCell::Uuid(values) => string_array(values, |value| value.to_string()),
         array => {
             unchanged(BigQueryType::String, BigQueryCell::from_native_cell(Cell::Array(array)))
@@ -401,18 +365,10 @@ fn lossy_cell(typ: &Type, cell: Cell) -> BigQueryCellMaterializationResult {
             value_changed(BigQueryType::native_for_source_type(typ), BigQueryCell::Float64(0.0))
         }
         Cell::Numeric(value) => lossy_numeric_cell(value),
-        Cell::Date(value) => value_changed(
-            BigQueryType::native_for_source_type(typ),
-            BigQueryCell::string(format_date(clamp_bigquery_date(value))),
-        ),
-        Cell::Timestamp(value) => value_changed(
-            BigQueryType::native_for_source_type(typ),
-            BigQueryCell::string(format_timestamp(clamp_bigquery_timestamp(value))),
-        ),
-        Cell::TimestampTz(value) => value_changed(
-            BigQueryType::native_for_source_type(typ),
-            BigQueryCell::string(format_timestamptz(clamp_bigquery_timestamptz(value))),
-        ),
+        Cell::Date(value) => lossy_date_cell(typ, value),
+        Cell::Time(value) => lossy_time_cell(typ, value),
+        Cell::Timestamp(value) => lossy_timestamp_cell(typ, value),
+        Cell::TimestampTz(value) => lossy_timestamptz_cell(typ, value),
         Cell::Uuid(value) => {
             type_changed(BigQueryType::String, BigQueryCell::string(value.to_string()))
         }
@@ -435,27 +391,6 @@ fn lossy_source_array_cell(cell: Cell) -> BigQueryCellMaterializationResult {
     }
 }
 
-/// Normalizes raw temporal text to BigQuery's finite temporal domains.
-fn lossy_temporal_text(typ: &Type, value: String) -> BigQueryCellMaterializationResult {
-    let value = match *typ {
-        Type::DATE => lossy_raw_date(&value),
-        Type::TIME => lossy_raw_time(&value),
-        Type::TIMESTAMP => lossy_raw_timestamp(&value),
-        Type::TIMESTAMPTZ => lossy_raw_timestamptz(&value),
-        _ => None,
-    };
-
-    match value {
-        Some(value) => {
-            value_changed(BigQueryType::native_for_source_type(typ), BigQueryCell::string(value))
-        }
-        None => invalid(
-            ErrorKind::UnsupportedValueInDestination,
-            "Temporal text cannot be normalized to BigQuery",
-        ),
-    }
-}
-
 /// Applies lossy materialization to raw JSON text.
 fn lossy_json_text(typ: &Type, value: String) -> BigQueryCellMaterializationResult {
     match parse_json_text_first_key_wins(&value) {
@@ -472,44 +407,6 @@ fn lossy_json_text(typ: &Type, value: String) -> BigQueryCellMaterializationResu
         }
         Err(result) => result,
     }
-}
-
-/// Normalizes raw date text to the BigQuery date domain.
-fn lossy_raw_date(value: &str) -> Option<String> {
-    Some(if lossy_temporal_text_is_negative(value) {
-        format_date(bigquery_min_date())
-    } else {
-        format_date(bigquery_max_date())
-    })
-}
-
-/// Normalizes raw time text to the BigQuery time domain.
-fn lossy_raw_time(value: &str) -> Option<String> {
-    if value.starts_with("24:") { Some("23:59:59.999999".to_owned()) } else { None }
-}
-
-/// Normalizes raw timestamp text to the BigQuery timestamp domain.
-fn lossy_raw_timestamp(value: &str) -> Option<String> {
-    Some(if lossy_temporal_text_is_negative(value) {
-        format_timestamp(bigquery_min_timestamp())
-    } else {
-        format_timestamp(bigquery_max_timestamp())
-    })
-}
-
-/// Normalizes raw timestamp-with-time-zone text to the BigQuery timestamp
-/// domain.
-fn lossy_raw_timestamptz(value: &str) -> Option<String> {
-    Some(if lossy_temporal_text_is_negative(value) {
-        format_timestamptz(bigquery_min_timestamptz())
-    } else {
-        format_timestamptz(bigquery_max_timestamptz())
-    })
-}
-
-/// Returns whether raw temporal text is below BigQuery's lower bound.
-fn lossy_temporal_text_is_negative(value: &str) -> bool {
-    value.starts_with('-') || value.ends_with(" BC")
 }
 
 /// Applies lossy materialization to a parsed array value.
@@ -530,12 +427,13 @@ fn lossy_array_cell(array: ArrayCell) -> BigQueryCellMaterializationResult {
             ArrayCell::F64,
         ),
         ArrayCell::Numeric(values) => lossy_numeric_array_cell(values),
-        ArrayCell::Date(values) => value_array(values, clamp_bigquery_date, ArrayCell::Date),
+        ArrayCell::Date(values) => value_array(values, clamp_bigquery_date_value, ArrayCell::Date),
+        ArrayCell::Time(values) => value_array(values, clamp_bigquery_time_value, ArrayCell::Time),
         ArrayCell::Timestamp(values) => {
-            value_array(values, clamp_bigquery_timestamp, ArrayCell::Timestamp)
+            value_array(values, clamp_bigquery_timestamp_value, ArrayCell::Timestamp)
         }
         ArrayCell::TimestampTz(values) => {
-            value_array(values, clamp_bigquery_timestamptz, ArrayCell::TimestampTz)
+            value_array(values, clamp_bigquery_timestamptz_value, ArrayCell::TimestampTz)
         }
         ArrayCell::Uuid(values) => string_array(values, |value| value.to_string()),
         array => {
@@ -576,6 +474,38 @@ fn lossy_numeric_array_cell(values: Vec<Option<PgNumeric>>) -> BigQueryCellMater
     }
 }
 
+/// Applies lossy materialization to a PostgreSQL date value.
+fn lossy_date_cell(typ: &Type, value: PgDate) -> BigQueryCellMaterializationResult {
+    value_changed(
+        BigQueryType::native_for_source_type(typ),
+        BigQueryCell::string(clamp_bigquery_date_value(value).to_string()),
+    )
+}
+
+/// Applies lossy materialization to a PostgreSQL time value.
+fn lossy_time_cell(typ: &Type, value: PgTime) -> BigQueryCellMaterializationResult {
+    value_changed(
+        BigQueryType::native_for_source_type(typ),
+        BigQueryCell::string(clamp_bigquery_time_value(value).to_string()),
+    )
+}
+
+/// Applies lossy materialization to a PostgreSQL timestamp value.
+fn lossy_timestamp_cell(typ: &Type, value: PgTimestamp) -> BigQueryCellMaterializationResult {
+    value_changed(
+        BigQueryType::native_for_source_type(typ),
+        BigQueryCell::string(clamp_bigquery_timestamp_value(value).to_string()),
+    )
+}
+
+/// Applies lossy materialization to a PostgreSQL timestamptz value.
+fn lossy_timestamptz_cell(typ: &Type, value: PgTimestampTz) -> BigQueryCellMaterializationResult {
+    value_changed(
+        BigQueryType::native_for_source_type(typ),
+        BigQueryCell::string(clamp_bigquery_timestamptz_value(value).to_string()),
+    )
+}
+
 /// Formats an array as a scalar string that preserves `NULL` elements.
 fn format_array(array: ArrayCell) -> String {
     match array {
@@ -588,10 +518,10 @@ fn format_array(array: ArrayCell) -> String {
         ArrayCell::F32(values) => format_array_values(values, |value| value.to_string()),
         ArrayCell::F64(values) => format_array_values(values, |value| value.to_string()),
         ArrayCell::Numeric(values) => format_array_values(values, |value| value.to_string()),
-        ArrayCell::Date(values) => format_array_values(values, format_date),
-        ArrayCell::Time(values) => format_array_values(values, format_time),
-        ArrayCell::Timestamp(values) => format_array_values(values, format_timestamp),
-        ArrayCell::TimestampTz(values) => format_array_values(values, format_timestamptz),
+        ArrayCell::Date(values) => format_array_values(values, |value| value.to_string()),
+        ArrayCell::Time(values) => format_array_values(values, |value| value.to_string()),
+        ArrayCell::Timestamp(values) => format_array_values(values, |value| value.to_string()),
+        ArrayCell::TimestampTz(values) => format_array_values(values, |value| value.to_string()),
         ArrayCell::Uuid(values) => format_array_values(values, |value| value.to_string()),
         ArrayCell::Bytes(values) => {
             format_array_values(values, |value| format!("\\x{}", encode_hex(&value)))
@@ -655,10 +585,10 @@ fn string_materialized_cell(cell: Cell) -> BigQueryCellMaterializationResult {
         Cell::F32(value) => BigQueryCell::string(value.to_string()),
         Cell::F64(value) => BigQueryCell::string(value.to_string()),
         Cell::Numeric(value) => BigQueryCell::string(value.to_string()),
-        Cell::Date(value) => BigQueryCell::string(format_date(value)),
-        Cell::Time(value) => BigQueryCell::string(format_time(value)),
-        Cell::Timestamp(value) => BigQueryCell::string(format_timestamp(value)),
-        Cell::TimestampTz(value) => BigQueryCell::string(format_timestamptz(value)),
+        Cell::Date(value) => BigQueryCell::string(value.to_string()),
+        Cell::Time(value) => BigQueryCell::string(value.to_string()),
+        Cell::Timestamp(value) => BigQueryCell::string(value.to_string()),
+        Cell::TimestampTz(value) => BigQueryCell::string(value.to_string()),
         Cell::Uuid(value) => BigQueryCell::string(value.to_string()),
         Cell::Bytes(value) => BigQueryCell::string(format!("\\x{}", encode_hex(&value))),
         Cell::Array(array) => BigQueryCell::string(format_array(array)),
@@ -705,13 +635,10 @@ fn validate_strict_cell(typ: &Type, cell: &Cell) -> Option<BigQueryCellMateriali
             Some(invalid_negative_zero())
         }
         Cell::Numeric(value) => validate_strict_numeric(value),
-        Cell::Date(value) if !bigquery_date_in_range(*value) => Some(invalid_date_range()),
-        Cell::Timestamp(value) if !bigquery_timestamp_in_range(*value) => {
-            Some(invalid_timestamp_range())
-        }
-        Cell::TimestampTz(value) if !bigquery_timestamptz_in_range(*value) => {
-            Some(invalid_timestamp_range())
-        }
+        Cell::Date(value) => validate_strict_pg_date(value),
+        Cell::Time(value) => validate_strict_pg_time(value),
+        Cell::Timestamp(value) => validate_strict_pg_timestamp(value),
+        Cell::TimestampTz(value) => validate_strict_pg_timestamptz(value),
         Cell::Uuid(_) => Some(invalid_non_native_value("UUID")),
         Cell::Array(array) => validate_strict_array(typ, array),
         _ => None,
@@ -725,26 +652,6 @@ fn validate_strict_array(
     array: &ArrayCell,
 ) -> Option<BigQueryCellMaterializationResult> {
     match (typ, array) {
-        (&Type::DATE_ARRAY, ArrayCell::String(values)) => {
-            validate_strict_array_values(values, |value| {
-                validate_strict_temporal_text(&Type::DATE, value)
-            })
-        }
-        (&Type::TIME_ARRAY, ArrayCell::String(values)) => {
-            validate_strict_array_values(values, |value| {
-                validate_strict_temporal_text(&Type::TIME, value)
-            })
-        }
-        (&Type::TIMESTAMP_ARRAY, ArrayCell::String(values)) => {
-            validate_strict_array_values(values, |value| {
-                validate_strict_temporal_text(&Type::TIMESTAMP, value)
-            })
-        }
-        (&Type::TIMESTAMPTZ_ARRAY, ArrayCell::String(values)) => {
-            validate_strict_array_values(values, |value| {
-                validate_strict_temporal_text(&Type::TIMESTAMPTZ, value)
-            })
-        }
         (&Type::JSON_ARRAY | &Type::JSONB_ARRAY, ArrayCell::String(values)) => {
             validate_strict_array_values(values, |value| validate_strict_json_text(value))
         }
@@ -764,15 +671,14 @@ fn validate_strict_array_value_domain(
             (*value == 0.0 && value.is_sign_negative()).then(invalid_negative_zero)
         }),
         ArrayCell::Numeric(values) => validate_strict_array_values(values, validate_strict_numeric),
-        ArrayCell::Date(values) => validate_strict_array_values(values, |value| {
-            (!bigquery_date_in_range(*value)).then(invalid_date_range)
-        }),
-        ArrayCell::Timestamp(values) => validate_strict_array_values(values, |value| {
-            (!bigquery_timestamp_in_range(*value)).then(invalid_timestamp_range)
-        }),
-        ArrayCell::TimestampTz(values) => validate_strict_array_values(values, |value| {
-            (!bigquery_timestamptz_in_range(*value)).then(invalid_timestamp_range)
-        }),
+        ArrayCell::Date(values) => validate_strict_array_values(values, validate_strict_pg_date),
+        ArrayCell::Time(values) => validate_strict_array_values(values, validate_strict_pg_time),
+        ArrayCell::Timestamp(values) => {
+            validate_strict_array_values(values, validate_strict_pg_timestamp)
+        }
+        ArrayCell::TimestampTz(values) => {
+            validate_strict_array_values(values, validate_strict_pg_timestamptz)
+        }
         ArrayCell::Uuid(values) => {
             validate_strict_array_values(values, |_| Some(invalid_non_native_value("UUID")))
         }
@@ -839,48 +745,50 @@ fn validate_strict_numeric(value: &PgNumeric) -> Option<BigQueryCellMaterializat
     }
 }
 
-/// Validates strict BigQuery materialization for raw temporal text.
-fn validate_strict_temporal_text(
-    typ: &Type,
-    value: &str,
-) -> Option<BigQueryCellMaterializationResult> {
-    match *typ {
-        Type::DATE => match NaiveDate::parse_from_str(value, DATE_FORMAT) {
-            Ok(value) if !bigquery_date_in_range(value) => Some(invalid_date_range()),
-            Ok(_) => None,
-            Err(_) => Some(invalid_strict_temporal_text(value)),
-        },
-        Type::TIME => match NaiveTime::parse_from_str(value, TIME_FORMAT) {
-            Ok(_) => None,
-            Err(_) => Some(invalid_strict_temporal_text(value)),
-        },
-        Type::TIMESTAMP => match NaiveDateTime::parse_from_str(value, TIMESTAMP_FORMAT) {
-            Ok(value) if !bigquery_timestamp_in_range(value) => Some(invalid_timestamp_range()),
-            Ok(_) => None,
-            Err(_) => Some(invalid_strict_temporal_text(value)),
-        },
-        Type::TIMESTAMPTZ => match parse_timestamptz_text(value) {
-            Ok(value) if !bigquery_timestamptz_in_range(value) => Some(invalid_timestamp_range()),
-            Ok(_) => None,
-            Err(_) => Some(invalid_strict_temporal_text(value)),
-        },
-        _ => None,
+/// Validates strict BigQuery materialization for a PostgreSQL date.
+fn validate_strict_pg_date(value: &PgDate) -> Option<BigQueryCellMaterializationResult> {
+    match value {
+        PgDate::Finite(value) if bigquery_date_in_range(*value) => None,
+        PgDate::Finite(_) => Some(invalid_date_range()),
+        PgDate::PosInfinity | PgDate::NegInfinity | PgDate::OutOfRange(_) => {
+            Some(invalid_date_range())
+        }
     }
 }
 
-/// Parses PostgreSQL timestamp-with-time-zone text.
-fn parse_timestamptz_text(value: &str) -> Result<DateTime<Utc>, chrono::ParseError> {
-    DateTime::<FixedOffset>::parse_from_str(value, TIMESTAMPTZ_FORMAT_HHMM)
-        .or_else(|_| DateTime::<FixedOffset>::parse_from_str(value, TIMESTAMPTZ_FORMAT_HH_MM))
-        .map(Into::into)
+/// Validates strict BigQuery materialization for a PostgreSQL time.
+fn validate_strict_pg_time(value: &PgTime) -> Option<BigQueryCellMaterializationResult> {
+    match value {
+        PgTime::Finite(_) => None,
+        PgTime::TwentyFourHour => Some(invalid(
+            ErrorKind::UnsupportedValueInDestination,
+            "A time value is outside the BigQuery TIME range",
+        )),
+    }
 }
 
-/// Returns a strict materialization failure for raw temporal text.
-fn invalid_strict_temporal_text(value: &str) -> BigQueryCellMaterializationResult {
-    invalid(
-        ErrorKind::UnsupportedValueInDestination,
-        format!("Temporal value '{value}' cannot be stored exactly in BigQuery"),
-    )
+/// Validates strict BigQuery materialization for a PostgreSQL timestamp.
+fn validate_strict_pg_timestamp(value: &PgTimestamp) -> Option<BigQueryCellMaterializationResult> {
+    match value {
+        PgTimestamp::Finite(value) if bigquery_timestamp_in_range(*value) => None,
+        PgTimestamp::Finite(_) => Some(invalid_timestamp_range()),
+        PgTimestamp::PosInfinity | PgTimestamp::NegInfinity | PgTimestamp::OutOfRange(_) => {
+            Some(invalid_timestamp_range())
+        }
+    }
+}
+
+/// Validates strict BigQuery materialization for a PostgreSQL timestamptz.
+fn validate_strict_pg_timestamptz(
+    value: &PgTimestampTz,
+) -> Option<BigQueryCellMaterializationResult> {
+    match value {
+        PgTimestampTz::Finite(value) if bigquery_timestamptz_in_range(*value) => None,
+        PgTimestampTz::Finite(_) => Some(invalid_timestamp_range()),
+        PgTimestampTz::PosInfinity | PgTimestampTz::NegInfinity | PgTimestampTz::OutOfRange(_) => {
+            Some(invalid_timestamp_range())
+        }
+    }
 }
 
 /// Validates that raw JSON text has no duplicate object keys.
@@ -1565,6 +1473,31 @@ fn clamp_bigquery_date(value: NaiveDate) -> NaiveDate {
     value.clamp(bigquery_min_date(), bigquery_max_date())
 }
 
+/// Normalizes a PostgreSQL date into BigQuery's finite date range.
+fn clamp_bigquery_date_value(value: PgDate) -> PgDate {
+    let value = match value {
+        PgDate::Finite(value) => clamp_bigquery_date(value),
+        PgDate::PosInfinity => bigquery_max_date(),
+        PgDate::NegInfinity => bigquery_min_date(),
+        PgDate::OutOfRange(value) => match value.bound() {
+            PgTemporalBound::Lower => bigquery_min_date(),
+            PgTemporalBound::Upper => bigquery_max_date(),
+        },
+    };
+
+    PgDate::Finite(value)
+}
+
+/// Normalizes a PostgreSQL time into BigQuery's finite time range.
+fn clamp_bigquery_time_value(value: PgTime) -> PgTime {
+    match value {
+        PgTime::Finite(value) => PgTime::Finite(value),
+        PgTime::TwentyFourHour => {
+            PgTime::Finite(NaiveTime::from_hms_micro_opt(23, 59, 59, 999_999).expect("valid time"))
+        }
+    }
+}
+
 /// Returns BigQuery's minimum timestamp.
 fn bigquery_min_timestamp() -> NaiveDateTime {
     bigquery_min_date().and_hms_micro_opt(0, 0, 0, 0).expect("valid BigQuery minimum timestamp")
@@ -1587,6 +1520,21 @@ fn clamp_bigquery_timestamp(value: NaiveDateTime) -> NaiveDateTime {
     value.clamp(bigquery_min_timestamp(), bigquery_max_timestamp())
 }
 
+/// Normalizes a PostgreSQL timestamp into BigQuery's finite timestamp range.
+fn clamp_bigquery_timestamp_value(value: PgTimestamp) -> PgTimestamp {
+    let value = match value {
+        PgTimestamp::Finite(value) => clamp_bigquery_timestamp(value),
+        PgTimestamp::PosInfinity => bigquery_max_timestamp(),
+        PgTimestamp::NegInfinity => bigquery_min_timestamp(),
+        PgTimestamp::OutOfRange(value) => match value.bound() {
+            PgTemporalBound::Lower => bigquery_min_timestamp(),
+            PgTemporalBound::Upper => bigquery_max_timestamp(),
+        },
+    };
+
+    PgTimestamp::Finite(value)
+}
+
 /// Returns BigQuery's minimum timestamp with timezone.
 fn bigquery_min_timestamptz() -> DateTime<Utc> {
     DateTime::from_naive_utc_and_offset(bigquery_min_timestamp(), Utc)
@@ -1607,24 +1555,19 @@ fn clamp_bigquery_timestamptz(value: DateTime<Utc>) -> DateTime<Utc> {
     value.clamp(bigquery_min_timestamptz(), bigquery_max_timestamptz())
 }
 
-/// Formats a date for BigQuery string transport.
-fn format_date(value: NaiveDate) -> String {
-    value.format(DATE_FORMAT).to_string()
-}
+/// Normalizes a PostgreSQL timestamptz into BigQuery's finite timestamp range.
+fn clamp_bigquery_timestamptz_value(value: PgTimestampTz) -> PgTimestampTz {
+    let value = match value {
+        PgTimestampTz::Finite(value) => clamp_bigquery_timestamptz(value),
+        PgTimestampTz::PosInfinity => bigquery_max_timestamptz(),
+        PgTimestampTz::NegInfinity => bigquery_min_timestamptz(),
+        PgTimestampTz::OutOfRange(value) => match value.bound() {
+            PgTemporalBound::Lower => bigquery_min_timestamptz(),
+            PgTemporalBound::Upper => bigquery_max_timestamptz(),
+        },
+    };
 
-/// Formats a time for BigQuery string transport.
-fn format_time(value: NaiveTime) -> String {
-    value.format(TIME_FORMAT).to_string()
-}
-
-/// Formats a timestamp for BigQuery string transport.
-fn format_timestamp(value: NaiveDateTime) -> String {
-    value.format(TIMESTAMP_FORMAT).to_string()
-}
-
-/// Formats a timestamp with timezone for BigQuery string transport.
-fn format_timestamptz(value: DateTime<Utc>) -> String {
-    value.format(TIMESTAMPTZ_FORMAT_HH_MM).to_string()
+    PgTimestampTz::Finite(value)
 }
 
 #[cfg(test)]
@@ -1827,7 +1770,7 @@ mod tests {
             (Type::JSON, Cell::String(r#"{"value":18446744073709551616}"#.to_owned())),
             (Type::JSON, Cell::String(r#"{"value":1e309}"#.to_owned())),
             (Type::FLOAT8, Cell::F64(-0.0)),
-            (Type::DATE, Cell::Date(NaiveDate::from_ymd_opt(0, 12, 31).unwrap())),
+            (Type::DATE, Cell::Date(NaiveDate::from_ymd_opt(0, 12, 31).unwrap().into())),
         ];
 
         for (typ, cell) in cases {
@@ -2014,10 +1957,10 @@ mod tests {
     }
 
     #[test]
-    fn strict_temporal_arrays_validate_string_elements_using_source_type() {
-        let cell = Cell::Array(ArrayCell::String(vec![
-            Some("2024-01-01".to_owned()),
-            Some("infinity".to_owned()),
+    fn strict_temporal_arrays_validate_postgres_temporal_elements() {
+        let cell = Cell::Array(ArrayCell::Date(vec![
+            Some(PgDate::Finite(bigquery_min_date())),
+            Some(PgDate::PosInfinity),
         ]));
 
         let result = materializer(DestinationTypeCompatibility::strict())
@@ -2031,8 +1974,8 @@ mod tests {
     }
 
     #[test]
-    fn scalar_temporal_text_fallbacks_use_temporal_materialization() {
-        let cell = Cell::String("infinity".to_owned());
+    fn postgres_temporal_edge_values_use_temporal_materialization() {
+        let cell = Cell::Date(PgDate::PosInfinity);
 
         assert!(
             materializer(DestinationTypeCompatibility::strict())
@@ -2046,14 +1989,14 @@ mod tests {
         );
         assert_eq!(
             materialized_cell(DestinationTypeCompatibility::lossy(), Type::DATE, cell).unwrap(),
-            BigQueryCell::String(format_date(bigquery_max_date()))
+            BigQueryCell::String(PgDate::Finite(bigquery_max_date()).to_string())
         );
 
         assert_eq!(
             materialized_cell(
                 DestinationTypeCompatibility::lossy(),
                 Type::TIME,
-                Cell::String("24:00:00".to_owned()),
+                Cell::Time(PgTime::TwentyFourHour),
             )
             .unwrap(),
             BigQueryCell::String("23:59:59.999999".to_owned())

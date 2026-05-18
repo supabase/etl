@@ -5,8 +5,8 @@ use etl::{
     error::EtlError,
     materialization::TypedCell,
     types::{
-        ArrayCell, Cell, DATE_FORMAT, TIME_FORMAT, TIMESTAMP_FORMAT, TIMESTAMPTZ_FORMAT_HH_MM,
-        TableRow, Type,
+        ArrayCell, Cell, DATE_FORMAT, PgDate, PgTime, PgTimestamp, PgTimestampTz, TIME_FORMAT,
+        TIMESTAMP_FORMAT, TIMESTAMPTZ_FORMAT_HH_MM, TableRow, Type,
     },
 };
 
@@ -337,10 +337,10 @@ impl BigQueryCell {
             Cell::F32(value) => Self::Float32(value),
             Cell::F64(value) => Self::Float64(value),
             Cell::Numeric(value) => Self::String(value.to_string()),
-            Cell::Date(value) => Self::String(format_date(value)),
-            Cell::Time(value) => Self::String(format_time(value)),
-            Cell::Timestamp(value) => Self::String(format_timestamp(value)),
-            Cell::TimestampTz(value) => Self::String(format_timestamptz(value)),
+            Cell::Date(value) => Self::String(format_pg_date(value)),
+            Cell::Time(value) => Self::String(format_pg_time(value)),
+            Cell::Timestamp(value) => Self::String(format_pg_timestamp(value)),
+            Cell::TimestampTz(value) => Self::String(format_pg_timestamptz(value)),
             Cell::Uuid(value) => Self::String(value.to_string()),
             Cell::U32(value) => Self::Int64(i64::from(value)),
             Cell::Bytes(value) => Self::Bytes(value),
@@ -390,17 +390,17 @@ impl BigQueryArrayCell {
                 required_values(values).into_iter().map(|value| value.to_string()).collect(),
             ),
             ArrayCell::Date(values) => {
-                Self::String(required_values(values).into_iter().map(format_date).collect())
+                Self::String(required_values(values).into_iter().map(format_pg_date).collect())
             }
             ArrayCell::Time(values) => {
-                Self::String(required_values(values).into_iter().map(format_time).collect())
+                Self::String(required_values(values).into_iter().map(format_pg_time).collect())
             }
             ArrayCell::Timestamp(values) => {
-                Self::String(required_values(values).into_iter().map(format_timestamp).collect())
+                Self::String(required_values(values).into_iter().map(format_pg_timestamp).collect())
             }
-            ArrayCell::TimestampTz(values) => {
-                Self::String(required_values(values).into_iter().map(format_timestamptz).collect())
-            }
+            ArrayCell::TimestampTz(values) => Self::String(
+                required_values(values).into_iter().map(format_pg_timestamptz).collect(),
+            ),
             ArrayCell::Uuid(values) => Self::String(
                 required_values(values).into_iter().map(|value| value.to_string()).collect(),
             ),
@@ -438,9 +438,25 @@ fn format_date(value: NaiveDate) -> String {
     value.format(DATE_FORMAT).to_string()
 }
 
+/// Formats a PostgreSQL date for BigQuery string-backed encodings.
+fn format_pg_date(value: PgDate) -> String {
+    match value {
+        PgDate::Finite(value) => format_date(value),
+        value => value.to_string(),
+    }
+}
+
 /// Formats a BigQuery time string.
 fn format_time(value: NaiveTime) -> String {
     value.format(TIME_FORMAT).to_string()
+}
+
+/// Formats a PostgreSQL time for BigQuery string-backed encodings.
+fn format_pg_time(value: PgTime) -> String {
+    match value {
+        PgTime::Finite(value) => format_time(value),
+        value => value.to_string(),
+    }
 }
 
 /// Formats a BigQuery datetime string.
@@ -448,7 +464,23 @@ fn format_timestamp(value: NaiveDateTime) -> String {
     value.format(TIMESTAMP_FORMAT).to_string()
 }
 
+/// Formats a PostgreSQL timestamp for BigQuery string-backed encodings.
+fn format_pg_timestamp(value: PgTimestamp) -> String {
+    match value {
+        PgTimestamp::Finite(value) => format_timestamp(value),
+        value => value.to_string(),
+    }
+}
+
 /// Formats a BigQuery timestamp string.
 fn format_timestamptz(value: DateTime<Utc>) -> String {
     value.format(TIMESTAMPTZ_FORMAT_HH_MM).to_string()
+}
+
+/// Formats a PostgreSQL timestamptz for BigQuery string-backed encodings.
+fn format_pg_timestamptz(value: PgTimestampTz) -> String {
+    match value {
+        PgTimestampTz::Finite(value) => format_timestamptz(value),
+        value => value.to_string(),
+    }
 }

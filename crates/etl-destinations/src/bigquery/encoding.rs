@@ -229,7 +229,7 @@ mod tests {
         let invalid_date = NaiveDate::from_ymd_opt(1, 1, 1).unwrap().pred_opt().unwrap();
 
         let result = typed_row(
-            [(Type::DATE, Cell::Date(invalid_date))],
+            [(Type::DATE, Cell::Date(invalid_date.into()))],
             DestinationTypeCompatibility::strict(),
         );
         assert!(result.is_err());
@@ -315,9 +315,9 @@ mod tests {
 
         let result = typed_row(
             [
-                (Type::DATE, Cell::Date(valid_date)),
-                (Type::TIME, Cell::Time(valid_time)),
-                (Type::TIMESTAMP, Cell::Timestamp(valid_datetime)),
+                (Type::DATE, Cell::Date(valid_date.into())),
+                (Type::TIME, Cell::Time(valid_time.into())),
+                (Type::TIMESTAMP, Cell::Timestamp(valid_datetime.into())),
             ],
             DestinationTypeCompatibility::default(),
         );
