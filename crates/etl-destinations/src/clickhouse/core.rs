@@ -417,19 +417,14 @@ where
         Ok(())
     }
 
-    /// Hard-errors if a pre-existing ClickHouse table uses a different engine
-    /// than the pipeline is configured for. A no-op if the table is absent
-    /// (the create flow will then run); the engine string comparison covers
-    /// both the configured-RMT-vs-existing-MT and the reverse case.
+    /// Rejects writing to a pre-existing ClickHouse table whose engine does
+    /// not match the configured one. No-op if the table doesn't exist yet.
     async fn ensure_engine_matches(&self, clickhouse_table_name: &str) -> EtlResult<()> {
-        let configured = self.inserter_config.engine;
-        let configured_name = engine_to_clickhouse_name(configured);
-
         let Some(existing) = self.client.table_engine(clickhouse_table_name).await? else {
             return Ok(());
         };
-
-        if existing == configured_name {
+        let configured = engine_to_clickhouse_name(self.inserter_config.engine);
+        if existing == configured {
             return Ok(());
         }
 
@@ -438,7 +433,7 @@ where
             "ClickHouse table engine mismatch",
             format!(
                 "Table '{clickhouse_table_name}' was previously created with engine '{existing}', \
-                 but the pipeline is configured for engine '{configured_name}'. Either drop the \
+                 but the pipeline is configured for engine '{configured}'. Either drop the \
                  destination table and re-sync, or reconfigure the pipeline's `engine` to match \
                  the existing table."
             )
@@ -769,9 +764,11 @@ where
             return Ok(());
         }
 
-        // RMT uses the PK as its `ORDER BY` / dedup key. Dropping or renaming
-        // a PK column would silently break dedup correctness, so reject the
-        // diff before any ALTER is issued.
+        // The RMT table's `ORDER BY` clause is the source primary key, and
+        // ClickHouse uses that ORDER BY as the dedup key during merges.
+        // Dropping or renaming a PK column would invalidate that key in a
+        // way `ALTER TABLE` cannot fix, so reject the diff before any ALTER
+        // is issued.
         if matches!(self.inserter_config.engine, ClickHouseEngine::ReplacingMergeTree) {
             reject_pk_alters_under_rmt(clickhouse_table_name, diff, current_schema)?;
         }
@@ -994,9 +991,14 @@ fn engine_to_clickhouse_name(engine: ClickHouseEngine) -> &'static str {
     }
 }
 
-/// Rejects schema diffs that would drop or rename a PK column on an RMT
-/// table. RMT's `ORDER BY` is the source PK, so altering it under us would
-/// silently break dedup; we error before the ALTER reaches ClickHouse.
+/// Rejects schema diffs that would drop or rename a primary-key column on
+/// an RMT table. The RMT table's `ORDER BY` clause is the source primary
+/// key (that's how `CREATE TABLE` was emitted), and ClickHouse uses that
+/// ORDER BY as the dedup key during merges. `ALTER TABLE` can change column
+/// shapes but it cannot rewrite the ORDER BY expression, so a PK drop or
+/// rename would leave the table referring to a column that no longer exists
+/// (or has a different meaning), silently breaking dedup. We error before
+/// the ALTER reaches the server.
 fn reject_pk_alters_under_rmt(
     clickhouse_table_name: &str,
     diff: &SchemaDiff,
@@ -1008,9 +1010,9 @@ fn reject_pk_alters_under_rmt(
                 ErrorKind::SourceSchemaError,
                 "ReplacingMergeTree does not support dropping a primary-key column",
                 format!(
-                    "Table '{clickhouse_table_name}': DROP COLUMN '{name}' would change the RMT \
-                     ORDER BY / dedup key. Switch this table to `engine: merge_tree` or restore \
-                     the column on the source.",
+                    "Table '{clickhouse_table_name}': DROP COLUMN '{name}' would invalidate the \
+                     RMT ORDER BY / dedup key. Switch this table to `engine: merge_tree` or \
+                     restore the column on the source.",
                     name = column.name
                 )
             ));
@@ -1029,7 +1031,7 @@ fn reject_pk_alters_under_rmt(
                 "ReplacingMergeTree does not support renaming a primary-key column",
                 format!(
                     "Table '{clickhouse_table_name}': RENAME COLUMN '{old}' -> '{new}' would \
-                     change the RMT ORDER BY / dedup key. Switch this table to `engine: \
+                     invalidate the RMT ORDER BY / dedup key. Switch this table to `engine: \
                      merge_tree` or revert the rename on the source.",
                     old = rename.old_name,
                     new = rename.new_name

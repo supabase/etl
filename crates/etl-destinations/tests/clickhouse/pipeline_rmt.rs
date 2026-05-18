@@ -369,8 +369,8 @@ async fn rmt_composite_pk_order_by_matches_pk_ordinal() {
     init_test_tracing();
     install_crypto_provider();
 
-    // --- GIVEN: a Postgres table with a composite PK whose ordinal order
-    // differs from table column order ---
+    // GIVEN: a Postgres table with a composite PK whose ordinal order differs
+    // from table column order
     let database = spawn_source_database().await;
     let table_name = test_table_name("rmt_composite");
 
@@ -709,8 +709,8 @@ async fn engine_mismatch_runs(first: ClickHouseEngine, second: ClickHouseEngine)
         pipeline.shutdown_and_wait().await.unwrap();
     }
 
-    // --- WHEN: a second pipeline configures the OTHER engine for the same
-    // destination database ---
+    // WHEN: a second pipeline configures the OTHER engine for the same
+    // destination database
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
     let destination = clickhouse_db.build_destination_with_engine(store.clone(), second).await;
