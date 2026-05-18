@@ -798,7 +798,9 @@ where
 
                 // Catchup has completed, so cleanup failures should not turn a
                 // completed table sync into a replication failure.
-                if let Err(err) = self.cleanup_resources(replication_client, self.store.clone()).await {
+                if let Err(err) =
+                    self.cleanup_resources(replication_client, self.store.clone()).await
+                {
                     warn!(
                         table_id = self.table_id.0,
                         error = %err,
