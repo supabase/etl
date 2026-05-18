@@ -11,15 +11,15 @@ use etl::{
     },
 };
 use etl_destinations::snowflake::{
-    AuthManager, Config, HttpExchanger, OffsetToken, RestStreamClient, SnowflakeClient,
-    SnowflakeDestination, SqlClient,
+    AuthManager, Client, Config, Destination, HttpExchanger, OffsetToken, RestStreamClient,
+    SqlClient,
     test_utils::{load_test_config, query_rows},
 };
 
 use super::common::{build_auth, poll_destination_offset, with_table_cleanup};
 
 struct TestHarness {
-    destination: SnowflakeDestination<
+    destination: Destination<
         NotifyingStore,
         AuthManager<HttpExchanger>,
         RestStreamClient<AuthManager<HttpExchanger>>,
@@ -37,8 +37,8 @@ impl TestHarness {
         let store = NotifyingStore::new();
         let pipeline_id: PipelineId = 1;
 
-        let client = SnowflakeClient::new(config.clone(), Arc::clone(&auth), pipeline_id);
-        let destination = SnowflakeDestination::new(client, store.clone());
+        let client = Client::new(config.clone(), Arc::clone(&auth), pipeline_id);
+        let destination = Destination::new(client, store.clone());
 
         Self { destination, sql, config, store }
     }

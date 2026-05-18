@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use etl_destinations::snowflake::{
-    AuthManager, Config, HttpExchanger, OffsetToken, RestStreamClient, SnowflakeDestination,
-    SqlClient, StreamClient,
+    AuthManager, Config, Destination, HttpExchanger, OffsetToken, RestStreamClient, SqlClient,
+    StreamClient,
     test_utils::{load_test_config, load_test_private_key_path},
 };
 use futures::FutureExt;
@@ -36,7 +36,7 @@ pub async fn with_table_cleanup<F, Fut>(
 }
 
 pub async fn poll_destination_offset<S, T, C>(
-    destination: &SnowflakeDestination<S, T, C>,
+    destination: &Destination<S, T, C>,
     table_id: etl::types::TableId,
     expected: &OffsetToken,
     interval: std::time::Duration,

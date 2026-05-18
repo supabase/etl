@@ -22,7 +22,7 @@ use etl_destinations::{
         DestinationNamespace, IcebergClient, IcebergDestination, S3_ACCESS_KEY_ID, S3_ENDPOINT,
         S3_SECRET_ACCESS_KEY,
     },
-    snowflake::{AuthManager, Config as SnowflakeConfig, SnowflakeClient, SnowflakeDestination},
+    snowflake,
 };
 use secrecy::ExposeSecret;
 use tokio::signal::unix::{SignalKind, signal};
@@ -205,10 +205,33 @@ pub(crate) async fn start_replicator_with_config(
             let pipeline = Pipeline::new(replicator_config.pipeline, state_store, destination);
             start_pipeline(pipeline).await?;
         }
-        DestinationConfig::Snowflake { .. } => {
-            return Err(ReplicatorError::config(std::io::Error::other(
-                "Snowflake destination is not yet implemented",
-            )));
+        DestinationConfig::Snowflake {
+            account_id,
+            user,
+            private_key_path,
+            private_key_passphrase,
+            database,
+            schema,
+            warehouse: _,
+            role,
+        } => {
+            let mut config = snowflake::Config::new(account_id, user, database, schema);
+            if let Some(r) = role {
+                config = config.with_role(r);
+            }
+            let auth = std::sync::Arc::new(
+                snowflake::AuthManager::new(
+                    &config,
+                    private_key_path,
+                    private_key_passphrase.as_ref(),
+                )
+                .map_err(|e| ReplicatorError::config(std::io::Error::other(e.to_string())))?,
+            );
+            let client = snowflake::Client::new(config, auth, pipeline_id);
+            let destination = snowflake::Destination::new(client, state_store.clone());
+
+            let pipeline = Pipeline::new(replicator_config.pipeline, state_store, destination);
+            start_pipeline(pipeline).await?;
         }
     }
 

@@ -15,7 +15,7 @@ use crate::snowflake::{
 ///
 /// Unifies the SQL REST API (DDL) and the Snowpipe Streaming API (channel
 /// lifecycle and row ingestion).
-pub struct SnowflakeClient<T: TokenProvider, C: StreamClient = RestStreamClient<T>> {
+pub struct Client<T: TokenProvider, C: StreamClient = RestStreamClient<T>> {
     sql_client: Arc<SqlClient<T>>,
     stream_client: Arc<C>,
     database: String,
@@ -24,7 +24,7 @@ pub struct SnowflakeClient<T: TokenProvider, C: StreamClient = RestStreamClient<
     channels: Arc<RwLock<HashMap<TableId, Arc<Mutex<ChannelHandle<C>>>>>>,
 }
 
-impl<T: TokenProvider, C: StreamClient> Clone for SnowflakeClient<T, C> {
+impl<T: TokenProvider, C: StreamClient> Clone for Client<T, C> {
     fn clone(&self) -> Self {
         Self {
             sql_client: Arc::clone(&self.sql_client),
@@ -38,7 +38,7 @@ impl<T: TokenProvider, C: StreamClient> Clone for SnowflakeClient<T, C> {
 }
 
 /// Convenience constructor for the default client stack.
-impl SnowflakeClient<AuthManager<HttpExchanger>> {
+impl Client<AuthManager<HttpExchanger>> {
     pub fn new(
         config: Config,
         auth: Arc<AuthManager<HttpExchanger>>,
@@ -57,7 +57,7 @@ impl SnowflakeClient<AuthManager<HttpExchanger>> {
     }
 }
 
-impl<T: TokenProvider, C: StreamClient> SnowflakeClient<T, C> {
+impl<T: TokenProvider, C: StreamClient> Client<T, C> {
     /// Build a client from pre-constructed SQL and streaming clients.
     pub fn with_clients(
         sql_client: SqlClient<T>,
