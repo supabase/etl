@@ -157,23 +157,11 @@ pub async fn add_tables_to_publication(
     publication: &Publication,
     pool: &PgPool,
 ) -> Result<(), PublicationsDbError> {
-    let mut query = String::new();
-    let quoted_publication_name = quote_identifier(&publication.name);
-    query.push_str("alter publication ");
-    query.push_str(&quoted_publication_name);
-    query.push_str(" add table only ");
-
-    for (i, table) in publication.tables.iter().enumerate() {
-        let quoted_schema = quote_identifier(&table.schema);
-        let quoted_name = quote_identifier(&table.name);
-        query.push_str(&quoted_schema);
-        query.push('.');
-        query.push_str(&quoted_name);
-
-        if i < publication.tables.len() - 1 {
-            query.push(',');
-        }
-    }
+    let query = format!(
+        "alter publication {} add table only {}",
+        quote_identifier(&publication.name),
+        format_table_list(&publication.tables),
+    );
     sqlx::query(AssertSqlSafe(query)).execute(pool).await?;
     Ok(())
 }
@@ -182,23 +170,19 @@ pub async fn drop_tables_from_publication(
     publication: &Publication,
     pool: &PgPool,
 ) -> Result<(), PublicationsDbError> {
-    let mut query = String::new();
-    let quoted_publication_name = quote_identifier(&publication.name);
-    query.push_str("alter publication ");
-    query.push_str(&quoted_publication_name);
-    query.push_str(" drop table only ");
-
-    for (i, table) in publication.tables.iter().enumerate() {
-        let quoted_schema = quote_identifier(&table.schema);
-        let quoted_name = quote_identifier(&table.name);
-        query.push_str(&quoted_schema);
-        query.push('.');
-        query.push_str(&quoted_name);
-        if i < publication.tables.len() - 1 {
-            query.push(',');
-        }
-    }
-
+    let query = format!(
+        "alter publication {} drop table only {}",
+        quote_identifier(&publication.name),
+        format_table_list(&publication.tables),
+    );
     sqlx::query(AssertSqlSafe(query)).execute(pool).await?;
     Ok(())
+}
+
+fn format_table_list(tables: &[Table]) -> String {
+    tables
+        .iter()
+        .map(|t| format!("{}.{}", quote_identifier(&t.schema), quote_identifier(&t.name)))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
