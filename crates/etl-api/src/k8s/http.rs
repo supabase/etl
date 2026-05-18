@@ -14,14 +14,21 @@ use k8s_openapi::{
 use kube::{
     Client,
     api::{Api, DeleteParams, Patch, PatchParams},
+    core::{ApiResource, DynamicObject, GroupVersionKind},
 };
 use serde_json::json;
 use tracing::debug;
 
 use crate::{
     config::K8sConfig,
-    configs::{log::LogLevel, pipeline::ReplicatorResourcesConfig},
-    k8s::{DestinationType, K8sClient, K8sError, PodPhase, PodStatus, ReplicatorConfigMapFile},
+    configs::{
+        log::LogLevel,
+        pipeline::{DuckLakeMaintenanceConfig, ReplicatorResourcesConfig},
+    },
+    k8s::{
+        DestinationType, DuckLakeMaintenanceResourceConfig, K8sClient, K8sError, PodPhase,
+        PodStatus, ReplicatorConfigMapFile, ReplicatorStatefulSetConfig,
+    },
 };
 
 /// Secret name suffix for the BigQuery service account key.
@@ -86,6 +93,16 @@ pub const TRUSTED_ROOT_CERT_CONFIG_MAP_NAME: &str = "trusted-root-certs-config";
 pub const TRUSTED_ROOT_CERT_KEY_NAME: &str = "trusted_root_certs";
 /// Label used to identify replicator pods.
 const REPLICATOR_APP_LABEL: &str = "etl-replicator-app";
+/// Label used to identify DuckLake maintenance resources.
+const DUCKLAKE_MAINTENANCE_APP_LABEL: &str = "etl-ducklake-maintenance-app";
+/// ServiceAccount used by replicator pods for runtime coordination.
+const REPLICATOR_SERVICE_ACCOUNT_NAME: &str = "etl-replicator";
+/// DuckLake maintenance CRD group.
+const DUCKLAKE_MAINTENANCE_GROUP: &str = "etl.supabase.com";
+/// DuckLake maintenance CRD version.
+const DUCKLAKE_MAINTENANCE_VERSION: &str = "v1alpha1";
+/// DuckLake maintenance CRD kind.
+const DUCKLAKE_MAINTENANCE_KIND: &str = "DuckLakeMaintenance";
 
 /// Default replicator memory request in prod, in Mi.
 const REPLICATOR_MEMORY_REQUEST_PROD_DEFAULT: i32 = 500;
@@ -204,6 +221,7 @@ pub struct HttpK8sClient {
     config_maps_api: Api<ConfigMap>,
     stateful_sets_api: Api<StatefulSet>,
     pods_api: Api<Pod>,
+    ducklake_maintenance_api: Api<DynamicObject>,
     k8s_config: K8sConfig,
 }
 
@@ -217,9 +235,21 @@ impl HttpK8sClient {
         let config_maps_api: Api<ConfigMap> = Api::namespaced(client.clone(), DATA_PLANE_NAMESPACE);
         let stateful_sets_api: Api<StatefulSet> =
             Api::namespaced(client.clone(), DATA_PLANE_NAMESPACE);
-        let pods_api: Api<Pod> = Api::namespaced(client, DATA_PLANE_NAMESPACE);
+        let pods_api: Api<Pod> = Api::namespaced(client.clone(), DATA_PLANE_NAMESPACE);
+        let ducklake_maintenance_api: Api<DynamicObject> = Api::namespaced_with(
+            client,
+            DATA_PLANE_NAMESPACE,
+            &ducklake_maintenance_api_resource(),
+        );
 
-        Ok(HttpK8sClient { secrets_api, config_maps_api, stateful_sets_api, pods_api, k8s_config })
+        Ok(HttpK8sClient {
+            secrets_api,
+            config_maps_api,
+            stateful_sets_api,
+            pods_api,
+            ducklake_maintenance_api,
+            k8s_config,
+        })
     }
 
     /// Helper function to handle delete operations that should ignore 404
@@ -544,35 +574,33 @@ impl K8sClient for HttpK8sClient {
 
     async fn create_or_update_replicator_stateful_set(
         &self,
-        prefix: &str,
-        replicator_image: &str,
-        environment: Environment,
-        replicator_resources: Option<&ReplicatorResourcesConfig>,
-        destination_type: DestinationType,
-        log_level: LogLevel,
+        request: ReplicatorStatefulSetConfig,
     ) -> Result<(), K8sError> {
         debug!("patching stateful set");
 
+        let prefix = request.prefix.as_str();
+        let replicator_image = request.replicator_image.as_str();
         let config = ReplicatorResourceConfig::load_with_overrides(
-            &environment,
+            &request.environment,
             &self.k8s_config,
-            replicator_resources,
+            request.replicator_resources.as_ref(),
         )?;
 
         let stateful_set_name = create_stateful_set_name(prefix);
 
         let container_environment = create_container_environment_json(
             prefix,
-            &environment,
+            &request.environment,
             replicator_image,
-            destination_type,
-            log_level,
+            request.destination_type,
+            request.ducklake_maintenance.as_ref(),
+            request.log_level,
         );
 
-        let node_selector = create_node_selector_json(&environment);
-        let init_containers = create_init_containers_json(prefix, &environment, &config);
-        let volumes = create_volumes_json(prefix, &environment);
-        let volume_mounts = create_volume_mounts_json(&environment);
+        let node_selector = create_node_selector_json(&request.environment);
+        let init_containers = create_init_containers_json(prefix, &request.environment, &config);
+        let volumes = create_volumes_json(prefix, &request.environment);
+        let volume_mounts = create_volume_mounts_json(&request.environment);
 
         let stateful_set_json = create_replicator_stateful_set_json(
             prefix,
@@ -604,6 +632,35 @@ impl K8sClient for HttpK8sClient {
         let dp = DeleteParams::default();
         Self::handle_delete_with_404_ignore(
             self.stateful_sets_api.delete(&stateful_set_name, &dp).await,
+        )?;
+
+        Ok(())
+    }
+
+    async fn create_or_update_ducklake_maintenance(
+        &self,
+        prefix: &str,
+        config: DuckLakeMaintenanceResourceConfig,
+    ) -> Result<(), K8sError> {
+        debug!("patching ducklake maintenance");
+
+        let name = create_ducklake_maintenance_name(prefix);
+        let ducklake_maintenance_json = create_ducklake_maintenance_json(prefix, &name, config);
+        let pp = PatchParams::apply(&name).force();
+        self.ducklake_maintenance_api
+            .patch(&name, &pp, &Patch::Apply(ducklake_maintenance_json))
+            .await?;
+
+        Ok(())
+    }
+
+    async fn delete_ducklake_maintenance(&self, prefix: &str) -> Result<(), K8sError> {
+        debug!("deleting ducklake maintenance");
+
+        let name = create_ducklake_maintenance_name(prefix);
+        let dp = DeleteParams::default();
+        Self::handle_delete_with_404_ignore(
+            self.ducklake_maintenance_api.delete(&name, &dp).await,
         )?;
 
         Ok(())
@@ -667,6 +724,10 @@ fn create_ducklake_secret_name(prefix: &str) -> String {
     format!("{prefix}-{DUCKLAKE_SECRET_NAME_SUFFIX}")
 }
 
+fn create_ducklake_maintenance_name(prefix: &str) -> String {
+    prefix.to_owned()
+}
+
 fn create_replicator_config_map_name(prefix: &str) -> String {
     format!("{prefix}-{REPLICATOR_CONFIG_MAP_NAME_SUFFIX}")
 }
@@ -681,6 +742,14 @@ fn create_pod_name(prefix: &str) -> String {
 
 fn create_replicator_app_name(prefix: &str) -> String {
     format!("{prefix}-{REPLICATOR_APP_SUFFIX}")
+}
+
+fn ducklake_maintenance_api_resource() -> ApiResource {
+    ApiResource::from_gvk(&GroupVersionKind::gvk(
+        DUCKLAKE_MAINTENANCE_GROUP,
+        DUCKLAKE_MAINTENANCE_VERSION,
+        DUCKLAKE_MAINTENANCE_KIND,
+    ))
 }
 
 fn create_replicator_container_name(prefix: &str) -> String {
@@ -838,11 +907,84 @@ fn create_replicator_config_map_json(
     })
 }
 
+fn create_ducklake_maintenance_json(
+    prefix: &str,
+    name: &str,
+    config: DuckLakeMaintenanceResourceConfig,
+) -> serde_json::Value {
+    let replicator_app_name = create_replicator_app_name(prefix);
+    let postgres_secret_name = create_postgres_secret_name(prefix);
+    let ducklake_secret_name = create_ducklake_secret_name(prefix);
+    let config_map_name = create_replicator_config_map_name(prefix);
+    json!({
+      "apiVersion": format!("{DUCKLAKE_MAINTENANCE_GROUP}/{DUCKLAKE_MAINTENANCE_VERSION}"),
+      "kind": DUCKLAKE_MAINTENANCE_KIND,
+      "metadata": {
+        "name": name,
+        "namespace": DATA_PLANE_NAMESPACE,
+        "labels": {
+          "etl.supabase.com/app-name": replicator_app_name,
+          "etl.supabase.com/app-type": DUCKLAKE_MAINTENANCE_APP_LABEL,
+        }
+      },
+      "spec": {
+        "pipelineRef": {
+          "tenantId": config.tenant_id,
+          "pipelineId": config.pipeline_id,
+          "replicatorId": config.replicator_id,
+        },
+        "schedule": {
+          "minIntervalSeconds": config.policy.min_interval_seconds,
+        },
+        "pause": {
+          "maxDurationSeconds": config.policy.max_pause_seconds,
+        },
+        "operations": {
+          "inlineFlush": {
+            "enabled": true,
+            "minInlinedBytes": config.policy.min_inlined_bytes,
+          },
+          "mergeAdjacentFiles": {
+            "enabled": true,
+            "maxCompactedFiles": config.policy.max_compacted_files,
+            "maxTablesPerRun": config.policy.max_tables_per_run,
+            "targetFileSize": config.policy.target_file_size,
+          },
+          "rewriteDataFiles": {
+            "enabled": true,
+            "deleteThreshold": config.policy.delete_threshold,
+            "maxTablesPerRun": config.policy.max_tables_per_run,
+          },
+          "expireSnapshots": {
+            "enabled": false,
+          },
+          "cleanupOldFiles": {
+            "enabled": true,
+          }
+        },
+        "jobTemplate": {
+          "image": config.image,
+          "cpuRequestMillicores": config.policy.cpu_request_millicores,
+          "memoryRequestMiB": config.policy.memory_request_mib,
+          "activeDeadlineSeconds": config.policy.active_deadline_seconds,
+          "backoffLimit": 1,
+          "ttlSecondsAfterFinished": 86400,
+        },
+        "runtimeRefs": {
+          "configMapName": config_map_name,
+          "postgresSecretName": postgres_secret_name,
+          "ducklakeSecretName": ducklake_secret_name,
+        }
+      }
+    })
+}
+
 fn create_container_environment_json(
     prefix: &str,
     environment: &Environment,
     replicator_image: &str,
     destination_type: DestinationType,
+    ducklake_maintenance: Option<&DuckLakeMaintenanceConfig>,
     log_level: LogLevel,
 ) -> Vec<serde_json::Value> {
     let mut container_environment = vec![
@@ -965,6 +1107,25 @@ fn create_container_environment_json(
             let ducklake_s3_secret_access_key_env_var_json =
                 create_ducklake_s3_secret_access_key_env_var_json(&ducklake_secret_name);
             container_environment.push(ducklake_s3_secret_access_key_env_var_json);
+
+            if let Some(ducklake_maintenance) = ducklake_maintenance {
+                container_environment.push(json!({
+                    "name": "ETL_DUCKLAKE_MAINTENANCE_CR_NAME",
+                    "value": create_ducklake_maintenance_name(prefix)
+                }));
+                container_environment.push(json!({
+                    "name": "ETL_DUCKLAKE_MAINTENANCE_CR_NAMESPACE",
+                    "value": DATA_PLANE_NAMESPACE
+                }));
+                container_environment.push(json!({
+                    "name": "ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_INLINE_FLUSH_MIN_INLINED_BYTES",
+                    "value": ducklake_maintenance.min_inlined_bytes.to_string()
+                }));
+                container_environment.push(json!({
+                    "name": "ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_REWRITE_DATA_FILES_MIN_ACTIVE_DATA_FILES",
+                    "value": ducklake_maintenance.min_active_data_files.to_string()
+                }));
+            }
         }
     }
     container_environment
@@ -1236,6 +1397,7 @@ fn create_replicator_stateful_set_json(
             }
           },
           "spec": {
+            "serviceAccountName": REPLICATOR_SERVICE_ACCOUNT_NAME,
             "volumes": volumes,
             // Allow scheduling onto nodes tainted with the right node role.
             "tolerations": [
@@ -1525,6 +1687,41 @@ mod tests {
     }
 
     #[test]
+    fn test_create_ducklake_maintenance_json() {
+        let prefix = create_k8s_object_prefix(TENANT_ID, 42);
+        let name = create_ducklake_maintenance_name(&prefix);
+
+        let ducklake_maintenance_json = create_ducklake_maintenance_json(
+            &prefix,
+            &name,
+            DuckLakeMaintenanceResourceConfig {
+                tenant_id: TENANT_ID.to_owned(),
+                pipeline_id: 24,
+                replicator_id: 42,
+                image: "supabase/replicator:1.2.3".to_owned(),
+                policy: DuckLakeMaintenanceConfig {
+                    min_interval_seconds: 3600,
+                    max_pause_seconds: 2700,
+                    min_inlined_bytes: 10_000_000,
+                    max_compacted_files: 32,
+                    max_tables_per_run: 8,
+                    target_file_size: "10MB".to_owned(),
+                    delete_threshold: 0.5,
+                    min_active_data_files: 40,
+                    cpu_request_millicores: 1000,
+                    memory_request_mib: 1024,
+                    active_deadline_seconds: 1800,
+                },
+            },
+        );
+
+        assert_snapshot!(serde_json::to_string_pretty(&ducklake_maintenance_json).unwrap());
+
+        let _ducklake_maintenance: DynamicObject =
+            serde_json::from_value(ducklake_maintenance_json).unwrap();
+    }
+
+    #[test]
     fn test_create_postgres_secret_env_var_json() {
         let prefix = create_k8s_object_prefix(TENANT_ID, 42);
         let postgres_secret_name = create_postgres_secret_name(&prefix);
@@ -1588,6 +1785,7 @@ mod tests {
             &environment,
             replicator_image,
             DestinationType::BigQuery,
+            None,
             LogLevel::Info,
         );
         assert_json_snapshot!(container_environment);
@@ -1598,6 +1796,7 @@ mod tests {
             &environment,
             replicator_image,
             DestinationType::BigQuery,
+            None,
             LogLevel::Info,
         );
         assert_json_snapshot!(container_environment);
@@ -1608,6 +1807,7 @@ mod tests {
             &environment,
             replicator_image,
             DestinationType::BigQuery,
+            None,
             LogLevel::Info,
         );
         assert_json_snapshot!(container_environment);
@@ -1623,6 +1823,7 @@ mod tests {
             &Environment::Dev,
             replicator_image,
             DestinationType::Iceberg,
+            None,
             LogLevel::Info,
         );
         assert_json_snapshot!(container_environment);
@@ -1632,6 +1833,7 @@ mod tests {
             &Environment::Staging,
             replicator_image,
             DestinationType::Iceberg,
+            None,
             LogLevel::Info,
         );
         assert_json_snapshot!(container_environment);
@@ -1641,6 +1843,7 @@ mod tests {
             &Environment::Prod,
             replicator_image,
             DestinationType::Iceberg,
+            None,
             LogLevel::Info,
         );
         assert_json_snapshot!(container_environment);
@@ -1656,6 +1859,7 @@ mod tests {
             &Environment::Dev,
             replicator_image,
             DestinationType::Ducklake,
+            None,
             LogLevel::Info,
         );
         assert_json_snapshot!(container_environment);
@@ -1665,6 +1869,7 @@ mod tests {
             &Environment::Staging,
             replicator_image,
             DestinationType::Ducklake,
+            None,
             LogLevel::Info,
         );
         assert_json_snapshot!(container_environment);
@@ -1674,6 +1879,7 @@ mod tests {
             &Environment::Prod,
             replicator_image,
             DestinationType::Ducklake,
+            None,
             LogLevel::Info,
         );
         assert_json_snapshot!(container_environment);
@@ -1689,6 +1895,7 @@ mod tests {
             &Environment::Dev,
             replicator_image,
             DestinationType::ClickHouse { password_secret_required: true },
+            None,
             LogLevel::Info,
         );
 
@@ -1712,6 +1919,7 @@ mod tests {
             &Environment::Dev,
             replicator_image,
             DestinationType::ClickHouse { password_secret_required: false },
+            None,
             LogLevel::Info,
         );
 
@@ -1804,6 +2012,7 @@ mod tests {
             &environment,
             replicator_image,
             DestinationType::BigQuery,
+            None,
             LogLevel::Info,
         );
 
@@ -1836,6 +2045,7 @@ mod tests {
             &environment,
             replicator_image,
             DestinationType::BigQuery,
+            None,
             LogLevel::Info,
         );
 
@@ -1868,6 +2078,7 @@ mod tests {
             &environment,
             replicator_image,
             DestinationType::BigQuery,
+            None,
             LogLevel::Info,
         );
 
@@ -1907,6 +2118,7 @@ mod tests {
             &environment,
             replicator_image,
             DestinationType::Iceberg,
+            None,
             LogLevel::Info,
         );
 
@@ -1939,6 +2151,7 @@ mod tests {
             &environment,
             replicator_image,
             DestinationType::Iceberg,
+            None,
             LogLevel::Info,
         );
 
@@ -1971,6 +2184,7 @@ mod tests {
             &environment,
             replicator_image,
             DestinationType::Iceberg,
+            None,
             LogLevel::Info,
         );
 
@@ -2010,6 +2224,7 @@ mod tests {
             &environment,
             replicator_image,
             DestinationType::Ducklake,
+            None,
             LogLevel::Info,
         );
 
@@ -2042,6 +2257,7 @@ mod tests {
             &environment,
             replicator_image,
             DestinationType::Ducklake,
+            None,
             LogLevel::Info,
         );
 
@@ -2074,6 +2290,7 @@ mod tests {
             &environment,
             replicator_image,
             DestinationType::Ducklake,
+            None,
             LogLevel::Info,
         );
 

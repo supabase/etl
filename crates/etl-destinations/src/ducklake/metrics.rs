@@ -13,19 +13,13 @@ use parking_lot::Mutex;
 use pg_escape::{quote_identifier, quote_literal};
 use sqlx::{AssertSqlSafe, PgPool};
 use tokio::{
-    sync::{mpsc, watch},
+    sync::watch,
     task::JoinHandle,
     time::{Duration, Instant, MissedTickBehavior},
 };
 use tracing::{info, warn};
 
-use crate::ducklake::{
-    DuckLakeTableName, LAKE_CATALOG,
-    client::format_query_error_detail,
-    maintenance::{
-        TableMaintenanceNotification, TableMetricsSample, send_maintenance_notification,
-    },
-};
+use crate::ducklake::{DuckLakeTableName, LAKE_CATALOG, client::format_query_error_detail};
 
 static REGISTER_METRICS: Once = Once::new();
 
@@ -54,14 +48,10 @@ pub(crate) const ETL_DUCKLAKE_INLINE_FLUSH_DURATION_SECONDS: &str =
 pub(crate) const ETL_DUCKLAKE_RETRIES_TOTAL: &str = "etl_ducklake_retries_total";
 pub(crate) const ETL_DUCKLAKE_FAILED_BATCHES_TOTAL: &str = "etl_ducklake_failed_batches_total";
 pub(crate) const ETL_DUCKLAKE_REPLAYED_BATCHES_TOTAL: &str = "etl_ducklake_replayed_batches_total";
-pub(crate) const ETL_DUCKLAKE_MAINTENANCE_STARTED_TOTAL: &str =
-    "etl_ducklake_maintenance_started_total";
-pub(crate) const ETL_DUCKLAKE_MAINTENANCE_IN_PROGRESS: &str =
-    "etl_ducklake_maintenance_in_progress";
-pub(crate) const ETL_DUCKLAKE_MAINTENANCE_DURATION_SECONDS: &str =
-    "etl_ducklake_maintenance_duration_seconds";
-pub(crate) const ETL_DUCKLAKE_MAINTENANCE_SKIPPED_TOTAL: &str =
-    "etl_ducklake_maintenance_skipped_total";
+pub(crate) const ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_PAUSE_DURATION_SECONDS: &str =
+    "etl_ducklake_external_maintenance_pause_duration_seconds";
+pub(crate) const ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_TRIGGERED_TOTAL: &str =
+    "etl_ducklake_external_maintenance_triggered_total";
 pub(crate) const ETL_DUCKLAKE_TABLE_ACTIVE_DATA_FILES: &str =
     "etl_ducklake_table_active_data_files";
 pub(crate) const ETL_DUCKLAKE_TABLE_ACTIVE_DATA_BYTES: &str =
@@ -96,7 +86,6 @@ pub(crate) const PREPARED_ROWS_KIND_LABEL: &str = "prepared_rows_kind";
 pub(crate) const DELETE_ORIGIN_LABEL: &str = "delete_origin";
 pub(crate) const RETRY_SCOPE_LABEL: &str = "retry_scope";
 pub(crate) const RESULT_LABEL: &str = "result";
-pub(crate) const MAINTENANCE_TASK_LABEL: &str = "task";
 pub(crate) const MAINTENANCE_OPERATION_LABEL: &str = "operation";
 pub(crate) const MAINTENANCE_REASON_LABEL: &str = "reason";
 pub(crate) const MAINTENANCE_OUTCOME_LABEL: &str = "outcome";
@@ -234,30 +223,17 @@ pub(crate) fn register_metrics() {
             "DuckLake batches skipped because an applied marker already existed, labeled by \
              batch_kind."
         );
-        describe_counter!(
-            ETL_DUCKLAKE_MAINTENANCE_STARTED_TOTAL,
-            Unit::Count,
-            "DuckLake background maintenance operations started, labeled by task, operation, and \
-             reason."
-        );
-        describe_gauge!(
-            ETL_DUCKLAKE_MAINTENANCE_IN_PROGRESS,
-            Unit::Count,
-            "DuckLake background maintenance operations currently in progress, labeled by task, \
-             operation, and reason."
-        );
         describe_histogram!(
-            ETL_DUCKLAKE_MAINTENANCE_DURATION_SECONDS,
+            ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_PAUSE_DURATION_SECONDS,
             Unit::Seconds,
-            "Duration of DuckLake background maintenance operations, labeled by task, operation, \
-             reason, and outcome. Use the histogram count as the event count for non-skipped \
-             outcomes."
+            "Duration that DuckLake foreground ingestion was paused for an external maintenance \
+             run, labeled by outcome."
         );
         describe_counter!(
-            ETL_DUCKLAKE_MAINTENANCE_SKIPPED_TOTAL,
+            ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_TRIGGERED_TOTAL,
             Unit::Count,
-            "DuckLake background maintenance operations skipped because execution was deferred, \
-             labeled by task, operation, and reason."
+            "External DuckLake maintenance operations requested by the replicator after catalog \
+             sampling, labeled by operation and reason."
         );
 
         describe_histogram!(
@@ -344,14 +320,12 @@ pub(super) fn spawn_ducklake_metrics_sampler(
     metadata_schema: String,
     metadata_pg_pool: PgPool,
     created_tables: Arc<Mutex<HashSet<DuckLakeTableName>>>,
-    maintenance_notification_tx: mpsc::Sender<TableMaintenanceNotification>,
 ) -> EtlResult<DuckLakeMetricsSampler> {
     let (shutdown_tx, shutdown_rx) = watch::channel(());
     let handle = tokio::spawn(run_ducklake_metrics_sampler(
         metadata_schema,
         metadata_pg_pool,
         created_tables,
-        maintenance_notification_tx,
         shutdown_rx,
     ));
 
@@ -363,7 +337,6 @@ async fn run_ducklake_metrics_sampler(
     metadata_schema: String,
     metadata_pg_pool: PgPool,
     created_tables: Arc<Mutex<HashSet<DuckLakeTableName>>>,
-    maintenance_notification_tx: mpsc::Sender<TableMaintenanceNotification>,
     mut shutdown_rx: watch::Receiver<()>,
 ) {
     let mut interval =
@@ -399,7 +372,6 @@ async fn run_ducklake_metrics_sampler(
                         &metadata_pg_pool,
                         &metadata_schema,
                         table_name.clone(),
-                        &maintenance_notification_tx,
                     )
                     .await
                     {
@@ -420,7 +392,6 @@ async fn record_table_storage_metrics(
     metadata_pg_pool: &PgPool,
     metadata_schema: &str,
     table_name: DuckLakeTableName,
-    maintenance_notification_tx: &mpsc::Sender<TableMaintenanceNotification>,
 ) -> EtlResult<()> {
     let metrics =
         query_table_storage_metrics(metadata_pg_pool, metadata_schema, &table_name).await?;
@@ -447,15 +418,6 @@ async fn record_table_storage_metrics(
     histogram!(ETL_DUCKLAKE_TABLE_ACTIVE_DELETE_FILES).record(active_delete_files);
     histogram!(ETL_DUCKLAKE_TABLE_ACTIVE_DELETE_BYTES).record(active_delete_bytes);
     histogram!(ETL_DUCKLAKE_TABLE_DELETED_ROW_RATIO).record(deleted_row_ratio);
-    send_maintenance_notification(
-        maintenance_notification_tx,
-        TableMaintenanceNotification::TableMetricsSample(TableMetricsSample {
-            table_name,
-            sampled_at: Instant::now(),
-            metrics,
-        }),
-    )
-    .await;
 
     Ok(())
 }

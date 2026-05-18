@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use etl::{
     destination::{
@@ -170,6 +170,111 @@ impl Default for ClickHouseInserterConfig {
     }
 }
 
+/// Configuration for the [`ClickHouseClient`].
+///
+/// Holds the server-side and client-side timeouts applied to each operation
+/// bucket. Additional client-level knobs can be added here over time.
+#[derive(Copy, Clone)]
+pub struct ClickHouseClientConfig {
+    /// Server-side budget for the connectivity check (`SELECT 1`).
+    pub connectivity_check_timeout: Duration,
+    /// Server-side budget for schema lookups (`system.columns`).
+    pub schema_query_timeout: Duration,
+    /// Server-side budget for DDL (CREATE / ALTER / DROP / RENAME / TRUNCATE).
+    pub ddl_timeout: Duration,
+    /// Server-side budget per INSERT statement. Wraps `insert.end().await`,
+    /// which is the only awaited network step inside `insert_rows`; each
+    /// flushed chunk therefore gets its own deadline.
+    pub insert_timeout: Duration,
+    /// Slack added to the server-side budget to derive the client-side
+    /// `tokio::time::timeout`.
+    pub client_timeout_epsilon: Duration,
+}
+
+impl ClickHouseClientConfig {
+    /// Default server-side budget for the connectivity check.
+    pub const DEFAULT_CONNECTIVITY_CHECK_TIMEOUT: Duration = Duration::from_secs(8);
+    /// Default server-side budget for schema lookups.
+    pub const DEFAULT_SCHEMA_QUERY_TIMEOUT: Duration = Duration::from_secs(16);
+    /// Default server-side budget for DDL.
+    pub const DEFAULT_DDL_TIMEOUT: Duration = Duration::from_secs(128);
+    /// Default server-side budget per INSERT statement.
+    pub const DEFAULT_INSERT_TIMEOUT: Duration = Duration::from_secs(256);
+    /// Default slack between server-side and client-side budgets.
+    pub const DEFAULT_CLIENT_TIMEOUT_EPSILON: Duration = Duration::from_secs(4);
+
+    /// Server-side timeout for `op`.
+    pub(crate) fn server_timeout_for(&self, op: ClickHouseOperationKind) -> Duration {
+        match op {
+            ClickHouseOperationKind::ConnectivityCheck => self.connectivity_check_timeout,
+            ClickHouseOperationKind::SchemaQuery => self.schema_query_timeout,
+            ClickHouseOperationKind::Ddl => self.ddl_timeout,
+            ClickHouseOperationKind::Insert => self.insert_timeout,
+        }
+    }
+
+    /// Client-side `tokio::time::timeout` for `op`:
+    /// `server_timeout_for(op) + client_timeout_epsilon`.
+    pub(crate) fn client_timeout_for(&self, op: ClickHouseOperationKind) -> Duration {
+        self.server_timeout_for(op) + self.client_timeout_epsilon
+    }
+}
+
+impl Default for ClickHouseClientConfig {
+    fn default() -> Self {
+        Self {
+            connectivity_check_timeout: Self::DEFAULT_CONNECTIVITY_CHECK_TIMEOUT,
+            schema_query_timeout: Self::DEFAULT_SCHEMA_QUERY_TIMEOUT,
+            ddl_timeout: Self::DEFAULT_DDL_TIMEOUT,
+            insert_timeout: Self::DEFAULT_INSERT_TIMEOUT,
+            client_timeout_epsilon: Self::DEFAULT_CLIENT_TIMEOUT_EPSILON,
+        }
+    }
+}
+
+/// Categories of ClickHouse client calls.
+///
+/// Used to:
+/// - select the corresponding server-side budget,
+/// - map a generic clickhouse error onto the appropriate [`ErrorKind`].
+#[derive(Copy, Clone)]
+pub(crate) enum ClickHouseOperationKind {
+    /// Connectivity check (`SELECT 1`).
+    ConnectivityCheck,
+    /// Schema lookup against `system.columns`.
+    SchemaQuery,
+    /// DDL: CREATE / ALTER / DROP / RENAME / TRUNCATE.
+    Ddl,
+    /// INSERT statement flush.
+    Insert,
+}
+
+impl ClickHouseOperationKind {
+    /// Error kind used when the inner future returns a
+    /// `clickhouse::error::Error`.
+    pub(crate) fn failed_kind(self) -> ErrorKind {
+        match self {
+            ClickHouseOperationKind::ConnectivityCheck => ErrorKind::DestinationConnectionFailed,
+            ClickHouseOperationKind::SchemaQuery | ClickHouseOperationKind::Ddl => {
+                ErrorKind::DestinationQueryFailed
+            }
+            ClickHouseOperationKind::Insert => ErrorKind::DestinationAtomicBatchRetryable,
+        }
+    }
+}
+
+impl std::fmt::Display for ClickHouseOperationKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            ClickHouseOperationKind::ConnectivityCheck => "connectivity check",
+            ClickHouseOperationKind::SchemaQuery => "schema query",
+            ClickHouseOperationKind::Ddl => "DDL",
+            ClickHouseOperationKind::Insert => "insert",
+        };
+        f.write_str(name)
+    }
+}
+
 /// CDC-capable ClickHouse destination that replicates Postgres tables.
 ///
 /// Uses append-only MergeTree tables with two CDC columns (`cdc_operation`,
@@ -209,11 +314,12 @@ where
         password: Option<String>,
         database: impl Into<String>,
         inserter_config: ClickHouseInserterConfig,
+        client_config: ClickHouseClientConfig,
         store: S,
     ) -> EtlResult<Self> {
         register_metrics();
         Ok(Self {
-            client: ClickHouseClient::new(url, user, password, database),
+            client: ClickHouseClient::new(url, user, password, database, client_config),
             inserter_config,
             store: Arc::new(store),
             table_cache: Arc::new(RwLock::new(HashMap::new())),
@@ -768,6 +874,23 @@ where
 fn validate_replica_identity_for_clickhouse(
     replicated_table_schema: &ReplicatedTableSchema,
 ) -> EtlResult<()> {
+    if !replicated_table_schema.all_primary_key_columns_replicated() {
+        let omitted_columns = replicated_table_schema
+            .unreplicated_primary_key_column_schemas()
+            .map(|column_schema| column_schema.name.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        return Err(etl_error!(
+            ErrorKind::SourceSchemaError,
+            "ClickHouse requires all source primary-key columns to be replicated",
+            format!(
+                "Table '{}' omits source primary-key columns from replication: {}",
+                replicated_table_schema.name(),
+                omitted_columns
+            )
+        ));
+    }
+
     match replicated_table_schema.identity_type() {
         IdentityType::PrimaryKey | IdentityType::Full => Ok(()),
         identity_type => Err(etl_error!(
@@ -959,6 +1082,22 @@ mod tests {
         ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask)
     }
 
+    fn replicated_schema_with_partial_primary_key() -> ReplicatedTableSchema {
+        let table_schema = Arc::new(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_owned(), "users".to_owned()),
+            vec![
+                ColumnSchema::new("tenant_id".to_owned(), Type::INT4, -1, 1, Some(1), false),
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 2, Some(2), false),
+                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 3, None, true),
+            ],
+        ));
+        let replication_mask = ReplicationMask::from_bytes(vec![0, 1, 1]);
+        let identity_mask = IdentityMask::from_bytes(vec![0, 1, 0]);
+
+        ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask)
+    }
+
     #[test]
     fn validate_replica_identity_for_clickhouse_accepts_primary_key() {
         validate_replica_identity_for_clickhouse(&replicated_schema(IdentityType::PrimaryKey))
@@ -985,6 +1124,15 @@ mod tests {
             validate_replica_identity_for_clickhouse(&replicated_schema(IdentityType::Missing))
                 .unwrap_err();
         assert_eq!(err.kind(), ErrorKind::SourceSchemaError);
+    }
+
+    #[test]
+    fn validate_replica_identity_for_clickhouse_rejects_partial_primary_key() {
+        let err =
+            validate_replica_identity_for_clickhouse(&replicated_schema_with_partial_primary_key())
+                .unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::SourceSchemaError);
+        assert!(err.to_string().contains("tenant_id"));
     }
 
     #[test]

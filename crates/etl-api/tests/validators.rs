@@ -86,6 +86,7 @@ fn create_pipeline_config(publication_name: &str) -> FullApiPipelineConfig {
         table_sync_copy: None,
         invalidated_slot_behavior: None,
         replicator_resources: None,
+        ducklake_maintenance: None,
     }
 }
 
