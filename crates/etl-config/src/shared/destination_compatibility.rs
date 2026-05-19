@@ -58,7 +58,7 @@ impl DestinationTypeCompatibility {
 
 impl Default for DestinationTypeCompatibility {
     fn default() -> Self {
-        Self::lossy()
+        Self::strict()
     }
 }
 
@@ -68,17 +68,20 @@ impl Default for DestinationTypeCompatibility {
 #[serde(rename_all = "snake_case")]
 pub enum DestinationTypeCompatibilityMode {
     /// Preserve destination-native types and reject values that may be changed.
+    ///
+    /// This is the default for backwards compatibility with destination schemas
+    /// created before configurable materialization modes were introduced.
+    #[default]
     Strict,
     /// Materialize risky source types using exact destination representations.
     Lossless,
     /// Allow destination-compatible coercions for values that do not fit
     /// exactly.
     ///
-    /// This is the default because CDC pipelines often need compatible source
-    /// and destination types to keep flowing when the destination can
-    /// accept an approximate representation, such as rounding a value to
-    /// the destination's supported precision.
-    #[default]
+    /// Many CDC pipelines benefit from this mode because they need compatible
+    /// source and destination types to keep flowing when the destination can
+    /// accept an approximate representation, such as rounding a value to the
+    /// destination's supported precision.
     Lossy,
 }
 
@@ -87,10 +90,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn destination_type_compatibility_defaults_to_lossy() {
+    fn destination_type_compatibility_defaults_to_strict() {
         assert_eq!(
             DestinationTypeCompatibility::default().mode(),
-            DestinationTypeCompatibilityMode::Lossy
+            DestinationTypeCompatibilityMode::Strict
         );
     }
 

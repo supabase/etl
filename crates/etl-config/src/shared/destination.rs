@@ -13,7 +13,7 @@ const fn default_ducklake_pool_size() -> u32 {
 }
 
 const fn default_destination_type_compatibility_mode() -> DestinationTypeCompatibilityMode {
-    DestinationTypeCompatibilityMode::Lossy
+    DestinationTypeCompatibilityMode::Strict
 }
 
 /// Configuration for supported ETL data destinations.
@@ -54,6 +54,11 @@ pub enum DestinationConfig {
         #[serde(default = "default_connection_pool_size")]
         connection_pool_size: usize,
         /// Type compatibility behavior for BigQuery materialization.
+        ///
+        /// Defaults to `strict` for backwards compatibility with existing
+        /// BigQuery tables. New pipelines may prefer `lossy` when they want
+        /// destination-compatible coercions instead of write failures for
+        /// values outside BigQuery's exact domains.
         #[serde(default = "default_destination_type_compatibility_mode")]
         type_compatibility: DestinationTypeCompatibilityMode,
     },
@@ -253,6 +258,11 @@ pub enum DestinationConfigWithoutSecrets {
         #[serde(default = "default_connection_pool_size")]
         connection_pool_size: usize,
         /// Type compatibility behavior for BigQuery materialization.
+        ///
+        /// Defaults to `strict` for backwards compatibility with existing
+        /// BigQuery tables. New pipelines may prefer `lossy` when they want
+        /// destination-compatible coercions instead of write failures for
+        /// values outside BigQuery's exact domains.
         #[serde(default = "default_destination_type_compatibility_mode")]
         type_compatibility: DestinationTypeCompatibilityMode,
     },
@@ -355,7 +365,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn big_query_type_compatibility_defaults_to_lossy() {
+    fn big_query_type_compatibility_defaults_to_strict() {
         let json = r#"{
             "big_query": {
                 "project_id": "project-id",
@@ -370,7 +380,7 @@ mod tests {
         let DestinationConfig::BigQuery { type_compatibility, .. } = config else {
             panic!("Expected BigQuery destination config");
         };
-        assert_eq!(type_compatibility, DestinationTypeCompatibilityMode::Lossy);
+        assert_eq!(type_compatibility, DestinationTypeCompatibilityMode::Strict);
     }
 
     #[test]
@@ -394,7 +404,7 @@ mod tests {
     }
 
     #[test]
-    fn big_query_without_secrets_serializes_default_type_compatibility() {
+    fn big_query_without_secrets_serializes_lossy_type_compatibility() {
         let config = DestinationConfigWithoutSecrets::BigQuery {
             project_id: "project-id".to_owned(),
             dataset_id: "dataset-id".to_owned(),

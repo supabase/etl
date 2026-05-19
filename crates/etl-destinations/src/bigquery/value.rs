@@ -725,7 +725,7 @@ mod tests {
 
     #[test]
     fn bigquery_table_row_try_from_array_with_nulls() {
-        let array_with_nulls = etl::types::ArrayCell::I32(vec![Some(1), None, Some(3)]);
+        let array_with_nulls = ArrayCell::I32(vec![Some(1), None, Some(3)]);
         let result = typed_row(
             [(Type::INT4_ARRAY, Cell::Array(array_with_nulls))],
             DestinationTypeCompatibility::strict(),
@@ -738,7 +738,7 @@ mod tests {
 
     #[test]
     fn bigquery_table_row_try_from_array_with_numeric_rounding_risk() {
-        let array_with_rounding_risk = etl::types::ArrayCell::Numeric(vec![
+        let array_with_rounding_risk = ArrayCell::Numeric(vec![
             Some(PgNumeric::from_str("123.456").unwrap()),
             Some(PgNumeric::from_str("0.000000000000000000000000000000000000001").unwrap()),
             Some(PgNumeric::from_str("789.012").unwrap()),
@@ -757,7 +757,7 @@ mod tests {
 
     #[test]
     fn bigquery_table_row_try_from_valid_array() {
-        let valid_array = etl::types::ArrayCell::I32(vec![Some(1), Some(2), Some(3)]);
+        let valid_array = ArrayCell::I32(vec![Some(1), Some(2), Some(3)]);
         let result = typed_row(
             [
                 (Type::TEXT, Cell::String("prefix".to_owned())),
@@ -781,7 +781,7 @@ mod tests {
                 ),
                 (
                     Type::NUMERIC_ARRAY,
-                    Cell::Array(etl::types::ArrayCell::Numeric(vec![Some(
+                    Cell::Array(ArrayCell::Numeric(vec![Some(
                         PgNumeric::from_str("0.000000000000000000000000000000000000002").unwrap(),
                     )])),
                 ),
@@ -828,7 +828,7 @@ mod tests {
     }
 
     #[test]
-    fn bigquery_table_row_try_from_uses_default_lossy_materialization() {
+    fn bigquery_table_row_try_from_uses_lossy_materialization_when_configured() {
         let result = BigQueryTableRow::try_from_typed_tagged_cells(
             [
                 (
@@ -841,7 +841,7 @@ mod tests {
                 (2, Type::JSON, Cell::String(r#"{"value":18446744073709551616}"#.to_owned())),
                 (3, Type::FLOAT8, Cell::F64(-0.0)),
             ],
-            &BigQueryMaterialization::materializer(DestinationTypeCompatibility::default()),
+            &BigQueryMaterialization::materializer(DestinationTypeCompatibility::lossy()),
         );
 
         assert!(result.is_ok());

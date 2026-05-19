@@ -12,9 +12,11 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, ValueEnum};
+#[cfg(feature = "bigquery")]
+use etl::destination::DestinationTypeCompatibility;
 use etl::{
     destination::{
-        Destination, DestinationTypeCompatibility,
+        Destination,
         async_result::{TruncateTableResult, WriteEventsResult, WriteTableRowsResult},
     },
     error::EtlResult,
@@ -477,7 +479,7 @@ impl BenchDestination {
                 let bigquery_options = BigQueryDestinationOptions::new(
                     dataset_id,
                     destination_args.bq_max_staleness_mins,
-                    DestinationTypeCompatibility::default(),
+                    DestinationTypeCompatibility::lossy(),
                     pipeline_id,
                 );
                 let destination = BigQueryDestination::new_with_key_path(

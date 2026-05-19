@@ -933,7 +933,7 @@ mod tests {
     }
 
     #[test]
-    fn encrypted_stored_destination_config_serializes_default_bigquery_type_compatibility() {
+    fn encrypted_stored_destination_config_serializes_lossy_bigquery_type_compatibility() {
         let config = EncryptedStoredDestinationConfig::BigQuery {
             project_id: "test-project".to_owned(),
             dataset_id: "test_dataset".to_owned(),
@@ -1219,7 +1219,7 @@ mod tests {
     }
 
     #[test]
-    fn full_api_destination_config_defaults_bigquery_type_compatibility_to_lossy() {
+    fn full_api_destination_config_defaults_bigquery_type_compatibility_to_strict() {
         let json = r#"{
             "big_query": {
                 "project_id": "test-project",
@@ -1234,7 +1234,7 @@ mod tests {
         let FullApiDestinationConfig::BigQuery { type_compatibility, .. } = deserialized else {
             panic!("Expected BigQuery destination config");
         };
-        assert_eq!(type_compatibility, DestinationTypeCompatibilityMode::Lossy);
+        assert_eq!(type_compatibility, DestinationTypeCompatibilityMode::Strict);
     }
 
     #[test]
@@ -1254,7 +1254,7 @@ mod tests {
     }
 
     #[test]
-    fn full_api_destination_config_serializes_default_bigquery_type_compatibility() {
+    fn full_api_destination_config_serializes_lossy_bigquery_type_compatibility() {
         let full_config = FullApiDestinationConfig::BigQuery {
             project_id: "test-project".to_owned(),
             dataset_id: "test_dataset".to_owned(),

@@ -1485,7 +1485,6 @@ mod tests {
         assert_eq!(bigquery_type(&Type::FLOAT4, compatibility), "float64");
         assert_eq!(bigquery_type(&Type::FLOAT8, compatibility), "float64");
         assert_eq!(bigquery_type(&Type::NUMERIC, compatibility), "bignumeric");
-        assert_eq!(bigquery_type(&Type::MONEY, compatibility), "string");
         assert_eq!(bigquery_type(&Type::OID, compatibility), "int64");
         assert_eq!(bigquery_type(&Type::TIMESTAMP, compatibility), "datetime");
         assert_eq!(bigquery_type(&Type::TIMESTAMPTZ, compatibility), "timestamp");
@@ -1494,24 +1493,20 @@ mod tests {
     }
 
     #[test]
-    fn materialize_type_array_types() {
+    fn materialize_type_default_preserves_native_array_types() {
         let compatibility = DestinationTypeCompatibility::default();
 
-        assert_eq!(bigquery_type(&Type::BOOL_ARRAY, compatibility), "string");
-        assert_eq!(bigquery_type(&Type::TEXT_ARRAY, compatibility), "string");
-        assert_eq!(bigquery_type(&Type::INT2_ARRAY, compatibility), "string");
-        assert_eq!(bigquery_type(&Type::INT4_ARRAY, compatibility), "string");
-        assert_eq!(bigquery_type(&Type::INT8_ARRAY, compatibility), "string");
-        assert_eq!(bigquery_type(&Type::FLOAT4_ARRAY, compatibility), "string");
-        assert_eq!(bigquery_type(&Type::FLOAT8_ARRAY, compatibility), "string");
-        assert_eq!(bigquery_type(&Type::NUMERIC_ARRAY, compatibility), "string");
-        assert_eq!(bigquery_type(&Type::MONEY_ARRAY, compatibility), "string");
-        assert_eq!(bigquery_type(&Type::OID_ARRAY, compatibility), "string");
-        assert_eq!(bigquery_type(&Type::TIMESTAMP_ARRAY, compatibility), "string");
-        assert_eq!(bigquery_type(&Type::TIMESTAMPTZ_ARRAY, compatibility), "string");
-        assert_eq!(bigquery_type(&Type::INTERVAL_ARRAY, compatibility), "string");
-        assert_eq!(bigquery_type(&Type::INET_ARRAY, compatibility), "string");
-        assert_eq!(bigquery_type(&Type::INT4_RANGE_ARRAY, compatibility), "string");
+        assert_eq!(bigquery_type(&Type::BOOL_ARRAY, compatibility), "array<bool>");
+        assert_eq!(bigquery_type(&Type::TEXT_ARRAY, compatibility), "array<string>");
+        assert_eq!(bigquery_type(&Type::INT2_ARRAY, compatibility), "array<int64>");
+        assert_eq!(bigquery_type(&Type::INT4_ARRAY, compatibility), "array<int64>");
+        assert_eq!(bigquery_type(&Type::INT8_ARRAY, compatibility), "array<int64>");
+        assert_eq!(bigquery_type(&Type::FLOAT4_ARRAY, compatibility), "array<float64>");
+        assert_eq!(bigquery_type(&Type::FLOAT8_ARRAY, compatibility), "array<float64>");
+        assert_eq!(bigquery_type(&Type::NUMERIC_ARRAY, compatibility), "array<bignumeric>");
+        assert_eq!(bigquery_type(&Type::OID_ARRAY, compatibility), "array<int64>");
+        assert_eq!(bigquery_type(&Type::TIMESTAMP_ARRAY, compatibility), "array<datetime>");
+        assert_eq!(bigquery_type(&Type::TIMESTAMPTZ_ARRAY, compatibility), "array<timestamp>");
     }
 
     #[test]

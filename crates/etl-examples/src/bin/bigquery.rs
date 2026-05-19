@@ -211,7 +211,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
     let bigquery_options = BigQueryDestinationOptions::new(
         args.bq_args.bq_dataset_id,
         None,
-        DestinationTypeCompatibility::default(),
+        DestinationTypeCompatibility::lossy(),
         pipeline_config.id,
     );
     let bigquery_destination = BigQueryDestination::new_with_key_path(

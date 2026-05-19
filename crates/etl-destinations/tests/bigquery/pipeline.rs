@@ -103,7 +103,13 @@ async fn table_copy_and_streaming_with_restart() {
 
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
+    let raw_destination = bigquery_database
+        .build_destination_with_compatibility(
+            pipeline_id,
+            store.clone(),
+            DestinationTypeCompatibility::lossy(),
+        )
+        .await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     // Start pipeline from scratch.
@@ -336,7 +342,13 @@ async fn table_subsequent_updates() {
 
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
+    let raw_destination = bigquery_database
+        .build_destination_with_compatibility(
+            pipeline_id,
+            store.clone(),
+            DestinationTypeCompatibility::lossy(),
+        )
+        .await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     // Start pipeline from scratch.
@@ -771,7 +783,13 @@ async fn table_nullable_scalar_columns() {
 
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
+    let raw_destination = bigquery_database
+        .build_destination_with_compatibility(
+            pipeline_id,
+            store.clone(),
+            DestinationTypeCompatibility::lossy(),
+        )
+        .await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     let publication_name = "test_pub".to_owned();
@@ -968,7 +986,13 @@ async fn table_nullable_array_columns() {
 
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
+    let raw_destination = bigquery_database
+        .build_destination_with_compatibility(
+            pipeline_id,
+            store.clone(),
+            DestinationTypeCompatibility::lossy(),
+        )
+        .await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     let publication_name = "test_pub_array".to_owned();
@@ -1185,7 +1209,13 @@ async fn table_non_nullable_scalar_columns() {
 
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
+    let raw_destination = bigquery_database
+        .build_destination_with_compatibility(
+            pipeline_id,
+            store.clone(),
+            DestinationTypeCompatibility::lossy(),
+        )
+        .await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     let publication_name = "test_pub_non_null".to_owned();
@@ -1423,7 +1453,13 @@ async fn table_non_nullable_array_columns() {
 
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
+    let raw_destination = bigquery_database
+        .build_destination_with_compatibility(
+            pipeline_id,
+            store.clone(),
+            DestinationTypeCompatibility::lossy(),
+        )
+        .await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     let publication_name = "test_pub_non_null_array".to_owned();
@@ -1671,7 +1707,13 @@ async fn table_array_with_null_values() {
 
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
+    let raw_destination = bigquery_database
+        .build_destination_with_compatibility(
+            pipeline_id,
+            store.clone(),
+            DestinationTypeCompatibility::lossy(),
+        )
+        .await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     let publication_name = "test_pub_array_nulls".to_owned();
@@ -1698,7 +1740,7 @@ async fn table_array_with_null_values() {
     let event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 3)]).await;
 
     // BigQuery cannot preserve NULL repeated fields or NULL repeated-field
-    // elements, so the default lossy mode stores arrays as scalar strings.
+    // elements, so lossy mode stores arrays as scalar strings.
     let client = database.client.as_ref().unwrap();
     let quoted_table_name = table_name.as_quoted_identifier();
     client
