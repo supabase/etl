@@ -222,6 +222,11 @@ pub(crate) async fn update_publication(
     let source_pool =
         connect_to_source_database_from_api(&source_config.into_connection_config(tls_config))
             .await?;
+
+    if data::publications::read_publication(&publication_name, &source_pool).await?.is_none() {
+        return Err(PublicationError::PublicationNotFound(publication_name));
+    }
+
     let publication = publication.0;
     let publication = Publication { name: publication_name, tables: publication.tables };
     data::publications::update_publication(&publication, &source_pool).await?;
@@ -344,10 +349,7 @@ pub(crate) async fn add_tables_to_publication(
         connect_to_source_database_from_api(&source_config.into_connection_config(tls_config))
             .await?;
 
-    if data::publications::read_publication(&publication_name, &source_pool)
-        .await?
-        .is_none()
-    {
+    if data::publications::read_publication(&publication_name, &source_pool).await?.is_none() {
         return Err(PublicationError::PublicationNotFound(publication_name));
     }
 
@@ -394,10 +396,7 @@ pub(crate) async fn drop_tables_from_publication(
         connect_to_source_database_from_api(&source_config.into_connection_config(tls_config))
             .await?;
 
-    if data::publications::read_publication(&publication_name, &source_pool)
-        .await?
-        .is_none()
-    {
+    if data::publications::read_publication(&publication_name, &source_pool).await?.is_none() {
         return Err(PublicationError::PublicationNotFound(publication_name));
     }
 
@@ -444,10 +443,7 @@ pub(crate) async fn set_publication_tables(
         connect_to_source_database_from_api(&source_config.into_connection_config(tls_config))
             .await?;
 
-    if data::publications::read_publication(&publication_name, &source_pool)
-        .await?
-        .is_none()
-    {
+    if data::publications::read_publication(&publication_name, &source_pool).await?.is_none() {
         return Err(PublicationError::PublicationNotFound(publication_name));
     }
 
