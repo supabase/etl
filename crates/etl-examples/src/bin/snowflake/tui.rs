@@ -19,11 +19,20 @@ use crate::{
     state::{DashboardState, GlobalPhase, LogLevel, TableInfo},
 };
 
-pub fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>, Box<dyn std::error::Error>> {
+pub struct TerminalGuard;
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        restore_terminal();
+    }
+}
+
+pub fn setup_terminal(
+) -> Result<(Terminal<CrosstermBackend<Stdout>>, TerminalGuard), Box<dyn std::error::Error>> {
     crossterm::terminal::enable_raw_mode()?;
     let mut stdout = std::io::stdout();
     crossterm::execute!(stdout, crossterm::terminal::EnterAlternateScreen)?;
-    Ok(Terminal::new(CrosstermBackend::new(stdout))?)
+    Ok((Terminal::new(CrosstermBackend::new(stdout))?, TerminalGuard))
 }
 
 pub fn restore_terminal() {

@@ -144,7 +144,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
         memory_refresh_interval_ms: 100,
         memory_backpressure: Some(MemoryBackpressureConfig::default()),
         table_sync_copy: TableSyncCopyConfig::default(),
-        invalidated_slot_behavior: InvalidatedSlotBehavior::default(),
+        invalidated_slot_behavior: InvalidatedSlotBehavior::Recreate,
         max_copy_connections_per_table: PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE,
     };
 
@@ -183,14 +183,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
 
     let metrics_handle = init_metrics_handle().ok();
 
-    // Panic hook to restore terminal
-    let original_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        tui::restore_terminal();
-        original_hook(info);
-    }));
-
-    let mut terminal = tui::setup_terminal()?;
+    let (mut terminal, _terminal_guard) = tui::setup_terminal()?;
 
     // Monitor state
     let mut samples: Vec<f64> = Vec::new();
@@ -310,9 +303,22 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     info!("F2: resetting table {}, stopping pipeline...", table_name);
                     dashboard.lock().unwrap().set_status(format!("Resetting {table_name}..."));
 
-                    // Stop pipeline
+                    // Stop pipeline (wait consumes self, so always rebuild after)
                     pipeline.shutdown();
-                    pipeline.wait().await?;
+                    let wait_err = pipeline.wait().await.err();
+
+                    let client = Client::new(config.clone(), Arc::clone(&auth), pipeline_id);
+                    destination = Destination::new(client, store.clone());
+                    pipeline =
+                        Pipeline::new(pipeline_config.clone(), store.clone(), destination.clone());
+
+                    if let Some(e) = wait_err {
+                        error!(error = %e, "pipeline shutdown failed during reset");
+                        dashboard.lock().unwrap().pipeline_running = false;
+                        dashboard.lock().unwrap().phase = GlobalPhase::Stopped;
+                        dashboard.lock().unwrap().set_status(format!("Reset failed: {e}"));
+                        continue;
+                    }
                     dashboard.lock().unwrap().pipeline_running = false;
                     dashboard.lock().unwrap().phase = GlobalPhase::Stopped;
 
@@ -322,11 +328,13 @@ async fn run() -> Result<(), Box<dyn Error>> {
 
                     // Restart pipeline
                     info!("restarting pipeline after reset...");
-                    let client = Client::new(config.clone(), Arc::clone(&auth), pipeline_id);
-                    destination = Destination::new(client, store.clone());
-                    pipeline =
-                        Pipeline::new(pipeline_config.clone(), store.clone(), destination.clone());
-                    pipeline.start().await?;
+                    if let Err(e) = pipeline.start().await {
+                        error!(error = %e, "pipeline restart failed after reset");
+                        dashboard.lock().unwrap().set_status(format!(
+                            "Reset done but restart failed: {e} -- press F3 to retry"
+                        ));
+                        continue;
+                    }
                     dashboard.lock().unwrap().pipeline_running = true;
 
                     info!("pipeline restarted after table reset");
@@ -341,18 +349,34 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     info!("F3: restarting pipeline...");
                     dashboard.lock().unwrap().set_status("Restarting pipeline...".to_owned());
 
-                    // Stop
+                    // Stop (wait consumes self, so always rebuild after)
                     pipeline.shutdown();
-                    pipeline.wait().await?;
-                    dashboard.lock().unwrap().pipeline_running = false;
-                    dashboard.lock().unwrap().phase = GlobalPhase::Stopped;
+                    let wait_err = pipeline.wait().await.err();
 
-                    // Restart
                     let client = Client::new(config.clone(), Arc::clone(&auth), pipeline_id);
                     destination = Destination::new(client, store.clone());
                     pipeline =
                         Pipeline::new(pipeline_config.clone(), store.clone(), destination.clone());
-                    pipeline.start().await?;
+
+                    if let Some(e) = wait_err {
+                        error!(error = %e, "pipeline shutdown failed during restart");
+                        dashboard.lock().unwrap().pipeline_running = false;
+                        dashboard.lock().unwrap().phase = GlobalPhase::Stopped;
+                        dashboard.lock().unwrap().set_status(format!("Restart failed: {e} -- press F3 to retry"));
+                        continue;
+                    }
+                    dashboard.lock().unwrap().pipeline_running = false;
+                    dashboard.lock().unwrap().phase = GlobalPhase::Stopped;
+
+                    // Restart
+                    if let Err(e) = pipeline.start().await {
+                        error!(error = %e, "pipeline restart failed");
+                        dashboard
+                            .lock()
+                            .unwrap()
+                            .set_status(format!("Restart failed: {e} -- press F3 to retry"));
+                        continue;
+                    }
                     dashboard.lock().unwrap().pipeline_running = true;
 
                     info!("pipeline restarted");
@@ -386,8 +410,6 @@ async fn run() -> Result<(), Box<dyn Error>> {
             }
         }
     }
-
-    tui::restore_terminal();
 
     // Wait for pipeline to finish
     pipeline.wait().await?;
