@@ -17,7 +17,7 @@ chrono = { workspace = true }
 configcat = { workspace = true }
 etl = { workspace = true }
 etl-config = { workspace = true, features = ["supabase"] }
-etl-destinations = { workspace = true, features = ["bigquery", "clickhouse", "ducklake", "iceberg"] }
+etl-destinations = { workspace = true, features = ["bigquery", "clickhouse", "ducklake", "iceberg", "snowflake"] }
 etl-telemetry = { workspace = true }
 k8s-openapi = { workspace = true, features = ["latest"] }
 metrics = { workspace = true }

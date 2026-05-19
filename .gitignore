@@ -14,6 +14,8 @@ target/
 
 # Added by cargo
 /target
+
+# Environment files (credentials)
 .env
 
 # macOS system files
@@ -42,3 +44,6 @@ configuration
 
 # Nix
 result
+
+# Local rust-analyzer config
+.rust-analyzer.toml
