@@ -2,9 +2,12 @@ use tokio_postgres::types::{Kind, PgLsn, Type};
 
 /// Converts a Postgres type OID to a [`Type`] instance.
 ///
-/// Returns a properly constructed [`Type`] for the given OID, or return TEXT
-/// type as fallback if the OID lookup fails.
-pub fn convert_type_oid_to_type(type_oid: u32) -> Type {
+/// Unknown OIDs are intentionally represented as [`Type::TEXT`]. The source
+/// schema message can contain richer type metadata, but row conversion is
+/// driven by the [`Type`] stored in [`crate::types::ColumnSchema`]. This
+/// fallback makes table copy and streaming parse the source value through
+/// PostgreSQL's text output and create a destination string column.
+pub fn convert_type_oid_to_type_or_text(type_oid: u32) -> Type {
     Type::from_oid(type_oid).unwrap_or(Type::TEXT)
 }
 
@@ -13,6 +16,16 @@ pub fn is_array_type(typ: &Type) -> bool {
     // `int2vector` and `oidvector` have array kind, but they are not regular
     // PostgreSQL array types and do not use underscore-prefixed array names.
     matches!(typ.kind(), Kind::Array(_)) && typ.name().starts_with('_')
+}
+
+/// Returns whether the Postgres type is a JSON type.
+pub fn is_json_type(typ: &Type) -> bool {
+    matches!(*typ, Type::JSON | Type::JSONB)
+}
+
+/// Returns whether the Postgres type is a temporal type.
+pub fn is_temporal_type(typ: &Type) -> bool {
+    matches!(*typ, Type::DATE | Type::TIME | Type::TIMESTAMP | Type::TIMESTAMPTZ)
 }
 
 /// Creates a hex-encoded sequence number from Postgres LSNs to ensure correct
@@ -42,6 +55,17 @@ pub fn generate_sequence_number(start_lsn: PgLsn, commit_lsn: PgLsn) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn convert_type_oid_to_type_or_text_preserves_known_type() {
+        assert_eq!(convert_type_oid_to_type_or_text(Type::INT4.oid()), Type::INT4);
+    }
+
+    #[test]
+    fn convert_type_oid_to_type_or_text_defaults_unknown_oid_to_text() {
+        assert_eq!(convert_type_oid_to_type_or_text(u32::MAX), Type::TEXT);
+    }
+
     #[test]
     fn is_array_type_fn() {
         // array types
@@ -113,6 +137,25 @@ mod tests {
         assert!(!is_array_type(&Type::INT2_VECTOR));
         assert!(!is_array_type(&Type::OID_VECTOR));
         assert!(!is_array_type(&Type::ANYARRAY));
+    }
+
+    #[test]
+    fn is_json_type_fn() {
+        assert!(is_json_type(&Type::JSON));
+        assert!(is_json_type(&Type::JSONB));
+        assert!(!is_json_type(&Type::JSON_ARRAY));
+        assert!(!is_json_type(&Type::TEXT));
+    }
+
+    #[test]
+    fn is_temporal_type_fn() {
+        assert!(is_temporal_type(&Type::DATE));
+        assert!(is_temporal_type(&Type::TIME));
+        assert!(is_temporal_type(&Type::TIMESTAMP));
+        assert!(is_temporal_type(&Type::TIMESTAMPTZ));
+        assert!(!is_temporal_type(&Type::TIMETZ));
+        assert!(!is_temporal_type(&Type::INTERVAL));
+        assert!(!is_temporal_type(&Type::TEXT));
     }
 
     #[test]

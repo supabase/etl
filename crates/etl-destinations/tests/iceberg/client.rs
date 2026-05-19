@@ -341,19 +341,25 @@ async fn insert_nullable_scalars() {
             Cell::F64(std::f64::consts::E),  // float8_col
             Cell::String("123.456".to_owned()), /* numeric_col (maps to
                                               * String in Iceberg) */
-            Cell::Date(NaiveDate::from_ymd_opt(2023, 12, 25).unwrap()), // date_col
-            Cell::Time(NaiveTime::from_hms_micro_opt(1, 2, 3, 4).unwrap()),
-            Cell::Timestamp(NaiveDateTime::new(
-                NaiveDate::from_ymd_opt(2023, 12, 25).unwrap(),
-                NaiveTime::from_hms_micro_opt(1, 2, 3, 4).unwrap(),
-            )),
-            Cell::TimestampTz(DateTime::<Utc>::from_naive_utc_and_offset(
+            Cell::Date(NaiveDate::from_ymd_opt(2023, 12, 25).unwrap().into()), // date_col
+            Cell::Time(NaiveTime::from_hms_micro_opt(1, 2, 3, 4).unwrap().into()),
+            Cell::Timestamp(
                 NaiveDateTime::new(
                     NaiveDate::from_ymd_opt(2023, 12, 25).unwrap(),
                     NaiveTime::from_hms_micro_opt(1, 2, 3, 4).unwrap(),
-                ),
-                Utc,
-            )),
+                )
+                .into(),
+            ),
+            Cell::TimestampTz(
+                DateTime::<Utc>::from_naive_utc_and_offset(
+                    NaiveDateTime::new(
+                        NaiveDate::from_ymd_opt(2023, 12, 25).unwrap(),
+                        NaiveTime::from_hms_micro_opt(1, 2, 3, 4).unwrap(),
+                    ),
+                    Utc,
+                )
+                .into(),
+            ),
             Cell::Uuid(Uuid::new_v4()),
             Cell::String(r#"{"key": "value"}"#.to_owned()), /* json_col (maps to String in
                                                              * Iceberg) */
@@ -485,19 +491,25 @@ async fn insert_non_nullable_scalars() {
         Cell::F64(std::f64::consts::E),  // float8_col
         Cell::String("123.456".to_owned()), /* numeric_col (maps to
                                           * String in Iceberg) */
-        Cell::Date(NaiveDate::from_ymd_opt(2023, 12, 25).unwrap()), // date_col
-        Cell::Time(NaiveTime::from_hms_micro_opt(1, 2, 3, 4).unwrap()),
-        Cell::Timestamp(NaiveDateTime::new(
-            NaiveDate::from_ymd_opt(2023, 12, 25).unwrap(),
-            NaiveTime::from_hms_micro_opt(1, 2, 3, 4).unwrap(),
-        )),
-        Cell::TimestampTz(DateTime::<Utc>::from_naive_utc_and_offset(
+        Cell::Date(NaiveDate::from_ymd_opt(2023, 12, 25).unwrap().into()), // date_col
+        Cell::Time(NaiveTime::from_hms_micro_opt(1, 2, 3, 4).unwrap().into()),
+        Cell::Timestamp(
             NaiveDateTime::new(
                 NaiveDate::from_ymd_opt(2023, 12, 25).unwrap(),
                 NaiveTime::from_hms_micro_opt(1, 2, 3, 4).unwrap(),
-            ),
-            Utc,
-        )),
+            )
+            .into(),
+        ),
+        Cell::TimestampTz(
+            DateTime::<Utc>::from_naive_utc_and_offset(
+                NaiveDateTime::new(
+                    NaiveDate::from_ymd_opt(2023, 12, 25).unwrap(),
+                    NaiveTime::from_hms_micro_opt(1, 2, 3, 4).unwrap(),
+                ),
+                Utc,
+            )
+            .into(),
+        ),
         Cell::Uuid(Uuid::new_v4()),
         Cell::String(r#"{"key": "value"}"#.to_owned()), // json_col (maps to String in Iceberg)
         Cell::String(r#"{"key": "value"}"#.to_owned()), // jsonb_col (maps to String in Iceberg)
@@ -612,47 +624,59 @@ async fn insert_nullable_array() {
                 Some("678.90".parse().unwrap()),
             ])), /* numeric_array_col */
             Cell::Array(ArrayCell::Date(vec![
-                Some(NaiveDate::from_ymd_opt(2023, 1, 1).unwrap()),
-                Some(NaiveDate::from_ymd_opt(2023, 12, 31).unwrap()),
+                Some((NaiveDate::from_ymd_opt(2023, 1, 1).unwrap()).into()),
+                Some((NaiveDate::from_ymd_opt(2023, 12, 31).unwrap()).into()),
             ])), /* date_array_col */
             Cell::Array(ArrayCell::Time(vec![
-                Some(NaiveTime::from_hms_opt(9, 0, 0).unwrap()),
-                Some(NaiveTime::from_hms_opt(17, 30, 0).unwrap()),
+                Some((NaiveTime::from_hms_opt(9, 0, 0).unwrap()).into()),
+                Some((NaiveTime::from_hms_opt(17, 30, 0).unwrap()).into()),
             ])), /* time_array_col */
             Cell::Array(ArrayCell::Timestamp(vec![
-                Some(NaiveDateTime::new(
-                    NaiveDate::from_ymd_opt(2023, 6, 15).unwrap(),
-                    NaiveTime::from_hms_opt(12, 0, 0).unwrap(),
-                )),
-                Some(NaiveDateTime::new(
-                    NaiveDate::from_ymd_opt(2023, 6, 16).unwrap(),
-                    NaiveTime::from_hms_opt(14, 30, 0).unwrap(),
-                )),
-            ])), /* timestamp_array_col */
-            Cell::Array(ArrayCell::TimestampTz(vec![
-                Some(DateTime::<Utc>::from_naive_utc_and_offset(
+                Some(
                     NaiveDateTime::new(
                         NaiveDate::from_ymd_opt(2023, 6, 15).unwrap(),
                         NaiveTime::from_hms_opt(12, 0, 0).unwrap(),
-                    ),
-                    Utc,
-                )),
-                Some(DateTime::<Utc>::from_naive_utc_and_offset(
+                    )
+                    .into(),
+                ),
+                Some(
                     NaiveDateTime::new(
                         NaiveDate::from_ymd_opt(2023, 6, 16).unwrap(),
                         NaiveTime::from_hms_opt(14, 30, 0).unwrap(),
-                    ),
-                    Utc,
-                )),
+                    )
+                    .into(),
+                ),
+            ])), /* timestamp_array_col */
+            Cell::Array(ArrayCell::TimestampTz(vec![
+                Some(
+                    DateTime::<Utc>::from_naive_utc_and_offset(
+                        NaiveDateTime::new(
+                            NaiveDate::from_ymd_opt(2023, 6, 15).unwrap(),
+                            NaiveTime::from_hms_opt(12, 0, 0).unwrap(),
+                        ),
+                        Utc,
+                    )
+                    .into(),
+                ),
+                Some(
+                    DateTime::<Utc>::from_naive_utc_and_offset(
+                        NaiveDateTime::new(
+                            NaiveDate::from_ymd_opt(2023, 6, 16).unwrap(),
+                            NaiveTime::from_hms_opt(14, 30, 0).unwrap(),
+                        ),
+                        Utc,
+                    )
+                    .into(),
+                ),
             ])), /* timestamptz_array_col */
             Cell::Array(ArrayCell::Uuid(vec![Some(Uuid::new_v4()), Some(Uuid::new_v4())])), /* uuid_array_col */
-            Cell::Array(ArrayCell::Json(vec![
-                Some(serde_json::json!({"key1": "value1"})),
-                Some(serde_json::json!({"key2": "value2"})),
+            Cell::Array(ArrayCell::String(vec![
+                Some(r#"{"key1":"value1"}"#.to_owned()),
+                Some(r#"{"key2":"value2"}"#.to_owned()),
             ])), /* json_array_col */
-            Cell::Array(ArrayCell::Json(vec![
-                Some(serde_json::json!({"keyb1": "valueb1"})),
-                Some(serde_json::json!({"keyb2": "valueb2"})),
+            Cell::Array(ArrayCell::String(vec![
+                Some(r#"{"keyb1":"valueb1"}"#.to_owned()),
+                Some(r#"{"keyb2":"valueb2"}"#.to_owned()),
             ])), /* jsonb_array_col */
             Cell::Array(ArrayCell::U32(vec![Some(1001), Some(1002)])), // oid_array_col
             Cell::Array(ArrayCell::Bytes(vec![
@@ -709,12 +733,12 @@ async fn insert_nullable_array() {
 
     // json_array_col (index 18) and jsonb_array_col (index 19): JSON arrays map to
     // String in Iceberg
-    if let Cell::Array(ArrayCell::Json(vec)) = &values[18] {
+    if let Cell::Array(ArrayCell::String(vec)) = &values[18] {
         let converted: Vec<Option<String>> =
             vec.iter().map(|opt| opt.as_ref().map(ToString::to_string)).collect();
         values[18] = Cell::Array(ArrayCell::String(converted));
     }
-    if let Cell::Array(ArrayCell::Json(vec)) = &values[19] {
+    if let Cell::Array(ArrayCell::String(vec)) = &values[19] {
         let converted: Vec<Option<String>> =
             vec.iter().map(|opt| opt.as_ref().map(ToString::to_string)).collect();
         values[19] = Cell::Array(ArrayCell::String(converted));
@@ -817,47 +841,59 @@ async fn insert_non_nullable_array() {
             Some("678.90".parse().unwrap()),
         ])), // numeric_array_col
         Cell::Array(ArrayCell::Date(vec![
-            Some(NaiveDate::from_ymd_opt(2023, 1, 1).unwrap()),
-            Some(NaiveDate::from_ymd_opt(2023, 12, 31).unwrap()),
+            Some((NaiveDate::from_ymd_opt(2023, 1, 1).unwrap()).into()),
+            Some((NaiveDate::from_ymd_opt(2023, 12, 31).unwrap()).into()),
         ])), // date_array_col
         Cell::Array(ArrayCell::Time(vec![
-            Some(NaiveTime::from_hms_opt(9, 0, 0).unwrap()),
-            Some(NaiveTime::from_hms_opt(17, 30, 0).unwrap()),
+            Some((NaiveTime::from_hms_opt(9, 0, 0).unwrap()).into()),
+            Some((NaiveTime::from_hms_opt(17, 30, 0).unwrap()).into()),
         ])), // time_array_col
         Cell::Array(ArrayCell::Timestamp(vec![
-            Some(NaiveDateTime::new(
-                NaiveDate::from_ymd_opt(2023, 6, 15).unwrap(),
-                NaiveTime::from_hms_opt(12, 0, 0).unwrap(),
-            )),
-            Some(NaiveDateTime::new(
-                NaiveDate::from_ymd_opt(2023, 6, 16).unwrap(),
-                NaiveTime::from_hms_opt(14, 30, 0).unwrap(),
-            )),
-        ])), // timestamp_array_col
-        Cell::Array(ArrayCell::TimestampTz(vec![
-            Some(DateTime::<Utc>::from_naive_utc_and_offset(
+            Some(
                 NaiveDateTime::new(
                     NaiveDate::from_ymd_opt(2023, 6, 15).unwrap(),
                     NaiveTime::from_hms_opt(12, 0, 0).unwrap(),
-                ),
-                Utc,
-            )),
-            Some(DateTime::<Utc>::from_naive_utc_and_offset(
+                )
+                .into(),
+            ),
+            Some(
                 NaiveDateTime::new(
                     NaiveDate::from_ymd_opt(2023, 6, 16).unwrap(),
                     NaiveTime::from_hms_opt(14, 30, 0).unwrap(),
-                ),
-                Utc,
-            )),
+                )
+                .into(),
+            ),
+        ])), // timestamp_array_col
+        Cell::Array(ArrayCell::TimestampTz(vec![
+            Some(
+                DateTime::<Utc>::from_naive_utc_and_offset(
+                    NaiveDateTime::new(
+                        NaiveDate::from_ymd_opt(2023, 6, 15).unwrap(),
+                        NaiveTime::from_hms_opt(12, 0, 0).unwrap(),
+                    ),
+                    Utc,
+                )
+                .into(),
+            ),
+            Some(
+                DateTime::<Utc>::from_naive_utc_and_offset(
+                    NaiveDateTime::new(
+                        NaiveDate::from_ymd_opt(2023, 6, 16).unwrap(),
+                        NaiveTime::from_hms_opt(14, 30, 0).unwrap(),
+                    ),
+                    Utc,
+                )
+                .into(),
+            ),
         ])), // timestamptz_array_col
         Cell::Array(ArrayCell::Uuid(vec![Some(Uuid::new_v4()), Some(Uuid::new_v4())])), /* uuid_array_col */
-        Cell::Array(ArrayCell::Json(vec![
-            Some(serde_json::json!({"key1": "value1"})),
-            Some(serde_json::json!({"key2": "value2"})),
+        Cell::Array(ArrayCell::String(vec![
+            Some(r#"{"key1":"value1"}"#.to_owned()),
+            Some(r#"{"key2":"value2"}"#.to_owned()),
         ])), /* json_array_col */
-        Cell::Array(ArrayCell::Json(vec![
-            Some(serde_json::json!({"keyb1": "valueb1"})),
-            Some(serde_json::json!({"keyb2": "valueb2"})),
+        Cell::Array(ArrayCell::String(vec![
+            Some(r#"{"keyb1":"valueb1"}"#.to_owned()),
+            Some(r#"{"keyb2":"valueb2"}"#.to_owned()),
         ])), /* jsonb_array_col */
         Cell::Array(ArrayCell::U32(vec![Some(1001), Some(1002)])), // oid_array_col
         Cell::Array(ArrayCell::Bytes(vec![
@@ -889,12 +925,12 @@ async fn insert_non_nullable_array() {
 
     // json_array_col (index 18) and jsonb_array_col (index 19): JSON arrays map to
     // String in Iceberg
-    if let Cell::Array(ArrayCell::Json(vec)) = &values[18] {
+    if let Cell::Array(ArrayCell::String(vec)) = &values[18] {
         let converted: Vec<Option<String>> =
             vec.iter().map(|opt| opt.as_ref().map(ToString::to_string)).collect();
         values[18] = Cell::Array(ArrayCell::String(converted));
     }
-    if let Cell::Array(ArrayCell::Json(vec)) = &values[19] {
+    if let Cell::Array(ArrayCell::String(vec)) = &values[19] {
         let converted: Vec<Option<String>> =
             vec.iter().map(|opt| opt.as_ref().map(ToString::to_string)).collect();
         values[19] = Cell::Array(ArrayCell::String(converted));

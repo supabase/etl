@@ -93,12 +93,19 @@
   letter. This applies to static error text, including `thiserror` messages.
 - Reserve panics for programmer errors or violated invariants.
 - Use `debug_assert!` and `unreachable!` where they make internal invariants explicit, but prefer typed errors for runtime failures that can be triggered by external input or system state.
+- `expect` is acceptable for static constants and literal values that cannot be
+  invalid unless the code itself is wrong, such as constructing a known-valid
+  date bound. Do not use `expect` for values derived from external input,
+  database rows, configuration, network responses, or other runtime state; use a
+  typed error and `Result` instead.
 - Only document `# Panics` when a function can actually panic.
 
 ## Unsafe And Concurrency
 - Avoid `unsafe` unless it is necessary.
 - Every `unsafe` block should have a preceding `// SAFETY:` comment explaining why it is sound.
 - Prefer explicit ownership and borrowing over unnecessary cloning or interior mutability.
+- Do not derive or implement `Clone` or `Copy` for structs or enums unless a
+  real caller needs value duplication. Prefer moves and borrowing in hot paths.
 - In async code, keep long-running background work behind named tasks or helpers.
 
 ## Documentation

@@ -32,6 +32,7 @@ ducklake = [
 ]
 bigquery = [
     "dep:gcp-bigquery-client",
+    "dep:serde",
     "dep:serde_json",
     "dep:prost",
     "dep:rand",

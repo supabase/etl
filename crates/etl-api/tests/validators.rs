@@ -7,7 +7,10 @@ use etl_api::{
         FailureType, ValidationContext, validate_destination, validate_pipeline, validate_source,
     },
 };
-use etl_config::{Environment, SerializableSecretString, shared::BatchConfig};
+use etl_config::{
+    Environment, SerializableSecretString,
+    shared::{BatchConfig, DestinationTypeCompatibilityMode},
+};
 use etl_destinations::{
     bigquery::test_utils::{
         setup_bigquery_database, setup_bigquery_database_without_dataset,
@@ -61,6 +64,7 @@ fn create_bigquery_config(
         service_account_key: SerializableSecretString::from(sa_key.to_owned()),
         max_staleness_mins: None,
         connection_pool_size: None,
+        type_compatibility: DestinationTypeCompatibilityMode::Lossy,
     }
 }
 

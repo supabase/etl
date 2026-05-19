@@ -15,7 +15,7 @@ use etl::{
 use etl_postgres::{
     below_version,
     tokio::test_utils::{TableModification, id_column_schema},
-    types::{ColumnSchema, convert_type_oid_to_type},
+    types::{ColumnSchema, convert_type_oid_to_type_or_text},
     version::POSTGRES_15,
 };
 use etl_telemetry::tracing::init_test_tracing;
@@ -67,7 +67,7 @@ fn column_schemas_from_ddl_message(message: &JsonValue) -> Vec<ColumnSchema> {
         .map(|column| {
             ColumnSchema::new(
                 column["attname"].as_str().unwrap().to_owned(),
-                convert_type_oid_to_type(column["atttypid"].as_u64().unwrap() as u32),
+                convert_type_oid_to_type_or_text(column["atttypid"].as_u64().unwrap() as u32),
                 column["atttypmod"].as_i64().unwrap() as i32,
                 column["attnum"].as_i64().unwrap() as i32,
                 primary_key_positions.get(&(column["attnum"].as_i64().unwrap() as i32)).copied(),

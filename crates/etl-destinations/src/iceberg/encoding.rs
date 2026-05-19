@@ -12,7 +12,7 @@ use arrow::{
     error::ArrowError,
 };
 use chrono::{NaiveDate, NaiveTime};
-use etl::types::{ArrayCell, Cell, DATE_FORMAT, TIME_FORMAT, TIMESTAMP_FORMAT, TableRow};
+use etl::types::{ArrayCell, Cell, TableRow};
 
 pub const UNIX_EPOCH: NaiveDate =
     NaiveDate::from_ymd_opt(1970, 1, 1).expect("unix epoch is a valid date");
@@ -38,6 +38,7 @@ pub(super) fn rows_to_record_batch(
     let mut arrays: Vec<ArrayRef> = Vec::with_capacity(schema.fields().len());
 
     for (field_idx, field) in schema.fields().iter().enumerate() {
+        validate_temporal_values_for_field(rows, field_idx, field.data_type())?;
         let array = build_array_for_field(rows, field_idx, field.data_type());
         arrays.push(array);
     }
@@ -45,6 +46,95 @@ pub(super) fn rows_to_record_batch(
     let batch = RecordBatch::try_new(Arc::new(schema), arrays)?;
 
     Ok(batch)
+}
+
+/// Validates PostgreSQL temporal values before Arrow null fallback can hide
+/// unsupported sentinels.
+fn validate_temporal_values_for_field(
+    rows: &[TableRow],
+    field_idx: usize,
+    data_type: &DataType,
+) -> Result<(), ArrowError> {
+    for row in rows {
+        validate_temporal_cell_for_type(&row.values()[field_idx], data_type)?;
+    }
+
+    Ok(())
+}
+
+/// Validates one cell against the expected Arrow temporal type.
+fn validate_temporal_cell_for_type(cell: &Cell, data_type: &DataType) -> Result<(), ArrowError> {
+    match (cell, data_type) {
+        (Cell::Date(value), DataType::Date32) if value.as_finite().is_none() => {
+            invalid_temporal_cell(value)
+        }
+        (Cell::Time(value), DataType::Time64(TimeUnit::Microsecond))
+            if value.as_finite().is_none() =>
+        {
+            invalid_temporal_cell(value)
+        }
+        (Cell::Timestamp(value), DataType::Timestamp(TimeUnit::Microsecond, None))
+            if value.as_finite().is_none() =>
+        {
+            invalid_temporal_cell(value)
+        }
+        (Cell::TimestampTz(value), DataType::Timestamp(TimeUnit::Microsecond, Some(_)))
+            if value.as_finite().is_none() =>
+        {
+            invalid_temporal_cell(value)
+        }
+        (Cell::Array(array), DataType::List(field)) => {
+            validate_temporal_array_for_type(array, field.data_type())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Validates one array cell against the expected Arrow temporal element type.
+fn validate_temporal_array_for_type(
+    array: &ArrayCell,
+    data_type: &DataType,
+) -> Result<(), ArrowError> {
+    match (array, data_type) {
+        (ArrayCell::Date(values), DataType::Date32) => {
+            validate_temporal_array_values(values, |value| value.as_finite().is_none())
+        }
+        (ArrayCell::Time(values), DataType::Time64(TimeUnit::Microsecond)) => {
+            validate_temporal_array_values(values, |value| value.as_finite().is_none())
+        }
+        (ArrayCell::Timestamp(values), DataType::Timestamp(TimeUnit::Microsecond, None)) => {
+            validate_temporal_array_values(values, |value| value.as_finite().is_none())
+        }
+        (ArrayCell::TimestampTz(values), DataType::Timestamp(TimeUnit::Microsecond, Some(_))) => {
+            validate_temporal_array_values(values, |value| value.as_finite().is_none())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Validates nullable temporal array values.
+fn validate_temporal_array_values<T>(
+    values: &[Option<T>],
+    is_invalid: impl Fn(&T) -> bool,
+) -> Result<(), ArrowError>
+where
+    T: std::fmt::Display,
+{
+    for value in values.iter().flatten() {
+        if is_invalid(value) {
+            return invalid_temporal_cell(value);
+        }
+    }
+
+    Ok(())
+}
+
+/// Returns an Arrow error for a PostgreSQL temporal value Iceberg cannot store.
+fn invalid_temporal_cell(value: impl std::fmt::Display) -> Result<(), ArrowError> {
+    Err(ArrowError::InvalidArgumentError(format!(
+        "PostgreSQL temporal value {value} cannot be represented in Iceberg's finite Arrow \
+         temporal type",
+    )))
 }
 
 /// Builds an [`ArrayRef`] from the [`TableRow`]s for a field specified by the
@@ -259,7 +349,9 @@ fn cell_to_bytes(cell: &Cell) -> Option<Vec<u8>> {
 /// [`None`] for non-date cell types.
 fn cell_to_date32(cell: &Cell) -> Option<i32> {
     match cell {
-        Cell::Date(date) => Some(date.signed_duration_since(UNIX_EPOCH).num_days() as i32),
+        Cell::Date(date) => {
+            date.as_finite().map(|date| date.signed_duration_since(UNIX_EPOCH).num_days() as i32)
+        }
         _ => None,
     }
 }
@@ -271,7 +363,9 @@ fn cell_to_date32(cell: &Cell) -> Option<i32> {
 /// be represented in microseconds or for non-time cell types.
 fn cell_to_time64(cell: &Cell) -> Option<i64> {
     match cell {
-        Cell::Time(time) => time.signed_duration_since(MIDNIGHT).num_microseconds(),
+        Cell::Time(time) => time
+            .as_finite()
+            .and_then(|time| time.signed_duration_since(MIDNIGHT).num_microseconds()),
         _ => None,
     }
 }
@@ -284,7 +378,7 @@ fn cell_to_time64(cell: &Cell) -> Option<i64> {
 /// non-timestamp cell types.
 fn cell_to_timestamp(cell: &Cell) -> Option<i64> {
     match cell {
-        Cell::Timestamp(ts) => Some(ts.and_utc().timestamp_micros()),
+        Cell::Timestamp(ts) => ts.as_finite().map(|ts| ts.and_utc().timestamp_micros()),
         _ => None,
     }
 }
@@ -297,7 +391,7 @@ fn cell_to_timestamp(cell: &Cell) -> Option<i64> {
 /// Returns [`None`] for non-timestamptz cell types.
 fn cell_to_timestamptz(cell: &Cell) -> Option<i64> {
     match cell {
-        Cell::TimestampTz(ts) => Some(ts.timestamp_micros()),
+        Cell::TimestampTz(ts) => ts.as_finite().map(|ts| ts.timestamp_micros()),
         _ => None,
     }
 }
@@ -326,10 +420,9 @@ fn cell_to_uuid(cell: &Cell) -> Option<&[u8; UUID_BYTE_WIDTH as usize]> {
 /// The conversion rules are:
 /// - [`Cell::Null`] becomes [`None`]
 /// - Primitive types use their standard string representation
-/// - Dates, times, and timestamps use predefined format strings
-/// - Timezone-aware timestamps use RFC3339 format
+/// - Numeric and JSON values use their serialized string form
+/// - Temporal scalar values are left to typed Arrow builders
 /// - Binary data is Base64-encoded
-/// - JSON values use their serialized string form
 /// - Arrays use debug formatting
 ///
 /// Returns [`Some`] with the string representation for non-null values,
@@ -352,7 +445,6 @@ fn cell_to_string(cell: &Cell) -> Option<String> {
         Cell::Timestamp(_) => None,
         Cell::TimestampTz(_) => None,
         Cell::Uuid(_) => None,
-        Cell::Json(j) => Some(j.to_string()),
         Cell::Bytes(_) => None,
         Cell::Array(_) => None,
     }
@@ -573,15 +665,6 @@ fn build_string_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef)
                     }
                     list_builder.append(true);
                 }
-                ArrayCell::Json(vec) => {
-                    for item in vec {
-                        match item {
-                            Some(j) => list_builder.values().append_value(j.to_string()),
-                            None => list_builder.values().append_null(),
-                        }
-                    }
-                    list_builder.append(true);
-                }
                 _ => {
                     return build_list_array_for_strings(rows, field_idx, field);
                 }
@@ -633,8 +716,11 @@ fn build_date32_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef)
             match array_cell {
                 ArrayCell::Date(vec) => {
                     for item in vec {
-                        let arrow_value = item
-                            .map(|date| date.signed_duration_since(UNIX_EPOCH).num_days() as i32);
+                        let arrow_value = item.as_ref().and_then(|date| {
+                            date.as_finite().map(|date| {
+                                date.signed_duration_since(UNIX_EPOCH).num_days() as i32
+                            })
+                        });
                         list_builder.values().append_option(arrow_value);
                     }
                     list_builder.append(true);
@@ -662,7 +748,9 @@ fn build_time64_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef)
                 ArrayCell::Time(vec) => {
                     for item in vec {
                         let arrow_value = item.and_then(|time| {
-                            time.signed_duration_since(MIDNIGHT).num_microseconds()
+                            time.as_finite().and_then(|time| {
+                                time.signed_duration_since(MIDNIGHT).num_microseconds()
+                            })
                         });
                         list_builder.values().append_option(arrow_value);
                     }
@@ -690,7 +778,9 @@ fn build_timestamp_list_array(rows: &[TableRow], field_idx: usize, field: FieldR
             match array_cell {
                 ArrayCell::Timestamp(vec) => {
                     for item in vec {
-                        let arrow_value = item.map(|ts| ts.and_utc().timestamp_micros());
+                        let arrow_value = item.as_ref().and_then(|ts| {
+                            ts.as_finite().map(|ts| ts.and_utc().timestamp_micros())
+                        });
                         list_builder.values().append_option(arrow_value);
                     }
                     list_builder.append(true);
@@ -724,7 +814,9 @@ fn build_timestamptz_list_array(rows: &[TableRow], field_idx: usize, field: Fiel
             match array_cell {
                 ArrayCell::TimestampTz(vec) => {
                     for item in vec {
-                        let arrow_value = item.map(|ts| ts.timestamp_micros());
+                        let arrow_value = item
+                            .as_ref()
+                            .and_then(|ts| ts.as_finite().map(|ts| ts.timestamp_micros()));
                         list_builder.values().append_option(arrow_value);
                     }
                     list_builder.append(true);
@@ -900,9 +992,7 @@ fn append_array_cell_as_strings(
         ArrayCell::Date(vec) => {
             for item in vec {
                 match item {
-                    Some(d) => {
-                        list_builder.values().append_value(d.format(DATE_FORMAT).to_string());
-                    }
+                    Some(d) => list_builder.values().append_value(d.to_string()),
                     None => list_builder.values().append_null(),
                 }
             }
@@ -910,9 +1000,7 @@ fn append_array_cell_as_strings(
         ArrayCell::Time(vec) => {
             for item in vec {
                 match item {
-                    Some(t) => {
-                        list_builder.values().append_value(t.format(TIME_FORMAT).to_string());
-                    }
+                    Some(t) => list_builder.values().append_value(t.to_string()),
                     None => list_builder.values().append_null(),
                 }
             }
@@ -920,9 +1008,7 @@ fn append_array_cell_as_strings(
         ArrayCell::Timestamp(vec) => {
             for item in vec {
                 match item {
-                    Some(ts) => {
-                        list_builder.values().append_value(ts.format(TIMESTAMP_FORMAT).to_string());
-                    }
+                    Some(ts) => list_builder.values().append_value(ts.to_string()),
                     None => list_builder.values().append_null(),
                 }
             }
@@ -930,7 +1016,7 @@ fn append_array_cell_as_strings(
         ArrayCell::TimestampTz(vec) => {
             for item in vec {
                 match item {
-                    Some(ts) => list_builder.values().append_value(ts.to_rfc3339()),
+                    Some(ts) => list_builder.values().append_value(ts.to_string()),
                     None => list_builder.values().append_null(),
                 }
             }
@@ -939,14 +1025,6 @@ fn append_array_cell_as_strings(
             for item in vec {
                 match item {
                     Some(u) => list_builder.values().append_value(u.to_string()),
-                    None => list_builder.values().append_null(),
-                }
-            }
-        }
-        ArrayCell::Json(vec) => {
-            for item in vec {
-                match item {
-                    Some(j) => list_builder.values().append_value(j.to_string()),
                     None => list_builder.values().append_null(),
                 }
             }
@@ -962,7 +1040,10 @@ fn append_array_cell_as_strings(
 #[cfg(test)]
 mod tests {
     use arrow::array::Array;
-    use etl::types::ArrayCell;
+    use etl::types::{
+        ArrayCell, DATE_FORMAT, PgDate, PgTimestamp, TIME_FORMAT, TIMESTAMP_FORMAT,
+        TIMESTAMPTZ_FORMAT_HH_MM,
+    };
 
     use super::*;
 
@@ -1028,8 +1109,12 @@ mod tests {
         let test_date = NaiveDate::from_ymd_opt(2023, 5, 15).unwrap();
         let expected_days = test_date.signed_duration_since(UNIX_EPOCH).num_days() as i32;
 
-        assert_eq!(cell_to_date32(&Cell::Date(test_date)), Some(expected_days));
-        assert_eq!(cell_to_date32(&Cell::Date(UNIX_EPOCH)), Some(0));
+        assert_eq!(cell_to_date32(&Cell::Date((test_date).into())), Some(expected_days));
+        assert_eq!(cell_to_date32(&Cell::Date((UNIX_EPOCH).into())), Some(0));
+        assert_eq!(
+            cell_to_date32(&Cell::Date((NaiveDate::from_ymd_opt(1969, 12, 31).unwrap()).into())),
+            Some(-1)
+        );
         assert_eq!(cell_to_date32(&Cell::Null), None);
         assert_eq!(cell_to_date32(&Cell::String("2023-05-15".to_owned())), None);
     }
@@ -1040,8 +1125,8 @@ mod tests {
         let test_time = NaiveTime::from_hms_opt(12, 30, 45).unwrap();
         let expected_micros = test_time.signed_duration_since(MIDNIGHT).num_microseconds();
 
-        assert_eq!(cell_to_time64(&Cell::Time(test_time)), expected_micros);
-        assert_eq!(cell_to_time64(&Cell::Time(MIDNIGHT)), Some(0));
+        assert_eq!(cell_to_time64(&Cell::Time((test_time).into())), expected_micros);
+        assert_eq!(cell_to_time64(&Cell::Time((MIDNIGHT).into())), Some(0));
         assert_eq!(cell_to_time64(&Cell::Null), None);
         assert_eq!(cell_to_time64(&Cell::String("12:30:45".to_owned())), None);
     }
@@ -1052,7 +1137,7 @@ mod tests {
         let test_ts = DateTime::from_timestamp(1000000000, 0).unwrap().naive_utc();
         let expected_micros = test_ts.and_utc().timestamp_micros();
 
-        assert_eq!(cell_to_timestamp(&Cell::Timestamp(test_ts)), Some(expected_micros));
+        assert_eq!(cell_to_timestamp(&Cell::Timestamp((test_ts).into())), Some(expected_micros));
         assert_eq!(cell_to_timestamp(&Cell::Null), None);
         assert_eq!(cell_to_timestamp(&Cell::String("2001-09-09 01:46:40".to_owned())), None);
     }
@@ -1063,7 +1148,10 @@ mod tests {
         let test_ts = DateTime::from_timestamp(1000000000, 0).unwrap();
         let expected_micros = test_ts.timestamp_micros();
 
-        assert_eq!(cell_to_timestamptz(&Cell::TimestampTz(test_ts)), Some(expected_micros));
+        assert_eq!(
+            cell_to_timestamptz(&Cell::TimestampTz((test_ts).into())),
+            Some(expected_micros)
+        );
         assert_eq!(cell_to_timestamptz(&Cell::Null), None);
         assert_eq!(cell_to_timestamptz(&Cell::String("2001-09-09T01:46:40Z".to_owned())), None);
     }
@@ -1098,18 +1186,18 @@ mod tests {
 
         // Test temporal types with known formats
         let test_date = NaiveDate::from_ymd_opt(2023, 5, 15).unwrap();
-        assert_eq!(cell_to_string(&Cell::Date(test_date)), None);
+        assert_eq!(cell_to_string(&Cell::Date((test_date).into())), None);
 
         let test_time = NaiveTime::from_hms_opt(12, 30, 45).unwrap();
-        assert_eq!(cell_to_string(&Cell::Time(test_time)), None);
+        assert_eq!(cell_to_string(&Cell::Time((test_time).into())), None);
 
         // Test UUID
         let test_uuid = Uuid::new_v4();
         assert_eq!(cell_to_string(&Cell::Uuid(test_uuid)), None);
 
-        // Test JSON
-        let json_val = serde_json::json!({"key": "value"});
-        assert_eq!(cell_to_string(&Cell::Json(json_val.clone())), Some(json_val.to_string()));
+        // Test JSON.
+        let json = r#"{"key":"value"}"#.to_owned();
+        assert_eq!(cell_to_string(&Cell::String(json.clone())), Some(json));
 
         // Test bytes (Base64 encoded)
         let test_bytes = vec![72, 101, 108, 108, 111];
@@ -1264,8 +1352,8 @@ mod tests {
         let expected_days = test_date.signed_duration_since(UNIX_EPOCH).num_days() as i32;
 
         let rows = vec![
-            TableRow::new(vec![Cell::Date(test_date)]),
-            TableRow::new(vec![Cell::Date(UNIX_EPOCH)]),
+            TableRow::new(vec![Cell::Date((test_date).into())]),
+            TableRow::new(vec![Cell::Date((UNIX_EPOCH).into())]),
             TableRow::new(vec![Cell::Null]),
             TableRow::new(vec![Cell::String("2023-05-15".to_owned())]),
         ];
@@ -1287,8 +1375,8 @@ mod tests {
         let expected_micros = test_time.signed_duration_since(MIDNIGHT).num_microseconds().unwrap();
 
         let rows = vec![
-            TableRow::new(vec![Cell::Time(test_time)]),
-            TableRow::new(vec![Cell::Time(MIDNIGHT)]),
+            TableRow::new(vec![Cell::Time((test_time).into())]),
+            TableRow::new(vec![Cell::Time((MIDNIGHT).into())]),
             TableRow::new(vec![Cell::Null]),
             TableRow::new(vec![Cell::String("12:30:45".to_owned())]),
         ];
@@ -1311,7 +1399,7 @@ mod tests {
         let expected_micros = test_ts.and_utc().timestamp_micros();
 
         let rows = vec![
-            TableRow::new(vec![Cell::Timestamp(test_ts)]),
+            TableRow::new(vec![Cell::Timestamp((test_ts).into())]),
             TableRow::new(vec![Cell::Null]),
             TableRow::new(vec![Cell::String("2001-09-09 01:46:40".to_owned())]),
         ];
@@ -1334,7 +1422,7 @@ mod tests {
         let expected_micros = test_ts.timestamp_micros();
 
         let rows = vec![
-            TableRow::new(vec![Cell::TimestampTz(test_ts)]),
+            TableRow::new(vec![Cell::TimestampTz((test_ts).into())]),
             TableRow::new(vec![Cell::Null]),
             TableRow::new(vec![Cell::String("2001-09-09T01:46:40Z".to_owned())]),
         ];
@@ -1457,10 +1545,10 @@ mod tests {
         let test_ts_tz = DateTime::from_timestamp(1000000000, 0).unwrap();
 
         let rows = vec![TableRow::new(vec![
-            Cell::Date(test_date),
-            Cell::Time(test_time),
-            Cell::Timestamp(test_ts),
-            Cell::TimestampTz(test_ts_tz),
+            Cell::Date((test_date).into()),
+            Cell::Time((test_time).into()),
+            Cell::Timestamp((test_ts).into()),
+            Cell::TimestampTz((test_ts_tz).into()),
         ])];
 
         let schema = Schema::new(vec![
@@ -1566,7 +1654,7 @@ mod tests {
         let rows = vec![
             TableRow::new(vec![
                 Cell::I32(42),
-                Cell::Json(serde_json::json!({"key": "value", "number": 123})),
+                Cell::String(r#"{"key":"value","number":123}"#.to_owned()),
             ]),
             TableRow::new(vec![Cell::I32(100), Cell::Null]),
         ];
@@ -1592,6 +1680,34 @@ mod tests {
         // JSON should be converted to string representation
         assert_eq!(metadata_array.value(0), r#"{"key":"value","number":123}"#);
         assert!(metadata_array.is_null(1));
+    }
+
+    #[test]
+    fn rows_to_record_batch_rejects_postgres_date_sentinel() {
+        use arrow::datatypes::{Field, Schema};
+
+        let rows = vec![TableRow::new(vec![Cell::Date(PgDate::PosInfinity)])];
+        let schema = Schema::new(vec![Field::new("date_col", DataType::Date32, false)]);
+
+        let error = rows_to_record_batch(&rows, schema).unwrap_err();
+
+        assert!(error.to_string().contains("cannot be represented in Iceberg"));
+    }
+
+    #[test]
+    fn rows_to_record_batch_rejects_postgres_timestamp_sentinel() {
+        use arrow::datatypes::{Field, Schema};
+
+        let rows = vec![TableRow::new(vec![Cell::Timestamp(PgTimestamp::NegInfinity)])];
+        let schema = Schema::new(vec![Field::new(
+            "ts_col",
+            DataType::Timestamp(TimeUnit::Microsecond, None),
+            false,
+        )]);
+
+        let error = rows_to_record_batch(&rows, schema).unwrap_err();
+
+        assert!(error.to_string().contains("cannot be represented in Iceberg"));
     }
 
     #[test]
@@ -1931,9 +2047,9 @@ mod tests {
                 Some("-6789".parse::<PgNumeric>().unwrap()),
                 None,
             ]))]),
-            TableRow::new(vec![Cell::Array(ArrayCell::Json(vec![
-                Some(serde_json::json!({"key": "value"})),
-                Some(serde_json::json!([1, 2, 3])),
+            TableRow::new(vec![Cell::Array(ArrayCell::String(vec![
+                Some(r#"{"key":"value"}"#.to_owned()),
+                Some("[1,2,3]".to_owned()),
                 None,
             ]))]),
             TableRow::new(vec![Cell::Array(ArrayCell::String(vec![]))]), // Empty array,
@@ -2050,11 +2166,11 @@ mod tests {
 
         let rows = vec![
             TableRow::new(vec![Cell::Array(ArrayCell::Date(vec![
-                Some(test_date_1),
-                Some(test_date_2),
+                Some((test_date_1).into()),
+                Some((test_date_2).into()),
                 None,
             ]))]),
-            TableRow::new(vec![Cell::Array(ArrayCell::Date(vec![Some(test_date_3)]))]),
+            TableRow::new(vec![Cell::Array(ArrayCell::Date(vec![Some((test_date_3).into())]))]),
             TableRow::new(vec![Cell::Array(ArrayCell::Date(vec![]))]), // Empty array,
             TableRow::new(vec![Cell::Null]),                           // Null cell,
         ];
@@ -2112,11 +2228,11 @@ mod tests {
 
         let rows = vec![
             TableRow::new(vec![Cell::Array(ArrayCell::Time(vec![
-                Some(test_time_1),
-                Some(test_time_2),
+                Some((test_time_1).into()),
+                Some((test_time_2).into()),
                 None,
             ]))]),
-            TableRow::new(vec![Cell::Array(ArrayCell::Time(vec![Some(test_time_3)]))]),
+            TableRow::new(vec![Cell::Array(ArrayCell::Time(vec![Some((test_time_3).into())]))]),
             TableRow::new(vec![Cell::Array(ArrayCell::Time(vec![]))]), // Empty array,
             TableRow::new(vec![Cell::Null]),                           // Null cell,
         ];
@@ -2176,12 +2292,12 @@ mod tests {
 
         let rows = vec![
             TableRow::new(vec![Cell::Array(ArrayCell::Timestamp(vec![
-                Some(test_ts_1),
-                Some(test_ts_2),
+                Some((test_ts_1).into()),
+                Some((test_ts_2).into()),
                 None,
             ]))]),
-            TableRow::new(vec![Cell::Array(ArrayCell::Timestamp(vec![Some(test_ts_3)]))]),
-            TableRow::new(vec![Cell::Array(ArrayCell::Timestamp(vec![]))]), // Empty array,
+            TableRow::new(vec![Cell::Array(ArrayCell::Timestamp(vec![Some((test_ts_3).into())]))]),
+            TableRow::new(vec![Cell::Array(ArrayCell::Timestamp(vec![]))]), /* Empty array, */
             TableRow::new(vec![Cell::Null]),                                // Null cell,
         ];
 
@@ -2235,12 +2351,14 @@ mod tests {
 
         let rows = vec![
             TableRow::new(vec![Cell::Array(ArrayCell::TimestampTz(vec![
-                Some(test_ts_1),
-                Some(test_ts_2),
+                Some((test_ts_1).into()),
+                Some((test_ts_2).into()),
                 None,
             ]))]),
-            TableRow::new(vec![Cell::Array(ArrayCell::TimestampTz(vec![Some(test_ts_3)]))]),
-            TableRow::new(vec![Cell::Array(ArrayCell::TimestampTz(vec![]))]), // Empty array,
+            TableRow::new(vec![Cell::Array(ArrayCell::TimestampTz(vec![Some(
+                (test_ts_3).into(),
+            )]))]),
+            TableRow::new(vec![Cell::Array(ArrayCell::TimestampTz(vec![]))]), /* Empty array, */
             TableRow::new(vec![Cell::Null]),                                  // Null cell,
         ];
 
@@ -2362,16 +2480,22 @@ mod tests {
                 None,
             ]))]),
             TableRow::new(vec![Cell::Array(ArrayCell::Uuid(vec![Some(test_uuid), None]))]),
-            TableRow::new(vec![Cell::Array(ArrayCell::Date(vec![Some(test_date), None]))]),
-            TableRow::new(vec![Cell::Array(ArrayCell::Time(vec![Some(test_time), None]))]),
-            TableRow::new(vec![Cell::Array(ArrayCell::Timestamp(vec![Some(test_ts), None]))]),
-            TableRow::new(vec![Cell::Array(ArrayCell::TimestampTz(vec![Some(test_ts_tz), None]))]),
+            TableRow::new(vec![Cell::Array(ArrayCell::Date(vec![Some((test_date).into()), None]))]),
+            TableRow::new(vec![Cell::Array(ArrayCell::Time(vec![Some((test_time).into()), None]))]),
+            TableRow::new(vec![Cell::Array(ArrayCell::Timestamp(vec![
+                Some((test_ts).into()),
+                None,
+            ]))]),
+            TableRow::new(vec![Cell::Array(ArrayCell::TimestampTz(vec![
+                Some((test_ts_tz).into()),
+                None,
+            ]))]),
             TableRow::new(vec![Cell::Array(ArrayCell::Numeric(vec![
                 Some("123.45".parse::<PgNumeric>().unwrap()),
                 None,
             ]))]),
-            TableRow::new(vec![Cell::Array(ArrayCell::Json(vec![
-                Some(serde_json::json!({"key": "value"})),
+            TableRow::new(vec![Cell::Array(ArrayCell::String(vec![
+                Some(r#"{"key":"value"}"#.to_owned()),
                 None,
             ]))]),
             TableRow::new(vec![Cell::Array(ArrayCell::Bytes(vec![Some(vec![1, 2, 3]), None]))]),
@@ -2448,12 +2572,12 @@ mod tests {
         assert_eq!(string_array.value(0), test_ts.format(TIMESTAMP_FORMAT).to_string());
         assert!(string_array.is_null(1));
 
-        // Row 8: TimestampTz array (converted to strings with RFC3339)
+        // Row 8: TimestampTz array (converted to PostgreSQL text)
         assert!(!list_array.is_null(8));
         let ts_tz_list = list_array.value(8);
         let string_array = ts_tz_list.as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
         assert_eq!(string_array.len(), 2);
-        assert_eq!(string_array.value(0), test_ts_tz.to_rfc3339());
+        assert_eq!(string_array.value(0), test_ts_tz.format(TIMESTAMPTZ_FORMAT_HH_MM).to_string());
         assert!(string_array.is_null(1));
 
         // Row 9: Numeric array (converted to strings)
@@ -2502,7 +2626,7 @@ mod tests {
         let date_str = test_date.format(DATE_FORMAT).to_string();
         let time_str = test_time.format(TIME_FORMAT).to_string();
         let ts_str = test_ts.format(TIMESTAMP_FORMAT).to_string();
-        let ts_tz_str = test_ts_tz.to_rfc3339();
+        let ts_tz_str = test_ts_tz.format(TIMESTAMPTZ_FORMAT_HH_MM).to_string();
         let uuid_str = test_uuid.to_string();
         let f32_pi_str = std::f32::consts::PI.to_string();
         let f64_e_str = std::f64::consts::E.to_string();
@@ -2555,22 +2679,22 @@ mod tests {
                 1, // 1 null
             ),
             (
-                ArrayCell::Date(vec![Some(test_date), None]),
+                ArrayCell::Date(vec![Some((test_date).into()), None]),
                 vec![date_str.as_str()],
                 1, // 1 null
             ),
             (
-                ArrayCell::Time(vec![Some(test_time), None]),
+                ArrayCell::Time(vec![Some((test_time).into()), None]),
                 vec![time_str.as_str()],
                 1, // 1 null
             ),
             (
-                ArrayCell::Timestamp(vec![Some(test_ts), None]),
+                ArrayCell::Timestamp(vec![Some((test_ts).into()), None]),
                 vec![ts_str.as_str()],
                 1, // 1 null
             ),
             (
-                ArrayCell::TimestampTz(vec![Some(test_ts_tz), None]),
+                ArrayCell::TimestampTz(vec![Some((test_ts_tz).into()), None]),
                 vec![ts_tz_str.as_str()],
                 1, // 1 null
             ),
@@ -2580,7 +2704,7 @@ mod tests {
                 1, // 1 null
             ),
             (
-                ArrayCell::Json(vec![Some(serde_json::json!({"key": "value"})), None]),
+                ArrayCell::String(vec![Some(r#"{"key":"value"}"#.to_owned()), None]),
                 vec![r#"{"key":"value"}"#],
                 1, // 1 null
             ),
@@ -2702,7 +2826,7 @@ mod tests {
                 Cell::Array(ArrayCell::I32(vec![Some(10), Some(20), None])),
                 Cell::Array(ArrayCell::String(vec![Some("hello".to_owned()), None])),
                 Cell::Array(ArrayCell::Uuid(vec![Some(test_uuid)])),
-                Cell::Array(ArrayCell::Date(vec![Some(test_date), None])),
+                Cell::Array(ArrayCell::Date(vec![Some((test_date).into()), None])),
             ]),
             TableRow::new(vec![
                 Cell::I32(2),

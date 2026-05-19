@@ -9,3 +9,5 @@ mod base;
 
 pub use async_result::{TruncateTableResult, WriteEventsResult, WriteTableRowsResult};
 pub use base::Destination;
+
+pub use crate::materialization::{DestinationTypeCompatibility, DestinationTypeCompatibilityMode};

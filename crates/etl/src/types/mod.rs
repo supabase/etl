@@ -9,9 +9,10 @@ mod event;
 mod pipeline;
 mod sized;
 mod table_row;
+mod temporal;
 
 // Re-exports.
-pub use cell::{ArrayCell, ArrayCellNonOptional, Cell, CellNonOptional};
+pub use cell::{ArrayCell, Cell};
 pub use etl_postgres::types::*;
 pub use event::{
     BeginEvent, CommitEvent, DeleteEvent, Event, EventSequenceKey, EventType, InsertEvent,
@@ -20,6 +21,9 @@ pub use event::{
 pub use pipeline::PipelineId;
 pub use sized::SizeHint;
 pub use table_row::{OldTableRow, PartialTableRow, TableRow, UpdatedTableRow};
+pub use temporal::{
+    PgDate, PgTemporalBound, PgTemporalOutOfRange, PgTime, PgTimestamp, PgTimestampTz,
+};
 pub use tokio_postgres::types::*;
 
 pub use crate::conversions::{InvalidSign, ParseNumericError, PgNumeric, Sign};

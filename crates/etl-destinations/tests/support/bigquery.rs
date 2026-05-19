@@ -10,6 +10,292 @@ use etl_destinations::bigquery::test_utils::parse_table_cell;
 use gcp_bigquery_client::model::{table_cell::TableCell, table_row::TableRow};
 use uuid::Uuid;
 
+/// Parses a BigQuery table cell as JSON.
+fn parse_json_value(table_cell: TableCell) -> Option<serde_json::Value> {
+    table_cell
+        .value
+        .and_then(|value| value.as_str().and_then(|value| serde_json::from_str(value).ok()))
+}
+
+/// Parses a BigQuery table cell as base64-encoded bytes.
+fn parse_bytes(table_cell: TableCell) -> Option<Vec<u8>> {
+    table_cell
+        .value
+        .and_then(|value| value.as_str().and_then(|value| BASE64_STANDARD.decode(value).ok()))
+}
+
+/// Parses a BigQuery TIMESTAMP query value.
+fn parse_unix_timestamp_str(value: &str) -> Option<DateTime<Utc>> {
+    value.parse::<f64>().ok().and_then(|timestamp| {
+        let secs = timestamp.trunc() as i64;
+        let nanos = ((timestamp.fract()) * 1_000_000_000.0).round() as u32;
+        DateTime::from_timestamp(secs, nanos)
+    })
+}
+
+/// Parses a BigQuery DATETIME query value.
+fn parse_naive_datetime_str(value: &str) -> Option<NaiveDateTime> {
+    NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S%.f")
+        .or_else(|_| NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S%.f"))
+        .ok()
+}
+
+/// Parses a BigQuery table cell as DATETIME.
+fn parse_naive_datetime_cell(table_cell: TableCell) -> Option<NaiveDateTime> {
+    table_cell.value.and_then(|value| {
+        value.as_str().and_then(|value| {
+            parse_naive_datetime_str(value)
+                .or_else(|| parse_unix_timestamp_str(value).map(|timestamp| timestamp.naive_utc()))
+        })
+    })
+}
+
+/// Parses a BigQuery table cell as TIMESTAMP.
+fn parse_timestamp_cell(table_cell: TableCell) -> Option<DateTime<Utc>> {
+    table_cell.value.and_then(|value| value.as_str().and_then(parse_unix_timestamp_str))
+}
+
+/// Parses a PostgreSQL-style TIMESTAMPTZ string.
+fn parse_postgres_timestamptz_str(value: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S%.f%:z").ok().map(std::convert::Into::into)
+}
+
+/// Parses a BigQuery repeated field.
+fn parse_array_cell<T>(table_cell: TableCell) -> Option<Vec<T>>
+where
+    T: FromStr,
+    <T as FromStr>::Err: fmt::Debug,
+{
+    table_cell.value.and_then(|value| {
+        value
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| {
+                        item.as_object()
+                            .and_then(|object| object.get("v"))
+                            .and_then(|value| value.as_str())
+                            .and_then(|value| value.parse::<T>().ok())
+                    })
+                    .collect()
+            })
+            .or_else(|| value.as_str().and_then(parse_stringified_array_cell))
+    })
+}
+
+/// Parses a BigQuery repeated JSON field.
+fn parse_json_array(table_cell: TableCell) -> Option<Vec<serde_json::Value>> {
+    table_cell.value.and_then(|value| {
+        value
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| {
+                        item.as_object()
+                            .and_then(|object| object.get("v"))
+                            .and_then(|value| value.as_str())
+                            .and_then(|value| serde_json::from_str(value).ok())
+                    })
+                    .collect()
+            })
+            .or_else(|| {
+                value.as_str().and_then(|value| {
+                    parse_stringified_array_items(value).map(|items| {
+                        items
+                            .into_iter()
+                            .filter_map(|item| {
+                                item.and_then(|value| serde_json::from_str(&value).ok())
+                            })
+                            .collect()
+                    })
+                })
+            })
+    })
+}
+
+/// Parses a BigQuery repeated TIMESTAMP field.
+fn parse_timestamp_array(table_cell: TableCell) -> Option<Vec<DateTime<Utc>>> {
+    table_cell.value.and_then(|value| {
+        value
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| {
+                        item.as_object()
+                            .and_then(|object| object.get("v"))
+                            .and_then(|value| value.as_str())
+                            .and_then(parse_unix_timestamp_str)
+                    })
+                    .collect()
+            })
+            .or_else(|| {
+                value.as_str().and_then(|value| {
+                    parse_stringified_array_items(value).map(|items| {
+                        items
+                            .into_iter()
+                            .filter_map(|item| {
+                                item.and_then(|value| parse_postgres_timestamptz_str(&value))
+                            })
+                            .collect()
+                    })
+                })
+            })
+    })
+}
+
+/// Parses a BigQuery repeated DATETIME field.
+fn parse_naive_datetime_array(table_cell: TableCell) -> Option<Vec<NaiveDateTime>> {
+    table_cell.value.and_then(|value| {
+        value
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| {
+                        item.as_object()
+                            .and_then(|object| object.get("v"))
+                            .and_then(|value| value.as_str())
+                            .and_then(|value| {
+                                parse_naive_datetime_str(value).or_else(|| {
+                                    parse_unix_timestamp_str(value)
+                                        .map(|timestamp| timestamp.naive_utc())
+                                })
+                            })
+                    })
+                    .collect()
+            })
+            .or_else(|| {
+                value.as_str().and_then(|value| {
+                    parse_stringified_array_items(value).map(|items| {
+                        items
+                            .into_iter()
+                            .filter_map(|item| {
+                                item.and_then(|value| parse_naive_datetime_str(&value))
+                            })
+                            .collect()
+                    })
+                })
+            })
+    })
+}
+
+/// Parses a BigQuery repeated BYTES field.
+fn parse_bytes_array(table_cell: TableCell) -> Option<Vec<Vec<u8>>> {
+    table_cell.value.and_then(|value| {
+        value
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| {
+                        item.as_object()
+                            .and_then(|object| object.get("v"))
+                            .and_then(|value| value.as_str())
+                            .and_then(|value| BASE64_STANDARD.decode(value).ok())
+                    })
+                    .collect()
+            })
+            .or_else(|| {
+                value.as_str().and_then(|value| {
+                    parse_stringified_array_items(value).map(|items| {
+                        items
+                            .into_iter()
+                            .filter_map(|item| item.and_then(|value| parse_hex_bytea(&value)))
+                            .collect()
+                    })
+                })
+            })
+    })
+}
+
+/// Parses a scalar string containing PostgreSQL-style array text.
+fn parse_stringified_array_cell<T>(value: &str) -> Option<Vec<T>>
+where
+    T: FromStr,
+    <T as FromStr>::Err: fmt::Debug,
+{
+    parse_stringified_array_items(value)?
+        .into_iter()
+        .map(|item| item.and_then(|value| value.parse::<T>().ok()))
+        .collect()
+}
+
+/// Parses the array text emitted by default lossy BigQuery materialization.
+fn parse_stringified_array_items(value: &str) -> Option<Vec<Option<String>>> {
+    if value.len() < 2 || !value.starts_with('{') || !value.ends_with('}') {
+        return None;
+    }
+
+    let mut items = Vec::new();
+    let value = &value[1..value.len() - 1];
+    if value.is_empty() {
+        return Some(items);
+    }
+
+    let mut item = String::new();
+    let mut in_quotes = false;
+    let mut in_escape = false;
+    let mut quoted = false;
+
+    for ch in value.chars() {
+        if in_escape {
+            item.push(ch);
+            in_escape = false;
+            continue;
+        }
+
+        match ch {
+            '"' => {
+                if !in_quotes {
+                    quoted = true;
+                }
+                in_quotes = !in_quotes;
+            }
+            '\\' => {
+                in_escape = true;
+            }
+            ',' if !in_quotes => {
+                items.push(parse_stringified_array_item(&item, quoted));
+                item.clear();
+                quoted = false;
+            }
+            ch => item.push(ch),
+        }
+    }
+
+    if in_quotes || in_escape {
+        return None;
+    }
+
+    items.push(parse_stringified_array_item(&item, quoted));
+    Some(items)
+}
+
+/// Parses one PostgreSQL-style array element.
+fn parse_stringified_array_item(value: &str, quoted: bool) -> Option<String> {
+    if !quoted && value.eq_ignore_ascii_case("NULL") { None } else { Some(value.to_owned()) }
+}
+
+/// Parses a PostgreSQL hex bytea literal.
+fn parse_hex_bytea(value: &str) -> Option<Vec<u8>> {
+    let value = value.strip_prefix("\\x")?;
+    if value.len() % 2 != 0 {
+        return None;
+    }
+
+    value
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|chunk| {
+            let hex = std::str::from_utf8(chunk).ok()?;
+            u8::from_str_radix(hex, 16).ok()
+        })
+        .collect()
+}
+
 #[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub(crate) struct BigQueryUser {
     id: i32,
@@ -177,39 +463,6 @@ impl From<TableRow> for NullableColsScalar {
     fn from(value: TableRow) -> Self {
         let columns = value.columns.unwrap();
 
-        // Helper function to parse JSON values
-        fn parse_json_value(table_cell: TableCell) -> Option<serde_json::Value> {
-            table_cell.value.and_then(|v| v.as_str().and_then(|s| serde_json::from_str(s).ok()))
-        }
-
-        // Helper function to parse byte arrays (decode from base64)
-        fn parse_bytes(table_cell: TableCell) -> Option<Vec<u8>> {
-            table_cell.value.and_then(|v| v.as_str().and_then(|s| BASE64_STANDARD.decode(s).ok()))
-        }
-
-        // Helper function to parse Unix timestamp from TableCell to DateTime<Utc>
-        fn parse_unix_timestamp_from_cell(table_cell: TableCell) -> Option<DateTime<Utc>> {
-            table_cell
-                .value
-                .and_then(|v| v.as_str().map(ToString::to_string))
-                .and_then(|s| s.parse::<f64>().ok())
-                .and_then(|timestamp| {
-                    let secs = timestamp.trunc() as i64;
-                    let nanos = ((timestamp.fract()) * 1_000_000_000.0).round() as u32;
-                    DateTime::from_timestamp(secs, nanos)
-                })
-        }
-
-        // Helper function to parse Unix timestamp to NaiveDateTime
-        fn parse_unix_timestamp_naive(table_cell: TableCell) -> Option<NaiveDateTime> {
-            parse_unix_timestamp_from_cell(table_cell).map(|dt| dt.naive_utc())
-        }
-
-        // Helper function to parse Unix timestamp to DateTime<Utc>
-        fn parse_unix_timestamp_utc(table_cell: TableCell) -> Option<DateTime<Utc>> {
-            parse_unix_timestamp_from_cell(table_cell)
-        }
-
         NullableColsScalar {
             id: parse_table_cell(columns[0].clone()).unwrap(),
             b: parse_table_cell(columns[1].clone()),
@@ -223,8 +476,8 @@ impl From<TableRow> for NullableColsScalar {
             by: parse_bytes(columns[9].clone()),
             d: parse_table_cell(columns[10].clone()),
             ti: parse_table_cell(columns[11].clone()),
-            ts: parse_unix_timestamp_naive(columns[12].clone()),
-            tstz: parse_unix_timestamp_utc(columns[13].clone()),
+            ts: parse_naive_datetime_cell(columns[12].clone()),
+            tstz: parse_timestamp_cell(columns[13].clone()),
             u: parse_table_cell(columns[14].clone()),
             j: parse_json_value(columns[15].clone()),
             jb: parse_json_value(columns[16].clone()),
@@ -310,6 +563,29 @@ pub(crate) struct NullableColsArray {
 }
 
 impl NullableColsArray {
+    pub(crate) fn all_null(id: i32) -> Self {
+        Self {
+            id,
+            b_arr: None,
+            t_arr: None,
+            i2_arr: None,
+            i4_arr: None,
+            i8_arr: None,
+            f4_arr: None,
+            f8_arr: None,
+            n_arr: None,
+            by_arr: None,
+            d_arr: None,
+            ti_arr: None,
+            ts_arr: None,
+            tstz_arr: None,
+            u_arr: None,
+            j_arr: None,
+            jb_arr: None,
+            o_arr: None,
+        }
+    }
+
     pub(crate) fn all_empty(id: i32) -> Self {
         Self {
             id,
@@ -380,86 +656,6 @@ impl NullableColsArray {
 impl From<TableRow> for NullableColsArray {
     fn from(value: TableRow) -> Self {
         let columns = value.columns.unwrap();
-
-        // Helper function to parse array values from BigQuery
-        fn parse_array_cell<T>(table_cell: TableCell) -> Option<Vec<T>>
-        where
-            T: FromStr,
-            <T as FromStr>::Err: fmt::Debug,
-        {
-            table_cell.value.and_then(|v| {
-                v.as_array().map(|arr| {
-                    arr.iter()
-                        .filter_map(|item| {
-                            item.as_object()
-                                .and_then(|obj| obj.get("v"))
-                                .and_then(|val| val.as_str())
-                                .and_then(|s| s.parse::<T>().ok())
-                        })
-                        .collect()
-                })
-            })
-        }
-
-        // Helper function to parse array of JSON values
-        fn parse_json_array(table_cell: TableCell) -> Option<Vec<serde_json::Value>> {
-            table_cell.value.and_then(|v| {
-                v.as_array().map(|arr| {
-                    arr.iter()
-                        .filter_map(|item| {
-                            item.as_object()
-                                .and_then(|obj| obj.get("v"))
-                                .and_then(|val| val.as_str())
-                                .and_then(|s| serde_json::from_str(s).ok())
-                        })
-                        .collect()
-                })
-            })
-        }
-
-        // Helper function to parse array of timestamps
-        fn parse_timestamp_array(table_cell: TableCell) -> Option<Vec<DateTime<Utc>>> {
-            table_cell.value.and_then(|v| {
-                v.as_array().map(|arr| {
-                    arr.iter()
-                        .filter_map(|item| {
-                            item.as_object()
-                                .and_then(|obj| obj.get("v"))
-                                .and_then(|val| val.as_str())
-                                .and_then(|s| s.parse::<f64>().ok())
-                                .and_then(|timestamp| {
-                                    let secs = timestamp.trunc() as i64;
-                                    let nanos =
-                                        ((timestamp.fract()) * 1_000_000_000.0).round() as u32;
-                                    DateTime::from_timestamp(secs, nanos)
-                                })
-                        })
-                        .collect()
-                })
-            })
-        }
-
-        // Helper function to parse array of naive datetimes
-        fn parse_naive_datetime_array(table_cell: TableCell) -> Option<Vec<NaiveDateTime>> {
-            parse_timestamp_array(table_cell)
-                .map(|timestamps| timestamps.into_iter().map(|dt| dt.naive_utc()).collect())
-        }
-
-        // Helper function to parse array of byte arrays (decode from base64)
-        fn parse_bytes_array(table_cell: TableCell) -> Option<Vec<Vec<u8>>> {
-            table_cell.value.and_then(|v| {
-                v.as_array().map(|arr| {
-                    arr.iter()
-                        .filter_map(|item| {
-                            item.as_object()
-                                .and_then(|obj| obj.get("v"))
-                                .and_then(|val| val.as_str())
-                                .and_then(|s| BASE64_STANDARD.decode(s).ok())
-                        })
-                        .collect()
-                })
-            })
-        }
 
         NullableColsArray {
             id: parse_table_cell(columns[0].clone()).unwrap(),
@@ -596,41 +792,6 @@ impl From<TableRow> for NonNullableColsScalar {
     fn from(value: TableRow) -> Self {
         let columns = value.columns.unwrap();
 
-        // Helper function to parse JSON values
-        fn parse_json_value(table_cell: TableCell) -> serde_json::Value {
-            table_cell
-                .value
-                .and_then(|v| v.as_str().and_then(|s| serde_json::from_str(s).ok()))
-                .unwrap()
-        }
-
-        // Helper function to parse byte arrays (decode from base64)
-        fn parse_bytes(table_cell: TableCell) -> Vec<u8> {
-            table_cell
-                .value
-                .and_then(|v| v.as_str().and_then(|s| BASE64_STANDARD.decode(s).ok()))
-                .unwrap()
-        }
-
-        // Helper function to parse Unix timestamp from TableCell to DateTime<Utc>
-        fn parse_unix_timestamp_from_cell(table_cell: TableCell) -> DateTime<Utc> {
-            table_cell
-                .value
-                .and_then(|v| v.as_str().map(ToString::to_string))
-                .and_then(|s| s.parse::<f64>().ok())
-                .and_then(|timestamp| {
-                    let secs = timestamp.trunc() as i64;
-                    let nanos = ((timestamp.fract()) * 1_000_000_000.0).round() as u32;
-                    DateTime::from_timestamp(secs, nanos)
-                })
-                .unwrap()
-        }
-
-        // Helper function to parse Unix timestamp to NaiveDateTime
-        fn parse_unix_timestamp_naive(table_cell: TableCell) -> NaiveDateTime {
-            parse_unix_timestamp_from_cell(table_cell).naive_utc()
-        }
-
         NonNullableColsScalar {
             id: parse_table_cell(columns[0].clone()).unwrap(),
             b: parse_table_cell(columns[1].clone()).unwrap(),
@@ -641,14 +802,14 @@ impl From<TableRow> for NonNullableColsScalar {
             f4: parse_table_cell(columns[6].clone()).unwrap(),
             f8: parse_table_cell(columns[7].clone()).unwrap(),
             n: parse_table_cell(columns[8].clone()).unwrap(),
-            by: parse_bytes(columns[9].clone()),
+            by: parse_bytes(columns[9].clone()).unwrap(),
             d: parse_table_cell(columns[10].clone()).unwrap(),
             ti: parse_table_cell(columns[11].clone()).unwrap(),
-            ts: parse_unix_timestamp_naive(columns[12].clone()),
-            tstz: parse_unix_timestamp_from_cell(columns[13].clone()),
+            ts: parse_naive_datetime_cell(columns[12].clone()).unwrap(),
+            tstz: parse_timestamp_cell(columns[13].clone()).unwrap(),
             u: parse_table_cell(columns[14].clone()).unwrap(),
-            j: parse_json_value(columns[15].clone()),
-            jb: parse_json_value(columns[16].clone()),
+            j: parse_json_value(columns[15].clone()).unwrap(),
+            jb: parse_json_value(columns[16].clone()).unwrap(),
             o: parse_table_cell(columns[17].clone()).unwrap(),
         }
     }
