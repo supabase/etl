@@ -143,9 +143,13 @@ where
     )
 }
 
-/// `ReplacingMergeTree` DDL: appends `_etl_lsn UInt64` (version) and
-/// `_etl_deleted UInt8` (tombstone), `ORDER BY` the source PK columns in
-/// `primary_key_ordinal_position` order.
+/// Emits `CREATE TABLE ... ENGINE = ReplacingMergeTree(_etl_lsn,
+/// _etl_deleted) ORDER BY (<pk cols>)`, with `<pk cols>` taken from the
+/// source primary key in `primary_key_ordinal_position` order. ClickHouse
+/// uses that `ORDER BY` as the sort + dedup key, so it must match the
+/// source PK exactly. Two trailing columns are appended after the user
+/// columns: `_etl_lsn UInt64` (version) and `_etl_deleted UInt8`
+/// (tombstone).
 ///
 /// Errors when the source schema has no PK columns.
 pub(super) fn create_replacing_merge_tree_sql<'a, I>(
@@ -157,7 +161,37 @@ where
     I::IntoIter: ExactSizeIterator,
 {
     let columns: Vec<&ColumnSchema> = column_schemas.into_iter().collect();
+    let pk_columns = primary_key_columns_sorted(table_name, &columns)?;
 
+    let mut col_defs: Vec<String> = columns
+        .iter()
+        .map(|col| {
+            format!("  {} {}", quote_identifier(&col.name), clickhouse_column_type(col, false))
+        })
+        .collect();
+    col_defs.push(format!("  {} UInt64", quote_identifier(ETL_LSN_COLUMN_NAME)));
+    col_defs.push(format!("  {} UInt8", quote_identifier(ETL_DELETED_COLUMN_NAME)));
+
+    let order_by =
+        pk_columns.iter().map(|c| quote_identifier(&c.name)).collect::<Vec<_>>().join(", ");
+
+    Ok(format!(
+        "CREATE TABLE IF NOT EXISTS {quoted_table_name} (\n{col_defs}\n) ENGINE = \
+         ReplacingMergeTree({lsn}, {del})\nORDER BY ({order_by})",
+        quoted_table_name = quote_identifier(table_name),
+        col_defs = col_defs.join(",\n"),
+        lsn = quote_identifier(ETL_LSN_COLUMN_NAME),
+        del = quote_identifier(ETL_DELETED_COLUMN_NAME),
+    ))
+}
+
+/// Returns the source primary-key columns sorted by
+/// `primary_key_ordinal_position`. Errors with `SourceSchemaError` when the
+/// schema has no PK columns (RMT cannot be created without an `ORDER BY`).
+fn primary_key_columns_sorted<'a>(
+    table_name: &str,
+    columns: &[&'a ColumnSchema],
+) -> EtlResult<Vec<&'a ColumnSchema>> {
     let mut pk_columns: Vec<&ColumnSchema> =
         columns.iter().copied().filter(|c| c.primary_key_ordinal_position.is_some()).collect();
 
@@ -166,34 +200,14 @@ where
             ErrorKind::SourceSchemaError,
             "ClickHouse ReplacingMergeTree requires a primary key",
             format!(
-                "Table '{}' has no primary-key columns; set `engine: merge_tree` or define a PK \
-                 on the source table.",
-                table_name
+                "Table '{table_name}' has no primary-key columns; set `engine: merge_tree` or \
+                 define a PK on the source table."
             )
         ));
     }
 
     pk_columns.sort_by_key(|c| c.primary_key_ordinal_position);
-
-    let mut cols = Vec::with_capacity(columns.len() + 2);
-    for col in &columns {
-        let col_type = clickhouse_column_type(col, false);
-        cols.push(format!("  {} {}", quote_identifier(&col.name), col_type));
-    }
-    cols.push(format!("  {} UInt64", quote_identifier(ETL_LSN_COLUMN_NAME)));
-    cols.push(format!("  {} UInt8", quote_identifier(ETL_DELETED_COLUMN_NAME)));
-
-    let col_defs = cols.join(",\n");
-    let quoted_table_name = quote_identifier(table_name);
-    let order_by =
-        pk_columns.iter().map(|c| quote_identifier(&c.name)).collect::<Vec<_>>().join(", ");
-
-    Ok(format!(
-        "CREATE TABLE IF NOT EXISTS {quoted_table_name} (\n{col_defs}\n) ENGINE = \
-         ReplacingMergeTree({lsn}, {del})\nORDER BY ({order_by})",
-        lsn = quote_identifier(ETL_LSN_COLUMN_NAME),
-        del = quote_identifier(ETL_DELETED_COLUMN_NAME),
-    ))
+    Ok(pk_columns)
 }
 
 /// `CREATE VIEW IF NOT EXISTS "<table>__current"` for an RMT table.
