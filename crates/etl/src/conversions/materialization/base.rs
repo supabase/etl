@@ -10,20 +10,18 @@ use crate::{
 };
 
 /// Cell plus the type used to interpret it at this conversion stage.
-#[derive(Debug, Clone, PartialEq)]
-pub struct TypedCell<T, C, M> {
+#[derive(Debug, PartialEq)]
+pub struct TypedCell<T, C> {
     /// Type used to interpret the cell at this conversion stage.
     typ: T,
     /// Cell value for the current conversion stage.
     cell: C,
-    /// Metadata carried alongside the cell, such as destination field index.
-    metadata: M,
 }
 
-impl<T, C, M> TypedCell<T, C, M> {
+impl<T, C> TypedCell<T, C> {
     /// Creates a typed cell.
-    pub const fn new(typ: T, cell: C, metadata: M) -> Self {
-        Self { typ, cell, metadata }
+    pub const fn new(typ: T, cell: C) -> Self {
+        Self { typ, cell }
     }
 
     /// Returns the type used to interpret the cell at this conversion stage.
@@ -31,19 +29,14 @@ impl<T, C, M> TypedCell<T, C, M> {
         &self.typ
     }
 
-    /// Returns the contained cell and metadata.
-    pub fn into_parts(self) -> (C, M) {
-        (self.cell, self.metadata)
-    }
-
-    /// Returns the type, contained cell, and metadata.
-    pub fn into_components(self) -> (T, C, M) {
-        (self.typ, self.cell, self.metadata)
+    /// Returns the type and contained cell.
+    pub fn into_parts(self) -> (T, C) {
+        (self.typ, self.cell)
     }
 }
 
 /// Result of applying a destination materialization policy to a type.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum TypeMaterializationResult<T> {
     /// The type can be used unchanged for destination materialization.
     Unchanged(T),
@@ -59,14 +52,15 @@ pub enum TypeMaterializationResult<T> {
 }
 
 /// Result of applying a destination materialization policy to a typed cell.
-#[derive(Debug, Clone, PartialEq)]
-pub enum CellMaterializationResult<T, C, M> {
-    /// The cell can be written unchanged.
-    Unchanged(TypedCell<T, C, M>),
-    /// The cell value changed but the destination materialized type did not.
-    ValueChanged(TypedCell<T, C, M>),
-    /// The cell changed to match a different materialized type.
-    TypeChanged(TypedCell<T, C, M>),
+#[derive(Debug, PartialEq)]
+pub enum CellMaterializationResult<T, C> {
+    /// The cell can be written to the materialized destination type.
+    Materialized {
+        /// Materialized cell plus destination type.
+        cell: TypedCell<T, C>,
+        /// How the cell changed during materialization.
+        outcome: MaterializationOutcome,
+    },
     /// The cell cannot be represented by the destination.
     Invalid {
         /// Error kind to surface to callers.
@@ -74,6 +68,28 @@ pub enum CellMaterializationResult<T, C, M> {
         /// Human-readable reason for the materialization failure.
         reason: String,
     },
+}
+
+/// Successful cell materialization outcome.
+#[derive(Debug, PartialEq, Eq)]
+pub enum MaterializationOutcome {
+    /// The cell can be written unchanged.
+    Unchanged,
+    /// The cell value changed but the destination materialized type did not.
+    ValueChanged,
+    /// The cell changed to match a different materialized type.
+    TypeChanged,
+}
+
+impl MaterializationOutcome {
+    /// Returns a stable log label for the outcome.
+    const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Unchanged => "unchanged",
+            Self::ValueChanged => "value_changed",
+            Self::TypeChanged => "type_changed",
+        }
+    }
 }
 
 /// Destination-specific rules for source types and cells.
@@ -95,18 +111,17 @@ pub trait MaterializationRules {
     ///
     /// The returned cell's type must match [`Self::materialize_type`] for the
     /// input cell's type under the same materialization policy.
-    fn materialize_cell<M>(
+    fn materialize_cell(
         &self,
-        typed_cell: TypedCell<Type, Cell, M>,
+        typed_cell: TypedCell<Type, Cell>,
         compatibility: DestinationTypeCompatibility,
-    ) -> CellMaterializationResult<Self::MaterializedType, Self::MaterializedCell, M>;
+    ) -> CellMaterializationResult<Self::MaterializedType, Self::MaterializedCell>;
 }
 
 /// Typed cell produced by a destination materialization implementation.
-pub type MaterializedCell<R, M> = TypedCell<
+pub type MaterializedCell<R> = TypedCell<
     <R as MaterializationRules>::MaterializedType,
     <R as MaterializationRules>::MaterializedCell,
-    M,
 >;
 
 /// Orchestrates materialization for one destination.
@@ -146,51 +161,40 @@ where
     }
 
     /// Returns the destination materialized cell or an [`EtlError`].
-    pub fn materialize_cell<M>(
+    pub fn materialize_cell(
         &self,
-        typed_cell: TypedCell<Type, Cell, M>,
-    ) -> EtlResult<MaterializedCell<C, M>> {
+        typed_cell: TypedCell<Type, Cell>,
+    ) -> EtlResult<MaterializedCell<C>> {
         self.materialize_cell_with_type(typed_cell)
     }
 
     /// Returns destination materialized cells.
     pub fn materialize_cells<M>(
         &self,
-        typed_cells: impl IntoIterator<Item = TypedCell<Type, Cell, M>>,
-    ) -> EtlResult<Vec<MaterializedCell<C, M>>> {
+        typed_cells: impl IntoIterator<Item = (M, TypedCell<Type, Cell>)>,
+    ) -> EtlResult<Vec<(M, MaterializedCell<C>)>> {
         typed_cells
             .into_iter()
             .enumerate()
-            .map(|(index, typed_cell)| self.materialize_cell_at_index(typed_cell, index))
+            .map(|(index, (metadata, typed_cell))| {
+                self.materialize_cell_at_index(typed_cell, index).map(|cell| (metadata, cell))
+            })
             .collect()
     }
 
     /// Returns the destination materialized cell and validates its type.
-    fn materialize_cell_with_type<M>(
+    fn materialize_cell_with_type(
         &self,
-        typed_cell: TypedCell<Type, Cell, M>,
-    ) -> EtlResult<MaterializedCell<C, M>> {
+        typed_cell: TypedCell<Type, Cell>,
+    ) -> EtlResult<MaterializedCell<C>> {
         let source_type = typed_cell.typ().clone();
         let materialized_type = self.materialize_type(&source_type)?;
         match self.rules.materialize_cell(typed_cell, self.type_compatibility) {
-            CellMaterializationResult::Unchanged(cell) => self.validate_and_log_materialized_cell(
-                &source_type,
-                &materialized_type,
-                "unchanged",
-                cell,
-            ),
-            CellMaterializationResult::ValueChanged(cell) => self
+            CellMaterializationResult::Materialized { cell, outcome } => self
                 .validate_and_log_materialized_cell(
                     &source_type,
                     &materialized_type,
-                    "value_changed",
-                    cell,
-                ),
-            CellMaterializationResult::TypeChanged(cell) => self
-                .validate_and_log_materialized_cell(
-                    &source_type,
-                    &materialized_type,
-                    "type_changed",
+                    outcome,
                     cell,
                 ),
             CellMaterializationResult::Invalid { kind, reason } => {
@@ -200,13 +204,13 @@ where
     }
 
     /// Validates and logs a destination materialized cell.
-    fn validate_and_log_materialized_cell<M>(
+    fn validate_and_log_materialized_cell(
         &self,
         source_type: &Type,
         materialized_type: &C::MaterializedType,
-        materialization_outcome: &'static str,
-        cell: MaterializedCell<C, M>,
-    ) -> EtlResult<MaterializedCell<C, M>> {
+        materialization_outcome: MaterializationOutcome,
+        cell: MaterializedCell<C>,
+    ) -> EtlResult<MaterializedCell<C>> {
         if cell.typ() != materialized_type {
             return Err(etl_error!(
                 ErrorKind::InvalidState,
@@ -219,7 +223,7 @@ where
             source_type = source_type.name(),
             materialized_type = %materialized_type,
             compatibility_mode = ?self.type_compatibility.mode(),
-            materialization_outcome,
+            materialization_outcome = materialization_outcome.as_str(),
             "materialized destination cell"
         );
 
@@ -227,11 +231,11 @@ where
     }
 
     /// Returns a destination materialized cell with index context on failures.
-    fn materialize_cell_at_index<M>(
+    fn materialize_cell_at_index(
         &self,
-        typed_cell: TypedCell<Type, Cell, M>,
+        typed_cell: TypedCell<Type, Cell>,
         index: usize,
-    ) -> EtlResult<MaterializedCell<C, M>> {
+    ) -> EtlResult<MaterializedCell<C>> {
         self.materialize_cell_with_type(typed_cell).map_err(|error| {
             let kind = error.kind();
             let detail = error.detail().map_or_else(

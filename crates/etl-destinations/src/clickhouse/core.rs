@@ -956,7 +956,7 @@ fn default_cell(typ: &Type) -> Cell {
         Type::FLOAT4 => Cell::F32(0.0),
         Type::FLOAT8 => Cell::F64(0.0),
         Type::DATE => Cell::Date(etl::types::PgDate::Finite(
-            chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap(),
+            chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap_or(chrono::NaiveDate::MIN),
         )),
         Type::TIMESTAMP => Cell::Timestamp(etl::types::PgTimestamp::Finite(
             chrono::DateTime::UNIX_EPOCH.naive_utc(),

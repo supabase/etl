@@ -1336,8 +1336,8 @@ impl BigQueryClient {
             | BigQueryType::DateTime
             | BigQueryType::Timestamp
             | BigQueryType::Json => ColumnType::String,
-            BigQueryType::Int64(encoding) => Self::bigquery_int_storage_write_type(*encoding),
-            BigQueryType::Float64(encoding) => Self::bigquery_float_storage_write_type(*encoding),
+            BigQueryType::Int64(encoding) => Self::bigquery_int_storage_write_type(encoding),
+            BigQueryType::Float64(encoding) => Self::bigquery_float_storage_write_type(encoding),
             BigQueryType::Bytes => ColumnType::Bytes,
             BigQueryType::Array(element_type) => {
                 Self::bigquery_array_storage_write_type(element_type)
@@ -1356,16 +1356,16 @@ impl BigQueryClient {
             | BigQueryArrayType::DateTime
             | BigQueryArrayType::Timestamp
             | BigQueryArrayType::Json => ColumnType::String,
-            BigQueryArrayType::Int64(encoding) => Self::bigquery_int_storage_write_type(*encoding),
+            BigQueryArrayType::Int64(encoding) => Self::bigquery_int_storage_write_type(encoding),
             BigQueryArrayType::Float64(encoding) => {
-                Self::bigquery_float_storage_write_type(*encoding)
+                Self::bigquery_float_storage_write_type(encoding)
             }
             BigQueryArrayType::Bytes => ColumnType::Bytes,
         }
     }
 
     /// Converts a BigQuery integer encoding to a Storage Write API type.
-    fn bigquery_int_storage_write_type(encoding: BigQueryIntEncoding) -> ColumnType {
+    fn bigquery_int_storage_write_type(encoding: &BigQueryIntEncoding) -> ColumnType {
         match encoding {
             BigQueryIntEncoding::Int32 => ColumnType::Int32,
             BigQueryIntEncoding::Int64 => ColumnType::Int64,
@@ -1373,7 +1373,7 @@ impl BigQueryClient {
     }
 
     /// Converts a BigQuery float encoding to a Storage Write API type.
-    fn bigquery_float_storage_write_type(encoding: BigQueryFloatEncoding) -> ColumnType {
+    fn bigquery_float_storage_write_type(encoding: &BigQueryFloatEncoding) -> ColumnType {
         match encoding {
             BigQueryFloatEncoding::Float => ColumnType::Float,
             BigQueryFloatEncoding::Double => ColumnType::Double,

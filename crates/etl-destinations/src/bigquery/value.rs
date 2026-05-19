@@ -2,7 +2,8 @@ use std::fmt;
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use etl::{
-    error::EtlError,
+    error::{ErrorKind, EtlError, EtlResult},
+    etl_error,
     materialization::TypedCell,
     types::{
         ArrayCell, Cell, DATE_FORMAT, PgDate, PgTime, PgTimestamp, PgTimestampTz, TIME_FORMAT,
@@ -21,7 +22,7 @@ use crate::bigquery::materialization::BigQueryMaterializer;
 /// as protobuf `float` and `double` respectively. Keeping that encoding here
 /// preserves the source width while [`BigQueryType::to_sql`] still emits the
 /// BigQuery SQL type required for DDL.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub(super) enum BigQueryType {
     /// BigQuery `BOOL`.
     Bool,
@@ -50,7 +51,7 @@ pub(super) enum BigQueryType {
 }
 
 /// BigQuery repeated column element type.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub(super) enum BigQueryArrayType {
     /// Repeated BigQuery `BOOL`.
     Bool,
@@ -80,7 +81,7 @@ pub(super) enum BigQueryArrayType {
 ///
 /// BigQuery stores the column as `INT64`, but the Write API accepts narrower
 /// protobuf integer fields when the source type is narrower.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub(super) enum BigQueryIntEncoding {
     /// Encode values with protobuf `int32`.
     Int32,
@@ -94,7 +95,7 @@ pub(super) enum BigQueryIntEncoding {
 /// The Write API descriptor still uses protobuf `float` for PostgreSQL
 /// `real`, and protobuf `double` for PostgreSQL `double precision`, matching
 /// the source value's precision and the existing main-branch wire format.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub(super) enum BigQueryFloatEncoding {
     /// Encode values with protobuf `float`.
     Float,
@@ -248,11 +249,11 @@ impl BigQueryTableRow {
             .materialize_cells(
                 tagged_cells
                     .into_iter()
-                    .map(|(index, typ, cell)| TypedCell::new(typ, cell, index as u32)),
+                    .map(|(index, typ, cell)| (index as u32, TypedCell::new(typ, cell))),
             )?
             .into_iter()
-            .map(|cell| {
-                let (_typ, cell, index) = cell.into_components();
+            .map(|(index, typed_cell)| {
+                let (_typ, cell) = typed_cell.into_parts();
                 (index, cell)
             })
             .collect();
@@ -294,19 +295,19 @@ impl prost::Message for BigQueryTableRow {
 
     /// Merges a field from a Protocol Buffer message into this table row.
     ///
-    /// Currently unimplemented as this functionality is not required for
-    /// BigQuery streaming inserts, which only need encoding capabilities.
+    /// Decoding is not used for BigQuery streaming inserts, so incoming fields
+    /// are skipped instead of decoded into row cells.
     fn merge_field(
         &mut self,
-        _tag: u32,
-        _wire_type: prost::encoding::WireType,
-        _buf: &mut impl bytes::Buf,
-        _ctx: prost::encoding::DecodeContext,
+        tag: u32,
+        wire_type: prost::encoding::WireType,
+        buf: &mut impl bytes::Buf,
+        ctx: prost::encoding::DecodeContext,
     ) -> Result<(), prost::DecodeError>
     where
         Self: Sized,
     {
-        unimplemented!("merge_field not implemented yet");
+        prost::encoding::skip_field(wire_type, tag, buf, ctx)
     }
 
     /// Calculates the encoded length of the table row in bytes.
@@ -331,7 +332,7 @@ impl prost::Message for BigQueryTableRow {
 }
 
 /// BigQuery materialized cell ready for Storage Write API encoding.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub(super) enum BigQueryCell {
     /// SQL `NULL`.
     Null,
@@ -354,7 +355,7 @@ pub(super) enum BigQueryCell {
 }
 
 /// BigQuery repeated field values ready for Storage Write API encoding.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub(super) enum BigQueryArrayCell {
     /// Repeated `BOOL`.
     Bool(Vec<bool>),
@@ -375,25 +376,25 @@ pub(super) enum BigQueryArrayCell {
 impl BigQueryCell {
     /// Converts an ETL cell that is already materialized for BigQuery into a
     /// BigQuery-specific cell.
-    pub(super) fn from_native_cell(cell: Cell) -> Self {
+    pub(super) fn try_from_native_cell(cell: Cell) -> EtlResult<Self> {
         match cell {
-            Cell::Null => Self::Null,
-            Cell::Bool(value) => Self::Bool(value),
-            Cell::String(value) => Self::String(value),
-            Cell::I16(value) => Self::Int32(i32::from(value)),
-            Cell::I32(value) => Self::Int32(value),
-            Cell::I64(value) => Self::Int64(value),
-            Cell::F32(value) => Self::Float32(value),
-            Cell::F64(value) => Self::Float64(value),
-            Cell::Numeric(value) => Self::String(value.to_string()),
-            Cell::Date(value) => Self::String(format_pg_date(value)),
-            Cell::Time(value) => Self::String(format_pg_time(value)),
-            Cell::Timestamp(value) => Self::String(format_pg_timestamp(value)),
-            Cell::TimestampTz(value) => Self::String(format_pg_timestamptz(value)),
-            Cell::Uuid(value) => Self::String(value.to_string()),
-            Cell::U32(value) => Self::Int64(i64::from(value)),
-            Cell::Bytes(value) => Self::Bytes(value),
-            Cell::Array(value) => Self::Array(BigQueryArrayCell::from_native_array(value)),
+            Cell::Null => Ok(Self::Null),
+            Cell::Bool(value) => Ok(Self::Bool(value)),
+            Cell::String(value) => Ok(Self::String(value)),
+            Cell::I16(value) => Ok(Self::Int32(i32::from(value))),
+            Cell::I32(value) => Ok(Self::Int32(value)),
+            Cell::I64(value) => Ok(Self::Int64(value)),
+            Cell::F32(value) => Ok(Self::Float32(value)),
+            Cell::F64(value) => Ok(Self::Float64(value)),
+            Cell::Numeric(value) => Ok(Self::String(value.to_string())),
+            Cell::Date(value) => Ok(Self::String(format_pg_date(value))),
+            Cell::Time(value) => Ok(Self::String(format_pg_time(value))),
+            Cell::Timestamp(value) => Ok(Self::String(format_pg_timestamp(value))),
+            Cell::TimestampTz(value) => Ok(Self::String(format_pg_timestamptz(value))),
+            Cell::Uuid(value) => Ok(Self::String(value.to_string())),
+            Cell::U32(value) => Ok(Self::Int64(i64::from(value))),
+            Cell::Bytes(value) => Ok(Self::Bytes(value)),
+            Cell::Array(value) => BigQueryArrayCell::try_from_native_array(value).map(Self::Array),
         }
     }
 
@@ -421,39 +422,39 @@ impl BigQueryCell {
 impl BigQueryArrayCell {
     /// Converts an ETL array that is already materialized for BigQuery into a
     /// BigQuery-specific repeated field.
-    pub(super) fn from_native_array(array: ArrayCell) -> Self {
+    pub(super) fn try_from_native_array(array: ArrayCell) -> EtlResult<Self> {
         match array {
-            ArrayCell::Bool(values) => Self::Bool(required_values(values)),
-            ArrayCell::String(values) => Self::String(required_values(values)),
+            ArrayCell::Bool(values) => Ok(Self::Bool(required_values(values)?)),
+            ArrayCell::String(values) => Ok(Self::String(required_values(values)?)),
             ArrayCell::I16(values) => {
-                Self::Int32(required_values(values).into_iter().map(i32::from).collect())
+                Ok(Self::Int32(required_values(values)?.into_iter().map(i32::from).collect()))
             }
-            ArrayCell::I32(values) => Self::Int32(required_values(values)),
+            ArrayCell::I32(values) => Ok(Self::Int32(required_values(values)?)),
             ArrayCell::U32(values) => {
-                Self::Int64(required_values(values).into_iter().map(i64::from).collect())
+                Ok(Self::Int64(required_values(values)?.into_iter().map(i64::from).collect()))
             }
-            ArrayCell::I64(values) => Self::Int64(required_values(values)),
-            ArrayCell::F32(values) => Self::Float32(required_values(values)),
-            ArrayCell::F64(values) => Self::Float64(required_values(values)),
-            ArrayCell::Numeric(values) => Self::String(
-                required_values(values).into_iter().map(|value| value.to_string()).collect(),
-            ),
+            ArrayCell::I64(values) => Ok(Self::Int64(required_values(values)?)),
+            ArrayCell::F32(values) => Ok(Self::Float32(required_values(values)?)),
+            ArrayCell::F64(values) => Ok(Self::Float64(required_values(values)?)),
+            ArrayCell::Numeric(values) => Ok(Self::String(
+                required_values(values)?.into_iter().map(|value| value.to_string()).collect(),
+            )),
             ArrayCell::Date(values) => {
-                Self::String(required_values(values).into_iter().map(format_pg_date).collect())
+                Ok(Self::String(required_values(values)?.into_iter().map(format_pg_date).collect()))
             }
             ArrayCell::Time(values) => {
-                Self::String(required_values(values).into_iter().map(format_pg_time).collect())
+                Ok(Self::String(required_values(values)?.into_iter().map(format_pg_time).collect()))
             }
-            ArrayCell::Timestamp(values) => {
-                Self::String(required_values(values).into_iter().map(format_pg_timestamp).collect())
-            }
-            ArrayCell::TimestampTz(values) => Self::String(
-                required_values(values).into_iter().map(format_pg_timestamptz).collect(),
-            ),
-            ArrayCell::Uuid(values) => Self::String(
-                required_values(values).into_iter().map(|value| value.to_string()).collect(),
-            ),
-            ArrayCell::Bytes(values) => Self::Bytes(required_values(values)),
+            ArrayCell::Timestamp(values) => Ok(Self::String(
+                required_values(values)?.into_iter().map(format_pg_timestamp).collect(),
+            )),
+            ArrayCell::TimestampTz(values) => Ok(Self::String(
+                required_values(values)?.into_iter().map(format_pg_timestamptz).collect(),
+            )),
+            ArrayCell::Uuid(values) => Ok(Self::String(
+                required_values(values)?.into_iter().map(|value| value.to_string()).collect(),
+            )),
+            ArrayCell::Bytes(values) => Ok(Self::Bytes(required_values(values)?)),
         }
     }
 
@@ -548,14 +549,22 @@ fn array_cell_encoded_len_prost(array_cell: &BigQueryArrayCell, tag: u32) -> usi
 }
 
 /// Returns array values after materialization validation has removed `NULL`s.
-fn required_values<T>(values: Vec<Option<T>>) -> Vec<T> {
-    values
-        .into_iter()
-        .map(|value| {
-            debug_assert!(value.is_some(), "BigQuery materialization rejects null array elements");
-            value.expect("BigQuery materialization rejects null array elements")
-        })
-        .collect()
+fn required_values<T>(values: Vec<Option<T>>) -> EtlResult<Vec<T>> {
+    let mut required = Vec::with_capacity(values.len());
+    for (index, value) in values.into_iter().enumerate() {
+        match value {
+            Some(value) => required.push(value),
+            None => {
+                return Err(etl_error!(
+                    ErrorKind::NullValuesNotSupportedInArrayInDestination,
+                    "Array contains NULL value",
+                    format!("Element at index {index} is NULL, which is not supported in BigQuery")
+                ));
+            }
+        }
+    }
+
+    Ok(required)
 }
 
 /// Formats a BigQuery date string.

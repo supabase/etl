@@ -147,7 +147,7 @@ fn parse_postgres_date(value: &str) -> EtlResult<PgDate> {
     match NaiveDate::parse_from_str(value, DATE_FORMAT) {
         Ok(value) => Ok(PgDate::Finite(value)),
         Err(_) if temporal_out_of_range_bound(value).is_some() => {
-            Ok(PgDate::OutOfRange(out_of_range_temporal(value)))
+            Ok(PgDate::OutOfRange(out_of_range_temporal(value)?))
         }
         Err(error) => Err(error.into()),
     }
@@ -173,7 +173,7 @@ fn parse_postgres_timestamp(value: &str) -> EtlResult<PgTimestamp> {
     match NaiveDateTime::parse_from_str(value, TIMESTAMP_FORMAT) {
         Ok(value) => Ok(PgTimestamp::Finite(value)),
         Err(_) if temporal_out_of_range_bound(value).is_some() => {
-            Ok(PgTimestamp::OutOfRange(out_of_range_temporal(value)))
+            Ok(PgTimestamp::OutOfRange(out_of_range_temporal(value)?))
         }
         Err(error) => Err(error.into()),
     }
@@ -194,9 +194,11 @@ fn parse_postgres_timestamptz(value: &str) -> EtlResult<PgTimestampTz> {
         .or_else(|_| DateTime::<FixedOffset>::parse_from_str(value, TIMESTAMPTZ_FORMAT_HH_MM))
         .map(|value| PgTimestampTz::Finite(value.into()))
         .or_else(|error| {
-            temporal_out_of_range_bound(value)
-                .map(|_| PgTimestampTz::OutOfRange(out_of_range_temporal(value)))
-                .ok_or(error)
+            if let Some(bound) = temporal_out_of_range_bound(value) {
+                Ok(PgTimestampTz::OutOfRange(PgTemporalOutOfRange::new(value, bound)))
+            } else {
+                Err(error)
+            }
         })
         .map_err(Into::into)
 }
@@ -215,12 +217,16 @@ fn is_postgres_twenty_four_hour_time(value: &str) -> bool {
 }
 
 /// Builds an out-of-range temporal wrapper from PostgreSQL text.
-fn out_of_range_temporal(value: &str) -> PgTemporalOutOfRange {
-    PgTemporalOutOfRange::new(
-        value,
-        temporal_out_of_range_bound(value)
-            .expect("out-of-range temporal values have a relative bound"),
-    )
+fn out_of_range_temporal(value: &str) -> EtlResult<PgTemporalOutOfRange> {
+    temporal_out_of_range_bound(value)
+        .map(|bound| PgTemporalOutOfRange::new(value, bound))
+        .ok_or_else(|| {
+            crate::etl_error!(
+                ErrorKind::ConversionError,
+                "Temporal value is not recognized as out of range",
+                format!("{value} does not have a lower or upper temporal bound")
+            )
+        })
 }
 
 /// Infers whether temporal text is below or above chrono's finite domain.
