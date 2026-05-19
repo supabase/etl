@@ -132,29 +132,6 @@ jobs:
         if: matrix.check == 'sort'
         run: cargo sort --workspace --grouped --check
 
-  fork-pr-notice:
-    name: Fork PR Notice
-    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    permissions:
-      pull-requests: write
-    steps:
-      - name: Post security notice
-        uses: marocchino/sticky-pull-request-comment@0ea0beb66eb9baf113663a64ec522f60e49231c0 # v3.0.4
-        with:
-          header: fork-pr-security-notice
-          message: |
-            ## Integration Tests -- Maintainer Approval Required
-
-            This PR is from a fork and requires maintainer approval to run integration tests.
-
-            **Before approving in the Actions tab**, verify that this PR does not:
-            - Modify CI workflow files, scripts, or build configuration
-            - Add suspicious dependencies in `Cargo.toml`
-            - Contain code that could exfiltrate environment variables or secrets
-
-            Approving will expose BigQuery service account credentials to this workflow run.
-
   test-full:
     name: Tests (Full, ${{ matrix.postgres_label }})
     environment: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true && 'integration-tests-secrets' || null }}
