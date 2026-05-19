@@ -4,6 +4,8 @@ on:
   pull_request_target:
     types: [opened, synchronize, reopened]
 
+permissions: {}
+
 concurrency:
   group: fork-tests-${{ github.event.pull_request.number }}
   cancel-in-progress: true
