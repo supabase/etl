@@ -1574,7 +1574,7 @@ async fn validate_connectivity_fails_against_unreachable_clickhouse() {
 
 /// Row struct for the ADD COLUMN test after schema change.
 /// Columns: id, name, age, email, score.
-#[derive(clickhouse::Row, serde::Deserialize, Debug)]
+#[derive(clickhouse::Row, serde::Deserialize, Debug, PartialEq, Eq)]
 struct AddColumnRow {
     id: i64,
     name: String,
@@ -1713,6 +1713,17 @@ async fn schema_change_add_column_inner(engine: ClickHouseEngine) {
         "id",
     );
     let rows: Vec<AddColumnRow> = clickhouse_db.query(&query).await;
+    let current_view_rows = if matches!(engine, ClickHouseEngine::ReplacingMergeTree) {
+        let rows: Vec<AddColumnRow> = clickhouse_db
+            .query(
+                "SELECT id, name, age, email, score FROM \"test_schema__add__col__current\" ORDER \
+                 BY id",
+            )
+            .await;
+        Some(rows)
+    } else {
+        None
+    };
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -1748,6 +1759,10 @@ async fn schema_change_add_column_inner(engine: ClickHouseEngine) {
     assert_eq!(rows[1].email, Some("bob@example.com".to_owned()));
     assert_eq!(rows[1].score, Some(7));
 
+    if let Some(view_rows) = current_view_rows {
+        assert_eq!(view_rows, rows, "__current view should match the evolved RMT schema");
+    }
+
     // Metadata snapshot_id should have advanced.
     let final_metadata = store
         .get_applied_destination_table_metadata(table_id)
@@ -1763,7 +1778,7 @@ async fn schema_change_add_column_inner(engine: ClickHouseEngine) {
 /// Row struct for the combined schema change test after all changes.
 /// Columns: id, full_name (renamed), status (kept), email (added).
 /// age is dropped.
-#[derive(clickhouse::Row, serde::Deserialize, Debug)]
+#[derive(clickhouse::Row, serde::Deserialize, Debug, PartialEq, Eq)]
 struct CombinedSchemaChangeRow {
     id: i64,
     full_name: String,
@@ -1916,6 +1931,17 @@ async fn schema_change_add_drop_rename_inner(engine: ClickHouseEngine) {
         "id",
     );
     let rows: Vec<CombinedSchemaChangeRow> = clickhouse_db.query(&query).await;
+    let current_view_rows = if matches!(engine, ClickHouseEngine::ReplacingMergeTree) {
+        let rows: Vec<CombinedSchemaChangeRow> = clickhouse_db
+            .query(
+                "SELECT id, full_name, status, email FROM \"test_schema__multi__current\" ORDER \
+                 BY id",
+            )
+            .await;
+        Some(rows)
+    } else {
+        None
+    };
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -1936,6 +1962,10 @@ async fn schema_change_add_drop_rename_inner(engine: ClickHouseEngine) {
     assert_eq!(rows[1].full_name, "Bob");
     assert_eq!(rows[1].status, Some("pending".to_owned()));
     assert_eq!(rows[1].email, Some("bob@example.com".to_owned()));
+
+    if let Some(view_rows) = current_view_rows {
+        assert_eq!(view_rows, rows, "__current view should match the evolved RMT schema");
+    }
 
     // Metadata snapshot_id should have advanced.
     let final_metadata = store

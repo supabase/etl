@@ -143,6 +143,7 @@ fn build_insert_rows_sql(table_name: &str) -> String {
 pub(crate) enum DdlKind {
     CreateTable,
     CreateView,
+    DropView,
     AddColumn,
     DropColumn,
     RenameColumn,
@@ -153,6 +154,7 @@ impl DdlKind {
         match self {
             DdlKind::CreateTable => "create_table",
             DdlKind::CreateView => "create_view",
+            DdlKind::DropView => "drop_view",
             DdlKind::AddColumn => "add_column",
             DdlKind::DropColumn => "drop_column",
             DdlKind::RenameColumn => "rename_column",

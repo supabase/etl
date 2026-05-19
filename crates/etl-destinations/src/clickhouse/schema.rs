@@ -233,6 +233,12 @@ where
     )
 }
 
+/// `DROP VIEW IF EXISTS "<table>__current"` for an RMT table.
+pub(super) fn drop_current_view_sql(table_name: &str) -> String {
+    let view_name = format!("{table_name}{CURRENT_VIEW_SUFFIX}");
+    format!("DROP VIEW IF EXISTS {}", quote_identifier(&view_name))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -502,6 +508,13 @@ mod tests {
         assert!(sql.contains("FROM \"public_users\" FINAL"));
         assert!(sql.contains("WHERE \"_etl_deleted\" = 0"));
         assert!(!sql.contains("_etl_lsn"), "view must not expose _etl_lsn: {sql}");
+    }
+
+    #[test]
+    fn drop_current_view_sql_quotes_view_name() {
+        let sql = drop_current_view_sql("public_us\"ers");
+
+        assert_eq!(sql, "DROP VIEW IF EXISTS \"public_us\"\"ers__current\"");
     }
 
     #[test]

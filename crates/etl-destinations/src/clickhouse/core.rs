@@ -25,7 +25,10 @@ use crate::{
         client::{ClickHouseClient, ClickHouseTableColumn, DdlKind},
         encoding::{ClickHouseValue, cell_to_clickhouse_value},
         metrics::register_metrics,
-        schema::{create_current_view_sql, create_table_sql, trailing_cdc_column_names},
+        schema::{
+            create_current_view_sql, create_table_sql, drop_current_view_sql,
+            trailing_cdc_column_names,
+        },
     },
     table_name::try_stringify_table_name,
 };
@@ -455,6 +458,24 @@ where
         Ok(())
     }
 
+    /// Rebuilds the RMT current-state view from the current replicated schema.
+    ///
+    /// The base table can evolve through `ALTER TABLE`, but ClickHouse views
+    /// keep the projection they were created with. Drop and recreate the view
+    /// after schema changes so `"<table>__current"` follows ADD, DROP, and
+    /// RENAME changes. Both statements are idempotent for recovery retries.
+    async fn refresh_current_view(
+        &self,
+        clickhouse_table_name: &str,
+        schema: &ReplicatedTableSchema,
+    ) -> EtlResult<()> {
+        let drop_view = drop_current_view_sql(clickhouse_table_name);
+        self.client.execute_ddl(DdlKind::DropView, &drop_view).await?;
+
+        let create_view = create_current_view_sql(clickhouse_table_name, schema.column_schemas());
+        self.client.execute_ddl(DdlKind::CreateView, &create_view).await
+    }
+
     /// Ensures the ClickHouse table for the given schema exists, returning
     /// `(clickhouse_table_name, nullable_flags)`.
     ///
@@ -567,7 +588,7 @@ where
                     metadata.replication_mask.clone(),
                 );
                 let diff = old_schema.diff(schema);
-                self.apply_schema_diff(clickhouse_table_name, &diff, &old_schema).await?;
+                self.apply_schema_diff(clickhouse_table_name, &diff, &old_schema, schema).await?;
             }
             None => {
                 self.issue_create_table_stmt(clickhouse_table_name, schema).await?;
@@ -702,7 +723,7 @@ where
         // Compute and apply the diff.
         let diff = current_schema.diff(new_schema);
         if let Err(err) =
-            self.apply_schema_diff(clickhouse_table_name, &diff, &current_schema).await
+            self.apply_schema_diff(clickhouse_table_name, &diff, &current_schema, new_schema).await
         {
             warn!(
                 "schema change failed for table {}: {}. Manual intervention may be required.",
@@ -731,7 +752,8 @@ where
     }
 
     /// Applies a schema diff to a ClickHouse table: add columns, rename
-    /// columns, then drop columns (in that order for safety).
+    /// columns, then drop columns (in that order for safety), and refreshes
+    /// the RMT current-state view when needed.
     ///
     /// New columns are placed AFTER the last existing user column (before the
     /// CDC columns) using ClickHouse's `AFTER` clause. This is critical because
@@ -755,8 +777,14 @@ where
         clickhouse_table_name: &str,
         diff: &SchemaDiff,
         current_schema: &ReplicatedTableSchema,
+        new_schema: &ReplicatedTableSchema,
     ) -> EtlResult<()> {
+        let is_replacing_merge_tree =
+            matches!(self.inserter_config.engine, ClickHouseEngine::ReplacingMergeTree);
         if diff.is_empty() {
+            if is_replacing_merge_tree {
+                self.refresh_current_view(clickhouse_table_name, new_schema).await?;
+            }
             return Ok(());
         }
 
@@ -765,7 +793,7 @@ where
         // Dropping or renaming a PK column would invalidate that key in a
         // way `ALTER TABLE` cannot fix, so reject the diff before any ALTER
         // is issued.
-        if matches!(self.inserter_config.engine, ClickHouseEngine::ReplacingMergeTree) {
+        if is_replacing_merge_tree {
             reject_pk_alters_under_rmt(clickhouse_table_name, diff, current_schema)?;
         }
 
@@ -792,6 +820,10 @@ where
 
         for column in &diff.columns_to_remove {
             self.client.drop_column(clickhouse_table_name, &column.name).await?;
+        }
+
+        if is_replacing_merge_tree {
+            self.refresh_current_view(clickhouse_table_name, new_schema).await?;
         }
 
         Ok(())
