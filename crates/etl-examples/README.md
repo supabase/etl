@@ -180,17 +180,14 @@ Read patterns:
 
 - Prefer the `__current` view for current-state queries.
 - Or query the base table with `SELECT ... FROM "public_orders" FINAL WHERE _etl_deleted = 0`
-  directly. `FINAL` is heavier than a plain `SELECT *`; if it becomes a bottleneck,
-  fall back to `argMax(_etl_lsn, ...)` patterns or schedule `OPTIMIZE`.
+  directly.
 
 `OPTIMIZE` guidance:
 
 - The replicator never runs `OPTIMIZE ... FINAL CLEANUP`. Background merges already
   collapse duplicates over time; physical removal of tombstones is operator-driven.
 - To reclaim deleted rows on disk, run `OPTIMIZE TABLE "<table>" FINAL CLEANUP` on a
-  schedule that matches your retention requirements. CLEANUP is gated behind an
-  experimental flag in current ClickHouse versions -- check your server's settings if
-  the call is rejected.
+  schedule that matches your retention requirements.
 
 #### MergeTree
 
@@ -214,18 +211,6 @@ Read patterns:
   ```
 
 - Event log queries: read the table directly; every CDC event is preserved.
-
-### Migration from pre-RMT pipelines
-
-If you have an existing pipeline that was using the previous `MergeTree`-only behavior,
-the destination's engine-mismatch detection will refuse to start the new pipeline against
-a table created under the wrong engine. Two paths:
-
-- **Adopt ReplacingMergeTree**: drop the ClickHouse tables for the publication and let the
-  pipeline re-sync them from Postgres under the default `replacing_merge_tree` engine.
-- **Keep the existing MergeTree tables**: pass `--clickhouse-engine merge_tree` (or set
-  `engine: merge_tree` in the replicator config) so the new pipeline matches the
-  on-disk engine. Behavior is unchanged from before.
 
 ### Connection notes
 

@@ -126,7 +126,7 @@ struct ClickHouseArgs {
     #[arg(long)]
     clickhouse_database: String,
     /// Table engine used for replicated tables. `replacing_merge_tree` is the
-    /// default and requires a source primary key + CH >= 23.5; `merge_tree`
+    /// default and requires a source primary key and CH >= 23.5; `merge_tree`
     /// gives the append-only event-log layout.
     #[arg(long, value_enum, default_value_t = ClickHouseEngineArg::ReplacingMergeTree)]
     clickhouse_engine: ClickHouseEngineArg,
@@ -140,10 +140,7 @@ struct ClickHouseArgs {
     max_table_sync_workers: u16,
 }
 
-/// CLI-facing enum mirroring `ClickHouseEngine` so we can derive
-/// `clap::ValueEnum` without touching the upstream type. `rename_all =
-/// "snake_case"` keeps the surface aligned with the YAML config key
-/// (`engine: merge_tree`).
+/// CLI-facing engine choice. Converts to `ClickHouseEngine` via `From`.
 #[derive(Debug, Copy, Clone, clap::ValueEnum)]
 #[clap(rename_all = "snake_case")]
 enum ClickHouseEngineArg {
