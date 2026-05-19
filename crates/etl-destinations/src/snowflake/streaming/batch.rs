@@ -29,6 +29,12 @@ const MAX_UNFLUSHED_BYTES: usize = 128 * 1024;
 /// Rejects degenerate TOAST rows before they enter the encoder.
 const MAX_UNCOMPRESSED_ROW_BYTES: usize = 2 * 1024 * 1024;
 
+/// Pre-allocated capacity for the per-row serialization scratch buffer.
+///
+/// One memory page covers most rows without reallocation, the buffer
+/// grows automatically for larger rows and retains its high-water mark.
+const SCRATCH_INITIAL_CAPACITY: usize = 4096;
+
 /// Compression level.
 ///
 /// Nice balance between compression and processor time spend compressing.
@@ -87,7 +93,7 @@ impl RowBatchBuilder {
     pub fn new() -> Self {
         Self {
             encoder: new_encoder(),
-            scratch: Vec::with_capacity(4096),
+            scratch: Vec::with_capacity(SCRATCH_INITIAL_CAPACITY),
             current_row_count: 0,
             current_offset: OffsetToken::zero(),
             input_since_flush: 0,

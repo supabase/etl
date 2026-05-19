@@ -1,4 +1,5 @@
 use etl::error::{ErrorKind, EtlError};
+use reqwest::StatusCode;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -6,7 +7,7 @@ pub enum Error {
     HttpTransport(#[from] reqwest::Error),
 
     #[error("HTTP status {status}: {body}")]
-    HttpStatus { status: u16, body: String },
+    HttpStatus { status: StatusCode, body: String },
 
     #[error("Authentication error: {0}")]
     Auth(String),
@@ -33,7 +34,7 @@ impl From<Error> for EtlError {
             Error::HttpTransport(_) => {
                 (ErrorKind::DestinationError, "Snowflake HTTP transport error")
             }
-            Error::HttpStatus { status, .. } if *status >= 500 => {
+            Error::HttpStatus { status, .. } if status.is_server_error() => {
                 (ErrorKind::DestinationError, "Snowflake server error")
             }
             Error::HttpStatus { .. } => (ErrorKind::DestinationError, "Snowflake HTTP error"),
