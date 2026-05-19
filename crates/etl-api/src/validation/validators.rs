@@ -925,7 +925,7 @@ impl Validator for DestinationValidator {
                 );
                 validator.validate(ctx).await
             }
-            FullApiDestinationConfig::ClickHouse { url, user, password, database } => {
+            FullApiDestinationConfig::ClickHouse { url, user, password, database, .. } => {
                 let validator = ClickHouseValidator::new(
                     url.clone(),
                     user.clone(),
