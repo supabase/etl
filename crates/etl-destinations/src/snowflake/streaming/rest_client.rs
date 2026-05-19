@@ -1,6 +1,6 @@
 use std::{string::String, sync::Arc, time::Duration};
 
-use reqwest::Client;
+use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use tokio::sync::OnceCell;
 use tracing::{debug, warn};
@@ -58,10 +58,10 @@ impl<T: TokenProvider> RestStreamClient<T> {
                     .await
                     .map_err(Error::HttpTransport)?;
 
-                let status = resp.status().as_u16();
+                let status = resp.status();
                 let body_text = resp.text().await.unwrap_or_default();
 
-                if status != 200 {
+                if status != StatusCode::OK {
                     return Err(Error::HttpStatus { status, body: body_text });
                 }
 
@@ -138,11 +138,11 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
                         .await
                         .map_err(Error::HttpTransport)?;
 
-                    let status = resp.status().as_u16();
+                    let status = resp.status();
                     let body = resp.text().await.unwrap_or_default();
 
-                    if status != 200 {
-                        if status == 401 {
+                    if status != StatusCode::OK {
+                        if status == StatusCode::UNAUTHORIZED {
                             warn!("received 401 from Snowpipe Streaming API, invalidating token");
                             auth.invalidate_token().await;
                         }
@@ -236,11 +236,11 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
                         .await
                         .map_err(Error::HttpTransport)?;
 
-                    let status = resp.status().as_u16();
+                    let status = resp.status();
                     let body = resp.text().await.unwrap_or_default();
 
-                    if status != 200 {
-                        if status == 401 {
+                    if status != StatusCode::OK {
+                        if status == StatusCode::UNAUTHORIZED {
                             warn!("received 401 from Snowpipe Streaming API, invalidating token");
                             auth.invalidate_token().await;
                         }
@@ -308,10 +308,10 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
                         .await
                         .map_err(Error::HttpTransport)?;
 
-                    let status = resp.status().as_u16();
-                    if status != 200 {
+                    let status = resp.status();
+                    if status != StatusCode::OK {
                         let body = resp.text().await.unwrap_or_default();
-                        if status == 401 {
+                        if status == StatusCode::UNAUTHORIZED {
                             warn!("received 401 from Snowpipe Streaming API, invalidating token");
                             auth.invalidate_token().await;
                         }
@@ -369,11 +369,11 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
                         .await
                         .map_err(Error::HttpTransport)?;
 
-                    let status = resp.status().as_u16();
+                    let status = resp.status();
                     let body_text = resp.text().await.unwrap_or_default();
 
-                    if status != 200 {
-                        if status == 401 {
+                    if status != StatusCode::OK {
+                        if status == StatusCode::UNAUTHORIZED {
                             warn!("received 401 from Snowpipe Streaming API, invalidating token");
                             auth.invalidate_token().await;
                         }
@@ -438,11 +438,17 @@ fn should_retry(error: &Error) -> RetryDecision {
             _ => RetryDecision::Retry,
         },
         Error::HttpTransport(_) => RetryDecision::Retry,
-        Error::HttpStatus { status, .. } => match *status {
-            401 | 408 | 429 => RetryDecision::Retry,
-            s if s >= 500 => RetryDecision::Retry,
-            _ => RetryDecision::Stop,
-        },
+        Error::HttpStatus { status, .. } => {
+            if *status == StatusCode::UNAUTHORIZED
+                || *status == StatusCode::REQUEST_TIMEOUT
+                || *status == StatusCode::TOO_MANY_REQUESTS
+                || status.is_server_error()
+            {
+                RetryDecision::Retry
+            } else {
+                RetryDecision::Stop
+            }
+        }
         _ => RetryDecision::Stop,
     }
 }
@@ -520,13 +526,13 @@ mod tests {
         assert_eq!(should_retry(&snowpipe(6)), RetryDecision::Retry);
         assert_eq!(should_retry(&snowpipe(99)), RetryDecision::Retry);
 
-        let http = |status| Error::HttpStatus { status, body: "test".into() };
+        let http = |status: StatusCode| Error::HttpStatus { status, body: "test".into() };
 
-        assert_eq!(should_retry(&http(500)), RetryDecision::Retry);
-        assert_eq!(should_retry(&http(429)), RetryDecision::Retry);
-        assert_eq!(should_retry(&http(408)), RetryDecision::Retry);
-        assert_eq!(should_retry(&http(401)), RetryDecision::Retry);
-        assert_eq!(should_retry(&http(400)), RetryDecision::Stop);
+        assert_eq!(should_retry(&http(StatusCode::INTERNAL_SERVER_ERROR)), RetryDecision::Retry);
+        assert_eq!(should_retry(&http(StatusCode::TOO_MANY_REQUESTS)), RetryDecision::Retry);
+        assert_eq!(should_retry(&http(StatusCode::REQUEST_TIMEOUT)), RetryDecision::Retry);
+        assert_eq!(should_retry(&http(StatusCode::UNAUTHORIZED)), RetryDecision::Retry);
+        assert_eq!(should_retry(&http(StatusCode::BAD_REQUEST)), RetryDecision::Stop);
 
         assert_eq!(should_retry(&Error::Auth("expired".into())), RetryDecision::Stop);
     }

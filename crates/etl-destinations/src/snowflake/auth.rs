@@ -3,6 +3,7 @@ use std::{future::Future, time::Duration};
 use aws_lc_rs::{encoding::AsDer, signature::KeyPair as _};
 use base64::{Engine as _, engine::general_purpose as base64_engine};
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
+use reqwest::StatusCode;
 use secrecy::ExposeSecret as _;
 use sha2::Digest as _;
 use tokio::{sync::Mutex, time::Instant};
@@ -68,16 +69,16 @@ impl TokenExchanger for HttpExchanger {
             .send()
             .await?;
 
-        let status = response.status().as_u16();
+        let status = response.status();
         let body_text = response.text().await?;
 
         // Likely wrong key, non-retriable.
-        if status == 401 {
+        if status == StatusCode::UNAUTHORIZED {
             return Err(Error::Auth(format!("token exchange rejected (401): {body_text}")));
         }
 
         // Transient failure, probably retriable error.
-        if status >= 400 {
+        if status.is_client_error() || status.is_server_error() {
             return Err(Error::HttpStatus { status, body: body_text });
         }
 

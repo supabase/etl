@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use etl::types::PipelineId;
 use metrics::{counter, histogram};
+use reqwest::StatusCode;
 use tracing::warn;
 
 use crate::snowflake::{
@@ -48,7 +49,7 @@ impl<C: StreamClient> ChannelHandle<C> {
         schema: String,
         table: String,
     ) -> Self {
-        let channel = format!("etl_{pipeline}_{table}_ch0");
+        let channel = format!("supabase_etl_{pipeline}_{schema}_{table}_ch0");
         Self {
             client,
             database,
@@ -97,7 +98,7 @@ impl<C: StreamClient> ChannelHandle<C> {
     pub async fn process_batches(&mut self, batches: Vec<RowBatch>) -> Result<()> {
         fn is_stale_channel(e: &Error) -> bool {
             matches!(e, Error::Snowpipe { status_code: 4, .. })
-                || matches!(e, Error::HttpStatus { status: 404, .. })
+                || matches!(e, Error::HttpStatus { status: StatusCode::NOT_FOUND, .. })
         }
 
         for batch in &batches {

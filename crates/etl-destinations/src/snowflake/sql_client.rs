@@ -1,6 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
-use reqwest::Client;
+use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
@@ -201,12 +201,12 @@ impl<T: TokenProvider> SqlClient<T> {
         loop {
             let token = self.auth.get_token().await?;
             let http_resp = self.send_post(url, &token, body).await?;
-            let status = http_resp.status().as_u16();
+            let status = http_resp.status();
 
             match status {
-                200 => return http_resp.json().await.map_err(Error::HttpTransport),
+                StatusCode::OK => return http_resp.json().await.map_err(Error::HttpTransport),
 
-                202 => {
+                StatusCode::ACCEPTED => {
                     let resp: StatementResponse =
                         http_resp.json().await.map_err(Error::HttpTransport)?;
                     return if let Some(ref handle) = resp.statement_handle {
@@ -220,7 +220,7 @@ impl<T: TokenProvider> SqlClient<T> {
                     };
                 }
 
-                422 => {
+                StatusCode::UNPROCESSABLE_ENTITY => {
                     let resp: StatementResponse =
                         http_resp.json().await.map_err(Error::HttpTransport)?;
                     return Err(Error::Sql {
@@ -229,7 +229,7 @@ impl<T: TokenProvider> SqlClient<T> {
                     });
                 }
 
-                401 if !retried_auth => {
+                StatusCode::UNAUTHORIZED if !retried_auth => {
                     warn!("received 401 from SQL REST API, invalidating cached token");
                     self.auth.invalidate_token().await;
                     retried_auth = true;
@@ -291,13 +291,13 @@ impl<T: TokenProvider> SqlClient<T> {
                 .await
                 .map_err(Error::HttpTransport)?;
 
-            match http_resp.status().as_u16() {
-                200 => return http_resp.json().await.map_err(Error::HttpTransport),
-                202 => {
+            match http_resp.status() {
+                StatusCode::OK => return http_resp.json().await.map_err(Error::HttpTransport),
+                StatusCode::ACCEPTED => {
                     debug!(statement_handle, "statement still running, continuing poll");
                     continue;
                 }
-                422 => {
+                StatusCode::UNPROCESSABLE_ENTITY => {
                     let resp: StatementResponse =
                         http_resp.json().await.map_err(Error::HttpTransport)?;
                     return Err(Error::Sql {
@@ -305,7 +305,7 @@ impl<T: TokenProvider> SqlClient<T> {
                         message: resp.message.unwrap_or_default(),
                     });
                 }
-                429 => {
+                StatusCode::TOO_MANY_REQUESTS => {
                     debug!(statement_handle, "rate limited during poll, backing off");
                     continue;
                 }
@@ -321,11 +321,16 @@ impl<T: TokenProvider> SqlClient<T> {
 fn classify_for_retry(error: &Error) -> RetryDecision {
     match error {
         Error::HttpTransport(_) => RetryDecision::Retry,
-        Error::HttpStatus { status, .. } => match *status {
-            408 | 429 => RetryDecision::Retry,
-            s if s >= 500 => RetryDecision::Retry,
-            _ => RetryDecision::Stop,
-        },
+        Error::HttpStatus { status, .. } => {
+            if *status == StatusCode::REQUEST_TIMEOUT
+                || *status == StatusCode::TOO_MANY_REQUESTS
+                || status.is_server_error()
+            {
+                RetryDecision::Retry
+            } else {
+                RetryDecision::Stop
+            }
+        }
         _ => RetryDecision::Stop,
     }
 }
@@ -337,10 +342,25 @@ mod tests {
     #[test]
     fn classify_for_retry_cases() {
         let cases = [
-            (Error::HttpStatus { status: 500, body: String::new() }, RetryDecision::Retry),
-            (Error::HttpStatus { status: 429, body: String::new() }, RetryDecision::Retry),
-            (Error::HttpStatus { status: 408, body: String::new() }, RetryDecision::Retry),
-            (Error::HttpStatus { status: 400, body: String::new() }, RetryDecision::Stop),
+            (
+                Error::HttpStatus {
+                    status: StatusCode::INTERNAL_SERVER_ERROR,
+                    body: String::new(),
+                },
+                RetryDecision::Retry,
+            ),
+            (
+                Error::HttpStatus { status: StatusCode::TOO_MANY_REQUESTS, body: String::new() },
+                RetryDecision::Retry,
+            ),
+            (
+                Error::HttpStatus { status: StatusCode::REQUEST_TIMEOUT, body: String::new() },
+                RetryDecision::Retry,
+            ),
+            (
+                Error::HttpStatus { status: StatusCode::BAD_REQUEST, body: String::new() },
+                RetryDecision::Stop,
+            ),
             (Error::Sql { statement_handle: None, message: String::new() }, RetryDecision::Stop),
         ];
         for (error, expected) in cases {
