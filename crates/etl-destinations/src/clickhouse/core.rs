@@ -423,7 +423,7 @@ where
         let Some(existing) = self.client.table_engine(clickhouse_table_name).await? else {
             return Ok(());
         };
-        let configured = engine_to_clickhouse_name(self.inserter_config.engine);
+        let configured = self.inserter_config.engine.as_clickhouse_str();
         if existing == configured {
             return Ok(());
         }
@@ -983,22 +983,16 @@ where
     }
 }
 
-/// The ClickHouse `system.tables.engine` string for each engine variant.
-fn engine_to_clickhouse_name(engine: ClickHouseEngine) -> &'static str {
-    match engine {
-        ClickHouseEngine::MergeTree => "MergeTree",
-        ClickHouseEngine::ReplacingMergeTree => "ReplacingMergeTree",
-    }
-}
-
 /// Rejects schema diffs that would drop or rename a primary-key column on
-/// an RMT table. The RMT table's `ORDER BY` clause is the source primary
-/// key (that's how `CREATE TABLE` was emitted), and ClickHouse uses that
-/// ORDER BY as the dedup key during merges. `ALTER TABLE` can change column
-/// shapes but it cannot rewrite the ORDER BY expression, so a PK drop or
-/// rename would leave the table referring to a column that no longer exists
-/// (or has a different meaning), silently breaking dedup. We error before
-/// the ALTER reaches the server.
+/// an RMT table.
+///
+/// The destination emits `CREATE TABLE ... ENGINE = ReplacingMergeTree(...)
+/// ORDER BY (<pk cols>)`, so the table's sort and dedup keys are bound to
+/// those PK column names. ClickHouse `ALTER TABLE` can change column shapes
+/// but cannot rewrite the ORDER BY expression, so a PK drop or rename would
+/// leave the ORDER BY referring to a column that no longer exists (or has a
+/// different meaning), silently breaking dedup. We error before the ALTER
+/// reaches the server.
 fn reject_pk_alters_under_rmt(
     clickhouse_table_name: &str,
     diff: &SchemaDiff,

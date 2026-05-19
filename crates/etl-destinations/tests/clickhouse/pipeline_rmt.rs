@@ -742,8 +742,8 @@ async fn engine_mismatch_runs(first: ClickHouseEngine, second: ClickHouseEngine)
         reason.contains("engine mismatch") || reason.contains("engine"),
         "Errored reason should mention the engine mismatch, got: {reason}"
     );
-    let first_name = engine_clickhouse_name(first);
-    let second_name = engine_clickhouse_name(second);
+    let first_name = first.as_clickhouse_str();
+    let second_name = second.as_clickhouse_str();
     assert!(
         reason.contains(first_name),
         "Errored reason should name the existing engine `{first_name}`: {reason}"
@@ -752,11 +752,4 @@ async fn engine_mismatch_runs(first: ClickHouseEngine, second: ClickHouseEngine)
         reason.contains(second_name),
         "Errored reason should name the configured engine `{second_name}`: {reason}"
     );
-}
-
-fn engine_clickhouse_name(engine: ClickHouseEngine) -> &'static str {
-    match engine {
-        ClickHouseEngine::MergeTree => "MergeTree",
-        ClickHouseEngine::ReplacingMergeTree => "ReplacingMergeTree",
-    }
 }

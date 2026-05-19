@@ -24,6 +24,19 @@ pub enum ClickHouseEngine {
     ReplacingMergeTree,
 }
 
+impl ClickHouseEngine {
+    /// The literal engine name ClickHouse uses in `system.tables.engine` and
+    /// in `CREATE TABLE ... ENGINE = <name>(...)`. Distinct from the
+    /// snake_case form used in YAML / CLI (`merge_tree`,
+    /// `replacing_merge_tree`).
+    pub const fn as_clickhouse_str(self) -> &'static str {
+        match self {
+            ClickHouseEngine::MergeTree => "MergeTree",
+            ClickHouseEngine::ReplacingMergeTree => "ReplacingMergeTree",
+        }
+    }
+}
+
 /// Configuration for supported ETL data destinations.
 ///
 /// Specifies the destination type and its associated configuration parameters.
