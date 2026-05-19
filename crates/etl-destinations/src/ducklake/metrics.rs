@@ -19,7 +19,10 @@ use tokio::{
 };
 use tracing::{info, warn};
 
-use crate::ducklake::{DuckLakeTableName, LAKE_CATALOG, client::format_query_error_detail};
+use crate::ducklake::{
+    DuckLakeTableName, LAKE_CATALOG, client::format_query_error_detail,
+    inline_size::DuckLakePendingInlineSizeSampler,
+};
 
 static REGISTER_METRICS: Once = Once::new();
 
@@ -341,6 +344,8 @@ async fn run_ducklake_metrics_sampler(
     let mut interval =
         tokio::time::interval_at(Instant::now() + METRICS_POLL_INTERVAL, METRICS_POLL_INTERVAL);
     interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let inline_sampler =
+        DuckLakePendingInlineSizeSampler::new(metadata_schema.clone(), metadata_pg_pool.clone());
 
     loop {
         tokio::select! {
@@ -378,6 +383,14 @@ async fn run_ducklake_metrics_sampler(
                             table = %table_name,
                             error = %error,
                             "ducklake table storage metrics collection failed"
+                        );
+                    }
+
+                    if let Err(error) = inline_sampler.sample_table(&table_name).await {
+                        warn!(
+                            table = %table_name,
+                            error = %error,
+                            "ducklake table active inlined data metrics collection failed"
                         );
                     }
                 }
