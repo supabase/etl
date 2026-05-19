@@ -1013,8 +1013,7 @@ fn reject_pk_alters_under_rmt(
         let was_pk = current_schema
             .column_schemas()
             .find(|c| c.name == rename.old_name)
-            .map(|c| c.primary_key_ordinal_position.is_some())
-            .unwrap_or(false);
+            .is_some_and(|c| c.primary_key_ordinal_position.is_some());
         if was_pk {
             return Err(etl_error!(
                 ErrorKind::SourceSchemaError,
