@@ -19,7 +19,10 @@ use tokio::{
 };
 use tracing::{info, warn};
 
-use crate::ducklake::{DuckLakeTableName, LAKE_CATALOG, client::format_query_error_detail};
+use crate::ducklake::{
+    DuckLakeTableName, LAKE_CATALOG, client::format_query_error_detail,
+    inline_size::DuckLakePendingInlineSizeSampler,
+};
 
 static REGISTER_METRICS: Once = Once::new();
 
@@ -85,7 +88,6 @@ pub(crate) const SUB_BATCH_KIND_LABEL: &str = "sub_batch_kind";
 pub(crate) const PREPARED_ROWS_KIND_LABEL: &str = "prepared_rows_kind";
 pub(crate) const DELETE_ORIGIN_LABEL: &str = "delete_origin";
 pub(crate) const RETRY_SCOPE_LABEL: &str = "retry_scope";
-pub(crate) const RESULT_LABEL: &str = "result";
 pub(crate) const MAINTENANCE_OPERATION_LABEL: &str = "operation";
 pub(crate) const MAINTENANCE_REASON_LABEL: &str = "reason";
 pub(crate) const MAINTENANCE_OUTCOME_LABEL: &str = "outcome";
@@ -342,6 +344,8 @@ async fn run_ducklake_metrics_sampler(
     let mut interval =
         tokio::time::interval_at(Instant::now() + METRICS_POLL_INTERVAL, METRICS_POLL_INTERVAL);
     interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let inline_sampler =
+        DuckLakePendingInlineSizeSampler::new(metadata_schema.clone(), metadata_pg_pool.clone());
 
     loop {
         tokio::select! {
@@ -379,6 +383,14 @@ async fn run_ducklake_metrics_sampler(
                             table = %table_name,
                             error = %error,
                             "ducklake table storage metrics collection failed"
+                        );
+                    }
+
+                    if let Err(error) = inline_sampler.sample_table(&table_name).await {
+                        warn!(
+                            table = %table_name,
+                            error = %error,
+                            "ducklake table active inlined data metrics collection failed"
                         );
                     }
                 }

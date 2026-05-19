@@ -32,6 +32,7 @@ constant_time_eq = { workspace = true }
 etl = { workspace = true }
 etl-config = { workspace = true, features = ["utoipa", "supabase"] }
 etl-destinations = { workspace = true, features = ["bigquery", "clickhouse", "ducklake", "iceberg"] }
+etl-maintenance = { workspace = true }
 etl-postgres = { workspace = true, features = ["replication"] }
 etl-telemetry = { workspace = true }
 k8s-openapi = { workspace = true, features = ["latest"] }

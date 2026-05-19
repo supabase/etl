@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use etl_config::Environment;
+use etl_maintenance::DuckLakeMaintenancePolicy;
 use k8s_openapi::api::core::v1::ConfigMap;
 use thiserror::Error;
 
@@ -49,7 +50,7 @@ pub struct DuckLakeMaintenanceResourceConfig {
     /// Image containing the maintenance binary.
     pub image: String,
     /// User-authored maintenance policy.
-    pub policy: DuckLakeMaintenanceConfig,
+    pub policy: DuckLakeMaintenancePolicy,
 }
 
 /// Replicator StatefulSet materialization input.
