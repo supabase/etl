@@ -1,15 +1,14 @@
-use std::ops::DerefMut;
+use std::{ops::DerefMut, sync::Arc};
 
-use actix_web::{
-    HttpResponse, Responder, ResponseError, delete, get,
-    http::{StatusCode, header::ContentType},
-    post, put,
-    web::{Data, Json, Path},
+use axum::{
+    Extension, Json,
+    extract::Path,
+    http::StatusCode,
+    response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use thiserror::Error;
-use tracing_actix_web::RootSpan;
 use utoipa::ToSchema;
 
 use crate::{
@@ -29,7 +28,7 @@ use crate::{
         K8sClient, TrustedRootCertsCache, TrustedRootCertsError,
         core::{K8sCoreError, first_active_pipeline_id},
     },
-    routes::ErrorMessage,
+    routes::{ErrorMessage, IntoInner, error_response},
 };
 
 #[derive(Debug, Error)]
@@ -75,9 +74,9 @@ impl TenantError {
     }
 }
 
-impl ResponseError for TenantError {
-    fn status_code(&self) -> StatusCode {
-        match self {
+impl IntoResponse for TenantError {
+    fn into_response(self) -> Response {
+        let status_code = match &self {
             TenantError::TenantsDb(TenantsDbError::Conflict(_))
             | TenantError::ActivePipeline(_) => StatusCode::CONFLICT,
             TenantError::TenantsDb(_)
@@ -87,14 +86,9 @@ impl ResponseError for TenantError {
             | TenantError::TrustedRootCerts(_)
             | TenantError::K8sCore(_) => StatusCode::INTERNAL_SERVER_ERROR,
             TenantError::TenantNotFound(_) => StatusCode::NOT_FOUND,
-        }
-    }
+        };
 
-    fn error_response(&self) -> HttpResponse {
-        let error_message = ErrorMessage { message: self.to_message() };
-        let body =
-            serde_json::to_string(&error_message).expect("failed to serialize error message");
-        HttpResponse::build(self.status_code()).insert_header(ContentType::json()).body(body)
+        error_response(status_code, self.to_message())
     }
 }
 
@@ -148,6 +142,8 @@ pub struct ReadTenantsResponse {
 }
 
 #[utoipa::path(
+    post,
+    path = "/tenants",
     summary = "Create a tenant",
     description = "Creates a new tenant with the provided ID and name.",
     request_body = CreateTenantRequest,
@@ -158,17 +154,15 @@ pub struct ReadTenantsResponse {
     ),
     tag = "Tenants"
 )]
-#[post("/tenants")]
 pub(crate) async fn create_tenant(
-    pool: Data<PgPool>,
+    Extension(pool): Extension<PgPool>,
     tenant: Json<CreateTenantRequest>,
-    root_span: RootSpan,
-) -> Result<impl Responder, TenantError> {
+) -> Result<impl IntoResponse, TenantError> {
     let tenant = tenant.into_inner();
 
-    root_span.record("project", &tenant.id);
+    tracing::Span::current().record("project", &tenant.id);
 
-    let id = data::tenants::create_tenant(&**pool, &tenant.id, &tenant.name).await?;
+    let id = data::tenants::create_tenant(&pool, &tenant.id, &tenant.name).await?;
 
     let response = CreateTenantResponse { id };
 
@@ -176,6 +170,8 @@ pub(crate) async fn create_tenant(
 }
 
 #[utoipa::path(
+    put,
+    path = "/tenants/{tenant_id}",
     summary = "Create or update a tenant",
     description = "Creates a tenant if it does not exist; otherwise updates its name.",
     request_body = CreateOrUpdateTenantRequest,
@@ -189,25 +185,25 @@ pub(crate) async fn create_tenant(
     ),
     tag = "Tenants"
 )]
-#[put("/tenants/{tenant_id}")]
 pub(crate) async fn create_or_update_tenant(
-    pool: Data<PgPool>,
+    Extension(pool): Extension<PgPool>,
     tenant_id: Path<String>,
     tenant: Json<CreateOrUpdateTenantRequest>,
-    root_span: RootSpan,
-) -> Result<impl Responder, TenantError> {
+) -> Result<impl IntoResponse, TenantError> {
     let tenant_id = tenant_id.into_inner();
     let tenant = tenant.into_inner();
 
-    root_span.record("project", &tenant_id);
+    tracing::Span::current().record("project", &tenant_id);
 
-    let id = data::tenants::create_or_update_tenant(&**pool, &tenant_id, &tenant.name).await?;
+    let id = data::tenants::create_or_update_tenant(&pool, &tenant_id, &tenant.name).await?;
     let response = CreateOrUpdateTenantResponse { id };
 
     Ok(Json(response))
 }
 
 #[utoipa::path(
+    get,
+    path = "/tenants/{tenant_id}",
     summary = "Retrieve a tenant",
     description = "Returns the tenant identified by the provided ID.",
     params(
@@ -220,17 +216,15 @@ pub(crate) async fn create_or_update_tenant(
     ),
     tag = "Tenants"
 )]
-#[get("/tenants/{tenant_id}")]
 pub(crate) async fn read_tenant(
-    pool: Data<PgPool>,
+    Extension(pool): Extension<PgPool>,
     tenant_id: Path<String>,
-    root_span: RootSpan,
-) -> Result<impl Responder, TenantError> {
+) -> Result<impl IntoResponse, TenantError> {
     let tenant_id = tenant_id.into_inner();
 
-    root_span.record("project", &tenant_id);
+    tracing::Span::current().record("project", &tenant_id);
 
-    let response = data::tenants::read_tenant(&**pool, &tenant_id)
+    let response = data::tenants::read_tenant(&pool, &tenant_id)
         .await?
         .map(|t| ReadTenantResponse { id: t.id, name: t.name })
         .ok_or(TenantError::TenantNotFound(tenant_id))?;
@@ -239,6 +233,8 @@ pub(crate) async fn read_tenant(
 }
 
 #[utoipa::path(
+    post,
+    path = "/tenants/{tenant_id}",
     summary = "Update a tenant",
     description = "Updates the tenant's display name.",
     request_body = UpdateTenantRequest,
@@ -252,26 +248,26 @@ pub(crate) async fn read_tenant(
     ),
     tag = "Tenants"
 )]
-#[post("/tenants/{tenant_id}")]
 pub(crate) async fn update_tenant(
-    pool: Data<PgPool>,
+    Extension(pool): Extension<PgPool>,
     tenant_id: Path<String>,
     tenant: Json<UpdateTenantRequest>,
-    root_span: RootSpan,
-) -> Result<impl Responder, TenantError> {
+) -> Result<impl IntoResponse, TenantError> {
     let tenant = tenant.into_inner();
     let tenant_id = tenant_id.into_inner();
 
-    root_span.record("project", &tenant_id);
+    tracing::Span::current().record("project", &tenant_id);
 
-    data::tenants::update_tenant(&**pool, &tenant_id, &tenant.name)
+    data::tenants::update_tenant(&pool, &tenant_id, &tenant.name)
         .await?
         .ok_or(TenantError::TenantNotFound(tenant_id))?;
 
-    Ok(HttpResponse::Ok().finish())
+    Ok(StatusCode::OK)
 }
 
 #[utoipa::path(
+    delete,
+    path = "/tenants/{tenant_id}",
     summary = "Delete a tenant",
     description = "Deletes the tenant identified by the provided ID.",
     params(
@@ -285,21 +281,19 @@ pub(crate) async fn update_tenant(
     ),
     tag = "Tenants"
 )]
-#[delete("/tenants/{tenant_id}")]
 pub(crate) async fn delete_tenant(
-    pool: Data<PgPool>,
-    api_config: Data<ApiConfig>,
-    encryption_key: Data<EncryptionKey>,
-    k8s_client: Data<dyn K8sClient>,
+    Extension(pool): Extension<PgPool>,
+    Extension(api_config): Extension<Arc<ApiConfig>>,
+    Extension(encryption_key): Extension<Arc<EncryptionKey>>,
+    Extension(k8s_client): Extension<Arc<dyn K8sClient>>,
     tenant_id: Path<String>,
-    trusted_root_certs_cache: Data<TrustedRootCertsCache>,
-    root_span: RootSpan,
-) -> Result<impl Responder, TenantError> {
+    Extension(trusted_root_certs_cache): Extension<Arc<TrustedRootCertsCache>>,
+) -> Result<impl IntoResponse, TenantError> {
     let tenant_id = tenant_id.into_inner();
 
-    root_span.record("project", &tenant_id);
+    tracing::Span::current().record("project", &tenant_id);
 
-    let pipelines = read_all_pipelines_for_deletion(&**pool, &tenant_id).await?;
+    let pipelines = read_all_pipelines_for_deletion(&pool, &tenant_id).await?;
     if let Some(pipeline_id) =
         first_active_pipeline_id(k8s_client.as_ref(), &tenant_id, &pipelines).await?
     {
@@ -307,7 +301,7 @@ pub(crate) async fn delete_tenant(
     }
 
     let sources =
-        data::sources::read_all_source_connections(&**pool, &tenant_id, &encryption_key).await?;
+        data::sources::read_all_source_connections(&pool, &tenant_id, &encryption_key).await?;
     let tls_config = trusted_root_certs_cache.get_tls_config(api_config.source.tls_enabled).await?;
     let mut pipelines_by_source = std::collections::BTreeMap::new();
     for pipeline in pipelines {
@@ -353,12 +347,14 @@ pub(crate) async fn delete_tenant(
     // Deleting the tenant is enough for API-side cleanup because Postgres cascades
     // tenant-owned rows in the app schema; we only clean source databases
     // manually above.
-    data::tenants::delete_tenant(&**pool, &tenant_id).await?;
+    data::tenants::delete_tenant(&pool, &tenant_id).await?;
 
-    Ok(HttpResponse::Ok().finish())
+    Ok(StatusCode::OK)
 }
 
 #[utoipa::path(
+    get,
+    path = "/tenants",
     summary = "List tenants",
     description = "Returns all tenants.",
     responses(
@@ -367,9 +363,10 @@ pub(crate) async fn delete_tenant(
     ),
     tag = "Tenants"
 )]
-#[get("/tenants")]
-pub(crate) async fn read_all_tenants(pool: Data<PgPool>) -> Result<impl Responder, TenantError> {
-    let tenants: Vec<ReadTenantResponse> = data::tenants::read_all_tenants(&**pool)
+pub(crate) async fn read_all_tenants(
+    Extension(pool): Extension<PgPool>,
+) -> Result<impl IntoResponse, TenantError> {
+    let tenants: Vec<ReadTenantResponse> = data::tenants::read_all_tenants(&pool)
         .await?
         .drain(..)
         .map(|t| ReadTenantResponse { id: t.id, name: t.name })

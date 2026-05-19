@@ -12,16 +12,19 @@ This API service provides a RESTful interface for managing Postgres replication 
 ## Features
 
 - RESTful API endpoints for pipeline management
+- Axum HTTP runtime with tower middleware
 - Multi-tenant support with isolated configurations
 - Kubernetes deployment support
 - Secure configuration management
 - Database schema versioning with migrations
+- OpenAPI descriptors generated from `utoipa` route macros
 - Integration with the core ETL system
 
 ## Table of Contents
 
 - [Prerequisites](#prerequisites)
 - [Development](#development)
+- [API Documentation](#api-documentation)
 - [Environment Variables](#environment-variables)
 - [Authentication](#authentication)
 
@@ -75,6 +78,14 @@ export APP_CONFIG_DIR=/etc/etl-api/config
 ```
 
 ## Development
+
+### API Documentation
+
+The service exposes the generated OpenAPI document at
+`/api-docs/openapi.json` and Swagger UI at `/swagger-ui`. Route descriptors are
+generated from the `utoipa` macros attached to the handlers, so changes to
+routes, parameters, request bodies, or responses should be reflected in those
+attributes as part of the same code change.
 
 ### Database Migrations
 

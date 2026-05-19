@@ -1,6 +1,6 @@
 use std::io::ErrorKind;
 
-use actix_web::http::StatusCode;
+use axum::http::StatusCode;
 
 use crate::validation::{ValidationError, ValidationFailure};
 

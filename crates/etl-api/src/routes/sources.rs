@@ -1,8 +1,10 @@
-use actix_web::{
-    HttpRequest, HttpResponse, Responder, ResponseError, delete, get,
-    http::{StatusCode, header::ContentType},
-    post,
-    web::{Data, Json, Path},
+use std::sync::Arc;
+
+use axum::{
+    Extension, Json,
+    extract::Path,
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -24,7 +26,9 @@ use crate::{
         K8sClient, TrustedRootCertsCache,
         core::{K8sCoreError, first_active_pipeline_id},
     },
-    routes::{ErrorMessage, TenantIdError, common, extract_tenant_id, utils},
+    routes::{
+        ErrorMessage, IntoInner, TenantIdError, common, error_response, extract_tenant_id, utils,
+    },
     validation::{FailureType, ValidationError, ValidationFailure},
 };
 
@@ -75,9 +79,9 @@ impl SourceError {
     }
 }
 
-impl ResponseError for SourceError {
-    fn status_code(&self) -> StatusCode {
-        match self {
+impl IntoResponse for SourceError {
+    fn into_response(self) -> Response {
+        let status_code = match &self {
             SourceError::SourceNotFound(_) => StatusCode::NOT_FOUND,
             SourceError::TenantId(_) => StatusCode::BAD_REQUEST,
             SourceError::SourcesDb(_) | SourceError::PipelinesDb(_) | SourceError::K8sCore(_) => {
@@ -86,14 +90,9 @@ impl ResponseError for SourceError {
             SourceError::Validation(error) => utils::validation_error_status_code(error),
             SourceError::ValidationFailed(_) => StatusCode::UNPROCESSABLE_ENTITY,
             SourceError::ActivePipeline(_) | SourceError::SourceInUse(_) => StatusCode::CONFLICT,
-        }
-    }
+        };
 
-    fn error_response(&self) -> HttpResponse {
-        let error_message = ErrorMessage { message: self.to_message() };
-        let body =
-            serde_json::to_string(&error_message).expect("failed to serialize error message");
-        HttpResponse::build(self.status_code()).insert_header(ContentType::json()).body(body)
+        error_response(status_code, self.to_message())
     }
 }
 
@@ -180,6 +179,8 @@ pub struct ValidateSourceResponse {
 }
 
 #[utoipa::path(
+    post,
+    path = "/sources",
     summary = "Create a source",
     description = "Creates a source for the specified tenant.",
     request_body = CreateSourceRequest,
@@ -194,16 +195,15 @@ pub struct ValidateSourceResponse {
     ),
     tag = "Sources"
 )]
-#[post("/sources")]
 pub(crate) async fn create_source(
-    req: HttpRequest,
-    pool: Data<PgPool>,
-    api_config: Data<ApiConfig>,
-    trusted_root_certs_cache: Data<TrustedRootCertsCache>,
-    encryption_key: Data<EncryptionKey>,
+    headers: HeaderMap,
+    Extension(pool): Extension<PgPool>,
+    Extension(api_config): Extension<Arc<ApiConfig>>,
+    Extension(trusted_root_certs_cache): Extension<Arc<TrustedRootCertsCache>>,
+    Extension(encryption_key): Extension<Arc<EncryptionKey>>,
     source: Json<CreateSourceRequest>,
-) -> Result<impl Responder, SourceError> {
-    let tenant_id = extract_tenant_id(&req)?;
+) -> Result<impl IntoResponse, SourceError> {
+    let tenant_id = extract_tenant_id(&headers)?;
     let source = source.into_inner();
 
     validate_source_config(
@@ -214,7 +214,7 @@ pub(crate) async fn create_source(
     .await?;
 
     let id = data::sources::create_source(
-        &**pool,
+        &pool,
         tenant_id,
         &source.name,
         source.config,
@@ -228,6 +228,8 @@ pub(crate) async fn create_source(
 }
 
 #[utoipa::path(
+    post,
+    path = "/sources/validate",
     summary = "Validate source configuration",
     description = "Validates source access using the source validation checks configured for the API.",
     request_body = ValidateSourceRequest,
@@ -241,14 +243,13 @@ pub(crate) async fn create_source(
     ),
     tag = "Sources"
 )]
-#[post("/sources/validate")]
 pub(crate) async fn validate_source(
-    req: HttpRequest,
-    api_config: Data<ApiConfig>,
-    trusted_root_certs_cache: Data<TrustedRootCertsCache>,
+    headers: HeaderMap,
+    Extension(api_config): Extension<Arc<ApiConfig>>,
+    Extension(trusted_root_certs_cache): Extension<Arc<TrustedRootCertsCache>>,
     request: Json<ValidateSourceRequest>,
-) -> Result<impl Responder, SourceError> {
-    let _tenant_id = extract_tenant_id(&req)?;
+) -> Result<impl IntoResponse, SourceError> {
+    let _tenant_id = extract_tenant_id(&headers)?;
     let request = request.into_inner();
 
     let failures = common::validate_source_config(
@@ -265,6 +266,8 @@ pub(crate) async fn validate_source(
 }
 
 #[utoipa::path(
+    get,
+    path = "/sources/{source_id}",
     summary = "Retrieve a source",
     description = "Returns a source by ID. Sensitive fields are omitted from the configuration.",
     params(
@@ -278,17 +281,16 @@ pub(crate) async fn validate_source(
     ),
     tag = "Sources"
 )]
-#[get("/sources/{source_id}")]
 pub(crate) async fn read_source(
-    req: HttpRequest,
-    pool: Data<PgPool>,
-    encryption_key: Data<EncryptionKey>,
+    headers: HeaderMap,
+    Extension(pool): Extension<PgPool>,
+    Extension(encryption_key): Extension<Arc<EncryptionKey>>,
     source_id: Path<i64>,
-) -> Result<impl Responder, SourceError> {
-    let tenant_id = extract_tenant_id(&req)?;
+) -> Result<impl IntoResponse, SourceError> {
+    let tenant_id = extract_tenant_id(&headers)?;
     let source_id = source_id.into_inner();
 
-    let response = data::sources::read_source(&**pool, tenant_id, source_id, &encryption_key)
+    let response = data::sources::read_source(&pool, tenant_id, source_id, &encryption_key)
         .await?
         .map(|s| ReadSourceResponse {
             id: s.id,
@@ -302,6 +304,8 @@ pub(crate) async fn read_source(
 }
 
 #[utoipa::path(
+    post,
+    path = "/sources/{source_id}",
     summary = "Update a source",
     description = "Updates a source's name and configuration.",
     request_body = UpdateSourceRequest,
@@ -317,17 +321,16 @@ pub(crate) async fn read_source(
     ),
     tag = "Sources"
 )]
-#[post("/sources/{source_id}")]
 pub(crate) async fn update_source(
-    req: HttpRequest,
-    pool: Data<PgPool>,
-    api_config: Data<ApiConfig>,
-    trusted_root_certs_cache: Data<TrustedRootCertsCache>,
+    headers: HeaderMap,
+    Extension(pool): Extension<PgPool>,
+    Extension(api_config): Extension<Arc<ApiConfig>>,
+    Extension(trusted_root_certs_cache): Extension<Arc<TrustedRootCertsCache>>,
     source_id: Path<i64>,
-    encryption_key: Data<EncryptionKey>,
+    Extension(encryption_key): Extension<Arc<EncryptionKey>>,
     source: Json<UpdateSourceRequest>,
-) -> Result<impl Responder, SourceError> {
-    let tenant_id = extract_tenant_id(&req)?;
+) -> Result<impl IntoResponse, SourceError> {
+    let tenant_id = extract_tenant_id(&headers)?;
     let source_id = source_id.into_inner();
     let source = source.into_inner();
 
@@ -339,7 +342,7 @@ pub(crate) async fn update_source(
     .await?;
 
     data::sources::update_source(
-        &**pool,
+        &pool,
         tenant_id,
         &source.name,
         source_id,
@@ -349,10 +352,12 @@ pub(crate) async fn update_source(
     .await?
     .ok_or(SourceError::SourceNotFound(source_id))?;
 
-    Ok(HttpResponse::Ok().finish())
+    Ok(StatusCode::OK)
 }
 
 #[utoipa::path(
+    delete,
+    path = "/sources/{source_id}",
     summary = "Delete a source",
     description = "Deletes a source by ID for the given tenant.",
     params(
@@ -367,21 +372,20 @@ pub(crate) async fn update_source(
     ),
     tag = "Sources"
 )]
-#[delete("/sources/{source_id}")]
 pub(crate) async fn delete_source(
-    req: HttpRequest,
-    pool: Data<PgPool>,
-    k8s_client: Data<dyn K8sClient>,
+    headers: HeaderMap,
+    Extension(pool): Extension<PgPool>,
+    Extension(k8s_client): Extension<Arc<dyn K8sClient>>,
     source_id: Path<i64>,
-) -> Result<impl Responder, SourceError> {
-    let tenant_id = extract_tenant_id(&req)?;
+) -> Result<impl IntoResponse, SourceError> {
+    let tenant_id = extract_tenant_id(&headers)?;
     let source_id = source_id.into_inner();
 
-    if !source_exists(&**pool, tenant_id, source_id).await? {
+    if !source_exists(&pool, tenant_id, source_id).await? {
         return Err(SourceError::SourceNotFound(source_id));
     }
 
-    let pipelines = read_pipelines_for_source_for_deletion(&**pool, tenant_id, source_id).await?;
+    let pipelines = read_pipelines_for_source_for_deletion(&pool, tenant_id, source_id).await?;
     if let Some(pipeline_id) =
         first_active_pipeline_id(k8s_client.as_ref(), tenant_id, &pipelines).await?
     {
@@ -397,14 +401,16 @@ pub(crate) async fn delete_source(
     // concurrent pipeline creation here. A pipeline can still appear between
     // the check and the final delete, in which case the database constraints
     // are the last line of defense.
-    data::sources::delete_source(&**pool, tenant_id, source_id)
+    data::sources::delete_source(&pool, tenant_id, source_id)
         .await?
         .ok_or(SourceError::SourceNotFound(source_id))?;
 
-    Ok(HttpResponse::Ok().finish())
+    Ok(StatusCode::OK)
 }
 
 #[utoipa::path(
+    get,
+    path = "/sources",
     summary = "List sources",
     description = "Returns all sources for the specified tenant.",
     params(
@@ -416,16 +422,15 @@ pub(crate) async fn delete_source(
     ),
     tag = "Sources"
 )]
-#[get("/sources")]
 pub(crate) async fn read_all_sources(
-    req: HttpRequest,
-    pool: Data<PgPool>,
-    encryption_key: Data<EncryptionKey>,
-) -> Result<impl Responder, SourceError> {
-    let tenant_id = extract_tenant_id(&req)?;
+    headers: HeaderMap,
+    Extension(pool): Extension<PgPool>,
+    Extension(encryption_key): Extension<Arc<EncryptionKey>>,
+) -> Result<impl IntoResponse, SourceError> {
+    let tenant_id = extract_tenant_id(&headers)?;
 
     let mut sources = vec![];
-    for source in data::sources::read_all_sources(&**pool, tenant_id, &encryption_key).await? {
+    for source in data::sources::read_all_sources(&pool, tenant_id, &encryption_key).await? {
         let source = ReadSourceResponse {
             id: source.id,
             tenant_id: source.tenant_id,

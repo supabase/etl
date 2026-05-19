@@ -599,14 +599,12 @@ async fn spawn_test_app_with_services(
     )
     .expect("failed to bind address");
 
-    let server_handle = tokio::spawn(server);
-
     TestApp {
         address: format!("http://{base_address}:{port}"),
         api_client: reqwest::Client::new(),
         api_key,
         config,
-        server_handle,
+        server_handle: server,
         k8s_state,
     }
 }

@@ -1,4 +1,9 @@
-use actix_web::HttpRequest;
+use axum::{
+    Extension, Json,
+    extract::Path,
+    http::HeaderMap,
+    response::{IntoResponse, Response},
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use utoipa::ToSchema;
@@ -30,8 +35,7 @@ pub enum TenantIdError {
     TenantIdIllFormed,
 }
 
-fn extract_tenant_id(req: &HttpRequest) -> Result<&str, TenantIdError> {
-    let headers = req.headers();
+fn extract_tenant_id(headers: &HeaderMap) -> Result<&str, TenantIdError> {
     let tenant_id = headers
         .get("tenant_id")
         .ok_or(TenantIdError::TenantIdMissing)?
@@ -39,4 +43,42 @@ fn extract_tenant_id(req: &HttpRequest) -> Result<&str, TenantIdError> {
         .map_err(|_| TenantIdError::TenantIdIllFormed)?;
 
     Ok(tenant_id)
+}
+
+/// Builds a JSON error response for route errors.
+pub(crate) fn error_response(status_code: axum::http::StatusCode, message: String) -> Response {
+    (status_code, Json(ErrorMessage { message })).into_response()
+}
+
+/// Returns the inner value from axum extractors used by route handlers.
+pub(crate) trait IntoInner {
+    /// The extractor's inner value.
+    type Inner;
+
+    /// Consumes the extractor and returns its inner value.
+    fn into_inner(self) -> Self::Inner;
+}
+
+impl<T> IntoInner for Json<T> {
+    type Inner = T;
+
+    fn into_inner(self) -> Self::Inner {
+        self.0
+    }
+}
+
+impl<T> IntoInner for Path<T> {
+    type Inner = T;
+
+    fn into_inner(self) -> Self::Inner {
+        self.0
+    }
+}
+
+impl<T> IntoInner for Extension<T> {
+    type Inner = T;
+
+    fn into_inner(self) -> Self::Inner {
+        self.0
+    }
 }

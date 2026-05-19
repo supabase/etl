@@ -1,8 +1,10 @@
-use actix_web::{
-    HttpRequest, HttpResponse, Responder, ResponseError, delete, get,
-    http::{StatusCode, header::ContentType},
-    post,
-    web::{Data, Json, Path},
+use std::sync::Arc;
+
+use axum::{
+    Extension, Json,
+    extract::Path,
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
 };
 use etl_config::Environment;
 use serde::{Deserialize, Serialize};
@@ -21,7 +23,7 @@ use crate::{
         K8sClient,
         core::{K8sCoreError, first_active_pipeline_id},
     },
-    routes::{ErrorMessage, TenantIdError, extract_tenant_id, utils},
+    routes::{ErrorMessage, IntoInner, TenantIdError, error_response, extract_tenant_id, utils},
     validation,
     validation::{FailureType, ValidationContext, ValidationError, ValidationFailure},
 };
@@ -73,9 +75,9 @@ impl DestinationError {
     }
 }
 
-impl ResponseError for DestinationError {
-    fn status_code(&self) -> StatusCode {
-        match self {
+impl IntoResponse for DestinationError {
+    fn into_response(self) -> Response {
+        let status_code = match &self {
             DestinationError::DestinationsDb(_)
             | DestinationError::PipelinesDb(_)
             | DestinationError::Environment(_)
@@ -86,14 +88,9 @@ impl ResponseError for DestinationError {
                 StatusCode::CONFLICT
             }
             DestinationError::TenantId(_) => StatusCode::BAD_REQUEST,
-        }
-    }
+        };
 
-    fn error_response(&self) -> HttpResponse {
-        let error_message = ErrorMessage { message: self.to_message() };
-        let body =
-            serde_json::to_string(&error_message).expect("failed to serialize error message");
-        HttpResponse::build(self.status_code()).insert_header(ContentType::json()).body(body)
+        error_response(status_code, self.to_message())
     }
 }
 
@@ -165,6 +162,8 @@ pub struct ValidateDestinationResponse {
 }
 
 #[utoipa::path(
+    post,
+    path = "/destinations",
     summary = "Create a destination",
     description = "Creates a destination for the specified tenant.",
     request_body = CreateDestinationRequest,
@@ -178,18 +177,17 @@ pub struct ValidateDestinationResponse {
     ),
     tag = "Destinations"
 )]
-#[post("/destinations")]
 pub(crate) async fn create_destination(
-    req: HttpRequest,
-    pool: Data<PgPool>,
-    encryption_key: Data<EncryptionKey>,
+    headers: HeaderMap,
+    Extension(pool): Extension<PgPool>,
+    Extension(encryption_key): Extension<Arc<EncryptionKey>>,
     destination: Json<CreateDestinationRequest>,
-) -> Result<impl Responder, DestinationError> {
-    let tenant_id = extract_tenant_id(&req)?;
+) -> Result<impl IntoResponse, DestinationError> {
+    let tenant_id = extract_tenant_id(&headers)?;
     let destination = destination.into_inner();
 
     let id = data::destinations::create_destination(
-        &**pool,
+        &pool,
         tenant_id,
         &destination.name,
         destination.config,
@@ -203,6 +201,8 @@ pub(crate) async fn create_destination(
 }
 
 #[utoipa::path(
+    get,
+    path = "/destinations/{destination_id}",
     summary = "Retrieve a destination",
     description = "Returns a destination identified by its ID for the given tenant.",
     params(
@@ -216,18 +216,17 @@ pub(crate) async fn create_destination(
     ),
     tag = "Destinations"
 )]
-#[get("/destinations/{destination_id}")]
 pub(crate) async fn read_destination(
-    req: HttpRequest,
-    pool: Data<PgPool>,
-    encryption_key: Data<EncryptionKey>,
+    headers: HeaderMap,
+    Extension(pool): Extension<PgPool>,
+    Extension(encryption_key): Extension<Arc<EncryptionKey>>,
     destination_id: Path<i64>,
-) -> Result<impl Responder, DestinationError> {
-    let tenant_id = extract_tenant_id(&req)?;
+) -> Result<impl IntoResponse, DestinationError> {
+    let tenant_id = extract_tenant_id(&headers)?;
     let destination_id = destination_id.into_inner();
 
     let response =
-        data::destinations::read_destination(&**pool, tenant_id, destination_id, &encryption_key)
+        data::destinations::read_destination(&pool, tenant_id, destination_id, &encryption_key)
             .await?
             .map(|destination| ReadDestinationResponse {
                 id: destination.id,
@@ -241,6 +240,8 @@ pub(crate) async fn read_destination(
 }
 
 #[utoipa::path(
+    post,
+    path = "/destinations/{destination_id}",
     summary = "Update a destination",
     description = "Updates the destination's name and configuration.",
     request_body = UpdateDestinationRequest,
@@ -255,20 +256,19 @@ pub(crate) async fn read_destination(
     ),
     tag = "Destinations"
 )]
-#[post("/destinations/{destination_id}")]
 pub(crate) async fn update_destination(
-    req: HttpRequest,
-    pool: Data<PgPool>,
+    headers: HeaderMap,
+    Extension(pool): Extension<PgPool>,
     destination_id: Path<i64>,
-    encryption_key: Data<EncryptionKey>,
+    Extension(encryption_key): Extension<Arc<EncryptionKey>>,
     destination: Json<UpdateDestinationRequest>,
-) -> Result<impl Responder, DestinationError> {
-    let tenant_id = extract_tenant_id(&req)?;
+) -> Result<impl IntoResponse, DestinationError> {
+    let tenant_id = extract_tenant_id(&headers)?;
     let destination_id = destination_id.into_inner();
     let destination = destination.into_inner();
 
     data::destinations::update_destination(
-        &**pool,
+        &pool,
         tenant_id,
         &destination.name,
         destination_id,
@@ -278,10 +278,12 @@ pub(crate) async fn update_destination(
     .await?
     .ok_or(DestinationError::DestinationNotFound(destination_id))?;
 
-    Ok(HttpResponse::Ok().finish())
+    Ok(StatusCode::OK)
 }
 
 #[utoipa::path(
+    delete,
+    path = "/destinations/{destination_id}",
     summary = "Delete a destination",
     description = "Deletes a destination by ID for the given tenant.",
     params(
@@ -296,22 +298,21 @@ pub(crate) async fn update_destination(
     ),
     tag = "Destinations"
 )]
-#[delete("/destinations/{destination_id}")]
 pub(crate) async fn delete_destination(
-    req: HttpRequest,
-    pool: Data<PgPool>,
+    headers: HeaderMap,
+    Extension(pool): Extension<PgPool>,
     destination_id: Path<i64>,
-    k8s_client: Data<dyn K8sClient>,
-) -> Result<impl Responder, DestinationError> {
-    let tenant_id = extract_tenant_id(&req)?;
+    Extension(k8s_client): Extension<Arc<dyn K8sClient>>,
+) -> Result<impl IntoResponse, DestinationError> {
+    let tenant_id = extract_tenant_id(&headers)?;
     let destination_id = destination_id.into_inner();
 
-    if !destination_exists(&**pool, tenant_id, destination_id).await? {
+    if !destination_exists(&pool, tenant_id, destination_id).await? {
         return Err(DestinationError::DestinationNotFound(destination_id));
     }
 
     let pipelines =
-        read_pipelines_for_destination_for_deletion(&**pool, tenant_id, destination_id).await?;
+        read_pipelines_for_destination_for_deletion(&pool, tenant_id, destination_id).await?;
     if let Some(pipeline_id) =
         first_active_pipeline_id(k8s_client.as_ref(), tenant_id, &pipelines).await?
     {
@@ -327,14 +328,16 @@ pub(crate) async fn delete_destination(
     // concurrent pipeline creation here. A pipeline can still appear between
     // the check and the final delete, in which case the database constraints
     // are the last line of defense.
-    data::destinations::delete_destination(&**pool, tenant_id, destination_id)
+    data::destinations::delete_destination(&pool, tenant_id, destination_id)
         .await?
         .ok_or(DestinationError::DestinationNotFound(destination_id))?;
 
-    Ok(HttpResponse::Ok().finish())
+    Ok(StatusCode::OK)
 }
 
 #[utoipa::path(
+    get,
+    path = "/destinations",
     summary = "List destinations",
     description = "Returns all destinations for the specified tenant.",
     responses(
@@ -346,17 +349,16 @@ pub(crate) async fn delete_destination(
     ),
     tag = "Destinations"
 )]
-#[get("/destinations")]
 pub(crate) async fn read_all_destinations(
-    req: HttpRequest,
-    pool: Data<PgPool>,
-    encryption_key: Data<EncryptionKey>,
-) -> Result<impl Responder, DestinationError> {
-    let tenant_id = extract_tenant_id(&req)?;
+    headers: HeaderMap,
+    Extension(pool): Extension<PgPool>,
+    Extension(encryption_key): Extension<Arc<EncryptionKey>>,
+) -> Result<impl IntoResponse, DestinationError> {
+    let tenant_id = extract_tenant_id(&headers)?;
 
     let mut destinations = vec![];
     for destination in
-        data::destinations::read_all_destinations(&**pool, tenant_id, &encryption_key).await?
+        data::destinations::read_all_destinations(&pool, tenant_id, &encryption_key).await?
     {
         let destination = ReadDestinationResponse {
             id: destination.id,
@@ -373,6 +375,8 @@ pub(crate) async fn read_all_destinations(
 }
 
 #[utoipa::path(
+    post,
+    path = "/destinations/validate",
     summary = "Validate destination configuration",
     description = "Validates that the destination is accessible and properly configured.",
     request_body = ValidateDestinationRequest,
@@ -386,12 +390,11 @@ pub(crate) async fn read_all_destinations(
     ),
     tag = "Destinations"
 )]
-#[post("/destinations/validate")]
 pub(crate) async fn validate_destination(
-    req: HttpRequest,
+    headers: HeaderMap,
     request: Json<ValidateDestinationRequest>,
-) -> Result<impl Responder, DestinationError> {
-    let _tenant_id = extract_tenant_id(&req)?;
+) -> Result<impl IntoResponse, DestinationError> {
+    let _tenant_id = extract_tenant_id(&headers)?;
     let request = request.into_inner();
 
     let environment = Environment::load()?;

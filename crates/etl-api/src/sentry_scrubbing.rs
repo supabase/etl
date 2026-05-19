@@ -1,9 +1,4 @@
-use actix_web::{
-    Error,
-    body::MessageBody,
-    dev::{ServiceRequest, ServiceResponse},
-    middleware::Next,
-};
+use axum::{extract::Request, middleware::Next, response::Response};
 
 /// Sentry tag used to mark routes whose payloads can contain secrets.
 pub const SENSITIVE_ENDPOINT_TAG: &str = "sensitive_endpoint";
@@ -16,19 +11,10 @@ pub const SENSITIVE_ENDPOINT_TAG_VALUE: &str = "true";
 /// This middleware is intended to wrap route groups whose request or response
 /// payloads can contain credentials or source data. The binary-level Sentry
 /// scrubber uses the tag to remove payloads from captured events.
-pub async fn mark_sensitive_sentry_scope<B>(
-    req: ServiceRequest,
-    next: Next<B>,
-) -> Result<ServiceResponse<B>, Error>
-where
-    B: MessageBody + 'static,
-{
-    // The Actix Sentry integration creates a request-local hub before calling
-    // downstream middleware. Tag that hub directly so returned handler errors
-    // are still marked when the outer Sentry middleware captures them.
+pub async fn mark_sensitive_sentry_scope(request: Request, next: Next) -> Response {
     sentry::configure_scope(|scope| {
         scope.set_tag(SENSITIVE_ENDPOINT_TAG, SENSITIVE_ENDPOINT_TAG_VALUE);
     });
 
-    next.call(req).await
+    next.run(request).await
 }

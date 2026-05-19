@@ -62,13 +62,11 @@ unnested_or_patterns = "warn"
 
 [workspace.dependencies]
 
-actix-web = { version = "4.11.0", default-features = false }
-actix-web-httpauth = { version = "0.8.2", default-features = false }
-actix-web-metrics = { version = "0.3.0", default-features = false }
 anyhow = { version = "1.0.98", default-features = false }
 arrow = { version = "57.0", default-features = false }
 async-trait = { version = "0.1.88" }
 aws-lc-rs = { version = "1.13.3", default-features = false }
+axum = { version = "0.8.9", default-features = false }
 base64 = { version = "0.22.1", default-features = false }
 byteorder = { version = "1.5.0", default-features = false }
 bytes = { version = "1.10.1" }
@@ -123,11 +121,12 @@ tokio-postgres = { git = "https://github.com/iambriccardo/rust-postgres", defaul
 tokio-rustls = { version = "0.26.2", default-features = false }
 tokio-stream = { version = "0.1.18", default-features = false, features = ["sync"] }
 tonic = { version = "0.14.2", default-features = false }
+tower = { version = "0.5.3", default-features = false }
 tracing = { version = "0.1.41", default-features = false }
-tracing-actix-web = { version = "0.7.19", default-features = false }
 tracing-appender = { version = "0.2.3", default-features = false }
 tracing-log = { version = "0.2.0", default-features = false }
 tracing-subscriber = { version = "0.3.19", default-features = false }
+tower-http = { version = "0.6.8", default-features = false }
 url = { version = "2.5.8", features = ["serde"] }
 utoipa = { version = "5.4.0", default-features = false }
 utoipa-swagger-ui = { version = "9.0.2", default-features = false, features = ["vendored"] }

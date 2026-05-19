@@ -1,18 +1,22 @@
-use actix_web::{
-    HttpResponse, Responder, ResponseError, delete, get,
-    http::{StatusCode, header::ContentType},
-    post,
-    web::{Data, Json, Path},
+use axum::{
+    Extension, Json,
+    extract::Path,
+    http::StatusCode,
+    response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use thiserror::Error;
 use utoipa::ToSchema;
 
-use crate::{data, data::images::ImagesDbError, routes::ErrorMessage};
+use crate::{
+    data,
+    data::images::ImagesDbError,
+    routes::{ErrorMessage, IntoInner, error_response},
+};
 
 #[derive(Debug, Error)]
-enum ImageError {
+pub(crate) enum ImageError {
     #[error("The image with id {0} was not found")]
     ImageNotFound(i64),
 
@@ -31,20 +35,15 @@ impl ImageError {
     }
 }
 
-impl ResponseError for ImageError {
-    fn status_code(&self) -> StatusCode {
-        match self {
+impl IntoResponse for ImageError {
+    fn into_response(self) -> Response {
+        let status_code = match &self {
             ImageError::ImagesDb(ImagesDbError::CannotDeleteDefault) => StatusCode::BAD_REQUEST,
             ImageError::ImagesDb(_) => StatusCode::INTERNAL_SERVER_ERROR,
             ImageError::ImageNotFound(_) => StatusCode::NOT_FOUND,
-        }
-    }
+        };
 
-    fn error_response(&self) -> HttpResponse {
-        let error_message = ErrorMessage { message: self.to_message() };
-        let body =
-            serde_json::to_string(&error_message).expect("failed to serialize error message");
-        HttpResponse::build(self.status_code()).insert_header(ContentType::json()).body(body)
+        error_response(status_code, self.to_message())
     }
 }
 
@@ -88,6 +87,8 @@ pub struct ReadImagesResponse {
 }
 
 #[utoipa::path(
+    post,
+    path = "/images",
     summary = "Create an image",
     description = "Creates an image entry; can be marked as the default.",
     request_body = CreateImageRequest,
@@ -98,11 +99,10 @@ pub struct ReadImagesResponse {
     ),
     tag = "Images"
 )]
-#[post("/images")]
 pub(crate) async fn create_image(
-    pool: Data<PgPool>,
+    Extension(pool): Extension<PgPool>,
     image: Json<CreateImageRequest>,
-) -> Result<impl Responder, ImageError> {
+) -> Result<impl IntoResponse, ImageError> {
     let image = image.into_inner();
 
     let id = data::images::create_image(&pool, &image.name, image.is_default).await?;
@@ -113,6 +113,8 @@ pub(crate) async fn create_image(
 }
 
 #[utoipa::path(
+    get,
+    path = "/images/{image_id}",
     summary = "Retrieve an image",
     description = "Returns an image identified by its ID.",
     params(
@@ -125,14 +127,13 @@ pub(crate) async fn create_image(
     ),
     tag = "Images"
 )]
-#[get("/images/{image_id}")]
 pub(crate) async fn read_image(
-    pool: Data<PgPool>,
+    Extension(pool): Extension<PgPool>,
     image_id: Path<i64>,
-) -> Result<impl Responder, ImageError> {
+) -> Result<impl IntoResponse, ImageError> {
     let image_id = image_id.into_inner();
 
-    let response = data::images::read_image(&**pool, image_id)
+    let response = data::images::read_image(&pool, image_id)
         .await?
         .map(|s| ReadImageResponse { id: s.id, name: s.name, is_default: s.is_default })
         .ok_or(ImageError::ImageNotFound(image_id))?;
@@ -141,6 +142,8 @@ pub(crate) async fn read_image(
 }
 
 #[utoipa::path(
+    post,
+    path = "/images/{image_id}",
     summary = "Update an image",
     description = "Updates an image's name and default flag.",
     request_body = UpdateImageRequest,
@@ -154,12 +157,11 @@ pub(crate) async fn read_image(
     ),
     tag = "Images"
 )]
-#[post("/images/{image_id}")]
 pub(crate) async fn update_image(
-    pool: Data<PgPool>,
+    Extension(pool): Extension<PgPool>,
     image_id: Path<i64>,
     image: Json<UpdateImageRequest>,
-) -> Result<impl Responder, ImageError> {
+) -> Result<impl IntoResponse, ImageError> {
     let image_id = image_id.into_inner();
     let image = image.into_inner();
 
@@ -167,10 +169,12 @@ pub(crate) async fn update_image(
         .await?
         .ok_or(ImageError::ImageNotFound(image_id))?;
 
-    Ok(HttpResponse::Ok().finish())
+    Ok(StatusCode::OK)
 }
 
 #[utoipa::path(
+    delete,
+    path = "/images/{image_id}",
     summary = "Delete an image",
     description = "Deletes an image by ID. Default images cannot be deleted.",
     params(
@@ -183,21 +187,22 @@ pub(crate) async fn update_image(
     ),
     tag = "Images"
 )]
-#[delete("/images/{image_id}")]
 pub(crate) async fn delete_image(
-    pool: Data<PgPool>,
+    Extension(pool): Extension<PgPool>,
     image_id: Path<i64>,
-) -> Result<impl Responder, ImageError> {
+) -> Result<impl IntoResponse, ImageError> {
     let image_id = image_id.into_inner();
 
     data::images::delete_image(&pool, image_id)
         .await?
         .ok_or(ImageError::ImageNotFound(image_id))?;
 
-    Ok(HttpResponse::Ok().finish())
+    Ok(StatusCode::OK)
 }
 
 #[utoipa::path(
+    get,
+    path = "/images",
     summary = "List images",
     description = "Returns all available images.",
     responses(
@@ -206,10 +211,11 @@ pub(crate) async fn delete_image(
     ),
     tag = "Images"
 )]
-#[get("/images")]
-pub(crate) async fn read_all_images(pool: Data<PgPool>) -> Result<impl Responder, ImageError> {
+pub(crate) async fn read_all_images(
+    Extension(pool): Extension<PgPool>,
+) -> Result<impl IntoResponse, ImageError> {
     let mut images = vec![];
-    for image in data::images::read_all_images(&**pool).await? {
+    for image in data::images::read_all_images(&pool).await? {
         let image =
             ReadImageResponse { id: image.id, name: image.name, is_default: image.is_default };
         images.push(image);

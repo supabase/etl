@@ -1,7 +1,10 @@
-use actix_web::{
-    HttpRequest, HttpResponse, Responder, ResponseError, get,
-    http::{StatusCode, header::ContentType},
-    web::{Data, Json, Path},
+use std::sync::Arc;
+
+use axum::{
+    Extension, Json,
+    extract::Path,
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -17,11 +20,11 @@ use crate::{
         tables::{Table, TablesDbError},
     },
     k8s::{TrustedRootCertsCache, TrustedRootCertsError},
-    routes::{ErrorMessage, TenantIdError, extract_tenant_id},
+    routes::{ErrorMessage, IntoInner, TenantIdError, error_response, extract_tenant_id},
 };
 
 #[derive(Debug, Error)]
-enum TableError {
+pub(crate) enum TableError {
     #[error("The source with id {0} was not found")]
     SourceNotFound(i64),
 
@@ -60,27 +63,24 @@ pub struct ReadTablesResponse {
     pub tables: Vec<Table>,
 }
 
-impl ResponseError for TableError {
-    fn status_code(&self) -> StatusCode {
-        match self {
+impl IntoResponse for TableError {
+    fn into_response(self) -> Response {
+        let status_code = match &self {
             TableError::SourcesDb(_)
             | TableError::TablesDb(_)
             | TableError::Database(_)
             | TableError::TrustedRootCerts(_) => StatusCode::INTERNAL_SERVER_ERROR,
             TableError::SourceNotFound(_) => StatusCode::NOT_FOUND,
             TableError::TenantId(_) => StatusCode::BAD_REQUEST,
-        }
-    }
+        };
 
-    fn error_response(&self) -> HttpResponse {
-        let error_message = ErrorMessage { message: self.to_message() };
-        let body =
-            serde_json::to_string(&error_message).expect("failed to serialize error message");
-        HttpResponse::build(self.status_code()).insert_header(ContentType::json()).body(body)
+        error_response(status_code, self.to_message())
     }
 }
 
 #[utoipa::path(
+    get,
+    path = "/sources/{source_id}/tables",
     summary = "List source tables",
     description = "Returns all tables discovered for the specified source.",
     tag = "Tables",
@@ -92,19 +92,18 @@ impl ResponseError for TableError {
         (status = 500, description = "Internal server error", body = ErrorMessage)
     )
 )]
-#[get("/sources/{source_id}/tables")]
 pub(crate) async fn read_table_names(
-    req: HttpRequest,
-    pool: Data<PgPool>,
-    api_config: Data<ApiConfig>,
-    encryption_key: Data<EncryptionKey>,
-    trusted_root_certs_cache: Data<TrustedRootCertsCache>,
+    headers: HeaderMap,
+    Extension(pool): Extension<PgPool>,
+    Extension(api_config): Extension<Arc<ApiConfig>>,
+    Extension(encryption_key): Extension<Arc<EncryptionKey>>,
+    Extension(trusted_root_certs_cache): Extension<Arc<TrustedRootCertsCache>>,
     source_id: Path<i64>,
-) -> Result<impl Responder, TableError> {
-    let tenant_id = extract_tenant_id(&req)?;
+) -> Result<impl IntoResponse, TableError> {
+    let tenant_id = extract_tenant_id(&headers)?;
     let source_id = source_id.into_inner();
 
-    let source_config = data::sources::read_source(&**pool, tenant_id, source_id, &encryption_key)
+    let source_config = data::sources::read_source(&pool, tenant_id, source_id, &encryption_key)
         .await?
         .map(|s| s.config)
         .ok_or(TableError::SourceNotFound(source_id))?;

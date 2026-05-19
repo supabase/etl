@@ -1,17 +1,17 @@
-use std::ops::DerefMut;
+use std::{ops::DerefMut, sync::Arc};
 
-use actix_web::{
-    HttpRequest, HttpResponse, Responder, ResponseError, delete,
-    http::{StatusCode, header::ContentType},
-    post,
-    web::{Data, Json, Path},
+use axum::{
+    Extension, Json,
+    extract::Path,
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use thiserror::Error;
 use utoipa::ToSchema;
 
-use super::{ErrorMessage, TenantIdError, extract_tenant_id, utils};
+use super::{ErrorMessage, IntoInner, TenantIdError, error_response, extract_tenant_id, utils};
 use crate::{
     config::ApiConfig,
     configs::{
@@ -41,7 +41,7 @@ use crate::{
 };
 
 #[derive(Debug, Error)]
-enum DestinationPipelineError {
+pub(crate) enum DestinationPipelineError {
     #[error("No default image was found")]
     NoDefaultImageFound,
 
@@ -136,9 +136,9 @@ impl DestinationPipelineError {
     }
 }
 
-impl ResponseError for DestinationPipelineError {
-    fn status_code(&self) -> StatusCode {
-        match self {
+impl IntoResponse for DestinationPipelineError {
+    fn into_response(self) -> Response {
+        let status_code = match &self {
             DestinationPipelineError::NoDefaultImageFound
             | DestinationPipelineError::DestinationPipelinesDb(_)
             | DestinationPipelineError::DestinationsDb(_)
@@ -162,14 +162,9 @@ impl ResponseError for DestinationPipelineError {
             DestinationPipelineError::PipelineLimitReached { .. } => {
                 StatusCode::UNPROCESSABLE_ENTITY
             }
-        }
-    }
+        };
 
-    fn error_response(&self) -> HttpResponse {
-        let error_message = ErrorMessage { message: self.to_message() };
-        let body =
-            serde_json::to_string(&error_message).expect("failed to serialize error message");
-        HttpResponse::build(self.status_code()).insert_header(ContentType::json()).body(body)
+        error_response(status_code, self.to_message())
     }
 }
 
@@ -224,6 +219,8 @@ fn validate_pipeline_request(
 }
 
 #[utoipa::path(
+    post,
+    path = "/destinations-pipelines",
     summary = "Create destination and pipeline",
     description = "Creates a destination and a pipeline linked to the specified source.",
     request_body = CreateDestinationPipelineRequest,
@@ -238,15 +235,14 @@ fn validate_pipeline_request(
     ),
     tag = "Destinations and Pipelines"
 )]
-#[post("/destinations-pipelines")]
 pub(crate) async fn create_destination_and_pipeline(
-    req: HttpRequest,
-    pool: Data<PgPool>,
+    headers: HeaderMap,
+    Extension(pool): Extension<PgPool>,
+    Extension(encryption_key): Extension<Arc<EncryptionKey>>,
+    feature_flags_client: Option<Extension<FeatureFlagsClient>>,
     destination_and_pipeline: Json<CreateDestinationPipelineRequest>,
-    encryption_key: Data<EncryptionKey>,
-    feature_flags_client: Option<Data<FeatureFlagsClient>>,
-) -> Result<impl Responder, DestinationPipelineError> {
-    let tenant_id = extract_tenant_id(&req)?;
+) -> Result<impl IntoResponse, DestinationPipelineError> {
+    let tenant_id = extract_tenant_id(&headers)?;
     let destination_and_pipeline = destination_and_pipeline.into_inner();
     validate_pipeline_request(&destination_and_pipeline.pipeline_config)?;
 
@@ -263,7 +259,7 @@ pub(crate) async fn create_destination_and_pipeline(
     .ok_or(DestinationPipelineError::SourceNotFound(destination_and_pipeline.source_id))?;
 
     let max_pipelines = get_max_pipelines_per_tenant(
-        feature_flags_client.as_ref(),
+        feature_flags_client.as_ref().map(|Extension(client)| client),
         tenant_id,
         MAX_PIPELINES_PER_TENANT,
     )
@@ -273,7 +269,7 @@ pub(crate) async fn create_destination_and_pipeline(
         return Err(DestinationPipelineError::PipelineLimitReached { limit: max_pipelines });
     }
 
-    let image = data::images::read_default_image(&**pool)
+    let image = data::images::read_default_image(&pool)
         .await?
         .ok_or(DestinationPipelineError::NoDefaultImageFound)?;
 
@@ -298,6 +294,8 @@ pub(crate) async fn create_destination_and_pipeline(
 }
 
 #[utoipa::path(
+    post,
+    path = "/destinations-pipelines/{destination_id}/{pipeline_id}",
     summary = "Update destination and pipeline",
     description = "Updates the destination and pipeline ensuring they remain linked.",
     request_body = UpdateDestinationPipelineRequest,
@@ -314,15 +312,14 @@ pub(crate) async fn create_destination_and_pipeline(
     ),
     tag = "Destinations and Pipelines"
 )]
-#[post("/destinations-pipelines/{destination_id}/{pipeline_id}")]
 pub(crate) async fn update_destination_and_pipeline(
-    req: HttpRequest,
-    pool: Data<PgPool>,
+    headers: HeaderMap,
+    Extension(pool): Extension<PgPool>,
     destination_and_pipeline_ids: Path<(i64, i64)>,
+    Extension(encryption_key): Extension<Arc<EncryptionKey>>,
     destination_and_pipeline: Json<UpdateDestinationPipelineRequest>,
-    encryption_key: Data<EncryptionKey>,
-) -> Result<impl Responder, DestinationPipelineError> {
-    let tenant_id = extract_tenant_id(&req)?;
+) -> Result<impl IntoResponse, DestinationPipelineError> {
+    let tenant_id = extract_tenant_id(&headers)?;
     let (destination_id, pipeline_id) = destination_and_pipeline_ids.into_inner();
     let destination_and_pipeline = destination_and_pipeline.into_inner();
     validate_pipeline_request(&destination_and_pipeline.pipeline_config)?;
@@ -376,10 +373,12 @@ pub(crate) async fn update_destination_and_pipeline(
         e => e.into(),
     })?;
 
-    Ok(HttpResponse::Ok().finish())
+    Ok(StatusCode::OK)
 }
 
 #[utoipa::path(
+    delete,
+    path = "/destinations-pipelines/{destination_id}/{pipeline_id}",
     summary = "Delete destination and pipeline",
     description = "Deletes the pipeline and its destination after validation.",
     params(
@@ -396,20 +395,19 @@ pub(crate) async fn update_destination_and_pipeline(
     ),
     tag = "Destinations and Pipelines"
 )]
-#[delete("/destinations-pipelines/{destination_id}/{pipeline_id}")]
 pub(crate) async fn delete_destination_and_pipeline(
-    req: HttpRequest,
-    pool: Data<PgPool>,
-    api_config: Data<ApiConfig>,
-    encryption_key: Data<EncryptionKey>,
-    k8s_client: Data<dyn K8sClient>,
-    trusted_root_certs_cache: Data<TrustedRootCertsCache>,
+    headers: HeaderMap,
+    Extension(pool): Extension<PgPool>,
+    Extension(api_config): Extension<Arc<ApiConfig>>,
+    Extension(encryption_key): Extension<Arc<EncryptionKey>>,
+    Extension(k8s_client): Extension<Arc<dyn K8sClient>>,
+    Extension(trusted_root_certs_cache): Extension<Arc<TrustedRootCertsCache>>,
     destination_and_pipeline_ids: Path<(i64, i64)>,
-) -> Result<impl Responder, DestinationPipelineError> {
-    let tenant_id = extract_tenant_id(&req)?;
+) -> Result<impl IntoResponse, DestinationPipelineError> {
+    let tenant_id = extract_tenant_id(&headers)?;
     let (destination_id, pipeline_id) = destination_and_pipeline_ids.into_inner();
 
-    let pipeline = read_pipeline_for_deletion(&**pool, tenant_id, pipeline_id)
+    let pipeline = read_pipeline_for_deletion(&pool, tenant_id, pipeline_id)
         .await?
         .ok_or(DestinationPipelineError::PipelineNotFound(pipeline_id))?;
 
@@ -426,7 +424,7 @@ pub(crate) async fn delete_destination_and_pipeline(
 
     let tls_config = trusted_root_certs_cache.get_tls_config(api_config.source.tls_enabled).await?;
     let source = data::sources::read_source_connection(
-        &**pool,
+        &pool,
         tenant_id,
         pipeline.source_id,
         &encryption_key,

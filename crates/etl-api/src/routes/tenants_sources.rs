@@ -1,13 +1,13 @@
-use actix_web::{
-    HttpResponse, Responder, ResponseError,
-    http::{StatusCode, header::ContentType},
-    post,
-    web::{Data, Json},
+use std::sync::Arc;
+
+use axum::{
+    Extension, Json,
+    http::StatusCode,
+    response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use thiserror::Error;
-use tracing_actix_web::RootSpan;
 use utoipa::ToSchema;
 
 use crate::{
@@ -18,12 +18,12 @@ use crate::{
     },
     data::{self, tenants::TenantsDbError, tenants_sources::TenantSourceDbError},
     k8s::TrustedRootCertsCache,
-    routes::{ErrorMessage, common, utils},
+    routes::{ErrorMessage, IntoInner, common, error_response, utils},
     validation::ValidationError,
 };
 
 #[derive(Debug, Error)]
-enum TenantSourceError {
+pub(crate) enum TenantSourceError {
     #[error(transparent)]
     TenantSourceDb(#[from] TenantSourceDbError),
 
@@ -56,9 +56,9 @@ impl TenantSourceError {
     }
 }
 
-impl ResponseError for TenantSourceError {
-    fn status_code(&self) -> StatusCode {
-        match self {
+impl IntoResponse for TenantSourceError {
+    fn into_response(self) -> Response {
+        let status_code = match &self {
             TenantSourceError::TenantSourceDb(TenantSourceDbError::Tenants(
                 TenantsDbError::Conflict(_),
             )) => StatusCode::CONFLICT,
@@ -67,14 +67,9 @@ impl ResponseError for TenantSourceError {
             }
             TenantSourceError::Validation(error) => utils::validation_error_status_code(error),
             TenantSourceError::ValidationFailed(_) => StatusCode::UNPROCESSABLE_ENTITY,
-        }
-    }
+        };
 
-    fn error_response(&self) -> HttpResponse {
-        let error_message = ErrorMessage { message: self.to_message() };
-        let body =
-            serde_json::to_string(&error_message).expect("failed to serialize error message");
-        HttpResponse::build(self.status_code()).insert_header(ContentType::json()).body(body)
+        error_response(status_code, self.to_message())
     }
 }
 
@@ -119,6 +114,8 @@ pub struct CreateTenantSourceResponse {
 }
 
 #[utoipa::path(
+    post,
+    path = "/tenants-sources",
     summary = "Create tenant and source",
     description = "Creates a new tenant and source within a single transaction.",
     request_body = CreateTenantSourceRequest,
@@ -130,18 +127,16 @@ pub struct CreateTenantSourceResponse {
     ),
     tag = "Tenants & Sources"
 )]
-#[post("/tenants-sources")]
 pub(crate) async fn create_tenant_and_source(
-    pool: Data<PgPool>,
-    api_config: Data<ApiConfig>,
-    trusted_root_certs_cache: Data<TrustedRootCertsCache>,
+    Extension(pool): Extension<PgPool>,
+    Extension(api_config): Extension<Arc<ApiConfig>>,
+    Extension(trusted_root_certs_cache): Extension<Arc<TrustedRootCertsCache>>,
+    Extension(encryption_key): Extension<Arc<EncryptionKey>>,
     tenant_and_source: Json<CreateTenantSourceRequest>,
-    encryption_key: Data<EncryptionKey>,
-    root_span: RootSpan,
-) -> Result<impl Responder, TenantSourceError> {
+) -> Result<impl IntoResponse, TenantSourceError> {
     let tenant_and_source = tenant_and_source.into_inner();
 
-    root_span.record("project", &tenant_and_source.tenant_id);
+    tracing::Span::current().record("project", &tenant_and_source.tenant_id);
 
     validate_source_config(
         tenant_and_source.source_config.clone().into(),

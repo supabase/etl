@@ -1,6 +1,8 @@
-use actix_web::{HttpResponse, Responder, get};
+use axum::response::IntoResponse;
 
 #[utoipa::path(
+    get,
+    path = "/health_check",
     summary = "API health status",
     description = "Returns 'ok' when the API is available and responding.",
     responses(
@@ -8,7 +10,6 @@ use actix_web::{HttpResponse, Responder, get};
     ),
     tag = "Health",
 )]
-#[get("/health_check")]
-pub(crate) async fn health_check() -> impl Responder {
-    HttpResponse::Ok().body("ok")
+pub(crate) async fn health_check() -> impl IntoResponse {
+    "ok"
 }
