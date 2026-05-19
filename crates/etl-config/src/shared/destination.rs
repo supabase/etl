@@ -35,6 +35,18 @@ impl ClickHouseEngine {
             ClickHouseEngine::ReplacingMergeTree => "ReplacingMergeTree",
         }
     }
+
+    /// Minimum ClickHouse server `(major, minor)` required to support this
+    /// engine, or `None` if any version works.
+    ///
+    /// `ReplacingMergeTree` requires >= 23.5 because earlier versions reject
+    /// the `(version, is_deleted)` argument pair we emit.
+    pub const fn min_server_version(self) -> Option<(u32, u32)> {
+        match self {
+            ClickHouseEngine::MergeTree => None,
+            ClickHouseEngine::ReplacingMergeTree => Some((23, 5)),
+        }
+    }
 }
 
 /// Configuration for supported ETL data destinations.

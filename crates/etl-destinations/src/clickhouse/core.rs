@@ -343,10 +343,6 @@ pub struct ClickHouseDestination<S> {
     table_cache: Arc<RwLock<HashMap<String, Arc<[bool]>>>>,
 }
 
-/// Minimum ClickHouse server version that supports `ReplacingMergeTree` with
-/// the `(version, is_deleted)` argument pair used by this destination.
-pub(crate) const MIN_REPLACING_MERGE_TREE_VERSION: (u32, u32) = (23, 5);
-
 impl<S> ClickHouseDestination<S>
 where
     S: StateStore + SchemaStore + Send + Sync,
@@ -1037,22 +1033,24 @@ fn reject_pk_alters_under_rmt(
     Ok(())
 }
 
-/// Verifies that the configured engine is supported on the given server
-/// version. RMT requires CH >= 23.5 because earlier versions do not accept
-/// the `(version, is_deleted)` argument pair on `ReplacingMergeTree`.
+/// Verifies the engine's `min_server_version()` constraint against the given
+/// server version. The per-engine version requirement lives on
+/// [`ClickHouseEngine`] itself; this function is just the error-construction
+/// shell that surfaces the mismatch as an `EtlResult`.
 fn ensure_engine_supported(engine: ClickHouseEngine, server_version: (u32, u32)) -> EtlResult<()> {
-    if matches!(engine, ClickHouseEngine::ReplacingMergeTree)
-        && server_version < MIN_REPLACING_MERGE_TREE_VERSION
+    if let Some(min) = engine.min_server_version()
+        && server_version < min
     {
-        let (min_major, min_minor) = MIN_REPLACING_MERGE_TREE_VERSION;
+        let (min_major, min_minor) = min;
         let (major, minor) = server_version;
 
         return Err(etl_error!(
             ErrorKind::ConfigError,
-            "ClickHouse server version is too old for ReplacingMergeTree",
+            "ClickHouse server version is too old for the configured engine",
             format!(
-                "Detected ClickHouse {major}.{minor}; engine `replacing_merge_tree` requires \
-                 {min_major}.{min_minor} or newer. Upgrade ClickHouse or set `engine: merge_tree`."
+                "Detected ClickHouse {major}.{minor}; engine `{cfg}` requires \
+                 {min_major}.{min_minor} or newer. Upgrade ClickHouse or set `engine: merge_tree`.",
+                cfg = engine.as_clickhouse_str()
             )
         ));
     }
