@@ -1758,6 +1758,68 @@ mod tests {
     }
 
     #[test]
+    fn schema_and_cell_materialization_return_the_same_bigquery_type() {
+        let cases = [
+            (DestinationTypeCompatibility::strict(), Type::INT4, Cell::I32(1)),
+            (
+                DestinationTypeCompatibility::strict(),
+                Type::NUMERIC,
+                Cell::Numeric(PgNumeric::from_str("1.23").unwrap()),
+            ),
+            (
+                DestinationTypeCompatibility::strict(),
+                Type::JSON,
+                Cell::String(r#"{"value":1}"#.to_owned()),
+            ),
+            (
+                DestinationTypeCompatibility::strict(),
+                Type::INT4_ARRAY,
+                Cell::Array(ArrayCell::I32(vec![Some(1), Some(2)])),
+            ),
+            (
+                DestinationTypeCompatibility::lossless(),
+                Type::INT4_ARRAY,
+                Cell::Array(ArrayCell::I32(vec![Some(1), None])),
+            ),
+            (
+                DestinationTypeCompatibility::lossy(),
+                Type::INT4_ARRAY,
+                Cell::Array(ArrayCell::I32(vec![Some(1), None])),
+            ),
+            (
+                DestinationTypeCompatibility::lossless(),
+                Type::NUMERIC,
+                Cell::Numeric(PgNumeric::from_str("1.23").unwrap()),
+            ),
+            (
+                DestinationTypeCompatibility::lossy(),
+                Type::NUMERIC,
+                Cell::Numeric(PgNumeric::from_str("1.23").unwrap()),
+            ),
+            (
+                DestinationTypeCompatibility::lossy(),
+                Type::DATE,
+                Cell::Date(PgDate::Finite(bigquery_max_date())),
+            ),
+            (
+                DestinationTypeCompatibility::lossy(),
+                Type::UUID,
+                Cell::Uuid(uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap()),
+            ),
+        ];
+
+        for (compatibility, typ, cell) in cases {
+            let materializer = materializer(compatibility);
+            let materialized_schema_type =
+                materializer.materialize_type(&typ).expect("type should materialize");
+            let (materialized_cell_type, _) = materialized_type_and_cell(compatibility, typ, cell)
+                .expect("cell should materialize");
+
+            assert_eq!(materialized_cell_type, materialized_schema_type);
+        }
+    }
+
+    #[test]
     fn strict_lossless_and_lossy_handle_risky_values() {
         let cases = [
             (

@@ -154,11 +154,6 @@ impl BigQueryType {
         }
     }
 
-    /// Returns `true` when this is a repeated BigQuery type.
-    pub(super) const fn is_array(&self) -> bool {
-        matches!(self, Self::Array(_))
-    }
-
     /// Returns this type as a BigQuery SQL fragment.
     pub(super) fn to_sql(&self) -> String {
         match self {

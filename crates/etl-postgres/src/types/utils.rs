@@ -11,14 +11,6 @@ pub fn convert_type_oid_to_type_or_text(type_oid: u32) -> Type {
     Type::from_oid(type_oid).unwrap_or(Type::TEXT)
 }
 
-/// Converts a Postgres type OID to a [`Type`] instance.
-///
-/// Prefer [`convert_type_oid_to_type_or_text`] at call sites that rely on the
-/// string fallback for unknown OIDs.
-pub fn convert_type_oid_to_type(type_oid: u32) -> Type {
-    convert_type_oid_to_type_or_text(type_oid)
-}
-
 /// Returns whether the Postgres type is an array type.
 pub fn is_array_type(typ: &Type) -> bool {
     // `int2vector` and `oidvector` have array kind, but they are not regular

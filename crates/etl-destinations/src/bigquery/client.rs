@@ -3,7 +3,7 @@ use std::fmt;
 use etl::{
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
-    types::{Cell, ColumnSchema, PipelineId, ReplicatedTableSchema, Type, is_array_type},
+    types::{Cell, ColumnSchema, PipelineId, ReplicatedTableSchema},
 };
 use gcp_bigquery_client::{
     Client,
@@ -814,7 +814,7 @@ impl BigQueryClient {
     ) -> EtlResult<()> {
         let full_table_name = self.full_table_name(dataset_id, table_id)?;
         let column_name = Self::sanitize_identifier(&column_schema.name, "BigQuery column name")?;
-        let column_type = Self::postgres_to_bigquery_type(&column_schema.typ, materializer)?;
+        let column_type = materializer.materialize_type(&column_schema.typ)?.to_sql();
 
         info!(
             "adding column `{column_name}` ({column_type}) to table {full_table_name} in BigQuery"
@@ -1189,11 +1189,15 @@ impl BigQueryClient {
         materializer: &BigQueryMaterializer,
     ) -> EtlResult<String> {
         let column_name = Self::sanitize_identifier(&column_schema.name, "BigQuery column name")?;
-        let column_type = Self::postgres_to_bigquery_type(&column_schema.typ, materializer)?;
+        let materialized_type = materializer.materialize_type(&column_schema.typ)?;
 
+        let column_type = materialized_type.to_sql();
         let mut column_spec = format!("`{column_name}` {column_type}");
 
-        if !column_schema.nullable && !is_array_type(&column_schema.typ) {
+        // BigQuery array columns use REPEATED mode and don't support NOT NULL.
+        // If an array source type materializes to a scalar string, preserve the
+        // source column nullability on that scalar destination column.
+        if !column_schema.nullable && !matches!(&materialized_type, BigQueryType::Array(_)) {
             column_spec.push_str(" not null");
         };
 
@@ -1258,15 +1262,6 @@ impl BigQueryClient {
         format!("options (max_staleness = interval {max_staleness_mins} minute)")
     }
 
-    /// Converts Postgres data types using a materialization policy.
-    fn postgres_to_bigquery_type(
-        typ: &Type,
-        materializer: &BigQueryMaterializer,
-    ) -> EtlResult<String> {
-        let typ = materializer.materialize_type(typ)?;
-        Ok(typ.to_sql())
-    }
-
     /// Converts Postgres column schemas to a BigQuery [`TableDescriptor`].
     ///
     /// Maps data types and nullability to BigQuery column specifications,
@@ -1282,9 +1277,10 @@ impl BigQueryClient {
 
         for column_schema in replicated_table_schema.column_schemas() {
             let materialized_type = materializer.materialize_type(&column_schema.typ)?;
+            let materialized_as_array = matches!(&materialized_type, BigQueryType::Array(_));
             let typ = Self::bigquery_storage_write_type(&materialized_type);
 
-            let mode = if materialized_type.is_array() {
+            let mode = if materialized_as_array {
                 ColumnMode::Repeated
             } else if use_cdc_sequence_column {
                 // CDC delete rows can omit non-key columns, so the writer
@@ -1398,7 +1394,7 @@ mod tests {
 
     use etl::{
         destination::DestinationTypeCompatibility,
-        types::{IdentityMask, ReplicationMask, TableId, TableName, TableSchema},
+        types::{IdentityMask, ReplicationMask, TableId, TableName, TableSchema, Type},
     };
     use gcp_bigquery_client::google::cloud::bigquery::storage::v1::{
         AppendRowsResponse, append_rows_response,
@@ -1471,12 +1467,14 @@ mod tests {
 
     /// Converts a type with a materialization policy for test assertions.
     fn bigquery_type(typ: &Type, compatibility: DestinationTypeCompatibility) -> String {
-        BigQueryClient::postgres_to_bigquery_type(typ, &materializer(compatibility))
+        materializer(compatibility)
+            .materialize_type(typ)
             .expect("type should be materializable for BigQuery in this test")
+            .to_sql()
     }
 
     #[test]
-    fn postgres_to_bigquery_type_basic_types() {
+    fn materialize_type_basic_types() {
         let compatibility = DestinationTypeCompatibility::default();
 
         assert_eq!(bigquery_type(&Type::BOOL, compatibility), "bool");
@@ -1496,7 +1494,7 @@ mod tests {
     }
 
     #[test]
-    fn postgres_to_bigquery_type_array_types() {
+    fn materialize_type_array_types() {
         let compatibility = DestinationTypeCompatibility::default();
 
         assert_eq!(bigquery_type(&Type::BOOL_ARRAY, compatibility), "string");
@@ -1517,7 +1515,7 @@ mod tests {
     }
 
     #[test]
-    fn postgres_to_bigquery_type_lossless_maps_risky_types_to_string() {
+    fn materialize_type_lossless_maps_risky_types_to_string() {
         let type_compatibility = DestinationTypeCompatibility::lossless();
 
         assert_eq!(bigquery_type(&Type::FLOAT8, type_compatibility), "string");
@@ -1530,7 +1528,7 @@ mod tests {
     }
 
     #[test]
-    fn postgres_to_bigquery_type_strict_rejects_non_native_types() {
+    fn materialize_type_strict_rejects_non_native_types() {
         for typ in [
             Type::UUID,
             Type::MONEY,
@@ -1540,10 +1538,8 @@ mod tests {
             Type::INET_ARRAY,
             Type::INT4_RANGE,
         ] {
-            let result = BigQueryClient::postgres_to_bigquery_type(
-                &typ,
-                &materializer(DestinationTypeCompatibility::strict()),
-            );
+            let result =
+                materializer(DestinationTypeCompatibility::strict()).materialize_type(&typ);
 
             assert!(matches!(
                 result,
@@ -1553,7 +1549,7 @@ mod tests {
     }
 
     #[test]
-    fn postgres_to_bigquery_type_lossy_uses_string_for_non_native_types() {
+    fn materialize_type_lossy_uses_string_for_non_native_types() {
         let type_compatibility = DestinationTypeCompatibility::lossy();
 
         assert_eq!(bigquery_type(&Type::UUID, type_compatibility), "string");
@@ -1605,6 +1601,14 @@ mod tests {
         )
         .expect("json array column spec");
         assert_eq!(json_array_spec, "`payloads` string");
+
+        let non_null_array_column = test_column("tags", Type::TEXT_ARRAY, 4, false, None);
+        let non_null_array_spec = BigQueryClient::column_spec(
+            &non_null_array_column,
+            &materializer(DestinationTypeCompatibility::lossless()),
+        )
+        .expect("non-null array column spec");
+        assert_eq!(non_null_array_spec, "`tags` string not null");
 
         let timestamp_column = test_column("created_at", Type::TIMESTAMPTZ, 3, true, None);
         let timestamp_spec = BigQueryClient::column_spec(
@@ -1838,6 +1842,29 @@ mod tests {
         assert_eq!(descriptor.field_descriptors[0].name, "values");
         assert!(matches!(descriptor.field_descriptors[0].typ, ColumnType::String));
         assert!(matches!(descriptor.field_descriptors[0].mode, ColumnMode::Nullable));
+
+        let columns = vec![test_column("values", Type::INT4_ARRAY, 1, false, None)];
+        let schema = test_replicated_schema(columns);
+
+        let descriptor = BigQueryClient::column_schemas_to_table_descriptor(
+            &schema,
+            false,
+            &materializer(DestinationTypeCompatibility::strict()),
+        )
+        .expect("strict table descriptor");
+
+        assert!(matches!(descriptor.field_descriptors[0].typ, ColumnType::Int32));
+        assert!(matches!(descriptor.field_descriptors[0].mode, ColumnMode::Repeated));
+
+        let descriptor = BigQueryClient::column_schemas_to_table_descriptor(
+            &schema,
+            false,
+            &materializer(DestinationTypeCompatibility::lossy()),
+        )
+        .expect("lossy table descriptor");
+
+        assert!(matches!(descriptor.field_descriptors[0].typ, ColumnType::String));
+        assert!(matches!(descriptor.field_descriptors[0].mode, ColumnMode::Required));
     }
 
     #[test]
