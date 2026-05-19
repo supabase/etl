@@ -149,10 +149,10 @@ cargo run -p etl-examples --bin clickhouse --features clickhouse -- \
 
 The destination supports two layouts, chosen per pipeline via `--clickhouse-engine`:
 
-| Flag value | Engine | Use it for |
-|------------|--------|------------|
+| Flag value                       | Engine               | Use it for                                              |
+|----------------------------------|----------------------|---------------------------------------------------------|
 | `replacing_merge_tree` (default) | `ReplacingMergeTree` | Current-state replicas. Source must have a primary key. |
-| `merge_tree` | `MergeTree` | Append-only event log. Works for PK-less source tables. |
+| `merge_tree`                     | `MergeTree`          | Append-only event log. Works for PK-less source tables. |
 
 Table names are derived from the Postgres schema and table name using double-underscore
 escaping (e.g. `public.orders` -> `public_orders`, `my_schema.t` -> `my__schema_t`).
