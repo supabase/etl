@@ -12,8 +12,8 @@ use super::{
     ExternalMaintenanceState, ExternalMaintenanceStore,
 };
 
-const CREATE_MIGRATION_SCHEMA_SQL: &str = "CREATE SCHEMA IF NOT EXISTS etl;";
-const SET_MIGRATION_SEARCH_PATH_SQL: &str = "SET search_path = etl, public;";
+const CREATE_MIGRATION_SCHEMA_SQL: &str = "create schema if not exists etl;";
+const SET_MIGRATION_SEARCH_PATH_SQL: &str = "set search_path = etl, public;";
 
 fn sqlx_error(error: sqlx::Error, message: &'static str) -> EtlError {
     etl_error!(ErrorKind::SourceQueryFailed, message, source: error)
@@ -69,10 +69,10 @@ impl PostgresExternalMaintenanceStore {
         let policy = Json(policy);
         sqlx::query(
             r#"
-            INSERT INTO etl.etl_external_maintenance_state (pipeline_id, operation_policy)
-            VALUES ($1, $2)
-            ON CONFLICT (pipeline_id)
-            DO UPDATE SET operation_policy = EXCLUDED.operation_policy, updated_at = now()
+            insert into etl.external_maintenance_state (pipeline_id, operation_policy)
+            values ($1, $2)
+            on conflict (pipeline_id)
+            do update set operation_policy = excluded.operation_policy, updated_at = now()
             "#,
         )
         .bind(self.pipeline_id)
@@ -93,9 +93,9 @@ impl PostgresExternalMaintenanceStore {
         let policy = Json(policy);
         sqlx::query(
             r#"
-            INSERT INTO etl.etl_external_maintenance_state (pipeline_id, operation_policy)
-            VALUES ($1, $2)
-            ON CONFLICT (pipeline_id) DO NOTHING
+            insert into etl.external_maintenance_state (pipeline_id, operation_policy)
+            values ($1, $2)
+            on conflict (pipeline_id) do nothing
             "#,
         )
         .bind(self.pipeline_id)
@@ -109,7 +109,7 @@ impl PostgresExternalMaintenanceStore {
 
     /// Deletes state for one pipeline.
     pub async fn delete_pipeline_state(&self) -> EtlResult<()> {
-        sqlx::query("DELETE FROM etl.etl_external_maintenance_state WHERE pipeline_id = $1")
+        sqlx::query("delete from etl.external_maintenance_state where pipeline_id = $1")
             .bind(self.pipeline_id)
             .execute(&self.pool)
             .await
@@ -124,7 +124,7 @@ impl ExternalMaintenanceStore for PostgresExternalMaintenanceStore {
     async fn load_state(&self) -> EtlResult<ExternalMaintenanceState> {
         let Some(row) = sqlx::query(
             r#"
-            SELECT
+            select
                 active_run,
                 pause_request,
                 operation_request,
@@ -132,8 +132,8 @@ impl ExternalMaintenanceStore for PostgresExternalMaintenanceStore {
                 last_successful_operations,
                 last_completed_at,
                 operation_policy
-            FROM etl.etl_external_maintenance_state
-            WHERE pipeline_id = $1
+            from etl.external_maintenance_state
+            where pipeline_id = $1
             "#,
         )
         .bind(self.pipeline_id)
@@ -199,10 +199,10 @@ impl ExternalMaintenanceStore for PostgresExternalMaintenanceStore {
 
         let Some(row) = sqlx::query(
             r#"
-            SELECT active_run, operation_request
-            FROM etl.etl_external_maintenance_state
-            WHERE pipeline_id = $1
-            FOR UPDATE
+            select active_run, operation_request
+            from etl.external_maintenance_state
+            where pipeline_id = $1
+            for update
             "#,
         )
         .bind(self.pipeline_id)
@@ -256,9 +256,9 @@ impl ExternalMaintenanceStore for PostgresExternalMaintenanceStore {
 
         sqlx::query(
             r#"
-            UPDATE etl.etl_external_maintenance_state
-            SET operation_request = $2, updated_at = now()
-            WHERE pipeline_id = $1
+            update etl.external_maintenance_state
+            set operation_request = $2, updated_at = now()
+            where pipeline_id = $1
             "#,
         )
         .bind(self.pipeline_id)
@@ -280,9 +280,9 @@ impl ExternalMaintenanceStore for PostgresExternalMaintenanceStore {
     ) -> EtlResult<()> {
         sqlx::query(
             r#"
-            UPDATE etl.etl_external_maintenance_state
-            SET replicator = $2, updated_at = now()
-            WHERE pipeline_id = $1
+            update etl.external_maintenance_state
+            set replicator = $2, updated_at = now()
+            where pipeline_id = $1
             "#,
         )
         .bind(self.pipeline_id)
@@ -297,9 +297,9 @@ impl ExternalMaintenanceStore for PostgresExternalMaintenanceStore {
     async fn clear_replicator_status(&self) -> EtlResult<()> {
         sqlx::query(
             r#"
-            UPDATE etl.etl_external_maintenance_state
-            SET replicator = NULL, updated_at = now()
-            WHERE pipeline_id = $1
+            update etl.external_maintenance_state
+            set replicator = null, updated_at = now()
+            where pipeline_id = $1
             "#,
         )
         .bind(self.pipeline_id)
