@@ -152,3 +152,37 @@ pub async fn read_all_publications(pool: &PgPool) -> Result<Vec<Publication>, Pu
 
     Ok(publications)
 }
+
+pub async fn add_tables_to_publication(
+    publication: &Publication,
+    pool: &PgPool,
+) -> Result<(), PublicationsDbError> {
+    let query = format!(
+        "alter publication {} add table only {}",
+        quote_identifier(&publication.name),
+        format_table_list(&publication.tables),
+    );
+    sqlx::query(AssertSqlSafe(query)).execute(pool).await?;
+    Ok(())
+}
+
+pub async fn drop_tables_from_publication(
+    publication: &Publication,
+    pool: &PgPool,
+) -> Result<(), PublicationsDbError> {
+    let query = format!(
+        "alter publication {} drop table only {}",
+        quote_identifier(&publication.name),
+        format_table_list(&publication.tables),
+    );
+    sqlx::query(AssertSqlSafe(query)).execute(pool).await?;
+    Ok(())
+}
+
+fn format_table_list(tables: &[Table]) -> String {
+    tables
+        .iter()
+        .map(|t| format!("{}.{}", quote_identifier(&t.schema), quote_identifier(&t.name)))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
