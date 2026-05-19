@@ -134,7 +134,7 @@ jobs:
 
   test-full:
     name: Tests (Full, ${{ matrix.postgres_label }})
-    environment: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true && 'integration-tests-secrets' || null }}
+    if: github.event_name != 'pull_request' || !github.event.pull_request.head.repo.fork
     runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
       contents: read

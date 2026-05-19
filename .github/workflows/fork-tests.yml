@@ -1,0 +1,159 @@
+name: Fork PR Tests
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+concurrency:
+  group: fork-tests-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  notice:
+    name: Fork PR Notice
+    if: github.event.pull_request.head.repo.fork == true
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Post security notice
+        uses: marocchino/sticky-pull-request-comment@0ea0beb66eb9baf113663a64ec522f60e49231c0 # v3.0.4
+        with:
+          header: fork-pr-security-notice
+          message: |
+            ## Integration Tests -- Maintainer Approval Required
+
+            This PR is from a fork and requires maintainer approval to run integration tests.
+
+            **Before approving**, navigate to the
+            [Actions tab](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            and review this workflow run. Verify that this PR does not:
+            - Modify CI workflow files, scripts, or build configuration
+            - Add suspicious dependencies in `Cargo.toml`
+            - Contain code that could exfiltrate environment variables or secrets
+
+            Approving will expose BigQuery service account credentials to this workflow run.
+
+  authorize:
+    name: Authorize
+    needs: notice
+    if: github.event.pull_request.head.repo.fork == true
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    environment: integration-tests-secrets
+    steps:
+      - run: echo "Approved by maintainer"
+
+  test-full:
+    name: Tests (Full, ${{ matrix.postgres_label }})
+    needs: authorize
+    if: github.event.pull_request.head.repo.fork == true
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      matrix:
+        include:
+          - postgres_label: postgres-18
+            postgres_version: 18
+            postgres_image: postgres:18
+            coverage: false
+          - postgres_label: postgres-17
+            postgres_version: 17
+            postgres_image: postgres:17
+            coverage: false
+          - postgres_label: postgres-16
+            postgres_version: 16
+            postgres_image: postgres:16
+            coverage: false
+          - postgres_label: postgres-15
+            postgres_version: 15
+            postgres_image: postgres:15
+            coverage: false
+          - postgres_label: postgres-14
+            postgres_version: 14
+            postgres_image: postgres:14
+            coverage: false
+          - postgres_label: orioledb-beta14-pg17
+            postgres_version: 17
+            postgres_image: orioledb/orioledb:beta14-pg17
+            coverage: false
+    env:
+      CARGO_TERM_COLOR: always
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+      POSTGRES_PORT: 5430
+      POSTGRES_HOST: localhost
+      TESTS_DATABASE_HOST: localhost
+      TESTS_DATABASE_PORT: 5430
+      TESTS_DATABASE_START_PORT: 5430
+      NUM_LOCAL_DATABASES: 4
+      TESTS_DATABASE_USERNAME: postgres
+      TESTS_DATABASE_PASSWORD: postgres
+      TESTS_CLICKHOUSE_URL: http://localhost:8123
+      TESTS_CLICKHOUSE_USER: etl
+      TESTS_CLICKHOUSE_PASSWORD: etl
+      ETL_DUCKDB_EXTENSION_ROOT: ${{ github.workspace }}/vendor/duckdb/extensions
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          persist-credentials: false
+
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@150fca883cd4034361b621bd4e6a9d34e5143606 # v1.15.4
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: test-full
+
+      - name: Start Docker Compose (${{ matrix.postgres_label }})
+        run: |
+          POSTGRES_IMAGE=${{ matrix.postgres_image }} \
+          POSTGRES_VERSION=${{ matrix.postgres_version }} \
+            cargo xtask postgres start
+
+      - name: Vendor DuckDB Extensions
+        run: |
+          set -euo pipefail
+          case "$(uname -m)" in
+            x86_64) duckdb_platform=linux_amd64 ;;
+            aarch64) duckdb_platform=linux_arm64 ;;
+            *) echo "unsupported runner architecture: $(uname -m)" >&2; exit 1 ;;
+          esac
+          ./scripts/vendor_duckdb_extensions.sh --platform "${duckdb_platform}"
+
+      - name: Install sqlx-cli
+        run: |
+          cargo install sqlx-cli \
+            --features native-tls,postgres \
+            --no-default-features \
+            --locked
+
+      - name: Migrate Database
+        run: |
+          sudo apt-get install libpq-dev -y
+          ./scripts/run_migrations.sh etl-api
+
+      - name: Set up BigQuery Credentials
+        run: |
+          printf '%s' '${{ secrets.TESTS_BIGQUERY_SA_KEY_JSON }}' > /tmp/bigquery-sa-key.json
+          echo "TESTS_BIGQUERY_PROJECT_ID=${{ secrets.TESTS_BIGQUERY_PROJECT_ID }}" >> $GITHUB_ENV
+          echo "TESTS_BIGQUERY_SA_KEY_PATH=/tmp/bigquery-sa-key.json" >> $GITHUB_ENV
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@328a871ad8f62ecac78390391f463ccabc974b72 # v2.69.9
+        with:
+          tool: cargo-nextest
+
+      - name: Run Unit and Integration Tests
+        run: |
+          cargo xtask nextest run
+
+      - name: Run Doctests
+        run: |
+          cargo test --doc --workspace --all-features --no-fail-fast
