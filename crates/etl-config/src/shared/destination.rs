@@ -1,6 +1,8 @@
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use url::Url;
+#[cfg(feature = "utoipa")]
+use utoipa::ToSchema;
 
 const fn default_connection_pool_size() -> usize {
     DestinationConfig::DEFAULT_CONNECTION_POOL_SIZE
@@ -47,6 +49,17 @@ impl ClickHouseEngine {
             ClickHouseEngine::ReplacingMergeTree => Some((23, 5)),
         }
     }
+}
+
+/// Runtime backend used for DuckLake external maintenance coordination.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum DuckLakeMaintenanceMode {
+    #[default]
+    Disabled,
+    Kubernetes,
+    Postgres,
 }
 
 /// Configuration for supported ETL data destinations.
@@ -135,6 +148,9 @@ pub enum DestinationConfig {
         maintenance_target_file_size: Option<String>,
         /// Optional DuckLake snapshot-retention interval.
         expire_snapshots_older_than: Option<String>,
+        /// External maintenance coordination backend.
+        #[serde(default)]
+        maintenance_mode: DuckLakeMaintenanceMode,
     },
 }
 
@@ -330,6 +346,9 @@ pub enum DestinationConfigWithoutSecrets {
         maintenance_target_file_size: Option<String>,
         /// Optional DuckLake snapshot-retention interval.
         expire_snapshots_older_than: Option<String>,
+        /// External maintenance coordination backend.
+        #[serde(default)]
+        maintenance_mode: DuckLakeMaintenanceMode,
     },
 }
 
@@ -368,6 +387,7 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
                 duckdb_memory_cache_limit,
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
+                maintenance_mode,
             } => DestinationConfigWithoutSecrets::Ducklake {
                 catalog_url,
                 data_path,
@@ -380,6 +400,7 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
                 duckdb_memory_cache_limit,
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
+                maintenance_mode,
             },
         }
     }
