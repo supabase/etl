@@ -10,16 +10,14 @@ The metrics fall into four groups:
 - external maintenance metrics: operation-trigger counts and duration samples
   for time foreground ingestion was quiesced by the Kubernetes maintenance
   plane.
-- table-health samples: histograms recorded by a background sampler every
-  30 seconds from the PostgreSQL DuckLake metadata catalog. They describe the
-  current shape of tables known to the current destination instance.
+- table-health samples: gauges recorded by a background sampler every 30 seconds
+  from the PostgreSQL DuckLake metadata catalog. They describe the current shape
+  of tables known to the current destination instance.
 - catalog-backlog gauges: current global snapshot and deletion backlog in the
   attached DuckLake catalog.
 
-These metrics intentionally avoid a `table_name` label. That keeps Prometheus
-cardinality low. The tradeoff is that table-health metrics are sampled as
-histograms over recently written tables rather than exported as one time series
-per table.
+Table-health metrics carry a `table` label because they are used to diagnose and
+trigger table-specific maintenance behavior.
 
 ## Metric groups
 
@@ -78,6 +76,7 @@ How to read them:
 ### External maintenance metrics
 
 - `etl_ducklake_external_maintenance_pause_duration_seconds`
+- `etl_ducklake_external_maintenance_pause_active`
 - `etl_ducklake_external_maintenance_triggered_total`
 
 `etl_ducklake_external_maintenance_pause_duration_seconds` is emitted by the
@@ -87,7 +86,13 @@ only the time after the destination has drained foreground mutations and reporte
 
 It carries one label:
 
-- `outcome`: `cleared`, `expired`, `replaced`, or `resource_deleted`
+- `outcome`: `cleared`, `expired`, `replaced`, or `state_missing`
+
+`etl_ducklake_external_maintenance_pause_active` is a 0/1 gauge emitted by the
+replicator while foreground ingestion is blocked or draining for an external
+maintenance pause. A value of `1` means ingestion is paused for external
+maintenance; `0` means the replicator is not currently paused by external
+maintenance.
 
 `etl_ducklake_external_maintenance_triggered_total` counts external maintenance
 operation requests emitted by the replicator after it samples DuckLake catalog
