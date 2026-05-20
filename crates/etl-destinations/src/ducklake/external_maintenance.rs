@@ -13,7 +13,7 @@ pub use etl_maintenance::{
     ExternalMaintenanceState, ExternalMaintenanceStore, ExternalMaintenanceWatcherConfig,
     KubernetesExternalMaintenanceStore, PostgresExternalMaintenanceStore,
 };
-use metrics::{counter, histogram};
+use metrics::{counter, gauge, histogram};
 use sqlx::PgPool;
 use tokio::time;
 use tracing::{debug, info, warn};
@@ -21,6 +21,7 @@ use tracing::{debug, info, warn};
 use crate::ducklake::{
     DuckLakeDestination, DuckLakeExternalMaintenancePause,
     metrics::{
+        ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_PAUSE_ACTIVE,
         ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_PAUSE_DURATION_SECONDS,
         ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_TRIGGERED_TOTAL, MAINTENANCE_OPERATION_LABEL,
         MAINTENANCE_OUTCOME_LABEL, MAINTENANCE_REASON_LABEL,
@@ -89,6 +90,7 @@ where
     M: ExternalMaintenanceStore,
 {
     let mut held_pause: Option<HeldPause> = None;
+    record_external_maintenance_pause_active(false);
 
     info!(
         poll_interval_ms = config.poll_interval.as_millis() as u64,
@@ -217,6 +219,7 @@ async fn reconcile_pause<S, M>(
         pause.expires_at.to_rfc3339()
     );
     report_pausing(store, &pause.run_id, config.store_timeout).await;
+    record_external_maintenance_pause_active(true);
 
     let external_pause = destination.acquire_external_maintenance_pause().await;
     if pause.expires_at <= Utc::now() {
@@ -305,6 +308,7 @@ fn release_held_pause(held: HeldPause, outcome: &'static str) {
     let held_ms =
         Utc::now().signed_duration_since(held.quiesced_at).num_milliseconds().max(0) as u64;
     record_external_maintenance_pause_duration(&held, outcome);
+    record_external_maintenance_pause_active(false);
     info!(
         run_id = %held.run_id,
         outcome,
@@ -314,6 +318,10 @@ fn release_held_pause(held: HeldPause, outcome: &'static str) {
         outcome,
         held_ms
     );
+}
+
+fn record_external_maintenance_pause_active(active: bool) {
+    gauge!(ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_PAUSE_ACTIVE).set(if active { 1.0 } else { 0.0 });
 }
 
 fn record_external_maintenance_pause_duration(held: &HeldPause, outcome: &'static str) {
@@ -578,5 +586,40 @@ fn record_external_maintenance_triggers(
             MAINTENANCE_REASON_LABEL => REASON_SNAPSHOT_RETENTION_THRESHOLD,
         )
         .increment(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use etl_telemetry::metrics::init_metrics_handle;
+
+    use crate::ducklake::metrics::{
+        ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_PAUSE_ACTIVE, register_metrics,
+    };
+
+    use super::record_external_maintenance_pause_active;
+
+    fn pause_active_gauge_value(rendered: &str) -> Option<f64> {
+        rendered.lines().find_map(|line| {
+            if line.starts_with(ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_PAUSE_ACTIVE) {
+                line.split_whitespace().last()?.parse::<f64>().ok()
+            } else {
+                None
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn recording_external_maintenance_pause_active_exports_gauge_value() {
+        let handle = init_metrics_handle().expect("failed to initialize prometheus handle");
+        register_metrics();
+
+        record_external_maintenance_pause_active(true);
+        let rendered = handle.render();
+        assert_eq!(pause_active_gauge_value(&rendered), Some(1.0));
+
+        record_external_maintenance_pause_active(false);
+        let rendered = handle.render();
+        assert_eq!(pause_active_gauge_value(&rendered), Some(0.0));
     }
 }
