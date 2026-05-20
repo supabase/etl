@@ -275,6 +275,9 @@ pub trait K8sClient: Send + Sync {
     /// Does nothing if the stateful set does not exist.
     async fn delete_replicator_stateful_set(&self, prefix: &str) -> Result<(), K8sError>;
 
+    /// Returns whether the replicator [`StatefulSet`] exists.
+    async fn replicator_stateful_set_exists(&self, prefix: &str) -> Result<bool, K8sError>;
+
     /// Creates or updates the DuckLake maintenance CR.
     async fn create_or_update_ducklake_maintenance(
         &self,
