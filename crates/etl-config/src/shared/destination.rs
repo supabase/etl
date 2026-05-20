@@ -165,8 +165,6 @@ pub enum DestinationConfig {
         database: String,
         /// Target schema name.
         schema: String,
-        /// Virtual warehouse name.
-        warehouse: Option<String>,
         /// Snowflake role.
         role: Option<String>,
     },
@@ -379,9 +377,6 @@ pub enum DestinationConfigWithoutSecrets {
         database: String,
         /// Target schema name.
         schema: String,
-        /// Virtual warehouse name.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        warehouse: Option<String>,
         /// Snowflake role.
         #[serde(skip_serializing_if = "Option::is_none")]
         role: Option<String>,
@@ -445,7 +440,6 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
                 private_key_passphrase: _,
                 database,
                 schema,
-                warehouse,
                 role,
             } => DestinationConfigWithoutSecrets::Snowflake {
                 account_id,
@@ -453,7 +447,6 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
                 private_key_path,
                 database,
                 schema,
-                warehouse,
                 role,
             },
         }

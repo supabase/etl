@@ -92,8 +92,6 @@ struct SnowflakeArgs {
     snowflake_schema: String,
     #[arg(long, env = "BENCH_SNOWFLAKE_ROLE")]
     snowflake_role: Option<String>,
-    #[arg(long, env = "BENCH_SNOWFLAKE_WAREHOUSE")]
-    snowflake_warehouse: Option<String>,
 }
 
 #[tokio::main]

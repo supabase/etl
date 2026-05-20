@@ -229,7 +229,6 @@ pub(crate) async fn start_replicator_with_config(
             private_key_passphrase,
             database,
             schema,
-            warehouse: _,
             role,
         } => {
             let mut config = snowflake::Config::new(account_id, user, database, schema);
