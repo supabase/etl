@@ -30,6 +30,7 @@ use etl_config::{
 };
 #[cfg(feature = "bigquery")]
 use etl_destinations::bigquery::BigQueryDestination;
+use etl_destinations::postgres::{PostgresDestination, PostgresDestinationConfig};
 use etl_telemetry::tracing::{LogFlusher, init_tracing};
 use serde::Serialize;
 use sqlx::{
@@ -37,6 +38,7 @@ use sqlx::{
     postgres::{PgConnectOptions, PgPoolOptions, PgSslMode},
 };
 use tokio::sync::Notify;
+use tokio_postgres::Config;
 use tracing::info;
 
 /// Default batch fill time for benchmark runs.
@@ -71,6 +73,8 @@ impl From<LogTarget> for Environment {
 pub enum DestinationType {
     /// Use a null destination that acknowledges all writes.
     Null,
+    /// Use Postgres as the destination.
+    Postgres,
     /// Use BigQuery as the destination.
     #[value(name = "bigquery")]
     BigQuery,
@@ -161,6 +165,39 @@ pub struct DestinationArgs {
     /// BigQuery connection pool size.
     #[arg(long, default_value_t = 32)]
     pub bq_connection_pool_size: usize,
+    /// Postgres destination schema.
+    #[arg(long, default_value = "etl_benchmark_destination")]
+    pub pg_destination_schema: String,
+    /// Postgres destination host. Defaults to the source Postgres host.
+    #[arg(long)]
+    pub pg_destination_host: Option<String>,
+    /// Postgres destination port. Defaults to the source Postgres port.
+    #[arg(long)]
+    pub pg_destination_port: Option<u16>,
+    /// Postgres destination database. Defaults to the source Postgres database.
+    #[arg(long)]
+    pub pg_destination_database: Option<String>,
+    /// Postgres destination username. Defaults to the source Postgres username.
+    #[arg(long)]
+    pub pg_destination_username: Option<String>,
+    /// Postgres destination password. Defaults to the source Postgres password.
+    #[arg(long)]
+    pub pg_destination_password: Option<String>,
+    /// Postgres destination connection pool size.
+    #[arg(long, default_value_t = 16)]
+    pub pg_destination_pool_size: usize,
+    /// Maximum rows per Postgres destination insert statement.
+    #[arg(long, default_value_t = 2_000)]
+    pub pg_destination_max_insert_rows: usize,
+    /// Maximum bind parameters per Postgres destination insert statement.
+    #[arg(long, default_value_t = 30_000)]
+    pub pg_destination_max_insert_params: usize,
+    /// Use durable synchronous commits for Postgres destination writes.
+    #[arg(long, default_value_t = false)]
+    pub pg_destination_synchronous_commit: bool,
+    /// Create Postgres destination tables as unlogged tables.
+    #[arg(long, default_value_t = false)]
+    pub pg_destination_unlogged: bool,
 }
 
 /// Snapshot of destination-side benchmark counters.
@@ -436,6 +473,8 @@ impl Destination for NullDestination {
 pub enum BenchDestination {
     /// Null destination variant.
     Null(CountingDestination<NullDestination>),
+    /// Postgres destination variant.
+    Postgres(CountingDestination<PostgresDestination>),
     /// BigQuery destination variant.
     #[cfg(feature = "bigquery")]
     BigQuery(CountingDestination<BigQueryDestination<NotifyingStore>>),
@@ -443,9 +482,9 @@ pub enum BenchDestination {
 
 impl BenchDestination {
     /// Creates a benchmark destination from CLI arguments.
-    #[cfg_attr(not(feature = "bigquery"), expect(clippy::unused_async))]
     pub async fn new(
         destination_args: &DestinationArgs,
+        pg: &PgConnectionArgs,
         pipeline_id: u64,
         store: NotifyingStore,
     ) -> Result<Self> {
@@ -454,6 +493,26 @@ impl BenchDestination {
 
         match destination_args.destination {
             DestinationType::Null => Ok(Self::Null(CountingDestination::new(NullDestination))),
+            DestinationType::Postgres => {
+                let destination_pg = destination_args.postgres_connection_args(pg);
+                if destination_pg.tls_enabled {
+                    bail!("Postgres destination benchmarks do not support TLS yet");
+                }
+
+                let destination_config =
+                    PostgresDestinationConfig::new(destination_args.pg_destination_schema.clone())
+                        .with_pool_size(destination_args.pg_destination_pool_size)
+                        .with_max_insert_rows(destination_args.pg_destination_max_insert_rows)
+                        .with_max_insert_params(destination_args.pg_destination_max_insert_params)
+                        .with_synchronous_commit(destination_args.pg_destination_synchronous_commit)
+                        .with_unlogged_tables(destination_args.pg_destination_unlogged);
+                let destination = PostgresDestination::new(
+                    tokio_postgres_config(&destination_pg),
+                    destination_config,
+                )
+                .await?;
+                Ok(Self::Postgres(CountingDestination::new(destination)))
+            }
             #[cfg(feature = "bigquery")]
             DestinationType::BigQuery => {
                 install_crypto_provider();
@@ -498,6 +557,7 @@ impl BenchDestination {
     pub fn stats(&self) -> DestinationStatsSnapshot {
         match self {
             Self::Null(destination) => destination.stats(),
+            Self::Postgres(destination) => destination.stats(),
             #[cfg(feature = "bigquery")]
             Self::BigQuery(destination) => destination.stats(),
         }
@@ -507,6 +567,7 @@ impl BenchDestination {
     pub fn reset_cdc_stats(&self) {
         match self {
             Self::Null(destination) => destination.reset_cdc_stats(),
+            Self::Postgres(destination) => destination.reset_cdc_stats(),
             #[cfg(feature = "bigquery")]
             Self::BigQuery(destination) => destination.reset_cdc_stats(),
         }
@@ -516,6 +577,7 @@ impl BenchDestination {
     pub fn set_cdc_target(&self, target: u64) {
         match self {
             Self::Null(destination) => destination.set_cdc_target(target),
+            Self::Postgres(destination) => destination.set_cdc_target(target),
             #[cfg(feature = "bigquery")]
             Self::BigQuery(destination) => destination.set_cdc_target(target),
         }
@@ -525,8 +587,31 @@ impl BenchDestination {
     pub async fn wait_for_cdc_target(&self) {
         match self {
             Self::Null(destination) => destination.wait_for_cdc_target().await,
+            Self::Postgres(destination) => destination.wait_for_cdc_target().await,
             #[cfg(feature = "bigquery")]
             Self::BigQuery(destination) => destination.wait_for_cdc_target().await,
+        }
+    }
+}
+
+impl DestinationArgs {
+    /// Builds destination Postgres connection args, falling back to the source
+    /// connection when destination-specific args are omitted.
+    fn postgres_connection_args(&self, source: &PgConnectionArgs) -> PgConnectionArgs {
+        PgConnectionArgs {
+            host: self.pg_destination_host.clone().unwrap_or_else(|| source.host.clone()),
+            port: self.pg_destination_port.unwrap_or(source.port),
+            database: self
+                .pg_destination_database
+                .clone()
+                .unwrap_or_else(|| source.database.clone()),
+            username: self
+                .pg_destination_username
+                .clone()
+                .unwrap_or_else(|| source.username.clone()),
+            password: self.pg_destination_password.clone().or_else(|| source.password.clone()),
+            tls_enabled: source.tls_enabled,
+            tls_certs: source.tls_certs.clone(),
         }
     }
 }
@@ -539,6 +624,7 @@ impl Destination for BenchDestination {
     async fn shutdown(&self) -> EtlResult<()> {
         match self {
             Self::Null(destination) => destination.shutdown().await,
+            Self::Postgres(destination) => destination.shutdown().await,
             #[cfg(feature = "bigquery")]
             Self::BigQuery(destination) => destination.shutdown().await,
         }
@@ -551,6 +637,9 @@ impl Destination for BenchDestination {
     ) -> EtlResult<()> {
         match self {
             Self::Null(destination) => {
+                destination.truncate_table(replicated_table_schema, async_result).await
+            }
+            Self::Postgres(destination) => {
                 destination.truncate_table(replicated_table_schema, async_result).await
             }
             #[cfg(feature = "bigquery")]
@@ -572,6 +661,11 @@ impl Destination for BenchDestination {
                     .write_table_rows(replicated_table_schema, table_rows, async_result)
                     .await
             }
+            Self::Postgres(destination) => {
+                destination
+                    .write_table_rows(replicated_table_schema, table_rows, async_result)
+                    .await
+            }
             #[cfg(feature = "bigquery")]
             Self::BigQuery(destination) => {
                 destination
@@ -588,6 +682,7 @@ impl Destination for BenchDestination {
     ) -> EtlResult<()> {
         match self {
             Self::Null(destination) => destination.write_events(events, async_result).await,
+            Self::Postgres(destination) => destination.write_events(events, async_result).await,
             #[cfg(feature = "bigquery")]
             Self::BigQuery(destination) => destination.write_events(events, async_result).await,
         }
@@ -615,6 +710,22 @@ fn pg_connect_options(args: &PgConnectionArgs) -> PgConnectOptions {
     }
 
     options
+}
+
+/// Builds a tokio-postgres config for Postgres destination benchmarks.
+fn tokio_postgres_config(args: &PgConnectionArgs) -> Config {
+    let mut config = Config::new();
+    config
+        .host(&args.host)
+        .port(args.port)
+        .dbname(&args.database)
+        .user(&args.username)
+        .application_name("etl-benchmark-postgres-destination");
+    if let Some(password) = &args.password {
+        config.password(password.as_bytes());
+    }
+
+    config
 }
 
 /// Opens a Postgres pool for benchmark helpers.

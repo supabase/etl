@@ -66,6 +66,13 @@ clickhouse = [
     "dep:url",
     "dep:uuid",
 ]
+postgres = [
+    "dep:bytes",
+    "dep:pg_escape",
+    "dep:tokio",
+    "dep:tokio-postgres",
+    "dep:tracing",
+]
 egress = ["etl/egress"]
 # We assume that `test-utils` is always used in conjunction with `bigquery` or `iceberg` thus we only
 # put here the extra dependencies needed.
@@ -75,6 +82,7 @@ test-utils = ["dep:uuid"]
 
 arrow = { workspace = true, optional = true }
 async-trait = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
 chrono = { workspace = true, features = ["serde"] }
 clickhouse = { workspace = true, optional = true, features = ["inserter", "lz4", "rustls-tls"] }
 duckdb = { workspace = true, optional = true, features = ["bundled", "json", "parquet", "r2d2"] }
@@ -98,7 +106,7 @@ serde = { workspace = true, optional = true, features = ["derive"] }
 serde_json = { workspace = true, optional = true, features = ["arbitrary_precision", "std"] }
 sqlx = { workspace = true, optional = true, features = ["runtime-tokio", "tls-rustls", "postgres"] }
 tokio = { workspace = true, optional = true, features = ["rt", "sync", "time"] }
-tokio-postgres = { workspace = true, optional = true }
+tokio-postgres = { workspace = true, optional = true, features = ["runtime", "array-impls", "with-chrono-0_4", "with-uuid-1", "with-serde_json-1"] }
 tonic = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true, default-features = true }
 url = { workspace = true, optional = true }

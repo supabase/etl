@@ -21,6 +21,9 @@ Both benchmarks support:
 
 - `null`: acknowledges and discards writes. Use this to measure source extraction,
   decoding, batching, and pipeline overhead without destination write cost.
+- `postgres`: writes decoded table rows into Postgres using pooled multi-row
+  `insert` statements. Use this to measure the current typed ETL path against a
+  throughput-oriented Postgres destination.
 - `bigquery`: writes to BigQuery. Use this for end-to-end destination throughput.
 
 Both benchmarks print a human-readable summary. When `--report-path` is set, they
@@ -212,6 +215,52 @@ BigQuery runs are the comparable end-to-end destination benchmark.
 The BigQuery dataset must already exist; the benchmark creates destination
 tables and views inside it, but it does not create the dataset.
 
+## Postgres Runs
+
+Postgres destination runs write into the source benchmark database by default,
+under the `etl_benchmark_destination` schema. Pass
+`--pg-destination-host`, `--pg-destination-port`, `--pg-destination-database`,
+`--pg-destination-username`, and `--pg-destination-password` to write to a
+separate Postgres instance. Destination tables are named by source table OID,
+have no indexes or constraints, and use session-level `synchronous_commit = off`
+unless `--pg-destination-synchronous-commit` is set.
+
+```bash
+cargo xtask benchmark \
+  --destination postgres \
+  --warehouses 10 \
+  --max-table-sync-workers 8 \
+  --max-copy-connections-per-table 4 \
+  --streaming-duration-seconds 300
+```
+
+The multi-row insert path defaults to at most 2,000 rows and 30,000 bind
+parameters per statement. Use `--pg-destination-unlogged` for an upper-bound
+run that also skips data WAL for destination tables.
+
+For a local source/destination split, run a second destination Postgres on a
+different port and point the destination flags at it:
+
+```bash
+docker run -d \
+  --name etl-benchmark-destination-postgres \
+  -e POSTGRES_USER=postgres \
+  -e POSTGRES_PASSWORD=postgres \
+  -e POSTGRES_DB=bench \
+  -p 5431:5432 \
+  postgres:18
+
+cargo xtask benchmark \
+  --destination postgres \
+  --pg-destination-host localhost \
+  --pg-destination-port 5431 \
+  --pg-destination-database bench \
+  --pg-destination-username postgres \
+  --pg-destination-password postgres \
+  --warehouses 10 \
+  --streaming-duration-seconds 300
+```
+
 ## GitHub Actions
 
 The `Benchmark` workflow is manual and runs through `workflow_dispatch`.
@@ -249,7 +298,7 @@ Important workflow inputs:
   bytes. Defaults to `0.2`.
 - `enable_memory_backpressure`: opt into ETL memory backpressure. Defaults to
   `false` for benchmark runs.
-- `destination`: `null` or `bigquery`.
+- `destination`: `null`, `postgres`, or `bigquery`.
 - `force_prepare`: drop and regenerate TPC-C tables before running.
 - `skip_table_copy`: skip table copy.
 - `skip_table_streaming`: skip table streaming.

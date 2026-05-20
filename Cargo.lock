@@ -1920,6 +1920,7 @@ dependencies = [
  "serde_json",
  "sqlx",
  "tokio",
+ "tokio-postgres",
  "tracing",
 ]
 
@@ -1946,6 +1947,7 @@ dependencies = [
  "arrow 57.3.0",
  "async-trait",
  "base64",
+ "bytes",
  "chrono",
  "clickhouse",
  "duckdb",
@@ -4530,6 +4532,7 @@ name = "postgres-types"
 version = "0.2.7"
 source = "git+https://github.com/iambriccardo/rust-postgres?rev=31acf55c7e5c2244e5bb3a36e7afa2a01bf52c38#31acf55c7e5c2244e5bb3a36e7afa2a01bf52c38"
 dependencies = [
+ "array-init",
  "bytes",
  "chrono",
  "fallible-iterator 0.2.0",

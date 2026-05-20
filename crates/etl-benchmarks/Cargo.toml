@@ -14,14 +14,14 @@ doctest = false
 
 [features]
 default = []
-bigquery = ["dep:etl-destinations", "etl-destinations/bigquery"]
+bigquery = ["etl-destinations/bigquery"]
 
 [dependencies]
 anyhow = { workspace = true }
 clap = { workspace = true, default-features = true, features = ["std", "derive"] }
 etl = { workspace = true, features = ["test-utils"] }
 etl-config = { workspace = true }
-etl-destinations = { workspace = true, optional = true }
+etl-destinations = { workspace = true, features = ["postgres"] }
 etl-postgres = { workspace = true, features = ["sqlx"] }
 etl-telemetry = { workspace = true }
 rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
@@ -29,6 +29,7 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sqlx = { workspace = true, features = ["runtime-tokio", "tls-rustls", "postgres", "migrate"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "signal"] }
+tokio-postgres = { workspace = true, features = ["runtime"] }
 tracing = { workspace = true, default-features = true }
 
 [lints]

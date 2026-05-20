@@ -76,6 +76,39 @@ pub(crate) struct BenchmarkArgs {
     /// BigQuery service account key file.
     #[arg(long, env = "BQ_SA_KEY_FILE")]
     bq_sa_key_file: Option<PathBuf>,
+    /// Postgres destination schema.
+    #[arg(long, default_value = "etl_benchmark_destination")]
+    pg_destination_schema: String,
+    /// Postgres destination host. Defaults to the source Postgres host.
+    #[arg(long)]
+    pg_destination_host: Option<String>,
+    /// Postgres destination port. Defaults to the source Postgres port.
+    #[arg(long)]
+    pg_destination_port: Option<u16>,
+    /// Postgres destination database. Defaults to the source Postgres database.
+    #[arg(long)]
+    pg_destination_database: Option<String>,
+    /// Postgres destination username. Defaults to the source Postgres username.
+    #[arg(long)]
+    pg_destination_username: Option<String>,
+    /// Postgres destination password. Defaults to the source Postgres password.
+    #[arg(long)]
+    pg_destination_password: Option<String>,
+    /// Postgres destination connection pool size.
+    #[arg(long, default_value_t = 16)]
+    pg_destination_pool_size: usize,
+    /// Maximum rows per Postgres destination insert statement.
+    #[arg(long, default_value_t = 2_000)]
+    pg_destination_max_insert_rows: usize,
+    /// Maximum bind parameters per Postgres destination insert statement.
+    #[arg(long, default_value_t = 30_000)]
+    pg_destination_max_insert_params: usize,
+    /// Use durable synchronous commits for Postgres destination writes.
+    #[arg(long, default_value_t = false)]
+    pg_destination_synchronous_commit: bool,
+    /// Create Postgres destination tables as unlogged tables.
+    #[arg(long, default_value_t = false)]
+    pg_destination_unlogged: bool,
     /// Run the TPC-C streaming workload for this many seconds.
     #[arg(long)]
     streaming_duration_seconds: Option<u64>,
@@ -114,6 +147,7 @@ pub(crate) struct BenchmarkArgs {
 #[derive(ValueEnum, Clone, Copy, Debug)]
 enum Destination {
     Null,
+    Postgres,
     #[value(name = "bigquery")]
     BigQuery,
 }
@@ -251,6 +285,50 @@ impl BenchmarkArgs {
                     "BigQuery service account key file does not exist: {}",
                     sa_key_file.display()
                 );
+            }
+        }
+
+        if matches!(self.destination, Destination::Postgres) {
+            if self.pg_destination_schema.trim().is_empty() {
+                bail!("--pg-destination-schema cannot be empty");
+            }
+
+            if self.pg_destination_host.as_deref().is_some_and(|host| host.trim().is_empty()) {
+                bail!("--pg-destination-host cannot be empty");
+            }
+
+            if self
+                .pg_destination_database
+                .as_deref()
+                .is_some_and(|database| database.trim().is_empty())
+            {
+                bail!("--pg-destination-database cannot be empty");
+            }
+
+            if self
+                .pg_destination_username
+                .as_deref()
+                .is_some_and(|username| username.trim().is_empty())
+            {
+                bail!("--pg-destination-username cannot be empty");
+            }
+
+            if self.pg_destination_port == Some(0) {
+                bail!("--pg-destination-port must be greater than 0");
+            }
+
+            if self.pg_destination_pool_size == 0 {
+                bail!("--pg-destination-pool-size must be greater than 0");
+            }
+
+            if self.pg_destination_max_insert_rows == 0 {
+                bail!("--pg-destination-max-insert-rows must be greater than 0");
+            }
+
+            if self.pg_destination_max_insert_params == 0
+                || self.pg_destination_max_insert_params > i16::MAX as usize
+            {
+                bail!("--pg-destination-max-insert-params must be between 1 and 32767");
             }
         }
 
@@ -439,6 +517,8 @@ impl BenchmarkArgs {
         for sample_idx in 0..total_samples {
             let pipeline_id = sample_pipeline_id(pipeline_id_base, 0, sample_idx)?;
             let publication_name = format!("bench_pub_{pipeline_id}");
+            let destination_schema =
+                self.postgres_sample_schema("table_copy", pipeline_id, sample_idx);
             let sample_report_path =
                 self.sample_report_path("table_copy", sample_idx.saturating_add(1));
             let sample_label = self.sample_label(sample_idx);
@@ -451,6 +531,7 @@ impl BenchmarkArgs {
                 table_ids,
                 expected_row_count,
                 pipeline_id,
+                destination_schema.as_deref(),
                 sample_report_path.clone(),
             )?;
             self.drop_publication(&publication_name)?;
@@ -482,12 +563,13 @@ impl BenchmarkArgs {
         table_ids: &str,
         expected_row_count: u64,
         pipeline_id: u64,
+        postgres_destination_schema: Option<&str>,
         report_path: PathBuf,
     ) -> Result<Value> {
         let mut args = vec!["--log-target".to_owned(), "terminal".to_owned(), "run".to_owned()];
         self.push_common_benchmark_args(&mut args);
         self.push_tuning_args(&mut args);
-        self.push_destination_args(&mut args);
+        self.push_destination_args(&mut args, postgres_destination_schema);
         args.extend([
             "--report-path".to_owned(),
             report_path.display().to_string(),
@@ -516,6 +598,8 @@ impl BenchmarkArgs {
         for sample_idx in 0..total_samples {
             let pipeline_id = sample_pipeline_id(pipeline_id_base, 1, sample_idx)?;
             let publication_name = format!("bench_streaming_pub_{pipeline_id}");
+            let destination_schema =
+                self.postgres_sample_schema("table_streaming", pipeline_id, sample_idx);
             let sample_report_path =
                 self.sample_report_path("table_streaming", sample_idx.saturating_add(1));
             let sample_label = self.sample_label(sample_idx);
@@ -526,6 +610,7 @@ impl BenchmarkArgs {
                 tpcc_threads,
                 pipeline_id,
                 &selected_tables,
+                destination_schema.as_deref(),
                 sample_report_path.clone(),
             )?;
             self.drop_publication(&publication_name)?;
@@ -557,12 +642,13 @@ impl BenchmarkArgs {
         tpcc_threads: u16,
         pipeline_id: u64,
         selected_tables: &[String],
+        postgres_destination_schema: Option<&str>,
         report_path: PathBuf,
     ) -> Result<Value> {
         let mut args = vec!["--log-target".to_owned(), "terminal".to_owned(), "run".to_owned()];
         self.push_common_benchmark_args(&mut args);
         self.push_tuning_args(&mut args);
-        self.push_destination_args(&mut args);
+        self.push_destination_args(&mut args, postgres_destination_schema);
         args.extend([
             "--report-path".to_owned(),
             report_path.display().to_string(),
@@ -620,6 +706,30 @@ impl BenchmarkArgs {
         self.output_dir.join(format!(".{benchmark}_sample_{sample_number}.json"))
     }
 
+    fn postgres_sample_schema(
+        &self,
+        benchmark: &str,
+        pipeline_id: u64,
+        sample_idx: usize,
+    ) -> Option<String> {
+        if !matches!(self.destination, Destination::Postgres) {
+            return None;
+        }
+
+        let benchmark_tag = match benchmark {
+            "table_copy" => "tc",
+            "table_streaming" => "ts",
+            _ => "sample",
+        };
+        Some(format!(
+            "{}_{}_{}_{}",
+            self.pg_destination_schema,
+            benchmark_tag,
+            pipeline_id,
+            sample_idx.saturating_add(1)
+        ))
+    }
+
     fn push_common_benchmark_args(&self, args: &mut Vec<String>) {
         args.extend([
             "--host".to_owned(),
@@ -652,8 +762,55 @@ impl BenchmarkArgs {
         }
     }
 
-    fn push_destination_args(&self, args: &mut Vec<String>) {
+    fn push_destination_args(
+        &self,
+        args: &mut Vec<String>,
+        postgres_schema_override: Option<&str>,
+    ) {
         args.extend(["--destination".to_owned(), self.destination.as_arg().to_owned()]);
+
+        if matches!(self.destination, Destination::Postgres) {
+            args.extend([
+                "--pg-destination-schema".to_owned(),
+                postgres_schema_override.unwrap_or(&self.pg_destination_schema).to_owned(),
+                "--pg-destination-pool-size".to_owned(),
+                self.pg_destination_pool_size.to_string(),
+                "--pg-destination-max-insert-rows".to_owned(),
+                self.pg_destination_max_insert_rows.to_string(),
+                "--pg-destination-max-insert-params".to_owned(),
+                self.pg_destination_max_insert_params.to_string(),
+            ]);
+
+            if let Some(host) = &self.pg_destination_host {
+                args.extend(["--pg-destination-host".to_owned(), host.clone()]);
+            }
+
+            if let Some(port) = self.pg_destination_port {
+                args.extend(["--pg-destination-port".to_owned(), port.to_string()]);
+            }
+
+            if let Some(database) = &self.pg_destination_database {
+                args.extend(["--pg-destination-database".to_owned(), database.clone()]);
+            }
+
+            if let Some(username) = &self.pg_destination_username {
+                args.extend(["--pg-destination-username".to_owned(), username.clone()]);
+            }
+
+            if let Some(password) = &self.pg_destination_password {
+                args.extend(["--pg-destination-password".to_owned(), password.clone()]);
+            }
+
+            if self.pg_destination_synchronous_commit {
+                args.push("--pg-destination-synchronous-commit".to_owned());
+            }
+
+            if self.pg_destination_unlogged {
+                args.push("--pg-destination-unlogged".to_owned());
+            }
+
+            return;
+        }
 
         if !matches!(self.destination, Destination::BigQuery) {
             return;
@@ -717,6 +874,7 @@ impl Destination {
     fn as_arg(self) -> &'static str {
         match self {
             Self::Null => "null",
+            Self::Postgres => "postgres",
             Self::BigQuery => "bigquery",
         }
     }

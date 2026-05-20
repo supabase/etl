@@ -55,6 +55,7 @@ on:
         type: choice
         options:
           - "null"
+          - postgres
           - bigquery
         default: "null"
       bq_project_id:

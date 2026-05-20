@@ -24,3 +24,5 @@ pub mod ducklake;
 pub mod egress;
 #[cfg(feature = "iceberg")]
 pub mod iceberg;
+#[cfg(feature = "postgres")]
+pub mod postgres;

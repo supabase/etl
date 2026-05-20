@@ -117,7 +117,7 @@ async fn run(args: RunArgs) -> Result<()> {
 
     let store = NotifyingStore::new();
     let destination =
-        BenchDestination::new(&args.destination, args.pipeline_id, store.clone()).await?;
+        BenchDestination::new(&args.destination, &args.pg, args.pipeline_id, store.clone()).await?;
     let config = pipeline_config(
         args.pipeline_id,
         args.publication_name.clone(),
@@ -230,6 +230,7 @@ fn print_summary(report: &TableCopyReport) {
 fn destination_label(destination: DestinationType) -> &'static str {
     match destination {
         DestinationType::Null => "null",
+        DestinationType::Postgres => "postgres",
         DestinationType::BigQuery => "bigquery",
     }
 }
