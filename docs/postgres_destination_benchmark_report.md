@@ -83,6 +83,34 @@ and 30,000 bind parameters per statement.
 | 8 | 513k | 426k-569k | 33.5% | 226 MiB/s | 2.1s |
 | 16 | 392k | 309k-638k | 106.6% | 173 MiB/s | 2.7s |
 
+## Metric Definitions
+
+The aggregate JSON files are median reports produced from 5 measured samples. The 1 warmup
+sample is discarded.
+
+Important fields:
+
+| Field | Meaning |
+| --- | --- |
+| `copied_rows` | Median copied row count across measured samples. Every sample in this sweep copied 1,037,461 rows. |
+| `estimated_copied_bytes` | Sum of ETL `SizeHint::size_hint` for decoded `TableRow`s observed by the benchmark destination wrapper. This is an in-memory decoded payload estimate, not physical Postgres table size, WAL size, wire bytes, or disk bytes. |
+| `estimated_copied_mib` | `estimated_copied_bytes / 1024 / 1024`. For this table: `479,697,880 / 1024 / 1024 = 457.4755 MiB`. |
+| `rows_per_second` | `copied_rows / copy_wait_duration_seconds` for each sample, then median across measured samples. |
+| `estimated_mib_per_second` | `estimated_copied_mib / copy_wait_duration_seconds` for each sample, then median across measured samples. |
+| `copy_wait_ms` | Time spent waiting for the table copy to finish after pipeline start. This is the denominator for throughput. |
+| `total_ms` | End-to-end benchmark sample time, including startup/shutdown overhead. |
+| `sample_summary` | Min, median, max, and spread across the measured samples for each numeric field. |
+
+Because top-level aggregate fields are medians of per-sample values, `estimated_mib_per_second`
+is not recomputed from the rounded top-level `estimated_copied_mib` and `copy_wait_ms`.
+Small differences are expected if you recompute it manually from rounded millisecond values.
+
+Destination row counts were checked directly in the destination Postgres after the sweep:
+
+| Checked target tables | Min rows | Max rows | Mismatches vs 1,037,461 |
+| ---: | ---: | ---: | ---: |
+| 30 | 1,037,461 | 1,037,461 | 0 |
+
 Interpretation:
 
 - Same-table parallel copy matters a lot for `order_line`.
