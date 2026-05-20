@@ -342,7 +342,7 @@ async fn updates_are_streamed_to_clickhouse_inner(engine: ClickHouseEngine) {
         .await
         .expect("Failed to insert initial update_flow row");
 
-    // --- WHEN: pipeline copies data, then an UPDATE is streamed ---
+    // --- WHEN: pipeline copies data and an UPDATE is streamed ---
     let clickhouse_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
@@ -760,7 +760,7 @@ async fn deletes_are_streamed_to_clickhouse_inner(engine: ClickHouseEngine) {
         .await
         .expect("Failed to insert delete_flow rows");
 
-    // --- WHEN: pipeline copies data, then a DELETE is streamed ---
+    // --- WHEN: pipeline copies data and a DELETE is streamed ---
 
     let clickhouse_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
@@ -891,7 +891,7 @@ async fn pipeline_restart_resumes_streaming_inner(engine: ClickHouseEngine) {
     assert_eq!(rows[0].id, 1);
     assert_eq!(rows[0].value, "before_restart");
 
-    // --- WHEN: rebuild destination and pipeline, then stream a new insert ---
+    // --- WHEN: rebuild destination and pipeline and stream a new insert ---
     let destination = TestDestinationWrapper::wrap(
         clickhouse_db.build_destination_with_engine(store.clone(), engine).await,
     );
@@ -996,7 +996,7 @@ async fn truncate_clears_table_and_accepts_new_inserts_inner(engine: ClickHouseE
     let rows: Vec<IdValueRow> = clickhouse_db.query(&truncate_query()).await;
     assert_eq!(rows.len(), 2, "table copy should produce two rows");
 
-    // --- WHEN: truncate, then insert a new row ---
+    // --- WHEN: truncate and insert a new row ---
     let truncate_notify = destination.wait_for_events_count(vec![(EventType::Truncate, 1)]).await;
 
     database
@@ -1678,7 +1678,7 @@ async fn schema_change_add_column_inner(engine: ClickHouseEngine) {
         .expect("metadata should exist after table creation");
     let initial_snapshot_id = initial_metadata.snapshot_id;
 
-    // --- WHEN: add column, then insert with new schema ---
+    // --- WHEN: add column and insert with new schema ---
     database
         .alter_table(
             table_name.clone(),
@@ -1891,7 +1891,7 @@ async fn schema_change_add_drop_rename_inner(engine: ClickHouseEngine) {
         .expect("metadata should exist after table creation");
     let initial_snapshot_id = initial_metadata.snapshot_id;
 
-    // --- WHEN: rename + drop + add, then insert with new schema ---
+    // --- WHEN: rename + drop + add and insert with new schema ---
     database
         .alter_table(
             table_name.clone(),
