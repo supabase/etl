@@ -2000,6 +2000,9 @@ async fn table_validation_out_of_bounds_values() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn table_schema_change() {
+    if skip_if_missing_bigquery_env_vars() {
+        return;
+    }
     init_test_tracing();
     install_crypto_provider();
 
