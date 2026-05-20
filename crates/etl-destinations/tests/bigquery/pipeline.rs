@@ -2041,8 +2041,17 @@ async fn table_type_compatibility_modes_handle_same_risky_data() {
                 true,
                 &[
                     ("numeric_value", "numeric"),
+                    ("infinite_numeric", "numeric"),
+                    ("float8_value", "double precision"),
+                    ("old_date", "date"),
+                    ("time_value", "time"),
+                    ("timestamp_value", "timestamp"),
+                    ("timestamptz_value", "timestamptz"),
+                    ("uuid_value", "uuid"),
                     ("json_value", "json"),
+                    ("json_duplicate", "json"),
                     ("numeric_array", "numeric[]"),
+                    ("uuid_array", "uuid[]"),
                     ("json_array", "json[]"),
                 ],
             )
@@ -2057,13 +2066,31 @@ async fn table_type_compatibility_modes_handle_same_risky_data() {
                 &format!(
                     "insert into {} (
                         numeric_value,
+                        infinite_numeric,
+                        float8_value,
+                        old_date,
+                        time_value,
+                        timestamp_value,
+                        timestamptz_value,
+                        uuid_value,
                         json_value,
+                        json_duplicate,
                         numeric_array,
+                        uuid_array,
                         json_array
                     ) values (
                         '0.000000000000000000000000000000000000001'::numeric,
+                        'Infinity'::numeric,
+                        '-0'::double precision,
+                        '-infinity'::date,
+                        '24:00:00'::time,
+                        'infinity'::timestamp,
+                        'infinity'::timestamptz,
+                        '550e8400-e29b-41d4-a716-446655440000'::uuid,
                         '{{\"value\":18446744073709551616}}'::json,
+                        '{{\"value\":1,\"value\":2}}'::json,
                         array['0.000000000000000000000000000000000000001'::numeric],
+                        array['550e8400-e29b-41d4-a716-446655440000'::uuid],
                         array['{{\"value\":18446744073709551616}}'::json]
                     )",
                     table_name.as_quoted_identifier()
@@ -2136,7 +2163,8 @@ async fn table_type_compatibility_modes_handle_same_risky_data() {
             assert!(
                 reason.contains("would be rounded by BigQuery")
                     || reason.contains("JSON integer would lose precision")
-                    || reason.contains("JSON integer is outside BigQuery"),
+                    || reason.contains("JSON integer is outside BigQuery")
+                    || reason.contains("has no strict native BigQuery representation"),
                 "{mode_name} mode should reject a silent BigQuery conversion risk: {reason}"
             );
 
@@ -2158,18 +2186,41 @@ async fn table_type_compatibility_modes_handle_same_risky_data() {
         };
 
         if type_compatibility.is_preserve() {
-            for column_name in ["numeric_value", "json_value"] {
+            for column_name in [
+                "numeric_value",
+                "infinite_numeric",
+                "float8_value",
+                "old_date",
+                "time_value",
+                "timestamp_value",
+                "timestamptz_value",
+                "uuid_value",
+                "json_value",
+                "json_duplicate",
+            ] {
                 assert_eq!(column_type(column_name), Some("STRING"), "{column_name}");
             }
         } else {
             assert_eq!(column_type("numeric_value"), Some("BIGNUMERIC"));
+            assert_eq!(column_type("infinite_numeric"), Some("BIGNUMERIC"));
+            assert_eq!(column_type("float8_value"), Some("FLOAT64"));
+            assert_eq!(column_type("old_date"), Some("DATE"));
+            assert_eq!(column_type("time_value"), Some("TIME"));
+            assert_eq!(column_type("timestamp_value"), Some("DATETIME"));
+            assert_eq!(column_type("timestamptz_value"), Some("TIMESTAMP"));
+            assert_eq!(column_type("uuid_value"), Some("STRING"));
             assert_eq!(column_type("json_value"), Some("JSON"));
+            assert_eq!(column_type("json_duplicate"), Some("JSON"));
         }
 
         if type_compatibility.is_preserve() {
-            for column_name in ["numeric_array", "json_array"] {
+            for column_name in ["numeric_array", "uuid_array", "json_array"] {
                 assert_eq!(column_type(column_name), Some("STRING"), "{column_name}");
             }
+        } else {
+            assert_eq!(column_type("numeric_array"), Some("ARRAY<BIGNUMERIC>"));
+            assert_eq!(column_type("uuid_array"), Some("ARRAY<STRING>"));
+            assert_eq!(column_type("json_array"), Some("ARRAY<JSON>"));
         }
 
         let destination_rows = bigquery_database.query_table(table_name).await.unwrap();

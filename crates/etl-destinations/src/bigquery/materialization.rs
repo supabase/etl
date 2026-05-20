@@ -1778,7 +1778,7 @@ mod tests {
     use etl::error::EtlResult;
 
     use super::*;
-    use crate::bigquery::value::{BigQueryArrayType, BigQueryIntEncoding};
+    use crate::bigquery::value::{BigQueryArrayType, BigQueryFloatEncoding, BigQueryIntEncoding};
 
     /// Returns a materializer for the supplied mode.
     fn materializer(
@@ -2075,46 +2075,145 @@ mod tests {
     }
 
     #[test]
-    fn strict_preserve_and_coerce_handle_risky_values() {
-        let cases = [
+    fn compatibility_modes_materialize_risky_values_by_policy() {
+        let tiny_numeric = "0.000000000000000000000000000000000000001";
+        let rounded_tiny_numeric = "0";
+
+        for (typ, cell, preserve_cell, coerce_type, coerce_cell) in [
             (
                 Type::NUMERIC,
-                Cell::Numeric(
-                    PgNumeric::from_str("0.000000000000000000000000000000000000001").unwrap(),
-                ),
+                Cell::Numeric(PgNumeric::from_str(tiny_numeric).unwrap()),
+                BigQueryCell::String(tiny_numeric.to_owned()),
+                BigQueryType::BigNumeric,
+                BigQueryCell::String(rounded_tiny_numeric.to_owned()),
             ),
-            (Type::NUMERIC, Cell::Numeric(PgNumeric::PositiveInfinity)),
-            (Type::JSON, Cell::String(r#"{"value":18446744073709551616}"#.to_owned())),
-            (Type::FLOAT8, Cell::F64(-0.0)),
-            (Type::DATE, Cell::Date(NaiveDate::from_ymd_opt(0, 12, 31).unwrap().into())),
-        ];
-
-        for (typ, cell) in cases {
+            (
+                Type::NUMERIC,
+                Cell::Numeric(PgNumeric::PositiveInfinity),
+                BigQueryCell::String("Infinity".to_owned()),
+                BigQueryType::BigNumeric,
+                BigQueryCell::String(BIGQUERY_BIGNUMERIC_MAX.to_owned()),
+            ),
+            (
+                Type::FLOAT8,
+                Cell::F64(-0.0),
+                BigQueryCell::String("-0".to_owned()),
+                BigQueryType::Float64(BigQueryFloatEncoding::Double),
+                BigQueryCell::Float64(0.0),
+            ),
+            (
+                Type::DATE,
+                Cell::Date(NaiveDate::from_ymd_opt(0, 12, 31).unwrap().into()),
+                BigQueryCell::String("0000-12-31".to_owned()),
+                BigQueryType::Date,
+                BigQueryCell::String("0001-01-01".to_owned()),
+            ),
+        ] {
             assert!(
                 materializer(DestinationTypeCompatibility::strict())
                     .materialize_cell(typed_cell(typ.clone(), cell.clone()))
-                    .is_err()
+                    .is_err(),
+                "strict should reject risky {} values",
+                typ.name(),
             );
             assert!(
                 materializer(DestinationTypeCompatibility::compatible())
                     .materialize_cell(typed_cell(typ.clone(), cell.clone()))
-                    .is_err()
+                    .is_err(),
+                "compatible should reject risky {} values",
+                typ.name(),
             );
-            assert!(matches!(
-                materialized_cell(
+            assert_eq!(
+                materialized_type_and_cell(
                     DestinationTypeCompatibility::preserve(),
                     typ.clone(),
                     cell.clone()
                 )
                 .unwrap(),
-                BigQueryCell::String(_)
-            ));
-            assert!(
-                materializer(DestinationTypeCompatibility::coerce())
-                    .materialize_cell(typed_cell(typ, cell))
-                    .is_ok()
+                (BigQueryType::String, preserve_cell),
+                "preserve should store exact {} text",
+                typ.name(),
+            );
+            assert_eq!(
+                materialized_type_and_cell(DestinationTypeCompatibility::coerce(), typ, cell)
+                    .unwrap(),
+                (coerce_type, coerce_cell),
+                "coerce should apply the documented value change",
             );
         }
+
+        let json_cell = Cell::String(r#"{"value":18446744073709551616}"#.to_owned());
+        assert!(
+            materializer(DestinationTypeCompatibility::strict())
+                .materialize_cell(typed_cell(Type::JSON, json_cell.clone()))
+                .is_err()
+        );
+        assert!(
+            materializer(DestinationTypeCompatibility::compatible())
+                .materialize_cell(typed_cell(Type::JSON, json_cell.clone()))
+                .is_err()
+        );
+        assert_eq!(
+            materialized_type_and_cell(
+                DestinationTypeCompatibility::preserve(),
+                Type::JSON,
+                json_cell.clone()
+            )
+            .unwrap(),
+            (
+                BigQueryType::String,
+                BigQueryCell::String(r#"{"value":18446744073709551616}"#.to_owned())
+            )
+        );
+
+        let (coerced_json_type, coerced_json_cell) = materialized_type_and_cell(
+            DestinationTypeCompatibility::coerce(),
+            Type::JSON,
+            json_cell,
+        )
+        .unwrap();
+        assert_eq!(coerced_json_type, BigQueryType::Json);
+        let BigQueryCell::String(coerced_json) = coerced_json_cell else {
+            panic!("coerced JSON should be string-backed for BigQuery writes");
+        };
+        let coerced_json: serde_json::Value = serde_json::from_str(&coerced_json).unwrap();
+        assert_eq!(coerced_json["value"].as_f64().unwrap(), 18_446_744_073_709_552_000.0);
+
+        let numeric_array =
+            Cell::Array(ArrayCell::Numeric(vec![Some(PgNumeric::from_str(tiny_numeric).unwrap())]));
+        assert!(
+            materializer(DestinationTypeCompatibility::strict())
+                .materialize_cell(typed_cell(Type::NUMERIC_ARRAY, numeric_array.clone()))
+                .is_err()
+        );
+        assert!(
+            materializer(DestinationTypeCompatibility::compatible())
+                .materialize_cell(typed_cell(Type::NUMERIC_ARRAY, numeric_array.clone()))
+                .is_err()
+        );
+        assert_eq!(
+            materialized_type_and_cell(
+                DestinationTypeCompatibility::preserve(),
+                Type::NUMERIC_ARRAY,
+                numeric_array.clone()
+            )
+            .unwrap(),
+            (BigQueryType::String, BigQueryCell::String(format!("{{{tiny_numeric}}}")))
+        );
+        assert_eq!(
+            materialized_type_and_cell(
+                DestinationTypeCompatibility::coerce(),
+                Type::NUMERIC_ARRAY,
+                numeric_array
+            )
+            .unwrap(),
+            (
+                BigQueryType::Array(BigQueryArrayType::BigNumeric),
+                BigQueryCell::Array(BigQueryArrayCell::String(vec![
+                    rounded_tiny_numeric.to_owned()
+                ]))
+            )
+        );
     }
 
     #[test]
