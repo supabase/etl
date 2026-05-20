@@ -8,7 +8,10 @@ use secrecy::ExposeSecret as _;
 use sha2::Digest as _;
 use tokio::{sync::Mutex, time::Instant};
 
-use crate::snowflake::{Config, Error, Result};
+use crate::snowflake::{
+    Config, Error, Result,
+    config::{HTTP_CONNECT_TIMEOUT, HTTP_REQUEST_TIMEOUT},
+};
 
 /// Self-signed JWT validity window (Snowflake rejects JWTs older than this).
 const TOKEN_LIFETIME_SECS: u64 = 3600;
@@ -116,7 +119,13 @@ impl AuthManager<HttpExchanger> {
             config,
             private_key_path,
             passphrase,
-            HttpExchanger::new(reqwest::Client::new()),
+            HttpExchanger::new(
+                reqwest::Client::builder()
+                    .connect_timeout(HTTP_CONNECT_TIMEOUT)
+                    .timeout(HTTP_REQUEST_TIMEOUT)
+                    .build()
+                    .expect("failed to build HTTP client"),
+            ),
         )
     }
 }

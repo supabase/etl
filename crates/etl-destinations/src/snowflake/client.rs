@@ -6,6 +6,7 @@ use tokio::sync::{Mutex, RwLock};
 use crate::snowflake::{
     Config, Error, Result,
     auth::{AuthManager, HttpExchanger, TokenProvider},
+    config::{HTTP_CONNECT_TIMEOUT, HTTP_REQUEST_TIMEOUT},
     schema,
     sql_client::SqlClient,
     streaming::{ChannelHandle, OffsetToken, RestStreamClient, RowBatch, StreamClient},
@@ -46,7 +47,11 @@ impl Client<AuthManager<HttpExchanger>> {
         auth: Arc<AuthManager<HttpExchanger>>,
         pipeline_id: PipelineId,
     ) -> Self {
-        let http = reqwest::Client::new();
+        let http = reqwest::Client::builder()
+            .connect_timeout(HTTP_CONNECT_TIMEOUT)
+            .timeout(HTTP_REQUEST_TIMEOUT)
+            .build()
+            .expect("failed to build HTTP client");
         let database = config.database.clone();
         let schema = config.schema.clone();
         let stream_client = Arc::new(RestStreamClient::new(

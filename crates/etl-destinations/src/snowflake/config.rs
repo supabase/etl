@@ -1,3 +1,8 @@
+use std::time::Duration;
+
+pub(crate) const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+pub(crate) const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
+
 /// Connection parameters for a Snowflake account.
 #[derive(Debug, Clone)]
 pub struct Config {
