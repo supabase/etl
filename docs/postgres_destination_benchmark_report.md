@@ -68,15 +68,15 @@ Interpretation:
 
 Comparison with public benchmarks:
 
-| Benchmark | Method | Result | Comparison |
-| --- | --- | ---: | --- |
-| This ETL benchmark, 4 copy connections | Multi-row `INSERT`, local source/destination containers | ~488k rows/s | Stable local result |
-| This ETL benchmark, 8 copy connections | Multi-row `INSERT`, local source/destination containers | ~513k rows/s | Best median, more variable |
-| [SQG Java benchmark](https://sqg.dev/blog/java-postgres-insert-benchmark/) | Multi-value `INSERT`, direct ingest | ~253k rows/s | Slower than this run |
-| [SQG Java benchmark](https://sqg.dev/blog/java-postgres-insert-benchmark/) | COPY CSV, direct ingest | ~360k rows/s | Slower than this run |
-| [SQG Java benchmark](https://sqg.dev/blog/java-postgres-insert-benchmark/) | COPY binary, direct ingest | ~712k rows/s | About 1.4x faster than 8 connections |
-| [Cybertec bulk-load benchmark](https://www.cybertec-postgresql.com/en/bulk-load-performance-in-postgresql/) | COPY, direct local load | ~714k rows/s | About 1.4x faster than 8 connections |
-| [Gold Lapel pgx benchmark](https://goldlapel.com/grounds/go-postgres/pgx-bulk-insert-benchmarks) | Binary COPY via `CopyFrom`, direct ingest | ~357k rows/s | Slower than this run |
+| Benchmark | Method | Environment | Result | Comparison |
+| --- | --- | --- | ---: | --- |
+| This ETL benchmark, 4 copy connections | Multi-row `INSERT` | Local Mac, two Docker containers, TCP via Docker Desktop | ~488k rows/s | Stable local result |
+| This ETL benchmark, 8 copy connections | Multi-row `INSERT` | Local Mac, two Docker containers, TCP via Docker Desktop | ~513k rows/s | Best median, more variable |
+| [SQG Java benchmark](https://sqg.dev/blog/java-postgres-insert-benchmark/) | Multi-value `INSERT` | Local direct ingest, PostgreSQL 18 via TestContainers | ~253k rows/s | Slower than this run |
+| [SQG Java benchmark](https://sqg.dev/blog/java-postgres-insert-benchmark/) | COPY CSV | Local direct ingest, PostgreSQL 18 via TestContainers | ~360k rows/s | Slower than this run |
+| [SQG Java benchmark](https://sqg.dev/blog/java-postgres-insert-benchmark/) | COPY binary | Local direct ingest, PostgreSQL 18 via TestContainers | ~712k rows/s | About 1.4x faster than 8 connections |
+| [Cybertec bulk-load benchmark](https://www.cybertec-postgresql.com/en/bulk-load-performance-in-postgresql/) | COPY | Local laptop, local domain socket, NVMe | ~714k rows/s | About 1.4x faster than 8 connections |
+| [Gold Lapel pgx benchmark](https://goldlapel.com/grounds/go-postgres/pgx-bulk-insert-benchmarks) | Binary COPY via `CopyFrom` | Local Unix socket, 0.1ms RTT, NVMe | ~357k rows/s | Slower than this run |
 
 This comparison is directional, not apples-to-apples. Public benchmarks usually measure
 direct client-to-Postgres ingestion. This benchmark includes source table copy, ETL
