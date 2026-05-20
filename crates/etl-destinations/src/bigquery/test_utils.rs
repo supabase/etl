@@ -63,9 +63,8 @@ pub const REQUIRE_BIGQUERY_CREDENTIALS_ENV: &str = "REQUIRE_BIGQUERY_CREDENTIALS
 /// Panics if [`REQUIRE_BIGQUERY_CREDENTIALS_ENV`] is set, and credentials are
 /// not provided.
 pub fn skip_if_missing_bigquery_env_vars() -> bool {
-    let sa_key_path = std::env::var(BIGQUERY_SA_KEY_PATH_ENV).ok().filter(|v| !v.is_empty());
-    let has_project_id =
-        std::env::var(BIGQUERY_PROJECT_ID_ENV).ok().filter(|v| !v.is_empty()).is_some();
+    let sa_key_path = std::env::var_os(BIGQUERY_SA_KEY_PATH_ENV);
+    let has_project_id = std::env::var_os(BIGQUERY_PROJECT_ID_ENV).is_some();
     let has_sa_key_path = sa_key_path.is_some();
     let has_sa_key_file = sa_key_path.as_ref().is_some_and(|path| Path::new(path).is_file());
     if has_sa_key_file && has_project_id {
@@ -73,7 +72,6 @@ pub fn skip_if_missing_bigquery_env_vars() -> bool {
     }
 
     let require = std::env::var_os(REQUIRE_BIGQUERY_CREDENTIALS_ENV).is_some_and(|v| !v.is_empty());
-
     let mut missing_env_vars = Vec::new();
     if !has_sa_key_path {
         missing_env_vars.push(BIGQUERY_SA_KEY_PATH_ENV);
