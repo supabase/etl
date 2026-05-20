@@ -69,13 +69,28 @@ impl MaterializationRules for BigQueryMaterialization {
                     ),
                 }
             }
-            DestinationTypeCompatibilityMode::Lossless
-                if materializes_as_bigquery_string_for_lossless(typ) =>
+            DestinationTypeCompatibilityMode::Compatible
+                if materializes_as_bigquery_string_array_for_compatible(typ) =>
+            {
+                TypeMaterializationResult::Changed(BigQueryType::native_for_source_type(typ))
+            }
+            DestinationTypeCompatibilityMode::Compatible
+                if materializes_as_bigquery_string_for_compatible(typ) =>
             {
                 TypeMaterializationResult::Changed(BigQueryType::String)
             }
-            DestinationTypeCompatibilityMode::Lossy
-                if materializes_as_bigquery_string_for_lossy(typ) =>
+            DestinationTypeCompatibilityMode::Preserve
+                if materializes_as_bigquery_string_for_preserve(typ) =>
+            {
+                TypeMaterializationResult::Changed(BigQueryType::String)
+            }
+            DestinationTypeCompatibilityMode::Coerce
+                if materializes_as_bigquery_string_array_for_coerce(typ) =>
+            {
+                TypeMaterializationResult::Changed(BigQueryType::native_for_source_type(typ))
+            }
+            DestinationTypeCompatibilityMode::Coerce
+                if materializes_as_bigquery_string_for_coerce(typ) =>
             {
                 TypeMaterializationResult::Changed(BigQueryType::String)
             }
@@ -122,8 +137,9 @@ fn bigquery_materialized_cell(
 
     match compatibility.mode() {
         DestinationTypeCompatibilityMode::Strict => strict_cell(typ, cell),
-        DestinationTypeCompatibilityMode::Lossless => lossless_cell(typ, cell),
-        DestinationTypeCompatibilityMode::Lossy => lossy_cell(typ, cell),
+        DestinationTypeCompatibilityMode::Compatible => compatible_cell(typ, cell),
+        DestinationTypeCompatibilityMode::Preserve => preserve_cell(typ, cell),
+        DestinationTypeCompatibilityMode::Coerce => coerce_cell(typ, cell),
     }
 }
 
@@ -174,9 +190,21 @@ fn has_strict_bigquery_native_type(typ: &Type) -> bool {
     )
 }
 
-/// Returns whether lossless mode should materialize the source type as
+/// Returns whether compatible mode should materialize the source type as
 /// `STRING`.
-fn materializes_as_bigquery_string_for_lossless(typ: &Type) -> bool {
+fn materializes_as_bigquery_string_for_compatible(typ: &Type) -> bool {
+    !is_array_type(typ) && !has_strict_bigquery_native_type(typ)
+}
+
+/// Returns whether compatible mode should materialize the source type as
+/// `ARRAY<STRING>`.
+fn materializes_as_bigquery_string_array_for_compatible(typ: &Type) -> bool {
+    is_array_type(typ) && !has_strict_bigquery_native_type(typ)
+}
+
+/// Returns whether preserve mode should materialize the source type as
+/// `STRING`.
+fn materializes_as_bigquery_string_for_preserve(typ: &Type) -> bool {
     if is_array_type(typ) {
         return true;
     }
@@ -199,9 +227,15 @@ fn materializes_as_bigquery_string_for_lossless(typ: &Type) -> bool {
     )
 }
 
-/// Returns whether lossy mode should materialize a non-native type as `STRING`.
-fn materializes_as_bigquery_string_for_lossy(typ: &Type) -> bool {
-    is_array_type(typ) || !has_strict_bigquery_native_type(typ)
+/// Returns whether coerce mode should materialize the source type as `STRING`.
+fn materializes_as_bigquery_string_for_coerce(typ: &Type) -> bool {
+    !is_array_type(typ) && !has_strict_bigquery_native_type(typ)
+}
+
+/// Returns whether coerce mode should materialize the source type as
+/// `ARRAY<STRING>`.
+fn materializes_as_bigquery_string_array_for_coerce(typ: &Type) -> bool {
+    is_array_type(typ) && !has_strict_bigquery_native_type(typ)
 }
 
 /// Returns whether the type is materialized as scalar BigQuery `STRING`.
@@ -211,10 +245,13 @@ fn materializes_as_bigquery_string(
 ) -> bool {
     match compatibility.mode() {
         DestinationTypeCompatibilityMode::Strict => false,
-        DestinationTypeCompatibilityMode::Lossless => {
-            materializes_as_bigquery_string_for_lossless(typ)
+        DestinationTypeCompatibilityMode::Compatible => {
+            materializes_as_bigquery_string_for_compatible(typ)
         }
-        DestinationTypeCompatibilityMode::Lossy => materializes_as_bigquery_string_for_lossy(typ),
+        DestinationTypeCompatibilityMode::Preserve => {
+            materializes_as_bigquery_string_for_preserve(typ)
+        }
+        DestinationTypeCompatibilityMode::Coerce => materializes_as_bigquery_string_for_coerce(typ),
     }
 }
 
@@ -225,10 +262,15 @@ fn array_typed_cell(
     cell: Cell,
     compatibility: DestinationTypeCompatibility,
 ) -> BigQueryCellMaterializationResult {
+    if materializes_as_bigquery_string(typ, compatibility) {
+        return string_materialized_cell(cell);
+    }
+
     match compatibility.mode() {
         DestinationTypeCompatibilityMode::Strict => strict_source_array_cell(typ, cell),
-        DestinationTypeCompatibilityMode::Lossless => lossless_source_array_cell(cell),
-        DestinationTypeCompatibilityMode::Lossy => lossy_source_array_cell(cell),
+        DestinationTypeCompatibilityMode::Compatible => compatible_source_array_cell(typ, cell),
+        DestinationTypeCompatibilityMode::Preserve => preserve_source_array_cell(cell),
+        DestinationTypeCompatibilityMode::Coerce => coerce_source_array_cell(typ, cell),
     }
 }
 
@@ -240,8 +282,9 @@ fn json_string_cell(
 ) -> BigQueryCellMaterializationResult {
     match compatibility.mode() {
         DestinationTypeCompatibilityMode::Strict => strict_json_text(typ, value),
-        DestinationTypeCompatibilityMode::Lossless => lossless_json_text(value),
-        DestinationTypeCompatibilityMode::Lossy => lossy_json_text(typ, value),
+        DestinationTypeCompatibilityMode::Compatible => compatible_json_text(typ, value),
+        DestinationTypeCompatibilityMode::Preserve => preserve_json_text(value),
+        DestinationTypeCompatibilityMode::Coerce => coerce_json_text(typ, value),
     }
 }
 
@@ -290,8 +333,38 @@ fn strict_json_text(typ: &Type, value: String) -> BigQueryCellMaterializationRes
     }
 }
 
-/// Applies lossless materialization to a source cell.
-fn lossless_cell(typ: &Type, cell: Cell) -> BigQueryCellMaterializationResult {
+/// Applies compatible materialization to a source cell.
+fn compatible_cell(typ: &Type, cell: Cell) -> BigQueryCellMaterializationResult {
+    strict_cell(typ, cell)
+}
+
+/// Applies compatible materialization to a source array column.
+fn compatible_source_array_cell(typ: &Type, cell: Cell) -> BigQueryCellMaterializationResult {
+    match cell {
+        Cell::Null => invalid(
+            ErrorKind::UnsupportedValueInDestination,
+            "NULL arrays cannot be preserved by BigQuery repeated fields",
+        ),
+        Cell::Array(array) => {
+            if let Some(result) = validate_array_has_no_nulls(&array) {
+                result
+            } else if has_strict_bigquery_native_type(typ) {
+                strict_cell(typ, Cell::Array(array))
+            } else {
+                string_element_array_cell(typ, array)
+            }
+        }
+        cell => strict_cell(typ, cell),
+    }
+}
+
+/// Applies compatible materialization to raw JSON text.
+fn compatible_json_text(typ: &Type, value: String) -> BigQueryCellMaterializationResult {
+    strict_json_text(typ, value)
+}
+
+/// Applies preserve materialization to a source cell.
+fn preserve_cell(typ: &Type, cell: Cell) -> BigQueryCellMaterializationResult {
     match cell {
         Cell::F32(value) => {
             materialized(BigQueryType::String, BigQueryCell::string(value.to_string()), TypeChanged)
@@ -317,13 +390,13 @@ fn lossless_cell(typ: &Type, cell: Cell) -> BigQueryCellMaterializationResult {
         Cell::Uuid(value) => {
             materialized(BigQueryType::String, BigQueryCell::string(value.to_string()), TypeChanged)
         }
-        Cell::Array(array) => lossless_array_cell(array),
+        Cell::Array(array) => preserve_array_cell(array),
         cell => materialized_native(BigQueryType::native_for_source_type(typ), cell, Unchanged),
     }
 }
 
 /// Materializes any source array column as scalar text, preserving NULLs.
-fn lossless_source_array_cell(cell: Cell) -> BigQueryCellMaterializationResult {
+fn preserve_source_array_cell(cell: Cell) -> BigQueryCellMaterializationResult {
     match cell {
         Cell::Array(array) => materialized(
             BigQueryType::String,
@@ -336,12 +409,12 @@ fn lossless_source_array_cell(cell: Cell) -> BigQueryCellMaterializationResult {
 }
 
 /// Preserves raw JSON text exactly.
-fn lossless_json_text(value: String) -> BigQueryCellMaterializationResult {
+fn preserve_json_text(value: String) -> BigQueryCellMaterializationResult {
     materialized(BigQueryType::String, BigQueryCell::string(value), TypeChanged)
 }
 
-/// Applies lossless materialization to a parsed array value.
-fn lossless_array_cell(array: ArrayCell) -> BigQueryCellMaterializationResult {
+/// Applies preserve materialization to a parsed array value.
+fn preserve_array_cell(array: ArrayCell) -> BigQueryCellMaterializationResult {
     match array {
         ArrayCell::F32(values) => string_array(values, |value| value.to_string()),
         ArrayCell::F64(values) => string_array(values, |value| value.to_string()),
@@ -355,8 +428,8 @@ fn lossless_array_cell(array: ArrayCell) -> BigQueryCellMaterializationResult {
     }
 }
 
-/// Applies lossy materialization to a source cell.
-fn lossy_cell(typ: &Type, cell: Cell) -> BigQueryCellMaterializationResult {
+/// Applies coerce materialization to a source cell.
+fn coerce_cell(typ: &Type, cell: Cell) -> BigQueryCellMaterializationResult {
     match cell {
         Cell::F32(value) if value == 0.0 && value.is_sign_negative() => materialized(
             BigQueryType::native_for_source_type(typ),
@@ -368,87 +441,139 @@ fn lossy_cell(typ: &Type, cell: Cell) -> BigQueryCellMaterializationResult {
             BigQueryCell::Float64(0.0),
             ValueChanged,
         ),
-        Cell::Numeric(value) => lossy_numeric_cell(value),
-        Cell::Date(value) => lossy_date_cell(typ, value),
-        Cell::Time(value) => lossy_time_cell(typ, value),
-        Cell::Timestamp(value) => lossy_timestamp_cell(typ, value),
-        Cell::TimestampTz(value) => lossy_timestamptz_cell(typ, value),
+        Cell::Numeric(value) => coerce_numeric_cell(value),
+        Cell::Date(value) => coerce_date_cell(typ, value),
+        Cell::Time(value) => coerce_time_cell(typ, value),
+        Cell::Timestamp(value) => coerce_timestamp_cell(typ, value),
+        Cell::TimestampTz(value) => coerce_timestamptz_cell(typ, value),
         Cell::Uuid(value) => {
             materialized(BigQueryType::String, BigQueryCell::string(value.to_string()), TypeChanged)
         }
-        Cell::Array(array) => lossy_array_cell(array),
+        Cell::Array(array) => coerce_array_cell(typ, array),
         cell => materialized_native(BigQueryType::native_for_source_type(typ), cell, Unchanged),
     }
 }
 
-/// Materializes any source array column as scalar text, preserving NULLs.
-fn lossy_source_array_cell(cell: Cell) -> BigQueryCellMaterializationResult {
+/// Applies coerce materialization to a source array column.
+fn coerce_source_array_cell(typ: &Type, cell: Cell) -> BigQueryCellMaterializationResult {
     match cell {
-        Cell::Array(array) => materialized(
-            BigQueryType::String,
-            BigQueryCell::string(format_array(array)),
-            TypeChanged,
+        Cell::Null => invalid(
+            ErrorKind::UnsupportedValueInDestination,
+            "NULL arrays cannot be preserved by BigQuery repeated fields",
         ),
-        Cell::Null => materialized(BigQueryType::String, BigQueryCell::Null, TypeChanged),
-        cell => materialized_native(BigQueryType::String, cell, TypeChanged),
+        Cell::Array(array) => {
+            if let Some(result) = validate_array_has_no_nulls(&array) {
+                result
+            } else if materializes_as_bigquery_string_array_for_coerce(typ) {
+                string_element_array_cell(typ, array)
+            } else {
+                coerce_array_cell(typ, array)
+            }
+        }
+        cell => coerce_cell(typ, cell),
     }
 }
 
-/// Applies lossy materialization to raw JSON text.
-fn lossy_json_text(typ: &Type, value: String) -> BigQueryCellMaterializationResult {
-    match parse_json_text_first_key_wins(&value) {
-        Ok(value_json) => {
-            if let Err(reason) = validate_bigquery_json_depth(&value_json) {
-                invalid(ErrorKind::UnsupportedValueInDestination, reason)
-            } else {
-                match normalize_bigquery_json_lossy(value_json) {
-                    Ok(normalized) => materialized(
-                        BigQueryType::native_for_source_type(typ),
-                        BigQueryCell::string(normalized.to_string()),
-                        ValueChanged,
-                    ),
-                    Err(reason) => invalid(ErrorKind::UnsupportedValueInDestination, reason),
-                }
-            }
-        }
+/// Applies coerce materialization to raw JSON text.
+fn coerce_json_text(typ: &Type, value: String) -> BigQueryCellMaterializationResult {
+    match coerce_json_value_text(value) {
+        Ok(value) => materialized(
+            BigQueryType::native_for_source_type(typ),
+            BigQueryCell::string(value),
+            ValueChanged,
+        ),
         Err(result) => result,
     }
 }
 
-/// Applies lossy materialization to a parsed array value.
-fn lossy_array_cell(array: ArrayCell) -> BigQueryCellMaterializationResult {
-    match array {
-        ArrayCell::F32(values) => value_array(
+/// Applies coerce materialization to a parsed array value.
+fn coerce_array_cell(typ: &Type, array: ArrayCell) -> BigQueryCellMaterializationResult {
+    match (typ, array) {
+        (&Type::JSON_ARRAY | &Type::JSONB_ARRAY, ArrayCell::String(values)) => {
+            coerce_json_array_cell(typ, values)
+        }
+        (_, ArrayCell::F32(values)) => value_array(
+            typ,
             values,
             |value| {
                 if value == 0.0 && value.is_sign_negative() { 0.0 } else { value }
             },
             ArrayCell::F32,
         ),
-        ArrayCell::F64(values) => value_array(
+        (_, ArrayCell::F64(values)) => value_array(
+            typ,
             values,
             |value| {
                 if value == 0.0 && value.is_sign_negative() { 0.0 } else { value }
             },
             ArrayCell::F64,
         ),
-        ArrayCell::Numeric(values) => lossy_numeric_array_cell(values),
-        ArrayCell::Date(values) => value_array(values, clamp_bigquery_date_value, ArrayCell::Date),
-        ArrayCell::Time(values) => value_array(values, clamp_bigquery_time_value, ArrayCell::Time),
-        ArrayCell::Timestamp(values) => {
-            value_array(values, clamp_bigquery_timestamp_value, ArrayCell::Timestamp)
+        (_, ArrayCell::Numeric(values)) => coerce_numeric_array_cell(typ, values),
+        (_, ArrayCell::Date(values)) => {
+            value_array(typ, values, clamp_bigquery_date_value, ArrayCell::Date)
         }
-        ArrayCell::TimestampTz(values) => {
-            value_array(values, clamp_bigquery_timestamptz_value, ArrayCell::TimestampTz)
+        (_, ArrayCell::Time(values)) => {
+            value_array(typ, values, clamp_bigquery_time_value, ArrayCell::Time)
         }
-        ArrayCell::Uuid(values) => string_array(values, |value| value.to_string()),
-        array => materialized_native(BigQueryType::String, Cell::Array(array), Unchanged),
+        (_, ArrayCell::Timestamp(values)) => {
+            value_array(typ, values, clamp_bigquery_timestamp_value, ArrayCell::Timestamp)
+        }
+        (_, ArrayCell::TimestampTz(values)) => {
+            value_array(typ, values, clamp_bigquery_timestamptz_value, ArrayCell::TimestampTz)
+        }
+        (_, ArrayCell::Uuid(values)) => string_array(values, |value| value.to_string()),
+        (_, array) => materialized_native(
+            BigQueryType::native_for_source_type(typ),
+            Cell::Array(array),
+            Unchanged,
+        ),
     }
 }
 
-/// Applies lossy materialization to a numeric value.
-fn lossy_numeric_cell(value: PgNumeric) -> BigQueryCellMaterializationResult {
-    match lossy_bigquery_numeric(value) {
+/// Applies coerce materialization to JSON array element values.
+fn coerce_json_array_cell(
+    typ: &Type,
+    values: Vec<Option<String>>,
+) -> BigQueryCellMaterializationResult {
+    let values = values
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| match value {
+            Some(value) => coerce_json_value_text(value)
+                .map(Some)
+                .map_err(|result| prefix_array_error(index, result)),
+            None => Err(invalid(
+                ErrorKind::NullValuesNotSupportedInArrayInDestination,
+                format!("Element at index {index} is NULL, which is not supported in BigQuery"),
+            )),
+        })
+        .collect::<Result<Vec<_>, _>>();
+
+    match values {
+        Ok(values) => materialized_native(
+            BigQueryType::native_for_source_type(typ),
+            Cell::Array(ArrayCell::String(values)),
+            ValueChanged,
+        ),
+        Err(result) => result,
+    }
+}
+
+/// Normalizes raw JSON text using BigQuery coercion rules.
+fn coerce_json_value_text(value: String) -> Result<String, BigQueryCellMaterializationResult> {
+    let value_json = parse_json_text_first_key_wins(&value)?;
+    if let Err(reason) = validate_bigquery_json_depth(&value_json) {
+        return Err(invalid(ErrorKind::UnsupportedValueInDestination, reason));
+    }
+
+    coerce_bigquery_json(value_json)
+        .map(|normalized| normalized.to_string())
+        .map_err(|reason| invalid(ErrorKind::UnsupportedValueInDestination, reason))
+}
+
+/// Applies coerce materialization to a numeric value.
+fn coerce_numeric_cell(value: PgNumeric) -> BigQueryCellMaterializationResult {
+    match coerce_bigquery_numeric(value) {
         Ok(value) => materialized(
             BigQueryType::BigNumeric,
             BigQueryCell::string(value.to_string()),
@@ -458,14 +583,17 @@ fn lossy_numeric_cell(value: PgNumeric) -> BigQueryCellMaterializationResult {
     }
 }
 
-/// Applies lossy materialization to numeric array values.
-fn lossy_numeric_array_cell(values: Vec<Option<PgNumeric>>) -> BigQueryCellMaterializationResult {
+/// Applies coerce materialization to numeric array values.
+fn coerce_numeric_array_cell(
+    typ: &Type,
+    values: Vec<Option<PgNumeric>>,
+) -> BigQueryCellMaterializationResult {
     let values = values
         .into_iter()
         .enumerate()
         .map(|(index, value)| {
             value
-                .map(lossy_bigquery_numeric)
+                .map(coerce_bigquery_numeric)
                 .transpose()
                 .map_err(|reason| format!("Element at index {index}: {reason}"))
         })
@@ -473,7 +601,7 @@ fn lossy_numeric_array_cell(values: Vec<Option<PgNumeric>>) -> BigQueryCellMater
 
     match values {
         Ok(values) => materialized_native(
-            BigQueryType::String,
+            BigQueryType::native_for_source_type(typ),
             Cell::Array(ArrayCell::Numeric(values)),
             ValueChanged,
         ),
@@ -481,8 +609,8 @@ fn lossy_numeric_array_cell(values: Vec<Option<PgNumeric>>) -> BigQueryCellMater
     }
 }
 
-/// Applies lossy materialization to a PostgreSQL date value.
-fn lossy_date_cell(typ: &Type, value: PgDate) -> BigQueryCellMaterializationResult {
+/// Applies coerce materialization to a PostgreSQL date value.
+fn coerce_date_cell(typ: &Type, value: PgDate) -> BigQueryCellMaterializationResult {
     materialized(
         BigQueryType::native_for_source_type(typ),
         BigQueryCell::string(clamp_bigquery_date_value(value).to_string()),
@@ -490,8 +618,8 @@ fn lossy_date_cell(typ: &Type, value: PgDate) -> BigQueryCellMaterializationResu
     )
 }
 
-/// Applies lossy materialization to a PostgreSQL time value.
-fn lossy_time_cell(typ: &Type, value: PgTime) -> BigQueryCellMaterializationResult {
+/// Applies coerce materialization to a PostgreSQL time value.
+fn coerce_time_cell(typ: &Type, value: PgTime) -> BigQueryCellMaterializationResult {
     materialized(
         BigQueryType::native_for_source_type(typ),
         BigQueryCell::string(clamp_bigquery_time_value(value).to_string()),
@@ -499,8 +627,8 @@ fn lossy_time_cell(typ: &Type, value: PgTime) -> BigQueryCellMaterializationResu
     )
 }
 
-/// Applies lossy materialization to a PostgreSQL timestamp value.
-fn lossy_timestamp_cell(typ: &Type, value: PgTimestamp) -> BigQueryCellMaterializationResult {
+/// Applies coerce materialization to a PostgreSQL timestamp value.
+fn coerce_timestamp_cell(typ: &Type, value: PgTimestamp) -> BigQueryCellMaterializationResult {
     materialized(
         BigQueryType::native_for_source_type(typ),
         BigQueryCell::string(clamp_bigquery_timestamp_value(value).to_string()),
@@ -508,8 +636,8 @@ fn lossy_timestamp_cell(typ: &Type, value: PgTimestamp) -> BigQueryCellMateriali
     )
 }
 
-/// Applies lossy materialization to a PostgreSQL timestamptz value.
-fn lossy_timestamptz_cell(typ: &Type, value: PgTimestampTz) -> BigQueryCellMaterializationResult {
+/// Applies coerce materialization to a PostgreSQL timestamptz value.
+fn coerce_timestamptz_cell(typ: &Type, value: PgTimestampTz) -> BigQueryCellMaterializationResult {
     materialized(
         BigQueryType::native_for_source_type(typ),
         BigQueryCell::string(clamp_bigquery_timestamptz_value(value).to_string()),
@@ -608,23 +736,60 @@ fn string_materialized_cell(cell: Cell) -> BigQueryCellMaterializationResult {
     materialized(BigQueryType::String, cell, TypeChanged)
 }
 
+/// Converts a source array column to a BigQuery repeated `STRING` cell.
+fn string_element_array_cell(typ: &Type, array: ArrayCell) -> BigQueryCellMaterializationResult {
+    match array {
+        ArrayCell::Bool(values) => string_element_array(typ, values, |value| value.to_string()),
+        ArrayCell::String(values) => string_element_array(typ, values, |value| value),
+        ArrayCell::I16(values) => string_element_array(typ, values, |value| value.to_string()),
+        ArrayCell::I32(values) => string_element_array(typ, values, |value| value.to_string()),
+        ArrayCell::U32(values) => string_element_array(typ, values, |value| value.to_string()),
+        ArrayCell::I64(values) => string_element_array(typ, values, |value| value.to_string()),
+        ArrayCell::F32(values) => string_element_array(typ, values, |value| value.to_string()),
+        ArrayCell::F64(values) => string_element_array(typ, values, |value| value.to_string()),
+        ArrayCell::Numeric(values) => string_element_array(typ, values, |value| value.to_string()),
+        ArrayCell::Date(values) => string_element_array(typ, values, |value| value.to_string()),
+        ArrayCell::Time(values) => string_element_array(typ, values, |value| value.to_string()),
+        ArrayCell::Timestamp(values) => {
+            string_element_array(typ, values, |value| value.to_string())
+        }
+        ArrayCell::TimestampTz(values) => {
+            string_element_array(typ, values, |value| value.to_string())
+        }
+        ArrayCell::Uuid(values) => string_element_array(typ, values, |value| value.to_string()),
+        ArrayCell::Bytes(values) => {
+            string_element_array(typ, values, |value| format!("\\x{}", encode_hex(&value)))
+        }
+    }
+}
+
+/// Converts an optional array to repeated `STRING` values.
+fn string_element_array<T>(
+    typ: &Type,
+    values: Vec<Option<T>>,
+    convert: impl FnMut(T) -> String,
+) -> BigQueryCellMaterializationResult {
+    let converted_values = match convert_string_array_values(values, convert) {
+        Ok(values) => values,
+        Err(result) => return result,
+    };
+
+    materialized(
+        BigQueryType::native_for_source_type(typ),
+        BigQueryCell::Array(BigQueryArrayCell::String(converted_values)),
+        TypeChanged,
+    )
+}
+
 /// Converts an optional array to a string array.
 fn string_array<T>(
     values: Vec<Option<T>>,
-    mut convert: impl FnMut(T) -> String,
+    convert: impl FnMut(T) -> String,
 ) -> BigQueryCellMaterializationResult {
-    let mut converted_values = Vec::with_capacity(values.len());
-    for (index, value) in values.into_iter().enumerate() {
-        match value {
-            Some(value) => converted_values.push(convert(value)),
-            None => {
-                return invalid(
-                    ErrorKind::NullValuesNotSupportedInArrayInDestination,
-                    format!("Element at index {index} is NULL, which is not supported in BigQuery"),
-                );
-            }
-        }
-    }
+    let converted_values = match convert_string_array_values(values, convert) {
+        Ok(values) => values,
+        Err(result) => return result,
+    };
 
     materialized(
         BigQueryType::String,
@@ -633,14 +798,36 @@ fn string_array<T>(
     )
 }
 
+/// Converts optional values to required `STRING` array elements.
+fn convert_string_array_values<T>(
+    values: Vec<Option<T>>,
+    mut convert: impl FnMut(T) -> String,
+) -> Result<Vec<String>, BigQueryCellMaterializationResult> {
+    let mut converted_values = Vec::with_capacity(values.len());
+    for (index, value) in values.into_iter().enumerate() {
+        match value {
+            Some(value) => converted_values.push(convert(value)),
+            None => {
+                return Err(invalid(
+                    ErrorKind::NullValuesNotSupportedInArrayInDestination,
+                    format!("Element at index {index} is NULL, which is not supported in BigQuery"),
+                ));
+            }
+        }
+    }
+
+    Ok(converted_values)
+}
+
 /// Converts an optional array while preserving the array variant.
 fn value_array<T>(
+    typ: &Type,
     values: Vec<Option<T>>,
     mut convert: impl FnMut(T) -> T,
     wrap: impl FnOnce(Vec<Option<T>>) -> ArrayCell,
 ) -> BigQueryCellMaterializationResult {
     materialized_native(
-        BigQueryType::String,
+        BigQueryType::native_for_source_type(typ),
         Cell::Array(wrap(values.into_iter().map(|value| value.map(&mut convert)).collect())),
         ValueChanged,
     )
@@ -1169,34 +1356,30 @@ fn json_number_fits_float64(number: &str) -> bool {
     number.parse::<f64>().is_ok_and(f64::is_finite)
 }
 
-/// Normalizes a JSON value using deterministic lossy BigQuery rules.
-fn normalize_bigquery_json_lossy(value: serde_json::Value) -> Result<serde_json::Value, String> {
+/// Normalizes a JSON value using deterministic BigQuery coercion rules.
+fn coerce_bigquery_json(value: serde_json::Value) -> Result<serde_json::Value, String> {
     match value {
         serde_json::Value::Array(values) => {
-            let values = values
-                .into_iter()
-                .map(normalize_bigquery_json_lossy)
-                .collect::<Result<Vec<_>, _>>()?;
+            let values =
+                values.into_iter().map(coerce_bigquery_json).collect::<Result<Vec<_>, _>>()?;
             Ok(serde_json::Value::Array(values))
         }
         serde_json::Value::Object(values) => {
             let values = values
                 .into_iter()
-                .map(|(key, value)| normalize_bigquery_json_lossy(value).map(|value| (key, value)))
+                .map(|(key, value)| coerce_bigquery_json(value).map(|value| (key, value)))
                 .collect::<Result<serde_json::Map<_, _>, _>>()?;
             Ok(serde_json::Value::Object(values))
         }
         serde_json::Value::Number(number) => {
-            normalize_bigquery_json_number_lossy(number).map(serde_json::Value::Number)
+            coerce_bigquery_json_number(number).map(serde_json::Value::Number)
         }
         value => Ok(value),
     }
 }
 
-/// Normalizes a JSON number using deterministic lossy BigQuery rules.
-fn normalize_bigquery_json_number_lossy(
-    number: serde_json::Number,
-) -> Result<serde_json::Number, String> {
+/// Normalizes a JSON number using deterministic BigQuery coercion rules.
+fn coerce_bigquery_json_number(number: serde_json::Number) -> Result<serde_json::Number, String> {
     let number_string = number.as_str().to_owned();
     let needs_float_normalization = if is_json_integer_literal(&number_string) {
         if number_string.starts_with('-') {
@@ -1214,10 +1397,11 @@ fn normalize_bigquery_json_number_lossy(
 
     let normalized = match number_string.parse::<f64>() {
         Ok(value) if value.is_finite() => value,
-        Ok(value) if value.is_sign_negative() => -f64::MAX,
-        Ok(_) => f64::MAX,
-        Err(_) if number_string.starts_with('-') => -f64::MAX,
-        Err(_) => f64::MAX,
+        Ok(_) | Err(_) => {
+            return Err(format!(
+                "JSON number {number_string} cannot be rounded to BigQuery's JSON number domain",
+            ));
+        }
     };
 
     serde_json::Number::from_f64(normalized).ok_or_else(|| {
@@ -1357,8 +1541,8 @@ fn bigquery_bignumeric_in_range(value: &PgNumeric) -> bool {
     }
 }
 
-/// Applies lossy BigQuery `BIGNUMERIC` rounding and clamping.
-fn lossy_bigquery_numeric(value: PgNumeric) -> Result<PgNumeric, String> {
+/// Applies BigQuery `BIGNUMERIC` coercion by rounding and clamping.
+fn coerce_bigquery_numeric(value: PgNumeric) -> Result<PgNumeric, String> {
     let value = match value {
         PgNumeric::NaN => return Err("NaN cannot be normalized to BigQuery BIGNUMERIC".to_owned()),
         PgNumeric::PositiveInfinity => BIGQUERY_BIGNUMERIC_MAX.to_owned(),
@@ -1594,6 +1778,7 @@ mod tests {
     use etl::error::EtlResult;
 
     use super::*;
+    use crate::bigquery::value::{BigQueryArrayType, BigQueryIntEncoding};
 
     /// Returns a materializer for the supplied mode.
     fn materializer(
@@ -1640,8 +1825,8 @@ mod tests {
     }
 
     #[test]
-    fn lossless_type_mapping_uses_string_for_bigquery_risky_types() {
-        let compatibility = DestinationTypeCompatibility::lossless();
+    fn preserve_type_mapping_uses_string_for_bigquery_risky_types() {
+        let compatibility = DestinationTypeCompatibility::preserve();
         let materializer = materializer(compatibility);
 
         for typ in [
@@ -1661,8 +1846,46 @@ mod tests {
 
         for typ in [Type::NUMERIC_ARRAY, Type::JSON_ARRAY, Type::TIMESTAMPTZ_ARRAY] {
             assert_eq!(
-                materializer.materialize_type(&typ).expect("array type should map to scalar text"),
+                materializer
+                    .materialize_type(&typ)
+                    .expect("preserve array type should map to scalar text"),
                 BigQueryType::String
+            );
+        }
+    }
+
+    #[test]
+    fn compatible_type_mapping_uses_native_types_with_string_fallbacks() {
+        let compatibility = DestinationTypeCompatibility::compatible();
+        let materializer = materializer(compatibility);
+
+        for (typ, expected_type) in [
+            (Type::NUMERIC, BigQueryType::BigNumeric),
+            (Type::JSONB, BigQueryType::Json),
+            (Type::TIMESTAMP, BigQueryType::DateTime),
+            (Type::TIMESTAMPTZ, BigQueryType::Timestamp),
+            (
+                Type::INT4_ARRAY,
+                BigQueryType::Array(BigQueryArrayType::Int64(BigQueryIntEncoding::Int32)),
+            ),
+        ] {
+            assert_eq!(
+                materializer.materialize_type(&typ).expect("native type should materialize"),
+                expected_type
+            );
+        }
+
+        for typ in [Type::UUID, Type::INTERVAL] {
+            assert_eq!(
+                materializer.materialize_type(&typ).expect("fallback type should materialize"),
+                BigQueryType::String
+            );
+        }
+
+        for typ in [Type::UUID_ARRAY, Type::MONEY_ARRAY, Type::INET_ARRAY, Type::INT4_RANGE_ARRAY] {
+            assert_eq!(
+                materializer.materialize_type(&typ).expect("fallback type should materialize"),
+                BigQueryType::Array(BigQueryArrayType::String)
             );
         }
     }
@@ -1699,8 +1922,8 @@ mod tests {
     }
 
     #[test]
-    fn lossy_type_mapping_uses_string_for_bigquery_non_native_types() {
-        let compatibility = DestinationTypeCompatibility::lossy();
+    fn coerce_type_mapping_uses_string_for_bigquery_non_native_types() {
+        let compatibility = DestinationTypeCompatibility::coerce();
         let materializer = materializer(compatibility);
 
         for typ in [
@@ -1726,8 +1949,8 @@ mod tests {
             assert_eq!(
                 materializer
                     .materialize_type(&typ)
-                    .expect("non-native array type should map to scalar text"),
-                BigQueryType::String
+                    .expect("non-native array type should map to repeated text"),
+                BigQueryType::Array(BigQueryArrayType::String)
             );
         }
     }
@@ -1735,16 +1958,16 @@ mod tests {
     #[test]
     fn string_materialized_types_return_text_carriers_for_all_modes() {
         let cases = [
-            (DestinationTypeCompatibility::lossless(), Type::NUMERIC, Cell::Null),
-            (DestinationTypeCompatibility::lossless(), Type::JSON, Cell::Null),
-            (DestinationTypeCompatibility::lossless(), Type::DATE, Cell::Null),
-            (DestinationTypeCompatibility::lossy(), Type::MONEY, Cell::String("$1.00".to_owned())),
+            (DestinationTypeCompatibility::preserve(), Type::NUMERIC, Cell::Null),
+            (DestinationTypeCompatibility::preserve(), Type::JSON, Cell::Null),
+            (DestinationTypeCompatibility::preserve(), Type::DATE, Cell::Null),
+            (DestinationTypeCompatibility::coerce(), Type::MONEY, Cell::String("$1.00".to_owned())),
             (
-                DestinationTypeCompatibility::lossless(),
+                DestinationTypeCompatibility::preserve(),
                 Type::INET,
                 Cell::String("127.0.0.1".to_owned()),
             ),
-            (DestinationTypeCompatibility::lossy(), Type::BIT, Cell::String("1010".to_owned())),
+            (DestinationTypeCompatibility::coerce(), Type::BIT, Cell::String("1010".to_owned())),
         ];
 
         for (compatibility, typ, cell) in cases {
@@ -1795,34 +2018,48 @@ mod tests {
                 Cell::Array(ArrayCell::I32(vec![Some(1), Some(2)])),
             ),
             (
-                DestinationTypeCompatibility::lossless(),
+                DestinationTypeCompatibility::preserve(),
                 Type::INT4_ARRAY,
                 Cell::Array(ArrayCell::I32(vec![Some(1), None])),
             ),
             (
-                DestinationTypeCompatibility::lossy(),
+                DestinationTypeCompatibility::compatible(),
                 Type::INT4_ARRAY,
-                Cell::Array(ArrayCell::I32(vec![Some(1), None])),
+                Cell::Array(ArrayCell::I32(vec![Some(1), Some(2)])),
             ),
             (
-                DestinationTypeCompatibility::lossless(),
+                DestinationTypeCompatibility::preserve(),
                 Type::NUMERIC,
                 Cell::Numeric(PgNumeric::from_str("1.23").unwrap()),
             ),
             (
-                DestinationTypeCompatibility::lossy(),
+                DestinationTypeCompatibility::coerce(),
                 Type::NUMERIC,
                 Cell::Numeric(PgNumeric::from_str("1.23").unwrap()),
             ),
             (
-                DestinationTypeCompatibility::lossy(),
+                DestinationTypeCompatibility::coerce(),
                 Type::DATE,
                 Cell::Date(PgDate::Finite(bigquery_max_date())),
             ),
             (
-                DestinationTypeCompatibility::lossy(),
+                DestinationTypeCompatibility::coerce(),
                 Type::UUID,
                 Cell::Uuid(uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap()),
+            ),
+            (
+                DestinationTypeCompatibility::compatible(),
+                Type::UUID_ARRAY,
+                Cell::Array(ArrayCell::Uuid(vec![Some(
+                    uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap(),
+                )])),
+            ),
+            (
+                DestinationTypeCompatibility::coerce(),
+                Type::UUID_ARRAY,
+                Cell::Array(ArrayCell::Uuid(vec![Some(
+                    uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap(),
+                )])),
             ),
         ];
 
@@ -1838,7 +2075,7 @@ mod tests {
     }
 
     #[test]
-    fn strict_lossless_and_lossy_handle_risky_values() {
+    fn strict_preserve_and_coerce_handle_risky_values() {
         let cases = [
             (
                 Type::NUMERIC,
@@ -1848,7 +2085,6 @@ mod tests {
             ),
             (Type::NUMERIC, Cell::Numeric(PgNumeric::PositiveInfinity)),
             (Type::JSON, Cell::String(r#"{"value":18446744073709551616}"#.to_owned())),
-            (Type::JSON, Cell::String(r#"{"value":1e309}"#.to_owned())),
             (Type::FLOAT8, Cell::F64(-0.0)),
             (Type::DATE, Cell::Date(NaiveDate::from_ymd_opt(0, 12, 31).unwrap().into())),
         ];
@@ -1859,9 +2095,14 @@ mod tests {
                     .materialize_cell(typed_cell(typ.clone(), cell.clone()))
                     .is_err()
             );
+            assert!(
+                materializer(DestinationTypeCompatibility::compatible())
+                    .materialize_cell(typed_cell(typ.clone(), cell.clone()))
+                    .is_err()
+            );
             assert!(matches!(
                 materialized_cell(
-                    DestinationTypeCompatibility::lossless(),
+                    DestinationTypeCompatibility::preserve(),
                     typ.clone(),
                     cell.clone()
                 )
@@ -1869,7 +2110,7 @@ mod tests {
                 BigQueryCell::String(_)
             ));
             assert!(
-                materializer(DestinationTypeCompatibility::lossy())
+                materializer(DestinationTypeCompatibility::coerce())
                     .materialize_cell(typed_cell(typ, cell))
                     .is_ok()
             );
@@ -1877,7 +2118,7 @@ mod tests {
     }
 
     #[test]
-    fn strict_lossless_and_lossy_handle_uuid_values() {
+    fn strict_preserve_and_coerce_handle_uuid_values() {
         let uuid = uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
 
         assert!(
@@ -1887,7 +2128,7 @@ mod tests {
         );
         assert_eq!(
             materialized_cell(
-                DestinationTypeCompatibility::lossless(),
+                DestinationTypeCompatibility::compatible(),
                 Type::UUID,
                 Cell::Uuid(uuid)
             )
@@ -1895,14 +2136,23 @@ mod tests {
             BigQueryCell::String(uuid.to_string())
         );
         assert_eq!(
-            materialized_cell(DestinationTypeCompatibility::lossy(), Type::UUID, Cell::Uuid(uuid))
+            materialized_cell(
+                DestinationTypeCompatibility::preserve(),
+                Type::UUID,
+                Cell::Uuid(uuid)
+            )
+            .unwrap(),
+            BigQueryCell::String(uuid.to_string())
+        );
+        assert_eq!(
+            materialized_cell(DestinationTypeCompatibility::coerce(), Type::UUID, Cell::Uuid(uuid))
                 .unwrap(),
             BigQueryCell::String(uuid.to_string())
         );
     }
 
     #[test]
-    fn strict_lossless_and_lossy_handle_uuid_array_values() {
+    fn strict_preserve_and_coerce_handle_uuid_array_values() {
         let uuid = uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
         let cell = Cell::Array(ArrayCell::Uuid(vec![Some(uuid)]));
 
@@ -1913,7 +2163,16 @@ mod tests {
         );
         assert_eq!(
             materialized_cell(
-                DestinationTypeCompatibility::lossless(),
+                DestinationTypeCompatibility::compatible(),
+                Type::UUID_ARRAY,
+                cell.clone()
+            )
+            .unwrap(),
+            BigQueryCell::Array(BigQueryArrayCell::String(vec![uuid.to_string()]))
+        );
+        assert_eq!(
+            materialized_cell(
+                DestinationTypeCompatibility::preserve(),
                 Type::UUID_ARRAY,
                 cell.clone()
             )
@@ -1921,24 +2180,49 @@ mod tests {
             BigQueryCell::String(format!("{{{uuid}}}"))
         );
         assert_eq!(
-            materialized_cell(DestinationTypeCompatibility::lossy(), Type::UUID_ARRAY, cell)
+            materialized_cell(DestinationTypeCompatibility::coerce(), Type::UUID_ARRAY, cell)
                 .unwrap(),
-            BigQueryCell::String(format!("{{{uuid}}}"))
+            BigQueryCell::Array(BigQueryArrayCell::String(vec![uuid.to_string()]))
         );
     }
 
     #[test]
-    fn lossy_numeric_rounds_and_clamps() {
-        let rounded = lossy_bigquery_numeric(
+    fn compatible_and_coerce_keep_non_native_arrays_as_repeated_strings() {
+        for (typ, values) in [
+            (Type::MONEY_ARRAY, vec!["$1.00".to_owned(), "-$0.01".to_owned()]),
+            (Type::INTERVAL_ARRAY, vec!["1 day".to_owned(), "2 hours".to_owned()]),
+            (Type::INET_ARRAY, vec!["127.0.0.1".to_owned(), "192.168.0.1".to_owned()]),
+            (Type::INT4_RANGE_ARRAY, vec!["[1,2)".to_owned(), "[3,4)".to_owned()]),
+        ] {
+            let cell = Cell::Array(ArrayCell::String(values.iter().cloned().map(Some).collect()));
+
+            for compatibility in
+                [DestinationTypeCompatibility::compatible(), DestinationTypeCompatibility::coerce()]
+            {
+                let (materialized_type, materialized_cell) =
+                    materialized_type_and_cell(compatibility, typ.clone(), cell.clone()).unwrap();
+
+                assert_eq!(materialized_type, BigQueryType::Array(BigQueryArrayType::String));
+                assert_eq!(
+                    materialized_cell,
+                    BigQueryCell::Array(BigQueryArrayCell::String(values.clone()))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn coerce_numeric_rounds_and_clamps() {
+        let rounded = coerce_bigquery_numeric(
             PgNumeric::from_str("0.123456789012345678901234567890123456789").unwrap(),
         )
         .unwrap();
         assert_eq!(rounded.to_string(), "0.12345678901234567890123456789012345679");
 
-        let clamped = lossy_bigquery_numeric(PgNumeric::PositiveInfinity).unwrap();
+        let clamped = coerce_bigquery_numeric(PgNumeric::PositiveInfinity).unwrap();
         assert_eq!(clamped.to_string(), BIGQUERY_BIGNUMERIC_MAX);
 
-        let zero = lossy_bigquery_numeric(
+        let zero = coerce_bigquery_numeric(
             PgNumeric::from_str("-0.000000000000000000000000000000000000001").unwrap(),
         )
         .unwrap();
@@ -2002,7 +2286,7 @@ mod tests {
     }
 
     #[test]
-    fn lossy_numeric_roundtrip_stays_inside_bigquery_bignumeric_range()
+    fn coerce_numeric_roundtrip_stays_inside_bigquery_bignumeric_range()
     -> Result<(), Box<dyn std::error::Error>> {
         let cases = [
             "0.123456789012345678901234567890123456789",
@@ -2014,14 +2298,14 @@ mod tests {
         ];
 
         for value in cases {
-            let materialized = lossy_bigquery_numeric(PgNumeric::from_str(value)?)
+            let materialized = coerce_bigquery_numeric(PgNumeric::from_str(value)?)
                 .map_err(std::io::Error::other)?;
             let roundtripped = PgNumeric::from_str(&materialized.to_string())?;
             assert!(bigquery_bignumeric_in_range(&roundtripped));
         }
 
         for value in [PgNumeric::PositiveInfinity, PgNumeric::NegativeInfinity] {
-            let materialized = lossy_bigquery_numeric(value).map_err(std::io::Error::other)?;
+            let materialized = coerce_bigquery_numeric(value).map_err(std::io::Error::other)?;
             let roundtripped = PgNumeric::from_str(&materialized.to_string())?;
             assert!(bigquery_bignumeric_in_range(&roundtripped));
         }
@@ -2030,7 +2314,7 @@ mod tests {
     }
 
     #[test]
-    fn json_depth_exceeding_bigquery_limit_is_rejected_unless_lossless() {
+    fn json_depth_exceeding_bigquery_limit_is_rejected_unless_preserve() {
         let cell = Cell::String(nested_json(BIGQUERY_JSON_MAX_NESTING_DEPTH + 1).to_string());
 
         assert!(
@@ -2039,19 +2323,19 @@ mod tests {
                 .is_err()
         );
         assert!(matches!(
-            materialized_cell(DestinationTypeCompatibility::lossless(), Type::JSON, cell.clone())
+            materialized_cell(DestinationTypeCompatibility::preserve(), Type::JSON, cell.clone())
                 .unwrap(),
             BigQueryCell::String(_)
         ));
         assert!(
-            materializer(DestinationTypeCompatibility::lossy())
+            materializer(DestinationTypeCompatibility::compatible())
                 .materialize_cell(typed_cell(Type::JSON, cell))
                 .is_err()
         );
     }
 
     #[test]
-    fn strict_rejects_and_lossy_canonicalizes_duplicate_json_keys() {
+    fn strict_rejects_and_coerce_canonicalizes_duplicate_json_keys() {
         let cell = Cell::String(r#"{"outer":{"value":1,"value":2}}"#.to_owned());
 
         let result = materializer(DestinationTypeCompatibility::strict())
@@ -2061,12 +2345,12 @@ mod tests {
             Err(err) if err.kind() == ErrorKind::UnsupportedValueInDestination
         ));
         assert!(matches!(
-            materialized_cell(DestinationTypeCompatibility::lossless(), Type::JSON, cell).unwrap(),
+            materialized_cell(DestinationTypeCompatibility::preserve(), Type::JSON, cell).unwrap(),
             BigQueryCell::String(_)
         ));
 
         let result = materialized_cell(
-            DestinationTypeCompatibility::lossy(),
+            DestinationTypeCompatibility::coerce(),
             Type::JSON,
             Cell::String(r#"{"outer":{"value":1,"value":2}}"#.to_owned()),
         )
@@ -2079,10 +2363,10 @@ mod tests {
     }
 
     #[test]
-    fn lossy_json_clamps_numbers_to_bigquery_float_domain() {
-        let cell = Cell::String(r#"{"value":1e309}"#.to_owned());
+    fn coerce_json_rounds_wide_numbers_to_bigquery_float_domain() {
+        let cell = Cell::String(r#"{"value":922337203685477580701}"#.to_owned());
         let result =
-            materialized_cell(DestinationTypeCompatibility::lossy(), Type::JSON, cell).unwrap();
+            materialized_cell(DestinationTypeCompatibility::coerce(), Type::JSON, cell).unwrap();
 
         let BigQueryCell::String(value) = result else {
             panic!("Expected JSON object");
@@ -2091,7 +2375,21 @@ mod tests {
             panic!("Expected JSON object");
         };
         let value = values.get("value").and_then(serde_json::Value::as_f64).unwrap();
-        assert_eq!(value, f64::MAX);
+        assert_eq!(value, 9.223372036854776e20);
+    }
+
+    #[test]
+    fn coerce_json_rejects_numbers_outside_bigquery_float_domain() {
+        let cell = Cell::String(r#"{"value":1e309}"#.to_owned());
+
+        let result = materializer(DestinationTypeCompatibility::coerce())
+            .materialize_cell(typed_cell(Type::JSON, cell));
+
+        assert!(matches!(
+            result,
+            Err(err) if err.kind() == ErrorKind::UnsupportedValueInDestination
+                && err.detail().is_some_and(|detail| detail.contains("cannot be rounded"))
+        ));
     }
 
     #[test]
@@ -2112,6 +2410,21 @@ mod tests {
         let cell = Cell::Array(ArrayCell::String(vec![Some(r#"{"value":1}"#.to_owned())]));
         let result =
             materialized_cell(DestinationTypeCompatibility::strict(), Type::JSON_ARRAY, cell)
+                .unwrap();
+
+        assert_eq!(
+            result,
+            BigQueryCell::Array(BigQueryArrayCell::String(vec![r#"{"value":1}"#.to_owned()]))
+        );
+    }
+
+    #[test]
+    fn coerce_json_arrays_normalize_string_elements_using_source_type() {
+        let cell =
+            Cell::Array(ArrayCell::String(vec![Some(r#"{"value":1,"value":2}"#.to_owned())]));
+
+        let result =
+            materialized_cell(DestinationTypeCompatibility::coerce(), Type::JSON_ARRAY, cell)
                 .unwrap();
 
         assert_eq!(
@@ -2147,18 +2460,18 @@ mod tests {
                 .is_err()
         );
         assert_eq!(
-            materialized_cell(DestinationTypeCompatibility::lossless(), Type::DATE, cell.clone())
+            materialized_cell(DestinationTypeCompatibility::preserve(), Type::DATE, cell.clone())
                 .unwrap(),
             BigQueryCell::String("infinity".to_owned())
         );
         assert_eq!(
-            materialized_cell(DestinationTypeCompatibility::lossy(), Type::DATE, cell).unwrap(),
+            materialized_cell(DestinationTypeCompatibility::coerce(), Type::DATE, cell).unwrap(),
             BigQueryCell::String(PgDate::Finite(bigquery_max_date()).to_string())
         );
 
         assert_eq!(
             materialized_cell(
-                DestinationTypeCompatibility::lossy(),
+                DestinationTypeCompatibility::coerce(),
                 Type::TIME,
                 Cell::Time(PgTime::TwentyFourHour),
             )
@@ -2168,39 +2481,58 @@ mod tests {
     }
 
     #[test]
-    fn typed_arrays_fail_strict_and_stringify_lossless_and_lossy_null_elements() {
+    fn typed_arrays_reject_native_null_elements_unless_preserve_stringifies() {
         let cell = Cell::Array(ArrayCell::I32(vec![Some(1), None]));
 
-        let result = materializer(DestinationTypeCompatibility::strict())
-            .materialize_cell(typed_cell(Type::INT4_ARRAY, cell.clone()));
-        assert!(result.is_err());
-        assert_eq!(
-            result.unwrap_err().kind(),
-            ErrorKind::NullValuesNotSupportedInArrayInDestination
-        );
+        for compatibility in [
+            DestinationTypeCompatibility::strict(),
+            DestinationTypeCompatibility::compatible(),
+            DestinationTypeCompatibility::coerce(),
+        ] {
+            let result = materializer(compatibility)
+                .materialize_cell(typed_cell(Type::INT4_ARRAY, cell.clone()));
+            assert!(result.is_err());
+            assert_eq!(
+                result.unwrap_err().kind(),
+                ErrorKind::NullValuesNotSupportedInArrayInDestination
+            );
+        }
 
         assert_eq!(
-            materialized_cell(
-                DestinationTypeCompatibility::lossless(),
-                Type::INT4_ARRAY,
-                cell.clone()
-            )
-            .unwrap(),
-            BigQueryCell::String("{1,NULL}".to_owned())
-        );
-        assert_eq!(
-            materialized_cell(DestinationTypeCompatibility::lossy(), Type::INT4_ARRAY, cell)
+            materialized_cell(DestinationTypeCompatibility::preserve(), Type::INT4_ARRAY, cell)
                 .unwrap(),
             BigQueryCell::String("{1,NULL}".to_owned())
         );
     }
 
     #[test]
-    fn typed_lossless_array_values_become_scalar_strings() {
+    fn coerce_native_arrays_stay_repeated_fields() {
+        let cell = Cell::Array(ArrayCell::Numeric(vec![Some(
+            PgNumeric::from_str("0.123456789012345678901234567890123456789").unwrap(),
+        )]));
+
+        let (typ, cell) = materialized_type_and_cell(
+            DestinationTypeCompatibility::coerce(),
+            Type::NUMERIC_ARRAY,
+            cell,
+        )
+        .unwrap();
+
+        assert_eq!(typ, BigQueryType::Array(BigQueryArrayType::BigNumeric));
+        assert_eq!(
+            cell,
+            BigQueryCell::Array(BigQueryArrayCell::String(vec![
+                "0.12345678901234567890123456789012345679".to_owned()
+            ]))
+        );
+    }
+
+    #[test]
+    fn typed_preserve_array_values_become_scalar_strings() {
         let cell =
             Cell::Array(ArrayCell::Numeric(vec![Some(PgNumeric::from_str("1.23").unwrap())]));
         let result =
-            materialized_cell(DestinationTypeCompatibility::lossless(), Type::NUMERIC_ARRAY, cell)
+            materialized_cell(DestinationTypeCompatibility::preserve(), Type::NUMERIC_ARRAY, cell)
                 .unwrap();
 
         assert_eq!(result, BigQueryCell::String("{1.23}".to_owned()));

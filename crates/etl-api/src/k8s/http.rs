@@ -1625,7 +1625,7 @@ mod tests {
                 service_account_key: "sa-key".into(),
                 max_staleness_mins: None,
                 connection_pool_size: 4,
-                type_compatibility: DestinationTypeCompatibilityMode::Lossy,
+                type_compatibility: DestinationTypeCompatibilityMode::Coerce,
             },
             pipeline: PipelineConfig {
                 id: 42,

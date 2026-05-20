@@ -43,7 +43,7 @@ pub enum FullApiDestinationConfig {
         #[schema(example = 8)]
         #[serde(skip_serializing_if = "Option::is_none")]
         connection_pool_size: Option<usize>,
-        #[schema(example = "lossless")]
+        #[schema(example = "compatible")]
         #[serde(default)]
         type_compatibility: DestinationTypeCompatibilityMode,
     },
@@ -893,7 +893,7 @@ mod tests {
             service_account_key: SerializableSecretString::from("{\"test\": \"key\"}".to_owned()),
             max_staleness_mins: Some(15),
             connection_pool_size: 8,
-            type_compatibility: DestinationTypeCompatibilityMode::Lossless,
+            type_compatibility: DestinationTypeCompatibilityMode::Preserve,
         };
 
         let key = EncryptionKey { id: 1, key: generate_random_key::<32>().unwrap() };
@@ -933,7 +933,7 @@ mod tests {
     }
 
     #[test]
-    fn encrypted_stored_destination_config_serializes_lossy_bigquery_type_compatibility() {
+    fn encrypted_stored_destination_config_serializes_coerce_bigquery_type_compatibility() {
         let config = EncryptedStoredDestinationConfig::BigQuery {
             project_id: "test-project".to_owned(),
             dataset_id: "test_dataset".to_owned(),
@@ -944,12 +944,12 @@ mod tests {
             },
             max_staleness_mins: None,
             connection_pool_size: DestinationConfig::DEFAULT_CONNECTION_POOL_SIZE,
-            type_compatibility: DestinationTypeCompatibilityMode::Lossy,
+            type_compatibility: DestinationTypeCompatibilityMode::Coerce,
         };
 
         let value = serde_json::to_value(config).unwrap();
 
-        assert_eq!(value["big_query"]["type_compatibility"], "lossy");
+        assert_eq!(value["big_query"]["type_compatibility"], "coerce");
     }
 
     #[test]
@@ -1206,7 +1206,7 @@ mod tests {
                 "dataset_id": "test_dataset",
                 "service_account_key": "{\"test\": \"key\"}",
                 "max_staleness_mins": null,
-                "type_compatibility": "lossless"
+                "type_compatibility": "preserve"
             }
         }"#;
 
@@ -1215,11 +1215,11 @@ mod tests {
         let FullApiDestinationConfig::BigQuery { type_compatibility, .. } = deserialized else {
             panic!("Expected BigQuery destination config");
         };
-        assert_eq!(type_compatibility, DestinationTypeCompatibilityMode::Lossless);
+        assert_eq!(type_compatibility, DestinationTypeCompatibilityMode::Preserve);
     }
 
     #[test]
-    fn full_api_destination_config_defaults_bigquery_type_compatibility_to_strict() {
+    fn full_api_destination_config_defaults_bigquery_type_compatibility_to_compatible() {
         let json = r#"{
             "big_query": {
                 "project_id": "test-project",
@@ -1234,39 +1234,39 @@ mod tests {
         let FullApiDestinationConfig::BigQuery { type_compatibility, .. } = deserialized else {
             panic!("Expected BigQuery destination config");
         };
-        assert_eq!(type_compatibility, DestinationTypeCompatibilityMode::Strict);
+        assert_eq!(type_compatibility, DestinationTypeCompatibilityMode::Compatible);
     }
 
     #[test]
-    fn full_api_destination_config_serializes_non_lossy_bigquery_type_compatibility() {
+    fn full_api_destination_config_serializes_preserve_bigquery_type_compatibility() {
         let full_config = FullApiDestinationConfig::BigQuery {
             project_id: "test-project".to_owned(),
             dataset_id: "test_dataset".to_owned(),
             service_account_key: SerializableSecretString::from("{\"test\": \"key\"}".to_owned()),
             max_staleness_mins: None,
             connection_pool_size: None,
-            type_compatibility: DestinationTypeCompatibilityMode::Lossless,
+            type_compatibility: DestinationTypeCompatibilityMode::Preserve,
         };
 
         let value = serde_json::to_value(full_config).unwrap();
 
-        assert_eq!(value["big_query"]["type_compatibility"], "lossless");
+        assert_eq!(value["big_query"]["type_compatibility"], "preserve");
     }
 
     #[test]
-    fn full_api_destination_config_serializes_lossy_bigquery_type_compatibility() {
+    fn full_api_destination_config_serializes_coerce_bigquery_type_compatibility() {
         let full_config = FullApiDestinationConfig::BigQuery {
             project_id: "test-project".to_owned(),
             dataset_id: "test_dataset".to_owned(),
             service_account_key: SerializableSecretString::from("{\"test\": \"key\"}".to_owned()),
             max_staleness_mins: None,
             connection_pool_size: None,
-            type_compatibility: DestinationTypeCompatibilityMode::Lossy,
+            type_compatibility: DestinationTypeCompatibilityMode::Coerce,
         };
 
         let value = serde_json::to_value(full_config).unwrap();
 
-        assert_eq!(value["big_query"]["type_compatibility"], "lossy");
+        assert_eq!(value["big_query"]["type_compatibility"], "coerce");
     }
 
     #[test]
@@ -1277,7 +1277,7 @@ mod tests {
             service_account_key: SerializableSecretString::from("{\"test\": \"key\"}".to_owned()),
             max_staleness_mins: Some(15),
             connection_pool_size: None,
-            type_compatibility: DestinationTypeCompatibilityMode::Lossless,
+            type_compatibility: DestinationTypeCompatibilityMode::Preserve,
         };
 
         let stored: StoredDestinationConfig = full_config.clone().into();

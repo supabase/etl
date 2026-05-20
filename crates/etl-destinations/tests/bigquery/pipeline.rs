@@ -107,7 +107,7 @@ async fn table_copy_and_streaming_with_restart() {
         .build_destination_with_compatibility(
             pipeline_id,
             store.clone(),
-            DestinationTypeCompatibility::lossy(),
+            DestinationTypeCompatibility::compatible(),
         )
         .await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
@@ -346,7 +346,7 @@ async fn table_subsequent_updates() {
         .build_destination_with_compatibility(
             pipeline_id,
             store.clone(),
-            DestinationTypeCompatibility::lossy(),
+            DestinationTypeCompatibility::compatible(),
         )
         .await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
@@ -787,7 +787,7 @@ async fn table_nullable_scalar_columns() {
         .build_destination_with_compatibility(
             pipeline_id,
             store.clone(),
-            DestinationTypeCompatibility::lossy(),
+            DestinationTypeCompatibility::coerce(),
         )
         .await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
@@ -990,7 +990,7 @@ async fn table_nullable_array_columns() {
         .build_destination_with_compatibility(
             pipeline_id,
             store.clone(),
-            DestinationTypeCompatibility::lossy(),
+            DestinationTypeCompatibility::preserve(),
         )
         .await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
@@ -1054,7 +1054,7 @@ async fn table_nullable_array_columns() {
 
     let table_rows = bigquery_database.query_table(table_name.clone()).await.unwrap();
     let parsed_table_rows = parse_bigquery_table_rows::<NullableColsArray>(table_rows);
-    // Default lossy materialization stores arrays as scalar strings so source
+    // Preserve materialization stores arrays as scalar strings so source
     // NULL arrays remain NULL instead of becoming BigQuery empty arrays.
     assert_eq!(parsed_table_rows, vec![NullableColsArray::all_null(1),]);
 
@@ -1213,7 +1213,7 @@ async fn table_non_nullable_scalar_columns() {
         .build_destination_with_compatibility(
             pipeline_id,
             store.clone(),
-            DestinationTypeCompatibility::lossy(),
+            DestinationTypeCompatibility::coerce(),
         )
         .await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
@@ -1457,7 +1457,7 @@ async fn table_non_nullable_array_columns() {
         .build_destination_with_compatibility(
             pipeline_id,
             store.clone(),
-            DestinationTypeCompatibility::lossy(),
+            DestinationTypeCompatibility::coerce(),
         )
         .await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
@@ -1711,7 +1711,7 @@ async fn table_array_with_null_values() {
         .build_destination_with_compatibility(
             pipeline_id,
             store.clone(),
-            DestinationTypeCompatibility::lossy(),
+            DestinationTypeCompatibility::preserve(),
         )
         .await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
@@ -1740,7 +1740,7 @@ async fn table_array_with_null_values() {
     let event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 3)]).await;
 
     // BigQuery cannot preserve NULL repeated fields or NULL repeated-field
-    // elements, so lossy mode stores arrays as scalar strings.
+    // elements, so preserve mode stores arrays as scalar strings.
     let client = database.client.as_ref().unwrap();
     let quoted_table_name = table_name.as_quoted_identifier();
     client
@@ -2023,8 +2023,13 @@ async fn table_type_compatibility_modes_handle_same_risky_data() {
 
     for (mode_name, type_compatibility, expected_phase) in [
         ("strict", DestinationTypeCompatibility::strict(), TableReplicationPhaseType::Errored),
-        ("lossless", DestinationTypeCompatibility::lossless(), TableReplicationPhaseType::Ready),
-        ("lossy", DestinationTypeCompatibility::lossy(), TableReplicationPhaseType::Ready),
+        (
+            "compatible",
+            DestinationTypeCompatibility::compatible(),
+            TableReplicationPhaseType::Errored,
+        ),
+        ("preserve", DestinationTypeCompatibility::preserve(), TableReplicationPhaseType::Ready),
+        ("coerce", DestinationTypeCompatibility::coerce(), TableReplicationPhaseType::Ready),
     ] {
         let database = spawn_source_database().await;
         let bigquery_database = setup_bigquery_database().await;
@@ -2121,18 +2126,18 @@ async fn table_type_compatibility_modes_handle_same_risky_data() {
 
         if expected_phase == TableReplicationPhaseType::Errored {
             let TableReplicationPhase::Errored { reason, .. } = table_state else {
-                panic!("strict table replication should have errored: {table_state:?}");
+                panic!("{mode_name} table replication should have errored: {table_state:?}");
             };
 
             assert!(
                 reason.contains("[UnsupportedValueInDestination]"),
-                "strict mode should reject the risky payload locally: {reason}"
+                "{mode_name} mode should reject the risky payload locally: {reason}"
             );
             assert!(
                 reason.contains("would be rounded by BigQuery")
                     || reason.contains("JSON integer would lose precision")
                     || reason.contains("JSON integer is outside BigQuery"),
-                "strict mode should reject a silent BigQuery conversion risk: {reason}"
+                "{mode_name} mode should reject a silent BigQuery conversion risk: {reason}"
             );
 
             continue;
@@ -2152,7 +2157,7 @@ async fn table_type_compatibility_modes_handle_same_risky_data() {
                 .map(|column| column.data_type.as_str())
         };
 
-        if type_compatibility.is_lossless() {
+        if type_compatibility.is_preserve() {
             for column_name in ["numeric_value", "json_value"] {
                 assert_eq!(column_type(column_name), Some("STRING"), "{column_name}");
             }
@@ -2161,8 +2166,10 @@ async fn table_type_compatibility_modes_handle_same_risky_data() {
             assert_eq!(column_type("json_value"), Some("JSON"));
         }
 
-        for column_name in ["numeric_array", "json_array"] {
-            assert_eq!(column_type(column_name), Some("STRING"), "{column_name}");
+        if type_compatibility.is_preserve() {
+            for column_name in ["numeric_array", "json_array"] {
+                assert_eq!(column_type(column_name), Some("STRING"), "{column_name}");
+            }
         }
 
         let destination_rows = bigquery_database.query_table(table_name).await.unwrap();

@@ -19,6 +19,7 @@ nav:
       - Architecture: explanation/architecture.md
       - Event Types: explanation/events.md
       - Schema Changes: explanation/schema-changes.md
+      - Data Type Compatibility: explanation/data-type-compatibility.md
       - Extension Points: explanation/traits.md
 
 theme:

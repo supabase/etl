@@ -14,5 +14,5 @@ BigQuery {
     connection_pool_size: Some(
         1,
     ),
-    type_compatibility: Lossy,
+    type_compatibility: Coerce,
 }

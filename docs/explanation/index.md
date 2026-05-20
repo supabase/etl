@@ -18,7 +18,9 @@
 
 4. **[Schema Changes](schema-changes.md)**: How ETL handles DDL, `Relation` events, add/drop/rename semantics, and current limitations.
 
-5. **[Extension Points](traits.md)**: The traits you implement - Destination, SchemaStore, StateStore, CleanupStore.
+5. **[Data Type Compatibility](data-type-compatibility.md)**: How destinations map PostgreSQL types, and what the compatibility modes mean.
+
+6. **[Extension Points](traits.md)**: The traits you implement - Destination, SchemaStore, StateStore, CleanupStore.
 
 ## Next Steps
 

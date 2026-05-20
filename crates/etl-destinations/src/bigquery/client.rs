@@ -1466,90 +1466,135 @@ mod tests {
     }
 
     /// Converts a type with a materialization policy for test assertions.
-    fn bigquery_type(typ: &Type, compatibility: DestinationTypeCompatibility) -> String {
-        materializer(compatibility)
-            .materialize_type(typ)
-            .expect("type should be materializable for BigQuery in this test")
-            .to_sql()
+    fn bigquery_type(typ: &Type, compatibility: DestinationTypeCompatibility) -> EtlResult<String> {
+        materializer(compatibility).materialize_type(typ).map(|typ| typ.to_sql())
     }
 
     #[test]
-    fn materialize_type_basic_types() {
-        let compatibility = DestinationTypeCompatibility::default();
-
-        assert_eq!(bigquery_type(&Type::BOOL, compatibility), "bool");
-        assert_eq!(bigquery_type(&Type::TEXT, compatibility), "string");
-        assert_eq!(bigquery_type(&Type::INT2, compatibility), "int64");
-        assert_eq!(bigquery_type(&Type::INT4, compatibility), "int64");
-        assert_eq!(bigquery_type(&Type::INT8, compatibility), "int64");
-        assert_eq!(bigquery_type(&Type::FLOAT4, compatibility), "float64");
-        assert_eq!(bigquery_type(&Type::FLOAT8, compatibility), "float64");
-        assert_eq!(bigquery_type(&Type::NUMERIC, compatibility), "bignumeric");
-        assert_eq!(bigquery_type(&Type::OID, compatibility), "int64");
-        assert_eq!(bigquery_type(&Type::TIMESTAMP, compatibility), "datetime");
-        assert_eq!(bigquery_type(&Type::TIMESTAMPTZ, compatibility), "timestamp");
-        assert_eq!(bigquery_type(&Type::JSON, compatibility), "json");
-        assert_eq!(bigquery_type(&Type::BYTEA, compatibility), "bytes");
-    }
-
-    #[test]
-    fn materialize_type_default_preserves_native_array_types() {
-        let compatibility = DestinationTypeCompatibility::default();
-
-        assert_eq!(bigquery_type(&Type::BOOL_ARRAY, compatibility), "array<bool>");
-        assert_eq!(bigquery_type(&Type::TEXT_ARRAY, compatibility), "array<string>");
-        assert_eq!(bigquery_type(&Type::INT2_ARRAY, compatibility), "array<int64>");
-        assert_eq!(bigquery_type(&Type::INT4_ARRAY, compatibility), "array<int64>");
-        assert_eq!(bigquery_type(&Type::INT8_ARRAY, compatibility), "array<int64>");
-        assert_eq!(bigquery_type(&Type::FLOAT4_ARRAY, compatibility), "array<float64>");
-        assert_eq!(bigquery_type(&Type::FLOAT8_ARRAY, compatibility), "array<float64>");
-        assert_eq!(bigquery_type(&Type::NUMERIC_ARRAY, compatibility), "array<bignumeric>");
-        assert_eq!(bigquery_type(&Type::OID_ARRAY, compatibility), "array<int64>");
-        assert_eq!(bigquery_type(&Type::TIMESTAMP_ARRAY, compatibility), "array<datetime>");
-        assert_eq!(bigquery_type(&Type::TIMESTAMPTZ_ARRAY, compatibility), "array<timestamp>");
-    }
-
-    #[test]
-    fn materialize_type_lossless_maps_risky_types_to_string() {
-        let type_compatibility = DestinationTypeCompatibility::lossless();
-
-        assert_eq!(bigquery_type(&Type::FLOAT8, type_compatibility), "string");
-        assert_eq!(bigquery_type(&Type::NUMERIC, type_compatibility), "string");
-        assert_eq!(bigquery_type(&Type::JSONB, type_compatibility), "string");
-        assert_eq!(bigquery_type(&Type::TIMESTAMPTZ, type_compatibility), "string");
-        assert_eq!(bigquery_type(&Type::NUMERIC_ARRAY, type_compatibility), "string");
-        assert_eq!(bigquery_type(&Type::JSON_ARRAY, type_compatibility), "string");
-        assert_eq!(bigquery_type(&Type::INT8, type_compatibility), "int64");
-    }
-
-    #[test]
-    fn materialize_type_strict_rejects_non_native_types() {
-        for typ in [
-            Type::UUID,
-            Type::MONEY,
-            Type::INTERVAL,
-            Type::REGCLASS,
-            Type::UUID_ARRAY,
-            Type::INET_ARRAY,
-            Type::INT4_RANGE,
+    fn materialize_type_modes_follow_documented_bigquery_schema_matrix() {
+        for (typ, strict, compatible, preserve, coerce) in [
+            (Type::BOOL, Some("bool"), Some("bool"), Some("bool"), Some("bool")),
+            (Type::TEXT, Some("string"), Some("string"), Some("string"), Some("string")),
+            (Type::INT4, Some("int64"), Some("int64"), Some("int64"), Some("int64")),
+            (Type::INT8, Some("int64"), Some("int64"), Some("int64"), Some("int64")),
+            (Type::OID, Some("int64"), Some("int64"), Some("int64"), Some("int64")),
+            (Type::FLOAT8, Some("float64"), Some("float64"), Some("string"), Some("float64")),
+            (
+                Type::NUMERIC,
+                Some("bignumeric"),
+                Some("bignumeric"),
+                Some("string"),
+                Some("bignumeric"),
+            ),
+            (Type::DATE, Some("date"), Some("date"), Some("string"), Some("date")),
+            (Type::TIME, Some("time"), Some("time"), Some("string"), Some("time")),
+            (Type::TIMESTAMP, Some("datetime"), Some("datetime"), Some("string"), Some("datetime")),
+            (
+                Type::TIMESTAMPTZ,
+                Some("timestamp"),
+                Some("timestamp"),
+                Some("string"),
+                Some("timestamp"),
+            ),
+            (Type::JSON, Some("json"), Some("json"), Some("string"), Some("json")),
+            (Type::BYTEA, Some("bytes"), Some("bytes"), Some("bytes"), Some("bytes")),
+            (Type::UUID, None, Some("string"), Some("string"), Some("string")),
+            (Type::MONEY, None, Some("string"), Some("string"), Some("string")),
+            (Type::INTERVAL, None, Some("string"), Some("string"), Some("string")),
+            (
+                Type::INT4_ARRAY,
+                Some("array<int64>"),
+                Some("array<int64>"),
+                Some("string"),
+                Some("array<int64>"),
+            ),
+            (
+                Type::NUMERIC_ARRAY,
+                Some("array<bignumeric>"),
+                Some("array<bignumeric>"),
+                Some("string"),
+                Some("array<bignumeric>"),
+            ),
+            (
+                Type::TIMESTAMP_ARRAY,
+                Some("array<datetime>"),
+                Some("array<datetime>"),
+                Some("string"),
+                Some("array<datetime>"),
+            ),
+            (
+                Type::TIMESTAMPTZ_ARRAY,
+                Some("array<timestamp>"),
+                Some("array<timestamp>"),
+                Some("string"),
+                Some("array<timestamp>"),
+            ),
+            (
+                Type::JSON_ARRAY,
+                Some("array<json>"),
+                Some("array<json>"),
+                Some("string"),
+                Some("array<json>"),
+            ),
+            (
+                Type::BYTEA_ARRAY,
+                Some("array<bytes>"),
+                Some("array<bytes>"),
+                Some("string"),
+                Some("array<bytes>"),
+            ),
+            (Type::UUID_ARRAY, None, Some("array<string>"), Some("string"), Some("array<string>")),
+            (Type::MONEY_ARRAY, None, Some("array<string>"), Some("string"), Some("array<string>")),
+            (
+                Type::INTERVAL_ARRAY,
+                None,
+                Some("array<string>"),
+                Some("string"),
+                Some("array<string>"),
+            ),
+            (
+                Type::INT4_RANGE_ARRAY,
+                None,
+                Some("array<string>"),
+                Some("string"),
+                Some("array<string>"),
+            ),
         ] {
-            let result =
-                materializer(DestinationTypeCompatibility::strict()).materialize_type(&typ);
-
-            assert!(matches!(
-                result,
-                Err(err) if err.kind() == ErrorKind::UnsupportedValueInDestination
-            ));
+            for (mode_name, compatibility, expected) in [
+                ("strict", DestinationTypeCompatibility::strict(), strict),
+                ("compatible", DestinationTypeCompatibility::compatible(), compatible),
+                ("preserve", DestinationTypeCompatibility::preserve(), preserve),
+                ("coerce", DestinationTypeCompatibility::coerce(), coerce),
+            ] {
+                match expected {
+                    Some(expected) => assert_eq!(
+                        bigquery_type(&typ, compatibility).unwrap(),
+                        expected,
+                        "{mode_name} mapping for {}",
+                        typ.name(),
+                    ),
+                    None => {
+                        let result = bigquery_type(&typ, compatibility);
+                        assert!(
+                            matches!(
+                                result,
+                                Err(ref err) if err.kind() == ErrorKind::UnsupportedValueInDestination
+                            ),
+                            "{mode_name} should reject {}: {result:?}",
+                            typ.name(),
+                        );
+                    }
+                }
+            }
         }
     }
 
     #[test]
-    fn materialize_type_lossy_uses_string_for_non_native_types() {
-        let type_compatibility = DestinationTypeCompatibility::lossy();
-
-        assert_eq!(bigquery_type(&Type::UUID, type_compatibility), "string");
-        assert_eq!(bigquery_type(&Type::INTERVAL_ARRAY, type_compatibility), "string");
-        assert_eq!(bigquery_type(&Type::JSON, type_compatibility), "json");
+    fn default_type_compatibility_is_compatible() {
+        assert_eq!(
+            bigquery_type(&Type::TIMESTAMP, DestinationTypeCompatibility::default()).unwrap(),
+            bigquery_type(&Type::TIMESTAMP, DestinationTypeCompatibility::compatible()).unwrap()
+        );
     }
 
     #[test]
@@ -1580,11 +1625,11 @@ mod tests {
     }
 
     #[test]
-    fn column_spec_lossless_uses_string_for_risky_types() {
+    fn column_spec_preserve_uses_string_for_risky_types() {
         let numeric_column = test_column("amount", Type::NUMERIC, 1, false, None);
         let numeric_spec = BigQueryClient::column_spec(
             &numeric_column,
-            &materializer(DestinationTypeCompatibility::lossless()),
+            &materializer(DestinationTypeCompatibility::preserve()),
         )
         .expect("numeric column spec");
         assert_eq!(numeric_spec, "`amount` string not null");
@@ -1592,7 +1637,7 @@ mod tests {
         let json_array_column = test_column("payloads", Type::JSONB_ARRAY, 2, true, None);
         let json_array_spec = BigQueryClient::column_spec(
             &json_array_column,
-            &materializer(DestinationTypeCompatibility::lossless()),
+            &materializer(DestinationTypeCompatibility::preserve()),
         )
         .expect("json array column spec");
         assert_eq!(json_array_spec, "`payloads` string");
@@ -1600,7 +1645,7 @@ mod tests {
         let non_null_array_column = test_column("tags", Type::TEXT_ARRAY, 4, false, None);
         let non_null_array_spec = BigQueryClient::column_spec(
             &non_null_array_column,
-            &materializer(DestinationTypeCompatibility::lossless()),
+            &materializer(DestinationTypeCompatibility::preserve()),
         )
         .expect("non-null array column spec");
         assert_eq!(non_null_array_spec, "`tags` string not null");
@@ -1608,7 +1653,7 @@ mod tests {
         let timestamp_column = test_column("created_at", Type::TIMESTAMPTZ, 3, true, None);
         let timestamp_spec = BigQueryClient::column_spec(
             &timestamp_column,
-            &materializer(DestinationTypeCompatibility::lossless()),
+            &materializer(DestinationTypeCompatibility::preserve()),
         )
         .expect("timestamp column spec");
         assert_eq!(timestamp_spec, "`created_at` string");
@@ -1630,12 +1675,12 @@ mod tests {
     }
 
     #[test]
-    fn column_spec_lossy_uses_string_for_non_native_types() {
+    fn column_spec_coerce_uses_string_for_non_native_types() {
         let column_schema = test_column("tenant_uuid", Type::UUID, 1, false, None);
 
         let spec = BigQueryClient::column_spec(
             &column_schema,
-            &materializer(DestinationTypeCompatibility::lossy()),
+            &materializer(DestinationTypeCompatibility::coerce()),
         )
         .expect("uuid column spec");
 
@@ -1830,9 +1875,9 @@ mod tests {
         let descriptor = BigQueryClient::column_schemas_to_table_descriptor(
             &schema,
             true,
-            &materializer(DestinationTypeCompatibility::lossy()),
+            &materializer(DestinationTypeCompatibility::preserve()),
         )
-        .expect("table descriptor");
+        .expect("preserve table descriptor");
 
         assert_eq!(descriptor.field_descriptors[0].name, "values");
         assert!(matches!(descriptor.field_descriptors[0].typ, ColumnType::String));
@@ -1854,12 +1899,12 @@ mod tests {
         let descriptor = BigQueryClient::column_schemas_to_table_descriptor(
             &schema,
             false,
-            &materializer(DestinationTypeCompatibility::lossy()),
+            &materializer(DestinationTypeCompatibility::coerce()),
         )
-        .expect("lossy table descriptor");
+        .expect("coerce table descriptor");
 
-        assert!(matches!(descriptor.field_descriptors[0].typ, ColumnType::String));
-        assert!(matches!(descriptor.field_descriptors[0].mode, ColumnMode::Required));
+        assert!(matches!(descriptor.field_descriptors[0].typ, ColumnType::Int32));
+        assert!(matches!(descriptor.field_descriptors[0].mode, ColumnMode::Repeated));
     }
 
     #[test]
@@ -1878,13 +1923,14 @@ mod tests {
         let descriptor = BigQueryClient::column_schemas_to_table_descriptor(
             &schema,
             true,
-            &materializer(DestinationTypeCompatibility::lossy()),
+            &materializer(DestinationTypeCompatibility::coerce()),
         )
         .expect("complex table descriptor");
 
         assert_eq!(descriptor.field_descriptors.len(), 9); // 7 columns + CDC columns
 
-        // Check that lossy non-native types use string storage API fields.
+        // Check that string-backed Storage Write API fields are used where
+        // BigQuery expects textual input for the materialized type.
         assert!(matches!(descriptor.field_descriptors[0].typ, ColumnType::String)); // UUID
         assert!(matches!(descriptor.field_descriptors[1].typ, ColumnType::String)); // JSON
         assert!(matches!(descriptor.field_descriptors[2].typ, ColumnType::Bytes)); // BYTEA

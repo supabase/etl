@@ -13,7 +13,7 @@ const fn default_ducklake_pool_size() -> u32 {
 }
 
 const fn default_destination_type_compatibility_mode() -> DestinationTypeCompatibilityMode {
-    DestinationTypeCompatibilityMode::Strict
+    DestinationTypeCompatibilityMode::Compatible
 }
 
 /// Configuration for supported ETL data destinations.
@@ -55,10 +55,9 @@ pub enum DestinationConfig {
         connection_pool_size: usize,
         /// Type compatibility behavior for BigQuery materialization.
         ///
-        /// Defaults to `strict` for backwards compatibility with existing
-        /// BigQuery tables. New pipelines may prefer `lossy` when they want
-        /// destination-compatible coercions instead of write failures for
-        /// values outside BigQuery's exact domains.
+        /// Defaults to `compatible`, which prefers native BigQuery types, uses
+        /// string fallbacks for PostgreSQL-only types, and rejects values that
+        /// would require coercion.
         #[serde(default = "default_destination_type_compatibility_mode")]
         type_compatibility: DestinationTypeCompatibilityMode,
     },
@@ -259,10 +258,9 @@ pub enum DestinationConfigWithoutSecrets {
         connection_pool_size: usize,
         /// Type compatibility behavior for BigQuery materialization.
         ///
-        /// Defaults to `strict` for backwards compatibility with existing
-        /// BigQuery tables. New pipelines may prefer `lossy` when they want
-        /// destination-compatible coercions instead of write failures for
-        /// values outside BigQuery's exact domains.
+        /// Defaults to `compatible`, which prefers native BigQuery types, uses
+        /// string fallbacks for PostgreSQL-only types, and rejects values that
+        /// would require coercion.
         #[serde(default = "default_destination_type_compatibility_mode")]
         type_compatibility: DestinationTypeCompatibilityMode,
     },
@@ -365,7 +363,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn big_query_type_compatibility_defaults_to_strict() {
+    fn big_query_type_compatibility_defaults_to_compatible() {
         let json = r#"{
             "big_query": {
                 "project_id": "project-id",
@@ -380,7 +378,7 @@ mod tests {
         let DestinationConfig::BigQuery { type_compatibility, .. } = config else {
             panic!("Expected BigQuery destination config");
         };
-        assert_eq!(type_compatibility, DestinationTypeCompatibilityMode::Strict);
+        assert_eq!(type_compatibility, DestinationTypeCompatibilityMode::Compatible);
     }
 
     #[test]
@@ -391,7 +389,7 @@ mod tests {
                 "dataset_id": "dataset-id",
                 "service_account_key": "service-account-key",
                 "max_staleness_mins": null,
-                "type_compatibility": "lossless"
+                "type_compatibility": "preserve"
             }
         }"#;
 
@@ -400,21 +398,21 @@ mod tests {
         let DestinationConfig::BigQuery { type_compatibility, .. } = config else {
             panic!("Expected BigQuery destination config");
         };
-        assert_eq!(type_compatibility, DestinationTypeCompatibilityMode::Lossless);
+        assert_eq!(type_compatibility, DestinationTypeCompatibilityMode::Preserve);
     }
 
     #[test]
-    fn big_query_without_secrets_serializes_lossy_type_compatibility() {
+    fn big_query_without_secrets_serializes_coerce_type_compatibility() {
         let config = DestinationConfigWithoutSecrets::BigQuery {
             project_id: "project-id".to_owned(),
             dataset_id: "dataset-id".to_owned(),
             max_staleness_mins: None,
             connection_pool_size: DestinationConfig::DEFAULT_CONNECTION_POOL_SIZE,
-            type_compatibility: DestinationTypeCompatibilityMode::Lossy,
+            type_compatibility: DestinationTypeCompatibilityMode::Coerce,
         };
 
         let value = serde_json::to_value(config).unwrap();
 
-        assert_eq!(value["big_query"]["type_compatibility"], "lossy");
+        assert_eq!(value["big_query"]["type_compatibility"], "coerce");
     }
 }

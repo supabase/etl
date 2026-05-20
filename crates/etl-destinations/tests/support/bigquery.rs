@@ -223,7 +223,7 @@ where
         .collect()
 }
 
-/// Parses the array text emitted by default lossy BigQuery materialization.
+/// Parses the array text emitted by preserve BigQuery materialization.
 fn parse_stringified_array_items(value: &str) -> Option<Vec<Option<String>>> {
     if value.len() < 2 || !value.starts_with('{') || !value.ends_with('}') {
         return None;

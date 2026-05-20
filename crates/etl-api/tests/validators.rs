@@ -64,7 +64,7 @@ fn create_bigquery_config(
         service_account_key: SerializableSecretString::from(sa_key.to_owned()),
         max_staleness_mins: None,
         connection_pool_size: None,
-        type_compatibility: DestinationTypeCompatibilityMode::Lossy,
+        type_compatibility: DestinationTypeCompatibilityMode::Coerce,
     }
 }
 

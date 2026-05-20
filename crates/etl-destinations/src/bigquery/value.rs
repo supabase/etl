@@ -7,7 +7,7 @@ use etl::{
     materialization::TypedCell,
     types::{
         ArrayCell, Cell, DATE_FORMAT, PgDate, PgTime, PgTimestamp, PgTimestampTz, TIME_FORMAT,
-        TIMESTAMP_FORMAT, TIMESTAMPTZ_FORMAT_HH_MM, TableRow, Type,
+        TIMESTAMP_FORMAT, TIMESTAMPTZ_FORMAT_HH_MM, TableRow, Type, is_array_type,
     },
 };
 use prost::bytes;
@@ -151,6 +151,7 @@ impl BigQueryType {
             Type::UUID_ARRAY => Self::Array(BigQueryArrayType::String),
             Type::JSON_ARRAY | Type::JSONB_ARRAY => Self::Array(BigQueryArrayType::Json),
             Type::BYTEA_ARRAY => Self::Array(BigQueryArrayType::Bytes),
+            _ if is_array_type(typ) => Self::Array(BigQueryArrayType::String),
             _ => Self::String,
         }
     }
@@ -695,7 +696,7 @@ mod tests {
     }
 
     #[test]
-    fn bigquery_table_row_try_from_lossless_accepts_string_materialized_values() {
+    fn bigquery_table_row_try_from_preserve_accepts_string_materialized_values() {
         let result = BigQueryTableRow::try_from_typed_tagged_cells(
             [
                 (1, Type::JSON, Cell::String(r#"{"value":18446744073709551616}"#.to_owned())),
@@ -707,7 +708,7 @@ mod tests {
                     ),
                 ),
             ],
-            &BigQueryMaterialization::materializer(DestinationTypeCompatibility::lossless()),
+            &BigQueryMaterialization::materializer(DestinationTypeCompatibility::preserve()),
         );
         assert!(result.is_ok());
     }
@@ -828,7 +829,7 @@ mod tests {
     }
 
     #[test]
-    fn bigquery_table_row_try_from_uses_lossy_materialization_when_configured() {
+    fn bigquery_table_row_try_from_uses_coerce_materialization_when_configured() {
         let result = BigQueryTableRow::try_from_typed_tagged_cells(
             [
                 (
@@ -841,7 +842,7 @@ mod tests {
                 (2, Type::JSON, Cell::String(r#"{"value":18446744073709551616}"#.to_owned())),
                 (3, Type::FLOAT8, Cell::F64(-0.0)),
             ],
-            &BigQueryMaterialization::materializer(DestinationTypeCompatibility::lossy()),
+            &BigQueryMaterialization::materializer(DestinationTypeCompatibility::coerce()),
         );
 
         assert!(result.is_ok());

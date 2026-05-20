@@ -12,6 +12,7 @@ ETL is a Rust framework for building change data capture (CDC) pipelines on Post
 | Ready to build | [Your First Pipeline](guides/first-pipeline.md) (15 min) |
 | Need custom destinations | [Custom Stores and Destinations](guides/custom-implementations.md) (30 min) |
 | Handling schema changes | [Schema Changes](explanation/schema-changes.md) |
+| Choosing destination type behavior | [Data Type Compatibility](explanation/data-type-compatibility.md) |
 | Setting up Postgres | [Configure Postgres](guides/configure-postgres.md) |
 
 ## Why ETL?
@@ -151,6 +152,7 @@ replication begins. If you use `PostgresStore` as the runtime store,
 |---------|------------------|
 | [Guides](guides/index.md) | Step-by-step instructions to get things done |
 | [Explanations](explanation/index.md) | Deep dives into concepts and architecture |
+| [Data Type Compatibility](explanation/data-type-compatibility.md) | Destination type mapping and compatibility modes |
 | [Examples](https://github.com/supabase/etl/tree/main/etl-examples) | Runnable `bigquery` and `ducklake` example binaries |
 
 ## Contributing
