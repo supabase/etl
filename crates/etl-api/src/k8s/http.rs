@@ -4,6 +4,8 @@ use async_trait::async_trait;
 use base64::{Engine, prelude::BASE64_STANDARD};
 use chrono::Utc;
 use etl_config::Environment;
+#[cfg(test)]
+use etl_maintenance::DuckLakeMaintenancePolicy;
 use k8s_openapi::{
     api::{
         apps::v1::StatefulSet,
@@ -941,25 +943,25 @@ fn create_ducklake_maintenance_json(
         },
         "operations": {
           "inlineFlush": {
-            "enabled": true,
+            "enabled": config.policy.operation_policy.inline_flush_enabled,
             "minInlinedBytes": config.policy.min_inlined_bytes,
           },
           "mergeAdjacentFiles": {
-            "enabled": true,
+            "enabled": config.policy.operation_policy.merge_adjacent_files_enabled,
             "maxCompactedFiles": config.policy.max_compacted_files,
             "maxTablesPerRun": config.policy.max_tables_per_run,
             "targetFileSize": config.policy.target_file_size,
           },
           "rewriteDataFiles": {
-            "enabled": true,
+            "enabled": config.policy.operation_policy.rewrite_data_files_enabled,
             "deleteThreshold": config.policy.delete_threshold,
             "maxTablesPerRun": config.policy.max_tables_per_run,
           },
           "expireSnapshots": {
-            "enabled": false,
+            "enabled": config.policy.operation_policy.expire_snapshots_enabled,
           },
           "cleanupOldFiles": {
-            "enabled": true,
+            "enabled": config.policy.operation_policy.cleanup_old_files_enabled,
           }
         },
         "jobTemplate": {
@@ -1699,7 +1701,7 @@ mod tests {
                 pipeline_id: 24,
                 replicator_id: 42,
                 image: "supabase/replicator:1.2.3".to_owned(),
-                policy: DuckLakeMaintenanceConfig {
+                policy: DuckLakeMaintenancePolicy {
                     min_interval_seconds: 3600,
                     max_pause_seconds: 2700,
                     min_inlined_bytes: 10_000_000,
@@ -1711,6 +1713,7 @@ mod tests {
                     cpu_request_millicores: 1000,
                     memory_request_mib: 1024,
                     active_deadline_seconds: 1800,
+                    operation_policy: Default::default(),
                 },
             },
         );

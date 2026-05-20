@@ -1878,6 +1878,7 @@ dependencies = [
  "etl",
  "etl-config",
  "etl-destinations",
+ "etl-maintenance",
  "etl-postgres",
  "etl-telemetry",
  "insta",
@@ -1949,6 +1950,8 @@ dependencies = [
  "clickhouse",
  "duckdb",
  "etl",
+ "etl-config",
+ "etl-maintenance",
  "etl-postgres",
  "etl-telemetry",
  "futures",
@@ -1957,7 +1960,6 @@ dependencies = [
  "iceberg",
  "iceberg-catalog-rest",
  "k8s-openapi",
- "kube",
  "metrics",
  "parking_lot",
  "parquet",
@@ -1986,6 +1988,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "etl",
+ "etl-config",
  "etl-destinations",
  "etl-telemetry",
  "k8s-openapi",
@@ -1993,6 +1996,32 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "url",
+]
+
+[[package]]
+name = "etl-maintenance"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "duckdb",
+ "etl",
+ "etl-telemetry",
+ "k8s-openapi",
+ "kube",
+ "metrics",
+ "pg_escape",
+ "r2d2",
+ "regex",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-postgres",
+ "tracing",
  "url",
 ]
 
@@ -2020,6 +2049,7 @@ dependencies = [
  "etl",
  "etl-config",
  "etl-destinations",
+ "etl-maintenance",
  "etl-telemetry",
  "k8s-openapi",
  "metrics",
@@ -5867,6 +5897,7 @@ dependencies = [
  "base64",
  "bytes",
  "cfg-if",
+ "chrono",
  "crc",
  "crossbeam-queue",
  "either",
@@ -5944,6 +5975,7 @@ dependencies = [
  "bitflags",
  "byteorder",
  "bytes",
+ "chrono",
  "crc",
  "digest",
  "dotenvy",
@@ -5984,6 +6016,7 @@ dependencies = [
  "base64",
  "bitflags",
  "byteorder",
+ "chrono",
  "crc",
  "dotenvy",
  "etcetera",
@@ -6017,6 +6050,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fe2cd6cee87120b1e1dd31356b5589911995c777707e49f2750eec7c7fe43eef"
 dependencies = [
  "atoi",
+ "chrono",
  "flume",
  "futures-channel",
  "futures-core",

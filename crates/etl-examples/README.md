@@ -121,6 +121,7 @@ them to absolute `file://` URLs before constructing the destination.
 ## ClickHouse Setup
 
 To run the ClickHouse example, you'll need a running ClickHouse instance accessible over HTTP(S).
+ClickHouse **23.5 or newer** is required for the default `ReplacingMergeTree` engine.
 
 Create a publication in Postgres:
 
@@ -144,16 +145,79 @@ cargo run -p etl-examples --bin clickhouse --features clickhouse -- \
         --publication my_pub
 ```
 
-Each Postgres table is replicated as an append-only `MergeTree` table. Two CDC metadata
-columns are appended to every row:
+### Table engines
 
-- `cdc_operation`: `INSERT`, `UPDATE`, or `DELETE`
-- `cdc_lsn`: the Postgres LSN at the time of the change
+The destination supports two layouts, chosen per pipeline via `--clickhouse-engine`:
+
+| Flag value                       | Engine               | Use it for                                              |
+|----------------------------------|----------------------|---------------------------------------------------------|
+| `replacing_merge_tree` (default) | `ReplacingMergeTree` | Current-state replicas. Source must have a primary key. |
+| `merge_tree`                     | `MergeTree`          | Append-only event log. Works for PK-less source tables. |
 
 Table names are derived from the Postgres schema and table name using double-underscore
-escaping (e.g. `public.orders` → `public_orders`, `my_schema.t` → `my__schema_t`).
+escaping (e.g. `public.orders` -> `public_orders`, `my_schema.t` -> `my__schema_t`).
 
-For HTTPS connections, provide an `https://` URL — TLS is handled automatically using
+#### ReplacingMergeTree (default)
+
+Each replicated table is created as `ReplacingMergeTree(_etl_version, _etl_deleted)` keyed
+on the source primary key. Two trailing columns drive dedup and tombstone handling:
+
+- `_etl_version UInt128` -- the packed Postgres event sequence key:
+  `(commit_lsn << 64) | tx_ordinal`. Higher values win during a `FINAL` merge, so the
+  latest event per primary key wins. Encoding both the commit LSN and the in-transaction
+  ordinal gives a total order across all events, including multiple row events that
+  share a WAL record.
+- `_etl_deleted UInt8` -- tombstone flag. `1` for DELETE events, `0` otherwise.
+
+Alongside each table, the destination also creates a `<table>__current` view that hides
+the ReplacingMergeTree internals:
+
+```sql
+CREATE VIEW IF NOT EXISTS "public_orders__current" AS
+SELECT <user columns>
+FROM "public_orders" FINAL
+WHERE _etl_deleted = 0
+```
+
+Read patterns:
+
+- Prefer the `__current` view for current-state queries.
+- Or query the base table with `SELECT ... FROM "public_orders" FINAL WHERE _etl_deleted = 0`
+  directly.
+
+`OPTIMIZE` guidance:
+
+- The replicator never runs `OPTIMIZE ... FINAL CLEANUP`. Background merges already
+  collapse duplicates over time; physical removal of tombstones is operator-driven.
+- To reclaim deleted rows on disk, run `OPTIMIZE TABLE "<table>" FINAL CLEANUP` on a
+  schedule that matches your retention requirements.
+
+#### MergeTree
+
+Each replicated table is created as `MergeTree() ORDER BY tuple()` with two CDC metadata
+columns appended to every row:
+
+- `cdc_operation`: `INSERT`, `UPDATE`, or `DELETE`
+- `cdc_lsn`: the Postgres commit LSN at the time of the change
+
+Read patterns:
+
+- Current state per primary key: take the latest event by `cdc_lsn` with `LIMIT 1 BY`,
+  then filter out tombstones. Example:
+
+  ```sql
+  SELECT <user columns> FROM (
+      SELECT * FROM "public_orders"
+      ORDER BY cdc_lsn DESC LIMIT 1 BY (id)
+  )
+  WHERE cdc_operation != 'DELETE'
+  ```
+
+- Event log queries: read the table directly; every CDC event is preserved.
+
+### Connection notes
+
+For HTTPS connections, provide an `https://` URL -- TLS is handled automatically using
 webpki root certificates. Use `--clickhouse-password` if your ClickHouse instance requires
 authentication.
 

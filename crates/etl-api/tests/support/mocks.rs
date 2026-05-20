@@ -12,7 +12,10 @@ use etl_api::{
         sources::{CreateSourceRequest, CreateSourceResponse},
     },
 };
-use etl_config::{SerializableSecretString, shared::DestinationTypeCompatibilityMode};
+use etl_config::{
+    SerializableSecretString,
+    shared::{DestinationTypeCompatibilityMode, DuckLakeMaintenanceMode},
+};
 
 use crate::support::test_app::TestApp;
 
@@ -89,6 +92,7 @@ pub(crate) mod destinations {
             duckdb_memory_cache_limit: None,
             maintenance_target_file_size: Some("10MB".to_owned()),
             expire_snapshots_older_than: Some("7 days".to_owned()),
+            maintenance_mode: DuckLakeMaintenanceMode::Kubernetes,
         }
     }
 

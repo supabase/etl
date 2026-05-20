@@ -60,6 +60,7 @@
 ## Rust Style
 - This section is only for project-specific judgment that is not already covered by rustfmt, rustc, or Clippy.
 - Prefer absolute crate imports for shared module items, for example `use crate::metrics::{PIPELINE_ID_LABEL, APP_TYPE_LABEL};`, instead of `use super::{...};`.
+- Write SQL queries with lowercase SQL keywords and identifiers, unless quoting or an external API requires specific casing.
 - When multiple files share constants, helpers, or a single entrypoint, prefer a module directory with `mod.rs`.
 - Keep top-level binaries focused on orchestration; move implementation detail into helpers or modules.
 - Prefer clear, boring code over clever abstractions.

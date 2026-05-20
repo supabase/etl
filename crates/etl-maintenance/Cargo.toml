@@ -1,0 +1,55 @@
+[package]
+name = "etl-maintenance"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[lib]
+doctest = false
+
+[features]
+default = []
+ducklake = [
+    "dep:duckdb",
+    "dep:kube",
+    "dep:metrics",
+    "dep:pg_escape",
+    "dep:r2d2",
+    "dep:regex",
+    "dep:serde_json",
+    "dep:tokio-postgres",
+    "dep:url",
+]
+test-utils = []
+
+[dependencies]
+async-trait = { workspace = true }
+chrono = { workspace = true, features = ["serde"] }
+duckdb = { workspace = true, optional = true, features = ["bundled", "json", "parquet", "r2d2"] }
+etl = { workspace = true }
+kube = { workspace = true, optional = true, features = ["client", "rustls-tls"] }
+metrics = { workspace = true, optional = true }
+pg_escape = { workspace = true, optional = true }
+r2d2 = { workspace = true, optional = true }
+regex = { workspace = true, optional = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true, optional = true, features = ["arbitrary_precision", "std"] }
+sqlx = { workspace = true, features = ["runtime-tokio", "tls-rustls", "postgres", "migrate", "chrono"] }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
+tokio-postgres = { workspace = true, optional = true }
+tracing = { workspace = true, default-features = true }
+url = { workspace = true, optional = true }
+
+[dev-dependencies]
+etl-telemetry = { workspace = true }
+k8s-openapi = { workspace = true, features = ["latest"] }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+
+[lints]
+workspace = true

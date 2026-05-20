@@ -14,7 +14,8 @@ pub use connection::{
     TcpKeepaliveConfig, TlsConfig,
 };
 pub use destination::{
-    DestinationConfig, DestinationConfigWithoutSecrets, IcebergConfig, IcebergConfigWithoutSecrets,
+    ClickHouseEngine, DestinationConfig, DestinationConfigWithoutSecrets, DuckLakeMaintenanceMode,
+    IcebergConfig, IcebergConfigWithoutSecrets,
 };
 pub use destination_compatibility::{
     DestinationTypeCompatibility, DestinationTypeCompatibilityMode,

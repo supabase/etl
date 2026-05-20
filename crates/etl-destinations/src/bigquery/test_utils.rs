@@ -54,9 +54,15 @@ pub const BIGQUERY_PROJECT_ID_ENV: &str = "TESTS_BIGQUERY_PROJECT_ID";
 /// Environment variable name for the BigQuery service account key path.
 pub const BIGQUERY_SA_KEY_PATH_ENV: &str = "TESTS_BIGQUERY_SA_KEY_PATH";
 
+/// When set, tests panic instead of skipping when BigQuery credentials are
+/// missing.
+pub const REQUIRE_BIGQUERY_CREDENTIALS_ENV: &str = "REQUIRE_BIGQUERY_CREDENTIALS";
+
 /// Returns whether BigQuery integration tests should be skipped.
 ///
 /// Prints a warning and returns `true` when credentials are unavailable.
+/// Panics if [`REQUIRE_BIGQUERY_CREDENTIALS_ENV`] is set, and credentials are
+/// not provided.
 pub fn skip_if_missing_bigquery_env_vars() -> bool {
     let sa_key_path = std::env::var_os(BIGQUERY_SA_KEY_PATH_ENV);
     let has_project_id = std::env::var_os(BIGQUERY_PROJECT_ID_ENV).is_some();
@@ -66,10 +72,17 @@ pub fn skip_if_missing_bigquery_env_vars() -> bool {
         return false;
     }
 
+    let require = std::env::var_os(REQUIRE_BIGQUERY_CREDENTIALS_ENV).is_some_and(|v| !v.is_empty());
     let mut missing_env_vars = Vec::new();
     if !has_sa_key_path {
         missing_env_vars.push(BIGQUERY_SA_KEY_PATH_ENV);
     } else if !has_sa_key_file {
+        if require {
+            panic!(
+                "BigQuery credentials required but {BIGQUERY_SA_KEY_PATH_ENV} does not point to \
+                 an existing file"
+            );
+        }
         eprintln!(
             "skipping bigquery integration test: {BIGQUERY_SA_KEY_PATH_ENV} does not point to an \
              existing file"
@@ -80,6 +93,10 @@ pub fn skip_if_missing_bigquery_env_vars() -> bool {
 
     if !has_project_id {
         missing_env_vars.push(BIGQUERY_PROJECT_ID_ENV);
+    }
+
+    if require {
+        panic!("BigQuery credentials required but missing: {}", missing_env_vars.join(", "));
     }
 
     eprintln!("skipping bigquery integration test: missing {}", missing_env_vars.join(", "));

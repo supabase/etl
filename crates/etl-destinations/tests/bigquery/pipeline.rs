@@ -2192,6 +2192,9 @@ async fn table_type_compatibility_modes_handle_same_risky_data() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn table_schema_change() {
+    if skip_if_missing_bigquery_env_vars() {
+        return;
+    }
     init_test_tracing();
     install_crypto_provider();
 

@@ -925,7 +925,7 @@ impl Validator for DestinationValidator {
                 );
                 validator.validate(ctx).await
             }
-            FullApiDestinationConfig::ClickHouse { url, user, password, database } => {
+            FullApiDestinationConfig::ClickHouse { url, user, password, database, .. } => {
                 let validator = ClickHouseValidator::new(
                     url.clone(),
                     user.clone(),
@@ -952,6 +952,7 @@ impl Validator for DestinationValidator {
                 duckdb_memory_cache_limit,
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
+                maintenance_mode: _,
             } => {
                 let validator = DucklakeValidator::new(
                     catalog_url.clone(),
