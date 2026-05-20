@@ -362,7 +362,10 @@ async fn run() -> Result<(), Box<dyn Error>> {
                         error!(error = %e, "pipeline shutdown failed during restart");
                         dashboard.lock().unwrap().pipeline_running = false;
                         dashboard.lock().unwrap().phase = GlobalPhase::Stopped;
-                        dashboard.lock().unwrap().set_status(format!("Restart failed: {e} -- press F3 to retry"));
+                        dashboard
+                            .lock()
+                            .unwrap()
+                            .set_status(format!("Restart failed: {e} -- press F3 to retry"));
                         continue;
                     }
                     dashboard.lock().unwrap().pipeline_running = false;

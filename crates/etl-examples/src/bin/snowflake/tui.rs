@@ -27,8 +27,8 @@ impl Drop for TerminalGuard {
     }
 }
 
-pub fn setup_terminal(
-) -> Result<(Terminal<CrosstermBackend<Stdout>>, TerminalGuard), Box<dyn std::error::Error>> {
+pub fn setup_terminal()
+-> Result<(Terminal<CrosstermBackend<Stdout>>, TerminalGuard), Box<dyn std::error::Error>> {
     crossterm::terminal::enable_raw_mode()?;
     let mut stdout = std::io::stdout();
     crossterm::execute!(stdout, crossterm::terminal::EnterAlternateScreen)?;
