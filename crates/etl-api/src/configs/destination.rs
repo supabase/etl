@@ -1,6 +1,6 @@
 use etl_config::{
     SerializableSecretString,
-    shared::{DestinationConfig, IcebergConfig},
+    shared::{ClickHouseEngine, DestinationConfig, DuckLakeMaintenanceMode, IcebergConfig},
 };
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
@@ -60,6 +60,10 @@ pub enum FullApiDestinationConfig {
         #[schema(example = "my_db")]
         #[serde(deserialize_with = "crate::utils::trim_string")]
         database: String,
+        /// Table engine used for replicated tables.
+        #[schema(value_type = String, example = "replacing_merge_tree")]
+        #[serde(default)]
+        engine: ClickHouseEngine,
     },
     Iceberg {
         #[serde(flatten)]
@@ -141,6 +145,9 @@ pub enum FullApiDestinationConfig {
             deserialize_with = "crate::utils::trim_option_string"
         )]
         expire_snapshots_older_than: Option<String>,
+        #[schema(example = "kubernetes")]
+        #[serde(default)]
+        maintenance_mode: DuckLakeMaintenanceMode,
     },
 }
 
@@ -160,8 +167,8 @@ impl From<StoredDestinationConfig> for FullApiDestinationConfig {
                 max_staleness_mins,
                 connection_pool_size: Some(connection_pool_size),
             },
-            StoredDestinationConfig::ClickHouse { url, user, password, database } => {
-                Self::ClickHouse { url, user, password, database }
+            StoredDestinationConfig::ClickHouse { url, user, password, database, engine } => {
+                Self::ClickHouse { url, user, password, database, engine }
             }
             StoredDestinationConfig::Iceberg { config } => match config {
                 StoredIcebergConfig::Supabase {
@@ -215,6 +222,7 @@ impl From<StoredDestinationConfig> for FullApiDestinationConfig {
                 duckdb_memory_cache_limit,
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
+                maintenance_mode,
             } => Self::Ducklake {
                 catalog_url,
                 data_path,
@@ -229,6 +237,7 @@ impl From<StoredDestinationConfig> for FullApiDestinationConfig {
                 duckdb_memory_cache_limit,
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
+                maintenance_mode,
             },
         }
     }
@@ -248,6 +257,7 @@ pub enum StoredDestinationConfig {
         user: String,
         password: Option<SerializableSecretString>,
         database: String,
+        engine: ClickHouseEngine,
     },
     Iceberg {
         config: StoredIcebergConfig,
@@ -266,6 +276,7 @@ pub enum StoredDestinationConfig {
         duckdb_memory_cache_limit: Option<String>,
         maintenance_target_file_size: Option<String>,
         expire_snapshots_older_than: Option<String>,
+        maintenance_mode: DuckLakeMaintenanceMode,
     },
 }
 
@@ -285,12 +296,15 @@ impl StoredDestinationConfig {
                 max_staleness_mins,
                 connection_pool_size,
             },
-            Self::ClickHouse { url, user, password, database } => DestinationConfig::ClickHouse {
-                url,
-                user,
-                password: password.map(Into::into),
-                database,
-            },
+            Self::ClickHouse { url, user, password, database, engine } => {
+                DestinationConfig::ClickHouse {
+                    url,
+                    user,
+                    password: password.map(Into::into),
+                    database,
+                    engine,
+                }
+            }
             Self::Iceberg { config } => match config {
                 StoredIcebergConfig::Supabase {
                     project_ref,
@@ -343,6 +357,7 @@ impl StoredDestinationConfig {
                 duckdb_memory_cache_limit,
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
+                maintenance_mode,
             } => DestinationConfig::Ducklake {
                 catalog_url,
                 data_path,
@@ -357,6 +372,7 @@ impl StoredDestinationConfig {
                 duckdb_memory_cache_limit,
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
+                maintenance_mode,
             },
         }
     }
@@ -379,8 +395,8 @@ impl From<FullApiDestinationConfig> for StoredDestinationConfig {
                 connection_pool_size: connection_pool_size
                     .unwrap_or(DestinationConfig::DEFAULT_CONNECTION_POOL_SIZE),
             },
-            FullApiDestinationConfig::ClickHouse { url, user, password, database } => {
-                Self::ClickHouse { url, user, password, database }
+            FullApiDestinationConfig::ClickHouse { url, user, password, database, engine } => {
+                Self::ClickHouse { url, user, password, database, engine }
             }
             FullApiDestinationConfig::Iceberg { config } => match config {
                 FullApiIcebergConfig::Supabase {
@@ -434,6 +450,7 @@ impl From<FullApiDestinationConfig> for StoredDestinationConfig {
                 duckdb_memory_cache_limit,
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
+                maintenance_mode,
             } => Self::Ducklake {
                 catalog_url,
                 data_path,
@@ -448,6 +465,7 @@ impl From<FullApiDestinationConfig> for StoredDestinationConfig {
                 duckdb_memory_cache_limit,
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
+                maintenance_mode,
             },
         }
     }
@@ -477,7 +495,7 @@ impl Encrypt<EncryptedStoredDestinationConfig> for StoredDestinationConfig {
                     connection_pool_size,
                 })
             }
-            Self::ClickHouse { url, user, password, database } => {
+            Self::ClickHouse { url, user, password, database, engine } => {
                 let encrypted_password = password
                     .map(|p| encrypt_text(p.expose_secret().to_owned(), encryption_key))
                     .transpose()?;
@@ -487,6 +505,7 @@ impl Encrypt<EncryptedStoredDestinationConfig> for StoredDestinationConfig {
                     user,
                     password: encrypted_password,
                     database,
+                    engine,
                 })
             }
             Self::Iceberg { config } => match config {
@@ -559,6 +578,7 @@ impl Encrypt<EncryptedStoredDestinationConfig> for StoredDestinationConfig {
                 duckdb_memory_cache_limit,
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
+                maintenance_mode,
             } => {
                 let s3_access_key_id = s3_access_key_id
                     .map(|value| encrypt_text(value.expose_secret().to_owned(), encryption_key))
@@ -581,6 +601,7 @@ impl Encrypt<EncryptedStoredDestinationConfig> for StoredDestinationConfig {
                     duckdb_memory_cache_limit,
                     maintenance_target_file_size,
                     expire_snapshots_older_than,
+                    maintenance_mode,
                 })
             }
         }
@@ -603,6 +624,8 @@ pub enum EncryptedStoredDestinationConfig {
         user: String,
         password: Option<EncryptedValue>,
         database: String,
+        #[serde(default)]
+        engine: ClickHouseEngine,
     },
     Iceberg {
         #[serde(flatten)]
@@ -623,6 +646,8 @@ pub enum EncryptedStoredDestinationConfig {
         duckdb_memory_cache_limit: Option<String>,
         maintenance_target_file_size: Option<String>,
         expire_snapshots_older_than: Option<String>,
+        #[serde(default)]
+        maintenance_mode: DuckLakeMaintenanceMode,
     },
 }
 
@@ -721,13 +746,19 @@ impl Decrypt<StoredDestinationConfig> for EncryptedStoredDestinationConfig {
                     })
                 }
             },
-            EncryptedStoredDestinationConfig::ClickHouse { url, user, password, database } => {
+            EncryptedStoredDestinationConfig::ClickHouse {
+                url,
+                user,
+                password,
+                database,
+                engine,
+            } => {
                 let password = password
                     .map(|p| decrypt_text(p, encryption_key))
                     .transpose()?
                     .map(SerializableSecretString::from);
 
-                Ok(StoredDestinationConfig::ClickHouse { url, user, password, database })
+                Ok(StoredDestinationConfig::ClickHouse { url, user, password, database, engine })
             }
             Self::Ducklake {
                 catalog_url,
@@ -743,6 +774,7 @@ impl Decrypt<StoredDestinationConfig> for EncryptedStoredDestinationConfig {
                 duckdb_memory_cache_limit,
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
+                maintenance_mode,
             } => Ok(StoredDestinationConfig::Ducklake {
                 catalog_url,
                 data_path,
@@ -765,6 +797,7 @@ impl Decrypt<StoredDestinationConfig> for EncryptedStoredDestinationConfig {
                 duckdb_memory_cache_limit,
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
+                maintenance_mode,
             }),
         }
     }
@@ -1045,6 +1078,7 @@ mod tests {
             user: "etl".to_owned(),
             password: Some(SerializableSecretString::from("secret".to_owned())),
             database: "analytics".to_owned(),
+            engine: ClickHouseEngine::MergeTree,
         };
 
         let key = EncryptionKey { id: 1, key: generate_random_key::<32>().unwrap() };
@@ -1059,17 +1093,20 @@ mod tests {
                     user: user1,
                     password: p1,
                     database: d1,
+                    engine: e1,
                 },
                 StoredDestinationConfig::ClickHouse {
                     url: u2,
                     user: user2,
                     password: p2,
                     database: d2,
+                    engine: e2,
                 },
             ) => {
                 assert_eq!(u1, u2);
                 assert_eq!(user1, user2);
                 assert_eq!(d1, d2);
+                assert_eq!(e1, e2);
                 assert_eq!(
                     p1.as_ref().map(|value| value.expose_secret()),
                     p2.as_ref().map(|value| value.expose_secret())
@@ -1086,6 +1123,7 @@ mod tests {
             user: "etl".to_owned(),
             password: Some(SerializableSecretString::from("secret".to_owned())),
             database: "analytics".to_owned(),
+            engine: ClickHouseEngine::MergeTree,
         };
 
         let stored: StoredDestinationConfig = full_config.clone().into();
@@ -1098,21 +1136,44 @@ mod tests {
                     user: user1,
                     password: p1,
                     database: d1,
+                    engine: e1,
                 },
                 FullApiDestinationConfig::ClickHouse {
                     url: u2,
                     user: user2,
                     password: p2,
                     database: d2,
+                    engine: e2,
                 },
             ) => {
                 assert_eq!(u1, u2);
                 assert_eq!(user1, user2);
                 assert_eq!(d1, d2);
+                assert_eq!(e1, e2);
                 assert_eq!(
                     p1.as_ref().map(|value| value.expose_secret()),
                     p2.as_ref().map(|value| value.expose_secret())
                 );
+            }
+            _ => panic!("Config types don't match"),
+        }
+    }
+
+    #[test]
+    fn stored_destination_config_into_etl_config_preserves_clickhouse_engine() {
+        let config = StoredDestinationConfig::ClickHouse {
+            url: Url::parse("https://example.com:8443").unwrap(),
+            user: "etl".to_owned(),
+            password: Some(SerializableSecretString::from("secret".to_owned())),
+            database: "analytics".to_owned(),
+            engine: ClickHouseEngine::MergeTree,
+        };
+
+        let etl_config = config.into_etl_config();
+
+        match etl_config {
+            DestinationConfig::ClickHouse { engine, .. } => {
+                assert_eq!(engine, ClickHouseEngine::MergeTree);
             }
             _ => panic!("Config types don't match"),
         }
@@ -1132,11 +1193,56 @@ mod tests {
 
         let deserialized: FullApiDestinationConfig = serde_json::from_str(json).unwrap();
         match deserialized {
-            FullApiDestinationConfig::ClickHouse { url, user, password, database } => {
+            FullApiDestinationConfig::ClickHouse { url, user, password, database, engine } => {
                 assert_eq!(url.as_str(), "https://example.com:8443/");
                 assert_eq!(user, "etl");
                 assert!(password.is_none());
                 assert_eq!(database, "analytics");
+                assert_eq!(engine, ClickHouseEngine::default());
+            }
+            _ => panic!("Deserialization failed or variant mismatch"),
+        }
+    }
+
+    #[test]
+    fn full_api_destination_config_deserializes_clickhouse_engine() {
+        let json = r#"
+        {
+            "clickhouse": {
+                "url": "https://example.com:8443",
+                "user": "etl",
+                "database": "analytics",
+                "engine": "merge_tree"
+            }
+        }
+        "#;
+
+        let deserialized: FullApiDestinationConfig = serde_json::from_str(json).unwrap();
+        match deserialized {
+            FullApiDestinationConfig::ClickHouse { engine, .. } => {
+                assert_eq!(engine, ClickHouseEngine::MergeTree);
+            }
+            _ => panic!("Deserialization failed or variant mismatch"),
+        }
+    }
+
+    #[test]
+    fn encrypted_stored_destination_config_defaults_legacy_clickhouse_engine() {
+        let json = r#"
+        {
+            "click_house": {
+                "url": "https://example.com:8443",
+                "user": "etl",
+                "password": null,
+                "database": "analytics"
+            }
+        }
+        "#;
+
+        let deserialized: EncryptedStoredDestinationConfig = serde_json::from_str(json).unwrap();
+        match deserialized {
+            EncryptedStoredDestinationConfig::ClickHouse { engine, .. } => {
+                assert_eq!(engine, ClickHouseEngine::default());
             }
             _ => panic!("Deserialization failed or variant mismatch"),
         }
@@ -1343,6 +1449,7 @@ mod tests {
             duckdb_memory_cache_limit: Some("50MB".to_owned()),
             maintenance_target_file_size: Some("10MB".to_owned()),
             expire_snapshots_older_than: Some("7 days".to_owned()),
+            maintenance_mode: DuckLakeMaintenanceMode::Kubernetes,
         };
 
         let key = EncryptionKey { id: 1, key: generate_random_key::<32>().unwrap() };
@@ -1366,6 +1473,7 @@ mod tests {
                     duckdb_memory_cache_limit: memory1,
                     maintenance_target_file_size: target1,
                     expire_snapshots_older_than: expire1,
+                    maintenance_mode: mode1,
                 },
                 StoredDestinationConfig::Ducklake {
                     catalog_url: c2,
@@ -1381,6 +1489,7 @@ mod tests {
                     duckdb_memory_cache_limit: memory2,
                     maintenance_target_file_size: target2,
                     expire_snapshots_older_than: expire2,
+                    maintenance_mode: mode2,
                 },
             ) => {
                 assert_eq!(c1, c2);
@@ -1402,8 +1511,46 @@ mod tests {
                 assert_eq!(memory1, memory2);
                 assert_eq!(target1, target2);
                 assert_eq!(expire1, expire2);
+                assert_eq!(mode1, mode2);
             }
             _ => panic!("Config types don't match"),
+        }
+    }
+
+    #[test]
+    fn encrypted_stored_destination_config_ducklake_defaults_maintenance_mode() {
+        let config: EncryptedStoredDestinationConfig = serde_json::from_value(serde_json::json!({
+            "ducklake": {
+                "catalog_url": "postgres://user:pass@localhost:5432/ducklake_catalog",
+                "data_path": "s3://bucket/path",
+                "pool_size": 8
+            }
+        }))
+        .unwrap();
+
+        match config {
+            EncryptedStoredDestinationConfig::Ducklake { maintenance_mode, .. } => {
+                assert_eq!(maintenance_mode, DuckLakeMaintenanceMode::Disabled);
+            }
+            _ => panic!("Config type doesn't match"),
+        }
+    }
+
+    #[test]
+    fn full_api_destination_config_ducklake_defaults_maintenance_mode() {
+        let config: FullApiDestinationConfig = serde_json::from_value(serde_json::json!({
+            "ducklake": {
+                "catalog_url": "postgres://user:pass@localhost:5432/ducklake_catalog",
+                "data_path": "s3://bucket/path"
+            }
+        }))
+        .unwrap();
+
+        match config {
+            FullApiDestinationConfig::Ducklake { maintenance_mode, .. } => {
+                assert_eq!(maintenance_mode, DuckLakeMaintenanceMode::Disabled);
+            }
+            _ => panic!("Config type doesn't match"),
         }
     }
 
@@ -1423,6 +1570,7 @@ mod tests {
             duckdb_memory_cache_limit: None,
             maintenance_target_file_size: None,
             expire_snapshots_older_than: None,
+            maintenance_mode: DuckLakeMaintenanceMode::Kubernetes,
         };
 
         let stored: StoredDestinationConfig = full_config.clone().into();
@@ -1480,6 +1628,7 @@ mod tests {
             duckdb_memory_cache_limit: Some("50MB".to_owned()),
             maintenance_target_file_size: Some("10MB".to_owned()),
             expire_snapshots_older_than: Some("7 days".to_owned()),
+            maintenance_mode: DuckLakeMaintenanceMode::Kubernetes,
         };
 
         assert_json_snapshot!(full_config);
@@ -1502,6 +1651,7 @@ mod tests {
                     duckdb_memory_cache_limit: memory1,
                     maintenance_target_file_size: target1,
                     expire_snapshots_older_than: expire1,
+                    maintenance_mode: mode1,
                 },
                 FullApiDestinationConfig::Ducklake {
                     catalog_url: c2,
@@ -1517,6 +1667,7 @@ mod tests {
                     duckdb_memory_cache_limit: memory2,
                     maintenance_target_file_size: target2,
                     expire_snapshots_older_than: expire2,
+                    maintenance_mode: mode2,
                 },
             ) => {
                 assert_eq!(c1, &c2);
@@ -1538,6 +1689,7 @@ mod tests {
                 assert_eq!(memory1, &memory2);
                 assert_eq!(target1, &target2);
                 assert_eq!(expire1, &expire2);
+                assert_eq!(mode1, &mode2);
             }
             _ => panic!("Deserialization failed or variant mismatch"),
         }

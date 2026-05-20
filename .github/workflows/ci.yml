@@ -222,10 +222,14 @@ jobs:
           ./scripts/run_migrations.sh etl-api
 
       - name: Set up BigQuery Credentials
+        # Conditional: fork PRs never receive secrets, BigQuery tests skipped gracefully.
         run: |
-          printf '%s' '${{ secrets.TESTS_BIGQUERY_SA_KEY_JSON }}' > /tmp/bigquery-sa-key.json
-          echo "TESTS_BIGQUERY_PROJECT_ID=${{ secrets.TESTS_BIGQUERY_PROJECT_ID }}" >> $GITHUB_ENV
-          echo "TESTS_BIGQUERY_SA_KEY_PATH=/tmp/bigquery-sa-key.json" >> $GITHUB_ENV
+          if [ -n '${{ secrets.TESTS_BIGQUERY_SA_KEY_JSON }}' ]; then
+            printf '%s' '${{ secrets.TESTS_BIGQUERY_SA_KEY_JSON }}' > /tmp/bigquery-sa-key.json
+            echo "TESTS_BIGQUERY_SA_KEY_PATH=/tmp/bigquery-sa-key.json" >> $GITHUB_ENV
+            echo "TESTS_BIGQUERY_PROJECT_ID=${{ secrets.TESTS_BIGQUERY_PROJECT_ID }}" >> $GITHUB_ENV
+            echo "REQUIRE_BIGQUERY_CREDENTIALS=true" >> $GITHUB_ENV
+          fi
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@328a871ad8f62ecac78390391f463ccabc974b72 # v2.69.9

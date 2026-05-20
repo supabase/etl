@@ -236,6 +236,10 @@ mod tests {
             Ok(())
         }
 
+        async fn replicator_stateful_set_exists(&self, _prefix: &str) -> Result<bool, K8sError> {
+            Ok(false)
+        }
+
         async fn create_or_update_ducklake_maintenance(
             &self,
             _prefix: &str,

@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use etl_config::Environment;
+use etl_maintenance::DuckLakeMaintenancePolicy;
 use k8s_openapi::api::core::v1::ConfigMap;
 use thiserror::Error;
 
@@ -49,7 +50,7 @@ pub struct DuckLakeMaintenanceResourceConfig {
     /// Image containing the maintenance binary.
     pub image: String,
     /// User-authored maintenance policy.
-    pub policy: DuckLakeMaintenanceConfig,
+    pub policy: DuckLakeMaintenancePolicy,
 }
 
 /// Replicator StatefulSet materialization input.
@@ -273,6 +274,9 @@ pub trait K8sClient: Send + Sync {
     ///
     /// Does nothing if the stateful set does not exist.
     async fn delete_replicator_stateful_set(&self, prefix: &str) -> Result<(), K8sError>;
+
+    /// Returns whether the replicator [`StatefulSet`] exists.
+    async fn replicator_stateful_set_exists(&self, prefix: &str) -> Result<bool, K8sError>;
 
     /// Creates or updates the DuckLake maintenance CR.
     async fn create_or_update_ducklake_maintenance(

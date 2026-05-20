@@ -1,7 +1,6 @@
 ---
 source: crates/etl-api/src/k8s/http.rs
-assertion_line: 1786
-expression: stateful_set_json
+expression: "serde_json :: to_string_pretty(& stateful_set_json).unwrap()"
 ---
 {
   "apiVersion": "apps/v1",
@@ -11,7 +10,7 @@ expression: stateful_set_json
       "etl.supabase.com/app-name": "abcdefghijklmnopqrst-42-replicator-app",
       "etl.supabase.com/app-type": "etl-replicator-app"
     },
-    "name": "abcdefghijklmnopqrst-42-replicator-stateful-set",
+    "name": "abcdefghijklmnopqrst-42-replicator",
     "namespace": "etl-data-plane"
   },
   "spec": {
