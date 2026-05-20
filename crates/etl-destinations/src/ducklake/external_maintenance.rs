@@ -593,11 +593,10 @@ fn record_external_maintenance_triggers(
 mod tests {
     use etl_telemetry::metrics::init_metrics_handle;
 
+    use super::record_external_maintenance_pause_active;
     use crate::ducklake::metrics::{
         ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_PAUSE_ACTIVE, register_metrics,
     };
-
-    use super::record_external_maintenance_pause_active;
 
     fn pause_active_gauge_value(rendered: &str) -> Option<f64> {
         rendered.lines().find_map(|line| {
