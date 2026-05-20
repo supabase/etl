@@ -155,7 +155,14 @@ Table-copy row count is controlled by TPC-C warehouse count:
   changing `--warehouses` on an existing benchmark database.
 - `--tpcc-threads`: controls `go-tpc` load and streaming concurrency, not dataset
   size.
-- `--tpcc-tables`: controls which prepared TPC-C tables are copied.
+- `--tpcc-tables`: controls which prepared TPC-C tables are copied and streamed.
+  Omit it to use the default full table set, pass one table for a single-table
+  run, or pass a comma-separated list for a subset:
+
+  ```bash
+  cargo xtask benchmark --tpcc-tables order_line
+  cargo xtask benchmark --tpcc-tables order_line,orders,stock
+  ```
 
 The default TPC-C table set intentionally excludes `history` because `go-tpc`
 creates it without a primary key in Postgres, while ETL requires primary keys

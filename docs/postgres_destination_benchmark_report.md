@@ -1,8 +1,11 @@
-# Postgres destination benchmark report
+# Postgres single-table copy benchmark
 
-Generated: 2026-05-20 10:54:32 CEST.
+Generated: 2026-05-20 11:17:29 CEST.
 
-This report summarizes the current Postgres destination benchmark after rerunning with separate source and destination Postgres containers on the same machine. Main numbers are rounded for readability; exact values are in the JSON files listed below.
+This report focuses only on copying one TPC-C table, `order_line`, from a source
+Postgres container to a separate destination Postgres container on the same machine.
+Main numbers are rounded for readability; exact values are in the JSON files listed
+below.
 
 ## Setup
 
@@ -51,66 +54,63 @@ docker run -d \
   postgres:18
 ```
 
-## What Was Benchmarked
-
-Dataset:
+## Benchmark Shape
 
 | Setting | Value |
 | --- | --- |
-| Source dataset | TPC-C, 1 warehouse |
-| Tables copied | 8 |
-| Rows copied | 1,387,362 |
-| Decoded data estimate | 657.7 MiB |
-| Measured samples | 5 |
-| Warmup samples | 1 |
+| Source table | `order_line` |
+| Table selection flag | `--tpcc-tables order_line` |
+| Rows copied | 1,037,461 |
+| Decoded data estimate | 457.5 MiB |
+| Destination mode | Normal logged table |
+| Destination write path | Multi-row parameterized `INSERT` |
+| Samples | 5 measured, 1 warmup |
 | Table streaming | Disabled |
+| Table sync workers | 1 |
+| Copy connections per table | Swept across 1, 2, 4, 8, 16 |
 
-Destination variants:
-
-| Variant | Meaning |
-| --- | --- |
-| `null` | No-op destination. Useful as a rough source/decode reference. |
-| `postgres logged` | Normal WAL-logged destination tables, with destination session `synchronous_commit = off`. |
-| `postgres unlogged` | `create unlogged table`, also with destination session `synchronous_commit = off`. |
-
-The Postgres destination is not using `COPY FROM STDIN` yet. It writes real Postgres rows with pooled multi-row parameterized `INSERT` statements, capped at 2,000 rows and 30,000 bind parameters per statement.
+The Postgres destination is not using `COPY FROM STDIN` yet. It writes real Postgres
+rows with pooled multi-row parameterized `INSERT` statements, capped at 2,000 rows
+and 30,000 bind parameters per statement.
 
 ## Results
 
-| Variant | Median rows/s | Range | Spread | Median MiB/s | Median total |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| `null` | 132k | 89k-310k | 248% | 63 MiB/s | 10.5s |
-| `postgres logged` | 122k | 108k-127k | 17.6% | 58 MiB/s | 11.6s |
-| `postgres unlogged` | 123k | 120k-125k | 4.6% | 58 MiB/s | 11.3s |
+| Copy connections/table | Median rows/s | Range | Spread | Median MiB/s | Median total |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 209k | 209k-214k | 2.1% | 92 MiB/s | 5.0s |
+| 2 | 342k | 331k-366k | 10.6% | 151 MiB/s | 3.1s |
+| 4 | 488k | 466k-540k | 15.9% | 215 MiB/s | 2.2s |
+| 8 | 513k | 426k-569k | 33.5% | 226 MiB/s | 2.1s |
+| 16 | 392k | 309k-638k | 106.6% | 173 MiB/s | 2.7s |
 
 Interpretation:
 
-- With source and destination split into two local containers, the current Postgres destination is around **122k-123k rows/s**.
-- Unlogged tables were only slightly faster than logged tables, so destination WAL was not the dominant bottleneck in this run.
-- The two-instance result is much slower than the previous same-instance local run. That is expected on Docker Desktop/macOS because the destination writes now cross container/host networking instead of writing back into the same Postgres server.
-- The `null` baseline is still noisy and should not be treated as a clean destination comparison. It remains useful as a rough source/decode reference.
+- Same-table parallel copy matters a lot for `order_line`.
+- 4 copy connections were about 2.3x faster than 1 connection.
+- 8 copy connections had the best median, but it was noticeably more variable than 4.
+- 16 copy connections over-drove this local setup: it produced some very fast samples,
+  but the median regressed and spread was high.
+- For this machine and dataset, `--max-copy-connections-per-table 4` looks like the best
+  stable setting; `8` is the peak-throughput experiment.
 
 ## Raw Results
 
-Exact aggregate JSON reports:
+| Copy connections/table | JSON |
+| ---: | --- |
+| 1 | `target/bench-results-single-order-line-c1-20260520/table_copy.json` |
+| 2 | `target/bench-results-single-order-line-c2-20260520/table_copy.json` |
+| 4 | `target/bench-results-single-order-line-c4-20260520/table_copy.json` |
+| 8 | `target/bench-results-single-order-line-c8-20260520/table_copy.json` |
+| 16 | `target/bench-results-single-order-line-c16-20260520/table_copy.json` |
 
-| Variant | JSON |
-| --- | --- |
-| `null` | `target/bench-results-two-instance-null-20260520/table_copy.json` |
-| `postgres logged` | `target/bench-results-two-instance-postgres-logged-20260520/table_copy.json` |
-| `postgres unlogged` | `target/bench-results-two-instance-postgres-unlogged-20260520/table_copy.json` |
-
-Useful verification command:
+Verification command:
 
 ```bash
-for f in \
-  target/bench-results-two-instance-null-20260520/table_copy.json \
-  target/bench-results-two-instance-postgres-logged-20260520/table_copy.json \
-  target/bench-results-two-instance-postgres-unlogged-20260520/table_copy.json
-do
+for c in 1 2 4 8 16; do
+  f="target/bench-results-single-order-line-c${c}-20260520/table_copy.json"
   echo "$f"
-  jq '{
-    destination,
+  jq --arg c "$c" '{
+    copy_connections: ($c | tonumber),
     sample_count,
     warmup_sample_count,
     copied_rows,
@@ -135,126 +135,66 @@ These commands assume:
 - both have a `bench` database;
 - source TPC-C tables have already been prepared.
 
-Shared benchmark shape:
+Run the full copy-connection sweep:
 
 ```bash
---warehouses 1 \
---skip-prepare \
---samples 5 \
---warmup-samples 1 \
---skip-table-streaming \
---max-table-sync-workers 2 \
---max-copy-connections-per-table 1 \
---batch-max-fill-ms 100
+for connections in 1 2 4 8 16; do
+  cargo xtask benchmark \
+    --destination postgres \
+    --pg-destination-host localhost \
+    --pg-destination-port 5431 \
+    --pg-destination-database bench \
+    --pg-destination-username postgres \
+    --pg-destination-password postgres \
+    --pg-destination-schema "etl_benchmark_single_order_line_c${connections}" \
+    --tpcc-tables order_line \
+    --warehouses 1 \
+    --skip-prepare \
+    --samples 5 \
+    --warmup-samples 1 \
+    --skip-table-streaming \
+    --max-table-sync-workers 1 \
+    --max-copy-connections-per-table "${connections}" \
+    --batch-max-fill-ms 100 \
+    --output-dir "target/bench-results-single-order-line-c${connections}-20260520"
+done
 ```
 
-Null baseline:
+Table selection behavior:
 
-```bash
-cargo xtask benchmark \
-  --destination null \
-  --warehouses 1 \
-  --skip-prepare \
-  --samples 5 \
-  --warmup-samples 1 \
-  --skip-table-streaming \
-  --max-table-sync-workers 2 \
-  --max-copy-connections-per-table 1 \
-  --batch-max-fill-ms 100 \
-  --output-dir target/bench-results-two-instance-null-20260520
-```
+- `--tpcc-tables order_line` runs this single-table benchmark.
+- A comma-separated list selects multiple tables, for example
+  `--tpcc-tables order_line,orders,stock`.
+- Omitting `--tpcc-tables` uses the default full TPC-C table set, but that is not the
+  benchmark covered by this report.
 
-Postgres logged, separate destination:
+Note: `xtask benchmark` derives a unique Postgres destination schema for each sample.
+That avoids stale target tables contaminating multi-sample Postgres results.
 
-```bash
-cargo xtask benchmark \
-  --destination postgres \
-  --pg-destination-host localhost \
-  --pg-destination-port 5431 \
-  --pg-destination-database bench \
-  --pg-destination-username postgres \
-  --pg-destination-password postgres \
-  --pg-destination-schema etl_benchmark_destination_two_instance_logged \
-  --warehouses 1 \
-  --skip-prepare \
-  --samples 5 \
-  --warmup-samples 1 \
-  --skip-table-streaming \
-  --max-table-sync-workers 2 \
-  --max-copy-connections-per-table 1 \
-  --batch-max-fill-ms 100 \
-  --output-dir target/bench-results-two-instance-postgres-logged-20260520
-```
+## External Context
 
-Postgres unlogged, separate destination:
-
-```bash
-cargo xtask benchmark \
-  --destination postgres \
-  --pg-destination-host localhost \
-  --pg-destination-port 5431 \
-  --pg-destination-database bench \
-  --pg-destination-username postgres \
-  --pg-destination-password postgres \
-  --pg-destination-schema etl_benchmark_destination_two_instance_unlogged \
-  --pg-destination-unlogged \
-  --warehouses 1 \
-  --skip-prepare \
-  --samples 5 \
-  --warmup-samples 1 \
-  --skip-table-streaming \
-  --max-table-sync-workers 2 \
-  --max-copy-connections-per-table 1 \
-  --batch-max-fill-ms 100 \
-  --output-dir target/bench-results-two-instance-postgres-unlogged-20260520
-```
-
-Note: `xtask benchmark` now derives a unique Postgres destination schema for each sample. That avoids stale target tables contaminating multi-sample Postgres results.
-
-## External COPY Context
-
-Very short version:
-
-| Source | Useful comparison |
-| --- | --- |
-| [PostgreSQL populate docs](https://www.postgresql.org/docs/current/populate.html) | Official guidance says `COPY` is almost always faster than `INSERT` for large loads, even with prepared/batched inserts. |
-| [PostgreSQL COPY docs](https://www.postgresql.org/docs/current/sql-copy.html) | Binary COPY is described as somewhat faster than text/CSV, but type-specific and less portable. |
-| [Cybertec bulk-load benchmark](https://www.cybertec-postgresql.com/en/bulk-load-performance-in-postgresql/) | 10M rows: bulk INSERT 52s, COPY 14s on the author's laptop. |
-| [SQG Java benchmark](https://sqg.dev/blog/java-postgres-insert-benchmark/) | 1M rows: COPY binary ~712k rows/s, COPY CSV ~360k rows/s, multi-value INSERT ~253k rows/s. |
-| [Gold Lapel pgx benchmark](https://goldlapel.com/grounds/go-postgres/pgx-bulk-insert-benchmarks) | 50k rows: pgx `CopyFrom` ~357k rows/s. |
-| [pgcopydb docs](https://pgcopydb.readthedocs.io/en/latest/ref/pgcopydb_copy.html) | Postgres-to-Postgres copy streams source `COPY TO` directly into target `COPY FROM`, avoiding disk. |
-
-The local two-instance destination result, around 122k-123k rows/s, is a multi-row INSERT result over local container networking. It should not be treated as the ceiling for a dedicated Postgres-to-Postgres COPY path.
-
-## How Good Is This Result?
-
-Short answer: it is a useful first baseline, but it is not fast compared with optimized
-Postgres bulk-copy paths.
+This single-table result is much stronger than the earlier full-table default-set run
+because all copy parallelism is concentrated on the large `order_line` table.
 
 | Benchmark | Method | Result | Comparison |
 | --- | --- | ---: | --- |
-| This ETL benchmark | Multi-row `INSERT`, separate local source/destination containers | ~122k rows/s | Baseline |
-| SQG Java | Multi-value `INSERT`, direct ingest | ~253k rows/s | About 2x faster |
-| SQG Java | COPY CSV, direct ingest | ~360k rows/s | About 3x faster |
-| SQG Java | COPY binary, direct ingest | ~712k rows/s | About 6x faster |
-| Cybertec | Bulk `INSERT`, direct local load | ~192k rows/s | About 1.6x faster |
-| Cybertec | COPY, direct local load | ~714k rows/s | About 6x faster |
-| Gold Lapel pgx | Binary COPY via `CopyFrom`, direct local ingest | ~357k rows/s | About 3x faster |
+| This ETL benchmark, 4 copy connections | Multi-row `INSERT`, separate local source/destination containers | ~488k rows/s | Stable local result |
+| This ETL benchmark, 8 copy connections | Multi-row `INSERT`, separate local source/destination containers | ~513k rows/s | Best median, more variable |
+| [SQG Java benchmark](https://sqg.dev/blog/java-postgres-insert-benchmark/) | Multi-value `INSERT`, direct ingest | ~253k rows/s | Slower than this single-table run |
+| [SQG Java benchmark](https://sqg.dev/blog/java-postgres-insert-benchmark/) | COPY CSV, direct ingest | ~360k rows/s | Slower than this single-table run |
+| [SQG Java benchmark](https://sqg.dev/blog/java-postgres-insert-benchmark/) | COPY binary, direct ingest | ~712k rows/s | About 1.4x faster than 8 connections |
+| [Cybertec bulk-load benchmark](https://www.cybertec-postgresql.com/en/bulk-load-performance-in-postgresql/) | COPY, direct local load | ~714k rows/s | About 1.4x faster than 8 connections |
+| [Gold Lapel pgx benchmark](https://goldlapel.com/grounds/go-postgres/pgx-bulk-insert-benchmarks) | Binary COPY via `CopyFrom`, direct local ingest | ~357k rows/s | Slower than this single-table run |
 
 This is not an apples-to-apples comparison. The public benchmarks usually measure direct
-client-to-Postgres ingestion. This ETL benchmark also includes source table copy, ETL
-decoding, type conversion, SQL generation, bind-parameter serialization, and Docker Desktop
-networking between two local containers.
+client-to-Postgres ingestion. This benchmark includes source table copy, ETL decoding,
+type conversion, SQL generation, bind-parameter serialization, and Docker Desktop
+networking between two local containers. It also uses same-table source parallelism,
+which can make the aggregate table throughput higher than a single direct-ingest stream.
 
-The conclusion is:
-
-1. The current destination is respectable as a compatibility baseline.
-2. It is probably not bottlenecked mostly on destination WAL, because logged and unlogged
-   were almost identical.
-3. It is not close to the expected ceiling for Postgres-to-Postgres copies.
-4. A real `COPY FROM STDIN` path should plausibly be multiple times faster, especially if
-   the implementation can stream source `COPY TO STDOUT` bytes directly into destination
-   `COPY FROM STDIN`.
+The result is encouraging for the current multi-row `INSERT` destination, but it still
+does not replace a real Postgres bulk-copy path. A dedicated `COPY FROM STDIN` path should
+remain the next performance target.
 
 ## Next Performance Step
 
@@ -266,4 +206,6 @@ The fastest Postgres-to-Postgres path should bypass decoded row serialization wh
 4. Pipe bytes directly when column order and types match.
 5. Use table-level parallelism first, and same-table chunking only for very large tables.
 
-For transformed ETL rows, the next best path is a destination-side `COPY FROM STDIN` encoder, with binary COPY as the high-performance version and text/CSV COPY as the simpler fallback.
+For transformed ETL rows, the next best path is a destination-side `COPY FROM STDIN`
+encoder, with binary COPY as the high-performance version and text/CSV COPY as the simpler
+fallback.
