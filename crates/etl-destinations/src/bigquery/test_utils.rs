@@ -53,16 +53,15 @@ pub const BIGQUERY_PROJECT_ID_ENV: &str = "TESTS_BIGQUERY_PROJECT_ID";
 /// Environment variable name for the BigQuery service account key path.
 pub const BIGQUERY_SA_KEY_PATH_ENV: &str = "TESTS_BIGQUERY_SA_KEY_PATH";
 
-/// When set (non-empty), BigQuery tests panic instead of skipping when
-/// credentials are missing. CI sets this so that internal PRs can never
-/// silently skip BigQuery tests.
+/// When set, tests panic instead of skipping when BigQuery credentials are
+/// missing.
 pub const REQUIRE_BIGQUERY_CREDENTIALS_ENV: &str = "REQUIRE_BIGQUERY_CREDENTIALS";
 
 /// Returns whether BigQuery integration tests should be skipped.
 ///
 /// Prints a warning and returns `true` when credentials are unavailable.
-/// When [`REQUIRE_BIGQUERY_CREDENTIALS_ENV`] is set, panics instead of
-/// skipping so that CI runs with secrets never silently skip BigQuery tests.
+/// Panics if [`REQUIRE_BIGQUERY_CREDENTIALS_ENV`] is set, and credentials are
+/// not provided.
 pub fn skip_if_missing_bigquery_env_vars() -> bool {
     let sa_key_path = std::env::var(BIGQUERY_SA_KEY_PATH_ENV).ok().filter(|v| !v.is_empty());
     let has_project_id =
