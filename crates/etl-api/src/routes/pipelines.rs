@@ -38,7 +38,8 @@ use crate::{
         TrustedRootCertsError,
         core::{
             create_k8s_object_prefix, create_or_update_pipeline_resources_in_k8s,
-            delete_pipeline_resources_in_k8s, is_replicator_active, is_replicator_pod_stopped,
+            delete_pipeline_resources_in_k8s, is_replicator_active,
+            should_reconcile_replicator_resources,
         },
     },
     routes::{ErrorMessage, TenantIdError, extract_tenant_id, utils as route_utils},
@@ -706,7 +707,8 @@ pub(crate) async fn update_pipeline(
     let (pipeline, replicator, image, source, destination) =
         read_pipeline_components(&mut txn, tenant_id, pipeline_id, &encryption_key).await?;
 
-    if is_replicator_pod_stopped(k8s_client.as_ref(), tenant_id, replicator.id).await? {
+    if !should_reconcile_replicator_resources(k8s_client.as_ref(), tenant_id, replicator.id).await?
+    {
         txn.commit().await?;
 
         return Ok(HttpResponse::Ok().finish());
@@ -1383,9 +1385,11 @@ pub(crate) async fn update_pipeline_version(
         return Ok(HttpResponse::Ok().finish());
     }
 
-    // If a replicator is not running, we don't want to create/update k8s resources.
-    // It's fine to just update the image version in the db.
-    if is_replicator_pod_stopped(k8s_client.as_ref(), tenant_id, replicator.id).await? {
+    // If a replicator has no runtime resources, we don't want to create new K8s
+    // resources. If a StatefulSet still exists, reconcile it even when no pod is
+    // currently running so a broken or stale StatefulSet can be repaired.
+    if !should_reconcile_replicator_resources(k8s_client.as_ref(), tenant_id, replicator.id).await?
+    {
         txn.commit().await?;
 
         return Ok(HttpResponse::Ok().finish());

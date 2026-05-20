@@ -293,13 +293,13 @@ async fn pipeline_with_another_tenants_source_cannot_be_created() {
     let tenant1_id = &create_tenant_with_id_and_name(
         &app,
         "abcdefghijklmnopqrst".to_owned(),
-        "tenant_1".to_owned(),
+        "tenant-1".to_owned(),
     )
     .await;
     let tenant2_id = &create_tenant_with_id_and_name(
         &app,
         "tsrqponmlkjihgfedcba".to_owned(),
-        "tenant_2".to_owned(),
+        "tenant-2".to_owned(),
     )
     .await;
     let source2_id = create_source(&app, tenant2_id).await;
@@ -326,13 +326,13 @@ async fn pipeline_with_another_tenants_destination_cannot_be_created() {
     let tenant1_id = &create_tenant_with_id_and_name(
         &app,
         "abcdefghijklmnopqrst".to_owned(),
-        "tenant_1".to_owned(),
+        "tenant-1".to_owned(),
     )
     .await;
     let tenant2_id = &create_tenant_with_id_and_name(
         &app,
         "tsrqponmlkjihgfedcba".to_owned(),
-        "tenant_2".to_owned(),
+        "tenant-2".to_owned(),
     )
     .await;
     let source1_id = create_source(&app, tenant1_id).await;
@@ -548,13 +548,13 @@ async fn pipeline_with_another_tenants_source_cannot_be_updated() {
     let tenant1_id = &create_tenant_with_id_and_name(
         &app,
         "abcdefghijklmnopqrst".to_owned(),
-        "tenant_1".to_owned(),
+        "tenant-1".to_owned(),
     )
     .await;
     let tenant2_id = &create_tenant_with_id_and_name(
         &app,
         "tsrqponmlkjihgfedcba".to_owned(),
-        "tenant_2".to_owned(),
+        "tenant-2".to_owned(),
     )
     .await;
     let source1_id = create_source(&app, tenant1_id).await;
@@ -592,13 +592,13 @@ async fn pipeline_with_another_tenants_destination_cannot_be_updated() {
     let tenant1_id = &create_tenant_with_id_and_name(
         &app,
         "abcdefghijklmnopqrst".to_owned(),
-        "tenant_1".to_owned(),
+        "tenant-1".to_owned(),
     )
     .await;
     let tenant2_id = &create_tenant_with_id_and_name(
         &app,
         "tsrqponmlkjihgfedcba".to_owned(),
-        "tenant_2".to_owned(),
+        "tenant-2".to_owned(),
     )
     .await;
     let source1_id = create_source(&app, tenant1_id).await;
