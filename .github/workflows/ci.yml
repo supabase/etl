@@ -222,6 +222,7 @@ jobs:
           ./scripts/run_migrations.sh etl-api
 
       - name: Set up BigQuery Credentials
+        # Conditional: fork PRs never receive secrets, BigQuery tests skipped gracefully.
         run: |
           if [ -n '${{ secrets.TESTS_BIGQUERY_SA_KEY_JSON }}' ]; then
             printf '%s' '${{ secrets.TESTS_BIGQUERY_SA_KEY_JSON }}' > /tmp/bigquery-sa-key.json
