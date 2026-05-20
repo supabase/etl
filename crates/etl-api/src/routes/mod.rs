@@ -30,7 +30,7 @@ pub enum TenantIdError {
     TenantIdIllFormed,
 }
 
-pub(crate) const MAX_TENANT_ID_LEN: usize = 25;
+pub(crate) const MAX_TENANT_ID_LEN: usize = 20;
 
 pub(crate) fn validate_tenant_id(tenant_id: &str) -> Result<(), TenantIdError> {
     let is_valid_char =
@@ -72,15 +72,14 @@ mod tests {
     fn tenant_id_validation_accepts_kubernetes_safe_ids() {
         validate_tenant_id("a").unwrap();
         validate_tenant_id("abc123").unwrap();
-        validate_tenant_id("etl-simulator-ducklake-0").unwrap();
-        validate_tenant_id("abcdefghijklmnopqrstuvwxy").unwrap();
+        validate_tenant_id("abcdefghijklmnopqrst").unwrap();
     }
 
     #[test]
     fn tenant_id_validation_rejects_kubernetes_unsafe_ids() {
         for tenant_id in [
             "",
-            "abcdefghijklmnopqrstuvwxyz",
+            "abcdefghijklmnopqrstu",
             "-tenant",
             "tenant-",
             "tenant_id",

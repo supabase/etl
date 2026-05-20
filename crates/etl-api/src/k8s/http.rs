@@ -62,7 +62,7 @@ const POSTGRES_SECRET_NAME_SUFFIX: &str = "postgres-password";
 /// ConfigMap name suffix for the replicator configuration files.
 const REPLICATOR_CONFIG_MAP_NAME_SUFFIX: &str = "replicator-config";
 /// StatefulSet name suffix for the replicator workload.
-const REPLICATOR_STATEFUL_SET_SUFFIX: &str = "repl";
+const REPLICATOR_STATEFUL_SET_SUFFIX: &str = "replicator";
 /// Previous StatefulSet suffix kept for existing pipeline cleanup/status.
 const LEGACY_REPLICATOR_STATEFUL_SET_SUFFIX: &str = "replicator-stateful-set";
 /// Application label suffix used to group resources.
@@ -1522,7 +1522,8 @@ mod tests {
     use crate::configs::pipeline::ReplicatorResourcesConfig;
 
     const TENANT_ID: &str = "abcdefghijklmnopqrst";
-    const MAX_TENANT_ID: &str = "abcdefghijklmnopqrstuvwxy";
+    const MAX_TENANT_ID: &str = "abcdefghijklmnopqrst";
+    const MAX_BIGINT_ID: i64 = 9_223_372_036_854_775_807;
     const MAX_K8S_LABEL_VALUE_LEN: usize = 63;
     const CONTROLLER_REVISION_HASH_LEN: usize = 10;
 
@@ -1631,7 +1632,7 @@ mod tests {
 
     #[test]
     fn generated_kubernetes_labels_fit_with_max_tenant_and_replicator_ids() {
-        let prefix = create_k8s_object_prefix(MAX_TENANT_ID, i64::MAX);
+        let prefix = create_k8s_object_prefix(MAX_TENANT_ID, MAX_BIGINT_ID);
         let replicator_app_name = create_replicator_app_name(&prefix);
         let postgres_secret_name = create_postgres_secret_name(&prefix);
         let clickhouse_secret_name = create_clickhouse_secret_name(&prefix);
@@ -1726,8 +1727,8 @@ mod tests {
                     &ducklake_maintenance_name,
                     DuckLakeMaintenanceResourceConfig {
                         tenant_id: MAX_TENANT_ID.to_owned(),
-                        pipeline_id: i64::MAX,
-                        replicator_id: i64::MAX,
+                        pipeline_id: MAX_BIGINT_ID,
+                        replicator_id: MAX_BIGINT_ID,
                         image: replicator_image.to_owned(),
                         policy: DuckLakeMaintenancePolicy::default(),
                     },
@@ -1758,16 +1759,19 @@ mod tests {
     fn replicator_workload_names_use_short_suffix_and_keep_legacy_lookup_names() {
         let prefix = create_k8s_object_prefix("tenant-1", 42);
 
-        assert_eq!(create_stateful_set_name(&prefix), "tenant-1-42-repl");
+        assert_eq!(create_stateful_set_name(&prefix), "tenant-1-42-replicator");
         assert_eq!(create_legacy_stateful_set_name(&prefix), "tenant-1-42-replicator-stateful-set");
         assert_eq!(
             stateful_set_names_for_lookup(&prefix),
-            vec!["tenant-1-42-repl".to_owned(), "tenant-1-42-replicator-stateful-set".to_owned(),]
+            vec![
+                "tenant-1-42-replicator".to_owned(),
+                "tenant-1-42-replicator-stateful-set".to_owned(),
+            ]
         );
         assert_eq!(
             pod_names_for_status(&prefix),
             vec![
-                "tenant-1-42-repl-0".to_owned(),
+                "tenant-1-42-replicator-0".to_owned(),
                 "tenant-1-42-replicator-stateful-set-0".to_owned(),
             ]
         );
