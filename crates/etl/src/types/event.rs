@@ -326,6 +326,14 @@ impl EventSequenceKey {
     pub fn new(commit_lsn: PgLsn, tx_ordinal: u64) -> Self {
         Self { commit_lsn, tx_ordinal }
     }
+
+    /// Returns the canonical packed `u128` form: `commit_lsn` in the high
+    /// 64 bits, `tx_ordinal` in the low 64 bits. Used by destinations that
+    /// need a single totally-ordered numeric key for CDC dedup (e.g.
+    /// ClickHouse's `ReplacingMergeTree` version column).
+    pub fn as_u128(self) -> u128 {
+        (u128::from(u64::from(self.commit_lsn)) << 64) | u128::from(self.tx_ordinal)
+    }
 }
 
 impl fmt::Display for EventSequenceKey {

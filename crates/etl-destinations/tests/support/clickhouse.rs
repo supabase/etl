@@ -1,5 +1,19 @@
 #![allow(dead_code)]
 
+use std::sync::Once;
+
+use etl_config::shared::ClickHouseEngine;
+
+/// Installs the rustls default crypto provider once per process. Subsequent
+/// `install_default()` calls return `Err` (already installed); we discard
+/// that error so multiple test files can call this safely.
+pub(crate) fn install_crypto_provider() {
+    static INIT_CRYPTO: Once = Once::new();
+    INIT_CRYPTO.call_once(|| {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    });
+}
+
 /// A row read back from the ClickHouse `all_types_encoding` test table.
 ///
 /// Column-to-type mapping:
@@ -35,7 +49,6 @@ pub(crate) struct AllTypesRow {
     pub cidr_col: String,
     pub macaddr_col: String,
     pub uuid_col: String, // via toString() in SELECT
-    pub cdc_operation: String,
 }
 
 /// A row read back from the ClickHouse `boundary_values` test table.
@@ -49,7 +62,6 @@ pub(crate) struct BoundaryValuesRow {
     pub nullable_int: Option<i32>,
     pub int_array_col: Vec<Option<i32>>,
     pub text_array_col: Vec<Option<String>>,
-    pub cdc_operation: String,
 }
 
 /// A row read back from a ClickHouse table with a single `Date32` column,
@@ -60,5 +72,54 @@ pub(crate) struct BoundaryValuesRow {
 pub(crate) struct DateBoundariesRow {
     pub id: i64,
     pub date_col: i32,
-    pub cdc_operation: String,
+}
+
+/// Builds an engine-aware "current state" SELECT for a replicated table.
+///
+/// The projection is supplied by the caller (so per-column SQL like
+/// `toString(uuid_col) AS uuid_col` keeps working). The helper handles the
+/// engine-specific dedup + tombstone filter and applies the caller's
+/// `ORDER BY` for deterministic test reads.
+///
+/// MergeTree path: take the latest event per PK with `LIMIT 1 BY`, then drop
+/// any whose latest event is a DELETE. The drop-DELETE filter must come
+/// AFTER the dedup, otherwise a deleted PK whose latest event is a DELETE
+/// would surface its prior INSERT instead of being absent.
+///
+/// ReplacingMergeTree path: `FINAL` + `_etl_deleted = 0`.
+pub(crate) fn current_state_query(
+    engine: ClickHouseEngine,
+    table: &str,
+    projection: &str,
+    pk_cols: &[&str],
+    order_by: &str,
+) -> String {
+    match engine {
+        ClickHouseEngine::MergeTree => format!(
+            "SELECT {projection} FROM (SELECT * FROM \"{table}\" ORDER BY cdc_lsn DESC LIMIT 1 BY \
+             ({pks})) AS current WHERE cdc_operation != 'DELETE' ORDER BY {order_by}",
+            pks = pk_cols.join(", ")
+        ),
+        ClickHouseEngine::ReplacingMergeTree => format!(
+            "SELECT {projection} FROM \"{table}\" FINAL WHERE _etl_deleted = 0 ORDER BY {order_by}"
+        ),
+    }
+}
+
+/// SQL to force a `ReplacingMergeTree` table to drop tombstoned rows. The
+/// `SETTINGS` clause enables the (still experimental, as of CH 25.x) merges-
+/// with-cleanup feature for this query only, without requiring it to be
+/// enabled server-wide.
+pub(crate) fn optimize_final_cleanup_sql(table: &str) -> String {
+    format!(
+        "OPTIMIZE TABLE \"{table}\" FINAL CLEANUP SETTINGS \
+         allow_experimental_replacing_merge_tree_with_cleanup = 1"
+    )
+}
+
+/// SQL to read the `engine` column from `system.tables` for a table.
+pub(crate) fn table_engine_query(table: &str) -> String {
+    format!(
+        "SELECT engine FROM system.tables WHERE database = currentDatabase() AND name = '{table}'"
+    )
 }

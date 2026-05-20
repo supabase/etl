@@ -503,7 +503,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
-    use etl_config::SerializableSecretString;
+    use etl_config::{SerializableSecretString, shared::ClickHouseEngine};
     use k8s_openapi::api::core::v1::ConfigMap;
 
     use super::*;
@@ -547,6 +547,7 @@ mod tests {
             user: "default".to_owned(),
             password: password.map(ToOwned::to_owned).map(SerializableSecretString::from),
             database: "default".to_owned(),
+            engine: ClickHouseEngine::default(),
         }
     }
 
