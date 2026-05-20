@@ -1,7 +1,7 @@
-//! ReplacingMergeTree-only integration tests. These verify RMT-specific
-//! semantics that have no analog under MergeTree: same-LSN tie-break, FINAL
-//! reads, the `__current` view, `OPTIMIZE ... FINAL CLEANUP` cleanup, PK-less
-//! source rejection, and composite PK ORDER BY.
+//! ReplacingMergeTree-only integration tests. These verify
+//! ReplacingMergeTree-specific semantics that have no analog under MergeTree:
+//! same-LSN tie-break, FINAL reads, the `__current` view, `OPTIMIZE ... FINAL
+//! CLEANUP` cleanup, PK-less source rejection, and composite PK ORDER BY.
 
 use etl::{
     state::table::{TableReplicationPhase, TableReplicationPhaseType},
@@ -34,10 +34,11 @@ struct CountRow {
     count: u64,
 }
 
-/// RMT: source table must have a primary key. `ensure_table_exists` rejects
-/// PK-less schemas under RMT with `SourceSchemaError`.
+/// ReplacingMergeTree: source table must have a primary key.
+/// `ensure_table_exists` rejects PK-less schemas under ReplacingMergeTree with
+/// `SourceSchemaError`.
 #[tokio::test(flavor = "multi_thread")]
-async fn rmt_rejects_pkless_source_table() {
+async fn replacing_merge_tree_rejects_pkless_source_table() {
     init_test_tracing();
     install_crypto_provider();
 
@@ -50,7 +51,7 @@ async fn rmt_rejects_pkless_source_table() {
         .await
         .expect("Failed to create pkless table");
 
-    let publication_name = "test_pub_rmt_pkless";
+    let publication_name = "test_pub_replacing_merge_tree_pkless";
     database
         .create_publication(publication_name, std::slice::from_ref(&table_name))
         .await
@@ -64,7 +65,7 @@ async fn rmt_rejects_pkless_source_table() {
         .await
         .expect("Failed to insert seed row");
 
-    // --- WHEN: pipeline runs under RMT ---
+    // --- WHEN: pipeline runs under ReplacingMergeTree ---
     let clickhouse_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
@@ -104,25 +105,25 @@ async fn rmt_rejects_pkless_source_table() {
     }
 }
 
-/// RMT: a same-transaction INSERT followed by an UPDATE of the same PK
-/// collapses under `FINAL` to the post-UPDATE value. Confirms that the
+/// ReplacingMergeTree: a same-transaction INSERT followed by an UPDATE of the
+/// same PK collapses under `FINAL` to the post-UPDATE value. Confirms that the
 /// packed `_etl_version = (commit_lsn << 64) | tx_ordinal` tie-breaks
 /// multi-event same-commit transactions correctly.
 #[tokio::test(flavor = "multi_thread")]
-async fn rmt_same_lsn_tx_insert_then_update_keeps_update() {
+async fn replacing_merge_tree_same_lsn_tx_insert_then_update_keeps_update() {
     init_test_tracing();
     install_crypto_provider();
 
     // --- GIVEN: an empty table copied to ClickHouse ---
     let mut database = spawn_source_database().await;
-    let table_name = test_table_name("rmt_tie_break");
+    let table_name = test_table_name("tie_break");
 
     let table_id = database
         .create_table(table_name.clone(), true, &[("value", "text not null")])
         .await
-        .expect("Failed to create rmt_tie_break table");
+        .expect("Failed to create tie_break table");
 
-    let publication_name = "test_pub_rmt_tie_break";
+    let publication_name = "test_pub_tie_break";
     database
         .create_publication(publication_name, std::slice::from_ref(&table_name))
         .await
@@ -175,7 +176,7 @@ async fn rmt_same_lsn_tx_insert_then_update_keeps_update() {
 
     let query = current_state_query(
         ClickHouseEngine::ReplacingMergeTree,
-        "test_rmt__tie__break",
+        "test_tie__break",
         "id, value",
         &["id"],
         "id",
@@ -190,22 +191,22 @@ async fn rmt_same_lsn_tx_insert_then_update_keeps_update() {
     assert_eq!(rows[0].value, "final");
 }
 
-/// RMT: a DELETE followed by an INSERT of the same PK in the same
-/// transaction shows the post-INSERT row under FINAL (no lingering
+/// ReplacingMergeTree: a DELETE followed by an INSERT of the same PK in the
+/// same transaction shows the post-INSERT row under FINAL (no lingering
 /// tombstone).
 #[tokio::test(flavor = "multi_thread")]
-async fn rmt_same_lsn_tx_delete_then_insert_keeps_insert() {
+async fn replacing_merge_tree_same_lsn_tx_delete_then_insert_keeps_insert() {
     init_test_tracing();
     install_crypto_provider();
 
     // --- GIVEN: a row already replicated under REPLICA IDENTITY FULL ---
     let mut database = spawn_source_database().await;
-    let table_name = test_table_name("rmt_del_ins");
+    let table_name = test_table_name("del_ins");
 
     let table_id = database
         .create_table(table_name.clone(), true, &[("value", "text not null")])
         .await
-        .expect("Failed to create rmt_del_ins table");
+        .expect("Failed to create del_ins table");
 
     database
         .run_sql(&format!(
@@ -215,7 +216,7 @@ async fn rmt_same_lsn_tx_delete_then_insert_keeps_insert() {
         .await
         .expect("Failed to set replica identity full");
 
-    let publication_name = "test_pub_rmt_del_ins";
+    let publication_name = "test_pub_del_ins";
     database
         .create_publication(publication_name, std::slice::from_ref(&table_name))
         .await
@@ -273,7 +274,7 @@ async fn rmt_same_lsn_tx_delete_then_insert_keeps_insert() {
 
     let query = current_state_query(
         ClickHouseEngine::ReplacingMergeTree,
-        "test_rmt__del__ins",
+        "test_del__ins",
         "id, value",
         &["id"],
         "id",
@@ -288,23 +289,23 @@ async fn rmt_same_lsn_tx_delete_then_insert_keeps_insert() {
     assert_eq!(rows[0].value, "recreated");
 }
 
-/// RMT: the auto-generated `__current` view exposes only user columns and
-/// returns the current state of the table.
+/// ReplacingMergeTree: the auto-generated `__current` view exposes only user
+/// columns and returns the current state of the table.
 #[tokio::test(flavor = "multi_thread")]
-async fn rmt_current_view_exposes_user_columns_and_current_state() {
+async fn replacing_merge_tree_current_view_exposes_user_columns_and_current_state() {
     init_test_tracing();
     install_crypto_provider();
 
     // --- GIVEN: a row copied + then updated ---
     let database = spawn_source_database().await;
-    let table_name = test_table_name("rmt_view");
+    let table_name = test_table_name("current_view");
 
     let table_id = database
         .create_table(table_name.clone(), true, &[("value", "text not null")])
         .await
-        .expect("Failed to create rmt_view table");
+        .expect("Failed to create current_view table");
 
-    let publication_name = "test_pub_rmt_view";
+    let publication_name = "test_pub_current_view";
     database
         .create_publication(publication_name, std::slice::from_ref(&table_name))
         .await
@@ -352,8 +353,9 @@ async fn rmt_current_view_exposes_user_columns_and_current_state() {
     event_notify.notified().await;
 
     // --- WHEN: read via the __current view ---
-    let rows: Vec<IdValueRow> =
-        clickhouse_db.query("SELECT id, value FROM \"test_rmt__view__current\" ORDER BY id").await;
+    let rows: Vec<IdValueRow> = clickhouse_db
+        .query("SELECT id, value FROM \"test_current__view__current\" ORDER BY id")
+        .await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -363,17 +365,17 @@ async fn rmt_current_view_exposes_user_columns_and_current_state() {
     assert_eq!(rows[0].value, "after");
 }
 
-/// RMT: composite PK source table is created with `ORDER BY` matching
-/// `primary_key_ordinal_position`.
+/// ReplacingMergeTree: composite PK source table is created with `ORDER BY`
+/// matching `primary_key_ordinal_position`.
 #[tokio::test(flavor = "multi_thread")]
-async fn rmt_composite_pk_order_by_matches_pk_ordinal() {
+async fn composite_pk_pk_order_by_matches_pk_ordinal() {
     init_test_tracing();
     install_crypto_provider();
 
     // GIVEN: a Postgres table with a composite PK whose ordinal order differs
     // from table column order
     let database = spawn_source_database().await;
-    let table_name = test_table_name("rmt_composite");
+    let table_name = test_table_name("composite_pk");
 
     // Source schema: (id serial PK is added by create_table). To get a true
     // composite PK whose ordinal differs from table order, we drop the
@@ -385,7 +387,7 @@ async fn rmt_composite_pk_order_by_matches_pk_ordinal() {
             &[("tenant_id", "integer not null"), ("value", "text not null")],
         )
         .await
-        .expect("Failed to create rmt_composite table");
+        .expect("Failed to create composite_pk table");
 
     database
         .run_sql(&format!(
@@ -404,7 +406,7 @@ async fn rmt_composite_pk_order_by_matches_pk_ordinal() {
         .await
         .expect("Failed to add composite primary key");
 
-    let publication_name = "test_pub_rmt_composite";
+    let publication_name = "test_pub_composite_pk";
     database
         .create_publication(publication_name, std::slice::from_ref(&table_name))
         .await
@@ -440,13 +442,14 @@ async fn rmt_composite_pk_order_by_matches_pk_ordinal() {
     table_ready.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
 
-    // --- WHEN: query system.tables for the created RMT ORDER BY clause ---
+    // --- WHEN: query system.tables for the created ReplacingMergeTree ORDER BY
+    // clause ---
     #[derive(clickhouse::Row, serde::Deserialize)]
     struct EngineRow {
         engine: String,
     }
     let engine_rows: Vec<EngineRow> =
-        clickhouse_db.query(&table_engine_query("test_rmt__composite")).await;
+        clickhouse_db.query(&table_engine_query("test_composite__pk")).await;
     assert_eq!(engine_rows.len(), 1);
     assert_eq!(engine_rows[0].engine, "ReplacingMergeTree");
 
@@ -458,7 +461,7 @@ async fn rmt_composite_pk_order_by_matches_pk_ordinal() {
     let sorting: Vec<SortingKeyRow> = clickhouse_db
         .query(
             "SELECT sorting_key FROM system.tables WHERE database = currentDatabase() AND name = \
-             'test_rmt__composite'",
+             'test_composite__pk'",
         )
         .await;
 
@@ -467,25 +470,25 @@ async fn rmt_composite_pk_order_by_matches_pk_ordinal() {
     assert_eq!(sorting[0].sorting_key, "tenant_id, id");
 }
 
-/// RMT: an initial-copy row followed by a streaming UPDATE collapses under
-/// `FINAL` to the streamed value. The initial-copy row has `_etl_version = 0`;
-/// the streamed UPDATE has a non-zero packed `_etl_version`, so the streamed
-/// row wins.
+/// ReplacingMergeTree: an initial-copy row followed by a streaming UPDATE
+/// collapses under `FINAL` to the streamed value. The initial-copy row has
+/// `_etl_version = 0`; the streamed UPDATE has a non-zero packed
+/// `_etl_version`, so the streamed row wins.
 #[tokio::test(flavor = "multi_thread")]
-async fn rmt_streamed_update_wins_over_initial_copy_row() {
+async fn replacing_merge_tree_streamed_update_wins_over_initial_copy_row() {
     init_test_tracing();
     install_crypto_provider();
 
     // --- GIVEN: a row copied via initial copy ---
     let database = spawn_source_database().await;
-    let table_name = test_table_name("rmt_copy_then_update");
+    let table_name = test_table_name("copy_then_update");
 
     let table_id = database
         .create_table(table_name.clone(), true, &[("value", "text not null")])
         .await
-        .expect("Failed to create rmt_copy_then_update table");
+        .expect("Failed to create copy_then_update table");
 
-    let publication_name = "test_pub_rmt_copy_then_update";
+    let publication_name = "test_pub_copy_then_update";
     database
         .create_publication(publication_name, std::slice::from_ref(&table_name))
         .await
@@ -535,7 +538,7 @@ async fn rmt_streamed_update_wins_over_initial_copy_row() {
 
     let query = current_state_query(
         ClickHouseEngine::ReplacingMergeTree,
-        "test_rmt__copy__then__update",
+        "test_copy__then__update",
         "id, value",
         &["id"],
         "id",
@@ -549,21 +552,21 @@ async fn rmt_streamed_update_wins_over_initial_copy_row() {
     assert_eq!(rows[0].value, "streamed_value");
 }
 
-/// RMT: a DELETE followed by `OPTIMIZE ... FINAL CLEANUP` physically removes
-/// the row from storage.
+/// ReplacingMergeTree: a DELETE followed by `OPTIMIZE ... FINAL CLEANUP`
+/// physically removes the row from storage.
 #[tokio::test(flavor = "multi_thread")]
-async fn rmt_optimize_cleanup_physically_removes_tombstoned_row() {
+async fn replacing_merge_tree_optimize_cleanup_physically_removes_tombstoned_row() {
     init_test_tracing();
     install_crypto_provider();
 
     // --- GIVEN: a copied row, REPLICA IDENTITY FULL ---
     let database = spawn_source_database().await;
-    let table_name = test_table_name("rmt_cleanup");
+    let table_name = test_table_name("final_cleanup");
 
     let table_id = database
         .create_table(table_name.clone(), true, &[("value", "text not null")])
         .await
-        .expect("Failed to create rmt_cleanup table");
+        .expect("Failed to create final_cleanup table");
 
     database
         .run_sql(&format!(
@@ -573,7 +576,7 @@ async fn rmt_optimize_cleanup_physically_removes_tombstoned_row() {
         .await
         .expect("Failed to set replica identity full");
 
-    let publication_name = "test_pub_rmt_cleanup";
+    let publication_name = "test_pub_final_cleanup";
     database
         .create_publication(publication_name, std::slice::from_ref(&table_name))
         .await
@@ -618,19 +621,19 @@ async fn rmt_optimize_cleanup_physically_removes_tombstoned_row() {
     event_notify.notified().await;
 
     // --- WHEN: operator runs OPTIMIZE ... FINAL CLEANUP ---
-    let optimize_sql = optimize_final_cleanup_sql("test_rmt__cleanup");
+    let optimize_sql = optimize_final_cleanup_sql("test_final__cleanup");
     let optimize_result = clickhouse_db.db_client().query(&optimize_sql).execute().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
-    // CH ships RMT-with-CLEANUP behind an experimental gate that has shifted
-    // names across versions (26.x removed the previous setting name). When
-    // the server does not allow the call, treat this test as covered by the
-    // FINAL-based spine assertions and skip the physical-removal check.
+    // CH ships ReplacingMergeTree-with-CLEANUP behind an experimental gate that has
+    // shifted names across versions (26.x removed the previous setting name).
+    // When the server does not allow the call, treat this test as covered by
+    // the FINAL-based spine assertions and skip the physical-removal check.
     match optimize_result {
         Ok(()) => {
             let counts: Vec<CountRow> =
-                clickhouse_db.query("SELECT count() AS count FROM \"test_rmt__cleanup\"").await;
+                clickhouse_db.query("SELECT count() AS count FROM \"test_final__cleanup\"").await;
             assert_eq!(
                 counts[0].count, 0,
                 "OPTIMIZE FINAL CLEANUP should have physically removed the tombstoned row"
@@ -646,17 +649,18 @@ async fn rmt_optimize_cleanup_physically_removes_tombstoned_row() {
     }
 }
 
-/// Engine mismatch (MT -> RMT): a table already created under MergeTree must
-/// hard-fail when a second pipeline tries to write to it under
-/// ReplacingMergeTree.
+/// Engine mismatch (MergeTree -> ReplacingMergeTree): a table already created
+/// under MergeTree must hard-fail when a second pipeline tries to write to it
+/// under ReplacingMergeTree.
 #[tokio::test(flavor = "multi_thread")]
-async fn engine_mismatch_existing_mt_then_rmt_pipeline() {
+async fn engine_mismatch_existing_merge_tree_then_replacing_merge_tree_pipeline() {
     engine_mismatch_runs(ClickHouseEngine::MergeTree, ClickHouseEngine::ReplacingMergeTree).await;
 }
 
-/// Engine mismatch (RMT -> MT): the reverse direction must also hard-fail.
+/// Engine mismatch (ReplacingMergeTree -> MergeTree): the reverse direction
+/// must also hard-fail.
 #[tokio::test(flavor = "multi_thread")]
-async fn engine_mismatch_existing_rmt_then_mt_pipeline() {
+async fn engine_mismatch_existing_replacing_merge_tree_then_merge_tree_pipeline() {
     engine_mismatch_runs(ClickHouseEngine::ReplacingMergeTree, ClickHouseEngine::MergeTree).await;
 }
 

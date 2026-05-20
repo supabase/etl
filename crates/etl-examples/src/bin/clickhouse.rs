@@ -22,7 +22,7 @@ double-underscore escaping (e.g. `public.orders` -> `public_orders`).
 Prerequisites:
 1. Postgres server with logical replication enabled (wal_level = logical)
 2. A publication created in Postgres (CREATE PUBLICATION my_pub FOR ALL TABLES;)
-3. A running ClickHouse instance accessible over HTTP(S). RMT additionally
+3. A running ClickHouse instance accessible over HTTP(S). ReplacingMergeTree additionally
    requires CH >= 23.5.
 
 Usage:

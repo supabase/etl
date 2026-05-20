@@ -1,5 +1,5 @@
 //! MergeTree-only integration tests. These verify event-log semantics
-//! (`cdc_operation` + `cdc_lsn`) that exist only on the MT engine; the
+//! (`cdc_operation` + `cdc_lsn`) that exist only on the MergeTree engine; the
 //! parameterized spine in `pipeline.rs` covers current-state behavior on
 //! both engines.
 
@@ -20,7 +20,7 @@ use rand::random;
 
 use crate::support::clickhouse::install_crypto_provider;
 
-/// MT event-log row: includes CDC metadata. All three operations in this
+/// MergeTree event-log row: includes CDC metadata. All three operations in this
 /// test target the same source row, so `id` is asserted on alongside the
 /// CDC columns.
 #[derive(clickhouse::Row, serde::Deserialize, Debug)]
@@ -37,11 +37,11 @@ const TX_ORDER_SELECT: &str = concat!(
     "ORDER BY id, cdc_lsn",
 );
 
-/// MT-only: verifies that updates from separately committed transactions
+/// MergeTree-only: verifies that updates from separately committed transactions
 /// arrive with strictly increasing `cdc_lsn` matching Postgres commit order.
 ///
-/// RMT collapses the event log under `FINAL`, so this ordering check has no
-/// analog on the RMT side.
+/// ReplacingMergeTree collapses the event log under `FINAL`, so this ordering
+/// check has no analog on the ReplacingMergeTree side.
 #[tokio::test(flavor = "multi_thread")]
 async fn sequential_transactions_preserve_commit_order_merge_tree() {
     init_test_tracing();

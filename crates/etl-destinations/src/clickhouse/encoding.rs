@@ -22,13 +22,14 @@ pub(crate) enum ClickHouseValue {
     Int16(i16),
     Int32(i32),
     Int64(i64),
-    /// Unsigned 8-bit integer, used for the RMT `_etl_deleted` tombstone.
+    /// Unsigned 8-bit integer, used for the ReplacingMergeTree `_etl_deleted`
+    /// tombstone.
     UInt8(u8),
     UInt32(u32),
     /// Unsigned 64-bit integer, used for the MergeTree `cdc_lsn` column.
     UInt64(u64),
-    /// Unsigned 128-bit integer, used for the RMT `_etl_version` column
-    /// (the packed `EventSequenceKey`).
+    /// Unsigned 128-bit integer, used for the ReplacingMergeTree `_etl_version`
+    /// column (the packed `EventSequenceKey`).
     UInt128(u128),
     Float32(f32),
     Float64(f64),

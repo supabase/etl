@@ -11,12 +11,13 @@ pub(crate) const CDC_OPERATION_COLUMN_NAME: &str = "cdc_operation";
 pub(crate) const CDC_LSN_COLUMN_NAME: &str = "cdc_lsn";
 /// (For ReplacingMergeTree engine) version column. Holds the packed
 /// `EventSequenceKey` (commit_lsn in the high 64 bits, tx_ordinal in the
-/// low 64 bits) as a UInt128, giving RMT a total order across all events
-/// for tie-breaking under `FINAL`.
+/// low 64 bits) as a UInt128, giving ReplacingMergeTree a total order across
+/// all events for tie-breaking under `FINAL`.
 pub(crate) const ETL_VERSION_COLUMN_NAME: &str = "_etl_version";
 /// (For ReplacingMergeTree engine) tombstone column.
 pub(crate) const ETL_DELETED_COLUMN_NAME: &str = "_etl_deleted";
-/// Suffix for the auto-generated current-state view over RMT tables.
+/// Suffix for the auto-generated current-state view over ReplacingMergeTree
+/// tables.
 pub(crate) const CURRENT_VIEW_SUFFIX: &str = "__current";
 
 /// Returns the base ClickHouse type string for a Postgres scalar type.
@@ -190,7 +191,8 @@ where
 
 /// Returns the source primary-key columns sorted by
 /// `primary_key_ordinal_position`. Errors with `SourceSchemaError` when the
-/// schema has no PK columns (RMT cannot be created without an `ORDER BY`).
+/// schema has no PK columns (ReplacingMergeTree cannot be created without an
+/// `ORDER BY`).
 fn primary_key_columns_sorted<'a>(
     table_name: &str,
     columns: &[&'a ColumnSchema],
@@ -213,7 +215,8 @@ fn primary_key_columns_sorted<'a>(
     Ok(pk_columns)
 }
 
-/// `CREATE VIEW IF NOT EXISTS "<table>__current"` for an RMT table.
+/// `CREATE VIEW IF NOT EXISTS "<table>__current"` for an ReplacingMergeTree
+/// table.
 ///
 /// Selects only user columns (drops `_etl_version` and `_etl_deleted`), reads
 /// via `FINAL`, and filters tombstones.
@@ -236,7 +239,7 @@ where
     )
 }
 
-/// `DROP VIEW IF EXISTS "<table>__current"` for an RMT table.
+/// `DROP VIEW IF EXISTS "<table>__current"` for an ReplacingMergeTree table.
 pub(super) fn drop_current_view_sql(table_name: &str) -> String {
     let view_name = format!("{table_name}{CURRENT_VIEW_SUFFIX}");
     format!("DROP VIEW IF EXISTS {}", quote_identifier(&view_name))
@@ -397,7 +400,7 @@ mod tests {
                 nullable: true,
             },
         ];
-        // --- WHEN: build the RMT DDL ---
+        // --- WHEN: build the ReplacingMergeTree DDL ---
         let sql = create_replacing_merge_tree_sql("public_users", &schemas).unwrap();
         // --- THEN: trailing etl columns, engine, and ORDER BY are correct ---
         assert!(sql.contains("\"id\" Int32"));
@@ -437,7 +440,7 @@ mod tests {
                 nullable: false,
             },
         ];
-        // --- WHEN: build the RMT DDL ---
+        // --- WHEN: build the ReplacingMergeTree DDL ---
         let sql = create_replacing_merge_tree_sql("public_users", &schemas).unwrap();
         // --- THEN: ORDER BY follows PK ordinal, not table ordinal ---
         assert!(
@@ -457,7 +460,7 @@ mod tests {
             primary_key_ordinal_position: None,
             nullable: true,
         }];
-        // --- WHEN: build the RMT DDL ---
+        // --- WHEN: build the ReplacingMergeTree DDL ---
         let err = create_replacing_merge_tree_sql("public_events", &schemas).unwrap_err();
         // --- THEN: builder rejects with SourceSchemaError ---
         assert_eq!(err.kind(), ErrorKind::SourceSchemaError);
@@ -475,11 +478,12 @@ mod tests {
             nullable: false,
         }];
         // --- WHEN/THEN: dispatcher selects the matching engine branch ---
-        let mt = create_table_sql(ClickHouseEngine::MergeTree, "public_t", &schemas).unwrap();
-        assert!(mt.contains("ENGINE = MergeTree()"));
-        let rmt =
+        let merge_tree =
+            create_table_sql(ClickHouseEngine::MergeTree, "public_t", &schemas).unwrap();
+        assert!(merge_tree.contains("ENGINE = MergeTree()"));
+        let replacing_merge_tree =
             create_table_sql(ClickHouseEngine::ReplacingMergeTree, "public_t", &schemas).unwrap();
-        assert!(rmt.contains("ENGINE = ReplacingMergeTree"));
+        assert!(replacing_merge_tree.contains("ENGINE = ReplacingMergeTree"));
     }
 
     #[test]

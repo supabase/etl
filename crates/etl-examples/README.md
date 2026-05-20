@@ -170,7 +170,7 @@ on the source primary key. Two trailing columns drive dedup and tombstone handli
 - `_etl_deleted UInt8` -- tombstone flag. `1` for DELETE events, `0` otherwise.
 
 Alongside each table, the destination also creates a `<table>__current` view that hides
-the RMT internals:
+the ReplacingMergeTree internals:
 
 ```sql
 CREATE VIEW IF NOT EXISTS "public_orders__current" AS

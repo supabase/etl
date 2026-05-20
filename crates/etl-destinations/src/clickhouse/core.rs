@@ -65,11 +65,13 @@ struct PendingRow {
     /// ReplacingMergeTree `_etl_deleted` tombstone flag.
     operation: CdcOperation,
     /// Transaction commit LSN. Written to the MergeTree `cdc_lsn` column,
-    /// and forms the high 64 bits of the RMT `_etl_version` column.
+    /// and forms the high 64 bits of the ReplacingMergeTree `_etl_version`
+    /// column.
     commit_lsn: PgLsn,
     /// Zero-based ordinal of this event within its transaction. Forms the
-    /// low 64 bits of the RMT `_etl_version` column so multi-event
-    /// same-commit transactions tie-break correctly under `FINAL`.
+    /// low 64 bits of the ReplacingMergeTree `_etl_version` column so
+    /// multi-event same-commit transactions tie-break correctly under
+    /// `FINAL`.
     tx_ordinal: u64,
     /// User column values in source schema order. The trailing CDC columns
     /// are appended at encode time and are not present here.
@@ -81,10 +83,10 @@ fn cdc_lsn_to_clickhouse_value(lsn: PgLsn) -> ClickHouseValue {
     ClickHouseValue::UInt64(u64::from(lsn))
 }
 
-/// Packs `(commit_lsn, tx_ordinal)` into the RMT version column: commit_lsn
-/// in the high 64 bits, tx_ordinal in the low 64 bits. Mirrors the codebase's
-/// canonical event ordering ([`etl::types::EventSequenceKey`]) so the version
-/// column is a total order across all events.
+/// Packs `(commit_lsn, tx_ordinal)` into the ReplacingMergeTree version column:
+/// commit_lsn in the high 64 bits, tx_ordinal in the low 64 bits. Mirrors the
+/// codebase's canonical event ordering ([`etl::types::EventSequenceKey`]) so
+/// the version column is a total order across all events.
 fn etl_version_value(commit_lsn: PgLsn, tx_ordinal: u64) -> ClickHouseValue {
     let packed = (u128::from(u64::from(commit_lsn)) << 64) | u128::from(tx_ordinal);
     ClickHouseValue::UInt128(packed)
@@ -383,7 +385,7 @@ where
     }
 
     /// Probes the server version and rejects unsupported engine/version pairs.
-    /// Currently the only gate: RMT requires CH >= 23.5.
+    /// Currently the only gate: ReplacingMergeTree requires CH >= 23.5.
     pub async fn validate_engine_support(&self) -> EtlResult<()> {
         let server_version = self.client.server_version().await?;
         ensure_engine_supported(self.inserter_config.engine, server_version)
@@ -449,9 +451,9 @@ where
         ))
     }
 
-    /// Issues the engine-correct `CREATE TABLE`, and under RMT also the
-    /// companion `CREATE VIEW "<table>__current"`. Both statements are
-    /// `IF NOT EXISTS`, so retries on the recovery path are idempotent.
+    /// Issues the engine-correct `CREATE TABLE`, and under ReplacingMergeTree
+    /// also the companion `CREATE VIEW "<table>__current"`. Both statements
+    /// are `IF NOT EXISTS`, so retries on the recovery path are idempotent.
     async fn issue_create_table_stmt(
         &self,
         clickhouse_table_name: &str,
@@ -468,7 +470,8 @@ where
         Ok(())
     }
 
-    /// Rebuilds the RMT current-state view from the current replicated schema.
+    /// Rebuilds the ReplacingMergeTree current-state view from the current
+    /// replicated schema.
     ///
     /// The base table can evolve through `ALTER TABLE`, but ClickHouse views
     /// keep the projection they were created with. Drop and recreate the view
@@ -632,7 +635,7 @@ where
                     .collect::<EtlResult<_>>()?;
                 // Initial-copy rows are tagged as INSERT with LSN 0 / tx_ordinal 0
                 // (sentinel meaning "this row pre-dates the streaming cursor"). For
-                // RMT, any streaming event then wins on FINAL because its packed
+                // ReplacingMergeTree, any streaming event then wins on FINAL because its packed
                 // `_etl_version` is non-zero.
                 append_cdc_columns(&mut values, CdcOperation::Insert, PgLsn::from(0), 0, engine);
                 Ok(values)
@@ -758,7 +761,7 @@ where
 
     /// Applies a schema diff to a ClickHouse table: add columns, rename
     /// columns, then drop columns (in that order for safety), and refreshes
-    /// the RMT current-state view when needed.
+    /// the ReplacingMergeTree current-state view when needed.
     ///
     /// New columns are placed AFTER the last existing user column (before the
     /// CDC columns) using ClickHouse's `AFTER` clause. This is critical because
@@ -793,13 +796,17 @@ where
             return Ok(());
         }
 
-        // The RMT table's `ORDER BY` clause is the source primary key, and
-        // ClickHouse uses that ORDER BY as the dedup key during merges.
+        // The ReplacingMergeTree table's `ORDER BY` clause is the source primary key,
+        // and ClickHouse uses that ORDER BY as the dedup key during merges.
         // Dropping or renaming a PK column would invalidate that key in a
         // way `ALTER TABLE` cannot fix, so reject the diff before any ALTER
         // is issued.
         if is_replacing_merge_tree {
-            reject_pk_alters_under_rmt(clickhouse_table_name, diff, current_schema)?;
+            reject_pk_alters_under_replacing_merge_tree(
+                clickhouse_table_name,
+                diff,
+                current_schema,
+            )?;
         }
 
         // Track the last user column name for AFTER placement. New columns
@@ -1017,7 +1024,7 @@ where
 }
 
 /// Rejects schema diffs that would drop or rename a primary-key column on
-/// an RMT table.
+/// an ReplacingMergeTree table.
 ///
 /// The destination emits `CREATE TABLE ... ENGINE = ReplacingMergeTree(...)
 /// ORDER BY (<pk cols>)`, so the table's sort and dedup keys are bound to
@@ -1026,7 +1033,7 @@ where
 /// leave the ORDER BY referring to a column that no longer exists (or has a
 /// different meaning), silently breaking dedup. We error before the ALTER
 /// reaches the server.
-fn reject_pk_alters_under_rmt(
+fn reject_pk_alters_under_replacing_merge_tree(
     clickhouse_table_name: &str,
     diff: &SchemaDiff,
     current_schema: &ReplicatedTableSchema,
@@ -1038,8 +1045,8 @@ fn reject_pk_alters_under_rmt(
                 "ReplacingMergeTree does not support dropping a primary-key column",
                 format!(
                     "Table '{clickhouse_table_name}': DROP COLUMN '{name}' would invalidate the \
-                     RMT ORDER BY / dedup key. Switch this table to `engine: merge_tree` or \
-                     restore the column on the source.",
+                     ReplacingMergeTree ORDER BY / dedup key. Switch this table to `engine: \
+                     merge_tree` or restore the column on the source.",
                     name = column.name
                 )
             ));
@@ -1057,8 +1064,8 @@ fn reject_pk_alters_under_rmt(
                 "ReplacingMergeTree does not support renaming a primary-key column",
                 format!(
                     "Table '{clickhouse_table_name}': RENAME COLUMN '{old}' -> '{new}' would \
-                     invalidate the RMT ORDER BY / dedup key. Switch this table to `engine: \
-                     merge_tree` or revert the rename on the source.",
+                     invalidate the ReplacingMergeTree ORDER BY / dedup key. Switch this table to \
+                     `engine: merge_tree` or revert the rename on the source.",
                     old = rename.old_name,
                     new = rename.new_name
                 )
@@ -1104,9 +1111,9 @@ fn ensure_engine_supported(engine: ClickHouseEngine, server_version: (u32, u32))
 /// identity values in the wrong PK slots or leave us without enough data to
 /// write a well-formed tombstone.
 ///
-/// RMT-only: the source table must have a primary key. RMT uses the PK as
-/// `ORDER BY`, which is also the dedup key; without a PK there is nothing to
-/// merge on.
+/// ReplacingMergeTree-only: the source table must have a primary key.
+/// ReplacingMergeTree uses the PK as `ORDER BY`, which is also the dedup key;
+/// without a PK there is nothing to merge on.
 fn validate_replica_identity_for_clickhouse(
     replicated_table_schema: &ReplicatedTableSchema,
     engine: ClickHouseEngine,
@@ -1394,7 +1401,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_replica_identity_for_clickhouse_rejects_pkless_schema_under_rmt() {
+    fn validate_replica_identity_for_clickhouse_rejects_pkless_schema_under_replacing_merge_tree() {
         // --- GIVEN: a PK-less schema and engine = ReplacingMergeTree ---
         let table_schema = Arc::new(TableSchema::new(
             TableId::new(2),
@@ -1406,7 +1413,7 @@ mod tests {
         let schema =
             ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask);
 
-        // --- WHEN: validating under RMT ---
+        // --- WHEN: validating under ReplacingMergeTree ---
         let err =
             validate_replica_identity_for_clickhouse(&schema, ClickHouseEngine::ReplacingMergeTree)
                 .unwrap_err();
@@ -1416,8 +1423,8 @@ mod tests {
     }
 
     #[test]
-    fn ensure_engine_supported_rejects_rmt_on_old_server() {
-        // --- GIVEN: server below the RMT minimum ---
+    fn ensure_engine_supported_rejects_replacing_merge_tree_on_old_server() {
+        // --- GIVEN: server below the ReplacingMergeTree minimum ---
         let err =
             ensure_engine_supported(ClickHouseEngine::ReplacingMergeTree, (23, 4)).unwrap_err();
         // --- THEN: surfaced as a config error ---
@@ -1425,12 +1432,12 @@ mod tests {
     }
 
     #[test]
-    fn ensure_engine_supported_accepts_mt_on_any_server() {
+    fn ensure_engine_supported_accepts_merge_tree_on_any_server() {
         ensure_engine_supported(ClickHouseEngine::MergeTree, (20, 0)).unwrap();
     }
 
     #[test]
-    fn ensure_engine_supported_accepts_rmt_on_supported_server() {
+    fn ensure_engine_supported_accepts_replacing_merge_tree_on_supported_server() {
         ensure_engine_supported(ClickHouseEngine::ReplacingMergeTree, (23, 5)).unwrap();
         ensure_engine_supported(ClickHouseEngine::ReplacingMergeTree, (24, 1)).unwrap();
     }
@@ -1440,7 +1447,7 @@ mod tests {
     fn replicated_schema_for_pk_alters() -> ReplicatedTableSchema {
         let table_schema = Arc::new(TableSchema::new(
             TableId::new(7),
-            TableName::new("public".to_owned(), "rmt_alter".to_owned()),
+            TableName::new("public".to_owned(), "replacing_merge_tree_alter".to_owned()),
             vec![
                 ColumnSchema::new("tenant_id".to_owned(), Type::INT4, -1, 1, Some(1), false),
                 ColumnSchema::new("id".to_owned(), Type::INT4, -1, 2, Some(2), false),
@@ -1453,7 +1460,7 @@ mod tests {
     }
 
     #[test]
-    fn reject_pk_alters_under_rmt_allows_non_pk_drop() {
+    fn reject_pk_alters_under_replacing_merge_tree_allows_non_pk_drop() {
         // --- GIVEN: a diff that drops the non-PK `value` column ---
         let schema = replicated_schema_for_pk_alters();
         let diff = SchemaDiff {
@@ -1469,11 +1476,16 @@ mod tests {
             columns_to_rename: Vec::new(),
         };
         // --- WHEN/THEN: guard passes ---
-        reject_pk_alters_under_rmt("public_rmt__alter", &diff, &schema).unwrap();
+        reject_pk_alters_under_replacing_merge_tree(
+            "public_replacing_merge_tree__alter",
+            &diff,
+            &schema,
+        )
+        .unwrap();
     }
 
     #[test]
-    fn reject_pk_alters_under_rmt_rejects_pk_drop() {
+    fn reject_pk_alters_under_replacing_merge_tree_rejects_pk_drop() {
         // --- GIVEN: a diff that drops the PK column `tenant_id` ---
         let schema = replicated_schema_for_pk_alters();
         let diff = SchemaDiff {
@@ -1489,14 +1501,19 @@ mod tests {
             columns_to_rename: Vec::new(),
         };
         // --- WHEN: validating ---
-        let err = reject_pk_alters_under_rmt("public_rmt__alter", &diff, &schema).unwrap_err();
+        let err = reject_pk_alters_under_replacing_merge_tree(
+            "public_replacing_merge_tree__alter",
+            &diff,
+            &schema,
+        )
+        .unwrap_err();
         // --- THEN: rejected with SourceSchemaError naming the column ---
         assert_eq!(err.kind(), ErrorKind::SourceSchemaError);
         assert!(err.to_string().contains("tenant_id"), "error must name the PK column: {err}");
     }
 
     #[test]
-    fn reject_pk_alters_under_rmt_allows_non_pk_rename() {
+    fn reject_pk_alters_under_replacing_merge_tree_allows_non_pk_rename() {
         // --- GIVEN: a rename of the non-PK `value` column ---
         let schema = replicated_schema_for_pk_alters();
         let diff = SchemaDiff {
@@ -1509,11 +1526,16 @@ mod tests {
             }],
         };
         // --- WHEN/THEN: guard passes ---
-        reject_pk_alters_under_rmt("public_rmt__alter", &diff, &schema).unwrap();
+        reject_pk_alters_under_replacing_merge_tree(
+            "public_replacing_merge_tree__alter",
+            &diff,
+            &schema,
+        )
+        .unwrap();
     }
 
     #[test]
-    fn reject_pk_alters_under_rmt_rejects_pk_rename() {
+    fn reject_pk_alters_under_replacing_merge_tree_rejects_pk_rename() {
         // --- GIVEN: a rename of the PK column `id` ---
         let schema = replicated_schema_for_pk_alters();
         let diff = SchemaDiff {
@@ -1526,7 +1548,12 @@ mod tests {
             }],
         };
         // --- WHEN: validating ---
-        let err = reject_pk_alters_under_rmt("public_rmt__alter", &diff, &schema).unwrap_err();
+        let err = reject_pk_alters_under_replacing_merge_tree(
+            "public_replacing_merge_tree__alter",
+            &diff,
+            &schema,
+        )
+        .unwrap_err();
         // --- THEN: rejected with SourceSchemaError naming the rename ---
         assert_eq!(err.kind(), ErrorKind::SourceSchemaError);
         assert!(

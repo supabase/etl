@@ -1760,7 +1760,10 @@ async fn schema_change_add_column_inner(engine: ClickHouseEngine) {
     assert_eq!(rows[1].score, Some(7));
 
     if let Some(view_rows) = current_view_rows {
-        assert_eq!(view_rows, rows, "__current view should match the evolved RMT schema");
+        assert_eq!(
+            view_rows, rows,
+            "__current view should match the evolved ReplacingMergeTree schema"
+        );
     }
 
     // Metadata snapshot_id should have advanced.
@@ -1964,7 +1967,10 @@ async fn schema_change_add_drop_rename_inner(engine: ClickHouseEngine) {
     assert_eq!(rows[1].email, Some("bob@example.com".to_owned()));
 
     if let Some(view_rows) = current_view_rows {
-        assert_eq!(view_rows, rows, "__current view should match the evolved RMT schema");
+        assert_eq!(
+            view_rows, rows,
+            "__current view should match the evolved ReplacingMergeTree schema"
+        );
     }
 
     // Metadata snapshot_id should have advanced.

@@ -224,8 +224,8 @@ impl ClickHouseClient {
     /// Returns the major/minor version pair from `SELECT version()`.
     ///
     /// Trailing components (patch, build) are ignored. Used at destination
-    /// construction to gate engine-specific feature requirements (e.g. RMT
-    /// needs >= 23.5).
+    /// construction to gate engine-specific feature requirements (e.g.
+    /// ReplacingMergeTree needs >= 23.5).
     pub(crate) async fn server_version(&self) -> EtlResult<(u32, u32)> {
         let raw = self.inner.query("SELECT version()").fetch_one::<String>().await.map_err(
             |err| etl_error!(ErrorKind::Unknown, "ClickHouse version query failed", source: err),
