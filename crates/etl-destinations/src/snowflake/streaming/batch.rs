@@ -1,5 +1,6 @@
 use std::{io::Write, mem};
 
+use bytes::Bytes;
 use etl::types::{ColumnSchema, TableRow};
 use zstd::stream::Encoder;
 
@@ -42,14 +43,14 @@ const ZSTD_COMPRESSION_LEVEL: i32 = 3;
 
 /// Batch of rows ready to be pushed to the Streaming API.
 pub struct RowBatch {
-    data: Vec<u8>,
+    data: Bytes,
     row_count: usize,
     offset: OffsetToken,
 }
 
 impl RowBatch {
     /// Payload bytes.
-    pub fn bytes(&self) -> &[u8] {
+    pub fn bytes(&self) -> &Bytes {
         &self.data
     }
 
@@ -161,7 +162,7 @@ impl RowBatchBuilder {
             }
 
             self.batches.push(RowBatch {
-                data: compressed,
+                data: Bytes::from(compressed),
                 row_count: self.current_row_count,
                 offset: self.current_offset,
             });
@@ -180,7 +181,7 @@ impl RowBatchBuilder {
             old_encoder.finish().map_err(|e| Error::Encoding(format!("zstd finish: {e}")))?;
 
         self.batches.push(RowBatch {
-            data: compressed,
+            data: Bytes::from(compressed),
             row_count: self.current_row_count,
             offset: mem::take(&mut self.current_offset),
         });
@@ -240,7 +241,7 @@ mod tests {
         assert!(batch.size() > 0);
         assert!(batch.size() <= MAX_COMPRESSED_BYTES);
 
-        let decompressed = zstd::decode_all(batch.bytes()).unwrap();
+        let decompressed = zstd::decode_all(batch.bytes().as_ref()).unwrap();
         let text = String::from_utf8(decompressed).unwrap();
         let lines: Vec<&str> = text.trim_end().split('\n').collect();
         assert_eq!(lines.len(), 10);
@@ -282,7 +283,7 @@ mod tests {
             );
             assert!(batch.row_count() > 0);
 
-            let decompressed = zstd::decode_all(batch.bytes()).unwrap();
+            let decompressed = zstd::decode_all(batch.bytes().as_ref()).unwrap();
             let text = String::from_utf8(decompressed).unwrap();
             let lines: Vec<&str> = text.trim_end().split('\n').collect();
             assert_eq!(lines.len(), batch.row_count());

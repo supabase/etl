@@ -59,14 +59,14 @@ impl<T: TokenProvider> RestStreamClient<T> {
                     .map_err(Error::HttpTransport)?;
 
                 let status = resp.status();
-                let body_text = resp.text().await.unwrap_or_default();
-
                 if status != StatusCode::OK {
-                    return Err(Error::HttpStatus { status, body: body_text });
+                    let body = resp.text().await.unwrap_or_default();
+                    return Err(Error::HttpStatus { status, body });
                 }
 
                 // Actual server returns plain text (even with Accept: application/json).
                 // Docs say JSON: https://docs.snowflake.com/en/user-guide/snowpipe-streaming/snowpipe-streaming-high-performance-rest-api#get-hostname
+                let body_text = resp.text().await.unwrap_or_default();
                 let hostname = serde_json::from_str::<HostnameResponse>(&body_text)
                     .map_or_else(|_| body_text.trim().to_owned(), |r| r.hostname);
 
@@ -139,9 +139,8 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
                         .map_err(Error::HttpTransport)?;
 
                     let status = resp.status();
-                    let body = resp.text().await.unwrap_or_default();
-
                     if status != StatusCode::OK {
+                        let body = resp.text().await.unwrap_or_default();
                         if status == StatusCode::UNAUTHORIZED {
                             warn!("received 401 from Snowpipe Streaming API, invalidating token");
                             auth.invalidate_token().await;
@@ -149,17 +148,16 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
                         return Err(Error::HttpStatus { status, body });
                     }
 
-                    let response: OpenChannelApiResponse =
-                        serde_json::from_str(&body).map_err(|e| {
-                            Error::Encoding(format!("failed to parse open_channel response: {e}"))
-                        })?;
+                    let response: OpenChannelApiResponse = resp.json().await.map_err(|e| {
+                        Error::Encoding(format!("failed to parse open_channel response: {e}"))
+                    })?;
 
                     if let Some(ref status) = response.channel_status
                         && let Some(ref code) = status.channel_status_code
                     {
                         let is_ok = code == "SUCCESS" || code == "ACTIVE" || code == "0";
                         if !is_ok {
-                            let msg = format!("open_channel returned status {code}: {body}");
+                            let msg = format!("open_channel returned unexpected status: {code}");
                             return Err(Error::Snowpipe { status_code: 1, message: msg });
                         }
                     }
@@ -191,7 +189,7 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
         let host = self.get_or_discover_host().await?;
         let base_url = insert_url(host, database, schema, table, channel);
 
-        let compressed = batch.bytes().to_vec();
+        let compressed = batch.bytes().clone();
         let query_params = [
             ("continuationToken", continuation_token.to_owned()),
             ("offsetToken", batch.offset().as_ref().to_owned()),
@@ -237,9 +235,8 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
                         .map_err(Error::HttpTransport)?;
 
                     let status = resp.status();
-                    let body = resp.text().await.unwrap_or_default();
-
                     if status != StatusCode::OK {
+                        let body = resp.text().await.unwrap_or_default();
                         if status == StatusCode::UNAUTHORIZED {
                             warn!("received 401 from Snowpipe Streaming API, invalidating token");
                             auth.invalidate_token().await;
@@ -255,10 +252,9 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
                         return Err(Error::HttpStatus { status, body });
                     }
 
-                    let response: InsertRowsApiResponse =
-                        serde_json::from_str(&body).map_err(|e| {
-                            Error::Encoding(format!("failed to parse insert_rows response: {e}"))
-                        })?;
+                    let response: InsertRowsApiResponse = resp.json().await.map_err(|e| {
+                        Error::Encoding(format!("failed to parse insert_rows response: {e}"))
+                    })?;
 
                     Ok(InsertRowsResponse { continuation_token: response.next_continuation_token })
                 }
@@ -370,20 +366,18 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
                         .map_err(Error::HttpTransport)?;
 
                     let status = resp.status();
-                    let body_text = resp.text().await.unwrap_or_default();
-
                     if status != StatusCode::OK {
+                        let body = resp.text().await.unwrap_or_default();
                         if status == StatusCode::UNAUTHORIZED {
                             warn!("received 401 from Snowpipe Streaming API, invalidating token");
                             auth.invalidate_token().await;
                         }
-                        return Err(Error::HttpStatus { status, body: body_text });
+                        return Err(Error::HttpStatus { status, body });
                     }
 
-                    let response: BulkStatusApiResponse = serde_json::from_str(&body_text)
-                        .map_err(|e| {
-                            Error::Encoding(format!("failed to parse channel_status response: {e}"))
-                        })?;
+                    let response: BulkStatusApiResponse = resp.json().await.map_err(|e| {
+                        Error::Encoding(format!("failed to parse channel_status response: {e}"))
+                    })?;
 
                     response.channel_statuses.into_iter().next().map_or_else(
                         || Err(Error::Channel("channel not found in status response".into())),
@@ -590,7 +584,7 @@ mod tests {
         let batch = batches.first().unwrap();
         assert!(batch.size() > 0);
 
-        let decompressed = zstd::decode_all(batch.bytes()).unwrap();
+        let decompressed = zstd::decode_all(batch.bytes().as_ref()).unwrap();
         let text = String::from_utf8(decompressed).unwrap();
         let line = text.trim();
         let val: serde_json::Value = serde_json::from_str(line).unwrap();
