@@ -166,17 +166,17 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
     ///
     /// Ref: https://docs.snowflake.com/en/user-guide/snowpipe-streaming/snowpipe-streaming-classic-recommendation
     pub async fn refresh_table(&self, table_id: &TableId) -> Result<()> {
-        self.get_channel(*table_id).await?.lock_owned().await.open().await
+        self.get_channel(*table_id).await?.lock().await.open().await
     }
 
     /// Send pre-encoded row batches through the table's channel.
     pub async fn insert_batches(&self, table_id: TableId, batches: Vec<RowBatch>) -> Result<()> {
-        self.get_channel(table_id).await?.lock_owned().await.process_batches(batches).await
+        self.get_channel(table_id).await?.lock().await.process_batches(batches).await
     }
 
     /// Last offset committed by Snowflake for this table's channel.
     pub async fn committed_offset(&self, table_id: TableId) -> Result<Option<OffsetToken>> {
-        self.get_channel(table_id).await?.lock_owned().await.committed_offset().await
+        self.get_channel(table_id).await?.lock().await.committed_offset().await
     }
 
     /// Get table-level guard.

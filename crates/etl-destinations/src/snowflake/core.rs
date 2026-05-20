@@ -163,7 +163,7 @@ where
             if matches!(event, Event::Truncate(_) | Event::Relation(_)) {
                 break;
             }
-            let event = iter.next().unwrap();
+            let event = iter.next().expect("iterator is non-empty after peek");
             match event {
                 Event::Insert(e) => self.encode_insert(e, &mut builders, &mut column_cache).await?,
                 Event::Update(e) => self.encode_update(e, &mut builders, &mut column_cache).await?,
