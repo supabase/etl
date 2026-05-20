@@ -192,7 +192,7 @@ impl ClickHouseTestDatabase {
 
     /// Returns the column names and ClickHouse type strings in position order,
     /// excluding both engines' trailing CDC columns (`cdc_operation`,
-    /// `cdc_lsn`, `_etl_lsn`, `_etl_deleted`).
+    /// `cdc_lsn`, `_etl_version`, `_etl_deleted`).
     pub async fn column_types(&self, table_name: &str) -> Vec<(String, String)> {
         #[derive(clickhouse::Row, serde::Deserialize)]
         struct Col {
@@ -202,7 +202,7 @@ impl ClickHouseTestDatabase {
         self.db_client
             .query(
                 "SELECT name, type AS type_name FROM system.columns WHERE database = ? AND table \
-                 = ? AND name NOT IN ('cdc_operation', 'cdc_lsn', '_etl_lsn', '_etl_deleted') \
+                 = ? AND name NOT IN ('cdc_operation', 'cdc_lsn', '_etl_version', '_etl_deleted') \
                  ORDER BY position",
             )
             .bind(&self.database)

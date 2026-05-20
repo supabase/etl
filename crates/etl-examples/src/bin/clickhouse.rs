@@ -9,9 +9,10 @@ Two table-engine layouts are supported, selected via `--clickhouse-engine`:
 
 - `replacing_merge_tree` (default): each replicated table becomes a
   `ReplacingMergeTree` keyed on the source primary key, with trailing
-  `_etl_lsn` (version) and `_etl_deleted` (tombstone) columns. A companion
-  `<table>__current` view reads current state via `FINAL` and filters
-  tombstones. Requires ClickHouse >= 23.5 and a primary key on the source.
+  `_etl_version` (UInt128 packed `(commit_lsn, tx_ordinal)`) and
+  `_etl_deleted` (tombstone) columns. A companion `<table>__current` view
+  reads current state via `FINAL` and filters tombstones. Requires
+  ClickHouse >= 23.5 and a primary key on the source.
 - `merge_tree`: append-only event-log layout with `cdc_operation` and
   `cdc_lsn` columns appended to every row. Works for PK-less source tables.
 

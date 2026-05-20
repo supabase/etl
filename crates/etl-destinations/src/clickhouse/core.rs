@@ -64,13 +64,13 @@ struct PendingRow {
     /// CDC op kind. Drives both the MergeTree `cdc_operation` string and the
     /// ReplacingMergeTree `_etl_deleted` tombstone flag.
     operation: CdcOperation,
-    /// Transaction commit LSN. Written to the MergeTree `cdc_lsn` column so
-    /// event-log consumers can group events by transaction.
+    /// Transaction commit LSN. Written to the MergeTree `cdc_lsn` column,
+    /// and forms the high 64 bits of the RMT `_etl_version` column.
     commit_lsn: PgLsn,
-    /// Per-event start LSN, globally monotonic across all events. Written to
-    /// the ReplacingMergeTree `_etl_lsn` (version) column so multi-event
+    /// Zero-based ordinal of this event within its transaction. Forms the
+    /// low 64 bits of the RMT `_etl_version` column so multi-event
     /// same-commit transactions tie-break correctly under `FINAL`.
-    start_lsn: PgLsn,
+    tx_ordinal: u64,
     /// User column values in source schema order. The trailing CDC columns
     /// are appended at encode time and are not present here.
     cells: Vec<Cell>,
@@ -81,16 +81,25 @@ fn cdc_lsn_to_clickhouse_value(lsn: PgLsn) -> ClickHouseValue {
     ClickHouseValue::UInt64(u64::from(lsn))
 }
 
+/// Packs `(commit_lsn, tx_ordinal)` into the RMT version column: commit_lsn
+/// in the high 64 bits, tx_ordinal in the low 64 bits. Mirrors the codebase's
+/// canonical event ordering ([`etl::types::EventSequenceKey`]) so the version
+/// column is a total order across all events.
+fn etl_version_value(commit_lsn: PgLsn, tx_ordinal: u64) -> ClickHouseValue {
+    let packed = (u128::from(u64::from(commit_lsn)) << 64) | u128::from(tx_ordinal);
+    ClickHouseValue::UInt128(packed)
+}
+
 /// Appends the trailing engine-specific CDC columns to the row encoding.
 ///
 /// MergeTree: `cdc_operation` (String), `cdc_lsn` (UInt64 commit LSN).
-/// ReplacingMergeTree: `_etl_lsn` (UInt64 start LSN, used as version),
+/// ReplacingMergeTree: `_etl_version` (UInt128 packed `EventSequenceKey`),
 /// `_etl_deleted` (UInt8 tombstone flag).
 fn append_cdc_columns(
     values: &mut Vec<ClickHouseValue>,
     operation: CdcOperation,
     commit_lsn: PgLsn,
-    start_lsn: PgLsn,
+    tx_ordinal: u64,
     engine: ClickHouseEngine,
 ) {
     match engine {
@@ -99,7 +108,7 @@ fn append_cdc_columns(
             values.push(cdc_lsn_to_clickhouse_value(commit_lsn));
         }
         ClickHouseEngine::ReplacingMergeTree => {
-            values.push(ClickHouseValue::UInt64(u64::from(start_lsn)));
+            values.push(etl_version_value(commit_lsn, tx_ordinal));
             values.push(ClickHouseValue::UInt8(matches!(operation, CdcOperation::Delete) as u8));
         }
     }
@@ -323,9 +332,10 @@ impl std::fmt::Display for ClickHouseOperationKind {
 ///
 /// Supports two engines, selected per pipeline via `ClickHouseInserterConfig`:
 /// `MergeTree` (append-only with `cdc_operation`/`cdc_lsn`) and
-/// `ReplacingMergeTree` (current-state with `_etl_lsn` version and
-/// `_etl_deleted` tombstone). Rows are encoded as RowBinary and sent via
-/// `INSERT INTO "table" FORMAT RowBinary` -- no column-name header required.
+/// `ReplacingMergeTree` (current-state with `_etl_version` UInt128 packed
+/// `EventSequenceKey` and `_etl_deleted` tombstone). Rows are encoded as
+/// RowBinary and sent via `INSERT INTO "table" FORMAT RowBinary` -- no
+/// column-name header required.
 #[derive(Clone)]
 pub struct ClickHouseDestination<S> {
     /// HTTP client used for all DDL and RowBinary INSERT traffic.
@@ -620,16 +630,11 @@ where
                     .into_iter()
                     .map(cell_to_clickhouse_value)
                     .collect::<EtlResult<_>>()?;
-                // Initial-copy rows are tagged as INSERT with LSN 0 (sentinel meaning
-                // "this row pre-dates the streaming cursor"). For RMT, any streaming
-                // event then wins on FINAL since start_lsn > 0.
-                append_cdc_columns(
-                    &mut values,
-                    CdcOperation::Insert,
-                    PgLsn::from(0),
-                    PgLsn::from(0),
-                    engine,
-                );
+                // Initial-copy rows are tagged as INSERT with LSN 0 / tx_ordinal 0
+                // (sentinel meaning "this row pre-dates the streaming cursor"). For
+                // RMT, any streaming event then wins on FINAL because its packed
+                // `_etl_version` is non-zero.
+                append_cdc_columns(&mut values, CdcOperation::Insert, PgLsn::from(0), 0, engine);
                 Ok(values)
             })
             .collect::<EtlResult<_>>()?;
@@ -859,7 +864,7 @@ where
                         entry.1.push(PendingRow {
                             operation: CdcOperation::Insert,
                             commit_lsn: insert.commit_lsn,
-                            start_lsn: insert.start_lsn,
+                            tx_ordinal: insert.tx_ordinal,
                             cells: insert.table_row.into_values(),
                         });
                     }
@@ -886,7 +891,7 @@ where
                         entry.1.push(PendingRow {
                             operation: CdcOperation::Update,
                             commit_lsn: update.commit_lsn,
-                            start_lsn: update.start_lsn,
+                            tx_ordinal: update.tx_ordinal,
                             cells: table_row.into_values(),
                         });
                     }
@@ -908,7 +913,7 @@ where
                         entry.1.push(PendingRow {
                             operation: CdcOperation::Delete,
                             commit_lsn: delete.commit_lsn,
-                            start_lsn: delete.start_lsn,
+                            tx_ordinal: delete.tx_ordinal,
                             cells: old_row.into_values(),
                         });
                     }
@@ -979,12 +984,12 @@ where
             join_set.spawn(async move {
                 let rows: Vec<Vec<ClickHouseValue>> = rows
                     .into_iter()
-                    .map(|PendingRow { operation, commit_lsn, start_lsn, cells }| {
+                    .map(|PendingRow { operation, commit_lsn, tx_ordinal, cells }| {
                         let mut values: Vec<ClickHouseValue> = cells
                             .into_iter()
                             .map(cell_to_clickhouse_value)
                             .collect::<EtlResult<_>>()?;
-                        append_cdc_columns(&mut values, operation, commit_lsn, start_lsn, engine);
+                        append_cdc_columns(&mut values, operation, commit_lsn, tx_ordinal, engine);
                         Ok(values)
                     })
                     .collect::<EtlResult<_>>()?;

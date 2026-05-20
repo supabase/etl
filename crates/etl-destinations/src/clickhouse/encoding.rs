@@ -25,8 +25,11 @@ pub(crate) enum ClickHouseValue {
     /// Unsigned 8-bit integer, used for the RMT `_etl_deleted` tombstone.
     UInt8(u8),
     UInt32(u32),
-    /// Unsigned 64-bit integer, used for CDC LSN metadata.
+    /// Unsigned 64-bit integer, used for the MergeTree `cdc_lsn` column.
     UInt64(u64),
+    /// Unsigned 128-bit integer, used for the RMT `_etl_version` column
+    /// (the packed `EventSequenceKey`).
+    UInt128(u128),
     Float32(f32),
     Float64(f64),
     /// TEXT, NUMERIC (string), TIME (string), JSON, BYTEA (hex-encoded)
@@ -219,6 +222,7 @@ pub(crate) fn rb_encode_value(val: ClickHouseValue, buf: &mut Vec<u8>) -> EtlRes
         ClickHouseValue::UInt8(v) => buf.push(v),
         ClickHouseValue::UInt32(v) => buf.extend_from_slice(&v.to_le_bytes()),
         ClickHouseValue::UInt64(v) => buf.extend_from_slice(&v.to_le_bytes()),
+        ClickHouseValue::UInt128(v) => buf.extend_from_slice(&v.to_le_bytes()),
         ClickHouseValue::Float32(v) => buf.extend_from_slice(&v.to_le_bytes()),
         ClickHouseValue::Float64(v) => buf.extend_from_slice(&v.to_le_bytes()),
         ClickHouseValue::String(s) => {

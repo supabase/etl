@@ -159,11 +159,14 @@ escaping (e.g. `public.orders` -> `public_orders`, `my_schema.t` -> `my__schema_
 
 #### ReplacingMergeTree (default)
 
-Each replicated table is created as `ReplacingMergeTree(_etl_lsn, _etl_deleted)` keyed on
-the source primary key. Two trailing columns drive dedup and tombstone handling:
+Each replicated table is created as `ReplacingMergeTree(_etl_version, _etl_deleted)` keyed
+on the source primary key. Two trailing columns drive dedup and tombstone handling:
 
-- `_etl_lsn UInt64` -- the source `start_lsn`, used as the RMT version. Higher values
-  win during a `FINAL` merge, so the latest event per primary key wins.
+- `_etl_version UInt128` -- the packed Postgres event sequence key:
+  `(commit_lsn << 64) | tx_ordinal`. Higher values win during a `FINAL` merge, so the
+  latest event per primary key wins. Encoding both the commit LSN and the in-transaction
+  ordinal gives a total order across all events, including multiple row events that
+  share a WAL record.
 - `_etl_deleted UInt8` -- tombstone flag. `1` for DELETE events, `0` otherwise.
 
 Alongside each table, the destination also creates a `<table>__current` view that hides

@@ -105,8 +105,9 @@ async fn rmt_rejects_pkless_source_table() {
 }
 
 /// RMT: a same-transaction INSERT followed by an UPDATE of the same PK
-/// collapses under `FINAL` to the post-UPDATE value. Confirms that
-/// `start_lsn` tie-breaks multi-event same-commit transactions correctly.
+/// collapses under `FINAL` to the post-UPDATE value. Confirms that the
+/// packed `_etl_version = (commit_lsn << 64) | tx_ordinal` tie-breaks
+/// multi-event same-commit transactions correctly.
 #[tokio::test(flavor = "multi_thread")]
 async fn rmt_same_lsn_tx_insert_then_update_keeps_update() {
     init_test_tracing();
@@ -467,8 +468,9 @@ async fn rmt_composite_pk_order_by_matches_pk_ordinal() {
 }
 
 /// RMT: an initial-copy row followed by a streaming UPDATE collapses under
-/// `FINAL` to the streamed value. The initial-copy row has `_etl_lsn = 0`;
-/// the streamed UPDATE has `start_lsn > 0`, so the streamed row wins.
+/// `FINAL` to the streamed value. The initial-copy row has `_etl_version = 0`;
+/// the streamed UPDATE has a non-zero packed `_etl_version`, so the streamed
+/// row wins.
 #[tokio::test(flavor = "multi_thread")]
 async fn rmt_streamed_update_wins_over_initial_copy_row() {
     init_test_tracing();

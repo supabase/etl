@@ -9,8 +9,11 @@ use etl_config::shared::ClickHouseEngine;
 pub(crate) const CDC_OPERATION_COLUMN_NAME: &str = "cdc_operation";
 /// (For MergeTree engine) CDC LSN column (commit_lsn).
 pub(crate) const CDC_LSN_COLUMN_NAME: &str = "cdc_lsn";
-/// (For ReplacingMergeTree engine) version column (start_lsn).
-pub(crate) const ETL_LSN_COLUMN_NAME: &str = "_etl_lsn";
+/// (For ReplacingMergeTree engine) version column. Holds the packed
+/// `EventSequenceKey` (commit_lsn in the high 64 bits, tx_ordinal in the
+/// low 64 bits) as a UInt128, giving RMT a total order across all events
+/// for tie-breaking under `FINAL`.
+pub(crate) const ETL_VERSION_COLUMN_NAME: &str = "_etl_version";
 /// (For ReplacingMergeTree engine) tombstone column.
 pub(crate) const ETL_DELETED_COLUMN_NAME: &str = "_etl_deleted";
 /// Suffix for the auto-generated current-state view over RMT tables.
@@ -95,7 +98,7 @@ pub(super) fn clickhouse_column_type(col: &ColumnSchema, force_nullable: bool) -
 pub(super) fn trailing_cdc_column_names(engine: ClickHouseEngine) -> &'static [&'static str] {
     match engine {
         ClickHouseEngine::MergeTree => &[CDC_OPERATION_COLUMN_NAME, CDC_LSN_COLUMN_NAME],
-        ClickHouseEngine::ReplacingMergeTree => &[ETL_LSN_COLUMN_NAME, ETL_DELETED_COLUMN_NAME],
+        ClickHouseEngine::ReplacingMergeTree => &[ETL_VERSION_COLUMN_NAME, ETL_DELETED_COLUMN_NAME],
     }
 }
 
@@ -143,13 +146,13 @@ where
     )
 }
 
-/// Emits `CREATE TABLE ... ENGINE = ReplacingMergeTree(_etl_lsn,
+/// Emits `CREATE TABLE ... ENGINE = ReplacingMergeTree(_etl_version,
 /// _etl_deleted) ORDER BY (<pk cols>)`, with `<pk cols>` taken from the
 /// source primary key in `primary_key_ordinal_position` order. ClickHouse
 /// uses that `ORDER BY` as the sort + dedup key, so it must match the
 /// source PK exactly. Two trailing columns are appended after the user
-/// columns: `_etl_lsn UInt64` (version) and `_etl_deleted UInt8`
-/// (tombstone).
+/// columns: `_etl_version UInt128` (packed `EventSequenceKey`) and
+/// `_etl_deleted UInt8` (tombstone).
 ///
 /// Errors when the source schema has no PK columns.
 pub(super) fn create_replacing_merge_tree_sql<'a, I>(
@@ -169,7 +172,7 @@ where
             format!("  {} {}", quote_identifier(&col.name), clickhouse_column_type(col, false))
         })
         .collect();
-    col_defs.push(format!("  {} UInt64", quote_identifier(ETL_LSN_COLUMN_NAME)));
+    col_defs.push(format!("  {} UInt128", quote_identifier(ETL_VERSION_COLUMN_NAME)));
     col_defs.push(format!("  {} UInt8", quote_identifier(ETL_DELETED_COLUMN_NAME)));
 
     let order_by =
@@ -180,7 +183,7 @@ where
          ReplacingMergeTree({lsn}, {del})\nORDER BY ({order_by})",
         quoted_table_name = quote_identifier(table_name),
         col_defs = col_defs.join(",\n"),
-        lsn = quote_identifier(ETL_LSN_COLUMN_NAME),
+        lsn = quote_identifier(ETL_VERSION_COLUMN_NAME),
         del = quote_identifier(ETL_DELETED_COLUMN_NAME),
     ))
 }
@@ -212,8 +215,8 @@ fn primary_key_columns_sorted<'a>(
 
 /// `CREATE VIEW IF NOT EXISTS "<table>__current"` for an RMT table.
 ///
-/// Selects only user columns (drops `_etl_lsn` and `_etl_deleted`), reads via
-/// `FINAL`, and filters tombstones.
+/// Selects only user columns (drops `_etl_version` and `_etl_deleted`), reads
+/// via `FINAL`, and filters tombstones.
 pub(super) fn create_current_view_sql<'a, I>(table_name: &str, column_schemas: I) -> String
 where
     I: IntoIterator<Item = &'a ColumnSchema>,
@@ -399,9 +402,9 @@ mod tests {
         // --- THEN: trailing etl columns, engine, and ORDER BY are correct ---
         assert!(sql.contains("\"id\" Int32"));
         assert!(sql.contains("\"name\" Nullable(String)"));
-        assert!(sql.contains("\"_etl_lsn\" UInt64"));
+        assert!(sql.contains("\"_etl_version\" UInt128"));
         assert!(sql.contains("\"_etl_deleted\" UInt8"));
-        assert!(sql.contains("ENGINE = ReplacingMergeTree(\"_etl_lsn\", \"_etl_deleted\")"));
+        assert!(sql.contains("ENGINE = ReplacingMergeTree(\"_etl_version\", \"_etl_deleted\")"));
         assert!(sql.contains("ORDER BY (\"id\")"));
     }
 
@@ -507,7 +510,7 @@ mod tests {
         assert!(sql.contains("SELECT \"id\", \"name\""));
         assert!(sql.contains("FROM \"public_users\" FINAL"));
         assert!(sql.contains("WHERE \"_etl_deleted\" = 0"));
-        assert!(!sql.contains("_etl_lsn"), "view must not expose _etl_lsn: {sql}");
+        assert!(!sql.contains("_etl_version"), "view must not expose _etl_version: {sql}");
     }
 
     #[test]
@@ -525,7 +528,7 @@ mod tests {
         );
         assert_eq!(
             trailing_cdc_column_names(ClickHouseEngine::ReplacingMergeTree),
-            &[ETL_LSN_COLUMN_NAME, ETL_DELETED_COLUMN_NAME]
+            &[ETL_VERSION_COLUMN_NAME, ETL_DELETED_COLUMN_NAME]
         );
     }
 }
