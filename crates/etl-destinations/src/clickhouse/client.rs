@@ -142,6 +142,8 @@ fn build_insert_rows_sql(table_name: &str) -> String {
 #[derive(Copy, Clone)]
 pub(crate) enum DdlKind {
     CreateTable,
+    CreateView,
+    DropView,
     AddColumn,
     DropColumn,
     RenameColumn,
@@ -151,6 +153,8 @@ impl DdlKind {
     fn as_label(self) -> &'static str {
         match self {
             DdlKind::CreateTable => "create_table",
+            DdlKind::CreateView => "create_view",
+            DdlKind::DropView => "drop_view",
             DdlKind::AddColumn => "add_column",
             DdlKind::DropColumn => "drop_column",
             DdlKind::RenameColumn => "rename_column",
@@ -217,6 +221,30 @@ impl ClickHouseClient {
         Ok(())
     }
 
+    /// Returns the major/minor version pair from `SELECT version()`.
+    ///
+    /// Trailing components (patch, build) are ignored. Used at destination
+    /// construction to gate engine-specific feature requirements (e.g.
+    /// ReplacingMergeTree needs >= 23.5).
+    pub(crate) async fn server_version(&self) -> EtlResult<(u32, u32)> {
+        let raw = self.inner.query("SELECT version()").fetch_one::<String>().await.map_err(
+            |err| etl_error!(ErrorKind::Unknown, "ClickHouse version query failed", source: err),
+        )?;
+
+        let mut parts = raw.split('.');
+        let major = parts.next().and_then(|s| s.parse::<u32>().ok());
+        let minor = parts.next().and_then(|s| s.parse::<u32>().ok());
+
+        match (major, minor) {
+            (Some(major), Some(minor)) => Ok((major, minor)),
+            _ => Err(etl_error!(
+                ErrorKind::Unknown,
+                "Unable to parse ClickHouse server version",
+                format!("server returned '{raw}'")
+            )),
+        }
+    }
+
     /// Executes a DDL statement (e.g. `CREATE TABLE IF NOT EXISTS …`) and
     /// records its duration in the `etl_clickhouse_ddl_duration_seconds`
     /// histogram labelled with the DDL `kind` and `table_name`.
@@ -236,6 +264,29 @@ impl ClickHouseClient {
         )
         .record(ddl_start.elapsed().as_secs_f64());
         result
+    }
+
+    /// Returns the ClickHouse engine name for a table, or `None` if the table
+    /// does not exist in the current database.
+    pub(crate) async fn table_engine(&self, table_name: &str) -> EtlResult<Option<String>> {
+        let rows: Vec<String> = self
+            .inner
+            .query(
+                "SELECT engine FROM system.tables WHERE database = currentDatabase() AND name = ?",
+            )
+            .bind(table_name)
+            .fetch_all::<String>()
+            .await
+            .map_err(|err| {
+                etl_error!(
+                    ErrorKind::Unknown,
+                    "ClickHouse engine lookup failed",
+                    format!("table: {table_name}"),
+                    source: err
+                )
+            })?;
+
+        Ok(rows.into_iter().next())
     }
 
     /// Returns ClickHouse columns for a table in position order.
