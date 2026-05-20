@@ -43,16 +43,16 @@ static PIPELINE_ID: OnceLock<u64> = OnceLock::new();
 /// Errors that can occur during tracing initialization.
 #[derive(Debug, Error)]
 pub enum TracingError {
-    #[error("failed to build rolling file appender: {0}")]
+    #[error("Failed to build rolling file appender: {0}")]
     InitAppender(#[from] InitError),
 
-    #[error("failed to init log tracer: {0}")]
+    #[error("Failed to init log tracer: {0}")]
     InitLogTracer(#[from] SetLoggerError),
 
-    #[error("failed to set global default subscriber: {0}")]
+    #[error("Failed to set global default subscriber: {0}")]
     SetGlobalDefault(#[from] SetGlobalDefaultError),
 
-    #[error("an io error occurred: {0}")]
+    #[error("An io error occurred: {0}")]
     Io(#[from] Error),
 }
 
