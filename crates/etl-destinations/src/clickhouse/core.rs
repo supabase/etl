@@ -10,8 +10,8 @@ use etl::{
     state::destination_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus},
     store::{schema::SchemaStore, state::StateStore},
     types::{
-        Cell, Event, IdentityType, OldTableRow, PgLsn, ReplicatedTableSchema, SchemaDiff, TableId,
-        TableRow, Type, UpdatedTableRow, is_array_type,
+        Cell, Event, EventSequenceKey, IdentityType, OldTableRow, PgLsn, ReplicatedTableSchema,
+        SchemaDiff, TableId, TableRow, Type, UpdatedTableRow, is_array_type,
     },
 };
 use etl_config::shared::ClickHouseEngine;
@@ -83,15 +83,6 @@ fn cdc_lsn_to_clickhouse_value(lsn: PgLsn) -> ClickHouseValue {
     ClickHouseValue::UInt64(u64::from(lsn))
 }
 
-/// Packs `(commit_lsn, tx_ordinal)` into the ReplacingMergeTree version column:
-/// commit_lsn in the high 64 bits, tx_ordinal in the low 64 bits. Mirrors the
-/// codebase's canonical event ordering ([`etl::types::EventSequenceKey`]) so
-/// the version column is a total order across all events.
-fn etl_version_value(commit_lsn: PgLsn, tx_ordinal: u64) -> ClickHouseValue {
-    let packed = (u128::from(u64::from(commit_lsn)) << 64) | u128::from(tx_ordinal);
-    ClickHouseValue::UInt128(packed)
-}
-
 /// Appends the trailing engine-specific CDC columns to the row encoding.
 ///
 /// MergeTree: `cdc_operation` (String), `cdc_lsn` (UInt64 commit LSN).
@@ -110,7 +101,8 @@ fn append_cdc_columns(
             values.push(cdc_lsn_to_clickhouse_value(commit_lsn));
         }
         ClickHouseEngine::ReplacingMergeTree => {
-            values.push(etl_version_value(commit_lsn, tx_ordinal));
+            let version = EventSequenceKey::new(commit_lsn, tx_ordinal).as_u128();
+            values.push(ClickHouseValue::UInt128(version));
             values.push(ClickHouseValue::UInt8(matches!(operation, CdcOperation::Delete) as u8));
         }
     }
@@ -332,12 +324,8 @@ impl std::fmt::Display for ClickHouseOperationKind {
 
 /// CDC-capable ClickHouse destination that replicates Postgres tables.
 ///
-/// Supports two engines, selected per pipeline via `ClickHouseInserterConfig`:
-/// `MergeTree` (append-only with `cdc_operation`/`cdc_lsn`) and
-/// `ReplacingMergeTree` (current-state with `_etl_version` UInt128 packed
-/// `EventSequenceKey` and `_etl_deleted` tombstone). Rows are encoded as
-/// RowBinary and sent via `INSERT INTO "table" FORMAT RowBinary` -- no
-/// column-name header required.
+/// The table engine is configured via [`ClickHouseInserterConfig::engine`];
+/// see [`ClickHouseEngine`] for the engine-specific layouts.
 #[derive(Clone)]
 pub struct ClickHouseDestination<S> {
     /// HTTP client used for all DDL and RowBinary INSERT traffic.
