@@ -53,35 +53,41 @@ pub const BIGQUERY_PROJECT_ID_ENV: &str = "TESTS_BIGQUERY_PROJECT_ID";
 /// Environment variable name for the BigQuery service account key path.
 pub const BIGQUERY_SA_KEY_PATH_ENV: &str = "TESTS_BIGQUERY_SA_KEY_PATH";
 
+/// When set (non-empty), BigQuery tests panic instead of skipping when
+/// credentials are missing. CI sets this so that internal PRs can never
+/// silently skip BigQuery tests.
+pub const REQUIRE_BIGQUERY_CREDENTIALS_ENV: &str = "REQUIRE_BIGQUERY_CREDENTIALS";
+
 /// Returns whether BigQuery integration tests should be skipped.
 ///
 /// Prints a warning and returns `true` when credentials are unavailable.
+/// When [`REQUIRE_BIGQUERY_CREDENTIALS_ENV`] is set, panics instead of
+/// skipping so that CI runs with secrets never silently skip BigQuery tests.
 pub fn skip_if_missing_bigquery_env_vars() -> bool {
-    let sa_key_path = std::env::var_os(BIGQUERY_SA_KEY_PATH_ENV);
-    let has_project_id = std::env::var_os(BIGQUERY_PROJECT_ID_ENV).is_some();
+    let sa_key_path = std::env::var(BIGQUERY_SA_KEY_PATH_ENV).ok().filter(|v| !v.is_empty());
+    let has_project_id =
+        std::env::var(BIGQUERY_PROJECT_ID_ENV).ok().filter(|v| !v.is_empty()).is_some();
     let has_sa_key_path = sa_key_path.is_some();
     let has_sa_key_file = sa_key_path.as_ref().is_some_and(|path| Path::new(path).is_file());
     if has_sa_key_file && has_project_id {
         return false;
     }
 
-    let mut missing_env_vars = Vec::new();
+    let mut missing = Vec::new();
     if !has_sa_key_path {
-        missing_env_vars.push(BIGQUERY_SA_KEY_PATH_ENV);
+        missing.push(BIGQUERY_SA_KEY_PATH_ENV);
     } else if !has_sa_key_file {
-        eprintln!(
-            "skipping bigquery integration test: {BIGQUERY_SA_KEY_PATH_ENV} does not point to an \
-             existing file"
-        );
-
-        return true;
+        missing.push(BIGQUERY_SA_KEY_PATH_ENV);
     }
-
     if !has_project_id {
-        missing_env_vars.push(BIGQUERY_PROJECT_ID_ENV);
+        missing.push(BIGQUERY_PROJECT_ID_ENV);
     }
 
-    eprintln!("skipping bigquery integration test: missing {}", missing_env_vars.join(", "));
+    if std::env::var(REQUIRE_BIGQUERY_CREDENTIALS_ENV).ok().filter(|v| !v.is_empty()).is_some() {
+        panic!("BigQuery credentials required but missing: {}", missing.join(", "));
+    }
+
+    eprintln!("skipping bigquery integration test: missing {}", missing.join(", "));
 
     true
 }
