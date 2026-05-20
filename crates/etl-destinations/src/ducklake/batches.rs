@@ -39,10 +39,7 @@ use tracing::{debug, trace, warn};
 use crate::{
     ducklake::{
         DuckLakeTableName, LAKE_CATALOG,
-        client::{
-            DuckDbBlockingOperationKind, DuckLakeConnectionManager, format_query_error_detail,
-            run_duckdb_blocking,
-        },
+        client::{DuckLakeConnectionManager, format_query_error_detail, run_duckdb_blocking},
         core::is_create_table_conflict,
         encoding::{
             PreparedRows, cell_to_sql_literal_ref, prepare_rows, table_row_to_sql_literal_ref,
@@ -319,42 +316,37 @@ pub(super) async fn ensure_applied_batches_table_exists(
     let created = Arc::clone(&applied_batches_table_created);
     let table_name = APPLIED_BATCHES_TABLE.to_owned();
 
-    run_duckdb_blocking(
-        pool,
-        blocking_slots,
-        DuckDbBlockingOperationKind::Foreground,
-        move |conn| -> EtlResult<()> {
-            match conn.execute_batch(&ddl) {
-                Ok(()) => {}
-                Err(error) if is_create_table_conflict(&error, &table_name) => {}
-                Err(error) => {
-                    return Err(etl_error!(
-                        ErrorKind::DestinationQueryFailed,
-                        "DuckLake CREATE TABLE failed",
-                        format_query_error_detail(&ddl),
-                        source: error
-                    ));
-                }
-            }
-
-            let set_option_sql = format!(
-                "CALL {LAKE_CATALOG}.set_option('data_inlining_row_limit', {}, table_name => {});",
-                APPLIED_BATCHES_TABLE_DATA_INLINING_ROW_LIMIT,
-                quote_literal(APPLIED_BATCHES_TABLE),
-            );
-            conn.execute_batch(&set_option_sql).map_err(|err| {
-                etl_error!(
+    run_duckdb_blocking(pool, blocking_slots, move |conn| -> EtlResult<()> {
+        match conn.execute_batch(&ddl) {
+            Ok(()) => {}
+            Err(error) if is_create_table_conflict(&error, &table_name) => {}
+            Err(error) => {
+                return Err(etl_error!(
                     ErrorKind::DestinationQueryFailed,
-                    "DuckLake set_option failed",
-                    format_query_error_detail(&set_option_sql),
-                    source: err
-                )
-            })?;
+                    "DuckLake CREATE TABLE failed",
+                    format_query_error_detail(&ddl),
+                    source: error
+                ));
+            }
+        }
 
-            created.store(true, Ordering::Relaxed);
-            Ok(())
-        },
-    )
+        let set_option_sql = format!(
+            "CALL {LAKE_CATALOG}.set_option('data_inlining_row_limit', {}, table_name => {});",
+            APPLIED_BATCHES_TABLE_DATA_INLINING_ROW_LIMIT,
+            quote_literal(APPLIED_BATCHES_TABLE),
+        );
+        conn.execute_batch(&set_option_sql).map_err(|err| {
+            etl_error!(
+                ErrorKind::DestinationQueryFailed,
+                "DuckLake set_option failed",
+                format_query_error_detail(&set_option_sql),
+                source: err
+            )
+        })?;
+
+        created.store(true, Ordering::Relaxed);
+        Ok(())
+    })
     .await
 }
 
@@ -388,42 +380,37 @@ pub(super) async fn ensure_streaming_progress_table_exists(
     let created = Arc::clone(&streaming_progress_table_created);
     let table_name = STREAMING_PROGRESS_TABLE.to_owned();
 
-    run_duckdb_blocking(
-        pool,
-        blocking_slots,
-        DuckDbBlockingOperationKind::Foreground,
-        move |conn| -> EtlResult<()> {
-            match conn.execute_batch(&ddl) {
-                Ok(()) => {}
-                Err(err) if is_create_table_conflict(&err, &table_name) => {}
-                Err(err) => {
-                    return Err(etl_error!(
-                        ErrorKind::DestinationQueryFailed,
-                        "DuckLake CREATE TABLE failed",
-                        format_query_error_detail(&ddl),
-                        source: err
-                    ));
-                }
-            }
-
-            let set_option_sql = format!(
-                "CALL {LAKE_CATALOG}.set_option('data_inlining_row_limit', {}, table_name => {});",
-                STREAMING_PROGRESS_TABLE_DATA_INLINING_ROW_LIMIT,
-                quote_literal(STREAMING_PROGRESS_TABLE),
-            );
-            conn.execute_batch(&set_option_sql).map_err(|error| {
-                etl_error!(
+    run_duckdb_blocking(pool, blocking_slots, move |conn| -> EtlResult<()> {
+        match conn.execute_batch(&ddl) {
+            Ok(()) => {}
+            Err(err) if is_create_table_conflict(&err, &table_name) => {}
+            Err(err) => {
+                return Err(etl_error!(
                     ErrorKind::DestinationQueryFailed,
-                    "DuckLake set_option failed",
-                    format_query_error_detail(&set_option_sql),
-                    source: error
-                )
-            })?;
+                    "DuckLake CREATE TABLE failed",
+                    format_query_error_detail(&ddl),
+                    source: err
+                ));
+            }
+        }
 
-            created.store(true, Ordering::Relaxed);
-            Ok(())
-        },
-    )
+        let set_option_sql = format!(
+            "CALL {LAKE_CATALOG}.set_option('data_inlining_row_limit', {}, table_name => {});",
+            STREAMING_PROGRESS_TABLE_DATA_INLINING_ROW_LIMIT,
+            quote_literal(STREAMING_PROGRESS_TABLE),
+        );
+        conn.execute_batch(&set_option_sql).map_err(|error| {
+            etl_error!(
+                ErrorKind::DestinationQueryFailed,
+                "DuckLake set_option failed",
+                format_query_error_detail(&set_option_sql),
+                source: error
+            )
+        })?;
+
+        created.store(true, Ordering::Relaxed);
+        Ok(())
+    })
     .await
 }
 
@@ -471,15 +458,10 @@ pub(super) async fn apply_table_batches_with_retry(
             let pool = Arc::clone(&pool);
             let blocking_slots = Arc::clone(&blocking_slots);
             async move {
-                run_duckdb_blocking(
-                    pool,
-                    blocking_slots,
-                    DuckDbBlockingOperationKind::Foreground,
-                    move |conn| {
-                        apply_table_batches(conn, attempt_batches.as_ref())?;
-                        Ok(())
-                    },
-                )
+                run_duckdb_blocking(pool, blocking_slots, move |conn| {
+                    apply_table_batches(conn, attempt_batches.as_ref())?;
+                    Ok(())
+                })
                 .await
             }
         },
@@ -543,25 +525,20 @@ pub(super) async fn apply_table_batch_with_retry(
             let pool = Arc::clone(&pool);
             let blocking_slots = Arc::clone(&blocking_slots);
             async move {
-                run_duckdb_blocking(
-                    pool,
-                    blocking_slots,
-                    DuckDbBlockingOperationKind::Foreground,
-                    move |conn| {
-                        if batch_kind == DuckLakeTableBatchKind::Copy {
-                            if applied_batch_marker_exists(conn, attempt_batch.as_ref())? {
-                                record_replayed_batch_skip(attempt_batch.as_ref());
-                                return Ok(());
-                            }
-
-                            apply_table_batch(conn, attempt_batch.as_ref())?;
+                run_duckdb_blocking(pool, blocking_slots, move |conn| {
+                    if batch_kind == DuckLakeTableBatchKind::Copy {
+                        if applied_batch_marker_exists(conn, attempt_batch.as_ref())? {
+                            record_replayed_batch_skip(attempt_batch.as_ref());
                             return Ok(());
                         }
 
-                        apply_table_batches(conn, std::slice::from_ref(attempt_batch.as_ref()))?;
-                        Ok(())
-                    },
-                )
+                        apply_table_batch(conn, attempt_batch.as_ref())?;
+                        return Ok(());
+                    }
+
+                    apply_table_batches(conn, std::slice::from_ref(attempt_batch.as_ref()))?;
+                    Ok(())
+                })
                 .await
             }
         },

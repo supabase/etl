@@ -132,6 +132,9 @@ pub enum PipelineError {
 
     #[error("Invalid pipeline request: {0}")]
     InvalidPipelineRequest(String),
+
+    #[error("Maintenance materialization failed: {0}")]
+    MaintenanceMaterialization(#[from] etl_maintenance::MaintenanceMaterializationError),
 }
 
 impl From<PipelinesDbError> for PipelineError {
@@ -153,6 +156,9 @@ impl From<crate::k8s::core::K8sCoreError> for PipelineError {
             crate::k8s::core::K8sCoreError::K8s(error) => Self::K8s(error),
             crate::k8s::core::K8sCoreError::InvalidConfig(error) => Self::InvalidConfig(error),
             crate::k8s::core::K8sCoreError::MissingEnvironment => Self::MissingEnvironment,
+            crate::k8s::core::K8sCoreError::MaintenanceMaterialization(error) => {
+                Self::MaintenanceMaterialization(error)
+            }
         }
     }
 }
@@ -174,6 +180,7 @@ impl PipelineError {
             | PipelineError::ImageNotFound(_)
             | PipelineError::NoDefaultImageFound
             | PipelineError::InvalidConfig(_)
+            | PipelineError::MaintenanceMaterialization(_)
             | PipelineError::K8s(_)
             | PipelineError::MissingEnvironment
             | PipelineError::MissingTableReplicationState
@@ -202,6 +209,7 @@ impl ResponseError for PipelineError {
             | PipelineError::ReplicatorsDb(_)
             | PipelineError::ImagesDb(_)
             | PipelineError::K8s(_)
+            | PipelineError::MaintenanceMaterialization(_)
             | PipelineError::TrustedRootCerts(_)
             | PipelineError::Database(_)
             | PipelineError::TableLookup(_)

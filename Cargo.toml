@@ -7,6 +7,7 @@ members = [
     "crates/etl-config",
     "crates/etl-destinations",
     "crates/etl-examples",
+    "crates/etl-maintenance",
     "crates/etl-postgres",
     "crates/etl-replicator",
     "crates/etl-telemetry",
@@ -83,6 +84,7 @@ duckdb = { version = "1", default-features = false }
 etl = { path = "crates/etl", default-features = false }
 etl-config = { path = "crates/etl-config", default-features = false }
 etl-destinations = { path = "crates/etl-destinations", default-features = false }
+etl-maintenance = { path = "crates/etl-maintenance", default-features = false }
 etl-postgres = { path = "crates/etl-postgres", default-features = false }
 etl-telemetry = { path = "crates/etl-telemetry", default-features = false }
 fail = { version = "0.5.1", default-features = false }

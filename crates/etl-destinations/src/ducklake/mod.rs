@@ -5,7 +5,6 @@ mod core;
 mod encoding;
 mod external_maintenance;
 mod inline_size;
-mod maintenance_runner;
 mod metrics;
 mod schema;
 
@@ -23,7 +22,8 @@ pub(super) type DuckLakeTableName = String;
 const ATTACH_DATA_INLINING_ROW_LIMIT: u64 = 10_000;
 
 pub use core::{
-    DuckLakeDestination, DuckLakeExternalMaintenancePause, table_name_to_ducklake_table_name,
+    DuckLakeDestination, DuckLakeExternalMaintenanceConfig, DuckLakeExternalMaintenancePause,
+    DuckLakeMaintenanceMode, table_name_to_ducklake_table_name,
 };
 #[cfg(feature = "test-utils")]
 pub use core::{
@@ -38,8 +38,16 @@ pub use batches::{
     reset_ducklake_test_hooks,
 };
 pub use config::S3Config;
-pub use maintenance_runner::{
+pub use etl_maintenance::ducklake::{
     CleanupOldFilesMaintenanceConfig, DuckLakeMaintenanceConfig, DuckLakeMaintenanceOutcome,
     ExpireSnapshotsMaintenanceConfig, InlineFlushMaintenanceConfig,
     MergeAdjacentFilesMaintenanceConfig, RewriteDataFilesMaintenanceConfig, run_maintenance_once,
+};
+pub use external_maintenance::{
+    ExternalMaintenanceOperationHistory, ExternalMaintenanceOperationPolicy,
+    ExternalMaintenanceOperationRequest, ExternalMaintenanceOperationRun,
+    ExternalMaintenanceOperations, ExternalMaintenancePause, ExternalMaintenanceReplicatorState,
+    ExternalMaintenanceReplicatorStatus, ExternalMaintenanceRequestOutcome, ExternalMaintenanceRun,
+    ExternalMaintenanceState, ExternalMaintenanceStore, ExternalMaintenanceWatcherConfig,
+    PostgresExternalMaintenanceStore, run_external_maintenance_watcher,
 };

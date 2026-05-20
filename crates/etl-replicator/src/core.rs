@@ -12,12 +12,18 @@ use etl::{
 };
 use etl_config::{
     Environment, parse_ducklake_url,
-    shared::{DestinationConfig, PgConnectionConfig, ReplicatorConfig},
+    shared::{
+        DestinationConfig, DuckLakeMaintenanceMode as ConfigDuckLakeMaintenanceMode,
+        PgConnectionConfig, ReplicatorConfig,
+    },
 };
 use etl_destinations::{
     bigquery::BigQueryDestination,
     clickhouse::{ClickHouseClientConfig, ClickHouseDestination, ClickHouseInserterConfig},
-    ducklake::{DuckLakeDestination, S3Config as DucklakeS3Config},
+    ducklake::{
+        DuckLakeDestination, DuckLakeExternalMaintenanceConfig, DuckLakeMaintenanceMode,
+        S3Config as DucklakeS3Config,
+    },
     iceberg::{
         DestinationNamespace, IcebergClient, IcebergDestination, S3_ACCESS_KEY_ID, S3_ENDPOINT,
         S3_SECRET_ACCESS_KEY,
@@ -155,6 +161,7 @@ pub(crate) async fn start_replicator_with_config(
             duckdb_memory_cache_limit,
             maintenance_target_file_size,
             expire_snapshots_older_than,
+            maintenance_mode,
         } => {
             let s3_config = match (s3_access_key_id, s3_secret_access_key) {
                 (Some(access_key_id), Some(secret_access_key)) => Some(DucklakeS3Config {
@@ -174,7 +181,15 @@ pub(crate) async fn start_replicator_with_config(
                 }
             };
 
-            let destination = DuckLakeDestination::new(
+            let maintenance_mode = match maintenance_mode {
+                ConfigDuckLakeMaintenanceMode::Disabled => DuckLakeMaintenanceMode::Disabled,
+                ConfigDuckLakeMaintenanceMode::Kubernetes => DuckLakeMaintenanceMode::Kubernetes,
+                ConfigDuckLakeMaintenanceMode::Postgres => DuckLakeMaintenanceMode::Postgres,
+            };
+            let external_maintenance =
+                DuckLakeExternalMaintenanceConfig { mode: maintenance_mode, pipeline_id };
+
+            let destination = DuckLakeDestination::new_with_external_maintenance(
                 parse_ducklake_url(catalog_url).map_err(ReplicatorError::config)?,
                 parse_ducklake_url(data_path).map_err(ReplicatorError::config)?,
                 *pool_size,
@@ -183,6 +198,7 @@ pub(crate) async fn start_replicator_with_config(
                 duckdb_memory_cache_limit.clone(),
                 maintenance_target_file_size.clone(),
                 expire_snapshots_older_than.clone(),
+                external_maintenance,
                 state_store.clone(),
             )
             .await?;
