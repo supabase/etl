@@ -73,21 +73,35 @@ pub fn skip_if_missing_bigquery_env_vars() -> bool {
         return false;
     }
 
-    let mut missing = Vec::new();
+    let require = std::env::var_os(REQUIRE_BIGQUERY_CREDENTIALS_ENV).is_some_and(|v| !v.is_empty());
+
+    let mut missing_env_vars = Vec::new();
     if !has_sa_key_path {
-        missing.push(BIGQUERY_SA_KEY_PATH_ENV);
+        missing_env_vars.push(BIGQUERY_SA_KEY_PATH_ENV);
     } else if !has_sa_key_file {
-        missing.push(BIGQUERY_SA_KEY_PATH_ENV);
+        if require {
+            panic!(
+                "BigQuery credentials required but {BIGQUERY_SA_KEY_PATH_ENV} does not point to \
+                 an existing file"
+            );
+        }
+        eprintln!(
+            "skipping bigquery integration test: {BIGQUERY_SA_KEY_PATH_ENV} does not point to an \
+             existing file"
+        );
+
+        return true;
     }
+
     if !has_project_id {
-        missing.push(BIGQUERY_PROJECT_ID_ENV);
+        missing_env_vars.push(BIGQUERY_PROJECT_ID_ENV);
     }
 
-    if std::env::var(REQUIRE_BIGQUERY_CREDENTIALS_ENV).ok().filter(|v| !v.is_empty()).is_some() {
-        panic!("BigQuery credentials required but missing: {}", missing.join(", "));
+    if require {
+        panic!("BigQuery credentials required but missing: {}", missing_env_vars.join(", "));
     }
 
-    eprintln!("skipping bigquery integration test: missing {}", missing.join(", "));
+    eprintln!("skipping bigquery integration test: missing {}", missing_env_vars.join(", "));
 
     true
 }
