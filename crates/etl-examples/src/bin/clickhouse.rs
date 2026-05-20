@@ -5,18 +5,25 @@ ClickHouse Example
 This example demonstrates how to use the pipeline to stream
 data from Postgres to ClickHouse using change data capture (CDC).
 
-Each Postgres table is replicated as an append-only MergeTree table.
-Two CDC metadata columns are appended to every row:
-  - `cdc_operation`: `INSERT`, `UPDATE`, or `DELETE`
-  - `cdc_lsn`: the Postgres LSN at the time of the change
+Two table-engine layouts are supported, selected via `--clickhouse-engine`:
+
+- `replacing_merge_tree` (default): each replicated table becomes a
+  `ReplacingMergeTree` keyed on the source primary key, with trailing
+  `_etl_version` (UInt128 packed `(commit_lsn, tx_ordinal)`) and
+  `_etl_deleted` (tombstone) columns. A companion `<table>__current` view
+  reads current state via `FINAL` and filters tombstones. Requires
+  ClickHouse >= 23.5 and a primary key on the source.
+- `merge_tree`: append-only event-log layout with `cdc_operation` and
+  `cdc_lsn` columns appended to every row. Works for PK-less source tables.
 
 Table names are derived from the Postgres schema and table name using
-double-underscore escaping (e.g. `public.orders` → `public__orders`).
+double-underscore escaping (e.g. `public.orders` -> `public_orders`).
 
 Prerequisites:
 1. Postgres server with logical replication enabled (wal_level = logical)
 2. A publication created in Postgres (CREATE PUBLICATION my_pub FOR ALL TABLES;)
-3. A running ClickHouse instance accessible over HTTP(S)
+3. A running ClickHouse instance accessible over HTTP(S). ReplacingMergeTree additionally
+   requires CH >= 23.5.
 
 Usage:
     cargo run -p etl-examples --bin clickhouse -- \
@@ -30,7 +37,7 @@ Usage:
         --clickhouse-database default \
         --publication my_pub
 
-For HTTPS connections, provide an `https://` URL — TLS is handled automatically
+For HTTPS connections, provide an `https://` URL -- TLS is handled automatically
 using webpki root certificates. Use `--clickhouse-password` if your ClickHouse instance
 requires authentication.
 
@@ -47,6 +54,7 @@ use etl::{
     pipeline::Pipeline,
     store::PostgresStore,
 };
+use etl_config::shared::ClickHouseEngine;
 use etl_destinations::clickhouse::{
     ClickHouseClientConfig, ClickHouseDestination, ClickHouseInserterConfig,
 };
@@ -118,6 +126,11 @@ struct ClickHouseArgs {
     /// ClickHouse target database
     #[arg(long)]
     clickhouse_database: String,
+    /// Table engine used for replicated tables. `replacing_merge_tree` is the
+    /// default and requires a source primary key and CH >= 23.5; `merge_tree`
+    /// gives the append-only event-log layout.
+    #[arg(long, value_enum, default_value_t = ClickHouseEngineArg::ReplacingMergeTree)]
+    clickhouse_engine: ClickHouseEngineArg,
     /// Maximum time to wait for a batch to fill in milliseconds (lower values =
     /// lower latency, less throughput)
     #[arg(long, default_value = "5000")]
@@ -126,6 +139,23 @@ struct ClickHouseArgs {
     /// initial sync, more resource usage)
     #[arg(long, default_value = "4")]
     max_table_sync_workers: u16,
+}
+
+/// CLI-facing engine choice. Converts to `ClickHouseEngine` via `From`.
+#[derive(Debug, Copy, Clone, clap::ValueEnum)]
+#[clap(rename_all = "snake_case")]
+enum ClickHouseEngineArg {
+    MergeTree,
+    ReplacingMergeTree,
+}
+
+impl From<ClickHouseEngineArg> for ClickHouseEngine {
+    fn from(arg: ClickHouseEngineArg) -> Self {
+        match arg {
+            ClickHouseEngineArg::MergeTree => ClickHouseEngine::MergeTree,
+            ClickHouseEngineArg::ReplacingMergeTree => ClickHouseEngine::ReplacingMergeTree,
+        }
+    }
 }
 
 /// Entry point — handles error reporting and process exit.
@@ -201,17 +231,19 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         max_copy_connections_per_table: PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE,
     };
 
-    // Initialize the ClickHouse destination.
-    // Tables are created automatically as append-only MergeTree tables.
     let clickhouse_destination = ClickHouseDestination::new(
         Url::parse(&args.clickhouse_args.clickhouse_url)?,
         args.clickhouse_args.clickhouse_user,
         args.clickhouse_args.clickhouse_password,
         args.clickhouse_args.clickhouse_database,
-        ClickHouseInserterConfig::default(),
+        ClickHouseInserterConfig {
+            engine: args.clickhouse_args.clickhouse_engine.into(),
+            ..Default::default()
+        },
         ClickHouseClientConfig::default(),
         store.clone(),
     )?;
+    clickhouse_destination.validate_engine_support().await?;
 
     let mut pipeline = Pipeline::new(pipeline_config, store, clickhouse_destination);
 

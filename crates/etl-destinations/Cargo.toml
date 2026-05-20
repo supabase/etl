@@ -79,6 +79,7 @@ chrono = { workspace = true, features = ["serde"] }
 clickhouse = { workspace = true, optional = true, features = ["inserter", "lz4", "rustls-tls"] }
 duckdb = { workspace = true, optional = true, features = ["bundled", "json", "parquet", "r2d2"] }
 etl = { workspace = true }
+etl-config = { workspace = true }
 etl-maintenance = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
 gcp-bigquery-client = { workspace = true, optional = true, features = ["rust-tls", "aws-lc-rs"] }

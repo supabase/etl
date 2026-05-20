@@ -1950,6 +1950,7 @@ dependencies = [
  "clickhouse",
  "duckdb",
  "etl",
+ "etl-config",
  "etl-maintenance",
  "etl-postgres",
  "etl-telemetry",
@@ -1987,6 +1988,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "etl",
+ "etl-config",
  "etl-destinations",
  "etl-telemetry",
  "k8s-openapi",
