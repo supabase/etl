@@ -1,3 +1,3 @@
 mod pipeline;
-mod pipeline_mt;
-mod pipeline_rmt;
+mod pipeline_merge_tree;
+mod pipeline_replacing_merge_tree;
