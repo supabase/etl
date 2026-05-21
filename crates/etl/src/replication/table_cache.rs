@@ -25,6 +25,23 @@
 //!   relation state for that snapshot.
 //! - [`SharedTableState::Ready`], where the full [`ReplicatedTableSchema`]
 //!   needed for row decoding is already materialized in memory.
+//!
+//! The cache relies on the following invariants:
+//! - A table has exactly one protocol owner at a time. The owner may be the
+//!   apply worker or the table sync worker for that table; non-owners must skip
+//!   DDL, `RELATION`, and row messages without changing the cache.
+//! - A table copy stores the initial schema with snapshot `0/0` and marks the
+//!   table [`SharedTableState::Ready`] before copied or catchup rows can be
+//!   decoded.
+//! - A table-copy restart removes any cached state before storing the fresh
+//!   `0/0` schema. The new copy lineage must repopulate the cache; stale ready
+//!   state from a previous copy must not be reused.
+//! - DDL handling stores the durable schema version before moving the cache to
+//!   [`SharedTableState::WaitingForRelation`] for that snapshot.
+//! - [`SharedTableState::WaitingForRelation`] is not a failure state, but it is
+//!   not decodable. Row handlers must reject row messages until a later
+//!   `RELATION` message materializes the runtime masks and moves the table back
+//!   to [`SharedTableState::Ready`].
 
 use std::{collections::HashMap, sync::Arc};
 

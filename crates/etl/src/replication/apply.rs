@@ -2056,7 +2056,7 @@ where
         let used_bootstrap_snapshot = shared_table_state.is_none();
         let table_snapshot_id = shared_table_state
             .map_or_else(|| self.state.bootstrap_snapshot_id(), |state| state.snapshot_id());
-        let table_schema = get_table_schema(
+        let table_schema = get_table_schema_for_relation(
             &self.schema_store,
             &table_id,
             table_snapshot_id,
@@ -3247,12 +3247,11 @@ mod table_sync_worker {
 
 /// Retrieves a table schema from the schema store by table ID and snapshot.
 ///
-/// When `used_bootstrap_snapshot` is `false`, the returned schema must match
-/// the requested snapshot exactly. When it is `true`, the lookup is allowed to
-/// resolve to an older schema version because the first `RELATION` message may
-/// arrive before shared per-table protocol state has been established, but it
-/// must never resolve to a newer schema than requested.
-async fn get_table_schema<S>(
+/// The reason for this handling is that the bootstrap snapshot id is just used
+/// as a boundary id that is needed for when etl starts and no DDL takes place.
+/// As soon as a DDL takes place within this active replication session, the
+/// exact snapshot id will be used to load the right table schema.
+async fn get_table_schema_for_relation<S>(
     schema_store: &S,
     table_id: &TableId,
     snapshot_id: SnapshotId,
