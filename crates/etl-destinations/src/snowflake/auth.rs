@@ -392,7 +392,7 @@ mod tests {
         let fp = manager.fingerprint();
 
         // Fingerprint must use the SHA256: prefix per Snowflake convention.
-        assert!(fp.starts_with("SHA256:"), "fingerprint: {fp}");
+        assert!(fp.starts_with("SHA256:"), "fingerprint missing SHA256 prefix");
 
         // The base64 payload must decode to exactly 32 bytes (SHA-256 digest).
         let b64_part = &fp["SHA256:".len()..];
