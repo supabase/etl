@@ -28,6 +28,7 @@ use crate::ducklake::{
     },
 };
 
+const EXPIRE_SNAPSHOTS_MIN_INTERVAL_SECONDS: i64 = 24 * 60 * 60;
 const OPERATION_INLINE_FLUSH: &str = "flush_inlined_data";
 const OPERATION_REWRITE_DATA_FILES: &str = "rewrite_data_files";
 const OPERATION_EXPIRE_SNAPSHOTS: &str = "expire_snapshots";
@@ -41,6 +42,14 @@ struct HeldPause {
     quiesced_at: DateTime<Utc>,
     quiesced_reported: bool,
     _pause: DuckLakeExternalMaintenancePause,
+}
+
+/// Suppresses duplicate expire-snapshots requests inside the daily controller
+/// interval.
+#[derive(Default)]
+struct ExpireSnapshotsRequestGate {
+    initialized_from_state: bool,
+    next_request_after: Option<DateTime<Utc>>,
 }
 
 pub(super) async fn run_kubernetes_external_maintenance_watcher<S>(
@@ -90,6 +99,7 @@ where
     M: ExternalMaintenanceStore,
 {
     let mut held_pause: Option<HeldPause> = None;
+    let mut expire_snapshots_gate = ExpireSnapshotsRequestGate::default();
     record_external_maintenance_pause_active(false);
 
     info!(
@@ -112,8 +122,16 @@ where
                     continue;
                 }
 
+                expire_snapshots_gate.initialize_from_state_once(&state);
                 reconcile_pause(&store, &config, &destination, &mut held_pause, &state).await;
-                maybe_request_operations(&store, &destination, &state, &config).await;
+                maybe_request_operations(
+                    &store,
+                    &destination,
+                    &state,
+                    &config,
+                    &mut expire_snapshots_gate,
+                )
+                .await;
             }
             Ok(Err(error)) => {
                 warn!(
@@ -335,11 +353,51 @@ fn record_external_maintenance_pause_duration(held: &HeldPause, outcome: &'stati
     .record(duration_seconds);
 }
 
+impl ExpireSnapshotsRequestGate {
+    fn initialize_from_state_once(&mut self, state: &ExternalMaintenanceState) {
+        if self.initialized_from_state {
+            return;
+        }
+        self.initialized_from_state = true;
+
+        let Some(completed_at) =
+            state.last_successful_operations.expire_snapshots.as_ref().map(|run| run.completed_at)
+        else {
+            debug!(
+                "ducklake expire-snapshots request gate initialized without previous successful \
+                 run"
+            );
+            return;
+        };
+
+        self.next_request_after =
+            Some(completed_at + chrono::Duration::seconds(EXPIRE_SNAPSHOTS_MIN_INTERVAL_SECONDS));
+        debug!(
+            completed_at = %completed_at,
+            next_request_after = ?self.next_request_after,
+            "ducklake expire-snapshots request gate initialized from maintenance state: \
+             completed_at={}, next_request_after={:?}",
+            completed_at,
+            self.next_request_after
+        );
+    }
+
+    fn is_suppressed(&self, now: DateTime<Utc>) -> bool {
+        self.next_request_after.is_some_and(|next_request_after| now < next_request_after)
+    }
+
+    fn record_requested(&mut self, now: DateTime<Utc>) {
+        self.next_request_after =
+            Some(now + chrono::Duration::seconds(EXPIRE_SNAPSHOTS_MIN_INTERVAL_SECONDS));
+    }
+}
+
 async fn maybe_request_operations<S, M>(
     store: &M,
     destination: &DuckLakeDestination<S>,
     state: &ExternalMaintenanceState,
     config: &ExternalMaintenanceWatcherConfig,
+    expire_snapshots_gate: &mut ExpireSnapshotsRequestGate,
 ) where
     S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
     M: ExternalMaintenanceStore,
@@ -364,6 +422,10 @@ async fn maybe_request_operations<S, M>(
             operations.rewrite_data_files &= state.operation_policy.rewrite_data_files_enabled;
             operations.expire_snapshots &= state.operation_policy.expire_snapshots_enabled;
             operations.cleanup_old_files &= state.operation_policy.cleanup_old_files_enabled;
+            if operations.expire_snapshots && expire_snapshots_gate.is_suppressed(Utc::now()) {
+                debug!("ducklake expire-snapshots request suppressed by local daily gate");
+                operations.expire_snapshots = false;
+            }
             operations
         }
         Err(error) => {
@@ -428,6 +490,9 @@ async fn maybe_request_operations<S, M>(
     };
     match time::timeout(config.store_timeout, store.request_operations(request)).await {
         Ok(Ok(ExternalMaintenanceRequestOutcome::Created)) => {
+            if requested.expire_snapshots && !already_requested.expire_snapshots {
+                expire_snapshots_gate.record_requested(Utc::now());
+            }
             record_external_maintenance_triggers(requested, already_requested);
         }
         Ok(Ok(ExternalMaintenanceRequestOutcome::AlreadyCovered)) => {
@@ -591,12 +656,27 @@ fn record_external_maintenance_triggers(
 
 #[cfg(test)]
 mod tests {
+    use chrono::{DateTime, TimeZone, Utc};
     use etl_telemetry::metrics::init_metrics_handle;
 
-    use super::record_external_maintenance_pause_active;
+    use super::{
+        ExpireSnapshotsRequestGate, ExternalMaintenanceOperationRun, ExternalMaintenanceState,
+        record_external_maintenance_pause_active,
+    };
     use crate::ducklake::metrics::{
         ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_PAUSE_ACTIVE, register_metrics,
     };
+
+    fn state_with_expire_snapshots_completed_at(
+        completed_at: DateTime<Utc>,
+    ) -> ExternalMaintenanceState {
+        let mut state = ExternalMaintenanceState::present();
+        state.last_successful_operations.expire_snapshots = Some(ExternalMaintenanceOperationRun {
+            run_id: Some("run-1".to_owned()),
+            completed_at,
+        });
+        state
+    }
 
     fn pause_active_gauge_value(rendered: &str) -> Option<f64> {
         rendered.lines().find_map(|line| {
@@ -606,6 +686,32 @@ mod tests {
                 None
             }
         })
+    }
+
+    #[test]
+    fn expire_snapshots_gate_initializes_from_state_once() {
+        let now = Utc.with_ymd_and_hms(2026, 5, 12, 12, 0, 0).unwrap();
+        let first = state_with_expire_snapshots_completed_at(now - chrono::Duration::hours(1));
+        let second = state_with_expire_snapshots_completed_at(now - chrono::Duration::hours(25));
+        let mut gate = ExpireSnapshotsRequestGate::default();
+
+        gate.initialize_from_state_once(&first);
+        gate.initialize_from_state_once(&second);
+
+        assert!(gate.is_suppressed(now));
+        assert!(gate.is_suppressed(now + chrono::Duration::hours(22)));
+        assert!(!gate.is_suppressed(now + chrono::Duration::hours(23)));
+    }
+
+    #[test]
+    fn expire_snapshots_gate_records_local_request() {
+        let now = Utc.with_ymd_and_hms(2026, 5, 12, 12, 0, 0).unwrap();
+        let mut gate = ExpireSnapshotsRequestGate::default();
+
+        gate.record_requested(now);
+
+        assert!(gate.is_suppressed(now + chrono::Duration::hours(23)));
+        assert!(!gate.is_suppressed(now + chrono::Duration::hours(24)));
     }
 
     #[tokio::test]
