@@ -922,6 +922,11 @@ async fn clear_table_copy_state_keeps_replication_state_and_deletes_schema_metad
 
     let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
 
+    // Test idempotency: clearing copy state for a non-existent table should
+    // succeed.
+    let nonexistent_table_id = TableId::new(99999);
+    store.clear_table_copy_state(nonexistent_table_id).await.unwrap();
+
     let mut table_schema = create_sample_table_schema();
     let table_id = table_schema.id;
     let other_table_schema = create_another_table_schema();

@@ -179,6 +179,12 @@ impl Inner {
     fn new() -> Self {
         Self { created_tables: HashSet::new(), created_views: HashMap::new() }
     }
+
+    /// Clears cached state for a destination table.
+    fn clear_table_cache(&mut self, base_table_id: &BigQueryTableId) {
+        self.created_views.remove(base_table_id);
+        self.created_tables.retain(|table_id| !table_id.belongs_to_base(base_table_id));
+    }
 }
 
 /// A BigQuery destination that implements the ETL [`Destination`] trait.
@@ -1113,6 +1119,7 @@ where
     ) -> EtlResult<()> {
         let base_bigquery_table_id =
             table_name_to_bigquery_table_id(replicated_table_schema.name())?;
+        let table_id = replicated_table_schema.id();
         let mut table_ids = HashSet::new();
 
         // Discover physical table versions from BigQuery instead of the local cache.
@@ -1138,13 +1145,8 @@ where
 
         // Once destination cleanup is done, remove any stale local cache entries.
         let mut inner = self.inner.lock().await;
-        inner.created_views.remove(&base_bigquery_table_id);
+        inner.clear_table_cache(&base_bigquery_table_id);
 
-        for sequenced_bigquery_table_id in table_ids {
-            inner.created_tables.remove(&sequenced_bigquery_table_id);
-        }
-
-        let table_id = replicated_table_schema.id();
         info!(table_id = table_id.0, "dropped bigquery table before copy");
 
         Ok(())
@@ -1847,6 +1849,37 @@ mod tests {
             None
         );
         assert_eq!(SequencedBigQueryTableId::parse_for_base("users_table", &base_table_id), None);
+    }
+
+    #[test]
+    fn clear_table_cache_removes_all_cached_table_state_for_base() {
+        let base_table_id = "users_table".to_owned();
+        let mut inner = Inner::new();
+
+        inner.created_tables.insert(SequencedBigQueryTableId(base_table_id.clone(), 0));
+        inner.created_tables.insert(SequencedBigQueryTableId(base_table_id.clone(), 1));
+        inner.created_tables.insert(SequencedBigQueryTableId("orders_table".to_owned(), 0));
+        inner
+            .created_views
+            .insert(base_table_id.clone(), SequencedBigQueryTableId(base_table_id.clone(), 1));
+        inner.created_views.insert(
+            "orders_table".to_owned(),
+            SequencedBigQueryTableId("orders_table".to_owned(), 0),
+        );
+
+        inner.clear_table_cache(&base_table_id);
+
+        assert_eq!(
+            inner.created_tables,
+            HashSet::from([SequencedBigQueryTableId("orders_table".to_owned(), 0)])
+        );
+        assert_eq!(
+            inner.created_views,
+            HashMap::from([(
+                "orders_table".to_owned(),
+                SequencedBigQueryTableId("orders_table".to_owned(), 0),
+            )])
+        );
     }
 
     #[test]
