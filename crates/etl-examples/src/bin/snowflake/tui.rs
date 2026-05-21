@@ -4,6 +4,8 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+type Term = ratatui::Terminal<ratatui::backend::CrosstermBackend<Stdout>>;
+
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
@@ -27,8 +29,7 @@ impl Drop for TerminalGuard {
     }
 }
 
-pub fn setup_terminal()
--> Result<(Terminal<CrosstermBackend<Stdout>>, TerminalGuard), Box<dyn std::error::Error>> {
+pub fn setup_terminal() -> Result<(Term, TerminalGuard), Box<dyn std::error::Error>> {
     crossterm::terminal::enable_raw_mode()?;
     let mut stdout = std::io::stdout();
     crossterm::execute!(stdout, crossterm::terminal::EnterAlternateScreen)?;
