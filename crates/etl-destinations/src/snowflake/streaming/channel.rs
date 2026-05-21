@@ -16,7 +16,7 @@ use crate::snowflake::{
 /// Manages the state and lifecycle of a single Snowpipe Streaming channel.
 ///
 /// Channel is a conduit via which we push data to Snowflake system.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct ChannelHandle<C> {
     /// Streaming API client.
     client: Arc<C>,
@@ -38,6 +38,20 @@ pub(crate) struct ChannelHandle<C> {
 
     /// Continuation token for the next API call on this channel.
     continuation_token: Option<String>,
+}
+
+impl<C> Clone for ChannelHandle<C> {
+    fn clone(&self) -> Self {
+        Self {
+            client: Arc::clone(&self.client),
+            database: self.database.clone(),
+            schema: self.schema.clone(),
+            table: self.table.clone(),
+            channel: self.channel.clone(),
+            last_offset_token: self.last_offset_token.clone(),
+            continuation_token: self.continuation_token.clone(),
+        }
+    }
 }
 
 impl<C: StreamClient> ChannelHandle<C> {
