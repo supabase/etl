@@ -79,7 +79,7 @@ Where replicated data goes. Implement the `Destination` trait to send data anywh
 pub trait Destination {
     fn name() -> &'static str;
     fn shutdown(&self) -> impl Future<Output = EtlResult<()>> + Send { async { Ok(()) } }
-    fn truncate_table(&self, replicated_table_schema: &ReplicatedTableSchema, async_result: TruncateTableResult<()>) -> impl Future<Output = EtlResult<()>> + Send;
+    fn drop_table_for_copy(&self, replicated_table_schema: &ReplicatedTableSchema, async_result: DropTableForCopyResult<()>) -> impl Future<Output = EtlResult<()>> + Send;
     fn write_table_rows(&self, replicated_table_schema: &ReplicatedTableSchema, rows: Vec<TableRow>, async_result: WriteTableRowsResult<()>) -> impl Future<Output = EtlResult<()>> + Send;
     fn write_events(&self, events: Vec<Event>, async_result: WriteEventsResult<()>) -> impl Future<Output = EtlResult<()>> + Send;
 }
@@ -88,14 +88,14 @@ pub trait Destination {
 | Method | When called | Purpose |
 |--------|-------------|---------|
 | `name()` | On initialization | Identify the destination |
-| `truncate_table()` | Before initial copy | Clear destination table using the current replicated schema |
+| `drop_table_for_copy()` | Before a fresh initial copy or copy retry | Drop the existing destination object and destination-private replay state using the current replicated schema |
 | `write_table_rows()` | During initial copy | Receive bulk rows for the current replicated schema |
 | `write_events()` | After initial copy | Receive streaming changes |
 
 Each write-like method receives an async result handle. The intent is different per method:
 
 - `write_events()`: after dispatch succeeds, ETL may keep processing while the destination finishes the batch.
-- `truncate_table()` and `write_table_rows()`: ETL waits for the result immediately. The handle is still useful because it keeps the destination API uniform and lets implementations reuse similar internal patterns.
+- `drop_table_for_copy()` and `write_table_rows()`: ETL waits for the result immediately. After a successful drop, ETL clears its own copy-scoped schema, destination metadata, and table-sync progress before storing the fresh `0/0` copy schema.
 
 ### Store
 
@@ -103,7 +103,7 @@ Persists pipeline state so replication can resume after restarts. Three traits w
 
 - **StateStore**: Tracks replication phase per table and destination table metadata
 - **SchemaStore**: Stores versioned table schema information (columns, types, primary keys, snapshot IDs) and prunes obsolete schema versions after acknowledged progress
-- **CleanupStore**: Removes stored state when a table is dropped from the publication
+- **CleanupStore**: Clears copy-scoped state before a table copy restart and removes all stored state when a table leaves the publication
 
 `StateStore` and `SchemaStore` use a cache-first pattern: reads hit an in-memory cache, writes go to both the cache and persistent storage. Schema pruning follows the same rule for implementations with durable storage: obsolete versions are removed from both the cache and the persistent store.
 

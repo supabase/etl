@@ -25,11 +25,11 @@ use crate::{
 pub type WriteTableRowsResult<T = ()> = AsyncResult<T>;
 
 /// Async completion handle used for
-/// [`crate::destination::Destination::truncate_table`].
+/// [`crate::destination::Destination::drop_table_for_copy`].
 ///
-/// ETL waits for this result immediately. It is primarily an API consistency
-/// hook rather than a mechanism for overlapping more ETL work with truncation.
-pub type TruncateTableResult<T = ()> = AsyncResult<T>;
+/// ETL waits for this result immediately before clearing stored table-copy
+/// metadata and starting a fresh copy.
+pub type DropTableForCopyResult<T = ()> = AsyncResult<T>;
 
 /// Async completion handle used for
 /// [`crate::destination::Destination::write_events`].

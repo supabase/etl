@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use etl::{
     destination::{
         Destination,
-        async_result::{TruncateTableResult, WriteEventsResult, WriteTableRowsResult},
+        async_result::{DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult},
     },
     error::{ErrorKind, EtlResult},
     etl_error,
@@ -603,6 +603,20 @@ where
     async fn truncate_table_inner(&self, schema: &ReplicatedTableSchema) -> EtlResult<()> {
         let (clickhouse_table_name, _) = self.ensure_table_exists(schema).await?;
         self.client.truncate_table(&clickhouse_table_name).await
+    }
+
+    async fn drop_table_for_copy_inner(&self, schema: &ReplicatedTableSchema) -> EtlResult<()> {
+        let clickhouse_table_name = try_stringify_table_name(schema.name())?;
+
+        if matches!(self.inserter_config.engine, ClickHouseEngine::ReplacingMergeTree) {
+            let drop_view = drop_current_view_sql(&clickhouse_table_name);
+            self.client.execute_ddl(DdlKind::DropView, &drop_view).await?;
+        }
+
+        self.client.drop_table(&clickhouse_table_name).await?;
+        self.table_cache.write().remove(&clickhouse_table_name);
+
+        Ok(())
     }
 
     async fn write_table_rows_inner(
@@ -1259,12 +1273,12 @@ where
     // sending" error if the path ever skips `send`, so the receiver is never
     // silently abandoned.
 
-    async fn truncate_table(
+    async fn drop_table_for_copy(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
-        async_result: TruncateTableResult<()>,
+        async_result: DropTableForCopyResult<()>,
     ) -> EtlResult<()> {
-        let result = self.truncate_table_inner(replicated_table_schema).await;
+        let result = self.drop_table_for_copy_inner(replicated_table_schema).await;
         async_result.send(result);
         Ok(())
     }

@@ -130,6 +130,12 @@ fn build_truncate_table_sql(table_name: &str) -> String {
     format!("TRUNCATE TABLE IF EXISTS {table_name}")
 }
 
+/// Builds the SQL used to drop a ClickHouse table.
+fn build_drop_table_sql(table_name: &str) -> String {
+    let table_name = quote_identifier(table_name);
+    format!("DROP TABLE IF EXISTS {table_name}")
+}
+
 /// Builds the SQL used to insert RowBinary rows into a ClickHouse table.
 fn build_insert_rows_sql(table_name: &str) -> String {
     let table_name = quote_identifier(table_name);
@@ -143,6 +149,7 @@ fn build_insert_rows_sql(table_name: &str) -> String {
 pub(crate) enum DdlKind {
     CreateTable,
     CreateView,
+    DropTable,
     DropView,
     AddColumn,
     DropColumn,
@@ -154,6 +161,7 @@ impl DdlKind {
         match self {
             DdlKind::CreateTable => "create_table",
             DdlKind::CreateView => "create_view",
+            DdlKind::DropTable => "drop_table",
             DdlKind::DropView => "drop_view",
             DdlKind::AddColumn => "add_column",
             DdlKind::DropColumn => "drop_column",
@@ -370,6 +378,12 @@ impl ClickHouseClient {
         .await
     }
 
+    /// Executes `DROP TABLE IF EXISTS` for the supplied table.
+    pub(crate) async fn drop_table(&self, table_name: &str) -> EtlResult<()> {
+        let sql = build_drop_table_sql(table_name);
+        self.execute_ddl(DdlKind::DropTable, &sql).await
+    }
+
     /// Inserts `rows` into `table_name` using the RowBinary format.
     ///
     /// Each element of `rows` is a complete, already-encoded row of
@@ -494,6 +508,13 @@ mod tests {
         let sql = build_truncate_table_sql("table\"name");
 
         assert_eq!(sql, "TRUNCATE TABLE IF EXISTS \"table\"\"name\"");
+    }
+
+    #[test]
+    fn drop_table_sql_quotes_identifiers() {
+        let sql = build_drop_table_sql("table\"name");
+
+        assert_eq!(sql, "DROP TABLE IF EXISTS \"table\"\"name\"");
     }
 
     #[test]

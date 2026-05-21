@@ -16,14 +16,14 @@ use crate::{
     concurrency::{BatchBudgetController, MemoryMonitor, ShutdownRx},
     destination::{
         Destination,
-        async_result::{TruncateTableResult, WriteTableRowsResult},
+        async_result::{DropTableForCopyResult, WriteTableRowsResult},
     },
     error::{ErrorKind, EtlResult},
     etl_error,
     metrics::{ETL_TABLE_COPY_DURATION_SECONDS, PARTITIONING_LABEL},
     replication::{WorkerType, client::PgReplicationClient, table_cache::SharedTableCache},
     state::table::{TableReplicationPhase, TableReplicationPhaseType},
-    store::{schema::SchemaStore, state::StateStore},
+    store::{cleanup::CleanupStore, schema::SchemaStore, state::StateStore},
     types::PipelineId,
     workers::{TableCopyResult, TableSyncWorkerState, table_copy},
 };
@@ -69,7 +69,7 @@ pub(crate) async fn start_table_sync<S, D>(
     batch_budget: BatchBudgetController,
 ) -> EtlResult<TableSyncResult>
 where
-    S: StateStore + SchemaStore + Clone + Send + 'static,
+    S: StateStore + SchemaStore + CleanupStore + Clone + Send + 'static,
     D: Destination + Clone + Send + 'static,
 {
     info!(table_id = table_id.0, "starting initial table sync");
@@ -148,88 +148,67 @@ where
             // - `Init` -> we can be in this state because we just started replicating the
             //   table or the state
             //  was reset. In this case we don't want to make assumptions about the previous
-            // state, so we  just try to delete the slot and truncate the table.
+            // state, so we just try to delete the slot and drop the table.
             // - `DataSync` -> we can be in this state because we failed during data sync,
             //   meaning that table
-            //  copy failed. In this case, we want to delete the slot and truncate the
+            //  copy failed. In this case, we want to delete the slot and drop the
             // table.
             //
             // We try to delete the slot also during `Init` because we support state
             // rollback and a slot might be there from the previous run.
             replication_client.delete_slot_if_exists(&slot_name).await?;
-            store.delete_replication_progress(WorkerType::TableSync { table_id }).await?;
 
-            // We must truncate the destination table before starting a copy to avoid data
-            // inconsistencies.
+            // We must drop the destination table and clear old ETL schema state before
+            // starting a copy to avoid data inconsistencies.
             //
             // Example scenario:
             // 1. The source table has a single row (id = 1) that is copied to the
             //    destination during the initial copy.
-            // 2. Before the table’s phase is set to `FinishedCopy`, the process crashes.
+            // 2. Before the table's phase is set to `FinishedCopy`, the process crashes.
             // 3. While down, the source deletes row id = 1 and inserts row id = 2.
-            // 4. When restarted, the process sees the table in the ` DataSync ` state,
+            // 4. When restarted, the process sees the table in the `DataSync` state,
             //    deletes the slot, and copies again.
             // 5. This time, only row id = 2 is copied, but row id = 1 still exists in the
             //    destination.
             // Result: the destination has two rows (id = 1 and id = 2) instead of only one
-            // (id = 2). Fix: Always truncate the destination table before
-            // starting a copy.
+            // (id = 2). Fix: Always drop the destination table before starting a copy.
             //
             // Try to load the previously stored destination table metadata, which contains
             // both the snapshot_id and replication_mask. If available, we can load the
-            // corresponding table schema and truncate the destination table before starting
-            // a copy. If the metadata is not present, we can safely assume that
-            // no data is there in the table; thus a truncate won't be issued.
+            // corresponding table schema and drop the destination table before starting a
+            // copy. If the metadata is not present, there is no destination object we
+            // know how to drop, but stale ETL schemas are still cleared below
+            // before the fresh `0/0` copy schema is stored.
             if let Some(current_metadata) = store.get_destination_table_metadata(table_id).await? {
-                match current_metadata.into_applied() {
-                    Err(err) => {
-                        // The schema DDL never completed. Skip the truncate and let the
-                        // destination re-create the table during the copy phase.
-                        warn!(
-                            table_id = table_id.0,
-                            error = %err,
-                            "destination table metadata is not in applied state; skipping pre-copy truncation"
-                        );
-                    }
-                    Ok(applied_metadata) => {
-                        if let Some(table_schema) =
-                            store.get_table_schema(&table_id, applied_metadata.snapshot_id).await?
-                        {
-                            let replicated_table_schema = ReplicatedTableSchema::from_mask(
-                                table_schema,
-                                applied_metadata.replication_mask,
-                            );
-                            let (truncate_result, pending_truncate_result) =
-                                TruncateTableResult::new(());
+                if let Some(table_schema) =
+                    store.get_table_schema(&table_id, current_metadata.snapshot_id).await?
+                {
+                    let replicated_table_schema = ReplicatedTableSchema::from_mask(
+                        table_schema,
+                        current_metadata.replication_mask,
+                    );
+                    let (drop_result, pending_drop_result) = DropTableForCopyResult::new(());
 
-                            if let Err(err) = destination
-                                .truncate_table(&replicated_table_schema, truncate_result)
-                                .await
-                            {
-                                warn!(
-                                    table_id = table_id.0,
-                                    error = %err,
-                                    "failed to dispatch destination table truncation before copy, continuing"
-                                );
-                            } else if let Err(err) = pending_truncate_result.await.into_result() {
-                                warn!(
-                                    table_id = table_id.0,
-                                    error = %err,
-                                    "failed to truncate destination table before copy, continuing"
-                                );
-                            } else {
-                                info!(%table_id, "truncated destination table before starting copy");
-                            }
-                        } else {
-                            bail!(
-                                ErrorKind::InvalidState,
-                                "Destination table metadata found, but not corresponding table \
-                                 schema exists"
-                            );
-                        }
-                    }
+                    destination.drop_table_for_copy(&replicated_table_schema, drop_result).await?;
+                    pending_drop_result.await.into_result()?;
+
+                    info!(%table_id, "dropped destination table before starting copy");
+                } else {
+                    bail!(
+                        ErrorKind::InvalidState,
+                        "Destination table metadata found, but no corresponding table schema \
+                         exists"
+                    );
                 }
             }
+
+            // We clear durable and in-memory table-copy state only after the destination
+            // table was dropped. The shared cache removal is idempotent: a first copy has
+            // no cached state yet, while an in-process retry can still hold the previous
+            // ready runtime schema. The fresh `0/0` copy schema below is the only state
+            // allowed to repopulate the cache.
+            store.clear_table_copy_state(table_id).await?;
+            shared_table_cache.remove_table(table_id).await;
 
             // We are ready to start copying table data, and we update the state
             // accordingly.

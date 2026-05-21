@@ -12,7 +12,7 @@ Receives replicated data. This is the primary extension point for sending data t
 pub trait Destination {
     fn name() -> &'static str;
     fn shutdown(&self) -> impl Future<Output = EtlResult<()>> + Send { async { Ok(()) } }
-    fn truncate_table(&self, replicated_table_schema: &ReplicatedTableSchema, async_result: TruncateTableResult<()>) -> impl Future<Output = EtlResult<()>> + Send;
+    fn drop_table_for_copy(&self, replicated_table_schema: &ReplicatedTableSchema, async_result: DropTableForCopyResult<()>) -> impl Future<Output = EtlResult<()>> + Send;
     fn write_table_rows(&self, replicated_table_schema: &ReplicatedTableSchema, table_rows: Vec<TableRow>, async_result: WriteTableRowsResult<()>) -> impl Future<Output = EtlResult<()>> + Send;
     fn write_events(&self, events: Vec<Event>, async_result: WriteEventsResult<()>) -> impl Future<Output = EtlResult<()>> + Send;
 }
@@ -24,19 +24,17 @@ pub trait Destination {
 |--------|---------|
 | `name()` | Returns identifier for logging and diagnostics |
 | `shutdown()` | Called when the pipeline shuts down. Default is a no-op. Override for cleanup or bookkeeping |
-| `truncate_table()` | Clears table data before initial sync. Receives the current replicated schema for the table |
+| `drop_table_for_copy()` | Drops the existing destination object and destination-private replay state before a fresh initial copy or copy retry. Receives the current replicated schema for the table |
 | `write_table_rows()` | Writes rows during initial table copy. Receives the current replicated schema and may get an empty vector for tables with no data |
 | `write_events()` | Processes streaming replication events (inserts, updates, deletes). Batches may span multiple tables |
 
 ### Implementation Notes
 
-- Operations should be idempotent when possible (ETL may retry on failure)
+- `drop_table_for_copy()` should be idempotent. ETL calls it before clearing copy-scoped store state, so implementations can still use the supplied schema and existing destination metadata to locate the old object.
+- Other operations should be idempotent when possible (ETL may retry on failure)
 - Handle concurrent calls safely (parallel table sync workers)
 - Process events in order to maintain data consistency
-- All three write-like methods use async results, but ETL waits differently:
-- `truncate_table()` waits immediately.
-- `write_table_rows()` also waits immediately, requesting the next batch only after the current one finishes for that copy partition.
-- `write_events()` is the method where ETL can keep processing while the destination finishes the current batch.
+- All three write-like methods use async results, but ETL waits differently. `drop_table_for_copy()` waits immediately before copy-scoped store cleanup. `write_table_rows()` also waits immediately, requesting the next batch only after the current one finishes for that copy partition. `write_events()` is the method where ETL can keep processing while the destination finishes the current batch.
 
 See [Event Types](events.md) for details on the events received by `write_events()`.
 
@@ -79,6 +77,11 @@ pub trait StateStore {
     fn update_table_replication_state(&self, table_id: TableId, state: TableReplicationPhase) -> impl Future<Output = EtlResult<()>> + Send;
     fn rollback_table_replication_state(&self, table_id: TableId) -> impl Future<Output = EtlResult<TableReplicationPhase>> + Send;
 
+    // Durable replication progress
+    fn get_replication_progress(&self, worker_type: WorkerType) -> impl Future<Output = EtlResult<Option<PgLsn>>> + Send;
+    fn upsert_replication_progress(&self, worker_type: WorkerType, flush_lsn: PgLsn) -> impl Future<Output = EtlResult<PgLsn>> + Send;
+    fn delete_replication_progress(&self, worker_type: WorkerType) -> impl Future<Output = EtlResult<()>> + Send;
+
     // Destination table metadata
     fn get_destination_table_metadata(&self, table_id: TableId) -> impl Future<Output = EtlResult<Option<DestinationTableMetadata>>> + Send;
     fn get_applied_destination_table_metadata(&self, table_id: TableId) -> impl Future<Output = EtlResult<Option<AppliedDestinationTableMetadata>>> + Send;
@@ -97,6 +100,18 @@ pub trait StateStore {
 | `update_table_replication_states()` | Atomically updates multiple table phases in both cache and persistent storage |
 | `update_table_replication_state()` | Updates phase in both cache and persistent storage |
 | `rollback_table_replication_state()` | Reverts table to previous phase. Returns the phase after rollback |
+
+### Durable Progress Methods
+
+Durable replication progress records the latest flushed LSN for the apply worker
+and table sync workers. It lets ETL resume from a safe boundary even when a slot
+or worker restarts.
+
+| Method | Purpose |
+|--------|---------|
+| `get_replication_progress()` | Returns stored flush progress for a worker, if present |
+| `upsert_replication_progress()` | Monotonically stores flush progress and returns the stored LSN. Implementations must not move progress backward |
+| `delete_replication_progress()` | Deletes progress when a worker slot lineage is intentionally reset |
 
 ### Destination Metadata Methods
 
@@ -126,17 +141,19 @@ Tables progress through these phases:
 
 ## CleanupStore
 
-Removes ETL metadata when tables are removed from the publication.
+Removes ETL metadata for table-copy restarts and publication removals.
 
 ```rust
 pub trait CleanupStore {
-    fn cleanup_table_state(&self, table_id: TableId) -> impl Future<Output = EtlResult<()>> + Send;
+    fn clear_table_copy_state(&self, table_id: TableId) -> impl Future<Output = EtlResult<()>> + Send;
+    fn delete_table_pipeline_state(&self, table_id: TableId) -> impl Future<Output = EtlResult<()>> + Send;
 }
 ```
 
 | Method | Purpose |
 |--------|---------|
-| `cleanup_table_state()` | Deletes all stored state for a table: replication state, schema versions, and destination table metadata. Does not modify destination tables |
+| `clear_table_copy_state()` | Clears destination metadata, schema versions, and durable table-sync progress while preserving the table replication phase. This is called only after the destination object was dropped for a fresh copy |
+| `delete_table_pipeline_state()` | Deletes all stored state for a table removed from the publication. Does not modify destination tables |
 
 ## Combining Traits
 

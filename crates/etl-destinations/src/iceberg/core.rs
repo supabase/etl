@@ -8,7 +8,7 @@ use etl::{
     concurrency::TaskSet,
     destination::{
         Destination,
-        async_result::{TruncateTableResult, WriteEventsResult, WriteTableRowsResult},
+        async_result::{DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult},
     },
     error::{ErrorKind, EtlResult},
     etl_error,
@@ -226,6 +226,40 @@ where
 
         // We recreate the table with the same schema.
         self.prepare_table_for_streaming(&mut inner, replicated_table_schema).await?;
+
+        Ok(())
+    }
+
+    /// Drops an Iceberg table before a fresh table copy.
+    async fn drop_table_for_copy_inner(
+        &self,
+        replicated_table_schema: &ReplicatedTableSchema,
+    ) -> EtlResult<()> {
+        let table_id = replicated_table_schema.id();
+        let table_name = replicated_table_schema.name();
+        let table_namespace = schema_to_namespace(&table_name.schema);
+        let (default_table_name, namespace) = {
+            let inner = self.inner.lock().await;
+            let default_table_name =
+                table_name_to_iceberg_table_name(table_name, inner.namespace.is_single())?;
+            let namespace = inner.namespace.get_or(&table_namespace).to_owned();
+
+            (default_table_name, namespace)
+        };
+        let iceberg_table_name =
+            if let Some(metadata) = self.store.get_destination_table_metadata(table_id).await? {
+                metadata.destination_table_id
+            } else {
+                default_table_name
+            };
+
+        self.client
+            .drop_table_if_exists(&namespace, iceberg_table_name.clone())
+            .await
+            .map_err(iceberg_error_to_etl_error)?;
+
+        let mut inner = self.inner.lock().await;
+        inner.created_tables.remove(&iceberg_table_name);
 
         Ok(())
     }
@@ -593,16 +627,16 @@ where
         self.tasks.shutdown().await
     }
 
-    /// Truncates the specified table by dropping and recreating it.
+    /// Drops the specified table before a fresh copy.
     ///
-    /// Removes all data from the target Iceberg table while preserving
-    /// the table schema structure for continued CDC operations.
-    async fn truncate_table(
+    /// The table sync worker clears ETL metadata after this succeeds, and the
+    /// next copy recreates the table from the fresh `0/0` schema.
+    async fn drop_table_for_copy(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
-        async_result: TruncateTableResult<()>,
+        async_result: DropTableForCopyResult<()>,
     ) -> EtlResult<()> {
-        let result = IcebergDestination::truncate_table(self, replicated_table_schema).await;
+        let result = self.drop_table_for_copy_inner(replicated_table_schema).await;
         async_result.send(result);
 
         Ok(())

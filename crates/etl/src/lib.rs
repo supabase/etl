@@ -63,7 +63,9 @@
 //!         BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PgConnectionConfig,
 //!         PipelineConfig, TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
 //!     },
-//!     destination::{Destination, TruncateTableResult, WriteEventsResult, WriteTableRowsResult},
+//!     destination::{
+//!         Destination, DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult,
+//!     },
 //!     error::EtlResult,
 //!     pipeline::Pipeline,
 //!     store::MemoryStore,
@@ -77,10 +79,10 @@
 //!     fn name() -> &'static str {
 //!         "noop"
 //!     }
-//!     async fn truncate_table(
+//!     async fn drop_table_for_copy(
 //!         &self,
 //!         _replicated_table_schema: &ReplicatedTableSchema,
-//!         async_result: TruncateTableResult<()>,
+//!         async_result: DropTableForCopyResult<()>,
 //!     ) -> EtlResult<()> {
 //!         async_result.send(Ok(()));
 //!         Ok(())

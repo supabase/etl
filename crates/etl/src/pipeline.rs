@@ -406,9 +406,9 @@ where
                     "table removed from publication, purging stored state and slot"
                 );
 
-                // We clean up all table state before removing the slot, so that we don't incur
-                // in the case where we have a slot tied to an invalid state.
-                self.store.cleanup_table_state(table_id).await?;
+                // We delete all table state before removing the slot, so that we don't
+                // incur in the case where we have a slot tied to an invalid state.
+                self.store.delete_table_pipeline_state(table_id).await?;
 
                 // We try to delete the replication slot.
                 let slot_name: String =

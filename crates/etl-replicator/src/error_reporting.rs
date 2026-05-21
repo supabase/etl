@@ -201,7 +201,11 @@ impl<S> CleanupStore for ErrorReportingStateStore<S>
 where
     S: CleanupStore + Send + Sync,
 {
-    async fn cleanup_table_state(&self, table_id: TableId) -> EtlResult<()> {
-        self.inner.cleanup_table_state(table_id).await
+    async fn clear_table_copy_state(&self, table_id: TableId) -> EtlResult<()> {
+        self.inner.clear_table_copy_state(table_id).await
+    }
+
+    async fn delete_table_pipeline_state(&self, table_id: TableId) -> EtlResult<()> {
+        self.inner.delete_table_pipeline_state(table_id).await
     }
 }

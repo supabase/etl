@@ -1,7 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
     fmt::Display,
-    iter,
     str::FromStr,
     sync::Arc,
 };
@@ -11,7 +10,7 @@ use etl::{
     concurrency::TaskSet,
     destination::{
         Destination,
-        async_result::{TruncateTableResult, WriteEventsResult, WriteTableRowsResult},
+        async_result::{DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult},
     },
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
@@ -65,6 +64,11 @@ impl SequencedBigQueryTableId {
     /// Creates a new sequenced table ID starting at version 0.
     fn new(table_id: BigQueryTableId) -> Self {
         Self(table_id, 0)
+    }
+
+    /// Returns the logical base table id for this sequenced table id.
+    fn base_table_id(&self) -> &BigQueryTableId {
+        &self.0
     }
 
     /// Returns the next version of this sequenced table ID.
@@ -169,6 +173,18 @@ impl Inner {
     /// Creates empty synchronized destination state.
     fn new() -> Self {
         Self { created_tables: HashSet::new(), created_views: HashMap::new() }
+    }
+
+    /// Returns cached sequenced table ids for the supplied logical table.
+    fn created_table_ids_for_base(
+        &self,
+        base_table_id: &BigQueryTableId,
+    ) -> Vec<SequencedBigQueryTableId> {
+        self.created_tables
+            .iter()
+            .filter(|table_id| table_id.base_table_id() == base_table_id)
+            .cloned()
+            .collect()
     }
 }
 
@@ -1096,6 +1112,53 @@ where
 
         Ok(())
     }
+
+    /// Drops destination table objects before a fresh table copy.
+    ///
+    /// Destination metadata is intentionally left untouched here. The table
+    /// sync worker clears it only after this drop succeeds so this method
+    /// can use the last stored destination table id to find the object that
+    /// must be removed.
+    async fn drop_table_for_copy_inner(
+        &self,
+        replicated_table_schema: &ReplicatedTableSchema,
+    ) -> EtlResult<()> {
+        let table_id = replicated_table_schema.id();
+        let base_bigquery_table_id =
+            table_name_to_bigquery_table_id(replicated_table_schema.name())?;
+        let base_sequenced_bigquery_table_id =
+            SequencedBigQueryTableId::new(base_bigquery_table_id.clone());
+        let mut table_ids = HashSet::new();
+
+        if let Some(metadata) = self.state_store.get_destination_table_metadata(table_id).await? {
+            table_ids.insert(metadata.destination_table_id.parse::<SequencedBigQueryTableId>()?);
+        }
+
+        {
+            let inner = self.inner.lock().await;
+            table_ids.extend(inner.created_table_ids_for_base(&base_bigquery_table_id));
+        }
+
+        table_ids.insert(base_sequenced_bigquery_table_id);
+
+        self.client.drop_view(&self.dataset_id, &base_bigquery_table_id).await?;
+
+        for sequenced_bigquery_table_id in &table_ids {
+            self.client
+                .drop_table(&self.dataset_id, &sequenced_bigquery_table_id.to_string())
+                .await?;
+        }
+
+        let mut inner = self.inner.lock().await;
+        for sequenced_bigquery_table_id in table_ids {
+            inner.created_tables.remove(&sequenced_bigquery_table_id);
+        }
+        inner.created_views.remove(&base_bigquery_table_id);
+
+        info!(table_id = table_id.0, "dropped bigquery table before copy");
+
+        Ok(())
+    }
 }
 
 /// Validates that a replicated table schema can be applied in BigQuery.
@@ -1170,15 +1233,14 @@ where
         self.tasks.shutdown().await
     }
 
-    async fn truncate_table(
+    async fn drop_table_for_copy(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
-        async_result: TruncateTableResult<()>,
+        async_result: DropTableForCopyResult<()>,
     ) -> EtlResult<()> {
         self.tasks.try_reap().await?;
 
-        let result =
-            self.process_truncate_for_schemas(iter::once(replicated_table_schema.clone())).await;
+        let result = self.drop_table_for_copy_inner(replicated_table_schema).await;
         async_result.send(result);
 
         Ok(())
@@ -1766,6 +1828,25 @@ mod tests {
     fn sequenced_bigquery_table_id_to_bigquery_table_id_zero_sequence() {
         let table_id = SequencedBigQueryTableId("simple_table".to_owned(), 0);
         assert_eq!(table_id.to_bigquery_table_id(), "simple_table");
+    }
+
+    #[test]
+    fn inner_created_table_ids_for_base_filters_cached_tables() {
+        let mut inner = Inner::new();
+        let base_table_id = "users_table".to_owned();
+        let current_table_id = SequencedBigQueryTableId(base_table_id.clone(), 2);
+        let older_table_id = SequencedBigQueryTableId(base_table_id.clone(), 1);
+        let other_table_id = SequencedBigQueryTableId("orders_table".to_owned(), 1);
+
+        inner.created_tables.insert(current_table_id.clone());
+        inner.created_tables.insert(older_table_id.clone());
+        inner.created_tables.insert(other_table_id);
+
+        let table_ids = inner.created_table_ids_for_base(&base_table_id);
+
+        assert_eq!(table_ids.len(), 2);
+        assert!(table_ids.contains(&current_table_id));
+        assert!(table_ids.contains(&older_table_id));
     }
 
     #[test]

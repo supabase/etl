@@ -109,6 +109,16 @@ impl SharedTableCache {
         self.upsert(table_id, SharedTableState::Ready { replicated_table_schema }).await;
     }
 
+    /// Removes cached runtime state for a table.
+    ///
+    /// This is intentionally idempotent: a first copy may not have cached state
+    /// yet, while an in-process copy restart may have stale ready state from
+    /// the previous copy.
+    pub(crate) async fn remove_table(&self, table_id: TableId) {
+        let mut guard = self.inner.write().await;
+        guard.remove(&table_id);
+    }
+
     /// Inserts or updates shared table state.
     ///
     /// This cache is deliberately oblivious to ordering and ownership. It
@@ -253,5 +263,23 @@ mod tests {
         assert_eq!(table_ids.len(), 2);
         assert!(table_ids.contains(&ready_table_id));
         assert!(table_ids.contains(&waiting_table_id));
+    }
+
+    #[tokio::test]
+    async fn remove_table_is_idempotent() {
+        let cache = SharedTableCache::new();
+        let table_id = TableId::new(123);
+
+        cache.remove_table(table_id).await;
+        assert!(cache.get(&table_id).await.is_none());
+
+        cache.note_ready(table_id, create_test_schema()).await;
+        assert!(cache.get(&table_id).await.is_some());
+
+        cache.remove_table(table_id).await;
+        cache.remove_table(table_id).await;
+
+        assert!(cache.get(&table_id).await.is_none());
+        assert!(!cache.active_table_ids().await.contains(&table_id));
     }
 }

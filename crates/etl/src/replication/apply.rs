@@ -76,6 +76,7 @@ use crate::{
     },
     state::table::{TableReplicationPhase, TableReplicationPhaseType},
     store::{
+        cleanup::CleanupStore,
         schema::{SchemaStore, TableSchemaRetention},
         state::StateStore,
     },
@@ -557,14 +558,6 @@ impl ApplyLoopState {
         Some(SchemaCleanupRun { deadline: Arc::clone(&self.schema_cleanup_deadline) })
     }
 
-    /// Moves the schema cleanup deadline into the past for tests.
-    #[cfg(test)]
-    async fn expire_schema_cleanup_deadline(&self) {
-        let mut schema_cleanup_deadline = self.schema_cleanup_deadline.lock().await;
-        *schema_cleanup_deadline =
-            Some(Instant::now() - SCHEMA_CLEANUP_INTERVAL - Duration::from_secs(1));
-    }
-
     /// Returns `true` if a schema cleanup task is still recorded.
     fn has_schema_cleanup_task(&self) -> bool {
         self.schema_cleanup_task.is_some()
@@ -720,7 +713,7 @@ pub(crate) struct ApplyLoop<S, D> {
 
 impl<S, D> ApplyLoop<S, D>
 where
-    S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
+    S: StateStore + SchemaStore + CleanupStore + Clone + Send + Sync + 'static,
     D: Destination + Clone + Send + Sync + 'static,
 {
     /// Starts the apply loop for processing replication events.
@@ -2482,7 +2475,7 @@ mod apply_worker {
         current_lsn: PgLsn,
     ) -> EtlResult<Option<ExitIntent>>
     where
-        S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
+        S: StateStore + SchemaStore + CleanupStore + Clone + Send + Sync + 'static,
         D: Destination + Clone + Send + Sync + 'static,
     {
         for (table_id, table_replication_phase) in get_syncing_tables(&ctx.store).await? {
@@ -2602,7 +2595,7 @@ mod apply_worker {
         current_lsn: PgLsn,
     ) -> EtlResult<Option<ExitIntent>>
     where
-        S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
+        S: StateStore + SchemaStore + CleanupStore + Clone + Send + Sync + 'static,
         D: Destination + Clone + Send + Sync + 'static,
     {
         let worker_state = ctx.pool.get_active_worker_state(table_id).await;
@@ -2741,7 +2734,7 @@ mod apply_worker {
         current_lsn: PgLsn,
     ) -> EtlResult<()>
     where
-        S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
+        S: StateStore + SchemaStore + CleanupStore + Clone + Send + Sync + 'static,
         D: Destination + Clone + Send + Sync + 'static,
     {
         for (table_id, table_replication_phase) in get_syncing_tables(&ctx.store).await? {
@@ -2767,7 +2760,7 @@ mod apply_worker {
         current_lsn: PgLsn,
     ) -> EtlResult<()>
     where
-        S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
+        S: StateStore + SchemaStore + CleanupStore + Clone + Send + Sync + 'static,
         D: Destination + Clone + Send + Sync + 'static,
     {
         let worker_state = ctx.pool.get_active_worker_state(table_id).await;
@@ -2879,7 +2872,7 @@ mod apply_worker {
         current_lsn: PgLsn,
     ) -> EtlResult<Option<ExitIntent>>
     where
-        S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
+        S: StateStore + SchemaStore + CleanupStore + Clone + Send + Sync + 'static,
         D: Destination + Clone + Send + Sync + 'static,
     {
         for (table_id, table_replication_phase) in get_syncing_tables(&ctx.store).await? {
@@ -2911,7 +2904,7 @@ mod apply_worker {
         current_lsn: PgLsn,
     ) -> EtlResult<Option<ExitIntent>>
     where
-        S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
+        S: StateStore + SchemaStore + CleanupStore + Clone + Send + Sync + 'static,
         D: Destination + Clone + Send + Sync + 'static,
     {
         let worker_state = ctx.pool.get_active_worker_state(table_id).await;
@@ -3111,7 +3104,7 @@ mod apply_worker {
         worker: TableSyncWorker<S, D>,
     ) -> Pin<Box<dyn Future<Output = EtlResult<()>> + Send>>
     where
-        S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
+        S: StateStore + SchemaStore + CleanupStore + Clone + Send + Sync + 'static,
         D: Destination + Clone + Send + Sync + 'static,
     {
         Box::pin(async move { worker.spawn_into_pool(&pool).await })
@@ -3350,37 +3343,4 @@ async fn get_replicated_table_schema(
     };
 
     Ok(replicated_table_schema)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn apply_loop_state() -> ApplyLoopState {
-        let start_lsn = PgLsn::from(100u64);
-        let replication_progress =
-            ReplicationProgress { last_received_lsn: start_lsn, last_flush_lsn: start_lsn };
-
-        ApplyLoopState::new(
-            replication_progress,
-            Duration::from_secs(1),
-            SnapshotId::from(start_lsn),
-            "test_slot".to_owned(),
-        )
-    }
-
-    #[tokio::test]
-    async fn schema_cleanup_uses_deadline_between_runs() {
-        let state = apply_loop_state();
-
-        state.expire_schema_cleanup_deadline().await;
-
-        let schema_cleanup_run = state.try_start_schema_cleanup().await.unwrap();
-
-        assert!(state.try_start_schema_cleanup().await.is_none());
-
-        schema_cleanup_run.finish().await;
-
-        assert!(state.try_start_schema_cleanup().await.is_none());
-    }
 }

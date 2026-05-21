@@ -25,7 +25,7 @@ use crate::{
     state::table::{
         RetryPolicy, TableReplicationError, TableReplicationPhase, TableReplicationPhaseType,
     },
-    store::{schema::SchemaStore, state::StateStore},
+    store::{cleanup::CleanupStore, schema::SchemaStore, state::StateStore},
     types::PipelineId,
     workers::{
         TableSyncWorkerPool,
@@ -380,7 +380,7 @@ impl<S, D> TableSyncWorker<S, D> {
 
 impl<S, D> TableSyncWorker<S, D>
 where
-    S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
+    S: StateStore + SchemaStore + CleanupStore + Clone + Send + Sync + 'static,
     D: Destination + Clone + Send + Sync + 'static,
 {
     /// Handles a table sync worker failure using the configured retry policy.

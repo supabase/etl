@@ -3,7 +3,7 @@ use std::time::Duration;
 use etl::{
     error::ErrorKind,
     state::table::{TableReplicationPhase, TableReplicationPhaseType},
-    store::state::StateStore,
+    store::{schema::SchemaStore, state::StateStore},
     test_utils::{
         database::{spawn_source_database, test_table_name},
         event::{EventCondition, group_events_by_type_and_table_id},
@@ -1764,8 +1764,8 @@ async fn empty_tables_are_created_at_destination() {
 }
 
 /// Tests that resetting a table's state to Init triggers a table sync that
-/// truncates the destination before re-copying data. This ensures no duplicate
-/// data after a state reset.
+/// drops the destination table before re-copying data. This ensures no
+/// duplicate data after a state reset.
 ///
 /// Test flow:
 /// 1. Initial table sync: 5 rows (ids 1-5) written to table_rows for both users
@@ -1775,7 +1775,7 @@ async fn empty_tables_are_created_at_destination() {
 /// 4. Insert 3 new rows (ids 100-102) for users only
 /// 5. Verify: users has 10 total rows (table_rows + events), orders unchanged
 #[tokio::test(flavor = "multi_thread")]
-async fn table_sync_truncates_destination_after_state_reset() {
+async fn table_sync_drops_destination_table_after_state_reset() {
     init_test_tracing();
     let mut database = spawn_source_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
@@ -1870,10 +1870,10 @@ async fn table_sync_truncates_destination_after_state_reset() {
 
     // We clear the events and rows to check that only users data is written.
     //
-    // This deletion becomes a bit confusing when used in the context of truncation
-    // that should take care of deleting data by itself, however, in this test
-    // we just want to make sure that truncation is called and that the data is
-    // rewritten from scratch.
+    // This deletion becomes a bit confusing when used in the context of a
+    // destination drop that should take care of deleting data by itself. In
+    // this test we just want to make sure that the drop is called and that the
+    // data is rewritten from scratch.
     destination.clear_events().await;
     destination.clear_table_rows().await;
 
@@ -1886,14 +1886,14 @@ async fn table_sync_truncates_destination_after_state_reset() {
         )
         .await;
 
-    // Reset users table state to Init, triggering a new table sync with truncate.
+    // Reset users table state to Init, triggering a fresh table sync.
     store.reset_table_state(database_schema.users_schema().id).await.unwrap();
 
     users_ready_notify.notified().await;
 
     // Wait for all user events (table_rows + CDC) to be processed.
-    // After reset, data can end up in either table_rows or events depending on
-    // timing.
+    // After the state reset, data can end up in either table_rows or events
+    // depending on timing.
     let total_expected_users = initial_rows + cdc_rows + new_rows_after_reset;
     let all_users_events_notify = destination
         .wait_for_all_events(vec![EventCondition::Table(
@@ -1940,9 +1940,18 @@ async fn table_sync_truncates_destination_after_state_reset() {
             .contains_key(&(EventType::Insert, database_schema.orders_schema().id))
     );
 
-    // Verify truncate was called for users (due to reset) but not for orders.
-    assert!(destination.was_table_truncated(database_schema.users_schema().id).await);
-    assert!(!destination.was_table_truncated(database_schema.orders_schema().id).await);
+    // Verify the destination table was dropped for users but not for orders.
+    assert!(destination.was_table_dropped_for_copy(database_schema.users_schema().id).await);
+    assert!(!destination.was_table_dropped_for_copy(database_schema.orders_schema().id).await);
+
+    let user_schemas = SchemaStore::get_table_schemas(&store)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|schema| schema.id == database_schema.users_schema().id)
+        .collect::<Vec<_>>();
+    assert_eq!(user_schemas.len(), 1);
+    assert_eq!(user_schemas[0].snapshot_id, etl_postgres::types::SnapshotId::initial());
 }
 
 #[tokio::test(flavor = "multi_thread")]

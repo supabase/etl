@@ -1,7 +1,7 @@
 use std::future::Future;
 
 use crate::{
-    destination::async_result::{TruncateTableResult, WriteEventsResult, WriteTableRowsResult},
+    destination::async_result::{DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult},
     error::EtlResult,
     types::{Event, ReplicatedTableSchema, TableRow},
 };
@@ -35,20 +35,21 @@ pub trait Destination {
         async { Ok(()) }
     }
 
-    /// Truncates all data in the specified table.
+    /// Drops the specified destination table before a fresh table copy.
     ///
-    /// This operation is called during initial table synchronization to ensure
-    /// the destination table starts from a clean state before bulk loading.
+    /// This operation is called when table synchronization intentionally
+    /// restarts from scratch. Implementations should remove the destination
+    /// object and any destination-private replay markers for the table so the
+    /// next copy can recreate it from the fresh source schema.
     ///
-    /// Implementations complete `async_result` when truncation is actually
-    /// done. ETL still waits for that result immediately before continuing.
-    /// The asynchronous result exists mainly to keep the destination
-    /// interface uniform across methods, not to let ETL overlap more work
-    /// with truncation.
-    fn truncate_table(
+    /// The supplied schema describes the previously known destination table and
+    /// exists only so the destination can locate what should be removed. ETL
+    /// clears its own destination metadata and stored schemas only after this
+    /// result completes successfully.
+    fn drop_table_for_copy(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
-        async_result: TruncateTableResult<()>,
+        async_result: DropTableForCopyResult<()>,
     ) -> impl Future<Output = EtlResult<()>> + Send;
 
     /// Writes a batch of table rows to the destination.

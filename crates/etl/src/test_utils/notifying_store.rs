@@ -108,6 +108,15 @@ pub struct NotifyingStore {
     inner: Arc<RwLock<Inner>>,
 }
 
+/// Scope of table-scoped state removal.
+#[derive(Debug, Clone, Copy)]
+enum TableStateCleanupScope {
+    /// Clear state that belongs to the previous table copy.
+    CopyRestart,
+    /// Delete all ETL state for a table removed from the publication.
+    PipelineRemoval,
+}
+
 impl NotifyingStore {
     /// Creates an empty notifying store.
     pub fn new() -> Self {
@@ -238,6 +247,27 @@ impl NotifyingStore {
         let states = Arc::make_mut(&mut inner.table_replication_states);
         states.remove(&table_id);
         states.insert(table_id, TableReplicationPhase::Init);
+
+        Ok(())
+    }
+
+    /// Deletes table-scoped state according to the requested scope.
+    async fn delete_table_state_for_scope(
+        &self,
+        table_id: TableId,
+        scope: TableStateCleanupScope,
+    ) -> EtlResult<()> {
+        let mut inner = self.inner.write().await;
+
+        if matches!(scope, TableStateCleanupScope::PipelineRemoval) {
+            Arc::make_mut(&mut inner.table_replication_states).remove(&table_id);
+            inner.table_state_history.remove(&table_id);
+        }
+
+        Arc::make_mut(&mut inner.table_schemas).remove_table(table_id);
+        Arc::make_mut(&mut inner.destination_tables_metadata).remove(&table_id);
+        inner.replication_progress.remove(&WorkerType::TableSync { table_id });
+        inner.check_conditions();
 
         Ok(())
     }
@@ -452,16 +482,12 @@ impl SchemaStore for NotifyingStore {
 }
 
 impl CleanupStore for NotifyingStore {
-    async fn cleanup_table_state(&self, table_id: TableId) -> EtlResult<()> {
-        let mut inner = self.inner.write().await;
+    async fn clear_table_copy_state(&self, table_id: TableId) -> EtlResult<()> {
+        self.delete_table_state_for_scope(table_id, TableStateCleanupScope::CopyRestart).await
+    }
 
-        Arc::make_mut(&mut inner.table_replication_states).remove(&table_id);
-        inner.table_state_history.remove(&table_id);
-        Arc::make_mut(&mut inner.table_schemas).remove_table(table_id);
-        Arc::make_mut(&mut inner.destination_tables_metadata).remove(&table_id);
-        inner.replication_progress.remove(&WorkerType::TableSync { table_id });
-
-        Ok(())
+    async fn delete_table_pipeline_state(&self, table_id: TableId) -> EtlResult<()> {
+        self.delete_table_state_for_scope(table_id, TableStateCleanupScope::PipelineRemoval).await
     }
 }
 

@@ -12,7 +12,7 @@ use etl::{
     concurrency::TaskSet,
     destination::{
         Destination,
-        async_result::{TruncateTableResult, WriteEventsResult, WriteTableRowsResult},
+        async_result::{DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult},
     },
     error::{ErrorKind, EtlResult},
     etl_error,
@@ -222,12 +222,12 @@ where
         Ok(())
     }
 
-    async fn truncate_table(
+    async fn drop_table_for_copy(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
-        async_result: TruncateTableResult<()>,
+        async_result: DropTableForCopyResult<()>,
     ) -> EtlResult<()> {
-        let result = self.truncate_table(replicated_table_schema).await;
+        let result = self.drop_table_for_copy_inner(replicated_table_schema).await;
         async_result.send(result);
 
         Ok(())
@@ -759,6 +759,83 @@ where
         .await
     }
 
+    /// Drops the destination table and replay markers before a fresh copy.
+    async fn drop_table_for_copy_inner(
+        &self,
+        replicated_table_schema: &ReplicatedTableSchema,
+    ) -> EtlResult<()> {
+        let table_name = self.resolve_destination_table_name(replicated_table_schema).await?;
+        let _table_write_permit = self.acquire_table_write_slot(&table_name).await?;
+        self.ensure_applied_batches_table_exists().await?;
+        self.ensure_streaming_progress_table_exists().await?;
+        let _checkpoint_guard = self.acquire_mutation_guard().await;
+        let table_name_for_drop = table_name.clone();
+
+        self.run_duckdb_blocking(move |conn| -> EtlResult<()> {
+            conn.execute_batch("BEGIN TRANSACTION").map_err(|e| {
+                etl_error!(
+                    ErrorKind::DestinationQueryFailed,
+                    "DuckLake BEGIN TRANSACTION failed",
+                    source: e
+                )
+            })?;
+
+            let result = (|| -> EtlResult<()> {
+                let quoted_table_name = quote_identifier(&table_name_for_drop).into_owned();
+                let drop_table_sql =
+                    format!("DROP TABLE IF EXISTS {LAKE_CATALOG}.{quoted_table_name};");
+                conn.execute_batch(&drop_table_sql).map_err(|e| {
+                    etl_error!(
+                        ErrorKind::DestinationQueryFailed,
+                        "DuckLake DROP TABLE failed",
+                        format_query_error_detail(&drop_table_sql),
+                        source: e
+                    )
+                })?;
+
+                clear_applied_batch_markers_for_kind(
+                    conn,
+                    &table_name_for_drop,
+                    DuckLakeTableBatchKind::Copy,
+                )?;
+                clear_applied_batch_markers_for_kind(
+                    conn,
+                    &table_name_for_drop,
+                    DuckLakeTableBatchKind::Mutation,
+                )?;
+                clear_applied_batch_markers_for_kind(
+                    conn,
+                    &table_name_for_drop,
+                    DuckLakeTableBatchKind::Truncate,
+                )?;
+                clear_table_streaming_progress(conn, &table_name_for_drop)?;
+                Ok(())
+            })();
+
+            match result {
+                Ok(()) => conn.execute_batch("COMMIT").map_err(|e| {
+                    etl_error!(
+                        ErrorKind::DestinationQueryFailed,
+                        "DuckLake COMMIT failed",
+                        source: e
+                    )
+                }),
+                Err(error) => {
+                    let err = conn.execute_batch("ROLLBACK");
+                    if let Err(err) = err {
+                        tracing::error!(error = %err, "error rollback");
+                    }
+                    Err(error)
+                }
+            }
+        })
+        .await?;
+
+        self.created_tables.lock().remove(&table_name);
+
+        Ok(())
+    }
+
     /// Bulk-inserts rows into the destination table inside a single
     /// transaction.
     ///
@@ -1112,7 +1189,7 @@ where
         replicated_table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<DuckLakeTableName> {
         let table_id = replicated_table_schema.id();
-        let table_name = self.get_or_create_destination_table_name(replicated_table_schema).await?;
+        let table_name = self.resolve_destination_table_name(replicated_table_schema).await?;
 
         // Fast path: already created.
         {
@@ -1225,9 +1302,8 @@ where
         .await
     }
 
-    /// Returns the stored destination table name for `table_id`, creating a
-    /// default name if none exists yet.
-    async fn get_or_create_destination_table_name(
+    /// Returns the stored destination table name or the deterministic default.
+    async fn resolve_destination_table_name(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<DuckLakeTableName> {
