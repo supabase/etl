@@ -10,6 +10,7 @@ Postgres to various destinations using the ETL pipeline.
 | [BigQuery](#bigquery)           | `bigquery`   | `bigquery`   | Google BigQuery (cloud data warehouse)     | Stable      |
 | [ClickHouse](#clickhouse-setup) | `clickhouse` | `clickhouse` | ClickHouse (column-oriented OLAP database) | In progress |
 | [DuckLake](#ducklake)           | `ducklake`   | `ducklake`   | DuckLake (open data lake format)           | In progress |
+| [Snowflake](src/bin/snowflake/README.md) | `snowflake` | `snowflake` | Snowflake (cloud data warehouse) | In progress |
 
 ## Building and running
 
@@ -25,7 +26,7 @@ cargo build --bin bigquery -p etl-examples --features bigquery
 cargo run --bin bigquery -p etl-examples --features bigquery -- [flags]
 ```
 
-Replace `bigquery` with `clickhouse` or `ducklake` as needed.
+Replace `bigquery` with `clickhouse`, `ducklake`, or `snowflake` as needed.
 
 ### All examples
 
