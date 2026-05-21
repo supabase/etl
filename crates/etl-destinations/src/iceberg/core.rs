@@ -230,7 +230,7 @@ where
         Ok(())
     }
 
-    /// Drops an Iceberg table before a fresh table copy.
+    /// Drops an Iceberg table before restarting a table copy.
     async fn drop_table_for_copy_inner(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,

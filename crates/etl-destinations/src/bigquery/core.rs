@@ -66,11 +66,6 @@ impl SequencedBigQueryTableId {
         Self(table_id, 0)
     }
 
-    /// Returns the logical base table id for this sequenced table id.
-    fn base_table_id(&self) -> &BigQueryTableId {
-        &self.0
-    }
-
     /// Returns the next version of this sequenced table ID.
     fn next(&self) -> Self {
         Self(self.0.clone(), self.1 + 1)
@@ -79,6 +74,16 @@ impl SequencedBigQueryTableId {
     /// Extracts the base BigQuery table ID without the sequence number.
     fn to_bigquery_table_id(&self) -> BigQueryTableId {
         self.0.clone()
+    }
+
+    /// Returns whether this sequenced table belongs to `base_table_id`.
+    fn belongs_to_base(&self, base_table_id: &BigQueryTableId) -> bool {
+        &self.0 == base_table_id
+    }
+
+    /// Parses a sequenced table id only when it belongs to `base_table_id`.
+    fn parse_for_base(table_id: &str, base_table_id: &BigQueryTableId) -> Option<Self> {
+        table_id.parse::<Self>().ok().filter(|table_id| table_id.belongs_to_base(base_table_id))
     }
 }
 
@@ -173,18 +178,6 @@ impl Inner {
     /// Creates empty synchronized destination state.
     fn new() -> Self {
         Self { created_tables: HashSet::new(), created_views: HashMap::new() }
-    }
-
-    /// Returns cached sequenced table ids for the supplied logical table.
-    fn created_table_ids_for_base(
-        &self,
-        base_table_id: &BigQueryTableId,
-    ) -> Vec<SequencedBigQueryTableId> {
-        self.created_tables
-            .iter()
-            .filter(|table_id| table_id.base_table_id() == base_table_id)
-            .cloned()
-            .collect()
     }
 }
 
@@ -1092,7 +1085,7 @@ where
             self.tasks
                 .spawn(async move {
                     if let Err(err) = client
-                        .drop_table(&dataset_id, &sequenced_bigquery_table_id.to_string())
+                        .drop_table_if_exists(&dataset_id, &sequenced_bigquery_table_id.to_string())
                         .await
                     {
                         warn!(
@@ -1113,48 +1106,45 @@ where
         Ok(())
     }
 
-    /// Drops destination table objects before a fresh table copy.
-    ///
-    /// Destination metadata is intentionally left untouched here. The table
-    /// sync worker clears it only after this drop succeeds so this method
-    /// can use the last stored destination table id to find the object that
-    /// must be removed.
+    /// Drops destination table objects before restarting a table copy.
     async fn drop_table_for_copy_inner(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<()> {
-        let table_id = replicated_table_schema.id();
         let base_bigquery_table_id =
             table_name_to_bigquery_table_id(replicated_table_schema.name())?;
-        let base_sequenced_bigquery_table_id =
-            SequencedBigQueryTableId::new(base_bigquery_table_id.clone());
         let mut table_ids = HashSet::new();
 
-        if let Some(metadata) = self.state_store.get_destination_table_metadata(table_id).await? {
-            table_ids.insert(metadata.destination_table_id.parse::<SequencedBigQueryTableId>()?);
-        }
+        // Discover physical table versions from BigQuery instead of the local cache.
+        // Older processes may have created versions this process never cached.
+        let listed_table_ids =
+            self.client.list_sequenced_table_ids(&self.dataset_id, &base_bigquery_table_id).await?;
+        let listed_sequenced_table_ids =
+            listed_table_ids.into_iter().filter_map(|listed_table_id| {
+                SequencedBigQueryTableId::parse_for_base(&listed_table_id, &base_bigquery_table_id)
+            });
+        table_ids.extend(listed_sequenced_table_ids);
 
-        {
-            let inner = self.inner.lock().await;
-            table_ids.extend(inner.created_table_ids_for_base(&base_bigquery_table_id));
-        }
+        // We first drop the view, so that the table is not queriable anymore.
+        self.client.drop_view_if_exists(&self.dataset_id, &base_bigquery_table_id).await?;
 
-        table_ids.insert(base_sequenced_bigquery_table_id);
-
-        self.client.drop_view(&self.dataset_id, &base_bigquery_table_id).await?;
-
+        // We then drop each table individually. If any of these operations fail, on the
+        // next restart the tables will be cleaned up.
         for sequenced_bigquery_table_id in &table_ids {
             self.client
-                .drop_table(&self.dataset_id, &sequenced_bigquery_table_id.to_string())
+                .drop_table_if_exists(&self.dataset_id, &sequenced_bigquery_table_id.to_string())
                 .await?;
         }
 
+        // Once destination cleanup is done, remove any stale local cache entries.
         let mut inner = self.inner.lock().await;
+        inner.created_views.remove(&base_bigquery_table_id);
+
         for sequenced_bigquery_table_id in table_ids {
             inner.created_tables.remove(&sequenced_bigquery_table_id);
         }
-        inner.created_views.remove(&base_bigquery_table_id);
 
+        let table_id = replicated_table_schema.id();
         info!(table_id = table_id.0, "dropped bigquery table before copy");
 
         Ok(())
@@ -1831,22 +1821,32 @@ mod tests {
     }
 
     #[test]
-    fn inner_created_table_ids_for_base_filters_cached_tables() {
-        let mut inner = Inner::new();
+    fn sequenced_bigquery_table_id_belongs_to_base() {
         let base_table_id = "users_table".to_owned();
-        let current_table_id = SequencedBigQueryTableId(base_table_id.clone(), 2);
-        let older_table_id = SequencedBigQueryTableId(base_table_id.clone(), 1);
-        let other_table_id = SequencedBigQueryTableId("orders_table".to_owned(), 1);
+        let users_table_id = SequencedBigQueryTableId(base_table_id.clone(), 2);
+        let orders_table_id = SequencedBigQueryTableId("orders_table".to_owned(), 2);
 
-        inner.created_tables.insert(current_table_id.clone());
-        inner.created_tables.insert(older_table_id.clone());
-        inner.created_tables.insert(other_table_id);
+        assert!(users_table_id.belongs_to_base(&base_table_id));
+        assert!(!orders_table_id.belongs_to_base(&base_table_id));
+    }
 
-        let table_ids = inner.created_table_ids_for_base(&base_table_id);
+    #[test]
+    fn sequenced_bigquery_table_id_parse_for_base_ignores_unrelated_tables() {
+        let base_table_id = "users_table".to_owned();
 
-        assert_eq!(table_ids.len(), 2);
-        assert!(table_ids.contains(&current_table_id));
-        assert!(table_ids.contains(&older_table_id));
+        assert_eq!(
+            SequencedBigQueryTableId::parse_for_base("users_table_2", &base_table_id),
+            Some(SequencedBigQueryTableId("users_table".to_owned(), 2))
+        );
+        assert_eq!(
+            SequencedBigQueryTableId::parse_for_base("users_table_backup", &base_table_id),
+            None
+        );
+        assert_eq!(
+            SequencedBigQueryTableId::parse_for_base("orders_table_2", &base_table_id),
+            None
+        );
+        assert_eq!(SequencedBigQueryTableId::parse_for_base("users_table", &base_table_id), None);
     }
 
     #[test]

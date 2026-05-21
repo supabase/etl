@@ -48,6 +48,36 @@ pub(crate) enum TableSyncResult {
     },
 }
 
+/// Returns the existing [`ReplicatedTableSchema`] if one exists.
+///
+/// A [`ReplicatedTableSchema`] could be there when starting a table copy
+/// because it was either interrupted or the state was reset.
+async fn get_existing_replicated_table_schema<S>(
+    store: &S,
+    table_id: TableId,
+) -> EtlResult<Option<ReplicatedTableSchema>>
+where
+    S: StateStore + SchemaStore + Send + 'static,
+{
+    let Some(current_metadata) = store.get_destination_table_metadata(table_id).await? else {
+        return Ok(None);
+    };
+
+    let Some(table_schema) =
+        store.get_table_schema(&table_id, current_metadata.snapshot_id).await?
+    else {
+        bail!(
+            ErrorKind::InvalidState,
+            "Destination table metadata found, but no corresponding table schema exists"
+        );
+    };
+
+    let existing_replicated_table_schema =
+        ReplicatedTableSchema::from_mask(table_schema, current_metadata.replication_mask);
+
+    Ok(Some(existing_replicated_table_schema))
+}
+
 /// Starts table synchronization for a specific table.
 ///
 /// This function performs the initial data copy for a table from the source
@@ -144,22 +174,8 @@ where
     // In case the phase is any other phase, we will return an error.
     let start_lsn = match phase_type {
         TableReplicationPhaseType::Init | TableReplicationPhaseType::DataSync => {
-            // When we are in these states, it could be for the following reasons:
-            // - `Init` -> we can be in this state because we just started replicating the
-            //   table or the state
-            //  was reset. In this case we don't want to make assumptions about the previous
-            // state, so we just try to delete the slot and drop the table.
-            // - `DataSync` -> we can be in this state because we failed during data sync,
-            //   meaning that table
-            //  copy failed. In this case, we want to delete the slot and drop the
-            // table.
-            //
-            // We try to delete the slot also during `Init` because we support state
-            // rollback and a slot might be there from the previous run.
-            replication_client.delete_slot_if_exists(&slot_name).await?;
-
-            // We must drop the destination table and clear old ETL schema state before
-            // starting a copy to avoid data inconsistencies.
+            // We must drop the destination table before starting a copy to avoid data
+            // inconsistencies when there is a previous table.
             //
             // Example scenario:
             // 1. The source table has a single row (id = 1) that is copied to the
@@ -170,43 +186,36 @@ where
             //    deletes the slot, and copies again.
             // 5. This time, only row id = 2 is copied, but row id = 1 still exists in the
             //    destination.
-            // Result: the destination has two rows (id = 1 and id = 2) instead of only one
-            // (id = 2). Fix: Always drop the destination table before starting a copy.
             //
-            // Try to load the previously stored destination table metadata, which contains
-            // both the snapshot_id and replication_mask. If available, we can load the
-            // corresponding table schema and drop the destination table before starting a
-            // copy. If the metadata is not present, there is no destination object we
-            // know how to drop, but stale ETL schemas are still cleared below
-            // before the fresh `0/0` copy schema is stored.
-            if let Some(current_metadata) = store.get_destination_table_metadata(table_id).await? {
-                if let Some(table_schema) =
-                    store.get_table_schema(&table_id, current_metadata.snapshot_id).await?
-                {
-                    let replicated_table_schema = ReplicatedTableSchema::from_mask(
-                        table_schema,
-                        current_metadata.replication_mask,
-                    );
-                    let (drop_result, pending_drop_result) = DropTableForCopyResult::new(());
-
-                    destination.drop_table_for_copy(&replicated_table_schema, drop_result).await?;
-                    pending_drop_result.await.into_result()?;
-
-                    info!(%table_id, "dropped destination table before starting copy");
-                } else {
-                    bail!(
-                        ErrorKind::InvalidState,
-                        "Destination table metadata found, but no corresponding table schema \
-                         exists"
-                    );
-                }
+            // Result: the destination has two rows (id = 1 and id = 2) instead of only one
+            // (id = 2).
+            //
+            // Fix: Always drop the destination table before starting a copy.
+            if let Some(current_replication_table_schema) =
+                get_existing_replicated_table_schema(&store, table_id).await?
+            {
+                let (drop_result, pending_drop_result) = DropTableForCopyResult::new(());
+                destination
+                    .drop_table_for_copy(&current_replication_table_schema, drop_result)
+                    .await?;
+                pending_drop_result.await.into_result()?;
             }
 
-            // We clear durable and in-memory table-copy state only after the destination
-            // table was dropped. The shared cache removal is idempotent: a first copy has
-            // no cached state yet, while an in-process retry can still hold the previous
-            // ready runtime schema. The fresh `0/0` copy schema below is the only state
-            // allowed to repopulate the cache.
+            // When we are in these states, it could be for the following reasons:
+            // - `Init` -> the table is newly included or table state was rolled back. We
+            //   avoid assumptions about previous state and delete any leftover slot.
+            // - `DataSync` -> the previous copy failed before completion. We delete the
+            //   table sync slot so the next copy starts from a clean snapshot.
+            //
+            // We try to delete the slot also during `Init` because we support state
+            // rollback and a slot might be there from the previous run.
+            replication_client.delete_slot_if_exists(&slot_name).await?;
+
+            // We clear durable and in-memory table-copy state only after external cleanup
+            // succeeds. The shared cache removal is idempotent: a first copy has no cached
+            // state yet, while an in-process retry can still hold the previous ready
+            // runtime schema. The fresh `0/0` copy schema below is the only state allowed
+            // to repopulate the cache.
             store.clear_table_copy_state(table_id).await?;
             shared_table_cache.remove_table(table_id).await;
 

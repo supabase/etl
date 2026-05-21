@@ -88,7 +88,7 @@ pub trait Destination {
 | Method | When called | Purpose |
 |--------|-------------|---------|
 | `name()` | On initialization | Identify the destination |
-| `drop_table_for_copy()` | Before a fresh initial copy or copy retry | Drop the existing destination object and destination-private replay state using the current replicated schema |
+| `drop_table_for_copy()` | Before restarting a table copy when previous destination state exists | Drop the existing destination object and destination-private replay state using the previously stored replicated schema |
 | `write_table_rows()` | During initial copy | Receive bulk rows for the current replicated schema |
 | `write_events()` | After initial copy | Receive streaming changes |
 

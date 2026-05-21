@@ -305,13 +305,13 @@ impl CleanupStore for CustomStore {
 Create `src/http_destination.rs`. A destination implements the `Destination` trait with four required methods:
 
 - `name()` - Return an identifier for logging
-- `drop_table_for_copy()` - Idempotently drop destination table state before a fresh table copy using the current replicated table schema
+- `drop_table_for_copy()` - Idempotently drop destination objects and replay state before restarting a table copy using the previously stored replicated table schema
 - `write_table_rows()` - Receive rows during initial copy together with the current replicated table schema
 - `write_events()` - Receive streaming changes (batches may span multiple tables)
 
 There's also an optional `shutdown()` method with a default no-op implementation. Override it if your destination needs cleanup when the pipeline shuts down.
 
-ETL clears its own schema versions, destination metadata, and table-sync progress only after `drop_table_for_copy()` succeeds. That lets the destination use the supplied replicated schema and any existing destination metadata to find the object that must be removed. If the object is already gone, return success.
+ETL clears its own schema versions, destination metadata, and table-sync progress only after `drop_table_for_copy()` succeeds. That lets the destination use the supplied previously stored replicated schema and any existing destination metadata to find the object that must be removed. If the object is already gone, return success.
 
 ```rust
 use reqwest::Client;

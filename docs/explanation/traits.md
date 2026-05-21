@@ -24,7 +24,7 @@ pub trait Destination {
 |--------|---------|
 | `name()` | Returns identifier for logging and diagnostics |
 | `shutdown()` | Called when the pipeline shuts down. Default is a no-op. Override for cleanup or bookkeeping |
-| `drop_table_for_copy()` | Drops the existing destination object and destination-private replay state before a fresh initial copy or copy retry. Receives the current replicated schema for the table |
+| `drop_table_for_copy()` | Drops the existing destination object and destination-private replay state before restarting a table copy. Receives the previously stored replicated schema for locating the old object |
 | `write_table_rows()` | Writes rows during initial table copy. Receives the current replicated schema and may get an empty vector for tables with no data |
 | `write_events()` | Processes streaming replication events (inserts, updates, deletes). Batches may span multiple tables |
 

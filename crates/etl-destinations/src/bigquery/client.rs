@@ -772,7 +772,7 @@ impl BigQueryClient {
     /// Drops a view from BigQuery.
     ///
     /// Executes a DROP VIEW statement to remove the logical view if it exists.
-    pub async fn drop_view(
+    pub async fn drop_view_if_exists(
         &self,
         dataset_id: &BigQueryDatasetId,
         view_name: &BigQueryTableId,
@@ -791,7 +791,7 @@ impl BigQueryClient {
     /// Drops a table from BigQuery.
     ///
     /// Executes a DROP TABLE statement to remove the table and all its data.
-    pub async fn drop_table(
+    pub async fn drop_table_if_exists(
         &self,
         dataset_id: &BigQueryDatasetId,
         table_id: &BigQueryTableId,
@@ -805,6 +805,34 @@ impl BigQueryClient {
         let _ = self.query(QueryRequest::new(query)).await?;
 
         Ok(())
+    }
+
+    /// Lists physical sequenced table ids for a base table.
+    ///
+    /// Queries `INFORMATION_SCHEMA.TABLES` instead of using the destination's
+    /// local cache so reset cleanup can remove versions left behind by earlier
+    /// processes.
+    pub async fn list_sequenced_table_ids(
+        &self,
+        dataset_id: &BigQueryDatasetId,
+        base_table_id: &BigQueryTableId,
+    ) -> EtlResult<Vec<BigQueryTableId>> {
+        info!(%dataset_id, %base_table_id, "listing sequenced tables from bigquery");
+
+        let query =
+            Self::list_sequenced_table_ids_query(&self.project_id, dataset_id, base_table_id)?;
+        let mut result_set = self.query(QueryRequest::new(query)).await?;
+        let mut table_ids = Vec::new();
+
+        while result_set.next_row() {
+            if let Some(table_id) =
+                result_set.get_string_by_name("table_name").map_err(bq_error_to_etl_error)?
+            {
+                table_ids.push(table_id);
+            }
+        }
+
+        Ok(table_ids)
     }
 
     /// Adds a column to an existing BigQuery table.
@@ -1146,6 +1174,24 @@ impl BigQueryClient {
             .map_err(bq_error_to_etl_error)?;
 
         Ok(ResultSet::new_from_query_response(query_response))
+    }
+
+    /// Builds the metadata query for sequenced physical table discovery.
+    fn list_sequenced_table_ids_query(
+        project_id: &BigQueryProjectId,
+        dataset_id: &BigQueryDatasetId,
+        base_table_id: &BigQueryTableId,
+    ) -> EtlResult<String> {
+        let project_id = Self::sanitize_identifier(project_id, "BigQuery project id")?;
+        let dataset_id = Self::sanitize_identifier(dataset_id, "BigQuery dataset id")?;
+        let _ = Self::sanitize_identifier(base_table_id, "BigQuery table id")?;
+        let regex = format!("^{base_table_id}_[0-9]+$");
+
+        Ok(format!(
+            "select table_name from `{project_id}.{dataset_id}.INFORMATION_SCHEMA.TABLES` where \
+             table_type = 'BASE TABLE' and regexp_contains(table_name, '{regex}') order by \
+             table_name"
+        ))
     }
 
     /// Sanitizes a BigQuery identifier for safe backtick quoting.
@@ -1566,6 +1612,26 @@ mod tests {
             result,
             Err(err) if err.kind() == ErrorKind::DestinationTableNameInvalid
         ));
+    }
+
+    #[test]
+    fn list_sequenced_table_ids_query_filters_matching_base_tables() {
+        let project_id = "test-project".to_owned();
+        let dataset_id = "test_dataset".to_owned();
+        let base_table_id = "public_users".to_owned();
+        let query = BigQueryClient::list_sequenced_table_ids_query(
+            &project_id,
+            &dataset_id,
+            &base_table_id,
+        )
+        .unwrap();
+
+        assert_eq!(
+            query,
+            "select table_name from `test-project.test_dataset.INFORMATION_SCHEMA.TABLES` where \
+             table_type = 'BASE TABLE' and regexp_contains(table_name, '^public_users_[0-9]+$') \
+             order by table_name"
+        );
     }
 
     #[test]

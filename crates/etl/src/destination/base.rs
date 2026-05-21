@@ -35,7 +35,7 @@ pub trait Destination {
         async { Ok(()) }
     }
 
-    /// Drops the specified destination table before a fresh table copy.
+    /// Drops destination objects before restarting a table copy.
     ///
     /// This operation is called when table synchronization intentionally
     /// restarts from scratch. Implementations should remove the destination

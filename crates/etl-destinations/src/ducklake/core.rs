@@ -759,7 +759,7 @@ where
         .await
     }
 
-    /// Drops the destination table and replay markers before a fresh copy.
+    /// Drops the destination table and replay markers before restarting a copy.
     async fn drop_table_for_copy_inner(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
