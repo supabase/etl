@@ -14,13 +14,10 @@ pub mod test_utils;
 
 pub use core::Destination;
 
-pub use auth::{AuthManager, HttpExchanger, TokenExchanger, TokenProvider};
+pub use auth::{AuthManager, HttpExchanger, TokenProvider};
 pub use client::Client;
 pub use config::Config;
 pub use encoding::{CdcMeta, CdcOperation};
 pub use error::{Error, Result};
 pub use sql_client::SqlClient;
-pub use streaming::{
-    ChannelHandle, ChannelStatusResponse, InsertRowsResponse, OffsetToken, OpenChannelResponse,
-    RestStreamClient, RowBatch, RowBatchBuilder, StreamClient,
-};
+pub use streaming::{OffsetToken, RestStreamClient, RowBatch, RowBatchBuilder, StreamClient};

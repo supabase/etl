@@ -160,7 +160,7 @@ impl<T: TokenProvider> SqlClient<T> {
     /// - HTTP 408/429/5xx: retriable via backoff.
     /// - Other 4xx: non-retriable `Error::HttpStatus`.
     pub(crate) async fn execute_statement(&self, sql: &str) -> Result<StatementResponse> {
-        let url = format!("{}/api/v2/statements", self.config.account_url);
+        let url = format!("{}/api/v2/statements", self.config.account_url());
 
         let body = StatementRequest {
             statement: sql,
@@ -263,7 +263,7 @@ impl<T: TokenProvider> SqlClient<T> {
     /// Poll an async statement until Snowflake returns 200 (success) or 422
     /// (failure).
     async fn poll_until_complete(&self, statement_handle: &str) -> Result<StatementResponse> {
-        let url = format!("{}/api/v2/statements/{}", self.config.account_url, statement_handle);
+        let url = format!("{}/api/v2/statements/{}", self.config.account_url(), statement_handle);
         let deadline = tokio::time::Instant::now() + POLL_TIMEOUT;
         let mut delay = POLL_INITIAL_DELAY;
 

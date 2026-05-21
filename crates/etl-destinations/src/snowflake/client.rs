@@ -55,7 +55,7 @@ impl Client<AuthManager<HttpExchanger>> {
         let database = config.database.clone();
         let schema = config.schema.clone();
         let stream_client = Arc::new(RestStreamClient::new(
-            config.account_url.clone(),
+            config.account_url().to_owned(),
             Arc::clone(&auth),
             http.clone(),
         ));

@@ -6,8 +6,8 @@ pub(crate) const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
 /// Connection parameters for a Snowflake account.
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// Full Snowflake account URL (e.g. `https://ORG-ACCT.snowflakecomputing.com`).
-    pub account_url: String,
+    /// Full Snowflake account URL, always HTTPS.
+    account_url: String,
 
     /// Snowflake account identifier (e.g. `ORGNAME-ACCTNAME`).
     ///
@@ -47,10 +47,9 @@ impl Config {
         }
     }
 
-    /// Override the derived URL (useful for private-link or local testing).
-    pub fn with_account_url(mut self, url: &str) -> Self {
-        self.account_url = url.to_owned();
-        self
+    /// HTTPS-only account URL used for all API requests.
+    pub fn account_url(&self) -> &str {
+        &self.account_url
     }
 
     /// Set the role to assume after connecting.

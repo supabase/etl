@@ -160,7 +160,7 @@ impl<E: TokenExchanger> AuthManager<E> {
         let encoding_key = EncodingKey::from_rsa_der(&pkcs1_der);
 
         Ok(Self {
-            account_url: config.account_url.clone(),
+            account_url: config.account_url().to_owned(),
             account: config.account_id.to_uppercase(),
             user: config.username.to_uppercase(),
             encoding_key,
@@ -354,7 +354,7 @@ mod tests {
             let iss = claims["iss"].as_str().expect("iss");
             assert!(
                 iss.starts_with(&format!("{expect_account}.{expect_user}.SHA256:")),
-                "iss={iss} for account={account}"
+                "unexpected iss: {iss}"
             );
 
             // Subject must be ACCOUNT.USER.
@@ -384,7 +384,7 @@ mod tests {
     #[test]
     fn config_derives_account_url() {
         let config = Config::new("ORG-ACCT", "USER", "TEST_DB", "PUBLIC");
-        assert_eq!(config.account_url, "https://ORG-ACCT.snowflakecomputing.com");
+        assert_eq!(config.account_url(), "https://ORG-ACCT.snowflakecomputing.com");
     }
 
     #[tokio::test]

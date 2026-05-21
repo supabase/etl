@@ -15,7 +15,7 @@ fn build_clients(
 ) -> (RestStreamClient<AuthManager<HttpExchanger>>, SqlClient<AuthManager<HttpExchanger>>) {
     let auth = build_auth();
     let stream = RestStreamClient::new(
-        config.account_url.clone(),
+        config.account_url().to_owned(),
         Arc::clone(&auth),
         reqwest::Client::new(),
     );
