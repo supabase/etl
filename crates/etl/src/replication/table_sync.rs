@@ -21,7 +21,7 @@ use crate::{
     error::{ErrorKind, EtlResult},
     etl_error,
     metrics::{ETL_TABLE_COPY_DURATION_SECONDS, PARTITIONING_LABEL},
-    replication::{WorkerType, client::PgReplicationClient, table_cache::SharedTableCache},
+    replication::{client::PgReplicationClient, table_cache::SharedTableCache},
     state::table::{TableReplicationPhase, TableReplicationPhaseType},
     store::{cleanup::CleanupStore, schema::SchemaStore, state::StateStore},
     types::PipelineId,
@@ -160,20 +160,23 @@ where
     let slot_name: String =
         EtlReplicationSlot::for_table_sync_worker(pipeline_id, table_id).try_into()?;
 
-    // There are three phases in which the table can be in:
-    // - `Init` -> this means that the table sync was never done, so we just perform
-    //   it.
-    // - `DataSync` -> this means that there was a failure during data sync, and we
-    //   have to restart
-    //  copying all the table data and delete the slot.
-    // - `FinishedCopy` -> this means that the table was successfully copied, but we
-    //   didn't manage to complete the table sync function, so we just want to
-    //   continue the cdc stream from durable table-sync progress when available, or
-    //   from the slot's confirmed flush LSN otherwise.
+    // There are three phases from which table sync can start:
+    // - `Init` -> the table sync was never done or the table was reset, so we
+    //   perform it.
+    // - `DataSync` -> a previous copy did not complete, so we restart the copy from
+    //   a clean snapshot.
+    // - `FinishedCopy` -> the copy completed, but the table sync worker did not
+    //   finish the ownership handoff. This is a narrow crash window, so we
+    //   intentionally restart the copy instead of trying to resume catchup.
+    //   Resuming soundly would require persisting the exact runtime relation
+    //   decoding state, including identity masks, and making handoff safe when no
+    //   further `RELATION` message arrives.
     //
     // In case the phase is any other phase, we will return an error.
     let start_lsn = match phase_type {
-        TableReplicationPhaseType::Init | TableReplicationPhaseType::DataSync => {
+        TableReplicationPhaseType::Init
+        | TableReplicationPhaseType::DataSync
+        | TableReplicationPhaseType::FinishedCopy => {
             // We must drop the destination table before starting a copy to avoid data
             // inconsistencies when there is a previous table.
             //
@@ -201,6 +204,11 @@ where
                 pending_drop_result.await.into_result()?;
             }
 
+            // We try to delete the slot if it already exists, since we might be starting a
+            // table copy after a previous one was reset or didn't complete
+            // successfully.
+            replication_client.delete_slot_if_exists(&slot_name).await?;
+
             // We clear durable and in-memory table-copy state only after external cleanup
             // succeeds. The shared cache removal is idempotent: a first copy has no cached
             // state yet, while an in-process retry can still hold the previous ready
@@ -208,16 +216,6 @@ where
             // to repopulate the cache.
             store.clear_table_copy_state(table_id).await?;
             shared_table_cache.remove_table(table_id).await;
-
-            // When we are in these states, it could be for the following reasons:
-            // - `Init` -> the table is newly included or table state was rolled back. We
-            //   avoid assumptions about previous state and delete any leftover slot.
-            // - `DataSync` -> the previous copy failed before completion. We delete the
-            //   table sync slot so the next copy starts from a clean snapshot.
-            //
-            // We try to delete the slot also during `Init` because we support state
-            // rollback and a slot might be there from the previous run.
-            replication_client.delete_slot_if_exists(&slot_name).await?;
 
             // We are ready to start copying table data, and we update the state
             // accordingly.
@@ -296,7 +294,6 @@ where
             // without waiting for a fresh relation message after restarts.
             let replicated_table_schema =
                 ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask);
-            shared_table_cache.note_ready(table_id, replicated_table_schema.clone()).await;
 
             let mut total_table_copy_rows = 0;
             let mut total_table_copy_duration_secs = 0.0;
@@ -369,41 +366,16 @@ where
                 inner.set_and_store(TableReplicationPhase::FinishedCopy, &store).await?;
             }
 
+            // After we finished copying, we mark this table as ready in the cache, so
+            // that we can start streaming and decoding immediately.
+            //
+            // This is needed, since it could be that the apply loop for the `Catchup` phase
+            // might be idle and progress only via keepalives and in that case no `Relation`
+            // message will be received, so we want the apply worker to already be able to
+            // start decoding.
+            shared_table_cache.note_ready(table_id, replicated_table_schema.clone()).await;
+
             slot.consistent_point
-        }
-        TableReplicationPhaseType::FinishedCopy => {
-            let slot = replication_client.get_slot(&slot_name).await?;
-            let worker_type = WorkerType::TableSync { table_id };
-            let durable_flush_lsn = store.get_replication_progress(worker_type).await?;
-            if let Some(durable_flush_lsn) = durable_flush_lsn {
-                // Durable progress and slot progress can legitimately differ. During idle
-                // periods we keep sending PostgreSQL feedback with the received LSN, but
-                // we do not persist those idle-only advances to the state database to
-                // avoid extra customer-database writes. Conversely, durable progress can
-                // be ahead if ETL flushed a batch but PostgreSQL did not confirm the
-                // feedback yet. Startup uses the latest boundary available from either
-                // source as a resume floor, which guarantees no event older than the
-                // chosen start LSN is emitted.
-                let start_lsn = durable_flush_lsn.max(slot.confirmed_flush_lsn);
-
-                info!(
-                    table_id = table_id.0,
-                    %durable_flush_lsn,
-                    confirmed_flush_lsn = %slot.confirmed_flush_lsn,
-                    %start_lsn,
-                    "resuming table sync from durable replication progress and replication slot"
-                );
-
-                start_lsn
-            } else {
-                info!(
-                    table_id = table_id.0,
-                    confirmed_flush_lsn = %slot.confirmed_flush_lsn,
-                    "durable table sync progress not found, using slot fallback"
-                );
-
-                slot.confirmed_flush_lsn
-            }
         }
         _ => unreachable!("phase type already validated above"),
     };

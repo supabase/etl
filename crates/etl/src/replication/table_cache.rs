@@ -31,8 +31,7 @@
 //!   apply worker or the table sync worker for that table; non-owners must skip
 //!   DDL, `RELATION`, and row messages without changing the cache.
 //! - A table copy stores the initial schema with snapshot `0/0` and marks the
-//!   table [`SharedTableState::Ready`] before copied or catchup rows can be
-//!   decoded.
+//!   table [`SharedTableState::Ready`] before catchup rows can be decoded.
 //! - A table-copy restart removes any cached state before storing the fresh
 //!   `0/0` schema. The new copy lineage must repopulate the cache; stale ready
 //!   state from a previous copy must not be reused.

@@ -508,8 +508,8 @@ where
                 // in a table sync worker, this is why it's not in the apply worker:
                 // - Errored -> Init: okay since it will restart from scratch.
                 // - Errored -> DataSync: okay since it will restart the copy from a new slot.
-                // - Errored -> FinishedCopy: okay since the table was already copied, so it
-                //   resumes streaming from durable table-sync progress or the slot fallback.
+                // - Errored -> FinishedCopy: okay since table sync startup treats it as a clean
+                //   copy restart.
                 // - Errored -> SyncDone: okay since the table sync will immediately stop.
                 // - Errored -> Ready: same as SyncDone.
                 //
