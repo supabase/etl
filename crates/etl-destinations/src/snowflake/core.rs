@@ -34,11 +34,7 @@ type EventIter = std::iter::Peekable<std::vec::IntoIter<Event>>;
 /// Thin adapter between the ETL [`etl::destination::Destination`] trait and
 /// [`Client`]. Translates replication events into client operations and manages
 /// the state store bookkeeping.
-pub struct Destination<
-    S,
-    T = AuthManager<HttpExchanger>,
-    C = RestStreamClient<T>,
-> {
+pub struct Destination<S, T = AuthManager<HttpExchanger>, C = RestStreamClient<T>> {
     client: Client<T, C>,
     store: S,
     tasks: TaskSet,
