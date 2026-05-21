@@ -201,6 +201,14 @@ where
                 pending_drop_result.await.into_result()?;
             }
 
+            // We clear durable and in-memory table-copy state only after external cleanup
+            // succeeds. The shared cache removal is idempotent: a first copy has no cached
+            // state yet, while an in-process retry can still hold the previous ready
+            // runtime schema. The fresh `0/0` copy schema below is the only state allowed
+            // to repopulate the cache.
+            store.clear_table_copy_state(table_id).await?;
+            shared_table_cache.remove_table(table_id).await;
+
             // When we are in these states, it could be for the following reasons:
             // - `Init` -> the table is newly included or table state was rolled back. We
             //   avoid assumptions about previous state and delete any leftover slot.
@@ -210,14 +218,6 @@ where
             // We try to delete the slot also during `Init` because we support state
             // rollback and a slot might be there from the previous run.
             replication_client.delete_slot_if_exists(&slot_name).await?;
-
-            // We clear durable and in-memory table-copy state only after external cleanup
-            // succeeds. The shared cache removal is idempotent: a first copy has no cached
-            // state yet, while an in-process retry can still hold the previous ready
-            // runtime schema. The fresh `0/0` copy schema below is the only state allowed
-            // to repopulate the cache.
-            store.clear_table_copy_state(table_id).await?;
-            shared_table_cache.remove_table(table_id).await;
 
             // We are ready to start copying table data, and we update the state
             // accordingly.
