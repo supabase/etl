@@ -32,7 +32,7 @@ const USER_AGENT: &str = "supabase-etl/0.1.0";
 /// Executes DDL and metadata operations against Snowflake's SQL REST API.
 ///
 /// All DDL runs on Snowflake's Cloud Services layer (no warehouse required).
-pub struct SqlClient<T: TokenProvider> {
+pub struct SqlClient<T> {
     config: Config,
     http: Client,
     auth: Arc<T>,

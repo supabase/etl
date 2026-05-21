@@ -18,7 +18,7 @@ type ChannelMap<C> = Arc<RwLock<HashMap<TableId, Arc<Mutex<ChannelHandle<C>>>>>>
 ///
 /// Unifies the SQL REST API (DDL) and the Snowpipe Streaming API (channel
 /// lifecycle and row ingestion).
-pub struct Client<T: TokenProvider, C: StreamClient = RestStreamClient<T>> {
+pub struct Client<T, C = RestStreamClient<T>> {
     sql_client: Arc<SqlClient<T>>,
     stream_client: Arc<C>,
     database: String,
@@ -85,7 +85,8 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
 
     /// Ensure the table exists in Snowflake and is ready to receive data.
     ///
-    /// Returns `true` when the table was newly created (DDL was issued).
+    /// Returns `true` when streaming was newly set up for this table in the
+    /// current process (the Snowflake table itself may have already existed).
     #[allow(clippy::map_entry)]
     pub async fn ensure_table(
         &self,

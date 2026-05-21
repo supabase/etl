@@ -13,23 +13,23 @@ pub struct Config {
     ///
     /// Used in JWT claims and API routing.
     /// Uppercased internally where Snowflake requires it.
-    pub account_id: String,
+    pub(crate) account_id: String,
 
     /// Snowflake login name used for key-pair authentication.
     ///
     /// This is the user identity that owns the RSA key pair.
-    pub username: String,
+    pub(crate) username: String,
 
     /// Target database for all operations.
-    pub database: String,
+    pub(crate) database: String,
 
     /// Target schema within the database.
-    pub schema: String,
+    pub(crate) schema: String,
 
     /// Snowflake role to assume after connecting.
     ///
     /// When `None`, the user's default role is used.
-    pub role: Option<String>,
+    pub(crate) role: Option<String>,
 }
 
 impl Config {
@@ -50,6 +50,16 @@ impl Config {
     /// HTTPS-only account URL used for all API requests.
     pub fn account_url(&self) -> &str {
         &self.account_url
+    }
+
+    /// Target database name.
+    pub fn database(&self) -> &str {
+        &self.database
+    }
+
+    /// Target schema name.
+    pub fn schema(&self) -> &str {
+        &self.schema
     }
 
     /// Set the role to assume after connecting.

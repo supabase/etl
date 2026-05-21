@@ -32,7 +32,7 @@ const USER_AGENT: &str = "supabase-etl/0.1.0";
 ///
 /// All mutating calls (open/drop channel, insert rows, channel status) are
 /// retried with exponential backoff.
-pub struct RestStreamClient<T: TokenProvider> {
+pub struct RestStreamClient<T> {
     account_url: String,
     auth: Arc<T>,
     http: Client,

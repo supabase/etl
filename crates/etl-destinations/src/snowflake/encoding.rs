@@ -37,9 +37,9 @@ impl CdcOperation {
 #[derive(Debug, Clone, Copy)]
 pub struct CdcMeta<'a> {
     /// Operation performed.
-    pub operation: CdcOperation,
+    pub(crate) operation: CdcOperation,
     /// WAL sequence identifier obtained from `OffsetToken`.
-    pub sequence: &'a str,
+    pub(crate) sequence: &'a str,
 }
 
 impl<'a> CdcMeta<'a> {

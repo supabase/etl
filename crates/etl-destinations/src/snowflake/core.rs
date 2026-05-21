@@ -36,8 +36,8 @@ type EventIter = std::iter::Peekable<std::vec::IntoIter<Event>>;
 /// the state store bookkeeping.
 pub struct Destination<
     S,
-    T: TokenProvider = AuthManager<HttpExchanger>,
-    C: StreamClient = RestStreamClient<T>,
+    T = AuthManager<HttpExchanger>,
+    C = RestStreamClient<T>,
 > {
     client: Client<T, C>,
     store: S,

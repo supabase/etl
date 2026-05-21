@@ -48,7 +48,7 @@ async fn channel_open_insert_status_drop() {
 
         // Open channel, no offset on fresh channel.
         let resp = stream
-            .open_channel(&config.database, &config.schema, &table, &channel)
+            .open_channel(config.database(), config.schema(), &table, &channel)
             .await
             .expect("open_channel failed");
         assert!(!resp.continuation_token.is_empty(), "expected non-empty continuation_token");
@@ -70,8 +70,8 @@ async fn channel_open_insert_status_drop() {
         );
         let resp = stream
             .insert_rows(
-                &config.database,
-                &config.schema,
+                config.database(),
+                config.schema(),
                 &table,
                 &channel,
                 &batch,
@@ -99,7 +99,7 @@ async fn channel_open_insert_status_drop() {
 
         // Drop channel.
         stream
-            .drop_channel(&config.database, &config.schema, &table, &channel)
+            .drop_channel(config.database(), config.schema(), &table, &channel)
             .await
             .expect("drop_channel failed");
     })
@@ -122,7 +122,7 @@ async fn channel_reopen_preserves_offset() {
 
         // Open and insert.
         let open_resp = stream
-            .open_channel(&config.database, &config.schema, &table, &channel)
+            .open_channel(config.database(), config.schema(), &table, &channel)
             .await
             .expect("open_channel failed");
 
@@ -138,8 +138,8 @@ async fn channel_reopen_preserves_offset() {
         );
         stream
             .insert_rows(
-                &config.database,
-                &config.schema,
+                config.database(),
+                config.schema(),
                 &table,
                 &channel,
                 &batch,
@@ -163,7 +163,7 @@ async fn channel_reopen_preserves_offset() {
 
         // Reopen channel, idempotent, should return the committed offset.
         let reopen_resp = stream
-            .open_channel(&config.database, &config.schema, &table, &channel)
+            .open_channel(config.database(), config.schema(), &table, &channel)
             .await
             .expect("reopen channel failed");
         assert_eq!(
@@ -172,7 +172,7 @@ async fn channel_reopen_preserves_offset() {
             "reopened channel must return the committed offset"
         );
 
-        let _ = stream.drop_channel(&config.database, &config.schema, &table, &channel).await;
+        let _ = stream.drop_channel(config.database(), config.schema(), &table, &channel).await;
     })
     .await;
 }
@@ -191,7 +191,7 @@ async fn continuation_token() {
             .await
             .expect("create table failed");
 
-        let fqn = format!("\"{}\".\"{}\".\"{table}\"", config.database, config.schema);
+        let fqn = format!("\"{}\".\"{}\".\"{table}\"", config.database(), config.schema());
 
         #[allow(clippy::too_many_arguments)]
         async fn verify(
@@ -226,7 +226,7 @@ async fn continuation_token() {
         }
 
         let resp = stream
-            .open_channel(&config.database, &config.schema, &table, &channel)
+            .open_channel(config.database(), config.schema(), &table, &channel)
             .await
             .expect("open_channel failed");
 
@@ -244,8 +244,8 @@ async fn continuation_token() {
         );
         let insert1 = stream
             .insert_rows(
-                &config.database,
-                &config.schema,
+                config.database(),
+                config.schema(),
                 &table,
                 &channel,
                 &batch1,
@@ -265,8 +265,8 @@ async fn continuation_token() {
         );
         let insert2 = stream
             .insert_rows(
-                &config.database,
-                &config.schema,
+                config.database(),
+                config.schema(),
                 &table,
                 &channel,
                 &batch2,
@@ -291,8 +291,8 @@ async fn continuation_token() {
         );
         let insert3 = stream
             .insert_rows(
-                &config.database,
-                &config.schema,
+                config.database(),
+                config.schema(),
                 &table,
                 &channel,
                 &batch3,
@@ -312,8 +312,8 @@ async fn continuation_token() {
         // Retry batch 3 with the CORRECT token, data commits, offset is updated.
         let insert3_retry = stream
             .insert_rows(
-                &config.database,
-                &config.schema,
+                config.database(),
+                config.schema(),
                 &table,
                 &channel,
                 &batch3,
@@ -329,7 +329,7 @@ async fn continuation_token() {
         verify(&stream, &sql, &config, &table, &channel, &fqn, &offset3, 3).await;
 
         // Cleanup
-        let _ = stream.drop_channel(&config.database, &config.schema, &table, &channel).await;
+        let _ = stream.drop_channel(config.database(), config.schema(), &table, &channel).await;
     })
     .await;
 }

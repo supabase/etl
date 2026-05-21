@@ -1,3 +1,20 @@
+//! Key-pair JWT authentication for the Snowflake SQL and Streaming APIs.
+//!
+//! Flow:
+//!   1. Load RSA private key from disk, derive a public-key fingerprint
+//!   2. Sign a short-lived JWT (1 h) identifying the account and user
+//!   3. Exchange the JWT at `POST {account_url}/oauth/token` for a bearer token
+//!      (~10 min TTL)
+//!   4. Cache the bearer token; refresh proactively when < 60 s remain
+//!
+//! The `scope` parameter is intentionally omitted from the token exchange so
+//! the resulting token is accepted by both the SQL REST API and the Snowpipe
+//! Streaming REST API. Setting `scope=<ingest_host>` would restrict the token
+//! to a single ingest host.
+//!
+//! Ref: <https://docs.snowflake.com/en/user-guide/key-pair-auth>
+//! Ref: <https://docs.snowflake.com/en/user-guide/snowpipe-streaming/snowpipe-streaming-high-performance-rest-api>
+
 use std::{future::Future, time::Duration};
 
 use aws_lc_rs::{encoding::AsDer, signature::KeyPair as _};
@@ -20,12 +37,14 @@ const TOKEN_LIFETIME_SECS: u64 = 3600;
 /// expiry.
 const TOKEN_REFRESH_BUFFER: Duration = Duration::from_secs(60);
 
-/// Token produced by Snowflake.
+/// Token produced by Snowflake's `/oauth/token` endpoint.
 ///
-/// Scoped tokens are short-lived, limited-privilege credentials.
+/// "Scoped" in Snowflake's terminology refers to the token being a short-lived,
+/// restricted derivative of the raw JWT, not the `scope` request parameter
+/// (which controls host restriction and is optional; see module docs).
 pub struct ScopedToken {
-    pub access_token: String,
-    pub expires_at: Instant,
+    pub(crate) access_token: String,
+    pub(crate) expires_at: Instant,
 }
 
 /// Abstracts the HTTP call that exchanges a self-signed JWT for a scoped token.
@@ -96,7 +115,7 @@ impl TokenExchanger for HttpExchanger {
 ///
 /// Signs a JWT locally, exchanges it for a short-lived scoped token via
 /// Snowflake's OAuth endpoint, and caches the result.
-pub struct AuthManager<E: TokenExchanger = HttpExchanger> {
+pub struct AuthManager<E = HttpExchanger> {
     account_url: String,
     account: String,
     user: String,

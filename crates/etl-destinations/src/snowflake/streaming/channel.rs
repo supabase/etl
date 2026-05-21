@@ -17,7 +17,7 @@ use crate::snowflake::{
 ///
 /// Channel is a conduit via which we push data to Snowflake system.
 #[derive(Debug, Clone)]
-pub struct ChannelHandle<C> {
+pub(crate) struct ChannelHandle<C> {
     /// Streaming API client.
     client: Arc<C>,
 

@@ -75,7 +75,7 @@ pub async fn poll_stream_offset(
     for _ in 0..max_attempts {
         tokio::time::sleep(interval).await;
         let status = stream
-            .channel_status(&config.database, &config.schema, table, channel)
+            .channel_status(config.database(), config.schema(), table, channel)
             .await
             .expect("channel_status failed");
         if status.offset_token.as_ref() == Some(expected) {

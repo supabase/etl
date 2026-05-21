@@ -7,7 +7,7 @@ mod rest_client;
 use std::future::Future;
 
 pub use batch::{RowBatch, RowBatchBuilder};
-pub use channel::ChannelHandle;
+pub(crate) use channel::ChannelHandle;
 pub use offset_token::OffsetToken;
 pub use rest_client::RestStreamClient;
 

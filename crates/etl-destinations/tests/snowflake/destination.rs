@@ -71,7 +71,7 @@ async fn poll_and_query_rows(
     );
 
     let fqn =
-        format!("\"{}\".\"{}\".\"{sf_table}\"", harness.config.database, harness.config.schema);
+        format!("\"{}\".\"{}\".\"{sf_table}\"", harness.config.database(), harness.config.schema());
     query_rows(&harness.sql, &format!("SELECT * FROM {fqn} ORDER BY \"_cdc_sequence_number\""))
         .await
         .expect("query_rows failed")
@@ -158,7 +158,7 @@ async fn write_table_rows_empty() {
         assert!(exists, "table should have been created even with empty row set");
 
         let fqn =
-            format!("\"{}\".\"{}\".\"{sf_table}\"", harness.config.database, harness.config.schema);
+            format!("\"{}\".\"{}\".\"{sf_table}\"", harness.config.database(), harness.config.schema());
         let rows = query_rows(&harness.sql, &format!("SELECT * FROM {fqn}"))
             .await
             .expect("query_rows failed");
@@ -390,7 +390,7 @@ async fn schema_evolution_add_column() {
         assert_eq!(committed, Some(expected_offset), "data should commit within 90s");
 
         let fqn =
-            format!("\"{}\".\"{}\".\"{sf_table}\"", harness.config.database, harness.config.schema);
+            format!("\"{}\".\"{}\".\"{sf_table}\"", harness.config.database(), harness.config.schema());
         let rows =
             query_rows(&harness.sql, &format!("SELECT \"email\" FROM {fqn} WHERE \"id\" = '2'"))
                 .await
@@ -506,7 +506,7 @@ async fn schema_evolution_rename_column() {
         assert_eq!(committed, Some(expected_offset), "data should commit within 90s");
 
         let fqn =
-            format!("\"{}\".\"{}\".\"{sf_table}\"", harness.config.database, harness.config.schema);
+            format!("\"{}\".\"{}\".\"{sf_table}\"", harness.config.database(), harness.config.schema());
 
         // New row uses the renamed column.
         let rows = query_rows(
@@ -635,7 +635,7 @@ async fn schema_evolution_drop_column() {
         assert_eq!(committed, Some(expected_offset), "data should commit within 90s");
 
         let fqn =
-            format!("\"{}\".\"{}\".\"{sf_table}\"", harness.config.database, harness.config.schema);
+            format!("\"{}\".\"{}\".\"{sf_table}\"", harness.config.database(), harness.config.schema());
 
         // New row landed with remaining columns.
         let rows =
@@ -859,7 +859,7 @@ async fn schema_evolution_interleaved_ddl_dml() {
         poll(301, 0).await;
 
         let fqn =
-            format!("\"{}\".\"{}\".\"{sf_table}\"", harness.config.database, harness.config.schema);
+            format!("\"{}\".\"{}\".\"{sf_table}\"", harness.config.database(), harness.config.schema());
 
         // Final schema should be (id, full_name) -- email was dropped, name was
         // renamed.
