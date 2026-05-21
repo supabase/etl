@@ -1,8 +1,8 @@
 use etl_config::{
     SerializableSecretString,
     shared::{
-        ClickHouseEngine, DestinationConfig, DestinationTypeCompatibilityMode,
-        DuckLakeMaintenanceMode, IcebergConfig,
+        ClickHouseEngine, DestinationConfig, DuckLakeMaintenanceMode, IcebergConfig, TypeStrategy,
+        ValueStrategy,
     },
 };
 use secrecy::ExposeSecret;
@@ -46,9 +46,12 @@ pub enum FullApiDestinationConfig {
         #[schema(example = 8)]
         #[serde(skip_serializing_if = "Option::is_none")]
         connection_pool_size: Option<usize>,
-        #[schema(example = "compatible")]
+        #[schema(example = "native_or_string")]
         #[serde(default)]
-        type_compatibility: DestinationTypeCompatibilityMode,
+        type_strategy: TypeStrategy,
+        #[schema(example = "reject")]
+        #[serde(default)]
+        value_strategy: ValueStrategy,
     },
     #[serde(rename = "clickhouse")]
     ClickHouse {
@@ -166,14 +169,16 @@ impl From<StoredDestinationConfig> for FullApiDestinationConfig {
                 service_account_key,
                 max_staleness_mins,
                 connection_pool_size,
-                type_compatibility,
+                type_strategy,
+                value_strategy,
             } => Self::BigQuery {
                 project_id,
                 dataset_id,
                 service_account_key,
                 max_staleness_mins,
                 connection_pool_size: Some(connection_pool_size),
-                type_compatibility,
+                type_strategy,
+                value_strategy,
             },
             StoredDestinationConfig::ClickHouse { url, user, password, database, engine } => {
                 Self::ClickHouse { url, user, password, database, engine }
@@ -259,7 +264,8 @@ pub enum StoredDestinationConfig {
         service_account_key: SerializableSecretString,
         max_staleness_mins: Option<u16>,
         connection_pool_size: usize,
-        type_compatibility: DestinationTypeCompatibilityMode,
+        type_strategy: TypeStrategy,
+        value_strategy: ValueStrategy,
     },
     ClickHouse {
         url: Url,
@@ -298,14 +304,16 @@ impl StoredDestinationConfig {
                 service_account_key,
                 max_staleness_mins,
                 connection_pool_size,
-                type_compatibility,
+                type_strategy,
+                value_strategy,
             } => DestinationConfig::BigQuery {
                 project_id,
                 dataset_id,
                 service_account_key: service_account_key.into(),
                 max_staleness_mins,
                 connection_pool_size,
-                type_compatibility,
+                type_strategy,
+                value_strategy,
             },
             Self::ClickHouse { url, user, password, database, engine } => {
                 DestinationConfig::ClickHouse {
@@ -398,7 +406,8 @@ impl From<FullApiDestinationConfig> for StoredDestinationConfig {
                 service_account_key,
                 max_staleness_mins,
                 connection_pool_size,
-                type_compatibility,
+                type_strategy,
+                value_strategy,
             } => Self::BigQuery {
                 project_id,
                 dataset_id,
@@ -406,7 +415,8 @@ impl From<FullApiDestinationConfig> for StoredDestinationConfig {
                 max_staleness_mins,
                 connection_pool_size: connection_pool_size
                     .unwrap_or(DestinationConfig::DEFAULT_CONNECTION_POOL_SIZE),
-                type_compatibility,
+                type_strategy,
+                value_strategy,
             },
             FullApiDestinationConfig::ClickHouse { url, user, password, database, engine } => {
                 Self::ClickHouse { url, user, password, database, engine }
@@ -496,7 +506,8 @@ impl Encrypt<EncryptedStoredDestinationConfig> for StoredDestinationConfig {
                 service_account_key,
                 max_staleness_mins,
                 connection_pool_size,
-                type_compatibility,
+                type_strategy,
+                value_strategy,
             } => {
                 let encrypted_service_account_key =
                     encrypt_text(service_account_key.expose_secret().to_owned(), encryption_key)?;
@@ -507,7 +518,8 @@ impl Encrypt<EncryptedStoredDestinationConfig> for StoredDestinationConfig {
                     service_account_key: encrypted_service_account_key,
                     max_staleness_mins,
                     connection_pool_size,
-                    type_compatibility,
+                    type_strategy,
+                    value_strategy,
                 })
             }
             Self::ClickHouse { url, user, password, database, engine } => {
@@ -634,7 +646,9 @@ pub enum EncryptedStoredDestinationConfig {
         #[serde(default = "default_connection_pool_size")]
         connection_pool_size: usize,
         #[serde(default)]
-        type_compatibility: DestinationTypeCompatibilityMode,
+        type_strategy: TypeStrategy,
+        #[serde(default)]
+        value_strategy: ValueStrategy,
     },
     ClickHouse {
         url: Url,
@@ -682,7 +696,8 @@ impl Decrypt<StoredDestinationConfig> for EncryptedStoredDestinationConfig {
                 service_account_key: encrypted_service_account_key,
                 max_staleness_mins,
                 connection_pool_size,
-                type_compatibility,
+                type_strategy,
+                value_strategy,
             } => {
                 let service_account_key = SerializableSecretString::from(decrypt_text(
                     encrypted_service_account_key,
@@ -695,7 +710,8 @@ impl Decrypt<StoredDestinationConfig> for EncryptedStoredDestinationConfig {
                     service_account_key,
                     max_staleness_mins,
                     connection_pool_size,
-                    type_compatibility,
+                    type_strategy,
+                    value_strategy,
                 })
             }
             Self::Iceberg { config } => match config {
@@ -929,7 +945,8 @@ mod tests {
             service_account_key: SerializableSecretString::from("{\"test\": \"key\"}".to_owned()),
             max_staleness_mins: Some(15),
             connection_pool_size: 8,
-            type_compatibility: DestinationTypeCompatibilityMode::Preserve,
+            type_strategy: TypeStrategy::StringIfRisky,
+            value_strategy: ValueStrategy::Preserve,
         };
 
         let key = EncryptionKey { id: 1, key: generate_random_key::<32>().unwrap() };
@@ -945,7 +962,8 @@ mod tests {
                     service_account_key: key1,
                     max_staleness_mins: staleness1,
                     connection_pool_size: connection_pool_size1,
-                    type_compatibility: type_compatibility1,
+                    type_strategy: type_strategy1,
+                    value_strategy: value_strategy1,
                 },
                 StoredDestinationConfig::BigQuery {
                     project_id: p2,
@@ -953,14 +971,16 @@ mod tests {
                     service_account_key: key2,
                     max_staleness_mins: staleness2,
                     connection_pool_size: connection_pool_size2,
-                    type_compatibility: type_compatibility2,
+                    type_strategy: type_strategy2,
+                    value_strategy: value_strategy2,
                 },
             ) => {
                 assert_eq!(p1, p2);
                 assert_eq!(d1, d2);
                 assert_eq!(staleness1, staleness2);
                 assert_eq!(connection_pool_size1, connection_pool_size2);
-                assert_eq!(type_compatibility1, type_compatibility2);
+                assert_eq!(type_strategy1, type_strategy2);
+                assert_eq!(value_strategy1, value_strategy2);
                 // Assert that service account key was encrypted and decrypted correctly
                 assert_eq!(key1.expose_secret(), key2.expose_secret());
             }
@@ -969,7 +989,7 @@ mod tests {
     }
 
     #[test]
-    fn encrypted_stored_destination_config_serializes_coerce_bigquery_type_compatibility() {
+    fn encrypted_stored_destination_config_serializes_bigquery_strategies() {
         let config = EncryptedStoredDestinationConfig::BigQuery {
             project_id: "test-project".to_owned(),
             dataset_id: "test_dataset".to_owned(),
@@ -980,12 +1000,14 @@ mod tests {
             },
             max_staleness_mins: None,
             connection_pool_size: DestinationConfig::DEFAULT_CONNECTION_POOL_SIZE,
-            type_compatibility: DestinationTypeCompatibilityMode::Coerce,
+            type_strategy: TypeStrategy::NativeOrString,
+            value_strategy: ValueStrategy::Normalize,
         };
 
         let value = serde_json::to_value(config).unwrap();
 
-        assert_eq!(value["big_query"]["type_compatibility"], "coerce");
+        assert_eq!(value["big_query"]["type_strategy"], "native_or_string");
+        assert_eq!(value["big_query"]["value_strategy"], "normalize");
     }
 
     #[test]
@@ -1308,27 +1330,30 @@ mod tests {
     }
 
     #[test]
-    fn full_api_destination_config_deserializes_bigquery_type_compatibility() {
+    fn full_api_destination_config_deserializes_bigquery_strategies() {
         let json = r#"{
             "big_query": {
                 "project_id": "test-project",
                 "dataset_id": "test_dataset",
                 "service_account_key": "{\"test\": \"key\"}",
                 "max_staleness_mins": null,
-                "type_compatibility": "preserve"
+                "type_strategy": "string_if_risky",
+                "value_strategy": "preserve"
             }
         }"#;
 
         let deserialized: FullApiDestinationConfig = serde_json::from_str(json).unwrap();
 
-        let FullApiDestinationConfig::BigQuery { type_compatibility, .. } = deserialized else {
+        let FullApiDestinationConfig::BigQuery { type_strategy, value_strategy, .. } = deserialized
+        else {
             panic!("Expected BigQuery destination config");
         };
-        assert_eq!(type_compatibility, DestinationTypeCompatibilityMode::Preserve);
+        assert_eq!(type_strategy, TypeStrategy::StringIfRisky);
+        assert_eq!(value_strategy, ValueStrategy::Preserve);
     }
 
     #[test]
-    fn full_api_destination_config_defaults_bigquery_type_compatibility_to_compatible() {
+    fn full_api_destination_config_defaults_bigquery_strategies() {
         let json = r#"{
             "big_query": {
                 "project_id": "test-project",
@@ -1340,42 +1365,48 @@ mod tests {
 
         let deserialized: FullApiDestinationConfig = serde_json::from_str(json).unwrap();
 
-        let FullApiDestinationConfig::BigQuery { type_compatibility, .. } = deserialized else {
+        let FullApiDestinationConfig::BigQuery { type_strategy, value_strategy, .. } = deserialized
+        else {
             panic!("Expected BigQuery destination config");
         };
-        assert_eq!(type_compatibility, DestinationTypeCompatibilityMode::Compatible);
+        assert_eq!(type_strategy, TypeStrategy::NativeOrString);
+        assert_eq!(value_strategy, ValueStrategy::Reject);
     }
 
     #[test]
-    fn full_api_destination_config_serializes_preserve_bigquery_type_compatibility() {
+    fn full_api_destination_config_serializes_preserve_bigquery_strategies() {
         let full_config = FullApiDestinationConfig::BigQuery {
             project_id: "test-project".to_owned(),
             dataset_id: "test_dataset".to_owned(),
             service_account_key: SerializableSecretString::from("{\"test\": \"key\"}".to_owned()),
             max_staleness_mins: None,
             connection_pool_size: None,
-            type_compatibility: DestinationTypeCompatibilityMode::Preserve,
+            type_strategy: TypeStrategy::StringIfRisky,
+            value_strategy: ValueStrategy::Preserve,
         };
 
         let value = serde_json::to_value(full_config).unwrap();
 
-        assert_eq!(value["big_query"]["type_compatibility"], "preserve");
+        assert_eq!(value["big_query"]["type_strategy"], "string_if_risky");
+        assert_eq!(value["big_query"]["value_strategy"], "preserve");
     }
 
     #[test]
-    fn full_api_destination_config_serializes_coerce_bigquery_type_compatibility() {
+    fn full_api_destination_config_serializes_normalize_bigquery_strategies() {
         let full_config = FullApiDestinationConfig::BigQuery {
             project_id: "test-project".to_owned(),
             dataset_id: "test_dataset".to_owned(),
             service_account_key: SerializableSecretString::from("{\"test\": \"key\"}".to_owned()),
             max_staleness_mins: None,
             connection_pool_size: None,
-            type_compatibility: DestinationTypeCompatibilityMode::Coerce,
+            type_strategy: TypeStrategy::NativeOrString,
+            value_strategy: ValueStrategy::Normalize,
         };
 
         let value = serde_json::to_value(full_config).unwrap();
 
-        assert_eq!(value["big_query"]["type_compatibility"], "coerce");
+        assert_eq!(value["big_query"]["type_strategy"], "native_or_string");
+        assert_eq!(value["big_query"]["value_strategy"], "normalize");
     }
 
     #[test]
@@ -1386,7 +1417,8 @@ mod tests {
             service_account_key: SerializableSecretString::from("{\"test\": \"key\"}".to_owned()),
             max_staleness_mins: Some(15),
             connection_pool_size: None,
-            type_compatibility: DestinationTypeCompatibilityMode::Preserve,
+            type_strategy: TypeStrategy::StringIfRisky,
+            value_strategy: ValueStrategy::Preserve,
         };
 
         let stored: StoredDestinationConfig = full_config.clone().into();
@@ -1400,7 +1432,8 @@ mod tests {
                     service_account_key: p1_service_account_key,
                     max_staleness_mins: p1_max_staleness_mins,
                     connection_pool_size: p1_connection_pool_size,
-                    type_compatibility: p1_type_compatibility,
+                    type_strategy: p1_type_strategy,
+                    value_strategy: p1_value_strategy,
                 },
                 FullApiDestinationConfig::BigQuery {
                     project_id: p2_project_id,
@@ -1408,7 +1441,8 @@ mod tests {
                     service_account_key: p2_service_account_key,
                     max_staleness_mins: p2_max_staleness_mins,
                     connection_pool_size: p2_connection_pool_size,
-                    type_compatibility: p2_type_compatibility,
+                    type_strategy: p2_type_strategy,
+                    value_strategy: p2_value_strategy,
                 },
             ) => {
                 assert_eq!(p1_project_id, p2_project_id);
@@ -1418,7 +1452,8 @@ mod tests {
                     p2_service_account_key.expose_secret()
                 );
                 assert_eq!(p1_max_staleness_mins, p2_max_staleness_mins);
-                assert_eq!(p1_type_compatibility, p2_type_compatibility);
+                assert_eq!(p1_type_strategy, p2_type_strategy);
+                assert_eq!(p1_value_strategy, p2_value_strategy);
                 // Note: connection_pool_size should be set to DEFAULT_POOL_SIZE when None
                 assert_eq!(p1_connection_pool_size, None);
                 assert_eq!(

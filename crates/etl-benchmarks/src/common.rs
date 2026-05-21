@@ -13,7 +13,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use clap::{Args, ValueEnum};
 #[cfg(feature = "bigquery")]
-use etl::destination::DestinationTypeCompatibility;
+use etl::destination::DestinationMaterializationPolicy;
 use etl::{
     destination::{
         Destination,
@@ -479,7 +479,7 @@ impl BenchDestination {
                 let bigquery_options = BigQueryDestinationOptions::new(
                     dataset_id,
                     destination_args.bq_max_staleness_mins,
-                    DestinationTypeCompatibility::coerce(),
+                    DestinationMaterializationPolicy::native_or_string_normalize(),
                     pipeline_id,
                 );
                 let destination = BigQueryDestination::new_with_key_path(

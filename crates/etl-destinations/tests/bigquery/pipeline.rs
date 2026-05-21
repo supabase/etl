@@ -3,7 +3,7 @@ use std::{str::FromStr, sync::Once, time::Duration};
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use etl::{
     config::BatchConfig,
-    destination::DestinationTypeCompatibility,
+    destination::{DestinationMaterializationPolicy, TypeStrategy, ValueStrategy},
     state::table::{TableReplicationPhase, TableReplicationPhaseType},
     store::state::StateStore,
     test_utils::{
@@ -104,10 +104,10 @@ async fn table_copy_and_streaming_with_restart() {
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
     let raw_destination = bigquery_database
-        .build_destination_with_compatibility(
+        .build_destination_with_materialization_policy(
             pipeline_id,
             store.clone(),
-            DestinationTypeCompatibility::compatible(),
+            DestinationMaterializationPolicy::native_or_string_reject(),
         )
         .await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
@@ -161,10 +161,10 @@ async fn table_copy_and_streaming_with_restart() {
     // Rebuild the destination for the restart so the test exercises state/schema
     // recovery instead of relying on a reused, previously shut-down wrapper.
     let raw_destination = bigquery_database
-        .build_destination_with_compatibility(
+        .build_destination_with_materialization_policy(
             pipeline_id,
             store.clone(),
-            DestinationTypeCompatibility::strict(),
+            DestinationMaterializationPolicy::native_only_reject(),
         )
         .await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
@@ -343,10 +343,10 @@ async fn table_subsequent_updates() {
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
     let raw_destination = bigquery_database
-        .build_destination_with_compatibility(
+        .build_destination_with_materialization_policy(
             pipeline_id,
             store.clone(),
-            DestinationTypeCompatibility::compatible(),
+            DestinationMaterializationPolicy::native_or_string_reject(),
         )
         .await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
@@ -784,10 +784,10 @@ async fn table_nullable_scalar_columns() {
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
     let raw_destination = bigquery_database
-        .build_destination_with_compatibility(
+        .build_destination_with_materialization_policy(
             pipeline_id,
             store.clone(),
-            DestinationTypeCompatibility::coerce(),
+            DestinationMaterializationPolicy::native_or_string_normalize(),
         )
         .await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
@@ -987,10 +987,10 @@ async fn table_nullable_array_columns() {
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
     let raw_destination = bigquery_database
-        .build_destination_with_compatibility(
+        .build_destination_with_materialization_policy(
             pipeline_id,
             store.clone(),
-            DestinationTypeCompatibility::preserve(),
+            DestinationMaterializationPolicy::string_if_risky_preserve(),
         )
         .await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
@@ -1210,10 +1210,10 @@ async fn table_non_nullable_scalar_columns() {
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
     let raw_destination = bigquery_database
-        .build_destination_with_compatibility(
+        .build_destination_with_materialization_policy(
             pipeline_id,
             store.clone(),
-            DestinationTypeCompatibility::coerce(),
+            DestinationMaterializationPolicy::native_or_string_normalize(),
         )
         .await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
@@ -1454,10 +1454,10 @@ async fn table_non_nullable_array_columns() {
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
     let raw_destination = bigquery_database
-        .build_destination_with_compatibility(
+        .build_destination_with_materialization_policy(
             pipeline_id,
             store.clone(),
-            DestinationTypeCompatibility::coerce(),
+            DestinationMaterializationPolicy::native_or_string_normalize(),
         )
         .await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
@@ -1708,10 +1708,10 @@ async fn table_array_with_null_values() {
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
     let raw_destination = bigquery_database
-        .build_destination_with_compatibility(
+        .build_destination_with_materialization_policy(
             pipeline_id,
             store.clone(),
-            DestinationTypeCompatibility::preserve(),
+            DestinationMaterializationPolicy::string_if_risky_preserve(),
         )
         .await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
@@ -1740,7 +1740,7 @@ async fn table_array_with_null_values() {
     let event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 3)]).await;
 
     // BigQuery cannot preserve NULL repeated fields or NULL repeated-field
-    // elements, so preserve mode stores arrays as scalar strings.
+    // elements, so the preserve value strategy stores arrays as scalar strings.
     let client = database.client.as_ref().unwrap();
     let quoted_table_name = table_name.as_quoted_identifier();
     client
@@ -1927,10 +1927,10 @@ async fn table_validation_out_of_bounds_values() {
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
     let raw_destination = bigquery_database
-        .build_destination_with_compatibility(
+        .build_destination_with_materialization_policy(
             pipeline_id,
             store.clone(),
-            DestinationTypeCompatibility::strict(),
+            DestinationMaterializationPolicy::native_only_reject(),
         )
         .await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
@@ -2013,7 +2013,7 @@ async fn table_validation_out_of_bounds_values() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn table_type_compatibility_modes_handle_same_risky_data() {
+async fn table_strategy_pairs_handle_same_risky_data() {
     if skip_if_missing_bigquery_env_vars() {
         return;
     }
@@ -2021,20 +2021,41 @@ async fn table_type_compatibility_modes_handle_same_risky_data() {
     init_test_tracing();
     install_crypto_provider();
 
-    for (mode_name, type_compatibility, expected_phase) in [
-        ("strict", DestinationTypeCompatibility::strict(), TableReplicationPhaseType::Errored),
+    for (strategy_name, policy, expected_phase) in [
         (
-            "compatible",
-            DestinationTypeCompatibility::compatible(),
+            "native_only_reject",
+            DestinationMaterializationPolicy::new(TypeStrategy::NativeOnly, ValueStrategy::Reject),
             TableReplicationPhaseType::Errored,
         ),
-        ("preserve", DestinationTypeCompatibility::preserve(), TableReplicationPhaseType::Ready),
-        ("coerce", DestinationTypeCompatibility::coerce(), TableReplicationPhaseType::Ready),
+        (
+            "native_or_string_reject",
+            DestinationMaterializationPolicy::new(
+                TypeStrategy::NativeOrString,
+                ValueStrategy::Reject,
+            ),
+            TableReplicationPhaseType::Errored,
+        ),
+        (
+            "string_if_risky_preserve",
+            DestinationMaterializationPolicy::new(
+                TypeStrategy::StringIfRisky,
+                ValueStrategy::Preserve,
+            ),
+            TableReplicationPhaseType::Ready,
+        ),
+        (
+            "native_or_string_normalize",
+            DestinationMaterializationPolicy::new(
+                TypeStrategy::NativeOrString,
+                ValueStrategy::Normalize,
+            ),
+            TableReplicationPhaseType::Ready,
+        ),
     ] {
         let database = spawn_source_database().await;
         let bigquery_database = setup_bigquery_database().await;
 
-        let table_name = test_table_name(&format!("{mode_name}_types"));
+        let table_name = test_table_name(&format!("{strategy_name}_types"));
         let table_id = database
             .create_table(
                 table_name.clone(),
@@ -2103,11 +2124,11 @@ async fn table_type_compatibility_modes_handle_same_risky_data() {
         let store = NotifyingStore::new();
         let pipeline_id: PipelineId = random();
         let raw_destination = bigquery_database
-            .build_destination_with_compatibility(pipeline_id, store.clone(), type_compatibility)
+            .build_destination_with_materialization_policy(pipeline_id, store.clone(), policy)
             .await;
         let destination = TestDestinationWrapper::wrap(raw_destination);
 
-        let publication_name = format!("test_pub_{mode_name}_types");
+        let publication_name = format!("test_pub_{strategy_name}_types");
         database
             .create_publication(&publication_name, std::slice::from_ref(&table_name))
             .await
@@ -2124,7 +2145,7 @@ async fn table_type_compatibility_modes_handle_same_risky_data() {
         let unexpected_phase = match expected_phase {
             TableReplicationPhaseType::Errored => TableReplicationPhaseType::Ready,
             TableReplicationPhaseType::Ready => TableReplicationPhaseType::Errored,
-            phase => unreachable!("unexpected compatibility test phase: {phase:?}"),
+            phase => unreachable!("unexpected materialization test phase: {phase:?}"),
         };
         let table_reached_outcome = store
             .notify_on_table_state(table_id, move |state| {
@@ -2140,7 +2161,7 @@ async fn table_type_compatibility_modes_handle_same_risky_data() {
             _ = sleep(Duration::from_secs(180)) => {
                 let table_state = store.get_table_replication_state(table_id).await.unwrap();
                 pipeline.shutdown_and_wait().await.unwrap();
-                panic!("timed out waiting for {mode_name} table outcome: {table_state:?}");
+                panic!("timed out waiting for {strategy_name} table outcome: {table_state:?}");
             }
         }
         let table_state = store
@@ -2153,26 +2174,26 @@ async fn table_type_compatibility_modes_handle_same_risky_data() {
 
         if expected_phase == TableReplicationPhaseType::Errored {
             let TableReplicationPhase::Errored { reason, .. } = table_state else {
-                panic!("{mode_name} table replication should have errored: {table_state:?}");
+                panic!("{strategy_name} table replication should have errored: {table_state:?}");
             };
 
             assert!(
                 reason.contains("[UnsupportedValueInDestination]"),
-                "{mode_name} mode should reject the risky payload locally: {reason}"
+                "{strategy_name} should reject the risky payload locally: {reason}"
             );
             assert!(
                 reason.contains("would be rounded by BigQuery")
                     || reason.contains("JSON integer would lose precision")
                     || reason.contains("JSON integer is outside BigQuery")
-                    || reason.contains("has no strict native BigQuery representation"),
-                "{mode_name} mode should reject a silent BigQuery conversion risk: {reason}"
+                    || reason.contains("has no native BigQuery representation"),
+                "{strategy_name} should reject a silent BigQuery conversion risk: {reason}"
             );
 
             continue;
         }
 
         if table_state.as_type() != TableReplicationPhaseType::Ready {
-            panic!("{mode_name} table replication should be ready: {table_state:?}");
+            panic!("{strategy_name} table replication should be ready: {table_state:?}");
         }
 
         let destination_schema =
@@ -2185,7 +2206,7 @@ async fn table_type_compatibility_modes_handle_same_risky_data() {
                 .map(|column| column.data_type.as_str())
         };
 
-        if type_compatibility.is_preserve() {
+        if policy.is_string_if_risky_preserve() {
             for column_name in [
                 "numeric_value",
                 "infinite_numeric",
@@ -2213,7 +2234,7 @@ async fn table_type_compatibility_modes_handle_same_risky_data() {
             assert_eq!(column_type("json_duplicate"), Some("JSON"));
         }
 
-        if type_compatibility.is_preserve() {
+        if policy.is_string_if_risky_preserve() {
             for column_name in ["numeric_array", "uuid_array", "json_array"] {
                 assert_eq!(column_type(column_name), Some("STRING"), "{column_name}");
             }

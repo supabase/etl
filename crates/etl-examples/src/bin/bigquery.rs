@@ -39,7 +39,7 @@ use etl::{
         BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PgConnectionConfig,
         PipelineConfig, TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
     },
-    destination::DestinationTypeCompatibility,
+    destination::DestinationMaterializationPolicy,
     pipeline::Pipeline,
     store::PostgresStore,
 };
@@ -211,7 +211,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
     let bigquery_options = BigQueryDestinationOptions::new(
         args.bq_args.bq_dataset_id,
         None,
-        DestinationTypeCompatibility::coerce(),
+        DestinationMaterializationPolicy::native_or_string_normalize(),
         pipeline_config.id,
     );
     let bigquery_destination = BigQueryDestination::new_with_key_path(

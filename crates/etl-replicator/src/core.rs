@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use etl::{
     config::IcebergConfig,
-    destination::{Destination, DestinationTypeCompatibility},
+    destination::{Destination, DestinationMaterializationPolicy},
     pipeline::Pipeline,
     store::{
         both::postgres::PostgresStore, cleanup::CleanupStore, schema::SchemaStore,
@@ -68,12 +68,13 @@ pub(crate) async fn start_replicator_with_config(
             service_account_key,
             max_staleness_mins,
             connection_pool_size,
-            type_compatibility,
+            type_strategy,
+            value_strategy,
         } => {
             let destination_options = BigQueryDestinationOptions::new(
                 dataset_id.clone(),
                 *max_staleness_mins,
-                DestinationTypeCompatibility::new(*type_compatibility),
+                DestinationMaterializationPolicy::new(*type_strategy, *value_strategy),
                 pipeline_id,
             );
             let destination = BigQueryDestination::new_with_key(

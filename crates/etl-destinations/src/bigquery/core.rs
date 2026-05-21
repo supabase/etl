@@ -10,7 +10,7 @@ use etl::{
     bail,
     concurrency::TaskSet,
     destination::{
-        Destination, DestinationTypeCompatibility,
+        Destination, DestinationMaterializationPolicy,
         async_result::{TruncateTableResult, WriteEventsResult, WriteTableRowsResult},
     },
     error::{ErrorKind, EtlError, EtlResult},
@@ -180,8 +180,8 @@ pub struct BigQueryDestinationOptions {
     dataset_id: BigQueryDatasetId,
     /// Maximum staleness in minutes for BigQuery CDC reads.
     max_staleness_mins: Option<u16>,
-    /// Type compatibility policy used by BigQuery materialization.
-    type_compatibility: DestinationTypeCompatibility,
+    /// Materialization policy used by BigQuery.
+    policy: DestinationMaterializationPolicy,
     /// ETL pipeline identifier.
     pipeline_id: PipelineId,
 }
@@ -191,10 +191,10 @@ impl BigQueryDestinationOptions {
     pub fn new(
         dataset_id: BigQueryDatasetId,
         max_staleness_mins: Option<u16>,
-        type_compatibility: DestinationTypeCompatibility,
+        policy: DestinationMaterializationPolicy,
         pipeline_id: PipelineId,
     ) -> Self {
-        Self { dataset_id, max_staleness_mins, type_compatibility, pipeline_id }
+        Self { dataset_id, max_staleness_mins, policy, pipeline_id }
     }
 }
 
@@ -338,7 +338,7 @@ where
             dataset_id: options.dataset_id,
             max_staleness_mins: options.max_staleness_mins,
             pipeline_id: options.pipeline_id,
-            materializer: BigQueryMaterialization::materializer(options.type_compatibility),
+            materializer: BigQueryMaterialization::materializer(options.policy),
             state_store,
             inner: Arc::new(Mutex::new(Inner::new())),
             tasks: TaskSet::new(),
@@ -1664,15 +1664,15 @@ mod tests {
     use super::*;
     use crate::bigquery::value::BigQueryCell;
 
-    /// Returns a strict BigQuery materializer for tests.
-    fn strict_materializer() -> BigQueryMaterializer {
-        BigQueryMaterialization::materializer(DestinationTypeCompatibility::strict())
+    /// Returns a native-only BigQuery materializer for tests.
+    fn native_only_materializer() -> BigQueryMaterializer {
+        BigQueryMaterialization::materializer(DestinationMaterializationPolicy::native_only_reject())
     }
 
     fn bigquery_text_row(value: impl Into<String>) -> BigQueryTableRow {
         BigQueryTableRow::try_from_typed_cells(
             [(Type::TEXT, Cell::String(value.into()))],
-            &BigQueryMaterialization::materializer(DestinationTypeCompatibility::default()),
+            &BigQueryMaterialization::materializer(DestinationMaterializationPolicy::default()),
         )
         .unwrap()
     }
@@ -2145,7 +2145,7 @@ mod tests {
             &replicated_table_schema,
             OldTableRow::Key(TableRow::new(vec![Cell::I32(42)])),
             "lsn:1".to_owned(),
-            &strict_materializer(),
+            &native_only_materializer(),
         )
         .unwrap();
 
@@ -2194,7 +2194,7 @@ mod tests {
                 Cell::I32(7),
             ])),
             "lsn:1".to_owned(),
-            &strict_materializer(),
+            &native_only_materializer(),
         )
         .unwrap();
 
@@ -2218,7 +2218,7 @@ mod tests {
             TableRow::new(vec![Cell::I32(2), Cell::String("updated".to_owned())]),
             Some(OldTableRow::Key(TableRow::new(vec![Cell::I32(1)]))),
             sequence_key,
-            &strict_materializer(),
+            &native_only_materializer(),
         )
         .unwrap();
 
@@ -2262,7 +2262,7 @@ mod tests {
             TableRow::new(vec![Cell::I32(1), Cell::String("updated".to_owned())]),
             Some(OldTableRow::Key(TableRow::new(vec![Cell::I32(1)]))),
             sequence_key,
-            &strict_materializer(),
+            &native_only_materializer(),
         )
         .unwrap();
 
@@ -2296,7 +2296,7 @@ mod tests {
                 Cell::String("before".to_owned()),
             ]))),
             sequence_key,
-            &strict_materializer(),
+            &native_only_materializer(),
         )
         .unwrap();
 

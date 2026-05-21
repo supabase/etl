@@ -1393,7 +1393,7 @@ mod tests {
     use std::{collections::HashSet, sync::Arc};
 
     use etl::{
-        destination::DestinationTypeCompatibility,
+        destination::DestinationMaterializationPolicy,
         types::{IdentityMask, ReplicationMask, TableId, TableName, TableSchema, Type},
     };
     use gcp_bigquery_client::google::cloud::bigquery::storage::v1::{
@@ -1404,8 +1404,8 @@ mod tests {
     use crate::bigquery::materialization::BigQueryMaterialization;
 
     /// Returns a BigQuery materializer for tests.
-    fn materializer(compatibility: DestinationTypeCompatibility) -> BigQueryMaterializer {
-        BigQueryMaterialization::materializer(compatibility)
+    fn materializer(policy: DestinationMaterializationPolicy) -> BigQueryMaterializer {
+        BigQueryMaterialization::materializer(policy)
     }
 
     fn successful_append_response() -> AppendRowsResponse {
@@ -1466,13 +1466,13 @@ mod tests {
     }
 
     /// Converts a type with a materialization policy for test assertions.
-    fn bigquery_type(typ: &Type, compatibility: DestinationTypeCompatibility) -> EtlResult<String> {
-        materializer(compatibility).materialize_type(typ).map(|typ| typ.to_sql())
+    fn bigquery_type(typ: &Type, policy: DestinationMaterializationPolicy) -> EtlResult<String> {
+        materializer(policy).materialize_type(typ).map(|typ| typ.to_sql())
     }
 
     #[test]
-    fn materialize_type_modes_follow_documented_bigquery_schema_matrix() {
-        for (typ, strict, compatible, preserve, coerce) in [
+    fn materialize_type_strategy_pairs_follow_documented_bigquery_schema_matrix() {
+        for (typ, native_only, native_or_string, string_if_risky, normalize) in [
             (Type::BOOL, Some("bool"), Some("bool"), Some("bool"), Some("bool")),
             (Type::TEXT, Some("string"), Some("string"), Some("string"), Some("string")),
             (Type::INT4, Some("int64"), Some("int64"), Some("int64"), Some("int64")),
@@ -1560,27 +1560,43 @@ mod tests {
                 Some("array<string>"),
             ),
         ] {
-            for (mode_name, compatibility, expected) in [
-                ("strict", DestinationTypeCompatibility::strict(), strict),
-                ("compatible", DestinationTypeCompatibility::compatible(), compatible),
-                ("preserve", DestinationTypeCompatibility::preserve(), preserve),
-                ("coerce", DestinationTypeCompatibility::coerce(), coerce),
+            for (strategy_name, policy, expected) in [
+                (
+                    "native_only_reject",
+                    DestinationMaterializationPolicy::native_only_reject(),
+                    native_only,
+                ),
+                (
+                    "native_or_string_reject",
+                    DestinationMaterializationPolicy::native_or_string_reject(),
+                    native_or_string,
+                ),
+                (
+                    "string_if_risky_preserve",
+                    DestinationMaterializationPolicy::string_if_risky_preserve(),
+                    string_if_risky,
+                ),
+                (
+                    "native_or_string_normalize",
+                    DestinationMaterializationPolicy::native_or_string_normalize(),
+                    normalize,
+                ),
             ] {
                 match expected {
                     Some(expected) => assert_eq!(
-                        bigquery_type(&typ, compatibility).unwrap(),
+                        bigquery_type(&typ, policy).unwrap(),
                         expected,
-                        "{mode_name} mapping for {}",
+                        "{strategy_name} mapping for {}",
                         typ.name(),
                     ),
                     None => {
-                        let result = bigquery_type(&typ, compatibility);
+                        let result = bigquery_type(&typ, policy);
                         assert!(
                             matches!(
                                 result,
                                 Err(ref err) if err.kind() == ErrorKind::UnsupportedValueInDestination
                             ),
-                            "{mode_name} should reject {}: {result:?}",
+                            "{strategy_name} should reject {}: {result:?}",
                             typ.name(),
                         );
                     }
@@ -1590,10 +1606,14 @@ mod tests {
     }
 
     #[test]
-    fn default_type_compatibility_is_compatible() {
+    fn default_strategy_pair_is_native_or_string_reject() {
         assert_eq!(
-            bigquery_type(&Type::TIMESTAMP, DestinationTypeCompatibility::default()).unwrap(),
-            bigquery_type(&Type::TIMESTAMP, DestinationTypeCompatibility::compatible()).unwrap()
+            bigquery_type(&Type::TIMESTAMP, DestinationMaterializationPolicy::default()).unwrap(),
+            bigquery_type(
+                &Type::TIMESTAMP,
+                DestinationMaterializationPolicy::native_or_string_reject()
+            )
+            .unwrap()
         );
     }
 
@@ -1602,7 +1622,7 @@ mod tests {
         let column_schema = test_column("test_col", Type::TEXT, 1, true, None);
         let spec = BigQueryClient::column_spec(
             &column_schema,
-            &materializer(DestinationTypeCompatibility::strict()),
+            &materializer(DestinationMaterializationPolicy::native_only_reject()),
         )
         .expect("column spec generation");
         assert_eq!(spec, "`test_col` string");
@@ -1610,7 +1630,7 @@ mod tests {
         let not_null_column = test_column("id", Type::INT4, 1, false, Some(1));
         let not_null_spec = BigQueryClient::column_spec(
             &not_null_column,
-            &materializer(DestinationTypeCompatibility::strict()),
+            &materializer(DestinationMaterializationPolicy::native_only_reject()),
         )
         .expect("not null column spec");
         assert_eq!(not_null_spec, "`id` int64 not null");
@@ -1618,18 +1638,18 @@ mod tests {
         let array_column = test_column("tags", Type::TEXT_ARRAY, 1, false, None);
         let array_spec = BigQueryClient::column_spec(
             &array_column,
-            &materializer(DestinationTypeCompatibility::strict()),
+            &materializer(DestinationMaterializationPolicy::native_only_reject()),
         )
         .expect("array column spec");
         assert_eq!(array_spec, "`tags` array<string>");
     }
 
     #[test]
-    fn column_spec_preserve_uses_string_for_risky_types() {
+    fn column_spec_preserve_uses_string_if_risky_types() {
         let numeric_column = test_column("amount", Type::NUMERIC, 1, false, None);
         let numeric_spec = BigQueryClient::column_spec(
             &numeric_column,
-            &materializer(DestinationTypeCompatibility::preserve()),
+            &materializer(DestinationMaterializationPolicy::string_if_risky_preserve()),
         )
         .expect("numeric column spec");
         assert_eq!(numeric_spec, "`amount` string not null");
@@ -1637,7 +1657,7 @@ mod tests {
         let json_array_column = test_column("payloads", Type::JSONB_ARRAY, 2, true, None);
         let json_array_spec = BigQueryClient::column_spec(
             &json_array_column,
-            &materializer(DestinationTypeCompatibility::preserve()),
+            &materializer(DestinationMaterializationPolicy::string_if_risky_preserve()),
         )
         .expect("json array column spec");
         assert_eq!(json_array_spec, "`payloads` string");
@@ -1645,7 +1665,7 @@ mod tests {
         let non_null_array_column = test_column("tags", Type::TEXT_ARRAY, 4, false, None);
         let non_null_array_spec = BigQueryClient::column_spec(
             &non_null_array_column,
-            &materializer(DestinationTypeCompatibility::preserve()),
+            &materializer(DestinationMaterializationPolicy::string_if_risky_preserve()),
         )
         .expect("non-null array column spec");
         assert_eq!(non_null_array_spec, "`tags` string not null");
@@ -1653,19 +1673,19 @@ mod tests {
         let timestamp_column = test_column("created_at", Type::TIMESTAMPTZ, 3, true, None);
         let timestamp_spec = BigQueryClient::column_spec(
             &timestamp_column,
-            &materializer(DestinationTypeCompatibility::preserve()),
+            &materializer(DestinationMaterializationPolicy::string_if_risky_preserve()),
         )
         .expect("timestamp column spec");
         assert_eq!(timestamp_spec, "`created_at` string");
     }
 
     #[test]
-    fn column_spec_strict_rejects_non_native_types() {
+    fn column_spec_native_only_rejects_non_native_types() {
         let column_schema = test_column("tenant_uuid", Type::UUID, 1, true, None);
 
         let result = BigQueryClient::column_spec(
             &column_schema,
-            &materializer(DestinationTypeCompatibility::strict()),
+            &materializer(DestinationMaterializationPolicy::native_only_reject()),
         );
 
         assert!(matches!(
@@ -1675,12 +1695,12 @@ mod tests {
     }
 
     #[test]
-    fn column_spec_coerce_uses_string_for_non_native_types() {
+    fn column_spec_normalize_uses_string_for_non_native_types() {
         let column_schema = test_column("tenant_uuid", Type::UUID, 1, false, None);
 
         let spec = BigQueryClient::column_spec(
             &column_schema,
-            &materializer(DestinationTypeCompatibility::coerce()),
+            &materializer(DestinationMaterializationPolicy::native_or_string_normalize()),
         )
         .expect("uuid column spec");
 
@@ -1693,7 +1713,7 @@ mod tests {
 
         let spec = BigQueryClient::column_spec(
             &column_schema,
-            &materializer(DestinationTypeCompatibility::strict()),
+            &materializer(DestinationMaterializationPolicy::native_only_reject()),
         )
         .expect("escaped column spec");
 
@@ -1783,7 +1803,7 @@ mod tests {
         let descriptor = BigQueryClient::column_schemas_to_table_descriptor(
             &schema,
             true,
-            &materializer(DestinationTypeCompatibility::strict()),
+            &materializer(DestinationMaterializationPolicy::native_only_reject()),
         )
         .expect("table descriptor");
 
@@ -1835,7 +1855,7 @@ mod tests {
         let descriptor = BigQueryClient::column_schemas_to_table_descriptor(
             &schema,
             false,
-            &materializer(DestinationTypeCompatibility::strict()),
+            &materializer(DestinationMaterializationPolicy::native_only_reject()),
         )
         .expect("table descriptor");
 
@@ -1858,7 +1878,7 @@ mod tests {
         let descriptor = BigQueryClient::column_schemas_to_table_descriptor(
             &schema,
             false,
-            &materializer(DestinationTypeCompatibility::strict()),
+            &materializer(DestinationMaterializationPolicy::native_only_reject()),
         )
         .expect("table copy descriptor");
 
@@ -1875,7 +1895,7 @@ mod tests {
         let descriptor = BigQueryClient::column_schemas_to_table_descriptor(
             &schema,
             true,
-            &materializer(DestinationTypeCompatibility::preserve()),
+            &materializer(DestinationMaterializationPolicy::string_if_risky_preserve()),
         )
         .expect("preserve table descriptor");
 
@@ -1889,9 +1909,9 @@ mod tests {
         let descriptor = BigQueryClient::column_schemas_to_table_descriptor(
             &schema,
             false,
-            &materializer(DestinationTypeCompatibility::strict()),
+            &materializer(DestinationMaterializationPolicy::native_only_reject()),
         )
-        .expect("strict table descriptor");
+        .expect("native-only table descriptor");
 
         assert!(matches!(descriptor.field_descriptors[0].typ, ColumnType::Int32));
         assert!(matches!(descriptor.field_descriptors[0].mode, ColumnMode::Repeated));
@@ -1899,9 +1919,9 @@ mod tests {
         let descriptor = BigQueryClient::column_schemas_to_table_descriptor(
             &schema,
             false,
-            &materializer(DestinationTypeCompatibility::coerce()),
+            &materializer(DestinationMaterializationPolicy::native_or_string_normalize()),
         )
-        .expect("coerce table descriptor");
+        .expect("normalize table descriptor");
 
         assert!(matches!(descriptor.field_descriptors[0].typ, ColumnType::Int32));
         assert!(matches!(descriptor.field_descriptors[0].mode, ColumnMode::Repeated));
@@ -1923,7 +1943,7 @@ mod tests {
         let descriptor = BigQueryClient::column_schemas_to_table_descriptor(
             &schema,
             true,
-            &materializer(DestinationTypeCompatibility::coerce()),
+            &materializer(DestinationMaterializationPolicy::native_or_string_normalize()),
         )
         .expect("complex table descriptor");
 
@@ -1941,14 +1961,14 @@ mod tests {
     }
 
     #[test]
-    fn column_schemas_to_table_descriptor_strict_rejects_non_native_types() {
+    fn column_schemas_to_table_descriptor_native_only_rejects_non_native_types() {
         let columns = vec![test_column("uuid_col", Type::UUID, 1, true, None)];
         let schema = test_replicated_schema(columns);
 
         let result = BigQueryClient::column_schemas_to_table_descriptor(
             &schema,
             true,
-            &materializer(DestinationTypeCompatibility::strict()),
+            &materializer(DestinationMaterializationPolicy::native_only_reject()),
         );
 
         assert!(matches!(

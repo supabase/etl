@@ -6,7 +6,7 @@
 use std::{fmt, path::Path, str::FromStr, time::Duration};
 
 use etl::{
-    destination::DestinationTypeCompatibility,
+    destination::DestinationMaterializationPolicy,
     store::{schema::SchemaStore, state::StateStore},
     types::{PipelineId, TableName},
 };
@@ -328,21 +328,20 @@ impl BigQueryDatabase {
     where
         S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
     {
-        self.build_destination_with_compatibility(
+        self.build_destination_with_materialization_policy(
             pipeline_id,
             schema_store,
-            DestinationTypeCompatibility::default(),
+            DestinationMaterializationPolicy::default(),
         )
         .await
     }
 
-    /// Creates a [`BigQueryDestination`] with a custom type compatibility
-    /// policy.
-    pub async fn build_destination_with_compatibility<S>(
+    /// Creates a [`BigQueryDestination`] with a custom materialization policy.
+    pub async fn build_destination_with_materialization_policy<S>(
         &self,
         pipeline_id: PipelineId,
         schema_store: S,
-        type_compatibility: DestinationTypeCompatibility,
+        policy: DestinationMaterializationPolicy,
     ) -> BigQueryDestination<S>
     where
         S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
@@ -350,7 +349,7 @@ impl BigQueryDatabase {
         let options = BigQueryDestinationOptions::new(
             self.dataset_id.clone(),
             Some(0), // Zero staleness for immediate consistency in tests.
-            type_compatibility,
+            policy,
             pipeline_id,
         );
 

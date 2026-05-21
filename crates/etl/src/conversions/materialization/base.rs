@@ -2,7 +2,7 @@ use std::fmt;
 
 use tracing::debug;
 
-use super::DestinationTypeCompatibility;
+use super::DestinationMaterializationPolicy;
 use crate::{
     error::{ErrorKind, EtlResult},
     etl_error,
@@ -104,17 +104,18 @@ pub trait MaterializationRules {
     fn materialize_type(
         &self,
         typ: &Type,
-        compatibility: DestinationTypeCompatibility,
+        policy: DestinationMaterializationPolicy,
     ) -> TypeMaterializationResult<Self::MaterializedType>;
 
     /// Returns the destination cell and its materialized destination type.
     ///
-    /// The returned cell's type must match [`Self::materialize_type`] for the
-    /// input cell's type under the same materialization policy.
+    /// Implementations should derive the materialized type from the input
+    /// source type and policy using the same deterministic mapping as
+    /// [`Self::materialize_type`].
     fn materialize_cell(
         &self,
         typed_cell: TypedCell<Type, Cell>,
-        compatibility: DestinationTypeCompatibility,
+        policy: DestinationMaterializationPolicy,
     ) -> CellMaterializationResult<Self::MaterializedType, Self::MaterializedCell>;
 }
 
@@ -127,8 +128,8 @@ pub type MaterializedCell<R> = TypedCell<
 /// Orchestrates materialization for one destination.
 #[derive(Debug, Clone)]
 pub struct DestinationMaterializer<C: MaterializationRules> {
-    /// Selected type materialization policy.
-    type_compatibility: DestinationTypeCompatibility,
+    /// Selected destination materialization policy.
+    policy: DestinationMaterializationPolicy,
     /// Destination-specific materialization rules.
     rules: C,
 }
@@ -139,18 +140,18 @@ where
     C::MaterializedType: fmt::Display + PartialEq,
 {
     /// Creates a materializer for a destination.
-    pub fn new(type_compatibility: DestinationTypeCompatibility, rules: C) -> Self {
-        Self { type_compatibility, rules }
+    pub fn new(policy: DestinationMaterializationPolicy, rules: C) -> Self {
+        Self { policy, rules }
     }
 
-    /// Returns the configured type materialization policy.
-    pub const fn type_compatibility(&self) -> DestinationTypeCompatibility {
-        self.type_compatibility
+    /// Returns the configured destination materialization policy.
+    pub const fn policy(&self) -> DestinationMaterializationPolicy {
+        self.policy
     }
 
     /// Returns the destination materialized type or an [`EtlError`].
     pub fn materialize_type(&self, typ: &Type) -> EtlResult<C::MaterializedType> {
-        match self.rules.materialize_type(typ, self.type_compatibility) {
+        match self.rules.materialize_type(typ, self.policy) {
             TypeMaterializationResult::Unchanged(typ) | TypeMaterializationResult::Changed(typ) => {
                 Ok(typ)
             }
@@ -189,7 +190,7 @@ where
     ) -> EtlResult<MaterializedCell<C>> {
         let source_type = typed_cell.typ().clone();
         let materialized_type = self.materialize_type(&source_type)?;
-        match self.rules.materialize_cell(typed_cell, self.type_compatibility) {
+        match self.rules.materialize_cell(typed_cell, self.policy) {
             CellMaterializationResult::Materialized { cell, outcome } => self
                 .validate_and_log_materialized_cell(
                     &source_type,
@@ -222,7 +223,8 @@ where
         debug!(
             source_type = source_type.name(),
             materialized_type = %materialized_type,
-            compatibility_mode = ?self.type_compatibility.mode(),
+            type_strategy = ?self.policy.type_strategy(),
+            value_strategy = ?self.policy.value_strategy(),
             materialization_outcome = materialization_outcome.as_str(),
             "materialized destination cell"
         );

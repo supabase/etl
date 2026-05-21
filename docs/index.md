@@ -152,7 +152,7 @@ replication begins. If you use `PostgresStore` as the runtime store,
 |---------|------------------|
 | [Guides](guides/index.md) | Step-by-step instructions to get things done |
 | [Explanations](explanation/index.md) | Deep dives into concepts and architecture |
-| [Data Type Compatibility](explanation/data-type-compatibility.md) | Destination type mapping and compatibility modes |
+| [Data Type Compatibility](explanation/data-type-compatibility.md) | Destination type and value strategy mapping |
 | [Examples](https://github.com/supabase/etl/tree/main/etl-examples) | Runnable `bigquery` and `ducklake` example binaries |
 
 ## Contributing

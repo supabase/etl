@@ -14,7 +14,7 @@ use etl_api::{
 };
 use etl_config::{
     SerializableSecretString,
-    shared::{DestinationTypeCompatibilityMode, DuckLakeMaintenanceMode},
+    shared::{DuckLakeMaintenanceMode, TypeStrategy, ValueStrategy},
 };
 
 use crate::support::test_app::TestApp;
@@ -58,7 +58,8 @@ pub(crate) mod destinations {
             ),
             max_staleness_mins: Some(10),
             connection_pool_size: Some(1),
-            type_compatibility: DestinationTypeCompatibilityMode::Coerce,
+            type_strategy: TypeStrategy::NativeOrString,
+            value_strategy: ValueStrategy::Normalize,
         }
     }
 
@@ -70,7 +71,8 @@ pub(crate) mod destinations {
             service_account_key: SerializableSecretString::from("service-account-key".to_owned()),
             max_staleness_mins: None,
             connection_pool_size: Some(1),
-            type_compatibility: DestinationTypeCompatibilityMode::Coerce,
+            type_strategy: TypeStrategy::NativeOrString,
+            value_strategy: ValueStrategy::Normalize,
         }
     }
 

@@ -9,7 +9,7 @@ use etl_api::{
 };
 use etl_config::{
     Environment, SerializableSecretString,
-    shared::{BatchConfig, DestinationTypeCompatibilityMode},
+    shared::{BatchConfig, TypeStrategy, ValueStrategy},
 };
 use etl_destinations::{
     bigquery::test_utils::{
@@ -64,7 +64,8 @@ fn create_bigquery_config(
         service_account_key: SerializableSecretString::from(sa_key.to_owned()),
         max_staleness_mins: None,
         connection_pool_size: None,
-        type_compatibility: DestinationTypeCompatibilityMode::Coerce,
+        type_strategy: TypeStrategy::NativeOrString,
+        value_strategy: ValueStrategy::Normalize,
     }
 }
 

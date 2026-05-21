@@ -1,7 +1,7 @@
 mod base;
 mod connection;
 mod destination;
-mod destination_compatibility;
+mod destination_materialization;
 mod pipeline;
 mod replicator;
 mod sentry;
@@ -17,8 +17,8 @@ pub use destination::{
     ClickHouseEngine, DestinationConfig, DestinationConfigWithoutSecrets, DuckLakeMaintenanceMode,
     IcebergConfig, IcebergConfigWithoutSecrets,
 };
-pub use destination_compatibility::{
-    DestinationTypeCompatibility, DestinationTypeCompatibilityMode,
+pub use destination_materialization::{
+    DestinationMaterializationPolicy, TypeStrategy, ValueStrategy,
 };
 pub use pipeline::{
     BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PipelineConfig,

@@ -6,4 +6,4 @@ pub use base::{
     CellMaterializationResult, DestinationMaterializer, MaterializationOutcome,
     MaterializationRules, MaterializedCell, TypeMaterializationResult, TypedCell,
 };
-pub use etl_config::shared::{DestinationTypeCompatibility, DestinationTypeCompatibilityMode};
+pub use etl_config::shared::{DestinationMaterializationPolicy, TypeStrategy, ValueStrategy};

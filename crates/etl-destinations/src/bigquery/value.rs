@@ -22,7 +22,7 @@ use crate::bigquery::materialization::BigQueryMaterializer;
 /// as protobuf `float` and `double` respectively. Keeping that encoding here
 /// preserves the source width while [`BigQueryType::to_sql`] still emits the
 /// BigQuery SQL type required for DDL.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum BigQueryType {
     /// BigQuery `BOOL`.
     Bool,
@@ -51,7 +51,7 @@ pub(super) enum BigQueryType {
 }
 
 /// BigQuery repeated column element type.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum BigQueryArrayType {
     /// Repeated BigQuery `BOOL`.
     Bool,
@@ -81,7 +81,7 @@ pub(super) enum BigQueryArrayType {
 ///
 /// BigQuery stores the column as `INT64`, but the Write API accepts narrower
 /// protobuf integer fields when the source type is narrower.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum BigQueryIntEncoding {
     /// Encode values with protobuf `int32`.
     Int32,
@@ -95,7 +95,7 @@ pub(super) enum BigQueryIntEncoding {
 /// The Write API descriptor still uses protobuf `float` for PostgreSQL
 /// `real`, and protobuf `double` for PostgreSQL `double precision`, matching
 /// the source value's precision and the existing main-branch wire format.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum BigQueryFloatEncoding {
     /// Encode values with protobuf `float`.
     Float,
@@ -627,7 +627,7 @@ mod tests {
     use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
     use etl::{
         error::{ErrorKind, EtlError},
-        materialization::DestinationTypeCompatibility,
+        materialization::DestinationMaterializationPolicy,
         types::{Cell, PgNumeric, Type},
     };
 
@@ -636,9 +636,9 @@ mod tests {
 
     fn typed_row(
         cells: impl IntoIterator<Item = (Type, Cell)>,
-        compatibility: DestinationTypeCompatibility,
+        policy: DestinationMaterializationPolicy,
     ) -> Result<BigQueryTableRow, EtlError> {
-        let materializer = BigQueryMaterialization::materializer(compatibility);
+        let materializer = BigQueryMaterialization::materializer(policy);
         BigQueryTableRow::try_from_typed_cells(cells, &materializer)
     }
 
@@ -651,7 +651,7 @@ mod tests {
                 (Type::BOOL, Cell::Bool(true)),
                 (Type::TEXT, Cell::Null),
             ],
-            DestinationTypeCompatibility::strict(),
+            DestinationMaterializationPolicy::native_only_reject(),
         );
         assert!(result.is_ok());
     }
@@ -660,7 +660,7 @@ mod tests {
     fn bigquery_table_row_try_from_rejects_numeric_nan() {
         let result = typed_row(
             [(Type::INT4, Cell::I32(42)), (Type::NUMERIC, Cell::Numeric(PgNumeric::NaN))],
-            DestinationTypeCompatibility::strict(),
+            DestinationMaterializationPolicy::native_only_reject(),
         );
         assert!(result.is_err());
     }
@@ -672,7 +672,7 @@ mod tests {
                 (Type::TEXT, Cell::String("valid".to_owned())),
                 (Type::NUMERIC, Cell::Numeric(PgNumeric::PositiveInfinity)),
             ],
-            DestinationTypeCompatibility::strict(),
+            DestinationMaterializationPolicy::native_only_reject(),
         );
         assert!(result.is_err());
     }
@@ -681,7 +681,9 @@ mod tests {
     fn bigquery_table_row_try_from_rejects_json_number_outside_float_domain() {
         let result = BigQueryTableRow::try_from_typed_tagged_cells(
             [(1, Type::JSON, Cell::String(r#"{"value":1e309}"#.to_owned()))],
-            &BigQueryMaterialization::materializer(DestinationTypeCompatibility::strict()),
+            &BigQueryMaterialization::materializer(
+                DestinationMaterializationPolicy::native_only_reject(),
+            ),
         );
         assert!(result.is_err());
     }
@@ -690,7 +692,9 @@ mod tests {
     fn bigquery_table_row_try_from_rejects_json_integer_precision_loss() {
         let result = BigQueryTableRow::try_from_typed_tagged_cells(
             [(1, Type::JSON, Cell::String(r#"{"value":18446744073709551616}"#.to_owned()))],
-            &BigQueryMaterialization::materializer(DestinationTypeCompatibility::strict()),
+            &BigQueryMaterialization::materializer(
+                DestinationMaterializationPolicy::native_only_reject(),
+            ),
         );
         assert!(result.is_err());
     }
@@ -708,7 +712,9 @@ mod tests {
                     ),
                 ),
             ],
-            &BigQueryMaterialization::materializer(DestinationTypeCompatibility::preserve()),
+            &BigQueryMaterialization::materializer(
+                DestinationMaterializationPolicy::string_if_risky_preserve(),
+            ),
         );
         assert!(result.is_ok());
     }
@@ -719,7 +725,7 @@ mod tests {
 
         let result = typed_row(
             [(Type::DATE, Cell::Date(invalid_date.into()))],
-            DestinationTypeCompatibility::strict(),
+            DestinationMaterializationPolicy::native_only_reject(),
         );
         assert!(result.is_err());
     }
@@ -729,7 +735,7 @@ mod tests {
         let array_with_nulls = ArrayCell::I32(vec![Some(1), None, Some(3)]);
         let result = typed_row(
             [(Type::INT4_ARRAY, Cell::Array(array_with_nulls))],
-            DestinationTypeCompatibility::strict(),
+            DestinationMaterializationPolicy::native_only_reject(),
         );
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -747,7 +753,7 @@ mod tests {
 
         let result = typed_row(
             [(Type::NUMERIC_ARRAY, Cell::Array(array_with_rounding_risk))],
-            DestinationTypeCompatibility::strict(),
+            DestinationMaterializationPolicy::native_only_reject(),
         );
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -765,7 +771,7 @@ mod tests {
                 (Type::INT4_ARRAY, Cell::Array(valid_array)),
                 (Type::TEXT, Cell::String("suffix".to_owned())),
             ],
-            DestinationTypeCompatibility::strict(),
+            DestinationMaterializationPolicy::native_only_reject(),
         );
         assert!(result.is_ok());
     }
@@ -787,7 +793,7 @@ mod tests {
                     )])),
                 ),
             ],
-            DestinationTypeCompatibility::strict(),
+            DestinationMaterializationPolicy::native_only_reject(),
         );
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -808,7 +814,7 @@ mod tests {
                 (Type::TIME, Cell::Time(valid_time.into())),
                 (Type::TIMESTAMP, Cell::Timestamp(valid_datetime.into())),
             ],
-            DestinationTypeCompatibility::default(),
+            DestinationMaterializationPolicy::default(),
         );
         assert!(result.is_ok());
     }
@@ -820,7 +826,7 @@ mod tests {
 
         let result = typed_row(
             [(Type::NUMERIC, Cell::Numeric(over_scale_numeric))],
-            DestinationTypeCompatibility::strict(),
+            DestinationMaterializationPolicy::native_only_reject(),
         );
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -829,7 +835,7 @@ mod tests {
     }
 
     #[test]
-    fn bigquery_table_row_try_from_uses_coerce_materialization_when_configured() {
+    fn bigquery_table_row_try_from_uses_normalize_materialization_when_configured() {
         let result = BigQueryTableRow::try_from_typed_tagged_cells(
             [
                 (
@@ -842,7 +848,9 @@ mod tests {
                 (2, Type::JSON, Cell::String(r#"{"value":18446744073709551616}"#.to_owned())),
                 (3, Type::FLOAT8, Cell::F64(-0.0)),
             ],
-            &BigQueryMaterialization::materializer(DestinationTypeCompatibility::coerce()),
+            &BigQueryMaterialization::materializer(
+                DestinationMaterializationPolicy::native_or_string_normalize(),
+            ),
         );
 
         assert!(result.is_ok());

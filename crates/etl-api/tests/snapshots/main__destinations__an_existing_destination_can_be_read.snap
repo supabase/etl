@@ -1,5 +1,6 @@
 ---
 source: crates/etl-api/tests/destinations.rs
+assertion_line: 111
 expression: response.config
 ---
 BigQuery {
@@ -12,5 +13,6 @@ BigQuery {
     connection_pool_size: Some(
         1,
     ),
-    type_compatibility: Coerce,
+    type_strategy: NativeOrString,
+    value_strategy: Normalize,
 }

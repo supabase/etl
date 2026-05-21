@@ -14,5 +14,6 @@ BigQuery {
     connection_pool_size: Some(
         1,
     ),
-    type_compatibility: Coerce,
+    type_strategy: NativeOrString,
+    value_strategy: Normalize,
 }
