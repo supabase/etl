@@ -16,16 +16,16 @@ use etl::{
     },
     error::{ErrorKind, EtlResult},
     etl_error,
-    state::destination_metadata::DestinationTableMetadata,
+    state::destination_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus},
     store::{schema::SchemaStore, state::StateStore},
     types::{
-        Event, EventSequenceKey, OldTableRow, PartialTableRow, ReplicatedTableSchema, TableId,
-        TableName, TableRow, UpdatedTableRow,
+        Event, EventSequenceKey, OldTableRow, PartialTableRow, ReplicatedTableSchema, SchemaDiff,
+        TableId, TableName, TableRow, UpdatedTableRow,
     },
 };
 use metrics::gauge;
 use parking_lot::Mutex;
-use pg_escape::quote_identifier;
+use pg_escape::{quote_identifier, quote_literal};
 use sqlx::{AssertSqlSafe, PgPool, postgres::PgPoolOptions};
 #[cfg(feature = "test-utils")]
 use tokio::sync::oneshot;
@@ -67,7 +67,10 @@ use crate::{
             query_table_storage_metrics, register_metrics,
             resolve_ducklake_metadata_schema_blocking, spawn_ducklake_metrics_sampler,
         },
-        schema::build_create_table_sql_ducklake,
+        schema::{
+            build_add_column_sql_ducklake, build_drop_column_sql_ducklake,
+            build_qualified_create_table_sql_ducklake, build_rename_column_sql_ducklake,
+        },
     },
     table_name::try_stringify_table_name,
 };
@@ -291,6 +294,22 @@ fn validate_ducklake_replica_identity(
     }
 
     Ok(())
+}
+
+/// Builds the query used to inspect a DuckLake table shape.
+fn ducklake_table_columns_sql(table_name: &str) -> String {
+    format!(
+        "select column_name from information_schema.columns where table_catalog = {} and \
+         table_schema = {} and table_name = {} order by ordinal_position",
+        quote_literal(LAKE_CATALOG),
+        quote_literal("main"),
+        quote_literal(table_name)
+    )
+}
+
+/// Finds a destination column by name.
+fn find_ducklake_column(column_names: &[String], column_name: &str) -> Option<usize> {
+    column_names.iter().position(|name| name == column_name)
 }
 
 impl<S> DuckLakeDestination<S>
@@ -798,6 +817,288 @@ where
         Ok(())
     }
 
+    /// Handles a schema-change relation event by applying the destination DDL
+    /// diff and advancing destination table metadata.
+    async fn handle_relation_event(
+        &self,
+        new_replicated_table_schema: &ReplicatedTableSchema,
+    ) -> EtlResult<()> {
+        let table_id = new_replicated_table_schema.id();
+        let new_snapshot_id = new_replicated_table_schema.inner().snapshot_id;
+        let new_replication_mask = new_replicated_table_schema.replication_mask().clone();
+
+        let metadata =
+            self.store.get_applied_destination_table_metadata(table_id).await?.ok_or_else(
+                || {
+                    etl_error!(
+                        ErrorKind::CorruptedTableSchema,
+                        "Missing destination table metadata",
+                        format!(
+                            "No destination table metadata found for table {} when processing \
+                             schema change. The metadata should have been recorded during initial \
+                             table synchronization.",
+                            table_id
+                        )
+                    )
+                },
+            )?;
+
+        let current_snapshot_id = metadata.snapshot_id;
+        let current_replication_mask = metadata.replication_mask.clone();
+        if current_snapshot_id == new_snapshot_id
+            && current_replication_mask == new_replication_mask
+        {
+            info!(
+                table_id = %table_id,
+                snapshot_id = %new_snapshot_id,
+                replication_mask = %new_replication_mask,
+                "ducklake schema unchanged"
+            );
+            return Ok(());
+        }
+
+        info!(
+            table_id = %table_id,
+            current_snapshot_id = %current_snapshot_id,
+            new_snapshot_id = %new_snapshot_id,
+            current_replication_mask = %current_replication_mask,
+            new_replication_mask = %new_replication_mask,
+            "ducklake schema change detected"
+        );
+
+        let current_table_schema =
+            self.store.get_table_schema(&table_id, current_snapshot_id).await?.ok_or_else(
+                || {
+                    etl_error!(
+                        ErrorKind::InvalidState,
+                        "Old schema not found",
+                        format!(
+                            "Could not find schema for table {} at snapshot_id {}",
+                            table_id, current_snapshot_id
+                        )
+                    )
+                },
+            )?;
+        let current_schema = ReplicatedTableSchema::from_mask(
+            current_table_schema,
+            current_replication_mask.clone(),
+        );
+        let table_name = metadata.destination_table_id.clone();
+        let updated_metadata = DestinationTableMetadata::new_applied(
+            table_name.clone(),
+            current_snapshot_id,
+            current_replication_mask,
+        )
+        .with_schema_change(
+            new_snapshot_id,
+            new_replication_mask,
+            DestinationTableSchemaStatus::Applying,
+        );
+        self.store.store_destination_table_metadata(table_id, updated_metadata.clone()).await?;
+
+        let diff = current_schema.diff(new_replicated_table_schema);
+        if let Err(error) = self.apply_schema_diff(&table_name, &diff).await {
+            warn!(
+                error = %error,
+                table_id = %table_id,
+                table = %table_name,
+                "ducklake schema change failed"
+            );
+            return Err(error);
+        }
+
+        self.store
+            .store_destination_table_metadata(table_id, updated_metadata.to_applied())
+            .await?;
+        self.created_tables.lock().insert(table_name.clone());
+
+        info!(
+            table_id = %table_id,
+            table = %table_name,
+            snapshot_id = %new_snapshot_id,
+            "ducklake schema change completed"
+        );
+
+        Ok(())
+    }
+
+    /// Applies a schema diff while serializing with table-local writes and
+    /// external maintenance.
+    async fn apply_schema_diff(&self, table_name: &str, diff: &SchemaDiff) -> EtlResult<()> {
+        if diff.is_empty() {
+            debug!(table = %table_name, "ducklake schema diff is empty");
+            return Ok(());
+        }
+
+        info!(
+            table = %table_name,
+            additions = diff.columns_to_add.len(),
+            removals = diff.columns_to_remove.len(),
+            renames = diff.columns_to_rename.len(),
+            "ducklake applying schema diff"
+        );
+
+        let _table_write_permit = self.acquire_table_write_slot(table_name).await?;
+        let _checkpoint_guard = self.acquire_mutation_guard().await;
+        let table_name = table_name.to_owned();
+        let diff = diff.clone();
+
+        run_duckdb_blocking(Arc::clone(&self.pool), Arc::clone(&self.blocking_slots), move |conn| {
+            let execute_ddl = |sql: &str, description: &'static str| -> EtlResult<()> {
+                conn.execute_batch(sql).map_err(|source| {
+                    etl_error!(
+                        ErrorKind::DestinationQueryFailed,
+                        description,
+                        format_query_error_detail(sql),
+                        source: source
+                    )
+                })
+            };
+
+            let read_column_names = || -> EtlResult<Vec<String>> {
+                let sql = ducklake_table_columns_sql(&table_name);
+                let mut statement = conn.prepare(&sql).map_err(|source| {
+                    etl_error!(
+                        ErrorKind::DestinationQueryFailed,
+                        "DuckLake table schema lookup failed",
+                        format_query_error_detail(&sql),
+                        source: source
+                    )
+                })?;
+                let mut rows = statement.query([]).map_err(|source| {
+                    etl_error!(
+                        ErrorKind::DestinationQueryFailed,
+                        "DuckLake table schema lookup failed",
+                        format_query_error_detail(&sql),
+                        source: source
+                    )
+                })?;
+                let mut column_names = Vec::new();
+                while let Some(row) = rows.next().map_err(|source| {
+                    etl_error!(
+                        ErrorKind::DestinationQueryFailed,
+                        "DuckLake table schema lookup failed",
+                        format_query_error_detail(&sql),
+                        source: source
+                    )
+                })? {
+                    column_names.push(row.get(0).map_err(|source| {
+                        etl_error!(
+                            ErrorKind::DestinationQueryFailed,
+                            "DuckLake table schema lookup failed",
+                            format_query_error_detail(&sql),
+                            source: source
+                        )
+                    })?);
+                }
+
+                Ok(column_names)
+            };
+
+            execute_ddl("begin transaction", "DuckLake DDL transaction failed")?;
+
+            let apply_result = (|| -> EtlResult<()> {
+                let mut column_names = read_column_names()?;
+
+                for column in &diff.columns_to_add {
+                    if find_ducklake_column(&column_names, &column.name).is_some() {
+                        debug!(
+                            table = %table_name,
+                            column = %column.name,
+                            "ducklake add column skipped because destination column already \
+                             exists"
+                        );
+                        continue;
+                    }
+
+                    let sql = build_add_column_sql_ducklake(&table_name, column);
+                    execute_ddl(&sql, "DuckLake alter table add column failed")?;
+                    column_names.push(column.name.clone());
+                }
+
+                for rename in &diff.columns_to_rename {
+                    let old_index = find_ducklake_column(&column_names, &rename.old_name);
+                    let new_index = find_ducklake_column(&column_names, &rename.new_name);
+
+                    match (old_index, new_index) {
+                        (Some(index), None) => {
+                            let sql = build_rename_column_sql_ducklake(
+                                &table_name,
+                                &rename.old_name,
+                                &rename.new_name,
+                            );
+                            execute_ddl(&sql, "DuckLake alter table rename column failed")?;
+                            column_names[index] = rename.new_name.clone();
+                        }
+                        (None, Some(_)) => {
+                            debug!(
+                                table = %table_name,
+                                old_column = %rename.old_name,
+                                new_column = %rename.new_name,
+                                "ducklake rename column skipped because destination column \
+                                 already has new name"
+                            );
+                        }
+                        (None, None) => {
+                            return Err(etl_error!(
+                                ErrorKind::CorruptedTableSchema,
+                                "DuckLake destination column for rename is missing",
+                                format!(
+                                    "Table '{table_name}' has neither old column '{}' nor new \
+                                     column '{}'",
+                                    rename.old_name, rename.new_name
+                                )
+                            ));
+                        }
+                        (Some(_), Some(_)) => {
+                            return Err(etl_error!(
+                                ErrorKind::CorruptedTableSchema,
+                                "DuckLake destination column rename is ambiguous",
+                                format!(
+                                    "Table '{table_name}' has both old column '{}' and new column \
+                                     '{}'",
+                                    rename.old_name, rename.new_name
+                                )
+                            ));
+                        }
+                    }
+                }
+
+                for column in &diff.columns_to_remove {
+                    let Some(index) = find_ducklake_column(&column_names, &column.name) else {
+                        debug!(
+                            table = %table_name,
+                            column = %column.name,
+                            "ducklake drop column skipped because destination column is \
+                             already absent"
+                        );
+                        continue;
+                    };
+
+                    let sql = build_drop_column_sql_ducklake(&table_name, &column.name);
+                    execute_ddl(&sql, "DuckLake alter table drop column failed")?;
+                    column_names.remove(index);
+                }
+
+                Ok(())
+            })();
+
+            if let Err(error) = apply_result {
+                if let Err(rollback_error) = conn.execute_batch("rollback") {
+                    warn!(
+                        error = %rollback_error,
+                        table = %table_name,
+                        "ducklake schema change rollback failed"
+                    );
+                }
+                return Err(error);
+            }
+
+            execute_ddl("commit", "DuckLake DDL transaction commit failed")
+        })
+        .await
+    }
+
     /// Writes streaming CDC events to the destination.
     ///
     /// Insert, Update, and Delete events are grouped by table and written in
@@ -816,10 +1117,9 @@ where
                 (ReplicatedTableSchema, Vec<TrackedTableMutation>),
             > = HashMap::new();
 
-            // Accumulate non-truncate events, stopping at the first Truncate.
+            // Accumulate row events, stopping at the first DDL or truncate boundary.
             while let Some(event) = event_iter.peek() {
-                if matches!(event, Event::Truncate(_)) {
-                    // Handled later
+                if matches!(event, Event::Relation(_) | Event::Truncate(_)) {
                     break;
                 }
 
@@ -1013,6 +1313,14 @@ where
                 }
             }
 
+            // Apply schema changes sequentially before any later row events
+            // are encoded with the new replicated schema.
+            while let Some(Event::Relation(_)) = event_iter.peek() {
+                if let Some(Event::Relation(relation)) = event_iter.next() {
+                    self.handle_relation_event(&relation.replicated_table_schema).await?;
+                }
+            }
+
             // Collect contiguous truncate events while preserving table-local order.
             let mut truncate_table_ids: HashMap<
                 TableId,
@@ -1106,20 +1414,128 @@ where
         Ok(())
     }
 
+    /// Creates a DuckLake table and brackets the DDL with destination metadata
+    /// state transitions.
+    async fn create_table_with_metadata(
+        &self,
+        table_id: TableId,
+        table_name: &str,
+        replicated_table_schema: &ReplicatedTableSchema,
+    ) -> EtlResult<()> {
+        let metadata = DestinationTableMetadata::new_applying(
+            table_name.to_owned(),
+            replicated_table_schema.inner().snapshot_id,
+            replicated_table_schema.replication_mask().clone(),
+        );
+        self.store.store_destination_table_metadata(table_id, metadata.clone()).await?;
+
+        self.issue_create_table_stmt(table_name, replicated_table_schema).await?;
+
+        self.store.store_destination_table_metadata(table_id, metadata.to_applied()).await
+    }
+
+    /// Issues DuckLake's idempotent `create table if not exists` statement.
+    async fn issue_create_table_stmt(
+        &self,
+        table_name: &str,
+        replicated_table_schema: &ReplicatedTableSchema,
+    ) -> EtlResult<()> {
+        let column_schemas: Vec<_> = replicated_table_schema.column_schemas().cloned().collect();
+        let ddl = build_qualified_create_table_sql_ducklake(table_name, &column_schemas);
+        let created_tables = Arc::clone(&self.created_tables);
+        let table_name = table_name.to_owned();
+        let _checkpoint_guard = self.acquire_mutation_guard().await;
+
+        run_duckdb_blocking(
+            Arc::clone(&self.pool),
+            Arc::clone(&self.blocking_slots),
+            move |conn| -> EtlResult<()> {
+                debug!(table = %table_name, "ducklake create table begin");
+                match conn.execute_batch(&ddl) {
+                    Ok(()) => {
+                        created_tables.lock().insert(table_name.clone());
+                    }
+                    Err(error) if is_create_table_conflict(&error, &table_name) => {
+                        created_tables.lock().insert(table_name.clone());
+                    }
+                    Err(error) => {
+                        return Err(etl_error!(
+                            ErrorKind::DestinationQueryFailed,
+                            "DuckLake create table failed",
+                            format_query_error_detail(&ddl),
+                            source: error
+                        ));
+                    }
+                }
+                debug!(table = %table_name, "ducklake create table finished");
+                Ok(())
+            },
+        )
+        .await
+    }
+
+    /// Replays interrupted DuckLake DDL and transitions metadata back to
+    /// `Applied`.
+    async fn recover_applying_metadata(
+        &self,
+        table_id: TableId,
+        table_name: &str,
+        replicated_table_schema: &ReplicatedTableSchema,
+        metadata: DestinationTableMetadata,
+    ) -> EtlResult<()> {
+        warn!(
+            table_id = %table_id,
+            table = %table_name,
+            "ducklake table has Applying metadata, recovering interrupted operation"
+        );
+
+        match metadata.previous_snapshot_id {
+            Some(previous_snapshot_id) => {
+                let old_table_schema = self
+                    .store
+                    .get_table_schema(&table_id, previous_snapshot_id)
+                    .await?
+                    .ok_or_else(|| {
+                        etl_error!(
+                            ErrorKind::InvalidState,
+                            "Old schema not found for recovery",
+                            format!(
+                                "Cannot find schema for table {} at snapshot_id {}",
+                                table_id, previous_snapshot_id
+                            )
+                        )
+                    })?;
+                let old_schema = ReplicatedTableSchema::from_mask(
+                    old_table_schema,
+                    metadata.replication_mask.clone(),
+                );
+                let diff = old_schema.diff(replicated_table_schema);
+                self.apply_schema_diff(table_name, &diff).await?;
+            }
+            None => {
+                self.issue_create_table_stmt(table_name, replicated_table_schema).await?;
+            }
+        }
+
+        self.store.store_destination_table_metadata(table_id, metadata.to_applied()).await
+    }
+
     /// Ensures the destination table exists, creating it (DDL) if necessary.
     async fn ensure_table_exists(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<DuckLakeTableName> {
         let table_id = replicated_table_schema.id();
-        let table_name = self.get_or_create_destination_table_name(replicated_table_schema).await?;
+        let metadata = self.store.get_destination_table_metadata(table_id).await?;
+        let table_name = metadata.as_ref().map_or_else(
+            || table_name_to_ducklake_table_name(replicated_table_schema.name()),
+            |metadata| Ok(metadata.destination_table_id.clone()),
+        )?;
 
-        // Fast path: already created.
+        if !metadata.as_ref().is_some_and(DestinationTableMetadata::is_applying)
+            && self.created_tables.lock().contains(&table_name)
         {
-            let cache = self.created_tables.lock();
-            if cache.contains(&table_name) {
-                return Ok(table_name);
-            }
+            return Ok(table_name);
         }
 
         info!(
@@ -1135,68 +1551,36 @@ where
                 etl_error!(ErrorKind::InvalidState, "DuckLake table creation semaphore closed")
             })?;
 
+        let metadata = self.store.get_destination_table_metadata(table_id).await?;
+        let table_name = metadata.as_ref().map_or_else(
+            || table_name_to_ducklake_table_name(replicated_table_schema.name()),
+            |metadata| Ok(metadata.destination_table_id.clone()),
+        )?;
+
+        if !metadata.as_ref().is_some_and(DestinationTableMetadata::is_applying)
+            && self.created_tables.lock().contains(&table_name)
         {
-            let cache = self.created_tables.lock();
-            if cache.contains(&table_name) {
-                return Ok(table_name);
-            }
+            return Ok(table_name);
         }
 
-        let metadata = DestinationTableMetadata::new_applying(
-            table_name.clone(),
-            replicated_table_schema.inner().snapshot_id,
-            replicated_table_schema.replication_mask().clone(),
-        );
-        self.store.store_destination_table_metadata(table_id, metadata.clone()).await?;
-
-        // `build_create_table_sql_ducklake` generates `CREATE TABLE IF NOT EXISTS
-        // "name" (...)`. Prefix the table name with the catalog alias so
-        // DuckLake knows which catalog to create the table in.
-        let ddl = build_create_table_sql_ducklake(
-            &table_name,
-            &replicated_table_schema.inner().column_schemas,
-        );
-        let quoted_table_name = quote_identifier(&table_name).into_owned();
-        let qualified_ddl =
-            ddl.replace(&quoted_table_name, &format!("{LAKE_CATALOG}.{quoted_table_name}"));
-
-        let created_tables = Arc::clone(&self.created_tables);
-        let table_name_clone = table_name.clone();
-        let _checkpoint_guard = self.acquire_mutation_guard().await;
-
-        run_duckdb_blocking(
-            Arc::clone(&self.pool),
-            Arc::clone(&self.blocking_slots),
-            move |conn| -> EtlResult<()> {
-                debug!(
-                    table = %table_name_clone,
-                    "ducklake create table begin"
-                );
-                match conn.execute_batch(&qualified_ddl) {
-                    Ok(()) => {
-                        created_tables.lock().insert(table_name_clone.clone());
-                    }
-                    Err(e) if is_create_table_conflict(&e, &table_name_clone) => {
-                        created_tables.lock().insert(table_name_clone.clone());
-                    }
-                    Err(e) => {
-                        return Err(etl_error!(
-                            ErrorKind::DestinationQueryFailed,
-                            "DuckLake CREATE TABLE failed",
-                            format_query_error_detail(&qualified_ddl),
-                            source: e
-                        ));
-                    }
-                }
-                debug!(
-                    table = %table_name_clone,
-                    "ducklake create table finished"
-                );
-                Ok(())
-            },
-        )
-        .await?;
-        self.store.store_destination_table_metadata(table_id, metadata.to_applied()).await?;
+        match metadata {
+            None => {
+                self.create_table_with_metadata(table_id, &table_name, replicated_table_schema)
+                    .await?;
+            }
+            Some(metadata) if metadata.is_applying() => {
+                self.recover_applying_metadata(
+                    table_id,
+                    &table_name,
+                    replicated_table_schema,
+                    metadata,
+                )
+                .await?;
+            }
+            Some(_) => {
+                self.issue_create_table_stmt(&table_name, replicated_table_schema).await?;
+            }
+        }
 
         Ok(table_name)
     }
@@ -1223,21 +1607,6 @@ where
             Arc::clone(&self.streaming_progress_table_created),
         )
         .await
-    }
-
-    /// Returns the stored destination table name for `table_id`, creating a
-    /// default name if none exists yet.
-    async fn get_or_create_destination_table_name(
-        &self,
-        replicated_table_schema: &ReplicatedTableSchema,
-    ) -> EtlResult<DuckLakeTableName> {
-        let table_id = replicated_table_schema.id();
-
-        if let Some(existing) = self.store.get_destination_table_metadata(table_id).await? {
-            return Ok(existing.destination_table_id);
-        }
-
-        table_name_to_ducklake_table_name(replicated_table_schema.name())
     }
 
     /// Serializes table-local truncate and CDC mutation writes.
