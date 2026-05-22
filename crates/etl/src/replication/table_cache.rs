@@ -25,6 +25,22 @@
 //!   relation state for that snapshot.
 //! - [`SharedTableState::Ready`], where the full [`ReplicatedTableSchema`]
 //!   needed for row decoding is already materialized in memory.
+//!
+//! The cache relies on the following invariants:
+//! - A table has exactly one protocol owner at a time. The owner may be the
+//!   apply worker or the table sync worker for that table; non-owners must skip
+//!   DDL, `RELATION`, and row messages without changing the cache.
+//! - A table copy stores the initial schema with snapshot `0/0` and marks the
+//!   table [`SharedTableState::Ready`] before catchup rows can be decoded.
+//! - A table-copy restart removes any cached state before storing the fresh
+//!   `0/0` schema. The new copy lineage must repopulate the cache; stale ready
+//!   state from a previous copy must not be reused.
+//! - DDL handling stores the durable schema version before moving the cache to
+//!   [`SharedTableState::WaitingForRelation`] for that snapshot.
+//! - [`SharedTableState::WaitingForRelation`] is not a failure state, but it is
+//!   not decodable. Row handlers must reject row messages until a later
+//!   `RELATION` message materializes the runtime masks and moves the table back
+//!   to [`SharedTableState::Ready`].
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -107,6 +123,16 @@ impl SharedTableCache {
         replicated_table_schema: ReplicatedTableSchema,
     ) {
         self.upsert(table_id, SharedTableState::Ready { replicated_table_schema }).await;
+    }
+
+    /// Removes cached runtime state for a table.
+    ///
+    /// This is intentionally idempotent: a first copy may not have cached state
+    /// yet, while an in-process copy restart may have stale ready state from
+    /// the previous copy.
+    pub(crate) async fn remove_table(&self, table_id: TableId) {
+        let mut guard = self.inner.write().await;
+        guard.remove(&table_id);
     }
 
     /// Inserts or updates shared table state.
@@ -253,5 +279,23 @@ mod tests {
         assert_eq!(table_ids.len(), 2);
         assert!(table_ids.contains(&ready_table_id));
         assert!(table_ids.contains(&waiting_table_id));
+    }
+
+    #[tokio::test]
+    async fn remove_table_is_idempotent() {
+        let cache = SharedTableCache::new();
+        let table_id = TableId::new(123);
+
+        cache.remove_table(table_id).await;
+        assert!(cache.get(&table_id).await.is_none());
+
+        cache.note_ready(table_id, create_test_schema()).await;
+        assert!(cache.get(&table_id).await.is_some());
+
+        cache.remove_table(table_id).await;
+        cache.remove_table(table_id).await;
+
+        assert!(cache.get(&table_id).await.is_none());
+        assert!(!cache.active_table_ids().await.contains(&table_id));
     }
 }
