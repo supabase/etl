@@ -15,7 +15,7 @@ use crate::{
     bail,
     concurrency::{BatchBudgetController, MemoryMonitor, ShutdownRx},
     destination::{
-        Destination,
+        PipelineDestination,
         async_result::{DropTableForCopyResult, WriteTableRowsResult},
     },
     error::{ErrorKind, EtlResult},
@@ -23,7 +23,7 @@ use crate::{
     metrics::{ETL_TABLE_COPY_DURATION_SECONDS, PARTITIONING_LABEL},
     replication::{client::PgReplicationClient, table_cache::SharedTableCache},
     state::table::{TableReplicationPhase, TableReplicationPhaseType},
-    store::{cleanup::CleanupStore, schema::SchemaStore, state::StateStore},
+    store::{PipelineStore, schema::SchemaStore, state::StateStore},
     types::PipelineId,
     workers::{TableCopyResult, TableSyncWorkerState, table_copy},
 };
@@ -99,8 +99,8 @@ pub(crate) async fn start_table_sync<S, D>(
     batch_budget: BatchBudgetController,
 ) -> EtlResult<TableSyncResult>
 where
-    S: StateStore + SchemaStore + CleanupStore + Clone + Send + 'static,
-    D: Destination + Clone + Send + 'static,
+    S: PipelineStore,
+    D: PipelineDestination,
 {
     info!(table_id = table_id.0, "starting initial table sync");
 

@@ -36,14 +36,21 @@
 //! external systems.
 //!
 //! ## Store
-//! The [`store::schema::SchemaStore`] and [`store::state::StateStore`] traits
-//! define where the table schemas, replication state, and destination table
-//! metadata are stored. These stores are critical to a pipeline's operation, as
-//! they allow it to be safely paused and resumed.
+//! The [`store::PipelineStore`] trait defines the complete store surface needed
+//! by the pipeline runtime. It combines narrower capabilities for table
+//! schemas, replication state, destination table metadata, and table lifecycle
+//! operations. These stores are critical to a pipeline's operation, as they
+//! allow it to be safely paused and resumed.
 //!
 //! The [`store::state::StateStore`] trait handles table replication states,
 //! durable replication progress, and destination table metadata, providing a
 //! single interface for all state-related storage operations.
+//!
+//! The [`store::schema::SchemaStore`] trait handles versioned table schemas,
+//! and [`store::TableLifecycleStore`] handles table-scoped reset and removal
+//! operations that must update state, schema, and metadata consistently.
+//! [`store::DestinationStore`] and [`store::PipelineStore`] are facade traits
+//! for code that needs common combinations of these capabilities.
 //!
 //! **Note:** To pause and resume a pipeline after the process is stopped, it
 //! must be able to persist data durably. The crate itself provides no

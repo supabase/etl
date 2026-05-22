@@ -7,7 +7,7 @@ use etl::{
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
     state::destination_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus},
-    store::{schema::SchemaStore, state::StateStore},
+    store::DestinationStore,
     types::{
         ColumnSchema, DeleteEvent, Event, InsertEvent, OldTableRow, ReplicatedTableSchema, TableId,
         TableRow, UpdateEvent, UpdatedTableRow,
@@ -48,7 +48,7 @@ impl<S: Clone, T: TokenProvider, C: StreamClient> Clone for Destination<S, T, C>
 
 impl<S, T, C> Destination<S, T, C>
 where
-    S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
+    S: DestinationStore,
     T: TokenProvider + 'static,
     C: StreamClient,
 {
@@ -417,7 +417,7 @@ where
 
 impl<S, T, C> etl::destination::Destination for Destination<S, T, C>
 where
-    S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
+    S: DestinationStore,
     T: TokenProvider + 'static,
     C: StreamClient,
 {

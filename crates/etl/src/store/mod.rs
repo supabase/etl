@@ -9,17 +9,24 @@
 //! - [`state`] - Replication progress and table synchronization states
 //! - [`schema`] - Database schema information, versioned schema storage, and
 //!   obsolete schema pruning
-//! - [`cleanup`] - Cleanup methods that span both stores
+//! - [`destination`] - Combined store capabilities commonly required by
+//!   destination implementations
+//! - [`lifecycle`] - Table lifecycle operations that span both stores
+//! - [`pipeline`] - Combined store capabilities required by the pipeline
 //!
 //! The [`both`] module provides combined implementations that handle both
 //! state and schema storage in unified systems.
 
 pub mod both;
-pub mod cleanup;
+pub mod destination;
+pub mod lifecycle;
+pub mod pipeline;
 pub mod schema;
 pub mod state;
 
 pub use both::{memory::MemoryStore, postgres::PostgresStore};
-pub use cleanup::CleanupStore;
+pub use destination::DestinationStore;
+pub use lifecycle::TableLifecycleStore;
+pub use pipeline::PipelineStore;
 pub use schema::SchemaStore;
 pub use state::{StateStore, TableReplicationStates};

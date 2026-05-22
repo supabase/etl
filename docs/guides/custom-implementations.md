@@ -57,7 +57,11 @@ Create `src/custom_store.rs`. A store must implement three traits (see [Extensio
 
 - `SchemaStore` - Versioned table schema storage, retrieval, and pruning
 - `StateStore` - Replication progress and destination table metadata tracking
-- `CleanupStore` - Store cleanup for table-copy restarts and publication changes
+- `TableLifecycleStore` - Store lifecycle operations for table-copy restarts and publication changes
+
+`DestinationStore` and `PipelineStore` are blanket-implemented facades over
+these traits plus the required clone/thread-safety bounds, so custom stores do
+not implement those directly.
 
 ```rust
 use std::collections::{BTreeMap, HashMap};
@@ -70,7 +74,7 @@ use etl::replication::WorkerType;
 use etl::state::{
     AppliedDestinationTableMetadata, DestinationTableMetadata, TableReplicationPhase,
 };
-use etl::store::{CleanupStore, SchemaStore, StateStore, TableReplicationStates};
+use etl::store::{SchemaStore, StateStore, TableLifecycleStore, TableReplicationStates};
 use etl::store::schema::TableSchemaRetention;
 use etl::types::{PgLsn, SnapshotId, TableId, TableSchema};
 
@@ -276,7 +280,7 @@ impl StateStore for CustomStore {
     }
 }
 
-impl CleanupStore for CustomStore {
+impl TableLifecycleStore for CustomStore {
     async fn clear_table_copy_state(&self, table_id: TableId) -> EtlResult<()> {
         let mut tables = self.tables.lock().await;
         if let Some(entry) = tables.get_mut(&table_id) {
@@ -521,7 +525,7 @@ The pipeline will connect to Postgres and start replicating. You'll see your cus
 
 ## What You Built
 
-- **Custom Store** - In-memory implementation of `SchemaStore`, `StateStore`, and `CleanupStore`
+- **Custom Store** - In-memory implementation of `SchemaStore`, `StateStore`, and `TableLifecycleStore`
 - **HTTP Destination** - Forwards replicated data via HTTP POST with retry logic
 - **Working Pipeline** - Connects your custom components to the ETL core
 

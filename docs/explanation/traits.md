@@ -2,7 +2,7 @@
 
 **Traits you implement to customize ETL behavior**
 
-ETL provides four traits for customization. Implement these to control where data goes and how state is stored.
+ETL provides extension traits for customization. Implement these to control where data goes and how state is stored.
 
 ## Destination
 
@@ -37,6 +37,11 @@ pub trait Destination {
 - All three write-like methods use async results, but ETL waits differently. `drop_table_for_copy()` waits immediately before copy-scoped store cleanup. `write_table_rows()` also waits immediately, requesting the next batch only after the current one finishes for that copy partition. `write_events()` is the method where ETL can keep processing while the destination finishes the current batch.
 
 See [Event Types](events.md) for details on the events received by `write_events()`.
+
+`PipelineDestination` is a blanket-implemented facade for destinations that
+also satisfy `Clone + Send + Sync + 'static`. Pipeline runtime code uses this
+facade when it needs to move destinations across worker tasks, but custom
+destinations only implement `Destination` directly.
 
 ## SchemaStore
 
@@ -139,12 +144,12 @@ Tables progress through these phases:
 | `Ready` | Yes | Streaming changes via apply worker |
 | `Errored { reason, solution, retry_policy }` | Yes | Error occurred, excluded until rollback |
 
-## CleanupStore
+## TableLifecycleStore
 
 Removes ETL metadata for table-copy restarts and publication removals.
 
 ```rust
-pub trait CleanupStore {
+pub trait TableLifecycleStore {
     fn clear_table_copy_state(&self, table_id: TableId) -> impl Future<Output = EtlResult<()>> + Send;
     fn delete_table_pipeline_state(&self, table_id: TableId) -> impl Future<Output = EtlResult<()>> + Send;
 }
@@ -164,8 +169,18 @@ pub struct MyStore { /* ... */ }
 
 impl SchemaStore for MyStore { /* ... */ }
 impl StateStore for MyStore { /* ... */ }
-impl CleanupStore for MyStore { /* ... */ }
+impl TableLifecycleStore for MyStore { /* ... */ }
 ```
+
+`PipelineStore` is a blanket-implemented facade for stores that satisfy
+`StateStore + SchemaStore + TableLifecycleStore + Clone + Send + Sync +
+'static`. Pipeline runtime code uses this facade, while code that only needs one
+capability should depend on the narrower trait directly.
+
+`DestinationStore` is a blanket-implemented facade for stores that satisfy
+`StateStore + SchemaStore + Clone + Send + Sync + 'static`. Destination
+implementations use this when they need schema and state metadata but do not
+need lifecycle reset/removal operations.
 
 ETL provides two built-in implementations:
 
