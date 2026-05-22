@@ -214,6 +214,95 @@ async fn table_copy_and_streaming_with_restart() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn table_copy_reset_drops_destination_table_before_recopy() {
+    if skip_if_missing_bigquery_env_vars() {
+        return;
+    }
+
+    init_test_tracing();
+    install_crypto_provider();
+
+    let database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+    let bigquery_database = setup_bigquery_database().await;
+    let users_schema = database_schema.users_schema();
+    let store = NotifyingStore::new();
+    let pipeline_id: PipelineId = random();
+
+    database
+        .insert_values(users_schema.name.clone(), &["name", "age"], &[&"before_1", &1])
+        .await
+        .unwrap();
+    database
+        .insert_values(users_schema.name.clone(), &["name", "age"], &[&"before_2", &2])
+        .await
+        .unwrap();
+
+    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
+    let destination = TestDestinationWrapper::wrap(raw_destination);
+
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    let users_ready =
+        store.notify_on_table_state_type(users_schema.id, TableReplicationPhaseType::Ready).await;
+
+    pipeline.start().await.unwrap();
+
+    users_ready.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let users_rows = bigquery_database.query_table(users_schema.name.clone()).await.unwrap();
+    assert_eq!(
+        parse_bigquery_table_rows::<BigQueryUser>(users_rows),
+        vec![BigQueryUser::new(1, "before_1", 1), BigQueryUser::new(2, "before_2", 2),]
+    );
+
+    database
+        .run_sql(&format!("delete from {} where true", users_schema.name.as_quoted_identifier()))
+        .await
+        .unwrap();
+    database
+        .insert_values(users_schema.name.clone(), &["name", "age"], &[&"after", &3])
+        .await
+        .unwrap();
+    store.reset_table_state(users_schema.id).await.unwrap();
+
+    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
+    let destination = TestDestinationWrapper::wrap(raw_destination);
+
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    let users_ready =
+        store.notify_on_table_state_type(users_schema.id, TableReplicationPhaseType::Ready).await;
+
+    pipeline.start().await.unwrap();
+
+    users_ready.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    assert!(destination.was_table_dropped_for_copy(users_schema.id).await);
+    let users_rows = bigquery_database.query_table(users_schema.name).await.unwrap();
+    assert_eq!(
+        parse_bigquery_table_rows::<BigQueryUser>(users_rows),
+        vec![BigQueryUser::new(3, "after", 3)]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn table_insert_update_delete() {
     if skip_if_missing_bigquery_env_vars() {
         return;

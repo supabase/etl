@@ -45,6 +45,15 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 /// need more than 2 schema versions for any given table.
 const MAX_CACHED_SCHEMAS_PER_TABLE: usize = 2;
 
+/// Scope of table-scoped state removal.
+#[derive(Debug, Clone, Copy)]
+enum TableStateCleanupScope {
+    /// Clear state that belongs to the previous table copy.
+    CopyRestart,
+    /// Delete all ETL state for a table removed from the publication.
+    PipelineRemoval,
+}
+
 /// Creates a lazily connected pool with automatic idle connection cleanup.
 ///
 /// This function returns immediately without establishing any connections.
@@ -182,6 +191,72 @@ impl PostgresStore {
         };
 
         Ok(Self { pipeline_id, pool, inner: Arc::new(Mutex::new(inner)) })
+    }
+
+    /// Deletes table-scoped persistent and cached state according to the
+    /// requested scope.
+    async fn delete_table_state_for_scope(
+        &self,
+        table_id: TableId,
+        scope: TableStateCleanupScope,
+    ) -> EtlResult<()> {
+        let mut inner = self.inner.lock().await;
+        let mut tx = self.pool.begin().await?;
+
+        destination_metadata::delete_destination_table_metadata(
+            &mut *tx,
+            self.pipeline_id as i64,
+            table_id,
+        )
+        .await
+        .map_err(|err| {
+            etl_error!(
+                ErrorKind::SourceQueryFailed,
+                "Destination table metadata deletion failed",
+                source: err
+            )
+        })?;
+
+        schema::delete_table_schema_for_table(&mut *tx, self.pipeline_id as i64, table_id)
+            .await
+            .map_err(|err| {
+                etl_error!(
+                    ErrorKind::SourceQueryFailed,
+                    "Table schema deletion failed",
+                    source: err
+                )
+            })?;
+
+        if matches!(scope, TableStateCleanupScope::PipelineRemoval) {
+            state::delete_replication_state_for_table(&mut *tx, self.pipeline_id as i64, table_id)
+                .await?;
+        }
+
+        progress::delete_replication_progress_for_table(
+            &mut *tx,
+            self.pipeline_id as i64,
+            table_id,
+        )
+        .await
+        .map_err(|err| {
+            etl_error!(
+                ErrorKind::SourceQueryFailed,
+                "Replication progress deletion failed",
+                source: err
+            )
+        })?;
+
+        tx.commit().await?;
+
+        if matches!(scope, TableStateCleanupScope::PipelineRemoval) {
+            inner.remove_table_state(table_id);
+            emit_table_metrics(&inner.phase_counts);
+        }
+
+        Arc::make_mut(&mut inner.table_schemas).remove_table(table_id);
+        Arc::make_mut(&mut inner.destination_tables_metadata).remove(&table_id);
+
+        Ok(())
     }
 }
 
@@ -637,60 +712,13 @@ impl SchemaStore for PostgresStore {
 }
 
 impl CleanupStore for PostgresStore {
+    async fn clear_table_copy_state(&self, table_id: TableId) -> EtlResult<()> {
+        self.delete_table_state_for_scope(table_id, TableStateCleanupScope::CopyRestart).await
+    }
+
     /// Removes all state for a table from both database and cache.
-    async fn cleanup_table_state(&self, table_id: TableId) -> EtlResult<()> {
-        let mut inner = self.inner.lock().await;
-        let mut tx = self.pool.begin().await?;
-
-        destination_metadata::delete_destination_table_metadata(
-            &mut *tx,
-            self.pipeline_id as i64,
-            table_id,
-        )
-        .await
-        .map_err(|err| {
-            etl_error!(
-                ErrorKind::SourceQueryFailed,
-                "Destination table metadata deletion failed",
-                format!("Failed to delete destination table metadata in PostgreSQL: {}", err)
-            )
-        })?;
-
-        schema::delete_table_schema_for_table(&mut *tx, self.pipeline_id as i64, table_id)
-            .await
-            .map_err(|err| {
-                etl_error!(
-                    ErrorKind::SourceQueryFailed,
-                    "Table schema deletion failed",
-                    format!("Failed to delete table schema in PostgreSQL: {}", err)
-                )
-            })?;
-
-        state::delete_replication_state_for_table(&mut *tx, self.pipeline_id as i64, table_id)
-            .await?;
-
-        progress::delete_replication_progress_for_table(
-            &mut *tx,
-            self.pipeline_id as i64,
-            table_id,
-        )
-        .await
-        .map_err(|err| {
-            etl_error!(
-                ErrorKind::SourceQueryFailed,
-                "Replication progress deletion failed",
-                source: err
-            )
-        })?;
-
-        tx.commit().await?;
-
-        inner.remove_table_state(table_id);
-        Arc::make_mut(&mut inner.table_schemas).remove_table(table_id);
-        Arc::make_mut(&mut inner.destination_tables_metadata).remove(&table_id);
-        emit_table_metrics(&inner.phase_counts);
-
-        Ok(())
+    async fn delete_table_pipeline_state(&self, table_id: TableId) -> EtlResult<()> {
+        self.delete_table_state_for_scope(table_id, TableStateCleanupScope::PipelineRemoval).await
     }
 }
 
