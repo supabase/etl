@@ -2146,6 +2146,9 @@ async fn table_schema_change() {
     // Verify initial schema.
     let initial_schema = bigquery_database.query_table_schema(table_name.clone()).await.unwrap();
     initial_schema.assert_columns(&["id", "name", "age", "status"]);
+    let initial_view_schema =
+        bigquery_database.query_view_schema(table_name.clone()).await.unwrap();
+    initial_view_schema.assert_columns(&["id", "name", "age", "status"]);
 
     // Verify destination schema state is applied after initial table creation.
     let initial_state = store
@@ -2212,6 +2215,10 @@ async fn table_schema_change() {
     final_schema.assert_columns(&["id", "full_name", "age", "email"]);
     final_schema.assert_no_column("name");
     final_schema.assert_no_column("status");
+    let final_view_schema = bigquery_database.query_view_schema(table_name.clone()).await.unwrap();
+    final_view_schema.assert_columns(&["id", "full_name", "age", "email"]);
+    final_view_schema.assert_no_column("name");
+    final_view_schema.assert_no_column("status");
 
     // Verify destination schema state is applied after schema changes.
     let final_state = store

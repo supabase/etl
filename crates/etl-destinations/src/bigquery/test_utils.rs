@@ -295,6 +295,40 @@ impl BigQueryDatabase {
         }
     }
 
+    /// Queries the schema for a logical view.
+    ///
+    /// Returns the column names and data types from INFORMATION_SCHEMA.COLUMNS.
+    pub async fn query_view_schema(&self, table_name: TableName) -> Option<BigQueryTableSchema> {
+        let project_id = self.project_id();
+        let dataset_id = self.dataset_id();
+        let table_id = table_name_to_bigquery_table_id(&table_name).unwrap();
+
+        let query = format!(
+            "select column_name, data_type, ordinal_position from \
+             `{project_id}.{dataset_id}.INFORMATION_SCHEMA.COLUMNS` where table_name = \
+             '{table_id}' order by ordinal_position"
+        );
+
+        let mut attempts_remaining = BIGQUERY_QUERY_MAX_ATTEMPTS;
+
+        loop {
+            let rows = self
+                .client
+                .job()
+                .query(project_id, QueryRequest::new(query.clone()))
+                .await
+                .unwrap()
+                .rows;
+
+            if rows.is_some() || attempts_remaining == 1 {
+                return rows.map(|r| BigQueryTableSchema::new(parse_bigquery_table_rows(r)));
+            }
+
+            attempts_remaining -= 1;
+            sleep(Duration::from_millis(BIGQUERY_QUERY_RETRY_DELAY_MS)).await;
+        }
+    }
+
     /// Manually creates a table in the test dataset using column definitions.
     ///
     /// Creates a table by generating a DDL statement from the provided column
