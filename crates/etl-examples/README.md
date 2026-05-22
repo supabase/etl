@@ -259,7 +259,7 @@ For offline local development on Linux or macOS, you can prefetch the required
 DuckDB extensions into the repository and point the destination at them:
 
 ```bash
-./scripts/vendor_duckdb_extensions.sh
+cargo x vendor-duckdb
 ETL_DUCKDB_EXTENSION_ROOT="$(pwd)/vendor/duckdb/extensions" \
   cargo run --bin ducklake -p etl-examples --features ducklake -- [flags]
 ```
