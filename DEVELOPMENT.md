@@ -75,11 +75,11 @@ Both default to `nightly-2026-04-15`. You can temporarily override the formatter
 
 ## Quick Start
 
-The fastest way to get started is using the setup script:
+The fastest way to get started:
 
 ```bash
 # From the project root
-./scripts/init.sh
+cargo x init
 ```
 
 This script will:
@@ -92,20 +92,20 @@ This script will:
 
 ### Using the Setup Script
 
-The `scripts/init.sh` script provides a complete development environment setup:
+`cargo x init` provides a complete development environment setup:
 
 ```bash
 # Use default settings (Postgres on port 5430)
-./scripts/init.sh
+cargo x init
 
 # Customize database settings
-POSTGRES_PORT=5432 POSTGRES_DB=mydb ./scripts/init.sh
+POSTGRES_PORT=5432 POSTGRES_DB=mydb cargo x init
 
 # Skip Docker if you already have Postgres running
-SKIP_DOCKER=1 ./scripts/init.sh
+SKIP_DOCKER=1 cargo x init
 
 # Use persistent storage
-POSTGRES_DATA_VOLUME=/path/to/data ./scripts/init.sh
+POSTGRES_DATA_VOLUME=/path/to/data cargo x init
 ```
 
 **Environment Variables:**
@@ -147,7 +147,7 @@ If using one database for both the API and ETL source/store objects:
 export DATABASE_URL=postgres://USER:PASSWORD@HOST:PORT/DB
 
 # Run all migrations on the same database
-./scripts/run_migrations.sh
+cargo x migrate
 ```
 
 #### Separate Database Setup
@@ -157,11 +157,11 @@ If using separate databases (recommended for production):
 ```bash
 # API migrations on the control plane database
 export DATABASE_URL=postgres://USER:PASSWORD@API_HOST:PORT/API_DB
-./scripts/run_migrations.sh etl-api
+cargo x migrate etl-api
 
 # ETL migrations on the source database
 export DATABASE_URL=postgres://USER:PASSWORD@SOURCE_HOST:PORT/SOURCE_DB
-./scripts/run_migrations.sh etl
+cargo x migrate etl
 ```
 
 This separation allows you to:
@@ -181,7 +181,7 @@ Located in `crates/etl-api/migrations/`, these create the control plane schema (
 
 ```bash
 # From project root
-./scripts/run_migrations.sh etl-api
+cargo x migrate etl-api
 
 # Or manually with SQLx CLI
 sqlx migrate run --source crates/etl-api/migrations
@@ -228,7 +228,7 @@ mismatch.
 
 ```bash
 # From project root
-./scripts/run_migrations.sh etl
+cargo x migrate etl
 
 # Or manually with SQLx CLI (requires setting search_path)
 psql $DATABASE_URL -c "create schema if not exists etl;"
@@ -442,7 +442,7 @@ ClickHouse destination tests require a reachable ClickHouse HTTP endpoint:
 | `TESTS_CLICKHOUSE_USER` | **Yes** | ClickHouse user name (for the local Docker Compose setup, use `etl`) |
 | `TESTS_CLICKHOUSE_PASSWORD` | No | ClickHouse password; for the local Docker Compose setup, use `etl` |
 
-**Note:** ClickHouse tests are only run when the `clickhouse` and `test-utils` features are enabled. Each test creates a unique database in ClickHouse and drops it automatically when the test finishes. The Docker Compose setup started by `./scripts/init.sh` is sufficient for these tests.
+**Note:** ClickHouse tests are only run when the `clickhouse` and `test-utils` features are enabled. Each test creates a unique database in ClickHouse and drops it automatically when the test finishes. The Docker Compose setup started by `cargo x init` is sufficient for these tests.
 
 #### Test Output and Logging
 
