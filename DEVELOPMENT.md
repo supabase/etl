@@ -4,6 +4,7 @@ This guide covers setting up your development environment, running migrations, a
 
 ## Table of Contents
 
+- [Task Runner](#task-runner)
 - [Prerequisites](#prerequisites)
 - [Quick Start](#quick-start)
 - [Database Setup](#database-setup)
@@ -40,20 +41,31 @@ cargo install --version 0.9.0-alpha.1 sqlx-cli --no-default-features --features 
   - [Install OrbStack](https://orbstack.dev)
   - Enable Kubernetes in OrbStack settings
 
+## Task Runner
+
+Common development tasks are available through `cargo x`, a shorthand alias for `cargo xtask`.
+Run `cargo x --help` to see all available commands.
+
+```bash
+cargo x fmt          # format code with nightly rustfmt
+cargo x fmt --check  # check formatting without changes
+cargo x check        # pre-PR gate: fmt, sort, clippy, nextest
+cargo x fix          # auto-fix: clippy --fix, fmt, sort
+cargo x msrv         # verify MSRV consistency
+```
+
 ## Formatting
 
 The workspace stays on the stable toolchain pinned in `rust-toolchain.toml` for builds, tests, and linting.
 Formatting is the only workflow that uses nightly Rust, because the repository relies on nightly-only
 `rustfmt` options for import grouping and layout.
 
-Use the pinned formatter scripts from the project root:
-
 ```bash
-./scripts/fmt
-./scripts/fmt-check
+cargo x fmt
+cargo x fmt --check
 ```
 
-Both scripts default to `nightly-2026-04-15`. You can temporarily override the formatter toolchain with
+Both default to `nightly-2026-04-15`. You can temporarily override the formatter toolchain with
 `RUSTFMT_NIGHTLY_TOOLCHAIN`, but CI and the repository defaults should stay pinned so formatting does not drift.
 
 ## Quick Start
