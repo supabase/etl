@@ -35,10 +35,11 @@ pub(super) fn rows_to_record_batch(
     rows: &[TableRow],
     schema: Schema,
 ) -> Result<RecordBatch, ArrowError> {
+    validate_rows_for_schema(rows, &schema)?;
+
     let mut arrays: Vec<ArrayRef> = Vec::with_capacity(schema.fields().len());
 
     for (field_idx, field) in schema.fields().iter().enumerate() {
-        validate_temporal_values_for_field(rows, field_idx, field.data_type())?;
         let array = build_array_for_field(rows, field_idx, field.data_type());
         arrays.push(array);
     }
@@ -48,93 +49,255 @@ pub(super) fn rows_to_record_batch(
     Ok(batch)
 }
 
-/// Validates PostgreSQL temporal values before Arrow null fallback can hide
-/// unsupported sentinels.
-fn validate_temporal_values_for_field(
-    rows: &[TableRow],
-    field_idx: usize,
-    data_type: &DataType,
-) -> Result<(), ArrowError> {
-    for row in rows {
-        validate_temporal_cell_for_type(&row.values()[field_idx], data_type)?;
+/// Validates row width and cell shapes against the Arrow schema.
+fn validate_rows_for_schema(rows: &[TableRow], schema: &Schema) -> Result<(), ArrowError> {
+    for (field_idx, field) in schema.fields().iter().enumerate() {
+        if !is_supported_data_type(field.data_type()) {
+            return Err(ArrowError::InvalidArgumentError(format!(
+                "Iceberg field {field_idx} ({}) uses unsupported Arrow type {}",
+                field.name(),
+                field.data_type()
+            )));
+        }
+    }
+
+    for (row_idx, row) in rows.iter().enumerate() {
+        if row.values().len() != schema.fields().len() {
+            return Err(ArrowError::InvalidArgumentError(format!(
+                "Row {row_idx} has {} values but Iceberg schema has {} fields",
+                row.values().len(),
+                schema.fields().len()
+            )));
+        }
+
+        for (field_idx, field) in schema.fields().iter().enumerate() {
+            validate_cell_for_type(row_idx, field_idx, &row.values()[field_idx], field)?;
+        }
     }
 
     Ok(())
 }
 
-/// Validates one cell against the expected Arrow temporal type.
-fn validate_temporal_cell_for_type(cell: &Cell, data_type: &DataType) -> Result<(), ArrowError> {
+/// Validates one cell against the expected Arrow type.
+fn validate_cell_for_type(
+    row_idx: usize,
+    field_idx: usize,
+    cell: &Cell,
+    field: &FieldRef,
+) -> Result<(), ArrowError> {
+    if matches!(cell, Cell::Null) {
+        if !field.is_nullable() {
+            return Err(ArrowError::InvalidArgumentError(format!(
+                "Row {row_idx} field {field_idx} ({}) is NULL but Iceberg field is required",
+                field.name()
+            )));
+        }
+
+        return Ok(());
+    }
+
+    if cell_matches_data_type(cell, field.data_type()) {
+        return Ok(());
+    }
+
+    if let Some(reason) = temporal_mismatch_reason(cell, field.data_type()) {
+        return Err(ArrowError::InvalidArgumentError(reason));
+    }
+
+    Err(ArrowError::InvalidArgumentError(format!(
+        "Row {row_idx} field {field_idx} ({}) cannot be represented as {}",
+        field.name(),
+        field.data_type()
+    )))
+}
+
+/// Returns whether a non-null cell can be encoded as the Arrow type.
+fn cell_matches_data_type(cell: &Cell, data_type: &DataType) -> bool {
+    match (cell, data_type) {
+        (Cell::Bool(_), DataType::Boolean) => true,
+        (Cell::I16(_) | Cell::I32(_), DataType::Int32) => true,
+        (Cell::I64(_) | Cell::U32(_), DataType::Int64) => true,
+        (Cell::F32(_), DataType::Float32) => true,
+        (Cell::F64(_), DataType::Float64) => true,
+        (Cell::String(_) | Cell::Numeric(_), DataType::Utf8) => true,
+        (Cell::Bytes(_), DataType::LargeBinary) => true,
+        (Cell::Date(value), DataType::Date32) => value.as_finite().is_some(),
+        (Cell::Time(value), DataType::Time64(TimeUnit::Microsecond)) => value.as_finite().is_some(),
+        (Cell::Timestamp(value), DataType::Timestamp(TimeUnit::Microsecond, None)) => {
+            value.as_finite().is_some()
+        }
+        (Cell::TimestampTz(value), DataType::Timestamp(TimeUnit::Microsecond, Some(_))) => {
+            value.as_finite().is_some()
+        }
+        (Cell::Uuid(_), DataType::FixedSizeBinary(UUID_BYTE_WIDTH)) => true,
+        (Cell::Array(array), DataType::List(field)) => array_matches_data_type(array, field),
+        _ => false,
+    }
+}
+
+/// Returns whether a non-null array cell can be encoded as the Arrow list type.
+fn array_matches_data_type(array: &ArrayCell, field: &FieldRef) -> bool {
+    if !field.is_nullable() && array_has_null_elements(array) {
+        return false;
+    }
+
+    match (array, field.data_type()) {
+        (ArrayCell::Bool(_), DataType::Boolean) => true,
+        (ArrayCell::I16(_) | ArrayCell::I32(_), DataType::Int32) => true,
+        (ArrayCell::I64(_) | ArrayCell::U32(_), DataType::Int64) => true,
+        (ArrayCell::F32(_), DataType::Float32) => true,
+        (ArrayCell::F64(_), DataType::Float64) => true,
+        (ArrayCell::String(_) | ArrayCell::Numeric(_), DataType::Utf8) => true,
+        (ArrayCell::Bytes(_), DataType::LargeBinary) => true,
+        (ArrayCell::Date(values), DataType::Date32) => {
+            values.iter().flatten().all(|value| value.as_finite().is_some())
+        }
+        (ArrayCell::Time(values), DataType::Time64(TimeUnit::Microsecond)) => {
+            values.iter().flatten().all(|value| value.as_finite().is_some())
+        }
+        (ArrayCell::Timestamp(values), DataType::Timestamp(TimeUnit::Microsecond, None)) => {
+            values.iter().flatten().all(|value| value.as_finite().is_some())
+        }
+        (ArrayCell::TimestampTz(values), DataType::Timestamp(TimeUnit::Microsecond, Some(_))) => {
+            values.iter().flatten().all(|value| value.as_finite().is_some())
+        }
+        (ArrayCell::Uuid(_), DataType::FixedSizeBinary(UUID_BYTE_WIDTH)) => true,
+        _ => false,
+    }
+}
+
+/// Returns whether an array cell contains any null element.
+fn array_has_null_elements(array: &ArrayCell) -> bool {
+    match array {
+        ArrayCell::Bool(values) => values.iter().any(Option::is_none),
+        ArrayCell::String(values) => values.iter().any(Option::is_none),
+        ArrayCell::I16(values) => values.iter().any(Option::is_none),
+        ArrayCell::I32(values) => values.iter().any(Option::is_none),
+        ArrayCell::U32(values) => values.iter().any(Option::is_none),
+        ArrayCell::I64(values) => values.iter().any(Option::is_none),
+        ArrayCell::F32(values) => values.iter().any(Option::is_none),
+        ArrayCell::F64(values) => values.iter().any(Option::is_none),
+        ArrayCell::Numeric(values) => values.iter().any(Option::is_none),
+        ArrayCell::Date(values) => values.iter().any(Option::is_none),
+        ArrayCell::Time(values) => values.iter().any(Option::is_none),
+        ArrayCell::Timestamp(values) => values.iter().any(Option::is_none),
+        ArrayCell::TimestampTz(values) => values.iter().any(Option::is_none),
+        ArrayCell::Uuid(values) => values.iter().any(Option::is_none),
+        ArrayCell::Bytes(values) => values.iter().any(Option::is_none),
+    }
+}
+
+/// Returns whether Arrow type has an encoder in this module.
+fn is_supported_data_type(data_type: &DataType) -> bool {
+    match data_type {
+        DataType::Boolean
+        | DataType::Int32
+        | DataType::Int64
+        | DataType::Float32
+        | DataType::Float64
+        | DataType::Utf8
+        | DataType::LargeBinary
+        | DataType::Date32
+        | DataType::Time64(TimeUnit::Microsecond)
+        | DataType::Timestamp(TimeUnit::Microsecond, None | Some(_))
+        | DataType::FixedSizeBinary(UUID_BYTE_WIDTH) => true,
+        DataType::List(field) => is_supported_data_type(field.data_type()),
+        _ => false,
+    }
+}
+
+/// Returns a diagnostic for unsupported PostgreSQL temporal values.
+fn temporal_mismatch_reason(cell: &Cell, data_type: &DataType) -> Option<String> {
     match (cell, data_type) {
         (Cell::Date(value), DataType::Date32) if value.as_finite().is_none() => {
-            invalid_temporal_cell(value)
+            Some(unsupported_temporal_value_message())
         }
         (Cell::Time(value), DataType::Time64(TimeUnit::Microsecond))
             if value.as_finite().is_none() =>
         {
-            invalid_temporal_cell(value)
+            Some(unsupported_temporal_value_message())
         }
         (Cell::Timestamp(value), DataType::Timestamp(TimeUnit::Microsecond, None))
             if value.as_finite().is_none() =>
         {
-            invalid_temporal_cell(value)
+            Some(unsupported_temporal_value_message())
         }
         (Cell::TimestampTz(value), DataType::Timestamp(TimeUnit::Microsecond, Some(_)))
             if value.as_finite().is_none() =>
         {
-            invalid_temporal_cell(value)
+            Some(unsupported_temporal_value_message())
         }
         (Cell::Array(array), DataType::List(field)) => {
-            validate_temporal_array_for_type(array, field.data_type())
+            temporal_array_mismatch_reason(array, field.data_type())
         }
-        _ => Ok(()),
+        _ => None,
     }
 }
 
-/// Validates one array cell against the expected Arrow temporal element type.
-fn validate_temporal_array_for_type(
-    array: &ArrayCell,
-    data_type: &DataType,
-) -> Result<(), ArrowError> {
+/// Returns a diagnostic for unsupported PostgreSQL temporal array values.
+fn temporal_array_mismatch_reason(array: &ArrayCell, data_type: &DataType) -> Option<String> {
     match (array, data_type) {
-        (ArrayCell::Date(values), DataType::Date32) => {
-            validate_temporal_array_values(values, |value| value.as_finite().is_none())
-        }
+        (ArrayCell::Date(values), DataType::Date32) => temporal_array_value_mismatch_reason(values),
         (ArrayCell::Time(values), DataType::Time64(TimeUnit::Microsecond)) => {
-            validate_temporal_array_values(values, |value| value.as_finite().is_none())
+            temporal_array_value_mismatch_reason(values)
         }
         (ArrayCell::Timestamp(values), DataType::Timestamp(TimeUnit::Microsecond, None)) => {
-            validate_temporal_array_values(values, |value| value.as_finite().is_none())
+            temporal_array_value_mismatch_reason(values)
         }
         (ArrayCell::TimestampTz(values), DataType::Timestamp(TimeUnit::Microsecond, Some(_))) => {
-            validate_temporal_array_values(values, |value| value.as_finite().is_none())
+            temporal_array_value_mismatch_reason(values)
         }
-        _ => Ok(()),
+        _ => None,
     }
 }
 
-/// Validates nullable temporal array values.
-fn validate_temporal_array_values<T>(
-    values: &[Option<T>],
-    is_invalid: impl Fn(&T) -> bool,
-) -> Result<(), ArrowError>
+/// Returns a diagnostic for the first unsupported PostgreSQL temporal array
+/// value.
+fn temporal_array_value_mismatch_reason<T>(values: &[Option<T>]) -> Option<String>
 where
-    T: std::fmt::Display,
+    T: std::fmt::Display + FiniteTemporal,
 {
-    for value in values.iter().flatten() {
-        if is_invalid(value) {
-            return invalid_temporal_cell(value);
-        }
-    }
-
-    Ok(())
+    values
+        .iter()
+        .flatten()
+        .find(|value| !value.is_finite_temporal())
+        .map(|_| unsupported_temporal_value_message())
 }
 
-/// Returns an Arrow error for a PostgreSQL temporal value Iceberg cannot store.
-fn invalid_temporal_cell(value: impl std::fmt::Display) -> Result<(), ArrowError> {
-    Err(ArrowError::InvalidArgumentError(format!(
-        "PostgreSQL temporal value {value} cannot be represented in Iceberg's finite Arrow \
-         temporal type",
-    )))
+/// Returns the finite-temporal incompatibility diagnostic.
+fn unsupported_temporal_value_message() -> String {
+    "PostgreSQL temporal value cannot be represented in Iceberg's finite Arrow temporal type"
+        .to_owned()
+}
+
+/// Temporal values that can report whether they are finite.
+trait FiniteTemporal {
+    /// Returns whether the value is finite.
+    fn is_finite_temporal(&self) -> bool;
+}
+
+impl FiniteTemporal for etl::types::PgDate {
+    fn is_finite_temporal(&self) -> bool {
+        self.as_finite().is_some()
+    }
+}
+
+impl FiniteTemporal for etl::types::PgTime {
+    fn is_finite_temporal(&self) -> bool {
+        self.as_finite().is_some()
+    }
+}
+
+impl FiniteTemporal for etl::types::PgTimestamp {
+    fn is_finite_temporal(&self) -> bool {
+        self.as_finite().is_some()
+    }
+}
+
+impl FiniteTemporal for etl::types::PgTimestampTz {
+    fn is_finite_temporal(&self) -> bool {
+        self.as_finite().is_some()
+    }
 }
 
 /// Builds an [`ArrayRef`] from the [`TableRow`]s for a field specified by the
@@ -1714,33 +1877,91 @@ mod tests {
     fn rows_to_record_batch_schema_mismatch_length() {
         use arrow::datatypes::{Field, Schema};
 
-        // Test what happens when row has different number of columns than schema
         let rows = vec![TableRow::new(vec![
             Cell::I32(1),
             Cell::String("test".to_owned()),
-            Cell::Bool(true), // Extra column not in schema
+            Cell::Bool(true),
         ])];
 
         let schema = Schema::new(vec![
             Field::new("id", DataType::Int32, false),
             Field::new("name", DataType::Utf8, false),
-            // Missing third field for the boolean
         ]);
 
-        // This should either handle gracefully or return an error
-        let result = rows_to_record_batch(&rows, schema);
+        let error = rows_to_record_batch(&rows, schema).unwrap_err();
 
-        // The function should handle this case - either by succeeding with partial data
-        // or by returning an appropriate error
-        match result {
-            Ok(batch) => {
-                assert_eq!(batch.num_rows(), 1);
-                assert_eq!(batch.num_columns(), 2); // Only schema columns
-            }
-            Err(_) => {
-                // Error is also acceptable for schema mismatch
-            }
-        }
+        assert!(error.to_string().contains("has 3 values but Iceberg schema has 2"));
+    }
+
+    #[test]
+    fn rows_to_record_batch_rejects_short_rows() {
+        use arrow::datatypes::{Field, Schema};
+
+        let rows = vec![TableRow::new(vec![Cell::I32(1)])];
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("name", DataType::Utf8, false),
+        ]);
+
+        let error = rows_to_record_batch(&rows, schema).unwrap_err();
+
+        assert!(error.to_string().contains("has 1 values but Iceberg schema has 2"));
+    }
+
+    #[test]
+    fn rows_to_record_batch_rejects_scalar_type_mismatch() {
+        use arrow::datatypes::{Field, Schema};
+
+        let rows = vec![TableRow::new(vec![Cell::Bool(true)])];
+        let schema = Schema::new(vec![Field::new("name", DataType::Utf8, false)]);
+
+        let error = rows_to_record_batch(&rows, schema).unwrap_err();
+
+        assert!(error.to_string().contains("cannot be represented as Utf8"));
+    }
+
+    #[test]
+    fn rows_to_record_batch_rejects_array_type_mismatch() {
+        use arrow::datatypes::{Field, Schema};
+
+        let rows = vec![TableRow::new(vec![Cell::Array(ArrayCell::Bool(vec![Some(true)]))])];
+        let schema = Schema::new(vec![Field::new(
+            "items",
+            DataType::List(Arc::new(Field::new("item", DataType::Int32, true))),
+            false,
+        )]);
+
+        let error = rows_to_record_batch(&rows, schema).unwrap_err();
+
+        assert!(error.to_string().contains("cannot be represented as List"));
+    }
+
+    #[test]
+    fn rows_to_record_batch_rejects_required_array_element_null() {
+        use arrow::datatypes::{Field, Schema};
+
+        let rows = vec![TableRow::new(vec![Cell::Array(ArrayCell::I32(vec![Some(1), None]))])];
+        let schema = Schema::new(vec![Field::new(
+            "items",
+            DataType::List(Arc::new(Field::new("item", DataType::Int32, false))),
+            false,
+        )]);
+
+        let error = rows_to_record_batch(&rows, schema).unwrap_err();
+
+        assert!(error.to_string().contains("cannot be represented as List"));
+    }
+
+    #[test]
+    fn rows_to_record_batch_rejects_unsupported_arrow_type() {
+        use arrow::datatypes::{Field, Schema};
+
+        let rows = vec![TableRow::new(vec![Cell::String("1.23".to_owned())])];
+        let schema = Schema::new(vec![Field::new("amount", DataType::Decimal128(10, 2), false)]);
+
+        let error = rows_to_record_batch(&rows, schema).unwrap_err();
+
+        assert!(error.to_string().contains("uses unsupported Arrow type"));
     }
 
     #[test]

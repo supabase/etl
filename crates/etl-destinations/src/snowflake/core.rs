@@ -375,6 +375,7 @@ where
             current_table_schema,
             current_replication_mask.clone(),
         );
+        schema::validate_no_type_changes(&current_schema, new_schema).map_err(EtlError::from)?;
 
         let table_name = try_stringify_table_name(new_schema.name())?.to_uppercase();
 

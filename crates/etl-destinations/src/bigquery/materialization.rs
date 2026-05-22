@@ -220,8 +220,8 @@ fn project_cell_to_text(cell: Cell) -> Cell {
         Cell::I32(value) => Cell::String(value.to_string()),
         Cell::U32(value) => Cell::String(value.to_string()),
         Cell::I64(value) => Cell::String(value.to_string()),
-        Cell::F32(value) => Cell::String(value.to_string()),
-        Cell::F64(value) => Cell::String(value.to_string()),
+        Cell::F32(value) => Cell::String(format_f32(value)),
+        Cell::F64(value) => Cell::String(format_f64(value)),
         Cell::Numeric(value) => Cell::String(value.to_string()),
         Cell::Date(value) => Cell::String(value.to_string()),
         Cell::Time(value) => Cell::String(value.to_string()),
@@ -250,8 +250,8 @@ fn project_array_to_text_array(array: ArrayCell) -> ArrayCell {
         ArrayCell::I32(values) => project_array_values_to_text(values, |value| value.to_string()),
         ArrayCell::U32(values) => project_array_values_to_text(values, |value| value.to_string()),
         ArrayCell::I64(values) => project_array_values_to_text(values, |value| value.to_string()),
-        ArrayCell::F32(values) => project_array_values_to_text(values, |value| value.to_string()),
-        ArrayCell::F64(values) => project_array_values_to_text(values, |value| value.to_string()),
+        ArrayCell::F32(values) => project_array_values_to_text(values, format_f32),
+        ArrayCell::F64(values) => project_array_values_to_text(values, format_f64),
         ArrayCell::Numeric(values) => {
             project_array_values_to_text(values, |value| value.to_string())
         }
@@ -603,8 +603,8 @@ fn format_array(array: ArrayCell) -> String {
         ArrayCell::I32(values) => format_array_values(values, |value| value.to_string()),
         ArrayCell::U32(values) => format_array_values(values, |value| value.to_string()),
         ArrayCell::I64(values) => format_array_values(values, |value| value.to_string()),
-        ArrayCell::F32(values) => format_array_values(values, |value| value.to_string()),
-        ArrayCell::F64(values) => format_array_values(values, |value| value.to_string()),
+        ArrayCell::F32(values) => format_array_values(values, format_f32),
+        ArrayCell::F64(values) => format_array_values(values, format_f64),
         ArrayCell::Numeric(values) => format_array_values(values, |value| value.to_string()),
         ArrayCell::Date(values) => format_array_values(values, |value| value.to_string()),
         ArrayCell::Time(values) => format_array_values(values, |value| value.to_string()),
@@ -644,6 +644,28 @@ fn quote_array_value(value: &str) -> String {
         format!("\"{escaped}\"")
     } else {
         value.to_owned()
+    }
+}
+
+/// Formats a PostgreSQL `real` value for text materialization.
+fn format_f32(value: f32) -> String {
+    if value == f32::INFINITY {
+        "Infinity".to_owned()
+    } else if value == f32::NEG_INFINITY {
+        "-Infinity".to_owned()
+    } else {
+        value.to_string()
+    }
+}
+
+/// Formats a PostgreSQL `double precision` value for text materialization.
+fn format_f64(value: f64) -> String {
+    if value == f64::INFINITY {
+        "Infinity".to_owned()
+    } else if value == f64::NEG_INFINITY {
+        "-Infinity".to_owned()
+    } else {
+        value.to_string()
     }
 }
 
@@ -2466,6 +2488,33 @@ mod tests {
                     rounded_tiny_numeric.to_owned()
                 ]))
             )
+        );
+    }
+
+    #[test]
+    fn preserve_float_infinities_uses_postgres_text_spelling() {
+        let policy = DestinationMaterializationPolicy::string_if_risky_preserve();
+
+        assert_eq!(
+            materialized_cell(policy, Type::FLOAT4, Cell::F32(f32::INFINITY)).unwrap(),
+            BigQueryCell::String("Infinity".to_owned())
+        );
+        assert_eq!(
+            materialized_cell(policy, Type::FLOAT8, Cell::F64(f64::NEG_INFINITY)).unwrap(),
+            BigQueryCell::String("-Infinity".to_owned())
+        );
+        assert_eq!(
+            materialized_cell(
+                policy,
+                Type::FLOAT8_ARRAY,
+                Cell::Array(ArrayCell::F64(vec![
+                    Some(f64::INFINITY),
+                    Some(f64::NEG_INFINITY),
+                    Some(f64::NAN),
+                ])),
+            )
+            .unwrap(),
+            BigQueryCell::String("{Infinity,-Infinity,NaN}".to_owned())
         );
     }
 

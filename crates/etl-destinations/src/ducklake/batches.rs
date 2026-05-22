@@ -51,6 +51,7 @@ use crate::{
             ETL_DUCKLAKE_RETRIES_TOTAL, ETL_DUCKLAKE_UPSERT_ROWS, PREPARED_ROWS_KIND_LABEL,
             RETRY_SCOPE_LABEL, SUB_BATCH_KIND_LABEL,
         },
+        qualified_table_identifier,
     },
     retry::{RetryAttempt, RetryDecision, RetryPolicy, retry_with_backoff},
 };
@@ -1556,11 +1557,9 @@ impl ReusableStagingTable {
         self.prepare(conn)?;
         self.load_rows(conn, prepared_rows)?;
 
-        let sql = format!(
-            r#"INSERT INTO {LAKE_CATALOG}."{table_name}" SELECT * FROM {staging:?};"#,
-            table_name = &self.table_name,
-            staging = &self.staging_name,
-        );
+        let target = qualified_table_identifier(&self.table_name);
+        let staging = quote_identifier(&self.staging_name);
+        let sql = format!("INSERT INTO {target} SELECT * FROM {staging};");
         conn.execute_batch(&sql).map_err(|err| {
             tracing::error!(error = %err, "error INSERT INTO");
             etl_error!(
@@ -1579,10 +1578,8 @@ impl ReusableStagingTable {
             return;
         }
 
-        if let Err(error) = conn.execute_batch(&format!(
-            "DROP TABLE IF EXISTS {staging:?}",
-            staging = &self.staging_name
-        )) {
+        let staging = quote_identifier(&self.staging_name);
+        if let Err(error) = conn.execute_batch(&format!("DROP TABLE IF EXISTS {staging}")) {
             tracing::error!(error = %error, "error drop table staging");
         }
     }
@@ -1590,7 +1587,8 @@ impl ReusableStagingTable {
     /// Creates the temp table once, then clears it before each reuse.
     fn prepare(&mut self, conn: &duckdb::Connection) -> EtlResult<()> {
         if self.created {
-            let sql = format!("TRUNCATE TABLE {staging:?};", staging = &self.staging_name);
+            let staging = quote_identifier(&self.staging_name);
+            let sql = format!("TRUNCATE TABLE {staging};");
             conn.execute_batch(&sql).map_err(|error| {
                 tracing::error!(error = %error, "error clear staging");
                 etl_error!(
@@ -1608,11 +1606,11 @@ impl ReusableStagingTable {
             *counts.entry(self.table_name.clone()).or_default() += 1;
         }
 
+        let staging = quote_identifier(&self.staging_name);
+        let target = qualified_table_identifier(&self.table_name);
         conn.execute_batch(&format!(
-            r#"CREATE OR REPLACE TEMP TABLE {staging:?} AS
-             SELECT * FROM {LAKE_CATALOG}."{table_name}" LIMIT 0;"#,
-            staging = &self.staging_name,
-            table_name = &self.table_name,
+            r#"CREATE OR REPLACE TEMP TABLE {staging} AS
+             SELECT * FROM {target} LIMIT 0;"#,
         ))
         .map_err(|error| {
             tracing::error!(error = %error, "error CREATE TEMP TABLE");
@@ -1768,7 +1766,8 @@ fn apply_table_batch(
 
 /// Applies the truncate action inside an open transaction.
 fn apply_truncate_batch_action(conn: &duckdb::Connection, table_name: &str) -> EtlResult<()> {
-    let sql = format!(r#"TRUNCATE TABLE {LAKE_CATALOG}."{table_name}";"#);
+    let target = qualified_table_identifier(table_name);
+    let sql = format!("TRUNCATE TABLE {target};");
     conn.execute_batch(&sql).map_err(|error| {
         tracing::error!(error = %error, "error TRUNCATE TABLE");
         etl_error!(
@@ -1853,8 +1852,8 @@ fn apply_delete_mutation(
         let where_clause =
             chunk.iter().map(|predicate| format!("({predicate})")).collect::<Vec<_>>().join(" OR ");
 
-        let sql_query =
-            format!(r#"DELETE FROM {LAKE_CATALOG}."{table_name}" WHERE {where_clause};"#);
+        let target = qualified_table_identifier(table_name);
+        let sql_query = format!("DELETE FROM {target} WHERE {where_clause};");
         conn.execute_batch(&sql_query).map_err(|error| {
             tracing::error!(error = %error, "error DELETE FROM");
             etl_error!(
@@ -1881,8 +1880,8 @@ fn apply_update_mutation(
     }
 
     let set_clause = assignments.join(", ");
-    let sql_query =
-        format!(r#"UPDATE {LAKE_CATALOG}."{table_name}" SET {set_clause} WHERE {predicate};"#);
+    let target = qualified_table_identifier(table_name);
+    let sql_query = format!("UPDATE {target} SET {set_clause} WHERE {predicate};");
     conn.execute_batch(&sql_query).map_err(|err| {
         tracing::error!(error = %err, "error UPDATE");
         etl_error!(
@@ -1964,8 +1963,9 @@ fn insert_rows_into_staging_with_sql(
     staging: &str,
     row_literals: &[String],
 ) -> EtlResult<()> {
+    let staging = quote_identifier(staging);
     for chunk in row_literals.chunks(SQL_INSERT_BATCH_SIZE) {
-        conn.execute_batch(&format!("INSERT INTO {staging:?} VALUES {};", chunk.join(", ")))
+        conn.execute_batch(&format!("INSERT INTO {staging} VALUES {};", chunk.join(", ")))
             .map_err(|err| {
                 tracing::error!(error = %err, "error insert_rows_into_staging_with_sql");
                 etl_error!(

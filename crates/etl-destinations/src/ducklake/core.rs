@@ -67,6 +67,7 @@ use crate::{
             query_table_storage_metrics, register_metrics,
             resolve_ducklake_metadata_schema_blocking, spawn_ducklake_metrics_sampler,
         },
+        qualified_table_identifier,
         schema::build_create_table_sql_ducklake,
     },
     table_name::try_stringify_table_name,
@@ -709,8 +710,8 @@ where
             })?;
 
             let result = (|| -> EtlResult<()> {
-                let truncate_table_sql =
-                    format!(r#"TRUNCATE TABLE {LAKE_CATALOG}."{table_name}";"#);
+                let target = qualified_table_identifier(&table_name);
+                let truncate_table_sql = format!("TRUNCATE TABLE {target};");
                 conn.execute_batch(&truncate_table_sql).map_err(|e| {
                     etl_error!(
                         ErrorKind::DestinationQueryFailed,
