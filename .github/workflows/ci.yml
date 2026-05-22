@@ -212,6 +212,7 @@ jobs:
       - name: Install sqlx-cli
         run: |
           cargo install sqlx-cli \
+            --version 0.9.0-alpha.1 \
             --features native-tls,postgres \
             --no-default-features \
             --locked
