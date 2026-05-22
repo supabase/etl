@@ -1628,7 +1628,7 @@ mod tests {
                 max_staleness_mins: None,
                 connection_pool_size: 4,
                 type_strategy: TypeStrategy::NativeOrString,
-                value_strategy: ValueStrategy::Normalize,
+                value_strategy: ValueStrategy::Reject,
             },
             pipeline: PipelineConfig {
                 id: 42,

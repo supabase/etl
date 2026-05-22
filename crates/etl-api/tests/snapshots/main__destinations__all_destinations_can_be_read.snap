@@ -14,5 +14,5 @@ BigQuery {
         1,
     ),
     type_strategy: NativeOrString,
-    value_strategy: Normalize,
+    value_strategy: Reject,
 }

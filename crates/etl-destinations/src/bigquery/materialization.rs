@@ -4,19 +4,20 @@ use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use etl::{
     error::{ErrorKind, EtlError},
     materialization::{
+        CellMaterializationOutcome,
+        CellMaterializationOutcome::{TypeChanged, Unchanged, ValueChanged},
         CellMaterializationResult, DestinationMaterializationPolicy, DestinationMaterializer,
-        MaterializationOutcome,
-        MaterializationOutcome::{TypeChanged, Unchanged, ValueChanged},
         MaterializationRules, TypeMaterializationResult, TypeStrategy, TypedCell, ValueStrategy,
     },
     types::{
-        ArrayCell, Cell, PgDate, PgNumeric, PgTemporalBound, PgTime, PgTimestamp, PgTimestampTz,
-        Type, is_array_type,
+        ArrayCell, Cell, DATE_FORMAT, PgDate, PgNumeric, PgTemporalBound, PgTime, PgTimestamp,
+        PgTimestampTz, TIME_FORMAT, TIMESTAMP_FORMAT, TIMESTAMPTZ_FORMAT_HH_MM, Type,
+        is_array_type,
     },
 };
 use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
 
-use crate::bigquery::value::{BigQueryArrayCell, BigQueryArrayType, BigQueryCell, BigQueryType};
+use crate::bigquery::value::{BigQueryArrayCell, BigQueryCell, BigQueryType};
 
 /// Maximum number of fractional digits in BigQuery `BIGNUMERIC`.
 const BIGQUERY_BIGNUMERIC_MAX_SCALE: usize = 38;
@@ -33,6 +34,38 @@ const SERDE_JSON_NUMBER_TOKEN: &str = "$serde_json::private::Number";
 
 /// BigQuery cell materialization result.
 type BigQueryCellMaterializationResult = CellMaterializationResult<BigQueryType, BigQueryCell>;
+
+/// Internal cell materialization result before BigQuery value encoding.
+type ProjectedCellMaterializationResult = CellMaterializationResult<Type, Cell>;
+
+/// Type selected by a type strategy before BigQuery type lowering.
+#[derive(Debug)]
+struct TypeProjection {
+    /// Type used after type-strategy projection.
+    typ: Type,
+    /// Whether the strategy changed the source type.
+    changed: bool,
+}
+
+/// Result of applying the type strategy to a source type and optional cell.
+#[derive(Debug)]
+struct TypeStrategyProjection {
+    /// Type used for value strategy handling after type projection.
+    typ: Type,
+    /// Cell reshaped to match [`TypeStrategyProjection::typ`], when present.
+    cell: Option<Cell>,
+    /// Whether type projection changed the source type.
+    type_changed: bool,
+}
+
+/// Materialization failure shared by type and cell projection.
+#[derive(Debug)]
+struct MaterializationFailure {
+    /// Error kind to surface to callers.
+    kind: ErrorKind,
+    /// Human-readable reason for the materialization failure.
+    reason: String,
+}
 
 /// BigQuery materializer.
 pub(super) type BigQueryMaterializer = DestinationMaterializer<BigQueryMaterialization>;
@@ -59,7 +92,7 @@ impl MaterializationRules for BigQueryMaterialization {
         typ: &Type,
         policy: DestinationMaterializationPolicy,
     ) -> TypeMaterializationResult<BigQueryType> {
-        bigquery_materialized_type(typ, policy.type_strategy())
+        materialize_bigquery_type(typ, policy.type_strategy())
     }
 
     fn materialize_cell(
@@ -68,134 +101,238 @@ impl MaterializationRules for BigQueryMaterialization {
         policy: DestinationMaterializationPolicy,
     ) -> BigQueryCellMaterializationResult {
         let (source_type, cell) = typed_cell.into_parts();
-        let materialized_type =
-            match bigquery_materialized_type(&source_type, policy.type_strategy()) {
-                TypeMaterializationResult::Unchanged(typ)
-                | TypeMaterializationResult::Changed(typ) => typ,
-                TypeMaterializationResult::Invalid { kind, reason } => {
-                    return invalid(kind, reason);
-                }
-            };
+        let projection = match apply_type_strategy(&source_type, Some(cell), policy.type_strategy())
+        {
+            Ok(projection) => projection,
+            Err(err) => return invalid(err.kind, err.reason),
+        };
+        let Some(cell) = projection.cell else {
+            // Cell materialization always projects with `Some(cell)`, so
+            // missing a cell here means the projection layer lost data.
+            return invalid(
+                ErrorKind::InvalidData,
+                "Type strategy projection did not return a cell for cell materialization",
+            );
+        };
 
-        bigquery_materialized_cell(&source_type, &materialized_type, cell, policy.value_strategy())
-    }
-}
-
-/// Returns the BigQuery materialized cell for a typed source value.
-fn bigquery_materialized_cell(
-    source_type: &Type,
-    materialized_type: &BigQueryType,
-    cell: Cell,
-    value_strategy: ValueStrategy,
-) -> BigQueryCellMaterializationResult {
-    // A scalar `STRING` selection is a type-strategy decision. Convert the
-    // source value into its BigQuery string carrier before value handling.
-    if matches!(materialized_type, BigQueryType::String) {
-        return string_materialized_cell(cell);
-    }
-
-    if is_array_type(source_type) {
-        return array_typed_cell(source_type, materialized_type, cell, value_strategy);
-    }
-
-    let cell = match (source_type, cell) {
-        (&Type::JSON | &Type::JSONB, Cell::String(value)) => {
-            return json_string_cell(materialized_type, value, value_strategy);
+        match apply_value_strategy(&projection.typ, cell, policy.value_strategy()) {
+            CellMaterializationResult::Materialized { cell, outcome } => {
+                let (typ, cell) = cell.into_parts();
+                let outcome = combine_outcomes(projection.type_changed, outcome);
+                encode_bigquery_cell(typ, cell, outcome)
+            }
+            CellMaterializationResult::Invalid { kind, reason } => invalid(kind, reason),
         }
-        (_, cell) => cell,
-    };
-
-    if let Cell::Array(array) = &cell
-        && let Some(result) = validate_array_has_no_nulls(array)
-    {
-        return result;
-    }
-
-    match value_strategy {
-        ValueStrategy::Reject => reject_cell(source_type, materialized_type, cell),
-        ValueStrategy::Normalize => normalize_cell(source_type, materialized_type, cell),
-        ValueStrategy::Preserve => preserve_cell(materialized_type, cell),
     }
 }
 
-/// Returns whether the source type has a native BigQuery target.
-fn has_native_bigquery_type(typ: &Type) -> bool {
-    matches!(
-        *typ,
-        Type::BOOL
-            | Type::CHAR
-            | Type::BPCHAR
-            | Type::VARCHAR
-            | Type::NAME
-            | Type::TEXT
-            | Type::INT2
-            | Type::INT4
-            | Type::INT8
-            | Type::OID
-            | Type::FLOAT4
-            | Type::FLOAT8
-            | Type::NUMERIC
-            | Type::DATE
-            | Type::TIME
-            | Type::TIMESTAMP
-            | Type::TIMESTAMPTZ
-            | Type::JSON
-            | Type::JSONB
-            | Type::BYTEA
-            | Type::BOOL_ARRAY
-            | Type::CHAR_ARRAY
-            | Type::BPCHAR_ARRAY
-            | Type::VARCHAR_ARRAY
-            | Type::NAME_ARRAY
-            | Type::TEXT_ARRAY
-            | Type::INT2_ARRAY
-            | Type::INT4_ARRAY
-            | Type::INT8_ARRAY
-            | Type::OID_ARRAY
-            | Type::FLOAT4_ARRAY
-            | Type::FLOAT8_ARRAY
-            | Type::NUMERIC_ARRAY
-            | Type::DATE_ARRAY
-            | Type::TIME_ARRAY
-            | Type::TIMESTAMP_ARRAY
-            | Type::TIMESTAMPTZ_ARRAY
-            | Type::JSON_ARRAY
-            | Type::JSONB_ARRAY
-            | Type::BYTEA_ARRAY
-    )
+/// Applies type-strategy projection to a source type and optional cell.
+///
+/// This is the first layer of materialization. It keeps the representation in
+/// the shared high-resolution [`Type`] and [`Cell`] model while applying
+/// destination-specific type choices such as projecting risky values to text.
+fn apply_type_strategy(
+    source_type: &Type,
+    cell: Option<Cell>,
+    type_strategy: TypeStrategy,
+) -> Result<TypeStrategyProjection, MaterializationFailure> {
+    let projection = project_type(source_type, type_strategy)?;
+    let cell = cell
+        .map(|cell| project_cell_to_type(&projection.typ, cell, projection.changed))
+        .transpose()?;
+
+    Ok(TypeStrategyProjection { typ: projection.typ, cell, type_changed: projection.changed })
 }
 
-/// Returns the BigQuery type selected by a type strategy.
-fn bigquery_materialized_type(
-    typ: &Type,
-    strategy: TypeStrategy,
-) -> TypeMaterializationResult<BigQueryType> {
-    match strategy {
-        TypeStrategy::NativeOnly if !has_native_bigquery_type(typ) => {
-            TypeMaterializationResult::Invalid {
+/// Returns the internal type selected by a type strategy.
+///
+/// This performs only `Type -> Type` projection. The projected type is later
+/// lowered to [`BigQueryType`] by [`materialize_bigquery_type`] or by the final
+/// cell encoder.
+fn project_type(
+    source_type: &Type,
+    type_strategy: TypeStrategy,
+) -> Result<TypeProjection, MaterializationFailure> {
+    match type_strategy {
+        TypeStrategy::NativeOnly if !has_native_bigquery_type(source_type) => {
+            Err(MaterializationFailure {
                 kind: ErrorKind::UnsupportedValueInDestination,
                 reason: format!(
                     "PostgreSQL type {} has no native BigQuery representation",
-                    typ.name()
+                    source_type.name()
                 ),
+            })
+        }
+        TypeStrategy::NativeOrString if !has_native_bigquery_type(source_type) => {
+            if is_array_type(source_type) {
+                Ok(TypeProjection { typ: Type::TEXT_ARRAY, changed: true })
+            } else {
+                Ok(TypeProjection { typ: Type::TEXT, changed: true })
             }
         }
-        TypeStrategy::NativeOrString if !has_native_bigquery_type(typ) => {
-            TypeMaterializationResult::Changed(BigQueryType::native_for_source_type(typ))
-        }
-        TypeStrategy::StringIfRisky if materializes_as_bigquery_string_if_risky_type(typ) => {
-            TypeMaterializationResult::Changed(BigQueryType::String)
+        TypeStrategy::StringIfRisky if should_project_to_text_for_string_if_risky(source_type) => {
+            // `string_if_risky` preserves the source value as one scalar text
+            // value, including arrays whose null elements BigQuery cannot
+            // represent in repeated fields.
+            Ok(TypeProjection { typ: Type::TEXT, changed: true })
         }
         TypeStrategy::NativeOnly | TypeStrategy::NativeOrString | TypeStrategy::StringIfRisky => {
-            TypeMaterializationResult::Unchanged(BigQueryType::native_for_source_type(typ))
+            Ok(TypeProjection { typ: source_type.clone(), changed: false })
         }
     }
 }
 
-/// Returns whether the source type should use scalar BigQuery `STRING` when
-/// preserving risky types.
-fn materializes_as_bigquery_string_if_risky_type(typ: &Type) -> bool {
+/// Projects a cell to the internal type selected by type strategy.
+fn project_cell_to_type(
+    projected_type: &Type,
+    cell: Cell,
+    type_changed: bool,
+) -> Result<Cell, MaterializationFailure> {
+    if !type_changed {
+        return Ok(cell);
+    }
+
+    match *projected_type {
+        Type::TEXT => Ok(project_cell_to_text(cell)),
+        Type::TEXT_ARRAY => Ok(project_cell_to_text_array(cell)),
+        _ => {
+            // Type strategies currently only rewrite cells for text
+            // projections. A future projection must define its cell shape here
+            // before value strategy handling can safely continue.
+            Err(failure(
+                ErrorKind::InvalidData,
+                format!(
+                    "Type strategy selected unsupported projected type {}",
+                    projected_type.name()
+                ),
+            ))
+        }
+    }
+}
+
+/// Converts a source cell into a scalar text-shaped cell.
+fn project_cell_to_text(cell: Cell) -> Cell {
+    match cell {
+        Cell::Null => Cell::Null,
+        Cell::Bool(value) => Cell::String(value.to_string()),
+        Cell::String(value) => Cell::String(value),
+        Cell::I16(value) => Cell::String(value.to_string()),
+        Cell::I32(value) => Cell::String(value.to_string()),
+        Cell::U32(value) => Cell::String(value.to_string()),
+        Cell::I64(value) => Cell::String(value.to_string()),
+        Cell::F32(value) => Cell::String(value.to_string()),
+        Cell::F64(value) => Cell::String(value.to_string()),
+        Cell::Numeric(value) => Cell::String(value.to_string()),
+        Cell::Date(value) => Cell::String(value.to_string()),
+        Cell::Time(value) => Cell::String(value.to_string()),
+        Cell::Timestamp(value) => Cell::String(value.to_string()),
+        Cell::TimestampTz(value) => Cell::String(value.to_string()),
+        Cell::Uuid(value) => Cell::String(value.to_string()),
+        Cell::Bytes(value) => Cell::String(format!("\\x{}", encode_hex(&value))),
+        Cell::Array(array) => Cell::String(format_array(array)),
+    }
+}
+
+/// Converts a source cell into a text-array-shaped cell.
+fn project_cell_to_text_array(cell: Cell) -> Cell {
+    match cell {
+        Cell::Array(array) => Cell::Array(project_array_to_text_array(array)),
+        cell => cell,
+    }
+}
+
+/// Converts source array values into nullable string elements.
+fn project_array_to_text_array(array: ArrayCell) -> ArrayCell {
+    match array {
+        ArrayCell::Bool(values) => project_array_values_to_text(values, |value| value.to_string()),
+        ArrayCell::String(values) => ArrayCell::String(values),
+        ArrayCell::I16(values) => project_array_values_to_text(values, |value| value.to_string()),
+        ArrayCell::I32(values) => project_array_values_to_text(values, |value| value.to_string()),
+        ArrayCell::U32(values) => project_array_values_to_text(values, |value| value.to_string()),
+        ArrayCell::I64(values) => project_array_values_to_text(values, |value| value.to_string()),
+        ArrayCell::F32(values) => project_array_values_to_text(values, |value| value.to_string()),
+        ArrayCell::F64(values) => project_array_values_to_text(values, |value| value.to_string()),
+        ArrayCell::Numeric(values) => {
+            project_array_values_to_text(values, |value| value.to_string())
+        }
+        ArrayCell::Date(values) => project_array_values_to_text(values, |value| value.to_string()),
+        ArrayCell::Time(values) => project_array_values_to_text(values, |value| value.to_string()),
+        ArrayCell::Timestamp(values) => {
+            project_array_values_to_text(values, |value| value.to_string())
+        }
+        ArrayCell::TimestampTz(values) => {
+            project_array_values_to_text(values, |value| value.to_string())
+        }
+        ArrayCell::Uuid(values) => project_array_values_to_text(values, |value| value.to_string()),
+        ArrayCell::Bytes(values) => {
+            project_array_values_to_text(values, |value| format!("\\x{}", encode_hex(&value)))
+        }
+    }
+}
+
+/// Converts nullable array elements into nullable string elements.
+fn project_array_values_to_text<T>(
+    values: Vec<Option<T>>,
+    mut convert: impl FnMut(T) -> String,
+) -> ArrayCell {
+    ArrayCell::String(values.into_iter().map(|value| value.map(&mut convert)).collect())
+}
+
+/// Combines type projection and value strategy outcomes.
+fn combine_outcomes(
+    type_changed: bool,
+    value_outcome: CellMaterializationOutcome,
+) -> CellMaterializationOutcome {
+    if type_changed { TypeChanged } else { value_outcome }
+}
+
+/// Returns whether the source type can stay unchanged for BigQuery.
+///
+/// This is intentionally stricter than "can eventually be stored in
+/// BigQuery". Types such as [`Type::UUID`] and [`Type::MONEY`] can be stored as
+/// `STRING`, but only after type-strategy projection changes them to
+/// [`Type::TEXT`] or [`Type::TEXT_ARRAY`].
+fn has_native_bigquery_type(typ: &Type) -> bool {
+    BigQueryType::for_projected_type(typ).is_some()
+}
+
+/// Returns the BigQuery type selected after type-strategy projection.
+///
+/// This is the schema path: source [`Type`] -> projected [`Type`] -> final
+/// [`BigQueryType`]. It does not inspect values.
+fn materialize_bigquery_type(
+    typ: &Type,
+    strategy: TypeStrategy,
+) -> TypeMaterializationResult<BigQueryType> {
+    match apply_type_strategy(typ, None, strategy) {
+        Ok(projection) => match bigquery_type_for_projection(&projection.typ) {
+            Ok(typ) if projection.type_changed => TypeMaterializationResult::Changed(typ),
+            Ok(typ) => TypeMaterializationResult::Unchanged(typ),
+            Err(err) => TypeMaterializationResult::Invalid { kind: err.kind, reason: err.reason },
+        },
+        Err(err) => TypeMaterializationResult::Invalid { kind: err.kind, reason: err.reason },
+    }
+}
+
+/// Returns the BigQuery type for a projected internal type.
+fn bigquery_type_for_projection(typ: &Type) -> Result<BigQueryType, MaterializationFailure> {
+    BigQueryType::for_projected_type(typ).ok_or_else(|| {
+        failure(
+            ErrorKind::UnsupportedValueInDestination,
+            format!(
+                "PostgreSQL type {} has no BigQuery representation after type strategy projection",
+                typ.name()
+            ),
+        )
+    })
+}
+
+/// Returns whether the source type should use scalar BigQuery `STRING` under
+/// [`TypeStrategy::StringIfRisky`].
+fn should_project_to_text_for_string_if_risky(typ: &Type) -> bool {
     if is_array_type(typ) {
+        // BigQuery repeated fields cannot preserve nullable array elements, so
+        // preserve-oriented string projection stores the whole array as text.
         return true;
     }
 
@@ -217,256 +354,196 @@ fn materializes_as_bigquery_string_if_risky_type(typ: &Type) -> bool {
     )
 }
 
-/// Applies BigQuery materialization for a cell known to come from an array
-/// column.
-fn array_typed_cell(
+/// Applies value materialization before final BigQuery value encoding.
+///
+/// This is the second layer of cell materialization. It receives the projected
+/// [`Type`] from the type strategy and continues to work with shared [`Cell`]
+/// values so normalization and rejection can use the full source value model.
+fn apply_value_strategy(
     typ: &Type,
-    materialized_type: &BigQueryType,
     cell: Cell,
     value_strategy: ValueStrategy,
-) -> BigQueryCellMaterializationResult {
-    // A scalar `STRING` selection for an array source is a type-strategy
-    // decision. Convert the whole source array before value handling.
-    if matches!(materialized_type, BigQueryType::String) {
-        return string_materialized_cell(cell);
-    }
-
-    match cell {
-        Cell::Null => invalid(
-            ErrorKind::UnsupportedValueInDestination,
-            "NULL arrays cannot be preserved by BigQuery repeated fields",
-        ),
-        Cell::Array(array) => {
-            if let Some(result) = validate_array_has_no_nulls(&array) {
-                result
-            } else if matches!(materialized_type, BigQueryType::Array(BigQueryArrayType::String)) {
-                // A repeated `STRING` selection is also a type-strategy
-                // decision, so elements are converted before value handling.
-                string_element_array_cell(materialized_type, array)
-            } else {
-                match value_strategy {
-                    ValueStrategy::Reject => {
-                        reject_cell(typ, materialized_type, Cell::Array(array))
-                    }
-                    ValueStrategy::Normalize => normalize_array_cell(typ, materialized_type, array),
-                    ValueStrategy::Preserve => materialized_native(
-                        materialized_type.clone(),
-                        Cell::Array(array),
-                        Unchanged,
-                    ),
-                }
-            }
-        }
-        cell => match value_strategy {
-            ValueStrategy::Reject => reject_cell(typ, materialized_type, cell),
-            ValueStrategy::Normalize => normalize_cell(typ, materialized_type, cell),
-            ValueStrategy::Preserve => preserve_cell(materialized_type, cell),
-        },
-    }
-}
-
-/// Applies BigQuery materialization for raw JSON text.
-fn json_string_cell(
-    materialized_type: &BigQueryType,
-    value: String,
-    value_strategy: ValueStrategy,
-) -> BigQueryCellMaterializationResult {
+) -> ProjectedCellMaterializationResult {
     match value_strategy {
-        ValueStrategy::Reject => reject_json_text(materialized_type, value),
-        ValueStrategy::Normalize => normalize_json_text(materialized_type, value),
-        ValueStrategy::Preserve => {
-            materialized(materialized_type.clone(), BigQueryCell::string(value), Unchanged)
-        }
+        ValueStrategy::Reject => reject_cell(typ, cell),
+        ValueStrategy::Normalize => normalize_cell(typ, cell),
+        ValueStrategy::Preserve => preserve_cell(typ, cell),
     }
 }
 
-/// Applies reject materialization to a source cell.
-fn reject_cell(
-    typ: &Type,
-    materialized_type: &BigQueryType,
-    cell: Cell,
-) -> BigQueryCellMaterializationResult {
-    if let Some(result) = validate_reject_cell(typ, &cell) {
-        return result;
-    }
+/// Applies reject materialization to a projected cell.
+fn reject_cell(typ: &Type, cell: Cell) -> ProjectedCellMaterializationResult {
+    match cell {
+        // JSON and JSONB use raw text in the shared cell model, so the
+        // projected type decides whether this string needs JSON validation.
+        Cell::String(value) if is_projected_json_type(typ) => reject_json_text(typ, value),
+        cell => {
+            if let Some(error) = validate_reject_cell(typ, &cell) {
+                return invalid_projected_cell_from_failure(error);
+            }
 
-    materialized_native(materialized_type.clone(), cell, Unchanged)
+            projected_cell(typ.clone(), cell, Unchanged)
+        }
+    }
 }
 
 /// Applies reject materialization to raw JSON text.
-fn reject_json_text(
-    materialized_type: &BigQueryType,
-    value: String,
-) -> BigQueryCellMaterializationResult {
+fn reject_json_text(typ: &Type, value: String) -> ProjectedCellMaterializationResult {
     match parse_json_text_without_duplicate_keys(&value) {
         Ok(value_json) => {
-            if let Some(result) = validate_reject_json(&value_json) {
-                result
+            if let Some(error) = validate_reject_json(&value_json) {
+                invalid_projected_cell_from_failure(error)
             } else {
-                materialized(materialized_type.clone(), BigQueryCell::string(value), Unchanged)
+                projected_cell(typ.clone(), Cell::String(value), Unchanged)
             }
         }
-        Err(result) => result,
+        Err(err) => invalid_projected_cell_from_failure(err),
     }
 }
 
-/// Applies preserve materialization to a source cell.
-fn preserve_cell(
-    materialized_type: &BigQueryType,
-    cell: Cell,
-) -> BigQueryCellMaterializationResult {
-    materialized_native(materialized_type.clone(), cell, Unchanged)
+/// Applies preserve materialization to a projected cell.
+///
+/// Preserve intentionally has no JSON branch because it keeps the projected
+/// type and cell exactly as they arrived from type projection.
+fn preserve_cell(typ: &Type, cell: Cell) -> ProjectedCellMaterializationResult {
+    projected_cell(typ.clone(), cell, Unchanged)
 }
 
-/// Applies normalize materialization to a source cell.
-fn normalize_cell(
-    typ: &Type,
-    materialized_type: &BigQueryType,
-    cell: Cell,
-) -> BigQueryCellMaterializationResult {
+/// Applies normalize materialization to a projected cell.
+fn normalize_cell(typ: &Type, cell: Cell) -> ProjectedCellMaterializationResult {
     match cell {
+        // JSON and JSONB use raw text in the shared cell model, so the
+        // projected type decides whether this string needs JSON normalization.
+        Cell::String(value) if is_projected_json_type(typ) => normalize_json_text(typ, value),
         Cell::F32(value) if value == 0.0 && value.is_sign_negative() => {
-            materialized(materialized_type.clone(), BigQueryCell::Float32(0.0), ValueChanged)
+            projected_cell(typ.clone(), Cell::F32(0.0), ValueChanged)
         }
         Cell::F64(value) if value == 0.0 && value.is_sign_negative() => {
-            materialized(materialized_type.clone(), BigQueryCell::Float64(0.0), ValueChanged)
+            projected_cell(typ.clone(), Cell::F64(0.0), ValueChanged)
         }
-        Cell::Numeric(value) => normalize_numeric_cell(value),
-        Cell::Date(value) => normalize_date_cell(materialized_type, value),
-        Cell::Time(value) => normalize_time_cell(materialized_type, value),
-        Cell::Timestamp(value) => normalize_timestamp_cell(materialized_type, value),
-        Cell::TimestampTz(value) => normalize_timestamptz_cell(materialized_type, value),
-        Cell::Uuid(value) => {
-            materialized(BigQueryType::String, BigQueryCell::string(value.to_string()), TypeChanged)
-        }
-        Cell::Array(array) => normalize_array_cell(typ, materialized_type, array),
-        cell => materialized_native(materialized_type.clone(), cell, Unchanged),
+        Cell::Numeric(value) => normalize_numeric_cell(typ, value),
+        Cell::Date(value) => normalize_date_cell(typ, value),
+        Cell::Time(value) => normalize_time_cell(typ, value),
+        Cell::Timestamp(value) => normalize_timestamp_cell(typ, value),
+        Cell::TimestampTz(value) => normalize_timestamptz_cell(typ, value),
+        Cell::Array(array) => normalize_array_cell(typ, array),
+        cell => projected_cell(typ.clone(), cell, Unchanged),
     }
+}
+
+/// Returns whether a projected type carries raw JSON text.
+fn is_projected_json_type(typ: &Type) -> bool {
+    matches!(*typ, Type::JSON | Type::JSONB)
+}
+
+/// Returns whether a projected array type carries raw JSON text elements.
+fn is_projected_json_array_type(typ: &Type) -> bool {
+    matches!(*typ, Type::JSON_ARRAY | Type::JSONB_ARRAY)
 }
 
 /// Applies normalize materialization to raw JSON text.
-fn normalize_json_text(
-    materialized_type: &BigQueryType,
-    value: String,
-) -> BigQueryCellMaterializationResult {
+fn normalize_json_text(typ: &Type, value: String) -> ProjectedCellMaterializationResult {
     match normalize_json_value_text(value) {
-        Ok(value) => {
-            materialized(materialized_type.clone(), BigQueryCell::string(value), ValueChanged)
-        }
-        Err(result) => result,
+        Ok(value) => projected_cell(typ.clone(), Cell::String(value), ValueChanged),
+        Err(err) => invalid_projected_cell_from_failure(err),
     }
 }
 
 /// Applies normalize materialization to a parsed array value.
-fn normalize_array_cell(
-    typ: &Type,
-    materialized_type: &BigQueryType,
-    array: ArrayCell,
-) -> BigQueryCellMaterializationResult {
+fn normalize_array_cell(typ: &Type, array: ArrayCell) -> ProjectedCellMaterializationResult {
     match (typ, array) {
-        (&Type::JSON_ARRAY | &Type::JSONB_ARRAY, ArrayCell::String(values)) => {
-            normalize_json_array_cell(materialized_type, values)
+        // JSON arrays also use string elements in the shared array model, so
+        // the projected array type selects JSON element normalization.
+        (typ, ArrayCell::String(values)) if is_projected_json_array_type(typ) => {
+            normalize_json_array_cell(typ, values)
         }
-        (_, ArrayCell::F32(values)) => value_array(
-            materialized_type,
-            values,
-            |value| {
-                if value == 0.0 && value.is_sign_negative() { 0.0 } else { value }
-            },
-            ArrayCell::F32,
-        ),
-        (_, ArrayCell::F64(values)) => value_array(
-            materialized_type,
-            values,
-            |value| {
-                if value == 0.0 && value.is_sign_negative() { 0.0 } else { value }
-            },
-            ArrayCell::F64,
-        ),
-        (_, ArrayCell::Numeric(values)) => normalize_numeric_array_cell(materialized_type, values),
+        (_, ArrayCell::F32(values)) => {
+            value_array(typ, values, normalize_f32_value, ArrayCell::F32)
+        }
+        (_, ArrayCell::F64(values)) => {
+            value_array(typ, values, normalize_f64_value, ArrayCell::F64)
+        }
+        (_, ArrayCell::Numeric(values)) => normalize_numeric_array_cell(typ, values),
         (_, ArrayCell::Date(values)) => {
-            value_array(materialized_type, values, clamp_bigquery_date_value, ArrayCell::Date)
+            value_array(typ, values, clamp_bigquery_date_value, ArrayCell::Date)
         }
         (_, ArrayCell::Time(values)) => {
-            value_array(materialized_type, values, clamp_bigquery_time_value, ArrayCell::Time)
+            value_array(typ, values, clamp_bigquery_time_value, ArrayCell::Time)
         }
-        (_, ArrayCell::Timestamp(values)) => value_array(
-            materialized_type,
-            values,
-            clamp_bigquery_timestamp_value,
-            ArrayCell::Timestamp,
-        ),
-        (_, ArrayCell::TimestampTz(values)) => value_array(
-            materialized_type,
-            values,
-            clamp_bigquery_timestamptz_value,
-            ArrayCell::TimestampTz,
-        ),
-        (_, ArrayCell::Uuid(values)) => {
-            string_element_array(materialized_type, values, |value| value.to_string())
+        (_, ArrayCell::Timestamp(values)) => {
+            value_array(typ, values, clamp_bigquery_timestamp_value, ArrayCell::Timestamp)
         }
-        (_, array) => materialized_native(materialized_type.clone(), Cell::Array(array), Unchanged),
+        (_, ArrayCell::TimestampTz(values)) => {
+            value_array(typ, values, clamp_bigquery_timestamptz_value, ArrayCell::TimestampTz)
+        }
+        (_, array) => projected_cell(typ.clone(), Cell::Array(array), Unchanged),
     }
 }
 
 /// Applies normalize materialization to JSON array element values.
 fn normalize_json_array_cell(
-    materialized_type: &BigQueryType,
+    typ: &Type,
     values: Vec<Option<String>>,
-) -> BigQueryCellMaterializationResult {
+) -> ProjectedCellMaterializationResult {
     let values = values
         .into_iter()
         .enumerate()
         .map(|(index, value)| match value {
             Some(value) => normalize_json_value_text(value)
                 .map(Some)
-                .map_err(|result| prefix_array_error(index, result)),
-            None => Err(invalid(
-                ErrorKind::NullValuesNotSupportedInArrayInDestination,
-                format!("Element at index {index} is NULL, which is not supported in BigQuery"),
-            )),
+                .map_err(|error| prefix_array_failure(index, error)),
+            None => Err(MaterializationFailure {
+                kind: ErrorKind::NullValuesNotSupportedInArrayInDestination,
+                reason: format!(
+                    "Element at index {index} is NULL, which is not supported in BigQuery"
+                ),
+            }),
         })
         .collect::<Result<Vec<_>, _>>();
 
     match values {
-        Ok(values) => materialized_native(
-            materialized_type.clone(),
-            Cell::Array(ArrayCell::String(values)),
-            ValueChanged,
-        ),
-        Err(result) => result,
+        Ok(values) => {
+            projected_cell(typ.clone(), Cell::Array(ArrayCell::String(values)), ValueChanged)
+        }
+        Err(err) => invalid_projected_cell(err.kind, err.reason),
     }
 }
 
+/// Normalizes a BigQuery `FLOAT64` value carried by `float`.
+fn normalize_f32_value(value: f32) -> f32 {
+    if value == 0.0 && value.is_sign_negative() { 0.0 } else { value }
+}
+
+/// Normalizes a BigQuery `FLOAT64` value carried by `double`.
+fn normalize_f64_value(value: f64) -> f64 {
+    if value == 0.0 && value.is_sign_negative() { 0.0 } else { value }
+}
+
 /// Normalizes raw JSON text using BigQuery normalization rules.
-fn normalize_json_value_text(value: String) -> Result<String, BigQueryCellMaterializationResult> {
+fn normalize_json_value_text(value: String) -> Result<String, MaterializationFailure> {
     let value_json = parse_json_text_first_key_wins(&value)?;
     if let Err(reason) = validate_bigquery_json_depth(&value_json) {
-        return Err(invalid(ErrorKind::UnsupportedValueInDestination, reason));
+        return Err(failure(ErrorKind::UnsupportedValueInDestination, reason));
     }
 
     normalize_bigquery_json(value_json)
         .map(|normalized| normalized.to_string())
-        .map_err(|reason| invalid(ErrorKind::UnsupportedValueInDestination, reason))
+        .map_err(|reason| failure(ErrorKind::UnsupportedValueInDestination, reason))
 }
 
 /// Applies normalize materialization to a numeric value.
-fn normalize_numeric_cell(value: PgNumeric) -> BigQueryCellMaterializationResult {
+fn normalize_numeric_cell(typ: &Type, value: PgNumeric) -> ProjectedCellMaterializationResult {
     match normalize_bigquery_numeric(value) {
-        Ok(value) => materialized(
-            BigQueryType::BigNumeric,
-            BigQueryCell::string(value.to_string()),
-            ValueChanged,
-        ),
-        Err(reason) => invalid(ErrorKind::UnsupportedValueInDestination, reason),
+        Ok(value) => projected_cell(typ.clone(), Cell::Numeric(value), ValueChanged),
+        Err(reason) => invalid_projected_cell(ErrorKind::UnsupportedValueInDestination, reason),
     }
 }
 
 /// Applies normalize materialization to numeric array values.
 fn normalize_numeric_array_cell(
-    materialized_type: &BigQueryType,
+    typ: &Type,
     values: Vec<Option<PgNumeric>>,
-) -> BigQueryCellMaterializationResult {
+) -> ProjectedCellMaterializationResult {
     let values = values
         .into_iter()
         .enumerate()
@@ -479,59 +556,40 @@ fn normalize_numeric_array_cell(
         .collect::<Result<Vec<_>, _>>();
 
     match values {
-        Ok(values) => materialized_native(
-            materialized_type.clone(),
-            Cell::Array(ArrayCell::Numeric(values)),
-            ValueChanged,
-        ),
-        Err(reason) => invalid(ErrorKind::UnsupportedValueInDestination, reason),
+        Ok(values) => {
+            projected_cell(typ.clone(), Cell::Array(ArrayCell::Numeric(values)), ValueChanged)
+        }
+        Err(reason) => invalid_projected_cell(ErrorKind::UnsupportedValueInDestination, reason),
     }
 }
 
 /// Applies normalize materialization to a PostgreSQL date value.
-fn normalize_date_cell(
-    materialized_type: &BigQueryType,
-    value: PgDate,
-) -> BigQueryCellMaterializationResult {
-    materialized(
-        materialized_type.clone(),
-        BigQueryCell::string(clamp_bigquery_date_value(value).to_string()),
-        ValueChanged,
-    )
+fn normalize_date_cell(typ: &Type, value: PgDate) -> ProjectedCellMaterializationResult {
+    projected_cell(typ.clone(), Cell::Date(clamp_bigquery_date_value(value)), ValueChanged)
 }
 
 /// Applies normalize materialization to a PostgreSQL time value.
-fn normalize_time_cell(
-    materialized_type: &BigQueryType,
-    value: PgTime,
-) -> BigQueryCellMaterializationResult {
-    materialized(
-        materialized_type.clone(),
-        BigQueryCell::string(clamp_bigquery_time_value(value).to_string()),
-        ValueChanged,
-    )
+fn normalize_time_cell(typ: &Type, value: PgTime) -> ProjectedCellMaterializationResult {
+    projected_cell(typ.clone(), Cell::Time(clamp_bigquery_time_value(value)), ValueChanged)
 }
 
 /// Applies normalize materialization to a PostgreSQL timestamp value.
-fn normalize_timestamp_cell(
-    materialized_type: &BigQueryType,
-    value: PgTimestamp,
-) -> BigQueryCellMaterializationResult {
-    materialized(
-        materialized_type.clone(),
-        BigQueryCell::string(clamp_bigquery_timestamp_value(value).to_string()),
+fn normalize_timestamp_cell(typ: &Type, value: PgTimestamp) -> ProjectedCellMaterializationResult {
+    projected_cell(
+        typ.clone(),
+        Cell::Timestamp(clamp_bigquery_timestamp_value(value)),
         ValueChanged,
     )
 }
 
 /// Applies normalize materialization to a PostgreSQL timestamptz value.
 fn normalize_timestamptz_cell(
-    materialized_type: &BigQueryType,
+    typ: &Type,
     value: PgTimestampTz,
-) -> BigQueryCellMaterializationResult {
-    materialized(
-        materialized_type.clone(),
-        BigQueryCell::string(clamp_bigquery_timestamptz_value(value).to_string()),
+) -> ProjectedCellMaterializationResult {
+    projected_cell(
+        typ.clone(),
+        Cell::TimestampTz(clamp_bigquery_timestamptz_value(value)),
         ValueChanged,
     )
 }
@@ -602,131 +660,15 @@ fn encode_hex(bytes: &[u8]) -> String {
     encoded
 }
 
-/// Converts a cell for a source type materialized as scalar BigQuery `STRING`.
-fn string_materialized_cell(cell: Cell) -> BigQueryCellMaterializationResult {
-    let cell = match cell {
-        Cell::Null => BigQueryCell::Null,
-        Cell::Bool(value) => BigQueryCell::string(value.to_string()),
-        Cell::String(value) => BigQueryCell::string(value),
-        Cell::I16(value) => BigQueryCell::string(value.to_string()),
-        Cell::I32(value) => BigQueryCell::string(value.to_string()),
-        Cell::U32(value) => BigQueryCell::string(value.to_string()),
-        Cell::I64(value) => BigQueryCell::string(value.to_string()),
-        Cell::F32(value) => BigQueryCell::string(value.to_string()),
-        Cell::F64(value) => BigQueryCell::string(value.to_string()),
-        Cell::Numeric(value) => BigQueryCell::string(value.to_string()),
-        Cell::Date(value) => BigQueryCell::string(value.to_string()),
-        Cell::Time(value) => BigQueryCell::string(value.to_string()),
-        Cell::Timestamp(value) => BigQueryCell::string(value.to_string()),
-        Cell::TimestampTz(value) => BigQueryCell::string(value.to_string()),
-        Cell::Uuid(value) => BigQueryCell::string(value.to_string()),
-        Cell::Bytes(value) => BigQueryCell::string(format!("\\x{}", encode_hex(&value))),
-        Cell::Array(array) => BigQueryCell::string(format_array(array)),
-    };
-
-    materialized(BigQueryType::String, cell, TypeChanged)
-}
-
-/// Converts a source array column to a BigQuery repeated `STRING` cell.
-fn string_element_array_cell(
-    materialized_type: &BigQueryType,
-    array: ArrayCell,
-) -> BigQueryCellMaterializationResult {
-    match array {
-        ArrayCell::Bool(values) => {
-            string_element_array(materialized_type, values, |value| value.to_string())
-        }
-        ArrayCell::String(values) => string_element_array(materialized_type, values, |value| value),
-        ArrayCell::I16(values) => {
-            string_element_array(materialized_type, values, |value| value.to_string())
-        }
-        ArrayCell::I32(values) => {
-            string_element_array(materialized_type, values, |value| value.to_string())
-        }
-        ArrayCell::U32(values) => {
-            string_element_array(materialized_type, values, |value| value.to_string())
-        }
-        ArrayCell::I64(values) => {
-            string_element_array(materialized_type, values, |value| value.to_string())
-        }
-        ArrayCell::F32(values) => {
-            string_element_array(materialized_type, values, |value| value.to_string())
-        }
-        ArrayCell::F64(values) => {
-            string_element_array(materialized_type, values, |value| value.to_string())
-        }
-        ArrayCell::Numeric(values) => {
-            string_element_array(materialized_type, values, |value| value.to_string())
-        }
-        ArrayCell::Date(values) => {
-            string_element_array(materialized_type, values, |value| value.to_string())
-        }
-        ArrayCell::Time(values) => {
-            string_element_array(materialized_type, values, |value| value.to_string())
-        }
-        ArrayCell::Timestamp(values) => {
-            string_element_array(materialized_type, values, |value| value.to_string())
-        }
-        ArrayCell::TimestampTz(values) => {
-            string_element_array(materialized_type, values, |value| value.to_string())
-        }
-        ArrayCell::Uuid(values) => {
-            string_element_array(materialized_type, values, |value| value.to_string())
-        }
-        ArrayCell::Bytes(values) => string_element_array(materialized_type, values, |value| {
-            format!("\\x{}", encode_hex(&value))
-        }),
-    }
-}
-
-/// Converts an optional array to repeated `STRING` values.
-fn string_element_array<T>(
-    materialized_type: &BigQueryType,
-    values: Vec<Option<T>>,
-    convert: impl FnMut(T) -> String,
-) -> BigQueryCellMaterializationResult {
-    let converted_values = match convert_string_array_values(values, convert) {
-        Ok(values) => values,
-        Err(result) => return result,
-    };
-
-    materialized(
-        materialized_type.clone(),
-        BigQueryCell::Array(BigQueryArrayCell::String(converted_values)),
-        TypeChanged,
-    )
-}
-
-/// Converts optional values to required `STRING` array elements.
-fn convert_string_array_values<T>(
-    values: Vec<Option<T>>,
-    mut convert: impl FnMut(T) -> String,
-) -> Result<Vec<String>, BigQueryCellMaterializationResult> {
-    let mut converted_values = Vec::with_capacity(values.len());
-    for (index, value) in values.into_iter().enumerate() {
-        match value {
-            Some(value) => converted_values.push(convert(value)),
-            None => {
-                return Err(invalid(
-                    ErrorKind::NullValuesNotSupportedInArrayInDestination,
-                    format!("Element at index {index} is NULL, which is not supported in BigQuery"),
-                ));
-            }
-        }
-    }
-
-    Ok(converted_values)
-}
-
 /// Converts an optional array while preserving the array variant.
 fn value_array<T>(
-    materialized_type: &BigQueryType,
+    typ: &Type,
     values: Vec<Option<T>>,
     mut convert: impl FnMut(T) -> T,
     wrap: impl FnOnce(Vec<Option<T>>) -> ArrayCell,
-) -> BigQueryCellMaterializationResult {
-    materialized_native(
-        materialized_type.clone(),
+) -> ProjectedCellMaterializationResult {
+    projected_cell(
+        typ.clone(),
         Cell::Array(wrap(values.into_iter().map(|value| value.map(&mut convert)).collect())),
         ValueChanged,
     )
@@ -734,7 +676,7 @@ fn value_array<T>(
 
 /// Returns a `reject` materialization failure when a cell is unsafe for
 /// BigQuery.
-fn validate_reject_cell(typ: &Type, cell: &Cell) -> Option<BigQueryCellMaterializationResult> {
+fn validate_reject_cell(typ: &Type, cell: &Cell) -> Option<MaterializationFailure> {
     match cell {
         Cell::F32(value) if *value == 0.0 && value.is_sign_negative() => {
             Some(invalid_negative_zero())
@@ -747,7 +689,6 @@ fn validate_reject_cell(typ: &Type, cell: &Cell) -> Option<BigQueryCellMateriali
         Cell::Time(value) => validate_reject_pg_time(value),
         Cell::Timestamp(value) => validate_reject_pg_timestamp(value),
         Cell::TimestampTz(value) => validate_reject_pg_timestamptz(value),
-        Cell::Uuid(_) => Some(invalid_non_native_value("UUID")),
         Cell::Array(array) => validate_reject_array(typ, array),
         _ => None,
     }
@@ -755,12 +696,11 @@ fn validate_reject_cell(typ: &Type, cell: &Cell) -> Option<BigQueryCellMateriali
 
 /// Returns a `reject` materialization failure when an array is unsafe for
 /// BigQuery.
-fn validate_reject_array(
-    typ: &Type,
-    array: &ArrayCell,
-) -> Option<BigQueryCellMaterializationResult> {
+fn validate_reject_array(typ: &Type, array: &ArrayCell) -> Option<MaterializationFailure> {
     match (typ, array) {
-        (&Type::JSON_ARRAY | &Type::JSONB_ARRAY, ArrayCell::String(values)) => {
+        // JSON arrays also use string elements in the shared array model, so
+        // the projected array type selects JSON element validation.
+        (typ, ArrayCell::String(values)) if is_projected_json_array_type(typ) => {
             validate_reject_array_values(values, |value| validate_reject_json_text(value))
         }
         (_, array) => validate_reject_array_value_domain(array),
@@ -768,9 +708,7 @@ fn validate_reject_array(
 }
 
 /// Returns a `reject` materialization failure based on the parsed array values.
-fn validate_reject_array_value_domain(
-    array: &ArrayCell,
-) -> Option<BigQueryCellMaterializationResult> {
+fn validate_reject_array_value_domain(array: &ArrayCell) -> Option<MaterializationFailure> {
     match array {
         ArrayCell::F32(values) => validate_reject_array_values(values, |value| {
             (*value == 0.0 && value.is_sign_negative()).then(invalid_negative_zero)
@@ -787,9 +725,6 @@ fn validate_reject_array_value_domain(
         ArrayCell::TimestampTz(values) => {
             validate_reject_array_values(values, validate_reject_pg_timestamptz)
         }
-        ArrayCell::Uuid(values) => {
-            validate_reject_array_values(values, |_| Some(invalid_non_native_value("UUID")))
-        }
         _ => None,
     }
 }
@@ -797,47 +732,42 @@ fn validate_reject_array_value_domain(
 /// Validates `reject` materialization for optional array elements.
 fn validate_reject_array_values<T>(
     values: &[Option<T>],
-    validate: impl Fn(&T) -> Option<BigQueryCellMaterializationResult>,
-) -> Option<BigQueryCellMaterializationResult> {
+    validate: impl Fn(&T) -> Option<MaterializationFailure>,
+) -> Option<MaterializationFailure> {
     for (index, value) in values.iter().enumerate() {
         if let Some(value) = value
             && let Some(result) = validate(value)
         {
-            return Some(prefix_array_error(index, result));
+            return Some(prefix_array_failure(index, result));
         }
     }
 
     None
 }
 
-/// Adds array element context to a materialization failure.
-fn prefix_array_error(
-    index: usize,
-    result: BigQueryCellMaterializationResult,
-) -> BigQueryCellMaterializationResult {
-    match result {
-        CellMaterializationResult::Invalid { kind, reason } => {
-            invalid(kind, format!("Element at index {index}: {reason}"))
-        }
-        result => result,
+/// Adds array element context to a projection failure.
+fn prefix_array_failure(index: usize, error: MaterializationFailure) -> MaterializationFailure {
+    MaterializationFailure {
+        kind: error.kind,
+        reason: format!("Element at index {index}: {}", error.reason),
     }
 }
 
 /// Validates `reject` BigQuery materialization for a numeric value.
-fn validate_reject_numeric(value: &PgNumeric) -> Option<BigQueryCellMaterializationResult> {
+fn validate_reject_numeric(value: &PgNumeric) -> Option<MaterializationFailure> {
     match value {
-        PgNumeric::NaN => Some(invalid(
+        PgNumeric::NaN => Some(failure(
             ErrorKind::UnsupportedValueInDestination,
             "NaN cannot be stored in BigQuery BIGNUMERIC",
         )),
-        PgNumeric::PositiveInfinity | PgNumeric::NegativeInfinity => Some(invalid(
+        PgNumeric::PositiveInfinity | PgNumeric::NegativeInfinity => Some(failure(
             ErrorKind::UnsupportedValueInDestination,
             "Infinity cannot be stored in BigQuery BIGNUMERIC",
         )),
         PgNumeric::Value { .. }
             if bigquery_bignumeric_scale(value) > BIGQUERY_BIGNUMERIC_MAX_SCALE =>
         {
-            Some(invalid(
+            Some(failure(
                 ErrorKind::UnsupportedValueInDestination,
                 format!(
                     "A numeric value has more than {BIGQUERY_BIGNUMERIC_MAX_SCALE} decimal places \
@@ -845,7 +775,7 @@ fn validate_reject_numeric(value: &PgNumeric) -> Option<BigQueryCellMaterializat
                 ),
             ))
         }
-        PgNumeric::Value { .. } if !bigquery_bignumeric_in_range(value) => Some(invalid(
+        PgNumeric::Value { .. } if !bigquery_bignumeric_in_range(value) => Some(failure(
             ErrorKind::UnsupportedValueInDestination,
             "A numeric value is outside the BigQuery BIGNUMERIC range",
         )),
@@ -854,7 +784,7 @@ fn validate_reject_numeric(value: &PgNumeric) -> Option<BigQueryCellMaterializat
 }
 
 /// Validates `reject` BigQuery materialization for a PostgreSQL date.
-fn validate_reject_pg_date(value: &PgDate) -> Option<BigQueryCellMaterializationResult> {
+fn validate_reject_pg_date(value: &PgDate) -> Option<MaterializationFailure> {
     match value {
         PgDate::Finite(value) if bigquery_date_in_range(*value) => None,
         PgDate::Finite(_) => Some(invalid_date_range()),
@@ -865,10 +795,10 @@ fn validate_reject_pg_date(value: &PgDate) -> Option<BigQueryCellMaterialization
 }
 
 /// Validates `reject` BigQuery materialization for a PostgreSQL time.
-fn validate_reject_pg_time(value: &PgTime) -> Option<BigQueryCellMaterializationResult> {
+fn validate_reject_pg_time(value: &PgTime) -> Option<MaterializationFailure> {
     match value {
         PgTime::Finite(_) => None,
-        PgTime::TwentyFourHour => Some(invalid(
+        PgTime::TwentyFourHour => Some(failure(
             ErrorKind::UnsupportedValueInDestination,
             "A time value is outside the BigQuery TIME range",
         )),
@@ -876,7 +806,7 @@ fn validate_reject_pg_time(value: &PgTime) -> Option<BigQueryCellMaterialization
 }
 
 /// Validates `reject` BigQuery materialization for a PostgreSQL timestamp.
-fn validate_reject_pg_timestamp(value: &PgTimestamp) -> Option<BigQueryCellMaterializationResult> {
+fn validate_reject_pg_timestamp(value: &PgTimestamp) -> Option<MaterializationFailure> {
     match value {
         PgTimestamp::Finite(value) if bigquery_timestamp_in_range(*value) => None,
         PgTimestamp::Finite(_) => Some(invalid_timestamp_range()),
@@ -887,9 +817,7 @@ fn validate_reject_pg_timestamp(value: &PgTimestamp) -> Option<BigQueryCellMater
 }
 
 /// Validates `reject` BigQuery materialization for a PostgreSQL timestamptz.
-fn validate_reject_pg_timestamptz(
-    value: &PgTimestampTz,
-) -> Option<BigQueryCellMaterializationResult> {
+fn validate_reject_pg_timestamptz(value: &PgTimestampTz) -> Option<MaterializationFailure> {
     match value {
         PgTimestampTz::Finite(value) if bigquery_timestamptz_in_range(*value) => None,
         PgTimestampTz::Finite(_) => Some(invalid_timestamp_range()),
@@ -900,18 +828,16 @@ fn validate_reject_pg_timestamptz(
 }
 
 /// Validates that raw JSON text has no duplicate object keys.
-fn validate_json_text_has_no_duplicate_keys(
-    value: &str,
-) -> Option<BigQueryCellMaterializationResult> {
+fn validate_json_text_has_no_duplicate_keys(value: &str) -> Option<MaterializationFailure> {
     match json_contains_duplicate_keys(value) {
-        Ok(true) => Some(invalid(
+        Ok(true) => Some(failure(
             ErrorKind::UnsupportedValueInDestination,
             "JSON text contains duplicate object keys that BigQuery would canonicalize",
         )),
         Ok(false) => None,
-        Err(error) => Some(invalid(
+        Err(err) => Some(failure(
             ErrorKind::UnsupportedValueInDestination,
-            format!("JSON text is not valid for BigQuery: {error}"),
+            format!("JSON text is not valid for BigQuery: {err}"),
         )),
     }
 }
@@ -919,13 +845,13 @@ fn validate_json_text_has_no_duplicate_keys(
 /// Parses JSON text after rejecting BigQuery canonicalization risks.
 fn parse_json_text_without_duplicate_keys(
     value: &str,
-) -> Result<serde_json::Value, BigQueryCellMaterializationResult> {
-    if let Some(result) = validate_json_text_has_no_duplicate_keys(value) {
-        return Err(result);
+) -> Result<serde_json::Value, MaterializationFailure> {
+    if let Some(err) = validate_json_text_has_no_duplicate_keys(value) {
+        return Err(err);
     }
 
     serde_json::from_str(value).map_err(|error| {
-        invalid(
+        failure(
             ErrorKind::UnsupportedValueInDestination,
             format!("JSON text is not valid for BigQuery: {error}"),
         )
@@ -935,16 +861,16 @@ fn parse_json_text_without_duplicate_keys(
 /// Parses JSON text using BigQuery's first-key-wins object canonicalization.
 fn parse_json_text_first_key_wins(
     value: &str,
-) -> Result<serde_json::Value, BigQueryCellMaterializationResult> {
+) -> Result<serde_json::Value, MaterializationFailure> {
     let mut deserializer = serde_json::Deserializer::from_str(value);
     let value = JsonFirstKeyWinsParser.deserialize(&mut deserializer).map_err(|error| {
-        invalid(
+        failure(
             ErrorKind::UnsupportedValueInDestination,
             format!("JSON text is not valid for BigQuery: {error}"),
         )
     })?;
     deserializer.end().map_err(|error| {
-        invalid(
+        failure(
             ErrorKind::UnsupportedValueInDestination,
             format!("JSON text is not valid for BigQuery: {error}"),
         )
@@ -954,7 +880,7 @@ fn parse_json_text_first_key_wins(
 }
 
 /// Validates `reject` BigQuery materialization for raw JSON text.
-fn validate_reject_json_text(value: &str) -> Option<BigQueryCellMaterializationResult> {
+fn validate_reject_json_text(value: &str) -> Option<MaterializationFailure> {
     match parse_json_text_without_duplicate_keys(value) {
         Ok(value_json) => validate_reject_json(&value_json),
         Err(result) => Some(result),
@@ -962,9 +888,9 @@ fn validate_reject_json_text(value: &str) -> Option<BigQueryCellMaterializationR
 }
 
 /// Validates `reject` BigQuery materialization for JSON.
-fn validate_reject_json(value: &serde_json::Value) -> Option<BigQueryCellMaterializationResult> {
+fn validate_reject_json(value: &serde_json::Value) -> Option<MaterializationFailure> {
     if let Err(reason) = validate_bigquery_json_depth(value) {
-        return Some(invalid(ErrorKind::UnsupportedValueInDestination, reason));
+        return Some(failure(ErrorKind::UnsupportedValueInDestination, reason));
     }
 
     let mut values = vec![value];
@@ -1218,9 +1144,7 @@ fn validate_bigquery_json_depth(value: &serde_json::Value) -> Result<(), String>
 }
 
 /// Validates `reject` BigQuery materialization for a JSON number.
-fn validate_reject_json_number(
-    number: &serde_json::Number,
-) -> Option<BigQueryCellMaterializationResult> {
+fn validate_reject_json_number(number: &serde_json::Number) -> Option<MaterializationFailure> {
     let number = number.as_str();
     if is_json_integer_literal(number) {
         let integer_outside_exact_domain = if number.starts_with('-') {
@@ -1230,14 +1154,14 @@ fn validate_reject_json_number(
         };
 
         if integer_outside_exact_domain {
-            return Some(invalid(
+            return Some(failure(
                 ErrorKind::UnsupportedValueInDestination,
                 "A JSON integer is outside BigQuery's exact signed or unsigned 64-bit integer \
                  domain and may be stored as FLOAT64",
             ));
         }
     } else if !json_number_fits_float64(number) {
-        return Some(invalid(
+        return Some(failure(
             ErrorKind::UnsupportedValueInDestination,
             "A JSON number is outside BigQuery's FLOAT64 domain",
         ));
@@ -1312,8 +1236,8 @@ fn normalize_bigquery_json_number(
 }
 
 /// Returns a `reject` materialization failure for negative zero.
-fn invalid_negative_zero() -> BigQueryCellMaterializationResult {
-    invalid(
+fn invalid_negative_zero() -> MaterializationFailure {
+    failure(
         ErrorKind::UnsupportedValueInDestination,
         "Negative zero cannot be stored in BigQuery tables",
     )
@@ -1321,8 +1245,8 @@ fn invalid_negative_zero() -> BigQueryCellMaterializationResult {
 
 /// Returns a `reject` materialization failure for a date outside BigQuery's
 /// range.
-fn invalid_date_range() -> BigQueryCellMaterializationResult {
-    invalid(
+fn invalid_date_range() -> MaterializationFailure {
+    failure(
         ErrorKind::UnsupportedValueInDestination,
         "Date value is outside BigQuery's supported range 0001-01-01..=9999-12-31",
     )
@@ -1330,46 +1254,328 @@ fn invalid_date_range() -> BigQueryCellMaterializationResult {
 
 /// Returns a `reject` materialization failure for a timestamp outside
 /// BigQuery's range.
-fn invalid_timestamp_range() -> BigQueryCellMaterializationResult {
-    invalid(
+fn invalid_timestamp_range() -> MaterializationFailure {
+    failure(
         ErrorKind::UnsupportedValueInDestination,
         "Timestamp value is outside BigQuery's supported range 0001-01-01..=9999-12-31",
     )
 }
 
-/// Returns a `reject` materialization failure for a value without a native
-/// type.
-fn invalid_non_native_value(type_name: &str) -> BigQueryCellMaterializationResult {
-    invalid(
-        ErrorKind::UnsupportedValueInDestination,
-        format!("{type_name} has no native BigQuery representation"),
-    )
-}
-
-/// Returns a successful materialized cell.
-fn materialized(
+/// Returns a successful BigQuery cell materialization result.
+fn bigquery_cell_result(
     typ: BigQueryType,
     cell: BigQueryCell,
-    outcome: MaterializationOutcome,
+    outcome: CellMaterializationOutcome,
 ) -> BigQueryCellMaterializationResult {
     CellMaterializationResult::Materialized { cell: TypedCell::new(typ, cell), outcome }
 }
 
-/// Converts a native cell and returns a successful materialized cell.
-fn materialized_native(
-    typ: BigQueryType,
+/// Returns a successful projected cell before BigQuery value encoding.
+fn projected_cell(
+    typ: Type,
     cell: Cell,
-    outcome: MaterializationOutcome,
+    outcome: CellMaterializationOutcome,
+) -> ProjectedCellMaterializationResult {
+    CellMaterializationResult::Materialized { cell: TypedCell::new(typ, cell), outcome }
+}
+
+/// Encodes the projected type and cell into the final BigQuery representation.
+///
+/// This is the only cell path that lowers the projected high-resolution
+/// [`Type`] and [`Cell`] pair into the BigQuery-specific schema type and value
+/// carrier. Type and value strategies must have already run before this point.
+fn encode_bigquery_cell(
+    typ: Type,
+    cell: Cell,
+    outcome: CellMaterializationOutcome,
 ) -> BigQueryCellMaterializationResult {
-    match BigQueryCell::try_from_native_cell(cell) {
-        Ok(cell) => materialized(typ, cell, outcome),
-        Err(error) => invalid_from_etl_error(error),
+    let bigquery_type = match bigquery_type_for_projection(&typ) {
+        Ok(typ) => typ,
+        Err(err) => return invalid(err.kind, err.reason),
+    };
+
+    match bigquery_cell_for_projected_type(&typ, cell) {
+        Ok(cell) => bigquery_cell_result(bigquery_type, cell, outcome),
+        Err(err) => invalid_from_etl_error(err),
     }
+}
+
+/// Returns the BigQuery value carrier for a projected internal type and cell.
+fn bigquery_cell_for_projected_type(typ: &Type, cell: Cell) -> Result<BigQueryCell, EtlError> {
+    if is_array_type(typ) {
+        // BigQuery arrays are encoded as repeated fields. They have elements,
+        // but no separate nullable array container to encode `Cell::Null`.
+        return match cell {
+            Cell::Array(array) => {
+                bigquery_array_cell_for_projected_type(typ, array).map(BigQueryCell::Array)
+            }
+            Cell::Null => Err(etl::etl_error!(
+                ErrorKind::UnsupportedValueInDestination,
+                "Cell cannot be materialized for BigQuery repeated field",
+                "NULL arrays cannot be preserved by BigQuery repeated fields"
+            )),
+            cell => Err(invalid_cell_for_type(typ, cell_kind(&cell))),
+        };
+    }
+
+    match (typ, cell) {
+        (_, Cell::Null) => Ok(BigQueryCell::Null),
+        (&Type::BOOL, Cell::Bool(value)) => Ok(BigQueryCell::Bool(value)),
+        (
+            &Type::CHAR
+            | &Type::BPCHAR
+            | &Type::VARCHAR
+            | &Type::NAME
+            | &Type::TEXT
+            | &Type::JSON
+            | &Type::JSONB,
+            Cell::String(value),
+        ) => Ok(BigQueryCell::String(value)),
+        (&Type::INT2, Cell::I16(value)) => Ok(BigQueryCell::Int32(i32::from(value))),
+        (&Type::INT4, Cell::I32(value)) => Ok(BigQueryCell::Int32(value)),
+        (&Type::INT8, Cell::I64(value)) => Ok(BigQueryCell::Int64(value)),
+        (&Type::OID, Cell::U32(value)) => Ok(BigQueryCell::Int64(i64::from(value))),
+        (&Type::FLOAT4, Cell::F32(value)) => Ok(BigQueryCell::Float32(value)),
+        (&Type::FLOAT8, Cell::F64(value)) => Ok(BigQueryCell::Float64(value)),
+        (&Type::NUMERIC, Cell::Numeric(value)) => Ok(BigQueryCell::String(value.to_string())),
+        (&Type::DATE, Cell::Date(value)) => Ok(BigQueryCell::String(format_pg_date(value))),
+        (&Type::TIME, Cell::Time(value)) => Ok(BigQueryCell::String(format_pg_time(value))),
+        (&Type::TIMESTAMP, Cell::Timestamp(value)) => {
+            Ok(BigQueryCell::String(format_pg_timestamp(value)))
+        }
+        (&Type::TIMESTAMPTZ, Cell::TimestampTz(value)) => {
+            Ok(BigQueryCell::String(format_pg_timestamptz(value)))
+        }
+        (&Type::BYTEA, Cell::Bytes(value)) => Ok(BigQueryCell::Bytes(value)),
+        (typ, cell) => Err(invalid_cell_for_type(typ, cell_kind(&cell))),
+    }
+}
+
+/// Returns the BigQuery repeated-field carrier for a projected array type.
+fn bigquery_array_cell_for_projected_type(
+    typ: &Type,
+    array: ArrayCell,
+) -> Result<BigQueryArrayCell, EtlError> {
+    match (typ, array) {
+        (&Type::BOOL_ARRAY, ArrayCell::Bool(values)) => {
+            bigquery_array_values(values, std::convert::identity, BigQueryArrayCell::Bool)
+        }
+        (
+            &Type::CHAR_ARRAY
+            | &Type::BPCHAR_ARRAY
+            | &Type::VARCHAR_ARRAY
+            | &Type::NAME_ARRAY
+            | &Type::TEXT_ARRAY
+            | &Type::JSON_ARRAY
+            | &Type::JSONB_ARRAY,
+            ArrayCell::String(values),
+        ) => bigquery_array_values(values, std::convert::identity, BigQueryArrayCell::String),
+        (&Type::INT2_ARRAY, ArrayCell::I16(values)) => {
+            bigquery_array_values(values, i32::from, BigQueryArrayCell::Int32)
+        }
+        (&Type::INT4_ARRAY, ArrayCell::I32(values)) => {
+            bigquery_array_values(values, std::convert::identity, BigQueryArrayCell::Int32)
+        }
+        (&Type::INT8_ARRAY, ArrayCell::I64(values)) => {
+            bigquery_array_values(values, std::convert::identity, BigQueryArrayCell::Int64)
+        }
+        (&Type::OID_ARRAY, ArrayCell::U32(values)) => {
+            bigquery_array_values(values, i64::from, BigQueryArrayCell::Int64)
+        }
+        (&Type::FLOAT4_ARRAY, ArrayCell::F32(values)) => {
+            bigquery_array_values(values, std::convert::identity, BigQueryArrayCell::Float32)
+        }
+        (&Type::FLOAT8_ARRAY, ArrayCell::F64(values)) => {
+            bigquery_array_values(values, std::convert::identity, BigQueryArrayCell::Float64)
+        }
+        (&Type::NUMERIC_ARRAY, ArrayCell::Numeric(values)) => {
+            bigquery_array_values(values, |value| value.to_string(), BigQueryArrayCell::String)
+        }
+        (&Type::DATE_ARRAY, ArrayCell::Date(values)) => {
+            bigquery_array_values(values, format_pg_date, BigQueryArrayCell::String)
+        }
+        (&Type::TIME_ARRAY, ArrayCell::Time(values)) => {
+            bigquery_array_values(values, format_pg_time, BigQueryArrayCell::String)
+        }
+        (&Type::TIMESTAMP_ARRAY, ArrayCell::Timestamp(values)) => {
+            bigquery_array_values(values, format_pg_timestamp, BigQueryArrayCell::String)
+        }
+        (&Type::TIMESTAMPTZ_ARRAY, ArrayCell::TimestampTz(values)) => {
+            bigquery_array_values(values, format_pg_timestamptz, BigQueryArrayCell::String)
+        }
+        (&Type::BYTEA_ARRAY, ArrayCell::Bytes(values)) => {
+            bigquery_array_values(values, std::convert::identity, BigQueryArrayCell::Bytes)
+        }
+        (typ, array) => Err(invalid_array_cell_for_type(typ, array_cell_kind(&array))),
+    }
+}
+
+/// Converts required array elements into a BigQuery repeated-field carrier.
+fn bigquery_array_values<T, U>(
+    values: Vec<Option<T>>,
+    convert: impl FnMut(T) -> U,
+    wrap: impl FnOnce(Vec<U>) -> BigQueryArrayCell,
+) -> Result<BigQueryArrayCell, EtlError> {
+    Ok(wrap(required_values(values)?.into_iter().map(convert).collect()))
 }
 
 /// Returns an invalid materialization result.
 fn invalid(kind: ErrorKind, reason: impl Into<String>) -> BigQueryCellMaterializationResult {
     CellMaterializationResult::Invalid { kind, reason: reason.into() }
+}
+
+/// Returns a materialization failure.
+fn failure(kind: ErrorKind, reason: impl Into<String>) -> MaterializationFailure {
+    MaterializationFailure { kind, reason: reason.into() }
+}
+
+/// Returns an invalid projected materialization result.
+fn invalid_projected_cell(
+    kind: ErrorKind,
+    reason: impl Into<String>,
+) -> ProjectedCellMaterializationResult {
+    CellMaterializationResult::Invalid { kind, reason: reason.into() }
+}
+
+/// Converts a materialization failure into a projected result.
+fn invalid_projected_cell_from_failure(
+    error: MaterializationFailure,
+) -> ProjectedCellMaterializationResult {
+    invalid_projected_cell(error.kind, error.reason)
+}
+
+/// Returns an error when a projected cell does not match its projected type.
+fn invalid_cell_for_type(typ: &Type, cell_kind: &'static str) -> EtlError {
+    etl::etl_error!(
+        ErrorKind::InvalidData,
+        "Cell does not match projected type",
+        format!("Expected projected PostgreSQL type {}, got {cell_kind}", typ.name())
+    )
+}
+
+/// Returns an error when a projected array cell does not match its projected
+/// array type.
+fn invalid_array_cell_for_type(typ: &Type, cell_kind: &'static str) -> EtlError {
+    etl::etl_error!(
+        ErrorKind::InvalidData,
+        "Cell does not match projected array type",
+        format!("Expected projected PostgreSQL array type {}, got {cell_kind}", typ.name())
+    )
+}
+
+/// Returns a stable kind name for a scalar cell without exposing the value.
+fn cell_kind(cell: &Cell) -> &'static str {
+    match cell {
+        Cell::Null => "null",
+        Cell::Bool(_) => "bool",
+        Cell::String(_) => "string",
+        Cell::I16(_) => "i16",
+        Cell::I32(_) => "i32",
+        Cell::U32(_) => "u32",
+        Cell::I64(_) => "i64",
+        Cell::F32(_) => "f32",
+        Cell::F64(_) => "f64",
+        Cell::Numeric(_) => "numeric",
+        Cell::Date(_) => "date",
+        Cell::Time(_) => "time",
+        Cell::Timestamp(_) => "timestamp",
+        Cell::TimestampTz(_) => "timestamptz",
+        Cell::Uuid(_) => "uuid",
+        Cell::Bytes(_) => "bytes",
+        Cell::Array(array) => array_cell_kind(array),
+    }
+}
+
+/// Returns a stable kind name for an array cell without exposing values.
+fn array_cell_kind(array: &ArrayCell) -> &'static str {
+    match array {
+        ArrayCell::Bool(_) => "bool[]",
+        ArrayCell::String(_) => "string[]",
+        ArrayCell::I16(_) => "i16[]",
+        ArrayCell::I32(_) => "i32[]",
+        ArrayCell::U32(_) => "u32[]",
+        ArrayCell::I64(_) => "i64[]",
+        ArrayCell::F32(_) => "f32[]",
+        ArrayCell::F64(_) => "f64[]",
+        ArrayCell::Numeric(_) => "numeric[]",
+        ArrayCell::Date(_) => "date[]",
+        ArrayCell::Time(_) => "time[]",
+        ArrayCell::Timestamp(_) => "timestamp[]",
+        ArrayCell::TimestampTz(_) => "timestamptz[]",
+        ArrayCell::Uuid(_) => "uuid[]",
+        ArrayCell::Bytes(_) => "bytes[]",
+    }
+}
+
+/// Returns array values after materialization validation has removed `NULL`s.
+fn required_values<T>(values: Vec<Option<T>>) -> Result<Vec<T>, EtlError> {
+    let mut required = Vec::with_capacity(values.len());
+    for (index, value) in values.into_iter().enumerate() {
+        match value {
+            Some(value) => required.push(value),
+            None => {
+                return Err(etl::etl_error!(
+                    ErrorKind::NullValuesNotSupportedInArrayInDestination,
+                    "Array contains NULL value",
+                    format!("Element at index {index} is NULL, which is not supported in BigQuery")
+                ));
+            }
+        }
+    }
+
+    Ok(required)
+}
+
+/// Formats a BigQuery date string.
+fn format_date(value: NaiveDate) -> String {
+    value.format(DATE_FORMAT).to_string()
+}
+
+/// Formats a PostgreSQL date for BigQuery string-backed encodings.
+fn format_pg_date(value: PgDate) -> String {
+    match value {
+        PgDate::Finite(value) => format_date(value),
+        value => value.to_string(),
+    }
+}
+
+/// Formats a BigQuery time string.
+fn format_time(value: NaiveTime) -> String {
+    value.format(TIME_FORMAT).to_string()
+}
+
+/// Formats a PostgreSQL time for BigQuery string-backed encodings.
+fn format_pg_time(value: PgTime) -> String {
+    match value {
+        PgTime::Finite(value) => format_time(value),
+        value => value.to_string(),
+    }
+}
+
+/// Formats a BigQuery datetime string.
+fn format_timestamp(value: NaiveDateTime) -> String {
+    value.format(TIMESTAMP_FORMAT).to_string()
+}
+
+/// Formats a PostgreSQL timestamp for BigQuery string-backed encodings.
+fn format_pg_timestamp(value: PgTimestamp) -> String {
+    match value {
+        PgTimestamp::Finite(value) => format_timestamp(value),
+        value => value.to_string(),
+    }
+}
+
+/// Formats a BigQuery timestamp string.
+fn format_timestamptz(value: DateTime<Utc>) -> String {
+    value.format(TIMESTAMPTZ_FORMAT_HH_MM).to_string()
+}
+
+/// Formats a PostgreSQL timestamptz for BigQuery string-backed encodings.
+fn format_pg_timestamptz(value: PgTimestampTz) -> String {
+    match value {
+        PgTimestampTz::Finite(value) => format_timestamptz(value),
+        value => value.to_string(),
+    }
 }
 
 /// Returns an invalid materialization result from an [`EtlError`].
@@ -1379,49 +1585,6 @@ fn invalid_from_etl_error(error: EtlError) -> BigQueryCellMaterializationResult 
         .or_else(|| error.description())
         .map_or_else(|| error.to_string(), ToOwned::to_owned);
     invalid(error.kind(), reason)
-}
-
-/// Returns a null-array materialization failure, if any element is null.
-fn validate_array_has_no_nulls(array: &ArrayCell) -> Option<BigQueryCellMaterializationResult> {
-    let (element_count, null_count) = array_counts(array);
-    if null_count == 0 {
-        return None;
-    }
-
-    Some(invalid(
-        ErrorKind::NullValuesNotSupportedInArrayInDestination,
-        format!(
-            "Array contains {null_count} NULL values across {element_count} elements, which are \
-             not supported in BigQuery",
-        ),
-    ))
-}
-
-/// Returns the total and null element counts for an array.
-fn array_counts(array: &ArrayCell) -> (usize, usize) {
-    macro_rules! counts {
-        ($values:expr) => {
-            ($values.len(), $values.iter().filter(|value| value.is_none()).count())
-        };
-    }
-
-    match array {
-        ArrayCell::Bool(values) => counts!(values),
-        ArrayCell::String(values) => counts!(values),
-        ArrayCell::I16(values) => counts!(values),
-        ArrayCell::I32(values) => counts!(values),
-        ArrayCell::U32(values) => counts!(values),
-        ArrayCell::I64(values) => counts!(values),
-        ArrayCell::F32(values) => counts!(values),
-        ArrayCell::F64(values) => counts!(values),
-        ArrayCell::Numeric(values) => counts!(values),
-        ArrayCell::Date(values) => counts!(values),
-        ArrayCell::Time(values) => counts!(values),
-        ArrayCell::Timestamp(values) => counts!(values),
-        ArrayCell::TimestampTz(values) => counts!(values),
-        ArrayCell::Uuid(values) => counts!(values),
-        ArrayCell::Bytes(values) => counts!(values),
-    }
 }
 
 /// Returns the number of fractional digits in a numeric string.
@@ -1681,7 +1844,9 @@ mod tests {
     use etl::error::EtlResult;
 
     use super::*;
-    use crate::bigquery::value::{BigQueryArrayType, BigQueryFloatEncoding, BigQueryIntEncoding};
+    use crate::bigquery::value::{
+        BigQueryArrayCell, BigQueryArrayType, BigQueryFloatEncoding, BigQueryIntEncoding,
+    };
 
     /// Returns a materializer for the supplied policy.
     fn materializer(
@@ -1787,6 +1952,77 @@ mod tests {
             assert_eq!(
                 materializer.materialize_type(&typ).expect("fallback type should materialize"),
                 BigQueryType::Array(BigQueryArrayType::String)
+            );
+        }
+    }
+
+    #[test]
+    fn native_only_type_strategy_accepts_all_native_bigquery_types() {
+        let materializer = materializer(DestinationMaterializationPolicy::native_only_reject());
+
+        for (typ, expected_type) in [
+            (Type::BOOL, BigQueryType::Bool),
+            (Type::CHAR, BigQueryType::String),
+            (Type::BPCHAR, BigQueryType::String),
+            (Type::VARCHAR, BigQueryType::String),
+            (Type::NAME, BigQueryType::String),
+            (Type::TEXT, BigQueryType::String),
+            (Type::INT2, BigQueryType::Int64(BigQueryIntEncoding::Int32)),
+            (Type::INT4, BigQueryType::Int64(BigQueryIntEncoding::Int32)),
+            (Type::INT8, BigQueryType::Int64(BigQueryIntEncoding::Int64)),
+            (Type::OID, BigQueryType::Int64(BigQueryIntEncoding::Int64)),
+            (Type::FLOAT4, BigQueryType::Float64(BigQueryFloatEncoding::Float)),
+            (Type::FLOAT8, BigQueryType::Float64(BigQueryFloatEncoding::Double)),
+            (Type::NUMERIC, BigQueryType::BigNumeric),
+            (Type::DATE, BigQueryType::Date),
+            (Type::TIME, BigQueryType::Time),
+            (Type::TIMESTAMP, BigQueryType::DateTime),
+            (Type::TIMESTAMPTZ, BigQueryType::Timestamp),
+            (Type::JSON, BigQueryType::Json),
+            (Type::JSONB, BigQueryType::Json),
+            (Type::BYTEA, BigQueryType::Bytes),
+            (Type::BOOL_ARRAY, BigQueryType::Array(BigQueryArrayType::Bool)),
+            (Type::CHAR_ARRAY, BigQueryType::Array(BigQueryArrayType::String)),
+            (Type::BPCHAR_ARRAY, BigQueryType::Array(BigQueryArrayType::String)),
+            (Type::VARCHAR_ARRAY, BigQueryType::Array(BigQueryArrayType::String)),
+            (Type::NAME_ARRAY, BigQueryType::Array(BigQueryArrayType::String)),
+            (Type::TEXT_ARRAY, BigQueryType::Array(BigQueryArrayType::String)),
+            (
+                Type::INT2_ARRAY,
+                BigQueryType::Array(BigQueryArrayType::Int64(BigQueryIntEncoding::Int32)),
+            ),
+            (
+                Type::INT4_ARRAY,
+                BigQueryType::Array(BigQueryArrayType::Int64(BigQueryIntEncoding::Int32)),
+            ),
+            (
+                Type::INT8_ARRAY,
+                BigQueryType::Array(BigQueryArrayType::Int64(BigQueryIntEncoding::Int64)),
+            ),
+            (
+                Type::OID_ARRAY,
+                BigQueryType::Array(BigQueryArrayType::Int64(BigQueryIntEncoding::Int64)),
+            ),
+            (
+                Type::FLOAT4_ARRAY,
+                BigQueryType::Array(BigQueryArrayType::Float64(BigQueryFloatEncoding::Float)),
+            ),
+            (
+                Type::FLOAT8_ARRAY,
+                BigQueryType::Array(BigQueryArrayType::Float64(BigQueryFloatEncoding::Double)),
+            ),
+            (Type::NUMERIC_ARRAY, BigQueryType::Array(BigQueryArrayType::BigNumeric)),
+            (Type::DATE_ARRAY, BigQueryType::Array(BigQueryArrayType::Date)),
+            (Type::TIME_ARRAY, BigQueryType::Array(BigQueryArrayType::Time)),
+            (Type::TIMESTAMP_ARRAY, BigQueryType::Array(BigQueryArrayType::DateTime)),
+            (Type::TIMESTAMPTZ_ARRAY, BigQueryType::Array(BigQueryArrayType::Timestamp)),
+            (Type::JSON_ARRAY, BigQueryType::Array(BigQueryArrayType::Json)),
+            (Type::JSONB_ARRAY, BigQueryType::Array(BigQueryArrayType::Json)),
+            (Type::BYTEA_ARRAY, BigQueryType::Array(BigQueryArrayType::Bytes)),
+        ] {
+            assert_eq!(
+                materializer.materialize_type(&typ).expect("native type should materialize"),
+                expected_type
             );
         }
     }
@@ -2531,7 +2767,7 @@ mod tests {
     }
 
     #[test]
-    fn reject_json_arrays_validate_string_elements_using_source_type() {
+    fn reject_json_arrays_validate_string_elements_using_selected_type() {
         let cell = Cell::Array(ArrayCell::String(vec![Some(
             r#"{"value":18446744073709551616}"#.to_owned(),
         )]));
@@ -2560,7 +2796,7 @@ mod tests {
     }
 
     #[test]
-    fn normalize_json_arrays_normalize_string_elements_using_source_type() {
+    fn normalize_json_arrays_normalize_string_elements_using_selected_type() {
         let cell =
             Cell::Array(ArrayCell::String(vec![Some(r#"{"value":1,"value":2}"#.to_owned())]));
 

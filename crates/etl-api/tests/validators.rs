@@ -65,7 +65,7 @@ fn create_bigquery_config(
         max_staleness_mins: None,
         connection_pool_size: None,
         type_strategy: TypeStrategy::NativeOrString,
-        value_strategy: ValueStrategy::Normalize,
+        value_strategy: ValueStrategy::Reject,
     }
 }
 

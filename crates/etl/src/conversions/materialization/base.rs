@@ -59,7 +59,7 @@ pub enum CellMaterializationResult<T, C> {
         /// Materialized cell plus destination type.
         cell: TypedCell<T, C>,
         /// How the cell changed during materialization.
-        outcome: MaterializationOutcome,
+        outcome: CellMaterializationOutcome,
     },
     /// The cell cannot be represented by the destination.
     Invalid {
@@ -72,7 +72,7 @@ pub enum CellMaterializationResult<T, C> {
 
 /// Successful cell materialization outcome.
 #[derive(Debug, PartialEq, Eq)]
-pub enum MaterializationOutcome {
+pub enum CellMaterializationOutcome {
     /// The cell can be written unchanged.
     Unchanged,
     /// The cell value changed but the destination materialized type did not.
@@ -81,7 +81,7 @@ pub enum MaterializationOutcome {
     TypeChanged,
 }
 
-impl MaterializationOutcome {
+impl CellMaterializationOutcome {
     /// Returns a stable log label for the outcome.
     const fn as_str(&self) -> &'static str {
         match self {
@@ -209,7 +209,7 @@ where
         &self,
         source_type: &Type,
         materialized_type: &C::MaterializedType,
-        materialization_outcome: MaterializationOutcome,
+        materialization_outcome: CellMaterializationOutcome,
         cell: MaterializedCell<C>,
     ) -> EtlResult<MaterializedCell<C>> {
         if cell.typ() != materialized_type {

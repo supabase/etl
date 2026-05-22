@@ -13,6 +13,15 @@ The default is `type_strategy = "native_or_string"` and
 string fallbacks for PostgreSQL-only types, and rejects values that would need
 normalization.
 
+Configure BigQuery destinations with the two strategy fields directly:
+
+```yaml
+destination:
+  big_query:
+    type_strategy: native_or_string
+    value_strategy: reject
+```
+
 ## Strategies
 
 | Strategy | Values | Behavior |
@@ -26,11 +35,13 @@ may reject, round, clamp, canonicalize, or otherwise lose source semantics. It
 uses the native destination type only when that type is supported and safe.
 
 The strategies are independent and are applied in order. ETL first applies the
-`type_strategy` to select the physical destination type for the column. It then
-applies the `value_strategy` against that selected destination type. For example,
-with `type_strategy = "native_or_string"`, a PostgreSQL `uuid` column
-materializes as BigQuery `STRING`; after that, any value strategy writes UUID
-values as strings because `STRING` is the selected type.
+`type_strategy` in its internal source-type model. That can keep the PostgreSQL
+type unchanged or project it to another PostgreSQL-shaped type, such as `text`.
+The destination then lowers that projected type to the physical destination type
+used for schema creation. For example, with `type_strategy =
+"native_or_string"`, a PostgreSQL `uuid` column is first projected to `text`,
+then materializes as BigQuery `STRING`; after that, any value strategy receives
+string-shaped cells and writes UUID values as strings.
 
 The strategies are destination-agnostic configuration values, but each
 destination defines its own native type surface and value rules. The table below
@@ -58,17 +69,23 @@ PostgreSQL array column is stored as a scalar `STRING` using PostgreSQL-style
 array text, which preserves `NULL` arrays and `NULL` elements but is no longer
 queryable as a BigQuery array.
 
-When the selected BigQuery type is `STRING`, the value strategy does not attempt
-destination-native validation or normalization for the original PostgreSQL type.
-It writes `NULL` as `NULL` and non-`NULL` source values as strings. When the
-selected BigQuery type is a repeated field, all value strategies must still
-reject `NULL` arrays and `NULL` elements because BigQuery repeated fields cannot
-represent them.
+For row values, ETL keeps using its internal PostgreSQL-shaped `Type`/`Cell`
+model after type projection. The value strategy runs against that projected
+type and projected cell. Only after value handling finishes does ETL lower the
+projected pair to the BigQuery schema type and Storage Write API value carrier.
+
+When the projected type lowers to BigQuery `STRING`, the value strategy does not
+attempt destination-native validation or normalization for the original
+PostgreSQL type. It writes `NULL` as `NULL` and non-`NULL` source values as
+strings. When the projected type lowers to a repeated BigQuery field, all value
+strategies must still reject `NULL` arrays and `NULL` elements because BigQuery
+repeated fields cannot represent them.
 
 ### Type Strategy Behavior
 
-This table describes only destination type selection. Value validation and
-normalization happen afterward against the selected BigQuery type.
+This table describes only destination type selection. Internally this is
+implemented as source type -> projected type -> BigQuery type. Value validation
+and normalization happen afterward against the projected type and cell.
 
 | PostgreSQL source type | `native_only` | `native_or_string` | `string_if_risky` |
 |------------------------|---------------|-------------------------|--------------------|

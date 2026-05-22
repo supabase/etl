@@ -1,14 +1,9 @@
 use std::fmt;
 
-use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use etl::{
-    error::{ErrorKind, EtlError, EtlResult},
-    etl_error,
+    error::EtlError,
     materialization::TypedCell,
-    types::{
-        ArrayCell, Cell, DATE_FORMAT, PgDate, PgTime, PgTimestamp, PgTimestampTz, TIME_FORMAT,
-        TIMESTAMP_FORMAT, TIMESTAMPTZ_FORMAT_HH_MM, TableRow, Type, is_array_type,
-    },
+    types::{Cell, TableRow, Type},
 };
 use prost::bytes;
 
@@ -50,6 +45,85 @@ pub(super) enum BigQueryType {
     Array(BigQueryArrayType),
 }
 
+impl BigQueryType {
+    /// Returns the BigQuery type for a projected internal type.
+    ///
+    /// Returns [`None`] when the type strategy should have projected the source
+    /// type to text or rejected it before final BigQuery encoding.
+    pub(super) fn for_projected_type(typ: &Type) -> Option<Self> {
+        let typ = match *typ {
+            Type::BOOL => Self::Bool,
+            Type::CHAR | Type::BPCHAR | Type::VARCHAR | Type::NAME | Type::TEXT => Self::String,
+            Type::INT2 | Type::INT4 => Self::Int64(BigQueryIntEncoding::Int32),
+            Type::INT8 | Type::OID => Self::Int64(BigQueryIntEncoding::Int64),
+            // BigQuery has only `FLOAT64`, but the Storage Write API can use
+            // either protobuf `float` or `double` as the incoming field type.
+            Type::FLOAT4 => Self::Float64(BigQueryFloatEncoding::Float),
+            Type::FLOAT8 => Self::Float64(BigQueryFloatEncoding::Double),
+            Type::NUMERIC => Self::BigNumeric,
+            Type::DATE => Self::Date,
+            Type::TIME => Self::Time,
+            Type::TIMESTAMP => Self::DateTime,
+            Type::TIMESTAMPTZ => Self::Timestamp,
+            Type::JSON | Type::JSONB => Self::Json,
+            Type::BYTEA => Self::Bytes,
+            Type::BOOL_ARRAY => Self::Array(BigQueryArrayType::Bool),
+            Type::CHAR_ARRAY
+            | Type::BPCHAR_ARRAY
+            | Type::VARCHAR_ARRAY
+            | Type::NAME_ARRAY
+            | Type::TEXT_ARRAY => Self::Array(BigQueryArrayType::String),
+            Type::INT2_ARRAY | Type::INT4_ARRAY => {
+                Self::Array(BigQueryArrayType::Int64(BigQueryIntEncoding::Int32))
+            }
+            Type::INT8_ARRAY | Type::OID_ARRAY => {
+                Self::Array(BigQueryArrayType::Int64(BigQueryIntEncoding::Int64))
+            }
+            Type::FLOAT4_ARRAY => {
+                Self::Array(BigQueryArrayType::Float64(BigQueryFloatEncoding::Float))
+            }
+            Type::FLOAT8_ARRAY => {
+                Self::Array(BigQueryArrayType::Float64(BigQueryFloatEncoding::Double))
+            }
+            Type::NUMERIC_ARRAY => Self::Array(BigQueryArrayType::BigNumeric),
+            Type::DATE_ARRAY => Self::Array(BigQueryArrayType::Date),
+            Type::TIME_ARRAY => Self::Array(BigQueryArrayType::Time),
+            Type::TIMESTAMP_ARRAY => Self::Array(BigQueryArrayType::DateTime),
+            Type::TIMESTAMPTZ_ARRAY => Self::Array(BigQueryArrayType::Timestamp),
+            Type::JSON_ARRAY | Type::JSONB_ARRAY => Self::Array(BigQueryArrayType::Json),
+            Type::BYTEA_ARRAY => Self::Array(BigQueryArrayType::Bytes),
+            _ => return None,
+        };
+
+        Some(typ)
+    }
+
+    /// Returns this type as a BigQuery SQL fragment.
+    pub(super) fn to_sql(&self) -> String {
+        match self {
+            Self::Bool => "bool".to_owned(),
+            Self::String => "string".to_owned(),
+            Self::Int64(_) => "int64".to_owned(),
+            Self::Float64(_) => "float64".to_owned(),
+            Self::BigNumeric => "bignumeric".to_owned(),
+            Self::Date => "date".to_owned(),
+            Self::Time => "time".to_owned(),
+            Self::DateTime => "datetime".to_owned(),
+            Self::Timestamp => "timestamp".to_owned(),
+            Self::Json => "json".to_owned(),
+            Self::Bytes => "bytes".to_owned(),
+            Self::Array(element_type) => format!("array<{}>", element_type.to_sql()),
+        }
+    }
+}
+
+impl fmt::Display for BigQueryType {
+    /// Formats this type as a BigQuery SQL fragment.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.to_sql())
+    }
+}
+
 /// BigQuery repeated column element type.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum BigQueryArrayType {
@@ -77,6 +151,25 @@ pub(super) enum BigQueryArrayType {
     Bytes,
 }
 
+impl BigQueryArrayType {
+    /// Returns this repeated element type as a BigQuery SQL fragment.
+    fn to_sql(&self) -> &'static str {
+        match self {
+            Self::Bool => "bool",
+            Self::String => "string",
+            Self::Int64(_) => "int64",
+            Self::Float64(_) => "float64",
+            Self::BigNumeric => "bignumeric",
+            Self::Date => "date",
+            Self::Time => "time",
+            Self::DateTime => "datetime",
+            Self::Timestamp => "timestamp",
+            Self::Json => "json",
+            Self::Bytes => "bytes",
+        }
+    }
+}
+
 /// Storage Write API integer encoding for a BigQuery `INT64`.
 ///
 /// BigQuery stores the column as `INT64`, but the Write API accepts narrower
@@ -101,104 +194,6 @@ pub(super) enum BigQueryFloatEncoding {
     Float,
     /// Encode values with protobuf `double`.
     Double,
-}
-
-impl BigQueryType {
-    /// Returns the native BigQuery type for a source type.
-    pub(super) fn native_for_source_type(typ: &Type) -> Self {
-        match *typ {
-            Type::BOOL => Self::Bool,
-            Type::CHAR | Type::BPCHAR | Type::VARCHAR | Type::NAME | Type::TEXT => Self::String,
-            Type::INT2 | Type::INT4 => Self::Int64(BigQueryIntEncoding::Int32),
-            Type::INT8 | Type::OID => Self::Int64(BigQueryIntEncoding::Int64),
-            // BigQuery has only `FLOAT64`, but the Storage Write API can use
-            // either protobuf `float` or `double` as the incoming field type.
-            Type::FLOAT4 => Self::Float64(BigQueryFloatEncoding::Float),
-            Type::FLOAT8 => Self::Float64(BigQueryFloatEncoding::Double),
-            Type::NUMERIC => Self::BigNumeric,
-            Type::MONEY => Self::String,
-            Type::DATE => Self::Date,
-            Type::TIME => Self::Time,
-            Type::TIMESTAMP => Self::DateTime,
-            Type::TIMESTAMPTZ => Self::Timestamp,
-            Type::UUID => Self::String,
-            Type::JSON | Type::JSONB => Self::Json,
-            Type::BYTEA => Self::Bytes,
-            Type::BOOL_ARRAY => Self::Array(BigQueryArrayType::Bool),
-            Type::CHAR_ARRAY
-            | Type::BPCHAR_ARRAY
-            | Type::VARCHAR_ARRAY
-            | Type::NAME_ARRAY
-            | Type::TEXT_ARRAY => Self::Array(BigQueryArrayType::String),
-            Type::INT2_ARRAY | Type::INT4_ARRAY => {
-                Self::Array(BigQueryArrayType::Int64(BigQueryIntEncoding::Int32))
-            }
-            Type::INT8_ARRAY | Type::OID_ARRAY => {
-                Self::Array(BigQueryArrayType::Int64(BigQueryIntEncoding::Int64))
-            }
-            Type::FLOAT4_ARRAY => {
-                Self::Array(BigQueryArrayType::Float64(BigQueryFloatEncoding::Float))
-            }
-            Type::FLOAT8_ARRAY => {
-                Self::Array(BigQueryArrayType::Float64(BigQueryFloatEncoding::Double))
-            }
-            Type::NUMERIC_ARRAY => Self::Array(BigQueryArrayType::BigNumeric),
-            Type::MONEY_ARRAY => Self::Array(BigQueryArrayType::String),
-            Type::DATE_ARRAY => Self::Array(BigQueryArrayType::Date),
-            Type::TIME_ARRAY => Self::Array(BigQueryArrayType::Time),
-            Type::TIMESTAMP_ARRAY => Self::Array(BigQueryArrayType::DateTime),
-            Type::TIMESTAMPTZ_ARRAY => Self::Array(BigQueryArrayType::Timestamp),
-            Type::UUID_ARRAY => Self::Array(BigQueryArrayType::String),
-            Type::JSON_ARRAY | Type::JSONB_ARRAY => Self::Array(BigQueryArrayType::Json),
-            Type::BYTEA_ARRAY => Self::Array(BigQueryArrayType::Bytes),
-            _ if is_array_type(typ) => Self::Array(BigQueryArrayType::String),
-            _ => Self::String,
-        }
-    }
-
-    /// Returns this type as a BigQuery SQL fragment.
-    pub(super) fn to_sql(&self) -> String {
-        match self {
-            Self::Bool => "bool".to_owned(),
-            Self::String => "string".to_owned(),
-            Self::Int64(_) => "int64".to_owned(),
-            Self::Float64(_) => "float64".to_owned(),
-            Self::BigNumeric => "bignumeric".to_owned(),
-            Self::Date => "date".to_owned(),
-            Self::Time => "time".to_owned(),
-            Self::DateTime => "datetime".to_owned(),
-            Self::Timestamp => "timestamp".to_owned(),
-            Self::Json => "json".to_owned(),
-            Self::Bytes => "bytes".to_owned(),
-            Self::Array(element_type) => format!("array<{}>", element_type.to_sql()),
-        }
-    }
-}
-
-impl BigQueryArrayType {
-    /// Returns this repeated element type as a BigQuery SQL fragment.
-    fn to_sql(&self) -> &'static str {
-        match self {
-            Self::Bool => "bool",
-            Self::String => "string",
-            Self::Int64(_) => "int64",
-            Self::Float64(_) => "float64",
-            Self::BigNumeric => "bignumeric",
-            Self::Date => "date",
-            Self::Time => "time",
-            Self::DateTime => "datetime",
-            Self::Timestamp => "timestamp",
-            Self::Json => "json",
-            Self::Bytes => "bytes",
-        }
-    }
-}
-
-impl fmt::Display for BigQueryType {
-    /// Formats this type as a BigQuery SQL fragment.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.to_sql())
-    }
 }
 
 /// Protocol buffer wrapper for a BigQuery table row.
@@ -355,6 +350,23 @@ pub(super) enum BigQueryCell {
     Array(BigQueryArrayCell),
 }
 
+impl BigQueryCell {
+    /// Clears the cell contents.
+    pub(super) fn clear(&mut self) {
+        match self {
+            Self::Null
+            | Self::Bool(_)
+            | Self::Int32(_)
+            | Self::Int64(_)
+            | Self::Float32(_)
+            | Self::Float64(_) => {}
+            Self::String(value) => value.clear(),
+            Self::Bytes(value) => value.clear(),
+            Self::Array(value) => value.clear(),
+        }
+    }
+}
+
 /// BigQuery repeated field values ready for Storage Write API encoding.
 #[derive(Debug, PartialEq)]
 pub(super) enum BigQueryArrayCell {
@@ -374,91 +386,7 @@ pub(super) enum BigQueryArrayCell {
     Bytes(Vec<Vec<u8>>),
 }
 
-impl BigQueryCell {
-    /// Converts an ETL cell that is already materialized for BigQuery into a
-    /// BigQuery-specific cell.
-    pub(super) fn try_from_native_cell(cell: Cell) -> EtlResult<Self> {
-        match cell {
-            Cell::Null => Ok(Self::Null),
-            Cell::Bool(value) => Ok(Self::Bool(value)),
-            Cell::String(value) => Ok(Self::String(value)),
-            Cell::I16(value) => Ok(Self::Int32(i32::from(value))),
-            Cell::I32(value) => Ok(Self::Int32(value)),
-            Cell::I64(value) => Ok(Self::Int64(value)),
-            Cell::F32(value) => Ok(Self::Float32(value)),
-            Cell::F64(value) => Ok(Self::Float64(value)),
-            Cell::Numeric(value) => Ok(Self::String(value.to_string())),
-            Cell::Date(value) => Ok(Self::String(format_pg_date(value))),
-            Cell::Time(value) => Ok(Self::String(format_pg_time(value))),
-            Cell::Timestamp(value) => Ok(Self::String(format_pg_timestamp(value))),
-            Cell::TimestampTz(value) => Ok(Self::String(format_pg_timestamptz(value))),
-            Cell::Uuid(value) => Ok(Self::String(value.to_string())),
-            Cell::U32(value) => Ok(Self::Int64(i64::from(value))),
-            Cell::Bytes(value) => Ok(Self::Bytes(value)),
-            Cell::Array(value) => BigQueryArrayCell::try_from_native_array(value).map(Self::Array),
-        }
-    }
-
-    /// Returns a BigQuery scalar string cell.
-    pub(super) fn string(value: impl Into<String>) -> Self {
-        Self::String(value.into())
-    }
-
-    /// Clears the cell contents.
-    pub(super) fn clear(&mut self) {
-        match self {
-            Self::Null
-            | Self::Bool(_)
-            | Self::Int32(_)
-            | Self::Int64(_)
-            | Self::Float32(_)
-            | Self::Float64(_) => {}
-            Self::String(value) => value.clear(),
-            Self::Bytes(value) => value.clear(),
-            Self::Array(value) => value.clear(),
-        }
-    }
-}
-
 impl BigQueryArrayCell {
-    /// Converts an ETL array that is already materialized for BigQuery into a
-    /// BigQuery-specific repeated field.
-    pub(super) fn try_from_native_array(array: ArrayCell) -> EtlResult<Self> {
-        match array {
-            ArrayCell::Bool(values) => Ok(Self::Bool(required_values(values)?)),
-            ArrayCell::String(values) => Ok(Self::String(required_values(values)?)),
-            ArrayCell::I16(values) => {
-                Ok(Self::Int32(required_values(values)?.into_iter().map(i32::from).collect()))
-            }
-            ArrayCell::I32(values) => Ok(Self::Int32(required_values(values)?)),
-            ArrayCell::U32(values) => {
-                Ok(Self::Int64(required_values(values)?.into_iter().map(i64::from).collect()))
-            }
-            ArrayCell::I64(values) => Ok(Self::Int64(required_values(values)?)),
-            ArrayCell::F32(values) => Ok(Self::Float32(required_values(values)?)),
-            ArrayCell::F64(values) => Ok(Self::Float64(required_values(values)?)),
-            ArrayCell::Numeric(values) => Ok(Self::String(
-                required_values(values)?.into_iter().map(|value| value.to_string()).collect(),
-            )),
-            ArrayCell::Date(values) => {
-                Ok(Self::String(required_values(values)?.into_iter().map(format_pg_date).collect()))
-            }
-            ArrayCell::Time(values) => {
-                Ok(Self::String(required_values(values)?.into_iter().map(format_pg_time).collect()))
-            }
-            ArrayCell::Timestamp(values) => Ok(Self::String(
-                required_values(values)?.into_iter().map(format_pg_timestamp).collect(),
-            )),
-            ArrayCell::TimestampTz(values) => Ok(Self::String(
-                required_values(values)?.into_iter().map(format_pg_timestamptz).collect(),
-            )),
-            ArrayCell::Uuid(values) => Ok(Self::String(
-                required_values(values)?.into_iter().map(|value| value.to_string()).collect(),
-            )),
-            ArrayCell::Bytes(values) => Ok(Self::Bytes(required_values(values)?)),
-        }
-    }
-
     /// Clears the repeated field contents.
     fn clear(&mut self) {
         match self {
@@ -549,77 +477,6 @@ fn array_cell_encoded_len_prost(array_cell: &BigQueryArrayCell, tag: u32) -> usi
     }
 }
 
-/// Returns array values after materialization validation has removed `NULL`s.
-fn required_values<T>(values: Vec<Option<T>>) -> EtlResult<Vec<T>> {
-    let mut required = Vec::with_capacity(values.len());
-    for (index, value) in values.into_iter().enumerate() {
-        match value {
-            Some(value) => required.push(value),
-            None => {
-                return Err(etl_error!(
-                    ErrorKind::NullValuesNotSupportedInArrayInDestination,
-                    "Array contains NULL value",
-                    format!("Element at index {index} is NULL, which is not supported in BigQuery")
-                ));
-            }
-        }
-    }
-
-    Ok(required)
-}
-
-/// Formats a BigQuery date string.
-fn format_date(value: NaiveDate) -> String {
-    value.format(DATE_FORMAT).to_string()
-}
-
-/// Formats a PostgreSQL date for BigQuery string-backed encodings.
-fn format_pg_date(value: PgDate) -> String {
-    match value {
-        PgDate::Finite(value) => format_date(value),
-        value => value.to_string(),
-    }
-}
-
-/// Formats a BigQuery time string.
-fn format_time(value: NaiveTime) -> String {
-    value.format(TIME_FORMAT).to_string()
-}
-
-/// Formats a PostgreSQL time for BigQuery string-backed encodings.
-fn format_pg_time(value: PgTime) -> String {
-    match value {
-        PgTime::Finite(value) => format_time(value),
-        value => value.to_string(),
-    }
-}
-
-/// Formats a BigQuery datetime string.
-fn format_timestamp(value: NaiveDateTime) -> String {
-    value.format(TIMESTAMP_FORMAT).to_string()
-}
-
-/// Formats a PostgreSQL timestamp for BigQuery string-backed encodings.
-fn format_pg_timestamp(value: PgTimestamp) -> String {
-    match value {
-        PgTimestamp::Finite(value) => format_timestamp(value),
-        value => value.to_string(),
-    }
-}
-
-/// Formats a BigQuery timestamp string.
-fn format_timestamptz(value: DateTime<Utc>) -> String {
-    value.format(TIMESTAMPTZ_FORMAT_HH_MM).to_string()
-}
-
-/// Formats a PostgreSQL timestamptz for BigQuery string-backed encodings.
-fn format_pg_timestamptz(value: PgTimestampTz) -> String {
-    match value {
-        PgTimestampTz::Finite(value) => format_timestamptz(value),
-        value => value.to_string(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
@@ -628,7 +485,7 @@ mod tests {
     use etl::{
         error::{ErrorKind, EtlError},
         materialization::DestinationMaterializationPolicy,
-        types::{Cell, PgNumeric, Type},
+        types::{ArrayCell, Cell, PgNumeric, Type},
     };
 
     use super::*;
