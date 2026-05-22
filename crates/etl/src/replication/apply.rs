@@ -76,7 +76,7 @@ use crate::{
     },
     state::table::{TableReplicationPhase, TableReplicationPhaseType},
     store::{
-        PipelineStore,
+        PipelineStore, SharedStateStore,
         schema::{SchemaStore, TableSchemaRetention},
         state::StateStore,
     },
@@ -2435,7 +2435,7 @@ mod apply_worker {
         remote_final_lsn: PgLsn,
     ) -> EtlResult<bool>
     where
-        S: StateStore + Clone + Send + Sync + 'static,
+        S: SharedStateStore,
     {
         fn is_phase_ready_for_changes(
             phase: TableReplicationPhase,
@@ -3173,7 +3173,7 @@ mod table_sync_worker {
         current_lsn: PgLsn,
     ) -> EtlResult<Option<ExitIntent>>
     where
-        S: StateStore + Clone + Send + Sync + 'static,
+        S: SharedStateStore,
     {
         try_complete_catchup(ctx, current_lsn).await
     }
@@ -3187,7 +3187,7 @@ mod table_sync_worker {
         current_lsn: PgLsn,
     ) -> EtlResult<Option<ExitIntent>>
     where
-        S: StateStore + Clone + Send + Sync + 'static,
+        S: SharedStateStore,
     {
         try_complete_catchup(ctx, current_lsn).await
     }
@@ -3201,7 +3201,7 @@ mod table_sync_worker {
         current_lsn: PgLsn,
     ) -> EtlResult<Option<ExitIntent>>
     where
-        S: StateStore + Clone + Send + Sync + 'static,
+        S: SharedStateStore,
     {
         let worker_type = WorkerType::TableSync { table_id: ctx.table_id };
         let mut inner = ctx.table_sync_worker_state.lock().await;

@@ -49,8 +49,9 @@
 //! The [`store::schema::SchemaStore`] trait handles versioned table schemas,
 //! and [`store::TableLifecycleStore`] handles table-scoped reset and removal
 //! operations that must update state, schema, and metadata consistently.
-//! [`store::DestinationStore`] and [`store::PipelineStore`] are facade traits
-//! for code that needs common combinations of these capabilities.
+//! [`store::SharedStateStore`], [`store::DestinationStore`], and
+//! [`store::PipelineStore`] are facade traits for code that needs common
+//! combinations of these capabilities.
 //!
 //! **Note:** To pause and resume a pipeline after the process is stopped, it
 //! must be able to persist data durably. The crate itself provides no

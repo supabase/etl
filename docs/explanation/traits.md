@@ -39,9 +39,9 @@ pub trait Destination {
 See [Event Types](events.md) for details on the events received by `write_events()`.
 
 `PipelineDestination` is a blanket-implemented facade for destinations that
-also satisfy `Clone + Send + Sync + 'static`. Pipeline runtime code uses this
-facade when it needs to move destinations across worker tasks, but custom
-destinations only implement `Destination` directly.
+also satisfy the pipeline runtime clone and thread-safety bounds. Pipeline
+runtime code uses this facade when it needs to move destinations across worker
+tasks, but custom destinations only implement `Destination` directly.
 
 ## SchemaStore
 
@@ -172,15 +172,16 @@ impl StateStore for MyStore { /* ... */ }
 impl TableLifecycleStore for MyStore { /* ... */ }
 ```
 
-`PipelineStore` is a blanket-implemented facade for stores that satisfy
-`StateStore + SchemaStore + TableLifecycleStore + Clone + Send + Sync +
-'static`. Pipeline runtime code uses this facade, while code that only needs one
-capability should depend on the narrower trait directly.
+`PipelineStore` is a blanket-implemented facade for stores that satisfy the
+full pipeline runtime store bounds. Pipeline runtime code uses this facade,
+while code that only needs one capability should depend on the narrower trait
+directly.
 
-`DestinationStore` is a blanket-implemented facade for stores that satisfy
-`StateStore + SchemaStore + Clone + Send + Sync + 'static`. Destination
-implementations use this when they need schema and state metadata but do not
-need lifecycle reset/removal operations.
+`DestinationStore` is a blanket-implemented facade for stores that satisfy the
+destination runtime store bounds. Destination implementations use this when
+they need schema and state metadata but do not need lifecycle reset/removal
+operations. `SharedStateStore` covers state-only users with the corresponding
+worker-safe bounds.
 
 ETL provides two built-in implementations:
 

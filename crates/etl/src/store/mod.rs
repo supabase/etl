@@ -5,28 +5,24 @@
 //! progress, versioned table schemas, destination table metadata, and
 //! synchronization status.
 //!
-//! Storage is divided into three main categories:
+//! Storage is divided into focused capability modules:
 //! - [`state`] - Replication progress and table synchronization states
 //! - [`schema`] - Database schema information, versioned schema storage, and
 //!   obsolete schema pruning
-//! - [`destination`] - Combined store capabilities commonly required by
-//!   destination implementations
+//! - [`capabilities`] - Named facade traits for common store capability sets
 //! - [`lifecycle`] - Table lifecycle operations that span both stores
-//! - [`pipeline`] - Combined store capabilities required by the pipeline
 //!
 //! The [`both`] module provides combined implementations that handle both
 //! state and schema storage in unified systems.
 
 pub mod both;
-pub mod destination;
+pub mod capabilities;
 pub mod lifecycle;
-pub mod pipeline;
 pub mod schema;
 pub mod state;
 
 pub use both::{memory::MemoryStore, postgres::PostgresStore};
-pub use destination::DestinationStore;
+pub use capabilities::{DestinationStore, PipelineStore, SharedStateStore};
 pub use lifecycle::TableLifecycleStore;
-pub use pipeline::PipelineStore;
 pub use schema::SchemaStore;
 pub use state::{StateStore, TableReplicationStates};

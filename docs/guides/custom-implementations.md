@@ -59,9 +59,9 @@ Create `src/custom_store.rs`. A store must implement three traits (see [Extensio
 - `StateStore` - Replication progress and destination table metadata tracking
 - `TableLifecycleStore` - Store lifecycle operations for table-copy restarts and publication changes
 
-`DestinationStore` and `PipelineStore` are blanket-implemented facades over
-these traits plus the required clone/thread-safety bounds, so custom stores do
-not implement those directly.
+`SharedStateStore`, `DestinationStore`, and `PipelineStore` are
+blanket-implemented facades over these traits plus the required
+clone/thread-safety bounds, so custom stores do not implement those directly.
 
 ```rust
 use std::collections::{BTreeMap, HashMap};
