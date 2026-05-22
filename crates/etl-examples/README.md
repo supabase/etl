@@ -1,7 +1,6 @@
 # `etl` — Examples
 
-This crate contains practical examples demonstrating how to replicate data from
-Postgres to various destinations using the ETL pipeline.
+This crate contains practical examples demonstrating how to replicate data from Postgres to various destinations using the ETL pipeline.
 
 ## Available Examples
 
@@ -10,13 +9,35 @@ Postgres to various destinations using the ETL pipeline.
 | [BigQuery](#bigquery)           | `bigquery`   | `bigquery`   | Google BigQuery (cloud data warehouse)     | Stable      |
 | [ClickHouse](#clickhouse-setup) | `clickhouse` | `clickhouse` | ClickHouse (column-oriented OLAP database) | In progress |
 | [DuckLake](#ducklake)           | `ducklake`   | `ducklake`   | DuckLake (open data lake format)           | In progress |
-| [Snowflake](src/bin/snowflake/README.md) | `snowflake` | `snowflake` | Snowflake (cloud data warehouse) | In progress |
+| [Snowflake](#snowflake)         | `snowflake`  | `snowflake`  | Snowflake (cloud data warehouse)           | In progress |
 
-## Building and running
+## Running an example
 
-Each binary is feature-gated so you only compile the dependencies you need. Some destinations (e.g. `ducklake`) pull in heavy native dependencies that can take several minutes to compile, and there's no reason to pay that cost when you only want to try BigQuery.
+The quickest way to run an example is via the xtask wrapper.
 
-### Single example
+After sourcing your `.env` (see `.env.example`), the DB connection is picked up automatically:
+
+```bash
+source .env
+cargo x example snowflake
+cargo x example bigquery
+cargo x example clickhouse
+cargo x example ducklake
+```
+
+This handles the `-p etl-examples --features <name>` boilerplate, injects `TESTS_DATABASE_*` env vars as `--db-*` flags, and defaults `--db-name` to `etl_testdata` and `--publication` to `seed_pub` (matching `cargo x seed`).
+
+Override any flag by passing it explicitly:
+
+```bash
+cargo x example snowflake --db-name mydb --publication my_pub
+```
+
+### Building manually
+
+Each binary is feature-gated so you only compile the dependencies you need. Some
+destinations (e.g. `ducklake`) pull in heavy native dependencies that can take
+several minutes to compile.
 
 ```bash
 # Build
@@ -45,7 +66,32 @@ All examples require a Postgres database with **logical replication** enabled:
 wal_level = logical
 ```
 
-Create a publication for the tables you want to replicate:
+The Postgres user must have the `REPLICATION` role:
+
+```sql
+ALTER USER my_user REPLICATION;
+```
+
+### Quick database setup
+
+The fastest way to get a seeded database with a publication is via the xtask:
+
+```bash
+# Start the dev Postgres (port 5430, wal_level=logical)
+cargo x init
+
+# Create and seed a database with 3 tables (users, orders, events) and a publication
+cargo x seed                          # defaults: etl_testdata, 1000 rows
+cargo x seed --rows 100000            # more data
+cargo x seed --database mydb --force  # custom name, recreate if exists
+```
+
+This creates three tables (users, orders, events) in the `public` schema and a
+`seed_pub` publication for them. Use `--help` for all options.
+
+### Manual setup
+
+If you prefer to use your own tables:
 
 ```sql
 -- Specific tables
@@ -53,12 +99,6 @@ CREATE PUBLICATION my_pub FOR TABLE orders, customers;
 
 -- All tables in the database
 CREATE PUBLICATION my_pub FOR ALL TABLES;
-```
-
-The Postgres user must have the `REPLICATION` role:
-
-```sql
-ALTER USER my_user REPLICATION;
 ```
 
 ---
@@ -151,7 +191,7 @@ cargo run -p etl-examples --bin clickhouse --features clickhouse -- \
 The destination supports two layouts, chosen per pipeline via `--clickhouse-engine`:
 
 | Flag value                       | Engine               | Use it for                                              |
-|----------------------------------|----------------------|---------------------------------------------------------|
+| -------------------------------- | -------------------- | ------------------------------------------------------- |
 | `replacing_merge_tree` (default) | `ReplacingMergeTree` | Current-state replicas. Source must have a primary key. |
 | `merge_tree`                     | `MergeTree`          | Append-only event log. Works for PK-less source tables. |
 
@@ -383,3 +423,59 @@ cargo run --bin bigquery -p etl-examples --features bigquery -- \
 | `--max-batch-fill-duration-ms` | `5000`       | Max time to wait before flushing a batch |
 | `--max-table-sync-workers`     | `4`          | Concurrent workers during initial copy   |
 | `--publication`                | _(required)_ | Postgres publication name                |
+
+---
+
+## Snowflake
+
+Replicates a Postgres publication to a Snowflake database via Snowpipe Streaming.
+
+### Prerequisites
+
+1. A Snowflake account with a user configured for **key-pair authentication**.
+2. An RSA private key file (`.p8`) with the public key registered on the Snowflake user.
+3. A target database and schema created in Snowflake.
+4. A role with USAGE on warehouse/database/schema and CREATE TABLE, CREATE STAGE,
+   CREATE PIPE on the schema.
+
+See `.env.example` for detailed setup instructions and SQL commands for each step.
+
+### Run
+
+```bash
+cargo run --bin snowflake -p etl-examples --features snowflake -- \
+    --db-host localhost \
+    --db-port 5430 \
+    --db-name etl_testdata \
+    --db-username postgres \
+    --db-password postgres \
+    --snowflake-account ORG-ACCOUNT \
+    --snowflake-user myuser \
+    --snowflake-private-key-path /path/to/rsa_key.p8 \
+    --snowflake-database MY_DATABASE \
+    --snowflake-role my_role \
+    --publication seed_pub
+```
+
+Snowflake args can also be set via `SNOWFLAKE_*` environment variables (e.g.
+`SNOWFLAKE_ACCOUNT`, `SNOWFLAKE_USER`, etc.) instead of CLI flags.
+
+### All flags
+
+| Flag                                 | Default      | Description                                       |
+| ------------------------------------ | ------------ | ------------------------------------------------- |
+| `--db-host`                          | _(required)_ | Postgres host                                     |
+| `--db-port`                          | _(required)_ | Postgres port                                     |
+| `--db-name`                          | _(required)_ | Postgres database name                            |
+| `--db-username`                      | _(required)_ | Postgres user                                     |
+| `--db-password`                      | --           | Postgres password                                 |
+| `--snowflake-account`                | _(required)_ | Snowflake account identifier (ORG-ACCOUNT format) |
+| `--snowflake-user`                   | _(required)_ | Snowflake user for key-pair auth                  |
+| `--snowflake-private-key-path`       | _(required)_ | Path to RSA private key file (.p8)                |
+| `--snowflake-private-key-passphrase` | --           | Passphrase if the key is encrypted                |
+| `--snowflake-database`               | _(required)_ | Snowflake target database                         |
+| `--snowflake-schema`                 | `PUBLIC`     | Snowflake target schema                           |
+| `--snowflake-role`                   | --           | Snowflake role (uses user default if omitted)     |
+| `--max-batch-fill-duration-ms`       | `5000`       | Max time to wait before flushing a batch          |
+| `--max-table-sync-workers`           | `4`          | Concurrent workers during initial copy            |
+| `--publication`                      | _(required)_ | Postgres publication name                         |
