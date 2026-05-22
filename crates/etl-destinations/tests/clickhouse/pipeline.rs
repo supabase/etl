@@ -52,6 +52,7 @@ const ID_VALUE_PROJECTION: &str = "id, value";
 const UPDATE_FLOW_TABLE: &str = "test_update__flow";
 const DELETE_FLOW_TABLE: &str = "test_delete__flow";
 const RESTART_FLOW_TABLE: &str = "test_restart__flow";
+const RESET_COPY_TABLE: &str = "test_reset__copy";
 const TRUNCATE_FLOW_TABLE: &str = "test_truncate__flow";
 
 /// Days from 1970-01-01 to 2024-01-15 (used to verify the `date_col`
@@ -928,6 +929,119 @@ async fn pipeline_restart_resumes_streaming_inner(engine: ClickHouseEngine) {
     assert_eq!(rows[0].value, "before_restart");
     assert_eq!(rows[1].id, 2);
     assert_eq!(rows[1].value, "after_restart");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn table_copy_reset_drops_destination_table_before_recopy_merge_tree() {
+    table_copy_reset_drops_destination_table_before_recopy_inner(ClickHouseEngine::MergeTree).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn table_copy_reset_drops_destination_table_before_recopy_replacing_merge_tree() {
+    table_copy_reset_drops_destination_table_before_recopy_inner(
+        ClickHouseEngine::ReplacingMergeTree,
+    )
+    .await;
+}
+
+async fn table_copy_reset_drops_destination_table_before_recopy_inner(engine: ClickHouseEngine) {
+    init_test_tracing();
+    install_crypto_provider();
+
+    let database = spawn_source_database().await;
+    let table_name = test_table_name("reset_copy");
+
+    let table_id = database
+        .create_table(table_name.clone(), true, &[("value", "text not null")])
+        .await
+        .expect("Failed to create reset_copy test table");
+
+    let publication_name = "test_pub_clickhouse_reset_copy";
+    database
+        .create_publication(publication_name, std::slice::from_ref(&table_name))
+        .await
+        .expect("Failed to create reset_copy publication");
+
+    database
+        .run_sql(&format!(
+            "INSERT INTO {} (value) VALUES ('before_1'), ('before_2')",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .expect("Failed to insert initial reset_copy rows");
+
+    let clickhouse_db = setup_clickhouse_database().await;
+    let store = NotifyingStore::new();
+    let pipeline_id: PipelineId = random();
+    let reset_query =
+        || current_state_query(engine, RESET_COPY_TABLE, ID_VALUE_PROJECTION, &["id"], "id");
+
+    let destination = TestDestinationWrapper::wrap(
+        clickhouse_db.build_destination_with_engine(store.clone(), engine).await,
+    );
+
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name.to_owned(),
+        store.clone(),
+        destination,
+    );
+
+    let table_ready =
+        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
+
+    pipeline.start().await.unwrap();
+
+    table_ready.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let rows: Vec<IdValueRow> = clickhouse_db.query(&reset_query()).await;
+    assert_eq!(rows.len(), 2, "first copy should produce two rows");
+    assert_eq!(rows[0].value, "before_1");
+    assert_eq!(rows[1].value, "before_2");
+
+    database
+        .run_sql(&format!("DELETE FROM {} WHERE true", table_name.as_quoted_identifier()))
+        .await
+        .expect("Failed to delete reset_copy source rows");
+    database
+        .run_sql(&format!(
+            "INSERT INTO {} (value) VALUES ('after')",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .expect("Failed to insert recopy reset_copy row");
+
+    store.reset_table_state(table_id).await.unwrap();
+
+    let destination = TestDestinationWrapper::wrap(
+        clickhouse_db.build_destination_with_engine(store.clone(), engine).await,
+    );
+
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name.to_owned(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    let table_ready =
+        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
+
+    pipeline.start().await.unwrap();
+
+    table_ready.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    assert!(destination.was_table_dropped_for_copy(table_id).await);
+    let rows: Vec<IdValueRow> = clickhouse_db.query(&reset_query()).await;
+    assert_eq!(rows.len(), 1, "recopy should not retain rows from the first copy");
+    assert_eq!(rows[0].id, 3);
+    assert_eq!(rows[0].value, "after");
 }
 
 /// Tests that TRUNCATE clears the ClickHouse table and that subsequent inserts
