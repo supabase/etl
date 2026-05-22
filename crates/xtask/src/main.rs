@@ -3,9 +3,9 @@ mod commands;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use commands::{
-    BenchmarkArgs, BenchmarkCompareArgs, ChaosArgs, CheckArgs, DeployLocalArgs, FixArgs, FmtArgs,
-    InitArgs, MigrateArgs, MsrvArgs, NextestArgs, PostgresArgs, TestClickhouseArgs,
-    VendorDuckdbArgs,
+    BenchmarkArgs, BenchmarkCompareArgs, ChaosArgs, CheckArgs, DeployLocalArgs, ExampleArgs,
+    FixArgs, FmtArgs, InitArgs, MigrateArgs, MsrvArgs, NextestArgs, PostgresArgs, SeedArgs,
+    TestClickhouseArgs, VendorDuckdbArgs,
 };
 
 #[derive(Parser)]
@@ -29,6 +29,8 @@ enum Command {
     /// Deploy the replicator to a local OrbStack Kubernetes cluster.
     #[command(name = "deploy-local")]
     DeployLocal(DeployLocalArgs),
+    /// Run a destination example (e.g. `cargo x example snowflake`).
+    Example(ExampleArgs),
     /// Auto-fix: clippy --fix, fmt, sort.
     Fix(FixArgs),
     /// Format code with nightly rustfmt.
@@ -44,6 +46,9 @@ enum Command {
     Nextest(NextestArgs),
     /// Manage test Postgres clusters.
     Postgres(PostgresArgs),
+    /// Seed a Postgres database with test tables and data for destination
+    /// examples.
+    Seed(SeedArgs),
     /// Run ClickHouse integration tests with a local Docker setup.
     #[command(name = "test-clickhouse")]
     TestClickhouse(TestClickhouseArgs),
@@ -61,6 +66,7 @@ async fn main() -> Result<()> {
         Command::Chaos(cmd) => cmd.run().await,
         Command::Check(cmd) => cmd.run(),
         Command::DeployLocal(cmd) => cmd.run(),
+        Command::Example(cmd) => cmd.run(),
         Command::Fix(cmd) => cmd.run(),
         Command::Fmt(cmd) => cmd.run(),
         Command::Init(cmd) => cmd.run(),
@@ -68,6 +74,7 @@ async fn main() -> Result<()> {
         Command::Msrv(cmd) => cmd.run(),
         Command::Nextest(cmd) => cmd.run(),
         Command::Postgres(cmd) => cmd.run(),
+        Command::Seed(cmd) => cmd.run(),
         Command::TestClickhouse(cmd) => cmd.run(),
         Command::VendorDuckdb(cmd) => cmd.run(),
     }
