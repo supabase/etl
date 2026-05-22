@@ -47,11 +47,16 @@ Common development tasks are available through `cargo x`, a shorthand alias for 
 Run `cargo x --help` to see all available commands.
 
 ```bash
-cargo x fmt          # format code with nightly rustfmt
-cargo x fmt --check  # check formatting without changes
-cargo x check        # pre-PR gate: fmt, sort, clippy, nextest
-cargo x fix          # auto-fix: clippy --fix, fmt, sort
-cargo x msrv         # verify MSRV consistency
+cargo x fmt              # format code with nightly rustfmt
+cargo x fmt --check      # check formatting without changes
+cargo x check            # pre-PR gate: fmt, sort, clippy
+cargo x fix              # auto-fix: clippy --fix, fmt, sort
+cargo x msrv             # verify MSRV consistency
+cargo x init             # set up local dev environment
+cargo x migrate          # run database migrations
+cargo x deploy-local     # deploy replicator to local OrbStack k8s
+cargo x test-clickhouse  # run ClickHouse integration tests
+cargo x vendor-duckdb    # download and vendor DuckDB extensions
 ```
 
 ## Formatting
