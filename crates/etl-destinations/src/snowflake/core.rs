@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use etl::{
     bail,
     concurrency::TaskSet,
-    destination::async_result::{TruncateTableResult, WriteEventsResult, WriteTableRowsResult},
+    destination::async_result::{DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult},
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
     state::destination_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus},
@@ -429,19 +429,21 @@ where
         self.tasks.shutdown().await
     }
 
-    async fn truncate_table(
+    async fn drop_table_for_copy(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
-        async_result: TruncateTableResult<()>,
+        async_result: DropTableForCopyResult<()>,
     ) -> EtlResult<()> {
-        self.prepare_table_for_streaming(replicated_table_schema).await?;
+        self.tasks.try_reap().await?;
+
         let table_name = try_stringify_table_name(replicated_table_schema.name())?.to_uppercase();
         let result = self
             .client
-            .truncate_table(replicated_table_schema.id(), &table_name)
+            .drop_table_for_copy(replicated_table_schema.id(), &table_name)
             .await
             .map_err(EtlError::from);
         async_result.send(result);
+
         Ok(())
     }
 
