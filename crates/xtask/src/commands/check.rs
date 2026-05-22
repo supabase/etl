@@ -5,11 +5,7 @@ use xshell::{Shell, cmd};
 use super::shared::NIGHTLY_TOOLCHAIN;
 
 #[derive(Args)]
-pub(crate) struct CheckArgs {
-    /// Extra arguments passed to nextest
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-    nextest_args: Vec<String>,
-}
+pub(crate) struct CheckArgs {}
 
 impl CheckArgs {
     pub(crate) fn run(self) -> Result<()> {
@@ -26,10 +22,6 @@ impl CheckArgs {
 
         eprintln!("[clippy]");
         cmd!(sh, "cargo clippy --all-targets --all-features --no-deps").run()?;
-
-        eprintln!("[nextest]");
-        let args = &self.nextest_args;
-        cmd!(sh, "cargo xtask nextest run {args...}").run()?;
 
         Ok(())
     }

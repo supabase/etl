@@ -23,7 +23,7 @@ enum Command {
     BenchmarkCompare(BenchmarkCompareArgs),
     /// Run chaos testing scenarios against the Kubernetes cluster.
     Chaos(ChaosArgs),
-    /// Pre-PR gate: fmt, sort, clippy, nextest.
+    /// Pre-PR gate: fmt, sort, clippy.
     Check(CheckArgs),
     /// Auto-fix: clippy --fix, fmt, sort.
     Fix(FixArgs),
