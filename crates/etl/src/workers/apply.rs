@@ -22,7 +22,7 @@ use crate::{
         client::{GetOrCreateSlotResult, PgReplicationClient, SlotState},
     },
     state::table::{TableReplicationPhase, TableReplicationPhaseType},
-    store::{schema::SchemaStore, state::StateStore},
+    store::{cleanup::CleanupStore, schema::SchemaStore, state::StateStore},
     types::PipelineId,
     workers::{
         TableSyncWorkerPool,
@@ -130,7 +130,7 @@ impl<S, D> ApplyWorker<S, D> {
 
 impl<S, D> ApplyWorker<S, D>
 where
-    S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
+    S: StateStore + SchemaStore + CleanupStore + Clone + Send + Sync + 'static,
     D: Destination + Clone + Send + Sync + 'static,
 {
     /// Handles apply worker errors using policy-based retry and backoff.

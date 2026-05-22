@@ -7,7 +7,7 @@
 pub mod async_result;
 mod base;
 
-pub use async_result::{TruncateTableResult, WriteEventsResult, WriteTableRowsResult};
+pub use async_result::{DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult};
 pub use base::Destination;
 
 pub use crate::materialization::{DestinationMaterializationPolicy, TypeStrategy, ValueStrategy};

@@ -29,7 +29,7 @@ use crate::{
         K8sClient, TrustedRootCertsCache, TrustedRootCertsError,
         core::{K8sCoreError, first_active_pipeline_id},
     },
-    routes::ErrorMessage,
+    routes::{ErrorMessage, TenantIdError, validate_tenant_id},
 };
 
 #[derive(Debug, Error)]
@@ -57,6 +57,9 @@ pub enum TenantError {
 
     #[error("The pipeline with id {0} is active; stop it before deleting it")]
     ActivePipeline(i64),
+
+    #[error(transparent)]
+    TenantId(#[from] TenantIdError),
 }
 
 impl TenantError {
@@ -80,6 +83,7 @@ impl ResponseError for TenantError {
         match self {
             TenantError::TenantsDb(TenantsDbError::Conflict(_))
             | TenantError::ActivePipeline(_) => StatusCode::CONFLICT,
+            TenantError::TenantId(_) => StatusCode::BAD_REQUEST,
             TenantError::TenantsDb(_)
             | TenantError::SourcesDb(_)
             | TenantError::PipelinesDb(_)
@@ -165,6 +169,7 @@ pub(crate) async fn create_tenant(
     root_span: RootSpan,
 ) -> Result<impl Responder, TenantError> {
     let tenant = tenant.into_inner();
+    validate_tenant_id(&tenant.id)?;
 
     root_span.record("project", &tenant.id);
 
@@ -198,6 +203,7 @@ pub(crate) async fn create_or_update_tenant(
 ) -> Result<impl Responder, TenantError> {
     let tenant_id = tenant_id.into_inner();
     let tenant = tenant.into_inner();
+    validate_tenant_id(&tenant_id)?;
 
     root_span.record("project", &tenant_id);
 
@@ -227,6 +233,7 @@ pub(crate) async fn read_tenant(
     root_span: RootSpan,
 ) -> Result<impl Responder, TenantError> {
     let tenant_id = tenant_id.into_inner();
+    validate_tenant_id(&tenant_id)?;
 
     root_span.record("project", &tenant_id);
 
@@ -261,6 +268,7 @@ pub(crate) async fn update_tenant(
 ) -> Result<impl Responder, TenantError> {
     let tenant = tenant.into_inner();
     let tenant_id = tenant_id.into_inner();
+    validate_tenant_id(&tenant_id)?;
 
     root_span.record("project", &tenant_id);
 
@@ -296,6 +304,7 @@ pub(crate) async fn delete_tenant(
     root_span: RootSpan,
 ) -> Result<impl Responder, TenantError> {
     let tenant_id = tenant_id.into_inner();
+    validate_tenant_id(&tenant_id)?;
 
     root_span.record("project", &tenant_id);
 

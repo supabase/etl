@@ -17,7 +17,7 @@ use etl::destination::DestinationMaterializationPolicy;
 use etl::{
     destination::{
         Destination,
-        async_result::{TruncateTableResult, WriteEventsResult, WriteTableRowsResult},
+        async_result::{DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult},
     },
     error::EtlResult,
     test_utils::notifying_store::NotifyingStore,
@@ -349,12 +349,12 @@ where
         self.inner.shutdown().await
     }
 
-    async fn truncate_table(
+    async fn drop_table_for_copy(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
-        async_result: TruncateTableResult<()>,
+        async_result: DropTableForCopyResult<()>,
     ) -> EtlResult<()> {
-        self.inner.truncate_table(replicated_table_schema, async_result).await
+        self.inner.drop_table_for_copy(replicated_table_schema, async_result).await
     }
 
     async fn write_table_rows(
@@ -403,10 +403,10 @@ impl Destination for NullDestination {
         "null"
     }
 
-    async fn truncate_table(
+    async fn drop_table_for_copy(
         &self,
         _replicated_table_schema: &ReplicatedTableSchema,
-        async_result: TruncateTableResult<()>,
+        async_result: DropTableForCopyResult<()>,
     ) -> EtlResult<()> {
         async_result.send(Ok(()));
         Ok(())
@@ -550,18 +550,18 @@ impl Destination for BenchDestination {
         }
     }
 
-    async fn truncate_table(
+    async fn drop_table_for_copy(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
-        async_result: TruncateTableResult<()>,
+        async_result: DropTableForCopyResult<()>,
     ) -> EtlResult<()> {
         match self {
             Self::Null(destination) => {
-                destination.truncate_table(replicated_table_schema, async_result).await
+                destination.drop_table_for_copy(replicated_table_schema, async_result).await
             }
             #[cfg(feature = "bigquery")]
             Self::BigQuery(destination) => {
-                destination.truncate_table(replicated_table_schema, async_result).await
+                destination.drop_table_for_copy(replicated_table_schema, async_result).await
             }
         }
     }

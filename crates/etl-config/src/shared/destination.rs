@@ -160,6 +160,22 @@ pub enum DestinationConfig {
         #[serde(default)]
         maintenance_mode: DuckLakeMaintenanceMode,
     },
+    Snowflake {
+        /// Snowflake account identifier in "ORGNAME-ACCOUNTNAME" format.
+        account_id: String,
+        /// Snowflake user with RSA public key configured.
+        user: String,
+        /// Path to RSA private key file (PEM/PKCS8 format).
+        private_key_path: String,
+        /// Optional passphrase for encrypted private key.
+        private_key_passphrase: Option<SecretString>,
+        /// Target database name.
+        database: String,
+        /// Target schema name.
+        schema: String,
+        /// Snowflake role.
+        role: Option<String>,
+    },
 }
 
 impl DestinationConfig {
@@ -364,6 +380,21 @@ pub enum DestinationConfigWithoutSecrets {
         #[serde(default)]
         maintenance_mode: DuckLakeMaintenanceMode,
     },
+    Snowflake {
+        /// Snowflake account identifier in "ORGNAME-ACCOUNTNAME" format.
+        account_id: String,
+        /// Snowflake user with RSA public key configured.
+        user: String,
+        /// Path to RSA private key file (PEM/PKCS8 format).
+        private_key_path: String,
+        /// Target database name.
+        database: String,
+        /// Target schema name.
+        schema: String,
+        /// Snowflake role.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        role: Option<String>,
+    },
 }
 
 impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
@@ -419,6 +450,22 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
                 maintenance_mode,
+            },
+            DestinationConfig::Snowflake {
+                account_id,
+                user,
+                private_key_path,
+                private_key_passphrase: _,
+                database,
+                schema,
+                role,
+            } => DestinationConfigWithoutSecrets::Snowflake {
+                account_id,
+                user,
+                private_key_path,
+                database,
+                schema,
+                role,
             },
         }
     }

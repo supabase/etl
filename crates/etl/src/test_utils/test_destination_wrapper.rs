@@ -16,8 +16,8 @@ use crate::{
     destination::{
         Destination,
         async_result::{
-            ApplyLoopAsyncResultMetadata, DispatchMetrics, TruncateTableResult, WriteEventsResult,
-            WriteTableRowsResult,
+            ApplyLoopAsyncResultMetadata, DispatchMetrics, DropTableForCopyResult,
+            WriteEventsResult, WriteTableRowsResult,
         },
     },
     error::EtlResult,
@@ -37,7 +37,7 @@ struct Inner<D> {
     wrapped_destination: D,
     events: Vec<Event>,
     table_rows: HashMap<TableId, Vec<TableRow>>,
-    truncated_tables: HashSet<TableId>,
+    tables_dropped_for_copy: HashSet<TableId>,
     event_conditions: Vec<(EventCheckFn, Arc<Notify>)>,
     table_row_conditions: Vec<(TableRowCheckFn, Arc<Notify>)>,
     combined_conditions: Vec<(CombinedCheckFn, Arc<Notify>)>,
@@ -119,7 +119,7 @@ impl<D> TestDestinationWrapper<D> {
             wrapped_destination: destination,
             events: Vec::new(),
             table_rows: HashMap::new(),
-            truncated_tables: HashSet::new(),
+            tables_dropped_for_copy: HashSet::new(),
             event_conditions: Vec::new(),
             table_row_conditions: Vec::new(),
             combined_conditions: Vec::new(),
@@ -211,9 +211,10 @@ impl<D> TestDestinationWrapper<D> {
         inner.events.clear();
     }
 
-    /// Returns whether the table was truncated through the wrapper.
-    pub async fn was_table_truncated(&self, table_id: TableId) -> bool {
-        self.inner.read().await.truncated_tables.contains(&table_id)
+    /// Returns whether the table was dropped for a fresh copy through the
+    /// wrapper.
+    pub async fn was_table_dropped_for_copy(&self, table_id: TableId) -> bool {
+        self.inner.read().await.tables_dropped_for_copy.contains(&table_id)
     }
 
     /// Returns how many times [`Destination::write_table_rows`] was called.
@@ -235,44 +236,47 @@ where
         "wrapper"
     }
 
-    async fn truncate_table(
+    async fn drop_table_for_copy(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
-        async_result: TruncateTableResult<()>,
+        async_result: DropTableForCopyResult<()>,
     ) -> EtlResult<()> {
         let destination = {
             let inner = self.inner.read().await;
             inner.wrapped_destination.clone()
         };
 
-        let (wrapped_truncate_result, pending_result) = TruncateTableResult::new(());
-        destination.truncate_table(replicated_table_schema, wrapped_truncate_result).await?;
+        let (wrapped_drop_result, pending_drop_result) = DropTableForCopyResult::new(());
+        destination.drop_table_for_copy(replicated_table_schema, wrapped_drop_result).await?;
 
         // We send the result back before doing the internal checks for this utility, to
         // avoid checking before the apply loop received the result.
-        let result = pending_result.await.into_result();
+        let result = pending_drop_result.await.into_result();
+        let should_record_drop = result.is_ok();
         async_result.send(result);
 
         let mut inner = self.inner.write().await;
 
         let table_id = replicated_table_schema.id();
-        inner.truncated_tables.insert(table_id);
-        inner.table_rows.remove(&table_id);
-        inner.events.retain_mut(|event| {
-            let has_table_id = event.has_table_id(&table_id);
-            if let Event::Truncate(truncate_event) = event
-                && has_table_id
-            {
-                truncate_event.truncated_tables.retain(|s| s.id() != table_id);
-                if truncate_event.truncated_tables.is_empty() {
-                    return false;
+        if should_record_drop {
+            inner.tables_dropped_for_copy.insert(table_id);
+            inner.table_rows.remove(&table_id);
+            inner.events.retain_mut(|event| {
+                let has_table_id = event.has_table_id(&table_id);
+                if let Event::Truncate(truncate_event) = event
+                    && has_table_id
+                {
+                    truncate_event.truncated_tables.retain(|s| s.id() != table_id);
+                    if truncate_event.truncated_tables.is_empty() {
+                        return false;
+                    }
+
+                    return true;
                 }
 
-                return true;
-            }
-
-            !has_table_id
-        });
+                !has_table_id
+            });
+        }
 
         Ok(())
     }
@@ -289,14 +293,14 @@ where
             inner.wrapped_destination.clone()
         };
 
-        let (wrapped_flush_result, pending_result) = WriteTableRowsResult::new(());
+        let (wrapped_flush_result, pending_flush_result) = WriteTableRowsResult::new(());
         destination
             .write_table_rows(replicated_table_schema, table_rows.clone(), wrapped_flush_result)
             .await?;
 
         // We send the result back before doing the internal checks for this utility, to
         // avoid checking before the apply loop received the result.
-        let result = pending_result.await.into_result();
+        let result = pending_flush_result.await.into_result();
         let should_record_table_rows = result.is_ok();
         async_result.send(result);
 
@@ -325,7 +329,7 @@ where
             inner.wrapped_destination.clone()
         };
 
-        let (wrapped_flush_result, pending_result) =
+        let (wrapped_flush_result, pending_flush_result) =
             WriteEventsResult::new(ApplyLoopAsyncResultMetadata {
                 commit_end_lsn: None,
                 metrics: DispatchMetrics {
@@ -349,7 +353,7 @@ where
             .spawn(async move {
                 // We send the result back before doing the internal checks for this utility, to
                 // avoid checking before the apply loop received the result.
-                let result = pending_result.await.into_result();
+                let result = pending_flush_result.await.into_result();
                 let should_record_events = result.is_ok();
                 async_result.send(result);
 

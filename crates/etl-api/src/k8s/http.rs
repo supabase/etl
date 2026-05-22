@@ -62,7 +62,9 @@ const POSTGRES_SECRET_NAME_SUFFIX: &str = "postgres-password";
 /// ConfigMap name suffix for the replicator configuration files.
 const REPLICATOR_CONFIG_MAP_NAME_SUFFIX: &str = "replicator-config";
 /// StatefulSet name suffix for the replicator workload.
-const REPLICATOR_STATEFUL_SET_SUFFIX: &str = "replicator-stateful-set";
+const REPLICATOR_STATEFUL_SET_SUFFIX: &str = "replicator";
+/// Previous StatefulSet suffix kept for existing pipeline cleanup/status.
+const LEGACY_REPLICATOR_STATEFUL_SET_SUFFIX: &str = "replicator-stateful-set";
 /// Application label suffix used to group resources.
 const REPLICATOR_APP_SUFFIX: &str = "replicator-app";
 /// Container name suffix for the replicator container.
@@ -589,6 +591,13 @@ impl K8sClient for HttpK8sClient {
         )?;
 
         let stateful_set_name = create_stateful_set_name(prefix);
+        let legacy_stateful_set_name = create_legacy_stateful_set_name(prefix);
+        if legacy_stateful_set_name != stateful_set_name {
+            let dp = DeleteParams::default();
+            Self::handle_delete_with_404_ignore(
+                self.stateful_sets_api.delete(&legacy_stateful_set_name, &dp).await,
+            )?;
+        }
 
         let container_environment = create_container_environment_json(
             prefix,
@@ -630,13 +639,28 @@ impl K8sClient for HttpK8sClient {
     async fn delete_replicator_stateful_set(&self, prefix: &str) -> Result<(), K8sError> {
         debug!("deleting stateful set");
 
-        let stateful_set_name = create_stateful_set_name(prefix);
         let dp = DeleteParams::default();
-        Self::handle_delete_with_404_ignore(
-            self.stateful_sets_api.delete(&stateful_set_name, &dp).await,
-        )?;
+        for stateful_set_name in stateful_set_names_for_lookup(prefix) {
+            Self::handle_delete_with_404_ignore(
+                self.stateful_sets_api.delete(&stateful_set_name, &dp).await,
+            )?;
+        }
 
         Ok(())
+    }
+
+    async fn replicator_stateful_set_exists(&self, prefix: &str) -> Result<bool, K8sError> {
+        debug!("checking stateful set existence");
+
+        for stateful_set_name in stateful_set_names_for_lookup(prefix) {
+            match self.stateful_sets_api.get(&stateful_set_name).await {
+                Ok(_) => return Ok(true),
+                Err(kube::Error::Api(er)) if er.code == 404 => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+
+        Ok(false)
     }
 
     async fn create_or_update_ducklake_maintenance(
@@ -671,11 +695,19 @@ impl K8sClient for HttpK8sClient {
     async fn get_replicator_pod_status(&self, prefix: &str) -> Result<PodStatus, K8sError> {
         debug!("getting pod status");
 
-        let pod_name = create_pod_name(prefix);
-        let pod = match self.pods_api.get(&pod_name).await {
-            Ok(pod) => pod,
-            Err(kube::Error::Api(er)) if er.code == 404 => return Ok(PodStatus::Stopped),
-            Err(e) => return Err(e.into()),
+        let mut pod = None;
+        for pod_name in pod_names_for_status(prefix) {
+            match self.pods_api.get(&pod_name).await {
+                Ok(found_pod) => {
+                    pod = Some(found_pod);
+                    break;
+                }
+                Err(kube::Error::Api(er)) if er.code == 404 => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        let Some(pod) = pod else {
+            return Ok(PodStatus::Stopped);
         };
 
         let replicator_container_name = create_replicator_container_name(prefix);
@@ -738,8 +770,31 @@ fn create_stateful_set_name(prefix: &str) -> String {
     format!("{prefix}-{REPLICATOR_STATEFUL_SET_SUFFIX}")
 }
 
+fn create_legacy_stateful_set_name(prefix: &str) -> String {
+    format!("{prefix}-{LEGACY_REPLICATOR_STATEFUL_SET_SUFFIX}")
+}
+
 fn create_pod_name(prefix: &str) -> String {
     format!("{prefix}-{REPLICATOR_STATEFUL_SET_SUFFIX}-0")
+}
+
+fn create_legacy_pod_name(prefix: &str) -> String {
+    format!("{prefix}-{LEGACY_REPLICATOR_STATEFUL_SET_SUFFIX}-0")
+}
+
+fn unique_current_and_legacy_names(current: String, legacy: String) -> Vec<String> {
+    if current == legacy { vec![current] } else { vec![current, legacy] }
+}
+
+fn stateful_set_names_for_lookup(prefix: &str) -> Vec<String> {
+    unique_current_and_legacy_names(
+        create_stateful_set_name(prefix),
+        create_legacy_stateful_set_name(prefix),
+    )
+}
+
+fn pod_names_for_status(prefix: &str) -> Vec<String> {
+    unique_current_and_legacy_names(create_pod_name(prefix), create_legacy_pod_name(prefix))
 }
 
 fn create_replicator_app_name(prefix: &str) -> String {
@@ -1467,6 +1522,10 @@ mod tests {
     use crate::configs::pipeline::ReplicatorResourcesConfig;
 
     const TENANT_ID: &str = "abcdefghijklmnopqrst";
+    const MAX_TENANT_ID: &str = "abcdefghijklmnopqrst";
+    const MAX_BIGINT_ID: i64 = 9_223_372_036_854_775_807;
+    const MAX_K8S_LABEL_VALUE_LEN: usize = 63;
+    const CONTROLLER_REVISION_HASH_LEN: usize = 10;
 
     fn create_k8s_object_prefix(tenant_id: &str, replicator_id: i64) -> String {
         format!("{tenant_id}-{replicator_id}")
@@ -1498,6 +1557,48 @@ mod tests {
             .any(|entry| entry.get("name").and_then(serde_json::Value::as_str) == Some(name))
     }
 
+    fn collect_kubernetes_label_values(
+        value: &serde_json::Value,
+        labels: &mut Vec<(String, String)>,
+    ) {
+        match value {
+            serde_json::Value::Object(map) => {
+                for label_field in ["labels", "matchLabels"] {
+                    if let Some(serde_json::Value::Object(label_map)) = map.get(label_field) {
+                        labels.extend(label_map.iter().filter_map(|(key, value)| {
+                            value.as_str().map(|value| (key.clone(), value.to_owned()))
+                        }));
+                    }
+                }
+
+                for child in map.values() {
+                    collect_kubernetes_label_values(child, labels);
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for child in values {
+                    collect_kubernetes_label_values(child, labels);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn assert_kubernetes_label_values_are_safe(resource_name: &str, resource: &serde_json::Value) {
+        let mut labels = Vec::new();
+        collect_kubernetes_label_values(resource, &mut labels);
+        assert!(!labels.is_empty(), "{resource_name} should contain Kubernetes labels");
+
+        for (key, value) in labels {
+            assert!(
+                value.len() <= MAX_K8S_LABEL_VALUE_LEN,
+                "{resource_name} generated label {key}={value} with length {}, exceeding \
+                 {MAX_K8S_LABEL_VALUE_LEN}",
+                value.len()
+            );
+        }
+    }
+
     #[test]
     fn test_replicator_resource_config_uses_environment_defaults() {
         let prod = ReplicatorResourceConfig::load(&Environment::Prod).unwrap();
@@ -1527,6 +1628,153 @@ mod tests {
         assert_eq!(config.replicator_memory_request, "1536Mi");
         assert_eq!(config.replicator_cpu_limit, "1500m");
         assert_eq!(config.replicator_memory_limit, "1843Mi");
+    }
+
+    #[test]
+    fn generated_kubernetes_labels_fit_with_max_tenant_and_replicator_ids() {
+        let prefix = create_k8s_object_prefix(MAX_TENANT_ID, MAX_BIGINT_ID);
+        let replicator_app_name = create_replicator_app_name(&prefix);
+        let postgres_secret_name = create_postgres_secret_name(&prefix);
+        let clickhouse_secret_name = create_clickhouse_secret_name(&prefix);
+        let bq_secret_name = create_bq_secret_name(&prefix);
+        let iceberg_secret_name = create_iceberg_secret_name(&prefix);
+        let ducklake_secret_name = create_ducklake_secret_name(&prefix);
+        let config_map_name = create_replicator_config_map_name(&prefix);
+        let ducklake_maintenance_name = create_ducklake_maintenance_name(&prefix);
+        let stateful_set_name = create_stateful_set_name(&prefix);
+        let controller_revision_label =
+            format!("{stateful_set_name}-{hash}", hash = "0".repeat(CONTROLLER_REVISION_HASH_LEN));
+
+        assert!(
+            controller_revision_label.len() <= MAX_K8S_LABEL_VALUE_LEN,
+            "stateful set controller revision label {controller_revision_label} has length {}, \
+             exceeding {MAX_K8S_LABEL_VALUE_LEN}",
+            controller_revision_label.len()
+        );
+
+        let environment = Environment::Prod;
+        let config = ReplicatorResourceConfig::load(&environment).unwrap();
+        let replicator_image = "supabase/replicator:1.2.3";
+        let container_environment = create_container_environment_json(
+            &prefix,
+            &environment,
+            replicator_image,
+            DestinationType::Ducklake,
+            None,
+            LogLevel::Info,
+        );
+        let node_selector = create_node_selector_json(&environment);
+        let init_containers = create_init_containers_json(&prefix, &environment, &config);
+        let volumes = create_volumes_json(&prefix, &environment);
+        let volume_mounts = create_volume_mounts_json(&environment);
+
+        let resources = vec![
+            (
+                "postgres secret",
+                create_postgres_secret_json(&postgres_secret_name, &replicator_app_name, "secret"),
+            ),
+            (
+                "clickhouse secret",
+                serde_json::to_value(create_clickhouse_password_secret(
+                    &clickhouse_secret_name,
+                    &replicator_app_name,
+                    "secret",
+                ))
+                .unwrap(),
+            ),
+            (
+                "bigquery secret",
+                create_bq_service_account_key_secret_json(
+                    &bq_secret_name,
+                    &replicator_app_name,
+                    "secret",
+                ),
+            ),
+            (
+                "iceberg secret",
+                create_iceberg_secret_json(
+                    &iceberg_secret_name,
+                    &replicator_app_name,
+                    "secret",
+                    "secret",
+                    "secret",
+                ),
+            ),
+            (
+                "ducklake secret",
+                create_ducklake_secret_json(
+                    &ducklake_secret_name,
+                    &replicator_app_name,
+                    "secret",
+                    "secret",
+                ),
+            ),
+            (
+                "replicator config map",
+                create_replicator_config_map_json(
+                    &config_map_name,
+                    &replicator_app_name,
+                    vec![ReplicatorConfigMapFile {
+                        filename: "prod.json".to_owned(),
+                        content: "{}".to_owned(),
+                    }],
+                ),
+            ),
+            (
+                "ducklake maintenance",
+                create_ducklake_maintenance_json(
+                    &prefix,
+                    &ducklake_maintenance_name,
+                    DuckLakeMaintenanceResourceConfig {
+                        tenant_id: MAX_TENANT_ID.to_owned(),
+                        pipeline_id: MAX_BIGINT_ID,
+                        replicator_id: MAX_BIGINT_ID,
+                        image: replicator_image.to_owned(),
+                        policy: DuckLakeMaintenancePolicy::default(),
+                    },
+                ),
+            ),
+            (
+                "replicator stateful set",
+                create_replicator_stateful_set_json(
+                    &prefix,
+                    &stateful_set_name,
+                    replicator_image,
+                    container_environment,
+                    node_selector,
+                    init_containers,
+                    volumes,
+                    volume_mounts,
+                    &config,
+                ),
+            ),
+        ];
+
+        for (resource_name, resource) in resources {
+            assert_kubernetes_label_values_are_safe(resource_name, &resource);
+        }
+    }
+
+    #[test]
+    fn replicator_workload_names_use_short_suffix_and_keep_legacy_lookup_names() {
+        let prefix = create_k8s_object_prefix("tenant-1", 42);
+
+        assert_eq!(create_stateful_set_name(&prefix), "tenant-1-42-replicator");
+        assert_eq!(create_legacy_stateful_set_name(&prefix), "tenant-1-42-replicator-stateful-set");
+        assert_eq!(
+            stateful_set_names_for_lookup(&prefix),
+            vec![
+                "tenant-1-42-replicator".to_owned(),
+                "tenant-1-42-replicator-stateful-set".to_owned(),
+            ]
+        );
+        assert_eq!(
+            pod_names_for_status(&prefix),
+            vec![
+                "tenant-1-42-replicator-0".to_owned(),
+                "tenant-1-42-replicator-stateful-set-0".to_owned(),
+            ]
+        );
     }
 
     #[test]
