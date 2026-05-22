@@ -36,7 +36,7 @@ For the full local development stack, use the setup script to start Postgres,
 run migrations, and apply the local Kubernetes resources.
 
 ```bash
-./scripts/init.sh
+cargo x init
 ```
 
 Alternative: if you already have a Postgres database, set `DATABASE_URL` and apply migrations manually:
