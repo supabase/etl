@@ -8,7 +8,7 @@ use etl::{
         table::TableReplicationPhase,
     },
     store::{
-        cleanup::CleanupStore,
+        lifecycle::TableLifecycleStore,
         schema::{SchemaStore, TableSchemaRetention},
         state::{StateStore, TableReplicationStates},
     },
@@ -197,9 +197,9 @@ where
     }
 }
 
-impl<S> CleanupStore for ErrorReportingStateStore<S>
+impl<S> TableLifecycleStore for ErrorReportingStateStore<S>
 where
-    S: CleanupStore + Send + Sync,
+    S: TableLifecycleStore + Send + Sync,
 {
     async fn clear_table_copy_state(&self, table_id: TableId) -> EtlResult<()> {
         self.inner.clear_table_copy_state(table_id).await

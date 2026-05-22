@@ -105,6 +105,12 @@
 ## Documentation
 - Document all items, public and private, using concise stdlib-style prose.
 - Link types and methods as [`Type`] and [`Type::method`].
+- In public or module-level docs, prefer fully qualified rustdoc links such as
+  [`crate::store::PipelineStore`] when referencing items outside the current
+  module.
+- In item docs where the type is already imported and central to the code,
+  short rustdoc links such as [`StateStore`] are fine.
+- Do not add imports solely to make rustdoc links shorter.
 - Keep comments and docs precise, short, and punctuated.
 - Normal comments should always end with `.`.
 - Do not add code examples in rustdoc for this repository.
