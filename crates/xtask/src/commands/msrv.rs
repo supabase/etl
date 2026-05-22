@@ -60,10 +60,10 @@ impl MsrvArgs {
             );
         }
 
-        eprintln!("verified msrv sync at rust {cargo_msrv}");
+        println!("verified msrv sync at rust {cargo_msrv}");
 
         if self.verify {
-            eprintln!("verifying workspace compiles with MSRV {cargo_msrv}...");
+            println!("verifying workspace compiles with MSRV {cargo_msrv}...");
             cmd!(
                 sh,
                 "cargo msrv verify
@@ -73,7 +73,7 @@ impl MsrvArgs {
             )
             .run()
             .context("cargo msrv verify failed")?;
-            eprintln!("verified workspace compiles with MSRV {cargo_msrv}");
+            println!("verified workspace compiles with MSRV {cargo_msrv}");
         }
 
         Ok(())

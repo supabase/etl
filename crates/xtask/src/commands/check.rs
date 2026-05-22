@@ -14,13 +14,13 @@ impl CheckArgs {
             .unwrap_or_else(|_| NIGHTLY_TOOLCHAIN.to_owned());
         let toolchain = format!("+{toolchain}");
 
-        eprintln!("[fmt]");
+        println!("[fmt]");
         cmd!(sh, "cargo {toolchain} fmt --all -- --check").run()?;
 
-        eprintln!("[sort]");
+        println!("[sort]");
         cmd!(sh, "cargo sort --workspace --grouped --check").run()?;
 
-        eprintln!("[clippy]");
+        println!("[clippy]");
         cmd!(sh, "cargo clippy --all-targets --all-features --no-deps").run()?;
 
         Ok(())
