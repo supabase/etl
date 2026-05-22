@@ -28,7 +28,7 @@ check_sqlx() {
   if ! [ -x "$(command -v sqlx)" ]; then
     echo >&2 "Error: SQLx CLI is not installed."
     echo >&2 "To install it, run:"
-    echo >&2 "    cargo install --version='~0.7' sqlx-cli --no-default-features --features rustls,postgres"
+    echo >&2 "    cargo install --version 0.9.0-alpha.1 sqlx-cli --no-default-features --features rustls,postgres --locked"
     exit 1
   fi
 }
