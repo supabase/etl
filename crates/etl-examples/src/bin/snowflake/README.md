@@ -20,7 +20,7 @@ Demonstrates the Snowflake destination's performance characteristics.
 From the repo root:
 
 ```bash
-./scripts/init.sh
+cargo x init
 ```
 
 This starts `source-postgres` on port 5430 with `wal_level=logical` and all replication settings configured. See `scripts/docker-compose.yaml` for details.
