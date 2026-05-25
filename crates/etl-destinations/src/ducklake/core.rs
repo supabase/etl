@@ -225,7 +225,7 @@ async fn interrupt_duckdb_connections_on_process_shutdown(manager: Arc<DuckLakeC
         _ = sigint.recv() => "sigint",
     };
 
-    let interrupted_connections = manager.interrupt_all_connections();
+    let interrupted_connections = manager.interrupt_all_connections_for_shutdown();
     info!(
         interrupted_connections,
         signal = signal_name,
@@ -241,7 +241,7 @@ async fn interrupt_duckdb_connections_on_process_shutdown(manager: Arc<DuckLakeC
         return;
     }
 
-    let interrupted_connections = manager.interrupt_all_connections();
+    let interrupted_connections = manager.interrupt_all_connections_for_shutdown();
     info!(
         interrupted_connections,
         signal = "ctrl_c",
@@ -258,7 +258,7 @@ where
     }
 
     async fn shutdown(&self) -> EtlResult<()> {
-        let interrupted_connections = self.manager.interrupt_all_connections();
+        let interrupted_connections = self.manager.interrupt_all_connections_for_shutdown();
         info!(
             interrupted_connections,
             "ducklake shutdown requested, interrupted active duckdb connections"
@@ -848,6 +848,7 @@ where
             setup_plan: Arc::clone(&setup_plan),
             disable_extension_autoload,
             interrupt_registry: Arc::new(DuckLakeInterruptRegistry::default()),
+            shutdown_requested: Arc::new(AtomicBool::new(false)),
             #[cfg(feature = "test-utils")]
             open_count: Arc::new(AtomicUsize::new(0)),
         });

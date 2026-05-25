@@ -39,7 +39,10 @@ use tracing::{debug, trace, warn};
 use crate::{
     ducklake::{
         DuckLakeTableName, LAKE_CATALOG,
-        client::{DuckLakeConnectionManager, format_query_error_detail, run_duckdb_blocking},
+        client::{
+            DuckLakeConnectionManager, format_query_error_detail,
+            is_ducklake_shutdown_requested_error, run_duckdb_blocking,
+        },
         core::is_create_table_conflict,
         encoding::{
             PreparedRows, cell_to_sql_literal_ref, prepare_rows, table_row_to_sql_literal_ref,
@@ -95,6 +98,15 @@ const INITIAL_RETRY_DELAY_MS: u64 = 50;
 const MAX_RETRY_DELAY_MS: u64 = 2_000;
 /// Minimum retry delay for transient delete-file visibility failures.
 const TRANSIENT_DELETE_FILE_RETRY_DELAY_MS: u64 = 5_000;
+
+/// Decides whether DuckLake-owned retry loops should retry one failure.
+fn ducklake_retry_decision(error: &etl::error::EtlError) -> RetryDecision {
+    if is_ducklake_shutdown_requested_error(error) {
+        RetryDecision::Stop
+    } else {
+        RetryDecision::Retry
+    }
+}
 
 /// Event-level table mutations that must be applied in order.
 pub(super) enum TableMutation {
@@ -435,7 +447,7 @@ pub(super) async fn apply_table_batches_with_retry(
             initial_delay: Duration::from_millis(INITIAL_RETRY_DELAY_MS),
             max_delay: Duration::from_millis(MAX_RETRY_DELAY_MS),
         },
-        |_| RetryDecision::Retry,
+        ducklake_retry_decision,
         jitter_ducklake_retry_delay,
         |attempt: RetryAttempt<'_, etl::error::EtlError>| {
             counter!(
@@ -468,6 +480,10 @@ pub(super) async fn apply_table_batches_with_retry(
     )
     .await
     .map_err(|failure| {
+        if is_ducklake_shutdown_requested_error(&failure.last_error) {
+            return failure.last_error;
+        }
+
         counter!(
             ETL_DUCKLAKE_FAILED_BATCHES_TOTAL,
             BATCH_KIND_LABEL => DuckLakeTableBatchKind::Mutation.as_str(),
@@ -502,7 +518,7 @@ pub(super) async fn apply_table_batch_with_retry(
                 MAX_RETRY_DELAY_MS.max(TRANSIENT_DELETE_FILE_RETRY_DELAY_MS),
             ),
         },
-        |_| RetryDecision::Retry,
+        ducklake_retry_decision,
         jitter_ducklake_retry_delay,
         |attempt: RetryAttempt<'_, etl::error::EtlError>| {
             counter!(
@@ -545,6 +561,10 @@ pub(super) async fn apply_table_batch_with_retry(
     )
     .await
     .map_err(|failure| {
+        if is_ducklake_shutdown_requested_error(&failure.last_error) {
+            return failure.last_error;
+        }
+
         counter!(
             ETL_DUCKLAKE_FAILED_BATCHES_TOTAL,
             BATCH_KIND_LABEL => batch_kind.as_str(),
