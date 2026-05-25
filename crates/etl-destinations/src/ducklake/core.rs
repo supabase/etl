@@ -19,14 +19,17 @@ use etl::{
     state::destination_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus},
     store::DestinationStore,
     types::{
-        Event, EventSequenceKey, OldTableRow, PartialTableRow, ReplicatedTableSchema,
-        ReplicationMask, SchemaDiff, TableId, TableName, TableRow, TableSchema, UpdatedTableRow,
+        ColumnSchema, Event, EventSequenceKey, OldTableRow, PartialTableRow, ReplicatedTableSchema,
+        ReplicationMask, SchemaDiff, SnapshotId, TableId, TableName, TableRow, TableSchema,
+        UpdatedTableRow,
     },
 };
 use metrics::gauge;
 use parking_lot::Mutex;
 use pg_escape::{quote_identifier, quote_literal};
 use sqlx::{AssertSqlSafe, PgPool, postgres::PgPoolOptions};
+#[cfg(unix)]
+use tokio::signal::unix::{SignalKind, signal};
 #[cfg(feature = "test-utils")]
 use tokio::sync::oneshot;
 use tokio::{
@@ -205,6 +208,47 @@ fn table_write_slot(
     Arc::clone(slot)
 }
 
+/// Waits for process shutdown signals and interrupts active DuckDB calls.
+#[cfg(unix)]
+async fn interrupt_duckdb_connections_on_process_shutdown(manager: Arc<DuckLakeConnectionManager>) {
+    let Ok(mut sigterm) = signal(SignalKind::terminate()) else {
+        warn!("ducklake failed to register sigterm interrupt handler");
+        return;
+    };
+    let Ok(mut sigint) = signal(SignalKind::interrupt()) else {
+        warn!("ducklake failed to register sigint interrupt handler");
+        return;
+    };
+
+    let signal_name = tokio::select! {
+        _ = sigterm.recv() => "sigterm",
+        _ = sigint.recv() => "sigint",
+    };
+
+    let interrupted_connections = manager.interrupt_all_connections();
+    info!(
+        interrupted_connections,
+        signal = signal_name,
+        "ducklake process shutdown signal received, interrupted active duckdb connections"
+    );
+}
+
+/// Waits for process shutdown signals and interrupts active DuckDB calls.
+#[cfg(not(unix))]
+async fn interrupt_duckdb_connections_on_process_shutdown(manager: Arc<DuckLakeConnectionManager>) {
+    if tokio::signal::ctrl_c().await.is_err() {
+        warn!("ducklake failed to register ctrl-c interrupt handler");
+        return;
+    }
+
+    let interrupted_connections = manager.interrupt_all_connections();
+    info!(
+        interrupted_connections,
+        signal = "ctrl_c",
+        "ducklake process shutdown signal received, interrupted active duckdb connections"
+    );
+}
+
 impl<S> Destination for DuckLakeDestination<S>
 where
     S: DestinationStore,
@@ -305,6 +349,52 @@ fn ducklake_table_columns_sql(table_name: &str) -> String {
         quote_literal("main"),
         quote_literal(table_name)
     )
+}
+
+/// Reads DuckLake table column names using blocking DuckDB APIs.
+///
+/// Call only from a [`run_duckdb_blocking`] closure.
+fn read_ducklake_table_column_names_blocking(
+    conn: &duckdb::Connection,
+    table_name: &str,
+) -> EtlResult<Vec<String>> {
+    let sql = ducklake_table_columns_sql(table_name);
+    let mut statement = conn.prepare(&sql).map_err(|source| {
+        etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            "DuckLake table schema lookup failed",
+            format_query_error_detail(&sql),
+            source: source
+        )
+    })?;
+    let mut rows = statement.query([]).map_err(|source| {
+        etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            "DuckLake table schema lookup failed",
+            format_query_error_detail(&sql),
+            source: source
+        )
+    })?;
+    let mut column_names = Vec::new();
+    while let Some(row) = rows.next().map_err(|source| {
+        etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            "DuckLake table schema lookup failed",
+            format_query_error_detail(&sql),
+            source: source
+        )
+    })? {
+        column_names.push(row.get(0).map_err(|source| {
+            etl_error!(
+                ErrorKind::DestinationQueryFailed,
+                "DuckLake table schema lookup failed",
+                format_query_error_detail(&sql),
+                source: source
+            )
+        })?);
+    }
+
+    Ok(column_names)
 }
 
 /// Finds a destination column by name.
@@ -494,6 +584,18 @@ fn previous_replication_mask_for_recovery(
         .collect();
 
     ReplicationMask::from_bytes(mask)
+}
+
+/// Returns target replicated columns that are missing from DuckLake.
+fn missing_replicated_columns_ducklake(
+    ducklake_columns: &[String],
+    target_schema: &ReplicatedTableSchema,
+) -> Vec<ColumnSchema> {
+    target_schema
+        .column_schemas()
+        .filter(|column| find_ducklake_column(ducklake_columns, &column.name).is_none())
+        .cloned()
+        .collect()
 }
 
 impl<S> DuckLakeDestination<S>
@@ -831,6 +933,13 @@ where
             streaming_progress_table_created: Arc::default(),
         };
         gauge!(ETL_DUCKLAKE_POOL_SIZE).set(pool_size as f64);
+        let shutdown_signal_manager = Arc::clone(&manager);
+        destination
+            .tasks
+            .spawn(async move {
+                interrupt_duckdb_connections_on_process_shutdown(shutdown_signal_manager).await;
+            })
+            .await;
         destination.ensure_applied_batches_table_exists().await?;
         destination.ensure_streaming_progress_table_exists().await?;
         destination.metrics_sampler = Arc::new(
@@ -1103,7 +1212,13 @@ where
             })?;
         let table_name = metadata.destination_table_id.clone();
         let metadata = if metadata.is_applying() {
-            self.recover_applying_metadata(table_id, &table_name, metadata).await?
+            self.recover_applying_metadata(
+                table_id,
+                &table_name,
+                metadata,
+                Some(new_replicated_table_schema),
+            )
+            .await?
         } else {
             metadata
         };
@@ -1113,6 +1228,8 @@ where
         if current_snapshot_id == new_snapshot_id
             && current_replication_mask == new_replication_mask
         {
+            self.reconcile_missing_replicated_columns(&table_name, new_replicated_table_schema)
+                .await?;
             info!(
                 table_id = %table_id,
                 snapshot_id = %new_snapshot_id,
@@ -1131,19 +1248,9 @@ where
             "ducklake schema change detected"
         );
 
-        let current_table_schema =
-            self.store.get_table_schema(&table_id, current_snapshot_id).await?.ok_or_else(
-                || {
-                    etl_error!(
-                        ErrorKind::InvalidState,
-                        "Old schema not found",
-                        format!(
-                            "Could not find schema for table {} at snapshot_id {}",
-                            table_id, current_snapshot_id
-                        )
-                    )
-                },
-            )?;
+        let current_table_schema = self
+            .load_exact_table_schema(table_id, current_snapshot_id, "Old schema not found")
+            .await?;
         let current_schema = ReplicatedTableSchema::from_mask(
             current_table_schema,
             current_replication_mask.clone(),
@@ -1170,6 +1277,7 @@ where
             );
             return Err(error);
         }
+        self.reconcile_missing_replicated_columns(&table_name, new_replicated_table_schema).await?;
 
         self.store
             .store_destination_table_metadata(table_id, updated_metadata.to_applied())
@@ -1219,50 +1327,10 @@ where
                 })
             };
 
-            let read_column_names = || -> EtlResult<Vec<String>> {
-                let sql = ducklake_table_columns_sql(&table_name);
-                let mut statement = conn.prepare(&sql).map_err(|source| {
-                    etl_error!(
-                        ErrorKind::DestinationQueryFailed,
-                        "DuckLake table schema lookup failed",
-                        format_query_error_detail(&sql),
-                        source: source
-                    )
-                })?;
-                let mut rows = statement.query([]).map_err(|source| {
-                    etl_error!(
-                        ErrorKind::DestinationQueryFailed,
-                        "DuckLake table schema lookup failed",
-                        format_query_error_detail(&sql),
-                        source: source
-                    )
-                })?;
-                let mut column_names = Vec::new();
-                while let Some(row) = rows.next().map_err(|source| {
-                    etl_error!(
-                        ErrorKind::DestinationQueryFailed,
-                        "DuckLake table schema lookup failed",
-                        format_query_error_detail(&sql),
-                        source: source
-                    )
-                })? {
-                    column_names.push(row.get(0).map_err(|source| {
-                        etl_error!(
-                            ErrorKind::DestinationQueryFailed,
-                            "DuckLake table schema lookup failed",
-                            format_query_error_detail(&sql),
-                            source: source
-                        )
-                    })?);
-                }
-
-                Ok(column_names)
-            };
-
             execute_ddl("begin transaction", "DuckLake DDL transaction failed")?;
 
             let apply_result = (|| -> EtlResult<()> {
-                let column_names = read_column_names()?;
+                let column_names = read_ducklake_table_column_names_blocking(conn, &table_name)?;
                 let DuckLakeSchemaDiffPlan { statements, column_names: _column_names } =
                     plan_schema_diff_sql_ducklake(&table_name, column_names, &diff)?;
 
@@ -1287,6 +1355,40 @@ where
             execute_ddl("commit", "DuckLake DDL transaction commit failed")
         })
         .await
+    }
+
+    /// Adds target replicated columns missing from the physical DuckLake table.
+    async fn reconcile_missing_replicated_columns(
+        &self,
+        table_name: &str,
+        target_schema: &ReplicatedTableSchema,
+    ) -> EtlResult<()> {
+        let table_name_for_read = table_name.to_owned();
+        let ducklake_columns = run_duckdb_blocking(
+            Arc::clone(&self.pool),
+            Arc::clone(&self.blocking_slots),
+            move |conn| read_ducklake_table_column_names_blocking(conn, &table_name_for_read),
+        )
+        .await?;
+        let missing_columns = missing_replicated_columns_ducklake(&ducklake_columns, target_schema);
+
+        if missing_columns.is_empty() {
+            return Ok(());
+        }
+
+        warn!(
+            table = %table_name,
+            missing_column_count = missing_columns.len(),
+            "ducklake destination table is missing replicated columns, reconciling"
+        );
+
+        let diff = SchemaDiff {
+            columns_to_add: missing_columns,
+            columns_to_remove: Vec::new(),
+            columns_to_rename: Vec::new(),
+        };
+
+        self.apply_schema_diff(table_name, &diff).await
     }
 
     /// Writes streaming CDC events to the destination.
@@ -1620,6 +1722,7 @@ where
         self.store.store_destination_table_metadata(table_id, metadata.clone()).await?;
 
         self.issue_create_table_stmt(table_name, replicated_table_schema).await?;
+        self.reconcile_missing_replicated_columns(table_name, replicated_table_schema).await?;
 
         self.store.store_destination_table_metadata(table_id, metadata.to_applied()).await
     }
@@ -1664,6 +1767,65 @@ where
         .await
     }
 
+    /// Loads an exact table schema snapshot from the store.
+    async fn load_exact_table_schema(
+        &self,
+        table_id: TableId,
+        snapshot_id: SnapshotId,
+        missing_schema_description: &'static str,
+    ) -> EtlResult<Arc<TableSchema>> {
+        let table_schema =
+            self.store.get_table_schema(&table_id, snapshot_id).await?.ok_or_else(|| {
+                etl_error!(
+                    ErrorKind::InvalidState,
+                    missing_schema_description,
+                    format!(
+                        "Could not find schema for table {} at snapshot_id {}",
+                        table_id, snapshot_id
+                    )
+                )
+            })?;
+
+        if table_schema.snapshot_id != snapshot_id {
+            return Err(etl_error!(
+                ErrorKind::InvalidState,
+                missing_schema_description,
+                format!(
+                    "Could not find exact schema for table {} at snapshot_id {}; found nearest \
+                     schema at snapshot_id {}",
+                    table_id, snapshot_id, table_schema.snapshot_id
+                )
+            ));
+        }
+
+        Ok(table_schema)
+    }
+
+    /// Resolves the target replicated schema for interrupted DDL recovery.
+    async fn target_schema_for_recovery(
+        &self,
+        table_id: TableId,
+        metadata: &DestinationTableMetadata,
+        provided_target_schema: Option<&ReplicatedTableSchema>,
+    ) -> EtlResult<ReplicatedTableSchema> {
+        if let Some(schema) = provided_target_schema
+            && schema.inner().snapshot_id == metadata.snapshot_id
+            && schema.replication_mask() == &metadata.replication_mask
+        {
+            return Ok(schema.clone());
+        }
+
+        let target_table_schema = self
+            .load_exact_table_schema(
+                table_id,
+                metadata.snapshot_id,
+                "DuckLake schema recovery target schema not found",
+            )
+            .await?;
+
+        Ok(ReplicatedTableSchema::from_mask(target_table_schema, metadata.replication_mask.clone()))
+    }
+
     /// Replays interrupted DuckLake DDL and transitions metadata back to
     /// `Applied`.
     async fn recover_applying_metadata(
@@ -1671,6 +1833,7 @@ where
         table_id: TableId,
         table_name: &str,
         metadata: DestinationTableMetadata,
+        target_schema: Option<&ReplicatedTableSchema>,
     ) -> EtlResult<DestinationTableMetadata> {
         warn!(
             table_id = %table_id,
@@ -1678,43 +1841,21 @@ where
             "ducklake table has Applying metadata, recovering interrupted operation"
         );
 
-        let target_table_schema =
-            self.store.get_table_schema(&table_id, metadata.snapshot_id).await?.ok_or_else(
-                || {
-                    etl_error!(
-                        ErrorKind::InvalidState,
-                        "DuckLake schema recovery target schema not found",
-                        format!(
-                            "Could not find schema for table {} at snapshot_id {}",
-                            table_id, metadata.snapshot_id
-                        )
-                    )
-                },
-            )?;
-        let target_schema = ReplicatedTableSchema::from_mask(
-            Arc::clone(&target_table_schema),
-            metadata.replication_mask.clone(),
-        );
+        let target_schema =
+            self.target_schema_for_recovery(table_id, &metadata, target_schema).await?;
 
         match metadata.previous_snapshot_id {
             Some(previous_snapshot_id) => {
                 let previous_table_schema = self
-                    .store
-                    .get_table_schema(&table_id, previous_snapshot_id)
-                    .await?
-                    .ok_or_else(|| {
-                        etl_error!(
-                            ErrorKind::InvalidState,
-                            "DuckLake schema recovery previous schema not found",
-                            format!(
-                                "Could not find schema for table {} at snapshot_id {}",
-                                table_id, previous_snapshot_id
-                            )
-                        )
-                    })?;
+                    .load_exact_table_schema(
+                        table_id,
+                        previous_snapshot_id,
+                        "DuckLake schema recovery previous schema not found",
+                    )
+                    .await?;
                 let previous_replication_mask = previous_replication_mask_for_recovery(
                     &previous_table_schema,
-                    &target_table_schema,
+                    target_schema.inner(),
                     &metadata.replication_mask,
                 );
                 let old_schema = ReplicatedTableSchema::from_mask(
@@ -1728,6 +1869,7 @@ where
                 self.issue_create_table_stmt(table_name, &target_schema).await?;
             }
         }
+        self.reconcile_missing_replicated_columns(table_name, &target_schema).await?;
 
         let metadata = metadata.to_applied();
         self.store.store_destination_table_metadata(table_id, metadata.clone()).await?;
@@ -1785,10 +1927,18 @@ where
                     .await?;
             }
             Some(metadata) if metadata.is_applying() => {
-                self.recover_applying_metadata(table_id, &table_name, metadata).await?;
+                self.recover_applying_metadata(
+                    table_id,
+                    &table_name,
+                    metadata,
+                    Some(replicated_table_schema),
+                )
+                .await?;
             }
             Some(_) => {
                 self.issue_create_table_stmt(&table_name, replicated_table_schema).await?;
+                self.reconcile_missing_replicated_columns(&table_name, replicated_table_schema)
+                    .await?;
             }
         }
 
@@ -2144,7 +2294,7 @@ mod tests {
         store::{both::memory::MemoryStore, schema::SchemaStore},
         types::{
             Cell, ColumnRename, ColumnSchema, IdentityMask, PartialTableRow, ReplicationMask,
-            SchemaDiff, TableRow, TableSchema, Type as PgType,
+            SchemaDiff, SnapshotId, TableRow, TableSchema, Type as PgType,
         },
     };
     use etl_maintenance::ducklake::flush_table_inlined_data;
@@ -2342,6 +2492,89 @@ mod tests {
             error.description(),
             Some("DuckLake does not support reusing a dropped column name")
         );
+    }
+
+    #[test]
+    fn missing_replicated_columns_ducklake_returns_only_active_target_columns() {
+        let table_schema = Arc::new(TableSchema::new(
+            TableId::new(4),
+            TableName::new("public".to_owned(), "users".to_owned()),
+            vec![
+                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false),
+                ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, None, true),
+                ColumnSchema::new("hidden".to_owned(), PgType::TEXT, -1, 3, None, true),
+                ColumnSchema::new("email".to_owned(), PgType::TEXT, -1, 4, None, true),
+            ],
+        ));
+        let target_schema = ReplicatedTableSchema::from_mask(
+            Arc::clone(&table_schema),
+            ReplicationMask::from_bytes(vec![1, 1, 0, 1]),
+        );
+
+        let missing_columns = missing_replicated_columns_ducklake(
+            &["id".to_owned(), "name".to_owned()],
+            &target_schema,
+        );
+        let missing_column_names: Vec<_> =
+            missing_columns.iter().map(|column| column.name.as_str()).collect();
+
+        assert_eq!(missing_column_names, vec!["email"]);
+    }
+
+    #[test]
+    fn previous_replication_mask_for_recovery_matches_previous_schema_width() {
+        let previous_schema = TableSchema::new(
+            TableId::new(4),
+            TableName::new("public".to_owned(), "users".to_owned()),
+            vec![
+                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false),
+                ColumnSchema::new("hidden".to_owned(), PgType::TEXT, -1, 2, None, true),
+            ],
+        );
+        let target_schema = TableSchema::with_snapshot_id(
+            previous_schema.id,
+            previous_schema.name.clone(),
+            vec![
+                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false),
+                ColumnSchema::new("hidden".to_owned(), PgType::TEXT, -1, 2, None, true),
+                ColumnSchema::new("email".to_owned(), PgType::TEXT, -1, 3, None, true),
+            ],
+            SnapshotId::from(42_u64),
+        );
+        let target_mask = ReplicationMask::from_bytes(vec![1, 0, 1]);
+
+        let previous_mask =
+            previous_replication_mask_for_recovery(&previous_schema, &target_schema, &target_mask);
+
+        assert_eq!(previous_mask.to_bytes(), vec![1, 0]);
+    }
+
+    #[test]
+    fn previous_replication_mask_for_recovery_keeps_removed_columns_for_drop_diff() {
+        let previous_schema = TableSchema::new(
+            TableId::new(5),
+            TableName::new("public".to_owned(), "users".to_owned()),
+            vec![
+                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false),
+                ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, None, true),
+                ColumnSchema::new("old_col".to_owned(), PgType::TEXT, -1, 3, None, true),
+            ],
+        );
+        let target_schema = TableSchema::with_snapshot_id(
+            previous_schema.id,
+            previous_schema.name.clone(),
+            vec![
+                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false),
+                ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, None, true),
+            ],
+            SnapshotId::from(43_u64),
+        );
+        let target_mask = ReplicationMask::from_bytes(vec![1, 1]);
+
+        let previous_mask =
+            previous_replication_mask_for_recovery(&previous_schema, &target_schema, &target_mask);
+
+        assert_eq!(previous_mask.to_bytes(), vec![1, 1, 1]);
     }
 
     fn path_to_file_url(path: &Path) -> Url {

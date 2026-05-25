@@ -1109,6 +1109,122 @@ async fn write_events_recovers_applying_metadata_before_relation_event() {
     );
 }
 
+/// `write_events` repairs physical DuckLake columns when metadata was already
+/// marked applied for a schema that was not fully applied.
+#[tokio::test(flavor = "multi_thread")]
+async fn write_events_reconciles_missing_columns_after_applied_metadata() {
+    use etl::types::{InsertEvent, RelationEvent};
+
+    let lake =
+        create_test_lake("write_events_reconciles_missing_columns_after_applied_metadata").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
+
+    let old_schema = make_schema(42, "public", "reconcile_applied");
+    let new_schema = TableSchema::with_snapshot_id(
+        old_schema.id,
+        old_schema.name.clone(),
+        vec![
+            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false),
+            ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, None, true),
+            ColumnSchema::new("email".to_owned(), PgType::TEXT, -1, 3, None, true),
+        ],
+        SnapshotId::from(43_u64),
+    );
+    let old_replicated_table_schema = make_replicated_table_schema(&old_schema);
+    let new_replicated_table_schema = make_replicated_table_schema(&new_schema);
+    let table_name = table_name_to_ducklake_table_name(&old_schema.name).unwrap();
+
+    let store = MemoryStore::new();
+    store.store_table_schema(old_schema.clone()).await.unwrap();
+    store.store_table_schema(new_schema.clone()).await.unwrap();
+
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        None,
+        store.clone(),
+    )
+    .await
+    .unwrap();
+
+    destination
+        .write_table_rows(
+            &old_replicated_table_schema,
+            vec![TableRow::new(vec![Cell::I32(1), Cell::String("Alice".to_owned())])],
+        )
+        .await
+        .unwrap();
+
+    let applied_metadata = DestinationTableMetadata::new_applied(
+        table_name.clone(),
+        new_schema.snapshot_id,
+        new_replicated_table_schema.replication_mask().clone(),
+    );
+    store.store_destination_table_metadata(old_schema.id, applied_metadata).await.unwrap();
+
+    let lsn = PgLsn::from(43_u64);
+    destination
+        .write_events(vec![
+            Event::Relation(RelationEvent {
+                start_lsn: lsn,
+                commit_lsn: lsn,
+                tx_ordinal: 0,
+                replicated_table_schema: new_replicated_table_schema.clone(),
+            }),
+            Event::Insert(InsertEvent {
+                start_lsn: lsn,
+                commit_lsn: lsn,
+                tx_ordinal: 1,
+                replicated_table_schema: new_replicated_table_schema.clone(),
+                table_row: TableRow::new(vec![
+                    Cell::I32(2),
+                    Cell::String("Bob".to_owned()),
+                    Cell::String("bob@example.com".to_owned()),
+                ]),
+            }),
+        ])
+        .await
+        .expect("write_events should reconcile missing applied schema columns");
+
+    let metadata = store
+        .get_destination_table_metadata(old_schema.id)
+        .await
+        .unwrap()
+        .expect("destination metadata should exist");
+    assert!(metadata.is_applied());
+    assert_eq!(metadata.snapshot_id, new_schema.snapshot_id);
+
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
+    let mut statement = conn
+        .prepare(&format!(
+            "select id, name, email from {}.{} order by id",
+            quote_identifier("lake"),
+            quote_identifier(&table_name)
+        ))
+        .expect("failed to prepare state query");
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, i32>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?))
+        })
+        .expect("failed to query reconciled table")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("failed to read reconciled table rows");
+
+    assert_eq!(
+        rows,
+        vec![
+            (1, "Alice".to_owned(), None),
+            (2, "Bob".to_owned(), Some("bob@example.com".to_owned())),
+        ]
+    );
+}
+
 /// Small CDC batches should remain inlined after the caller returns.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_small_batch_stays_inlined_after_return() {
