@@ -28,13 +28,7 @@ test = false
 
 [[bin]]
 name = "snowflake"
-path = "src/bin/snowflake/main.rs"
-required-features = ["snowflake"]
-test = false
-
-[[bin]]
-name = "snowflake-loadgen"
-path = "src/bin/snowflake_loadgen.rs"
+path = "src/bin/snowflake.rs"
 required-features = ["snowflake"]
 test = false
 
@@ -45,12 +39,7 @@ clickhouse = ["etl-destinations/clickhouse"]
 ducklake = ["etl-destinations/ducklake"]
 snowflake = [
     "etl-destinations/snowflake",
-    "dep:crossterm",
-    "dep:ratatui",
-    "dep:rand",
-    "dep:reqwest",
     "dep:secrecy",
-    "dep:tokio-postgres",
 ]
 
 [dependencies]
@@ -60,21 +49,14 @@ clap = { workspace = true, default-features = true, features = [
     "derive",
     "env",
 ] }
-crossterm = { version = "0.29", optional = true }
 etl = { workspace = true }
 etl-config = { workspace = true }
 etl-destinations = { workspace = true }
 etl-telemetry = { workspace = true }
 k8s-openapi = { workspace = true, features = ["latest"] }
-rand = { workspace = true, optional = true, features = ["std", "std_rng"] }
-ratatui = { version = "0.30", optional = true, default-features = false, features = [
-    "crossterm",
-] }
-reqwest = { workspace = true, optional = true, features = ["json"] }
 rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
 secrecy = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["macros", "signal", "time"] }
-tokio-postgres = { workspace = true, optional = true }
 tracing = { workspace = true, default-features = true }
 tracing-subscriber = { workspace = true, default-features = true, features = [
     "env-filter",

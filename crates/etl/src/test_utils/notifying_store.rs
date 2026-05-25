@@ -16,7 +16,7 @@ use crate::{
         table::{TableReplicationPhase, TableReplicationPhaseType},
     },
     store::{
-        cleanup::CleanupStore,
+        lifecycle::TableLifecycleStore,
         schema::{SchemaStore, TableSchemaRetention, TableSchemaSnapshots},
         state::{DestinationTablesMetadata, StateStore, TableReplicationStates},
     },
@@ -481,7 +481,7 @@ impl SchemaStore for NotifyingStore {
     }
 }
 
-impl CleanupStore for NotifyingStore {
+impl TableLifecycleStore for NotifyingStore {
     async fn clear_table_copy_state(&self, table_id: TableId) -> EtlResult<()> {
         self.delete_table_state_for_scope(table_id, TableStateCleanupScope::CopyRestart).await
     }

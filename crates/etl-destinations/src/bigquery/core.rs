@@ -15,7 +15,7 @@ use etl::{
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
     state::destination_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus},
-    store::{schema::SchemaStore, state::StateStore},
+    store::DestinationStore,
     types::{
         Cell, Event, EventSequenceKey, IdentityType, OldTableRow, PipelineId,
         ReplicatedTableSchema, SchemaDiff, TableId, TableName, TableRow, UpdatedTableRow,
@@ -209,7 +209,7 @@ pub struct BigQueryDestination<S> {
 
 impl<S> BigQueryDestination<S>
 where
-    S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
+    S: DestinationStore,
 {
     /// Creates a new [`BigQueryDestination`] with a pre-configured client.
     ///
@@ -1215,7 +1215,7 @@ fn validate_bigquery_replica_identity(
 
 impl<S> Destination for BigQueryDestination<S>
 where
-    S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
+    S: DestinationStore,
 {
     fn name() -> &'static str {
         "bigquery"

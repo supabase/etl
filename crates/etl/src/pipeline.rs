@@ -14,14 +14,14 @@ use crate::{
     bail,
     concurrency::{MemoryMonitor, ShutdownTx, create_shutdown_channel},
     config::PipelineConfig,
-    destination::Destination,
+    destination::PipelineDestination,
     error::{ErrorKind, EtlResult},
     etl_error,
     metrics::register_metrics,
     migrations,
     replication::{SharedTableCache, client::PgReplicationClient},
     state::table::TableReplicationPhase,
-    store::{cleanup::CleanupStore, schema::SchemaStore, state::StateStore},
+    store::PipelineStore,
     types::{PipelineId, TableId},
     workers::{ApplyWorker, ApplyWorkerHandle, TableSyncWorkerPool},
 };
@@ -72,18 +72,19 @@ pub struct Pipeline<S, D> {
 
 impl<S, D> Pipeline<S, D>
 where
-    S: StateStore + SchemaStore + CleanupStore + Clone + Send + Sync + 'static,
-    D: Destination + Clone + Send + Sync + 'static,
+    S: PipelineStore,
+    D: PipelineDestination,
 {
     /// Creates a new pipeline with the given configuration.
     ///
     /// The pipeline is initially in the not-started state and must be
-    /// explicitly started using [`Pipeline::start`]. The state store is used
-    /// for tracking replication progress, table schemas, and destination
-    /// table metadata, while the destination receives replicated data.
+    /// explicitly started using [`Pipeline::start`]. The store is
+    /// used for tracking replication progress, table schemas, destination
+    /// table metadata, and table lifecycle state, while the destination
+    /// receives replicated data.
     /// The pipeline ID is extracted from the configuration, ensuring
     /// consistency between pipeline identity and configuration settings.
-    pub fn new(config: PipelineConfig, state_store: S, destination: D) -> Self {
+    pub fn new(config: PipelineConfig, store: S, destination: D) -> Self {
         // Register metrics here during pipeline creation to avoid burdening the
         // users of etl crate to explicitly calling it. Since this method is safe to
         // call multiple times, it is ok even if there are multiple pipelines created.
@@ -99,7 +100,7 @@ where
 
         Self {
             config: Arc::new(config),
-            store: state_store,
+            store,
             destination,
             state: PipelineState::NotStarted,
             shutdown_tx,

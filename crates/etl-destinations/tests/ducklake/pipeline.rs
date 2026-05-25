@@ -63,7 +63,7 @@ fn open_lake_conn(catalog: &Url, data: &Url) -> Connection {
     let conn = open_verification_connection();
     let catalog_attach_target = catalog_attach_target(catalog);
     conn.execute_batch(&format!(
-        "{} ATTACH {} AS {} (DATA_PATH {});",
+        "{} attach {} as {} (data_path {});",
         ducklake_load_sql(),
         quote_literal(&format!("ducklake:{catalog_attach_target}")),
         quote_identifier("lake"),
@@ -81,14 +81,14 @@ fn open_lake_conn(catalog: &Url, data: &Url) -> Connection {
 /// DuckDB connection to verify the final lake state. Without an explicit
 /// checkpoint here, that new connection can observe stale catalog metadata for
 /// a short period even though the pipeline shutdown has already completed,
-/// which makes the assertions flaky in CI. Running `CHECKPOINT` makes the final
+/// which makes the assertions flaky in CI. Running `checkpoint` makes the final
 /// durable state visible to the verification connection deterministically.
 ///
 /// Production async code must wrap equivalent blocking DuckDB work in
 /// `run_duckdb_blocking`.
 fn checkpoint_lake(catalog: &Url, data: &Url) {
     let conn = open_lake_conn(catalog, data);
-    conn.execute_batch("CHECKPOINT").expect("failed to checkpoint DuckLake catalog");
+    conn.execute_batch("checkpoint").expect("failed to checkpoint DuckLake catalog");
 }
 
 /// Queries replicated user rows using blocking DuckDB APIs.

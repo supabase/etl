@@ -17,10 +17,10 @@ use etl::{
     error::{ErrorKind, EtlResult},
     etl_error,
     state::destination_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus},
-    store::{schema::SchemaStore, state::StateStore},
+    store::DestinationStore,
     types::{
-        Event, EventSequenceKey, OldTableRow, PartialTableRow, ReplicatedTableSchema, SchemaDiff,
-        TableId, TableName, TableRow, UpdatedTableRow,
+        Event, EventSequenceKey, OldTableRow, PartialTableRow, ReplicatedTableSchema,
+        ReplicationMask, SchemaDiff, SnapshotId, TableId, TableName, TableRow, UpdatedTableRow,
     },
 };
 use metrics::gauge;
@@ -207,7 +207,7 @@ fn table_write_slot(
 
 impl<S> Destination for DuckLakeDestination<S>
 where
-    S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
+    S: DestinationStore,
 {
     fn name() -> &'static str {
         "ducklake"
@@ -312,9 +312,164 @@ fn find_ducklake_column(column_names: &[String], column_name: &str) -> Option<us
     column_names.iter().position(|name| name == column_name)
 }
 
+/// One planned DuckLake DDL statement.
+#[derive(Debug, PartialEq, Eq)]
+struct DuckLakeSchemaDdlStatement {
+    /// SQL to execute.
+    sql: String,
+    /// Error description to attach if execution fails.
+    error_description: &'static str,
+}
+
+/// Planned DuckLake schema DDL and the expected resulting column names.
+#[derive(Debug, PartialEq, Eq)]
+struct DuckLakeSchemaDiffPlan {
+    /// Statements to execute in order.
+    statements: Vec<DuckLakeSchemaDdlStatement>,
+    /// Destination column names after applying the plan.
+    column_names: Vec<String>,
+}
+
+/// Rejects diffs whose dropped column names are reused in the same change.
+///
+/// DuckLake DDL is transactional, but the destination metadata update happens
+/// after the DuckLake commit. If the process stops between those two steps,
+/// replay only sees the final destination column names. A dropped name reused
+/// by an added column or rename target cannot be distinguished from the
+/// pre-change column, so applying it again could drop the replacement column.
+fn reject_removed_column_name_reuse_ducklake(diff: &SchemaDiff) -> EtlResult<()> {
+    let added_column_names: HashSet<_> =
+        diff.columns_to_add.iter().map(|column| column.name.as_str()).collect();
+    let rename_target_names: HashSet<_> =
+        diff.columns_to_rename.iter().map(|rename| rename.new_name.as_str()).collect();
+
+    for column in &diff.columns_to_remove {
+        if added_column_names.contains(column.name.as_str())
+            || rename_target_names.contains(column.name.as_str())
+        {
+            return Err(etl_error!(
+                ErrorKind::SourceSchemaError,
+                "DuckLake does not support reusing a dropped column name",
+                format!(
+                    "Column '{}' is removed and then reused in the same schema change. DuckLake \
+                     cannot replay that DDL safely after an interrupted metadata update.",
+                    column.name
+                )
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Plans idempotent DuckLake schema DDL for the current destination columns.
+fn plan_schema_diff_sql_ducklake(
+    table_name: &str,
+    mut column_names: Vec<String>,
+    diff: &SchemaDiff,
+) -> EtlResult<DuckLakeSchemaDiffPlan> {
+    reject_removed_column_name_reuse_ducklake(diff)?;
+
+    let added_column_names: HashSet<_> =
+        diff.columns_to_add.iter().map(|column| column.name.as_str()).collect();
+    let mut statements = Vec::new();
+
+    for column in &diff.columns_to_remove {
+        let Some(index) = find_ducklake_column(&column_names, &column.name) else {
+            debug!(
+                table = %table_name,
+                column = %column.name,
+                "ducklake drop column skipped because destination column is already absent"
+            );
+            continue;
+        };
+
+        statements.push(DuckLakeSchemaDdlStatement {
+            sql: build_drop_column_sql_ducklake(table_name, &column.name),
+            error_description: "DuckLake alter table drop column failed",
+        });
+        column_names.remove(index);
+    }
+
+    for rename in &diff.columns_to_rename {
+        let old_index = find_ducklake_column(&column_names, &rename.old_name);
+        let new_index = find_ducklake_column(&column_names, &rename.new_name);
+
+        match (old_index, new_index) {
+            (Some(index), None) => {
+                statements.push(DuckLakeSchemaDdlStatement {
+                    sql: build_rename_column_sql_ducklake(
+                        table_name,
+                        &rename.old_name,
+                        &rename.new_name,
+                    ),
+                    error_description: "DuckLake alter table rename column failed",
+                });
+                column_names[index] = rename.new_name.clone();
+            }
+            (None, Some(_)) => {
+                debug!(
+                    table = %table_name,
+                    old_column = %rename.old_name,
+                    new_column = %rename.new_name,
+                    "ducklake rename column skipped because destination column already has new \
+                     name"
+                );
+            }
+            (None, None) => {
+                return Err(etl_error!(
+                    ErrorKind::CorruptedTableSchema,
+                    "DuckLake destination column for rename is missing",
+                    format!(
+                        "Table '{table_name}' has neither old column '{}' nor new column '{}'",
+                        rename.old_name, rename.new_name
+                    )
+                ));
+            }
+            (Some(_), Some(_)) if added_column_names.contains(rename.old_name.as_str()) => {
+                debug!(
+                    table = %table_name,
+                    old_column = %rename.old_name,
+                    new_column = %rename.new_name,
+                    "ducklake rename column skipped because destination has both names after replay"
+                );
+            }
+            (Some(_), Some(_)) => {
+                return Err(etl_error!(
+                    ErrorKind::CorruptedTableSchema,
+                    "DuckLake destination column rename is ambiguous",
+                    format!(
+                        "Table '{table_name}' has both old column '{}' and new column '{}'",
+                        rename.old_name, rename.new_name
+                    )
+                ));
+            }
+        }
+    }
+
+    for column in &diff.columns_to_add {
+        if find_ducklake_column(&column_names, &column.name).is_some() {
+            debug!(
+                table = %table_name,
+                column = %column.name,
+                "ducklake add column skipped because destination column already exists"
+            );
+            continue;
+        }
+
+        statements.push(DuckLakeSchemaDdlStatement {
+            sql: build_add_column_sql_ducklake(table_name, column),
+            error_description: "DuckLake alter table add column failed",
+        });
+        column_names.push(column.name.clone());
+    }
+
+    Ok(DuckLakeSchemaDiffPlan { statements, column_names })
+}
+
 impl<S> DuckLakeDestination<S>
 where
-    S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
+    S: DestinationStore,
 {
     /// Builds a key-only row from a partial update row when PostgreSQL omits
     /// the old key image because the replica identity did not change.
@@ -905,20 +1060,24 @@ where
         let new_replication_mask = new_replicated_table_schema.replication_mask().clone();
 
         let metadata =
-            self.store.get_applied_destination_table_metadata(table_id).await?.ok_or_else(
-                || {
-                    etl_error!(
-                        ErrorKind::CorruptedTableSchema,
-                        "Missing destination table metadata",
-                        format!(
-                            "No destination table metadata found for table {} when processing \
-                             schema change. The metadata should have been recorded during initial \
-                             table synchronization.",
-                            table_id
-                        )
+            self.store.get_destination_table_metadata(table_id).await?.ok_or_else(|| {
+                etl_error!(
+                    ErrorKind::CorruptedTableSchema,
+                    "Missing destination table metadata",
+                    format!(
+                        "No destination table metadata found for table {} when processing schema \
+                         change. The metadata should have been recorded during initial table \
+                         synchronization.",
+                        table_id
                     )
-                },
-            )?;
+                )
+            })?;
+        let table_name = metadata.destination_table_id.clone();
+        let metadata = if metadata.is_applying() {
+            self.recover_applying_metadata(table_id, &table_name, metadata).await?
+        } else {
+            metadata
+        };
 
         let current_snapshot_id = metadata.snapshot_id;
         let current_replication_mask = metadata.replication_mask.clone();
@@ -960,7 +1119,6 @@ where
             current_table_schema,
             current_replication_mask.clone(),
         );
-        let table_name = metadata.destination_table_id.clone();
         let updated_metadata = DestinationTableMetadata::new_applied(
             table_name.clone(),
             current_snapshot_id,
@@ -1075,86 +1233,12 @@ where
             execute_ddl("begin transaction", "DuckLake DDL transaction failed")?;
 
             let apply_result = (|| -> EtlResult<()> {
-                let mut column_names = read_column_names()?;
+                let column_names = read_column_names()?;
+                let DuckLakeSchemaDiffPlan { statements, column_names: _column_names } =
+                    plan_schema_diff_sql_ducklake(&table_name, column_names, &diff)?;
 
-                for column in &diff.columns_to_add {
-                    if find_ducklake_column(&column_names, &column.name).is_some() {
-                        debug!(
-                            table = %table_name,
-                            column = %column.name,
-                            "ducklake add column skipped because destination column already \
-                             exists"
-                        );
-                        continue;
-                    }
-
-                    let sql = build_add_column_sql_ducklake(&table_name, column);
-                    execute_ddl(&sql, "DuckLake alter table add column failed")?;
-                    column_names.push(column.name.clone());
-                }
-
-                for rename in &diff.columns_to_rename {
-                    let old_index = find_ducklake_column(&column_names, &rename.old_name);
-                    let new_index = find_ducklake_column(&column_names, &rename.new_name);
-
-                    match (old_index, new_index) {
-                        (Some(index), None) => {
-                            let sql = build_rename_column_sql_ducklake(
-                                &table_name,
-                                &rename.old_name,
-                                &rename.new_name,
-                            );
-                            execute_ddl(&sql, "DuckLake alter table rename column failed")?;
-                            column_names[index] = rename.new_name.clone();
-                        }
-                        (None, Some(_)) => {
-                            debug!(
-                                table = %table_name,
-                                old_column = %rename.old_name,
-                                new_column = %rename.new_name,
-                                "ducklake rename column skipped because destination column \
-                                 already has new name"
-                            );
-                        }
-                        (None, None) => {
-                            return Err(etl_error!(
-                                ErrorKind::CorruptedTableSchema,
-                                "DuckLake destination column for rename is missing",
-                                format!(
-                                    "Table '{table_name}' has neither old column '{}' nor new \
-                                     column '{}'",
-                                    rename.old_name, rename.new_name
-                                )
-                            ));
-                        }
-                        (Some(_), Some(_)) => {
-                            return Err(etl_error!(
-                                ErrorKind::CorruptedTableSchema,
-                                "DuckLake destination column rename is ambiguous",
-                                format!(
-                                    "Table '{table_name}' has both old column '{}' and new column \
-                                     '{}'",
-                                    rename.old_name, rename.new_name
-                                )
-                            ));
-                        }
-                    }
-                }
-
-                for column in &diff.columns_to_remove {
-                    let Some(index) = find_ducklake_column(&column_names, &column.name) else {
-                        debug!(
-                            table = %table_name,
-                            column = %column.name,
-                            "ducklake drop column skipped because destination column is \
-                             already absent"
-                        );
-                        continue;
-                    };
-
-                    let sql = build_drop_column_sql_ducklake(&table_name, &column.name);
-                    execute_ddl(&sql, "DuckLake alter table drop column failed")?;
-                    column_names.remove(index);
+                for statement in statements {
+                    execute_ddl(&statement.sql, statement.error_description)?;
                 }
 
                 Ok(())
@@ -1551,50 +1635,75 @@ where
         .await
     }
 
+    /// Builds a replicated schema for one stored table schema snapshot.
+    async fn replicated_schema_for_snapshot(
+        &self,
+        table_id: TableId,
+        snapshot_id: SnapshotId,
+        replication_mask: ReplicationMask,
+        missing_schema_description: &'static str,
+    ) -> EtlResult<ReplicatedTableSchema> {
+        let table_schema =
+            self.store.get_table_schema(&table_id, snapshot_id).await?.ok_or_else(|| {
+                etl_error!(
+                    ErrorKind::InvalidState,
+                    missing_schema_description,
+                    format!(
+                        "Could not find schema for table {} at snapshot_id {}",
+                        table_id, snapshot_id
+                    )
+                )
+            })?;
+
+        Ok(ReplicatedTableSchema::from_mask(table_schema, replication_mask))
+    }
+
     /// Replays interrupted DuckLake DDL and transitions metadata back to
     /// `Applied`.
     async fn recover_applying_metadata(
         &self,
         table_id: TableId,
         table_name: &str,
-        replicated_table_schema: &ReplicatedTableSchema,
         metadata: DestinationTableMetadata,
-    ) -> EtlResult<()> {
+    ) -> EtlResult<DestinationTableMetadata> {
         warn!(
             table_id = %table_id,
             table = %table_name,
             "ducklake table has Applying metadata, recovering interrupted operation"
         );
 
+        let target_schema = self
+            .replicated_schema_for_snapshot(
+                table_id,
+                metadata.snapshot_id,
+                metadata.replication_mask.clone(),
+                "DuckLake schema recovery target schema not found",
+            )
+            .await?;
+
         match metadata.previous_snapshot_id {
             Some(previous_snapshot_id) => {
-                let old_table_schema = self
-                    .store
-                    .get_table_schema(&table_id, previous_snapshot_id)
-                    .await?
-                    .ok_or_else(|| {
-                        etl_error!(
-                            ErrorKind::InvalidState,
-                            "Old schema not found for recovery",
-                            format!(
-                                "Cannot find schema for table {} at snapshot_id {}",
-                                table_id, previous_snapshot_id
-                            )
-                        )
-                    })?;
-                let old_schema = ReplicatedTableSchema::from_mask(
-                    old_table_schema,
-                    metadata.replication_mask.clone(),
-                );
-                let diff = old_schema.diff(replicated_table_schema);
+                let old_schema = self
+                    .replicated_schema_for_snapshot(
+                        table_id,
+                        previous_snapshot_id,
+                        metadata.replication_mask.clone(),
+                        "DuckLake schema recovery previous schema not found",
+                    )
+                    .await?;
+                let diff = old_schema.diff(&target_schema);
                 self.apply_schema_diff(table_name, &diff).await?;
             }
             None => {
-                self.issue_create_table_stmt(table_name, replicated_table_schema).await?;
+                self.issue_create_table_stmt(table_name, &target_schema).await?;
             }
         }
 
-        self.store.store_destination_table_metadata(table_id, metadata.to_applied()).await
+        let metadata = metadata.to_applied();
+        self.store.store_destination_table_metadata(table_id, metadata.clone()).await?;
+        self.created_tables.lock().insert(table_name.to_owned());
+
+        Ok(metadata)
     }
 
     /// Ensures the destination table exists, creating it (DDL) if necessary.
@@ -1646,13 +1755,7 @@ where
                     .await?;
             }
             Some(metadata) if metadata.is_applying() => {
-                self.recover_applying_metadata(
-                    table_id,
-                    &table_name,
-                    replicated_table_schema,
-                    metadata,
-                )
-                .await?;
+                self.recover_applying_metadata(table_id, &table_name, metadata).await?;
             }
             Some(_) => {
                 self.issue_create_table_stmt(&table_name, replicated_table_schema).await?;
@@ -2010,8 +2113,8 @@ mod tests {
         config::{PgConnectionConfig, TcpKeepaliveConfig, TlsConfig},
         store::{both::memory::MemoryStore, schema::SchemaStore},
         types::{
-            Cell, ColumnSchema, IdentityMask, PartialTableRow, ReplicationMask, TableRow,
-            TableSchema, Type as PgType,
+            Cell, ColumnRename, ColumnSchema, IdentityMask, PartialTableRow, ReplicationMask,
+            SchemaDiff, TableRow, TableSchema, Type as PgType,
         },
     };
     use etl_maintenance::ducklake::flush_table_inlined_data;
@@ -2111,6 +2214,104 @@ mod tests {
 
         assert_eq!(error.kind(), ErrorKind::InvalidState);
         assert_eq!(error.description(), Some("DuckLake update requires a replica identity"));
+    }
+
+    #[test]
+    fn plan_schema_diff_renames_before_adding_reused_source_name() {
+        let diff = SchemaDiff {
+            columns_to_add: vec![ColumnSchema::new(
+                "name".to_owned(),
+                PgType::TEXT,
+                -1,
+                3,
+                None,
+                true,
+            )],
+            columns_to_remove: Vec::new(),
+            columns_to_rename: vec![ColumnRename {
+                old_name: "name".to_owned(),
+                new_name: "full_name".to_owned(),
+                ordinal_position: 2,
+            }],
+        };
+
+        let plan =
+            plan_schema_diff_sql_ducklake("users", vec!["id".to_owned(), "name".to_owned()], &diff)
+                .expect("schema diff should plan");
+        let statement_sql: Vec<_> =
+            plan.statements.iter().map(|statement| statement.sql.as_str()).collect();
+
+        assert_eq!(
+            statement_sql,
+            vec![
+                "alter table lake.users rename column name to full_name",
+                "alter table lake.users add column name varchar",
+            ]
+        );
+        assert_eq!(plan.column_names, vec!["id", "full_name", "name"]);
+    }
+
+    #[test]
+    fn plan_schema_diff_skips_replayed_rename_with_reused_source_name() {
+        let diff = SchemaDiff {
+            columns_to_add: vec![ColumnSchema::new(
+                "name".to_owned(),
+                PgType::TEXT,
+                -1,
+                3,
+                None,
+                true,
+            )],
+            columns_to_remove: Vec::new(),
+            columns_to_rename: vec![ColumnRename {
+                old_name: "name".to_owned(),
+                new_name: "full_name".to_owned(),
+                ordinal_position: 2,
+            }],
+        };
+
+        let plan = plan_schema_diff_sql_ducklake(
+            "users",
+            vec!["id".to_owned(), "full_name".to_owned(), "name".to_owned()],
+            &diff,
+        )
+        .expect("schema diff replay should plan");
+
+        assert!(plan.statements.is_empty());
+        assert_eq!(plan.column_names, vec!["id", "full_name", "name"]);
+    }
+
+    #[test]
+    fn plan_schema_diff_rejects_reusing_removed_column_name() {
+        let diff = SchemaDiff {
+            columns_to_add: Vec::new(),
+            columns_to_remove: vec![ColumnSchema::new(
+                "status".to_owned(),
+                PgType::TEXT,
+                -1,
+                3,
+                None,
+                true,
+            )],
+            columns_to_rename: vec![ColumnRename {
+                old_name: "name".to_owned(),
+                new_name: "status".to_owned(),
+                ordinal_position: 2,
+            }],
+        };
+
+        let error = plan_schema_diff_sql_ducklake(
+            "users",
+            vec!["id".to_owned(), "name".to_owned(), "status".to_owned()],
+            &diff,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::SourceSchemaError);
+        assert_eq!(
+            error.description(),
+            Some("DuckLake does not support reusing a dropped column name")
+        );
     }
 
     fn path_to_file_url(path: &Path) -> Url {

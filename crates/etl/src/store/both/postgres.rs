@@ -25,7 +25,7 @@ use crate::{
         table::TableReplicationPhase,
     },
     store::{
-        cleanup::CleanupStore,
+        lifecycle::TableLifecycleStore,
         schema::{SchemaStore, TableSchemaRetention, TableSchemaSnapshots},
         state::{DestinationTablesMetadata, StateStore, TableReplicationStates},
     },
@@ -148,8 +148,9 @@ impl Inner {
 
 /// Postgres-backed storage for ETL pipeline state and schema information.
 ///
-/// [`PostgresStore`] implements both [`StateStore`] and [`SchemaStore`] traits,
-/// providing persistent storage of replication state and schema information
+/// [`PostgresStore`] implements the store traits required by
+/// [`crate::store::PipelineStore`], providing persistent storage of replication
+/// state, schema information, table lifecycle data, and destination metadata
 /// directly in the source Postgres database. This ensures durability and
 /// consistency of the pipeline state across restarts.
 ///
@@ -711,7 +712,7 @@ impl SchemaStore for PostgresStore {
     }
 }
 
-impl CleanupStore for PostgresStore {
+impl TableLifecycleStore for PostgresStore {
     async fn clear_table_copy_state(&self, table_id: TableId) -> EtlResult<()> {
         self.delete_table_state_for_scope(table_id, TableStateCleanupScope::CopyRestart).await
     }
