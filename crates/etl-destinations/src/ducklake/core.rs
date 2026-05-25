@@ -20,7 +20,7 @@ use etl::{
     store::DestinationStore,
     types::{
         Event, EventSequenceKey, OldTableRow, PartialTableRow, ReplicatedTableSchema,
-        ReplicationMask, SchemaDiff, SnapshotId, TableId, TableName, TableRow, UpdatedTableRow,
+        ReplicationMask, SchemaDiff, TableId, TableName, TableRow, TableSchema, UpdatedTableRow,
     },
 };
 use metrics::gauge;
@@ -465,6 +465,35 @@ fn plan_schema_diff_sql_ducklake(
     }
 
     Ok(DuckLakeSchemaDiffPlan { statements, column_names })
+}
+
+/// Builds the best previous-schema replication mask available during recovery.
+///
+/// [`DestinationTableMetadata`] stores the target mask, not the previous mask.
+/// For a source-schema change we project target bits back by ordinal position.
+/// Columns that no longer exist in the target schema are treated as previously
+/// replicated so the idempotent DDL planner can drop them if they exist.
+fn previous_replication_mask_for_recovery(
+    previous_schema: &TableSchema,
+    target_schema: &TableSchema,
+    target_replication_mask: &ReplicationMask,
+) -> ReplicationMask {
+    let mask = previous_schema
+        .column_schemas
+        .iter()
+        .map(|previous_column| {
+            target_schema
+                .column_schemas
+                .iter()
+                .position(|target_column| {
+                    target_column.ordinal_position == previous_column.ordinal_position
+                })
+                .and_then(|index| target_replication_mask.as_slice().get(index).copied())
+                .unwrap_or(1)
+        })
+        .collect();
+
+    ReplicationMask::from_bytes(mask)
 }
 
 impl<S> DuckLakeDestination<S>
@@ -1635,29 +1664,6 @@ where
         .await
     }
 
-    /// Builds a replicated schema for one stored table schema snapshot.
-    async fn replicated_schema_for_snapshot(
-        &self,
-        table_id: TableId,
-        snapshot_id: SnapshotId,
-        replication_mask: ReplicationMask,
-        missing_schema_description: &'static str,
-    ) -> EtlResult<ReplicatedTableSchema> {
-        let table_schema =
-            self.store.get_table_schema(&table_id, snapshot_id).await?.ok_or_else(|| {
-                etl_error!(
-                    ErrorKind::InvalidState,
-                    missing_schema_description,
-                    format!(
-                        "Could not find schema for table {} at snapshot_id {}",
-                        table_id, snapshot_id
-                    )
-                )
-            })?;
-
-        Ok(ReplicatedTableSchema::from_mask(table_schema, replication_mask))
-    }
-
     /// Replays interrupted DuckLake DDL and transitions metadata back to
     /// `Applied`.
     async fn recover_applying_metadata(
@@ -1672,25 +1678,49 @@ where
             "ducklake table has Applying metadata, recovering interrupted operation"
         );
 
-        let target_schema = self
-            .replicated_schema_for_snapshot(
-                table_id,
-                metadata.snapshot_id,
-                metadata.replication_mask.clone(),
-                "DuckLake schema recovery target schema not found",
-            )
-            .await?;
+        let target_table_schema =
+            self.store.get_table_schema(&table_id, metadata.snapshot_id).await?.ok_or_else(
+                || {
+                    etl_error!(
+                        ErrorKind::InvalidState,
+                        "DuckLake schema recovery target schema not found",
+                        format!(
+                            "Could not find schema for table {} at snapshot_id {}",
+                            table_id, metadata.snapshot_id
+                        )
+                    )
+                },
+            )?;
+        let target_schema = ReplicatedTableSchema::from_mask(
+            Arc::clone(&target_table_schema),
+            metadata.replication_mask.clone(),
+        );
 
         match metadata.previous_snapshot_id {
             Some(previous_snapshot_id) => {
-                let old_schema = self
-                    .replicated_schema_for_snapshot(
-                        table_id,
-                        previous_snapshot_id,
-                        metadata.replication_mask.clone(),
-                        "DuckLake schema recovery previous schema not found",
-                    )
-                    .await?;
+                let previous_table_schema = self
+                    .store
+                    .get_table_schema(&table_id, previous_snapshot_id)
+                    .await?
+                    .ok_or_else(|| {
+                        etl_error!(
+                            ErrorKind::InvalidState,
+                            "DuckLake schema recovery previous schema not found",
+                            format!(
+                                "Could not find schema for table {} at snapshot_id {}",
+                                table_id, previous_snapshot_id
+                            )
+                        )
+                    })?;
+                let previous_replication_mask = previous_replication_mask_for_recovery(
+                    &previous_table_schema,
+                    &target_table_schema,
+                    &metadata.replication_mask,
+                );
+                let old_schema = ReplicatedTableSchema::from_mask(
+                    previous_table_schema,
+                    previous_replication_mask,
+                );
                 let diff = old_schema.diff(&target_schema);
                 self.apply_schema_diff(table_name, &diff).await?;
             }
