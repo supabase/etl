@@ -20,12 +20,12 @@ replication = ["sqlx"]
 
 [dependencies]
 
-bytes = { workspace = true }
 aws-lc-rs = { workspace = true }
+bytes = { workspace = true }
 const-oid = { workspace = true }
 etl-config = { workspace = true }
-pg_escape = { workspace = true }
 futures = { workspace = true }
+pg_escape = { workspace = true }
 rustls = { workspace = true, features = ["aws-lc-rs"] }
 serde_json = { workspace = true }
 sqlx = { workspace = true, features = ["runtime-tokio", "tls-rustls", "macros", "postgres", "json", "migrate"] }
