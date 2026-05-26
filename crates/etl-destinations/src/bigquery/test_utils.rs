@@ -295,40 +295,6 @@ impl BigQueryDatabase {
         }
     }
 
-    /// Queries the schema for a logical view.
-    ///
-    /// Returns the column names and data types from INFORMATION_SCHEMA.COLUMNS.
-    pub async fn query_view_schema(&self, table_name: TableName) -> Option<BigQueryTableSchema> {
-        let project_id = self.project_id();
-        let dataset_id = self.dataset_id();
-        let table_id = table_name_to_bigquery_table_id(&table_name).unwrap();
-
-        let query = format!(
-            "select column_name, data_type, ordinal_position from \
-             `{project_id}.{dataset_id}.INFORMATION_SCHEMA.COLUMNS` where table_name = \
-             '{table_id}' order by ordinal_position"
-        );
-
-        let mut attempts_remaining = BIGQUERY_QUERY_MAX_ATTEMPTS;
-
-        loop {
-            let rows = self
-                .client
-                .job()
-                .query(project_id, QueryRequest::new(query.clone()))
-                .await
-                .unwrap()
-                .rows;
-
-            if rows.is_some() || attempts_remaining == 1 {
-                return rows.map(|r| BigQueryTableSchema::new(parse_bigquery_table_rows(r)));
-            }
-
-            attempts_remaining -= 1;
-            sleep(Duration::from_millis(BIGQUERY_QUERY_RETRY_DELAY_MS)).await;
-        }
-    }
-
     /// Gets the logical view schema from the BigQuery table metadata API.
     pub async fn get_view_schema(&self, table_name: TableName) -> Option<BigQueryTableSchema> {
         let table_id = table_name_to_bigquery_table_id(&table_name).unwrap();
@@ -469,18 +435,6 @@ impl BigQueryTableSchema {
         self.0.iter().any(|c| c.column_name == name)
     }
 
-    /// Asserts that a column with the given name exists in the schema.
-    ///
-    /// Panics with a descriptive message if the column is not found.
-    pub fn assert_has_column(&self, name: &str) {
-        assert!(
-            self.has_column(name),
-            "expected column '{}' to exist in schema, but it was not found. Columns: {:?}",
-            name,
-            self.column_names()
-        );
-    }
-
     /// Asserts that a column with the given name does not exist in the schema.
     ///
     /// Panics with a descriptive message if the column is found.
@@ -521,11 +475,6 @@ impl BigQueryTableSchema {
     /// Returns the names of all columns in the schema.
     pub fn column_names(&self) -> Vec<&str> {
         self.0.iter().map(|c| c.column_name.as_str()).collect()
-    }
-
-    /// Returns a reference to the underlying column schemas.
-    pub fn columns(&self) -> &[BigQueryColumnSchema] {
-        &self.0
     }
 }
 
