@@ -17,7 +17,7 @@ use etl::{
     error::{ErrorKind, EtlResult},
     etl_error,
     state::destination_metadata::DestinationTableMetadata,
-    store::{schema::SchemaStore, state::StateStore},
+    store::DestinationStore,
     types::{
         Event, EventSequenceKey, OldTableRow, PartialTableRow, ReplicatedTableSchema, TableId,
         TableName, TableRow, UpdatedTableRow,
@@ -204,7 +204,7 @@ fn table_write_slot(
 
 impl<S> Destination for DuckLakeDestination<S>
 where
-    S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
+    S: DestinationStore,
 {
     fn name() -> &'static str {
         "ducklake"
@@ -295,7 +295,7 @@ fn validate_ducklake_replica_identity(
 
 impl<S> DuckLakeDestination<S>
 where
-    S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
+    S: DestinationStore,
 {
     /// Builds a key-only row from a partial update row when PostgreSQL omits
     /// the old key image because the replica identity did not change.

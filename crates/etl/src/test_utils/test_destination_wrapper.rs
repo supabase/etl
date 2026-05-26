@@ -14,7 +14,7 @@ use tokio::{
 use crate::{
     concurrency::TaskSet,
     destination::{
-        Destination,
+        Destination, PipelineDestination,
         async_result::{
             ApplyLoopAsyncResultMetadata, DispatchMetrics, DropTableForCopyResult,
             WriteEventsResult, WriteTableRowsResult,
@@ -230,7 +230,7 @@ impl<D> TestDestinationWrapper<D> {
 
 impl<D> Destination for TestDestinationWrapper<D>
 where
-    D: Destination + Send + Sync + Clone + 'static,
+    D: PipelineDestination,
 {
     fn name() -> &'static str {
         "wrapper"

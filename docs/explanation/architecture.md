@@ -103,7 +103,7 @@ Persists pipeline state so replication can resume after restarts. Three traits w
 
 - **StateStore**: Tracks replication phase per table and destination table metadata
 - **SchemaStore**: Stores versioned table schema information (columns, types, primary keys, snapshot IDs) and prunes obsolete schema versions after acknowledged progress
-- **CleanupStore**: Clears copy-scoped state before a table copy restart and removes all stored state when a table leaves the publication
+- **TableLifecycleStore**: Clears copy-scoped state before a table copy restart and removes all stored state when a table leaves the publication
 
 `StateStore` and `SchemaStore` use a cache-first pattern: reads hit an in-memory cache, writes go to both the cache and persistent storage. Schema pruning follows the same rule for implementations with durable storage: obsolete versions are removed from both the cache and the persistent store.
 

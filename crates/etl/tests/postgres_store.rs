@@ -11,8 +11,8 @@ use etl::{
         table::{RetryPolicy, TableReplicationPhase},
     },
     store::{
+        TableLifecycleStore,
         both::postgres::PostgresStore,
-        cleanup::CleanupStore,
         schema::{SchemaStore, TableSchemaRetention},
         state::StateStore,
     },

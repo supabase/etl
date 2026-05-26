@@ -6,7 +6,7 @@
 use std::{fmt, path::Path, str::FromStr, time::Duration};
 
 use etl::{
-    store::{schema::SchemaStore, state::StateStore},
+    store::DestinationStore,
     types::{PipelineId, TableName},
 };
 use gcp_bigquery_client::{
@@ -345,7 +345,7 @@ impl BigQueryDatabase {
         schema_store: S,
     ) -> BigQueryDestination<S>
     where
-        S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
+        S: DestinationStore,
     {
         BigQueryDestination::new_with_key_path(
             self.project_id.clone(),

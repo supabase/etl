@@ -14,7 +14,7 @@ use crate::{
         table::TableReplicationPhase,
     },
     store::{
-        cleanup::CleanupStore,
+        lifecycle::TableLifecycleStore,
         schema::{SchemaStore, TableSchemaRetention, TableSchemaSnapshots},
         state::{DestinationTablesMetadata, StateStore, TableReplicationStates},
     },
@@ -43,10 +43,10 @@ struct Inner {
 
 /// In-memory storage for ETL pipeline state and schema information.
 ///
-/// [`MemoryStore`] implements both [`StateStore`] and [`SchemaStore`] traits,
-/// providing a complete storage solution that keeps all data in memory. This is
-/// ideal for testing, development, and scenarios where persistence is not
-/// required.
+/// [`MemoryStore`] implements the store traits required by
+/// [`crate::store::PipelineStore`], providing a complete storage solution that
+/// keeps all data in memory. This is ideal for testing, development, and
+/// scenarios where persistence is not required.
 ///
 /// All state information including table replication phases, schema
 /// definitions, and destination table metadata are stored in memory and will be
@@ -297,7 +297,7 @@ impl SchemaStore for MemoryStore {
     }
 }
 
-impl CleanupStore for MemoryStore {
+impl TableLifecycleStore for MemoryStore {
     async fn clear_table_copy_state(&self, table_id: TableId) -> EtlResult<()> {
         self.delete_table_state_for_scope(table_id, TableStateCleanupScope::CopyRestart).await
     }
