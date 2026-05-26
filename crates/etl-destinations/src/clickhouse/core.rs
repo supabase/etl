@@ -15,7 +15,7 @@ use etl::{
     },
 };
 use etl_config::shared::ClickHouseEngine;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use tokio::task::JoinSet;
 use tracing::{debug, info, warn};
 use url::Url;
@@ -344,6 +344,19 @@ pub struct ClickHouseDestination<S> {
     /// section is a brief in-memory map op with no `.await` inside, so the
     /// async `tokio::sync::RwLock` would be needless overhead.
     table_cache: Arc<RwLock<HashMap<String, Arc<[bool]>>>>,
+    /// Per-`table_id` locks serialising first-time table creation.
+    ///
+    /// The two ctid copy workers spawned when `max_copy_connections > 1` share
+    /// this destination (it is `Clone` over `Arc` state), so without a guard
+    /// both fall through the cache miss in [`Self::ensure_table_exists`] and
+    /// issue racing `CREATE TABLE` / `CREATE VIEW` statements. On ClickHouse
+    /// Cloud the replicated `... IF NOT EXISTS` is not atomic across replicas,
+    /// so the loser fails with "DDL failed". A `tokio::sync::Mutex` (held across
+    /// the DDL `.await`) per table makes the second worker wait, then fall
+    /// through the post-lock cache re-check. The outer map is guarded by a
+    /// brief, await-free `parking_lot::Mutex` and grows at most one entry per
+    /// replicated table.
+    create_locks: Arc<Mutex<HashMap<TableId, Arc<tokio::sync::Mutex<()>>>>>,
 }
 
 impl<S> ClickHouseDestination<S>
@@ -369,6 +382,7 @@ where
             inserter_config,
             store: Arc::new(store),
             table_cache: Arc::new(RwLock::new(HashMap::new())),
+            create_locks: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -494,13 +508,33 @@ where
             return Ok((clickhouse_table_name, flags));
         }
 
+        let table_id = schema.id();
+
+        // Serialise the first-time create/recover path per `table_id`. When
+        // `max_copy_connections > 1` the two ctid copy workers share this
+        // destination and would otherwise both fall through the cache miss
+        // above and issue racing CREATE TABLE / CREATE VIEW statements; on
+        // ClickHouse Cloud the replicated `... IF NOT EXISTS` is not atomic
+        // across replicas, so the loser fails with "DDL failed". See the
+        // `create_locks` field doc.
+        let table_lock = {
+            let mut guard = self.create_locks.lock();
+            Arc::clone(guard.entry(table_id).or_default())
+        };
+        let _create_guard = table_lock.lock().await;
+
+        // Re-check the cache under the lock: a worker that went ahead of us may
+        // have completed creation and populated it while we were blocked.
+        if let Some(flags) = self.table_cache.read().get(&clickhouse_table_name).cloned() {
+            return Ok((clickhouse_table_name, flags));
+        }
+
         // Engine-mismatch detection runs before any DDL or metadata mutation:
         // a pre-existing table created under a different engine must hard-fail
         // here, not silently get an idempotent CREATE TABLE IF NOT EXISTS that
         // would then mis-align RowBinary on insert.
         self.ensure_engine_matches(&clickhouse_table_name).await?;
 
-        let table_id = schema.id();
         match self.store.get_destination_table_metadata(table_id).await? {
             None => {
                 self.create_table_with_metadata(
