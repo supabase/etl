@@ -15,7 +15,10 @@ use etl::{
         is_array_type,
     },
 };
-use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
+use serde::{
+    Deserialize,
+    de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor},
+};
 use serde_json::value::RawValue;
 
 use crate::bigquery::value::{BigQueryArrayCell, BigQueryCell, BigQueryType};
@@ -870,7 +873,7 @@ fn parse_json_text_without_duplicate_keys(
         return Err(err);
     }
 
-    serde_json::from_str(value).map_err(|error| {
+    parse_json_value(value).map_err(|error| {
         failure(
             ErrorKind::UnsupportedValueInDestination,
             format!("JSON text is not valid for BigQuery: {error}"),
@@ -896,13 +899,24 @@ fn parse_json_raw_first_key_wins(value: &str) -> Result<serde_json::Value, Strin
     match first_byte {
         Some(b'{') => deserialize_json_first_key_wins_object(value),
         Some(b'[') => deserialize_json_first_key_wins_array(value),
-        _ => serde_json::from_str(value).map_err(|error| error.to_string()),
+        _ => parse_json_value(value).map_err(|error| error.to_string()),
     }
+}
+
+/// Parses JSON with serde's recursion limit disabled.
+fn parse_json_value(value: &str) -> Result<serde_json::Value, serde_json::Error> {
+    let mut deserializer = serde_json::Deserializer::from_str(value);
+    deserializer.disable_recursion_limit();
+    let value = serde_json::Value::deserialize(&mut deserializer)?;
+    deserializer.end()?;
+
+    Ok(value)
 }
 
 /// Deserializes a raw JSON object using first-key-wins semantics.
 fn deserialize_json_first_key_wins_object(value: &str) -> Result<serde_json::Value, String> {
     let mut deserializer = serde_json::Deserializer::from_str(value);
+    deserializer.disable_recursion_limit();
     let value = JsonFirstKeyWinsObjectParser
         .deserialize(&mut deserializer)
         .map_err(|error| error.to_string())?;
@@ -914,6 +928,7 @@ fn deserialize_json_first_key_wins_object(value: &str) -> Result<serde_json::Val
 /// Deserializes a raw JSON array while recursively preserving object semantics.
 fn deserialize_json_first_key_wins_array(value: &str) -> Result<serde_json::Value, String> {
     let mut deserializer = serde_json::Deserializer::from_str(value);
+    deserializer.disable_recursion_limit();
     let value = JsonFirstKeyWinsArrayParser
         .deserialize(&mut deserializer)
         .map_err(|error| error.to_string())?;
@@ -1034,7 +1049,9 @@ impl<'de> Visitor<'de> for JsonFirstKeyWinsArrayParser {
 fn json_contains_duplicate_keys(value: &str) -> Result<bool, serde_json::Error> {
     let mut detector = JsonDuplicateKeyDetector { found_duplicate: false };
     let mut deserializer = serde_json::Deserializer::from_str(value);
+    deserializer.disable_recursion_limit();
     (&mut detector).deserialize(&mut deserializer)?;
+    deserializer.end()?;
 
     Ok(detector.found_duplicate)
 }
@@ -2765,6 +2782,22 @@ mod tests {
             materializer(DestinationMaterializationPolicy::native_or_string_reject())
                 .materialize_cell(typed_cell(Type::JSON, cell))
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn json_depth_at_bigquery_limit_is_accepted() {
+        let cell = Cell::String(nested_json(BIGQUERY_JSON_MAX_NESTING_DEPTH).to_string());
+
+        assert!(
+            materializer(DestinationMaterializationPolicy::native_only_reject())
+                .materialize_cell(typed_cell(Type::JSON, cell.clone()))
+                .is_ok()
+        );
+        assert!(
+            materializer(DestinationMaterializationPolicy::native_or_string_normalize())
+                .materialize_cell(typed_cell(Type::JSON, cell))
+                .is_ok()
         );
     }
 
