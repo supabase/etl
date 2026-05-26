@@ -9,9 +9,6 @@ rust-version.workspace = true
 repository.workspace = true
 homepage.workspace = true
 
-[package.metadata.cargo-machete]
-ignored = ["k8s-openapi"]
-
 [lib]
 doctest = false
 

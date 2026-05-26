@@ -8,9 +8,6 @@ rust-version.workspace = true
 repository.workspace = true
 homepage.workspace = true
 
-[package.metadata.cargo-machete]
-ignored = ["k8s-openapi"]
-
 [[bin]]
 name = "bigquery"
 path = "src/bin/bigquery.rs"
