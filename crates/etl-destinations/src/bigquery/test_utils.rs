@@ -500,6 +500,11 @@ impl BigQueryTableSchema {
     pub fn column_names(&self) -> Vec<&str> {
         self.0.iter().map(|c| c.column_name.as_str()).collect()
     }
+
+    /// Returns all columns in the schema.
+    pub fn columns(&self) -> &[BigQueryColumnSchema] {
+        &self.0
+    }
 }
 
 /// Sets up a BigQuery database connection for testing.

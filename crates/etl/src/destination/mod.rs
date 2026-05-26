@@ -11,6 +11,6 @@ pub mod capabilities;
 
 pub use async_result::{DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult};
 pub use base::Destination;
+pub use capabilities::PipelineDestination;
 
 pub use crate::materialization::{DestinationMaterializationPolicy, TypeStrategy, ValueStrategy};
-pub use capabilities::PipelineDestination;
