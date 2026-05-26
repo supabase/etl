@@ -1,10 +1,7 @@
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use etl::{
-    error::EtlResult,
-    store::{schema::SchemaStore, state::StateStore},
-};
+use etl::{error::EtlResult, store::DestinationStore};
 pub use etl_maintenance::{
     ExternalMaintenanceOperationHistory, ExternalMaintenanceOperationPolicy,
     ExternalMaintenanceOperationRequest, ExternalMaintenanceOperationRun,
@@ -56,7 +53,7 @@ pub(super) async fn run_kubernetes_external_maintenance_watcher<S>(
     destination: DuckLakeDestination<S>,
 ) -> EtlResult<()>
 where
-    S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
+    S: DestinationStore,
 {
     let config = ExternalMaintenanceWatcherConfig::from_env();
     let Some(store) = KubernetesExternalMaintenanceStore::from_env(config.store_timeout).await?
@@ -74,7 +71,7 @@ pub(super) async fn run_postgres_external_maintenance_watcher<S>(
     pool: PgPool,
 ) -> EtlResult<()>
 where
-    S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
+    S: DestinationStore,
 {
     let config = ExternalMaintenanceWatcherConfig::from_env();
     let store = PostgresExternalMaintenanceStore::new(pipeline_id, pool);
@@ -95,7 +92,7 @@ pub async fn run_external_maintenance_watcher<S, M>(
     config: ExternalMaintenanceWatcherConfig,
 ) -> EtlResult<()>
 where
-    S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
+    S: DestinationStore,
     M: ExternalMaintenanceStore,
 {
     let mut held_pause: Option<HeldPause> = None;
@@ -186,7 +183,7 @@ async fn reconcile_pause<S, M>(
     held_pause: &mut Option<HeldPause>,
     state: &ExternalMaintenanceState,
 ) where
-    S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
+    S: DestinationStore,
     M: ExternalMaintenanceStore,
 {
     let active_pause = state.pause_request.clone().filter(|pause| pause.expires_at > Utc::now());
@@ -399,7 +396,7 @@ async fn maybe_request_operations<S, M>(
     config: &ExternalMaintenanceWatcherConfig,
     expire_snapshots_gate: &mut ExpireSnapshotsRequestGate,
 ) where
-    S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
+    S: DestinationStore,
     M: ExternalMaintenanceStore,
 {
     if state.active_run.is_some() {

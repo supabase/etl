@@ -15,7 +15,7 @@ use etl::{
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
     state::destination_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus},
-    store::{schema::SchemaStore, state::StateStore},
+    store::DestinationStore,
     types::{
         Cell, Event, EventSequenceKey, IdentityType, OldTableRow, PipelineId,
         ReplicatedTableSchema, SchemaDiff, TableId, TableName, TableRow, Type, UpdatedTableRow,
@@ -236,7 +236,7 @@ pub struct BigQueryDestination<S> {
 
 impl<S> BigQueryDestination<S>
 where
-    S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
+    S: DestinationStore,
 {
     /// Creates a new [`BigQueryDestination`] with a pre-configured client.
     ///
@@ -463,12 +463,15 @@ where
     }
 
     /// Adds a table to the creation cache to avoid redundant existence checks.
-    fn add_to_created_tables_cache(inner: &mut Inner, table_id: &SequencedBigQueryTableId) {
-        if inner.created_tables.contains(table_id) {
+    fn add_to_created_tables_cache(
+        inner: &mut Inner,
+        sequenced_bigquery_table_id: &SequencedBigQueryTableId,
+    ) {
+        if inner.created_tables.contains(sequenced_bigquery_table_id) {
             return;
         }
 
-        inner.created_tables.insert(table_id.clone());
+        inner.created_tables.insert(sequenced_bigquery_table_id.clone());
     }
 
     /// Retrieves the current sequenced table ID from the destination table
@@ -496,15 +499,15 @@ where
     async fn ensure_view_points_to_table(
         &self,
         inner: &mut Inner,
-        view_name: &BigQueryTableId,
-        target_table_id: &SequencedBigQueryTableId,
+        bigquery_table_id: &BigQueryTableId,
+        sequenced_bigquery_table_id: &SequencedBigQueryTableId,
     ) -> EtlResult<bool> {
-        if let Some(current_target) = inner.created_views.get(view_name)
-            && current_target == target_table_id
+        if let Some(current_target) = inner.created_views.get(bigquery_table_id)
+            && current_target == sequenced_bigquery_table_id
         {
             debug!(
-                %view_name,
-                %target_table_id,
+                %bigquery_table_id,
+                %sequenced_bigquery_table_id,
                 "view already points to target, skipping creation"
             );
 
@@ -512,19 +515,50 @@ where
         }
 
         self.client
-            .create_or_replace_view(&self.dataset_id, view_name, &target_table_id.to_string())
+            .create_or_replace_view(
+                &self.dataset_id,
+                bigquery_table_id,
+                &sequenced_bigquery_table_id.to_string(),
+            )
             .await?;
 
         // We insert/overwrite the cached view target.
-        inner.created_views.insert(view_name.clone(), target_table_id.clone());
+        inner.created_views.insert(bigquery_table_id.clone(), sequenced_bigquery_table_id.clone());
 
         debug!(
-            %view_name,
-            %target_table_id,
+            %bigquery_table_id,
+            %sequenced_bigquery_table_id,
             "view created/updated to point to target"
         );
 
         Ok(true)
+    }
+
+    /// Recreates a view for a target table even when the cached target is
+    /// unchanged.
+    async fn recreate_view_for_table(
+        &self,
+        bigquery_table_id: &BigQueryTableId,
+        sequenced_bigquery_table_id: &SequencedBigQueryTableId,
+    ) -> EtlResult<()> {
+        self.client
+            .create_or_replace_view(
+                &self.dataset_id,
+                bigquery_table_id,
+                &sequenced_bigquery_table_id.to_string(),
+            )
+            .await?;
+
+        let mut inner = self.inner.lock().await;
+        inner.created_views.insert(bigquery_table_id.clone(), sequenced_bigquery_table_id.clone());
+
+        debug!(
+            %bigquery_table_id,
+            %sequenced_bigquery_table_id,
+            "view recreated for target table"
+        );
+
+        Ok(())
     }
 
     /// Writes table-copy rows using the BigQuery upsert row format.
@@ -681,7 +715,7 @@ where
             current_replication_mask.clone(),
         );
 
-        let bigquery_table_id = metadata.destination_table_id.parse()?;
+        let sequenced_bigquery_table_id = metadata.destination_table_id.parse()?;
 
         // Mark as applying before making changes (with the NEW snapshot_id and mask).
         //
@@ -705,13 +739,18 @@ where
 
         // Compute and apply the diff.
         let diff = current_schema.diff(new_replicated_table_schema);
-        if let Err(err) = self.apply_schema_diff(&table_id, &bigquery_table_id, &diff).await {
+        if let Err(err) =
+            self.apply_schema_diff(&table_id, &sequenced_bigquery_table_id, &diff).await
+        {
             warn!(
                 "schema change failed for table {}: {}. Manual intervention may be required.",
                 table_id, err
             );
             return Err(err);
         }
+
+        let bigquery_table_id = sequenced_bigquery_table_id.to_bigquery_table_id();
+        self.recreate_view_for_table(&bigquery_table_id, &sequenced_bigquery_table_id).await?;
 
         // Mark as applied after successful changes.
         self.state_store
@@ -741,7 +780,7 @@ where
     async fn apply_schema_diff(
         &self,
         table_id: &TableId,
-        bigquery_table_id: &SequencedBigQueryTableId,
+        sequenced_bigquery_table_id: &SequencedBigQueryTableId,
         diff: &SchemaDiff,
     ) -> EtlResult<()> {
         if diff.is_empty() {
@@ -751,7 +790,7 @@ where
 
         info!(
             "applying schema changes to table {}: {} additions, {} removals, {} renames",
-            bigquery_table_id,
+            sequenced_bigquery_table_id,
             diff.columns_to_add.len(),
             diff.columns_to_remove.len(),
             diff.columns_to_rename.len()
@@ -762,7 +801,7 @@ where
             self.client
                 .add_column(
                     &self.dataset_id,
-                    &bigquery_table_id.to_string(),
+                    &sequenced_bigquery_table_id.to_string(),
                     column,
                     &self.materializer,
                 )
@@ -775,7 +814,7 @@ where
             self.client
                 .rename_column(
                     &self.dataset_id,
-                    &bigquery_table_id.to_string(),
+                    &sequenced_bigquery_table_id.to_string(),
                     &rename.old_name,
                     &rename.new_name,
                 )
@@ -785,11 +824,15 @@ where
         // Apply column removals last.
         for column in &diff.columns_to_remove {
             self.client
-                .drop_column(&self.dataset_id, &bigquery_table_id.to_string(), &column.name)
+                .drop_column(
+                    &self.dataset_id,
+                    &sequenced_bigquery_table_id.to_string(),
+                    &column.name,
+                )
                 .await?;
         }
 
-        info!("schema changes applied successfully to table {}", bigquery_table_id);
+        info!("schema changes applied successfully to table {}", sequenced_bigquery_table_id);
 
         Ok(())
     }
@@ -1219,7 +1262,7 @@ fn validate_bigquery_replica_identity(
 
 impl<S> Destination for BigQueryDestination<S>
 where
-    S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
+    S: DestinationStore,
 {
     fn name() -> &'static str {
         "bigquery"

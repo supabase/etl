@@ -20,7 +20,7 @@
 
 5. **[Data Type Compatibility](data-type-compatibility.md)**: How destinations map PostgreSQL types, and what type and value strategies mean.
 
-6. **[Extension Points](traits.md)**: The traits you implement - Destination, SchemaStore, StateStore, CleanupStore.
+6. **[Extension Points](traits.md)**: The traits you implement - Destination, SchemaStore, StateStore, TableLifecycleStore.
 
 ## Next Steps
 

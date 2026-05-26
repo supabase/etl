@@ -1,13 +1,19 @@
+//! Table lifecycle store capability.
+//!
+//! Lifecycle operations are table-scoped mutations that must keep replication
+//! state, versioned schemas, destination metadata, and in-memory caches
+//! consistent.
+
 use std::future::Future;
 
 use crate::{error::EtlResult, types::TableId};
 
-/// Combined maintenance operations across state and schema stores.
+/// Table lifecycle operations across state and schema stores.
 ///
-/// Provides atomic table-scoped primitives that affect both replication state
-/// and schema-related data. Implementations should ensure consistency across
-/// in-memory caches and the persistent store.
-pub trait CleanupStore {
+/// Provides atomic table-scoped primitives that affect both replication state,
+/// schema-related data, and destination metadata. Implementations should ensure
+/// consistency across in-memory caches and the persistent store.
+pub trait TableLifecycleStore {
     /// Clears stored table-copy state for `table_id`.
     ///
     /// Removes destination table metadata, all stored table schemas, and

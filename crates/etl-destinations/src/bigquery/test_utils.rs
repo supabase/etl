@@ -7,7 +7,7 @@ use std::{fmt, path::Path, str::FromStr, time::Duration};
 
 use etl::{
     destination::DestinationMaterializationPolicy,
-    store::{schema::SchemaStore, state::StateStore},
+    store::DestinationStore,
     types::{PipelineId, TableName},
 };
 use gcp_bigquery_client::{
@@ -296,6 +296,26 @@ impl BigQueryDatabase {
         }
     }
 
+    /// Gets the logical view schema from the BigQuery table metadata API.
+    pub async fn get_view_schema(&self, table_name: TableName) -> Option<BigQueryTableSchema> {
+        let table_id = table_name_to_bigquery_table_id(&table_name).unwrap();
+
+        self.get_table_schema_by_id(&table_id).await
+    }
+
+    /// Gets a table or view schema from the BigQuery table metadata API.
+    pub async fn get_table_schema_by_id(&self, table_id: &str) -> Option<BigQueryTableSchema> {
+        let table =
+            match self.client.table().get(&self.project_id, &self.dataset_id, table_id, None).await
+            {
+                Ok(table) => table,
+                Err(BQError::ResponseError { error }) if error.error.code == 404 => return None,
+                Err(err) => panic!("Failed to get BigQuery table metadata: {err:?}"),
+            };
+
+        Some(BigQueryTableSchema::from_table_fields(table.schema.fields.unwrap_or_default()))
+    }
+
     /// Manually creates a table in the test dataset using column definitions.
     ///
     /// Creates a table by generating a DDL statement from the provided column
@@ -326,7 +346,7 @@ impl BigQueryDatabase {
         schema_store: S,
     ) -> BigQueryDestination<S>
     where
-        S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
+        S: DestinationStore,
     {
         self.build_destination_with_materialization_policy(
             pipeline_id,
@@ -344,7 +364,7 @@ impl BigQueryDatabase {
         policy: DestinationMaterializationPolicy,
     ) -> BigQueryDestination<S>
     where
-        S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
+        S: DestinationStore,
     {
         let options = BigQueryDestinationOptions::new(
             self.dataset_id.clone(),
@@ -417,21 +437,26 @@ impl BigQueryTableSchema {
         Self(columns)
     }
 
+    /// Creates a schema wrapper from BigQuery table metadata fields.
+    pub fn from_table_fields(
+        fields: Vec<gcp_bigquery_client::model::table_field_schema::TableFieldSchema>,
+    ) -> Self {
+        let columns = fields
+            .into_iter()
+            .enumerate()
+            .map(|(index, field)| BigQueryColumnSchema {
+                column_name: field.name,
+                data_type: format!("{:?}", field.r#type),
+                ordinal_position: index as i64 + 1,
+            })
+            .collect();
+
+        Self(columns)
+    }
+
     /// Returns true if a column with the given name exists in the schema.
     pub fn has_column(&self, name: &str) -> bool {
         self.0.iter().any(|c| c.column_name == name)
-    }
-
-    /// Asserts that a column with the given name exists in the schema.
-    ///
-    /// Panics with a descriptive message if the column is not found.
-    pub fn assert_has_column(&self, name: &str) {
-        assert!(
-            self.has_column(name),
-            "expected column '{}' to exist in schema, but it was not found. Columns: {:?}",
-            name,
-            self.column_names()
-        );
     }
 
     /// Asserts that a column with the given name does not exist in the schema.
@@ -474,11 +499,6 @@ impl BigQueryTableSchema {
     /// Returns the names of all columns in the schema.
     pub fn column_names(&self) -> Vec<&str> {
         self.0.iter().map(|c| c.column_name.as_str()).collect()
-    }
-
-    /// Returns a reference to the underlying column schemas.
-    pub fn columns(&self) -> &[BigQueryColumnSchema] {
-        &self.0
     }
 }
 

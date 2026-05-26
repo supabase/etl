@@ -13,7 +13,7 @@ use etl::{
     error::{ErrorKind, EtlResult},
     etl_error,
     state::destination_metadata::DestinationTableMetadata,
-    store::state::StateStore,
+    store::SharedStateStore,
     types::{
         Cell, ColumnSchema, Event, IdentityType, OldTableRow, ReplicatedTableSchema, TableId,
         TableName, TableRow, Type, generate_sequence_number,
@@ -164,7 +164,7 @@ struct Inner {
 
 impl<S> IcebergDestination<S>
 where
-    S: StateStore + Clone + Send + Sync + 'static,
+    S: SharedStateStore,
 {
     /// Creates a new Iceberg destination instance.
     ///
@@ -616,7 +616,7 @@ where
 
 impl<S> Destination for IcebergDestination<S>
 where
-    S: StateStore + Clone + Send + Sync + 'static,
+    S: SharedStateStore,
 {
     /// Returns the identifier name for this destination type.
     fn name() -> &'static str {

@@ -1,5 +1,6 @@
 [alias]
 xtask = "run --package xtask --"
+x = "run --package xtask --"
 
 # Use lld linker for faster linking (1.5-2x faster than default ld)
 # lld is part of the LLVM toolchain and widely available

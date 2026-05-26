@@ -13,16 +13,16 @@
   - `crates/etl-benchmarks/`: benchmarks.
   - `crates/xtask/`: workspace automation commands.
 - Docs live in `docs/`.
-- Local development and ops tooling live in `scripts/` and `DEVELOPMENT.md`.
+- Local development and ops tooling live in `crates/xtask/` (run via `cargo x`) and `DEVELOPMENT.md`.
 - Tests live next to code in `src/` or `tests/`.
 
 ## Commands
 - Build everything:
   - `cargo build --workspace --all-targets --all-features`
 - Format:
-  - `./scripts/fmt`
+  - `cargo x fmt`
 - Check formatting:
-  - `./scripts/fmt-check`
+  - `cargo x fmt --check`
 - Lint:
   - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
 - Run unit tests (no Postgres required):
@@ -43,7 +43,7 @@
 - Do not add dependencies unless they are justified by the task.
 - If you change workflow assumptions, build or test the smallest relevant target and report what actually ran.
 - Never create commits, push branches, open pull requests, or perform other git write actions unless the user explicitly instructs you to do so.
-- Keep the workspace on the stable toolchain from `rust-toolchain.toml` for build, lint, and test commands; use the pinned nightly formatter only through `./scripts/fmt` and `./scripts/fmt-check`.
+- Keep the workspace on the stable toolchain from `rust-toolchain.toml` for build, lint, and test commands; use the pinned nightly formatter only through `cargo x fmt` and `cargo x fmt --check`.
 - Treat `Cargo.toml` workspace lints, `rustfmt.toml`, and compiler diagnostics as the source of truth for enforceable style and correctness rules. Prefer adding or tightening static checks over adding prose rules here.
 - Run Clippy, builds, and tests intentionally when they are relevant: for example
   after changing Rust code, when compiler/lint diagnostics indicate a problem,
@@ -112,6 +112,12 @@
 ## Documentation
 - Document all items, public and private, using concise stdlib-style prose.
 - Link types and methods as [`Type`] and [`Type::method`].
+- In public or module-level docs, prefer fully qualified rustdoc links such as
+  [`crate::store::PipelineStore`] when referencing items outside the current
+  module.
+- In item docs where the type is already imported and central to the code,
+  short rustdoc links such as [`StateStore`] are fine.
+- Do not add imports solely to make rustdoc links shorter.
 - Keep comments and docs precise, short, and punctuated.
 - Normal comments should always end with `.`.
 - Do not add code examples in rustdoc for this repository.

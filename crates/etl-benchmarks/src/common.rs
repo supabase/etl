@@ -16,7 +16,7 @@ use clap::{Args, ValueEnum};
 use etl::destination::DestinationMaterializationPolicy;
 use etl::{
     destination::{
-        Destination,
+        Destination, PipelineDestination,
         async_result::{DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult},
     },
     error::EtlResult,
@@ -339,7 +339,7 @@ impl<D> CountingDestination<D> {
 
 impl<D> Destination for CountingDestination<D>
 where
-    D: Destination + Clone + Send + Sync + 'static,
+    D: PipelineDestination,
 {
     fn name() -> &'static str {
         D::name()

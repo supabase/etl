@@ -14,7 +14,7 @@ use tracing::{Instrument, debug, error, info, warn};
 use crate::{
     bail,
     concurrency::{BatchBudgetController, MemoryMonitor, ShutdownResult, ShutdownRx},
-    destination::Destination,
+    destination::PipelineDestination,
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
     metrics::{ERROR_TYPE_LABEL, ETL_WORKER_ERRORS_TOTAL, WORKER_TYPE_LABEL},
@@ -25,7 +25,7 @@ use crate::{
     state::table::{
         RetryPolicy, TableReplicationError, TableReplicationPhase, TableReplicationPhaseType,
     },
-    store::{cleanup::CleanupStore, schema::SchemaStore, state::StateStore},
+    store::{PipelineStore, state::StateStore},
     types::PipelineId,
     workers::{
         TableSyncWorkerPool,
@@ -380,8 +380,8 @@ impl<S, D> TableSyncWorker<S, D> {
 
 impl<S, D> TableSyncWorker<S, D>
 where
-    S: StateStore + SchemaStore + CleanupStore + Clone + Send + Sync + 'static,
-    D: Destination + Clone + Send + Sync + 'static,
+    S: PipelineStore,
+    D: PipelineDestination,
 {
     /// Handles a table sync worker failure using the configured retry policy.
     ///
