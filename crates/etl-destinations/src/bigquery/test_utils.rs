@@ -329,6 +329,26 @@ impl BigQueryDatabase {
         }
     }
 
+    /// Gets the logical view schema from the BigQuery table metadata API.
+    pub async fn get_view_schema(&self, table_name: TableName) -> Option<BigQueryTableSchema> {
+        let table_id = table_name_to_bigquery_table_id(&table_name).unwrap();
+
+        self.get_table_schema_by_id(&table_id).await
+    }
+
+    /// Gets a table or view schema from the BigQuery table metadata API.
+    pub async fn get_table_schema_by_id(&self, table_id: &str) -> Option<BigQueryTableSchema> {
+        let table =
+            match self.client.table().get(&self.project_id, &self.dataset_id, table_id, None).await
+            {
+                Ok(table) => table,
+                Err(BQError::ResponseError { error }) if error.error.code == 404 => return None,
+                Err(err) => panic!("Failed to get BigQuery table metadata: {err:?}"),
+            };
+
+        Some(BigQueryTableSchema::from_table_fields(table.schema.fields.unwrap_or_default()))
+    }
+
     /// Manually creates a table in the test dataset using column definitions.
     ///
     /// Creates a table by generating a DDL statement from the provided column
@@ -424,6 +444,23 @@ pub struct BigQueryTableSchema(Vec<BigQueryColumnSchema>);
 impl BigQueryTableSchema {
     /// Creates a new schema wrapper from a vector of column schemas.
     pub fn new(columns: Vec<BigQueryColumnSchema>) -> Self {
+        Self(columns)
+    }
+
+    /// Creates a schema wrapper from BigQuery table metadata fields.
+    pub fn from_table_fields(
+        fields: Vec<gcp_bigquery_client::model::table_field_schema::TableFieldSchema>,
+    ) -> Self {
+        let columns = fields
+            .into_iter()
+            .enumerate()
+            .map(|(index, field)| BigQueryColumnSchema {
+                column_name: field.name,
+                data_type: format!("{:?}", field.r#type),
+                ordinal_position: index as i64 + 1,
+            })
+            .collect();
+
         Self(columns)
     }
 
