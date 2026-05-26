@@ -2156,15 +2156,21 @@ dependencies = [
 name = "etl-postgres"
 version = "0.1.0"
 dependencies = [
+ "aws-lc-rs",
  "bytes",
+ "const-oid 0.9.6",
  "etl-config",
+ "futures",
  "pg_escape",
+ "rustls",
  "serde_json",
  "sqlx",
  "thiserror 2.0.18",
  "tokio",
  "tokio-postgres",
+ "tokio-rustls",
  "tracing",
+ "x509-cert",
 ]
 
 [[package]]
