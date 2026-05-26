@@ -158,6 +158,7 @@ where
         // are loaded in the cache.
         self.store.load_destination_tables_metadata().await?;
         self.store.load_table_schemas().await?;
+        self.destination.startup().await?;
 
         // We load the table states by checking the table ids of a publication and
         // loading/creating the table replication states based on the current

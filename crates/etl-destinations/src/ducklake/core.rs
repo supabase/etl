@@ -269,6 +269,10 @@ where
         Ok(())
     }
 
+    async fn startup(&self) -> EtlResult<()> {
+        self.reconcile_existing_tables_after_restart().await
+    }
+
     async fn drop_table_for_copy(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
@@ -1390,6 +1394,49 @@ where
         };
 
         self.apply_schema_diff(table_name, &diff).await
+    }
+
+    /// Reconciles persisted destination metadata with physical DuckLake tables.
+    async fn reconcile_existing_tables_after_restart(&self) -> EtlResult<()> {
+        let table_schemas = self.store.get_table_schemas().await?;
+        let table_ids: HashSet<_> = table_schemas.iter().map(|schema| schema.id).collect();
+
+        if table_ids.is_empty() {
+            return Ok(());
+        }
+
+        info!(
+            table_count = table_ids.len(),
+            "ducklake reconciling destination table schemas after restart"
+        );
+
+        for table_id in table_ids {
+            let Some(metadata) = self.store.get_destination_table_metadata(table_id).await? else {
+                continue;
+            };
+
+            let table_name = metadata.destination_table_id.clone();
+            if metadata.is_applying() {
+                self.recover_applying_metadata(table_id, &table_name, metadata, None).await?;
+                continue;
+            }
+
+            let target_table_schema = self
+                .load_exact_table_schema(
+                    table_id,
+                    metadata.snapshot_id,
+                    "DuckLake startup schema not found",
+                )
+                .await?;
+            let target_schema =
+                ReplicatedTableSchema::from_mask(target_table_schema, metadata.replication_mask);
+
+            self.issue_create_table_stmt(&table_name, &target_schema).await?;
+            self.reconcile_missing_replicated_columns(&table_name, &target_schema).await?;
+            self.created_tables.lock().insert(table_name);
+        }
+
+        Ok(())
     }
 
     /// Writes streaming CDC events to the destination.
