@@ -16,6 +16,7 @@ use etl::{
     },
 };
 use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
+use serde_json::value::RawValue;
 
 use crate::bigquery::value::{BigQueryArrayCell, BigQueryCell, BigQueryType};
 
@@ -29,9 +30,6 @@ const BIGQUERY_BIGNUMERIC_MIN: &str =
     "-578960446186580977117854925043439539266.34992332820282019728792003956564819968";
 /// Maximum nesting depth for a BigQuery `JSON` value.
 const BIGQUERY_JSON_MAX_NESTING_DEPTH: usize = 500;
-/// Internal serde_json token used for arbitrary-precision numbers.
-const SERDE_JSON_NUMBER_TOKEN: &str = "$serde_json::private::Number";
-
 /// BigQuery cell materialization result.
 type BigQueryCellMaterializationResult = CellMaterializationResult<BigQueryType, BigQueryCell>;
 
@@ -527,7 +525,7 @@ fn normalize_json_value_text(value: String) -> Result<String, MaterializationFai
     }
 
     normalize_bigquery_json(value_json)
-        .map(|normalized| normalized.to_string())
+        .map(|normalized| format_json_value(&normalized))
         .map_err(|reason| failure(ErrorKind::UnsupportedValueInDestination, reason))
 }
 
@@ -884,19 +882,42 @@ fn parse_json_text_without_duplicate_keys(
 fn parse_json_text_first_key_wins(
     value: &str,
 ) -> Result<serde_json::Value, MaterializationFailure> {
+    parse_json_raw_first_key_wins(value).map_err(|error| {
+        failure(
+            ErrorKind::UnsupportedValueInDestination,
+            format!("JSON text is not valid for BigQuery: {error}"),
+        )
+    })
+}
+
+/// Parses raw JSON while preserving first-key-wins object semantics.
+fn parse_json_raw_first_key_wins(value: &str) -> Result<serde_json::Value, String> {
+    let first_byte = value.bytes().find(|byte| !byte.is_ascii_whitespace());
+    match first_byte {
+        Some(b'{') => deserialize_json_first_key_wins_object(value),
+        Some(b'[') => deserialize_json_first_key_wins_array(value),
+        _ => serde_json::from_str(value).map_err(|error| error.to_string()),
+    }
+}
+
+/// Deserializes a raw JSON object using first-key-wins semantics.
+fn deserialize_json_first_key_wins_object(value: &str) -> Result<serde_json::Value, String> {
     let mut deserializer = serde_json::Deserializer::from_str(value);
-    let value = JsonFirstKeyWinsParser.deserialize(&mut deserializer).map_err(|error| {
-        failure(
-            ErrorKind::UnsupportedValueInDestination,
-            format!("JSON text is not valid for BigQuery: {error}"),
-        )
-    })?;
-    deserializer.end().map_err(|error| {
-        failure(
-            ErrorKind::UnsupportedValueInDestination,
-            format!("JSON text is not valid for BigQuery: {error}"),
-        )
-    })?;
+    let value = JsonFirstKeyWinsObjectParser
+        .deserialize(&mut deserializer)
+        .map_err(|error| error.to_string())?;
+    deserializer.end().map_err(|error| error.to_string())?;
+
+    Ok(value)
+}
+
+/// Deserializes a raw JSON array while recursively preserving object semantics.
+fn deserialize_json_first_key_wins_array(value: &str) -> Result<serde_json::Value, String> {
+    let mut deserializer = serde_json::Deserializer::from_str(value);
+    let value = JsonFirstKeyWinsArrayParser
+        .deserialize(&mut deserializer)
+        .map_err(|error| error.to_string())?;
+    deserializer.end().map_err(|error| error.to_string())?;
 
     Ok(value)
 }
@@ -934,69 +955,66 @@ fn validate_reject_json(value: &serde_json::Value) -> Option<MaterializationFail
     None
 }
 
-/// Streaming JSON parser that keeps the first object value for duplicate keys.
-struct JsonFirstKeyWinsParser;
+/// Streaming JSON object parser that keeps the first value for duplicate keys.
+struct JsonFirstKeyWinsObjectParser;
 
-impl<'de> DeserializeSeed<'de> for JsonFirstKeyWinsParser {
+impl<'de> DeserializeSeed<'de> for JsonFirstKeyWinsObjectParser {
     type Value = serde_json::Value;
 
     fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
-        deserializer.deserialize_any(self)
+        deserializer.deserialize_map(self)
     }
 }
 
-impl<'de> Visitor<'de> for JsonFirstKeyWinsParser {
+impl<'de> Visitor<'de> for JsonFirstKeyWinsObjectParser {
     type Value = serde_json::Value;
 
     fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("any JSON value")
+        formatter.write_str("a JSON object")
     }
 
-    fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E> {
-        Ok(serde_json::Value::Bool(value))
-    }
-
-    fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> {
-        Ok(serde_json::Value::Number(value.into()))
-    }
-
-    fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
-        Ok(serde_json::Value::Number(value.into()))
-    }
-
-    fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
     where
-        E: de::Error,
+        A: MapAccess<'de>,
     {
-        serde_json::Number::from_f64(value)
-            .map(serde_json::Value::Number)
-            .ok_or_else(|| de::Error::custom("JSON number is not finite"))
-    }
+        let mut values = serde_json::Map::new();
 
-    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
-        Ok(serde_json::Value::String(value.to_owned()))
-    }
+        while let Some(key) = map.next_key::<String>()? {
+            let raw_value = map.next_value::<Box<RawValue>>()?;
 
-    fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
-        Ok(serde_json::Value::String(value))
-    }
+            if !values.contains_key(&key) {
+                let value =
+                    parse_json_raw_first_key_wins(raw_value.get()).map_err(de::Error::custom)?;
+                values.insert(key, value);
+            }
+        }
 
-    fn visit_none<E>(self) -> Result<Self::Value, E> {
-        Ok(serde_json::Value::Null)
+        Ok(serde_json::Value::Object(values))
     }
+}
 
-    fn visit_unit<E>(self) -> Result<Self::Value, E> {
-        Ok(serde_json::Value::Null)
-    }
+/// Streaming JSON array parser that recursively applies object semantics.
+struct JsonFirstKeyWinsArrayParser;
 
-    fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+impl<'de> DeserializeSeed<'de> for JsonFirstKeyWinsArrayParser {
+    type Value = serde_json::Value;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
-        deserializer.deserialize_any(self)
+        deserializer.deserialize_seq(self)
+    }
+}
+
+impl<'de> Visitor<'de> for JsonFirstKeyWinsArrayParser {
+    type Value = serde_json::Value;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a JSON array")
     }
 
     fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
@@ -1004,38 +1022,11 @@ impl<'de> Visitor<'de> for JsonFirstKeyWinsParser {
         A: SeqAccess<'de>,
     {
         let mut values = Vec::new();
-        while let Some(value) = seq.next_element_seed(JsonFirstKeyWinsParser)? {
-            values.push(value);
+        while let Some(raw_value) = seq.next_element::<Box<RawValue>>()? {
+            values.push(parse_json_raw_first_key_wins(raw_value.get()).map_err(de::Error::custom)?);
         }
 
         Ok(serde_json::Value::Array(values))
-    }
-
-    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
-    where
-        A: MapAccess<'de>,
-    {
-        let Some(first_key) = map.next_key::<String>()? else {
-            return Ok(serde_json::Value::Object(serde_json::Map::new()));
-        };
-
-        if first_key == SERDE_JSON_NUMBER_TOKEN {
-            let number = map.next_value::<String>()?;
-            return serde_json::from_str::<serde_json::Number>(&number)
-                .map(serde_json::Value::Number)
-                .map_err(de::Error::custom);
-        }
-
-        let mut values = serde_json::Map::new();
-        let first_value = map.next_value_seed(JsonFirstKeyWinsParser)?;
-        values.insert(first_key, first_value);
-
-        while let Some(key) = map.next_key::<String>()? {
-            let value = map.next_value_seed(JsonFirstKeyWinsParser)?;
-            values.entry(key).or_insert(value);
-        }
-
-        Ok(serde_json::Value::Object(values))
     }
 }
 
@@ -1221,6 +1212,35 @@ fn normalize_bigquery_json(value: serde_json::Value) -> Result<serde_json::Value
             normalize_bigquery_json_number(number).map(serde_json::Value::Number)
         }
         value => Ok(value),
+    }
+}
+
+/// Formats JSON without interpreting serde_json's private number object key.
+fn format_json_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => "null".to_owned(),
+        serde_json::Value::Bool(value) => value.to_string(),
+        serde_json::Value::Number(value) => value.to_string(),
+        serde_json::Value::String(value) => {
+            serde_json::to_string(value).expect("serializing a JSON string cannot fail")
+        }
+        serde_json::Value::Array(values) => {
+            let values = values.iter().map(format_json_value).collect::<Vec<_>>().join(",");
+            format!("[{values}]")
+        }
+        serde_json::Value::Object(values) => {
+            let values = values
+                .iter()
+                .map(|(key, value)| {
+                    let key =
+                        serde_json::to_string(key).expect("serializing a JSON key cannot fail");
+                    let value = format_json_value(value);
+                    format!("{key}:{value}")
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("{{{values}}}")
+        }
     }
 }
 
@@ -2779,6 +2799,33 @@ mod tests {
         };
         let value: serde_json::Value = serde_json::from_str(&value).unwrap();
         assert_eq!(value["outer"]["value"], serde_json::json!(1));
+    }
+
+    #[test]
+    fn normalize_json_preserves_private_number_token_object_keys() {
+        let result = materialized_cell(
+            DestinationMaterializationPolicy::native_or_string_normalize(),
+            Type::JSON,
+            Cell::String(r#"{"$serde_json::private::Number":"123","keep":true}"#.to_owned()),
+        )
+        .unwrap();
+        let BigQueryCell::String(value) = result else {
+            panic!("Expected JSON object");
+        };
+        serde_json::from_str::<Box<RawValue>>(&value).unwrap();
+        assert_eq!(value, r#"{"$serde_json::private::Number":"123","keep":true}"#);
+
+        let result = materialized_cell(
+            DestinationMaterializationPolicy::native_or_string_normalize(),
+            Type::JSON,
+            Cell::String(r#"{"$serde_json::private::Number":"456"}"#.to_owned()),
+        )
+        .unwrap();
+        let BigQueryCell::String(value) = result else {
+            panic!("Expected JSON object");
+        };
+        serde_json::from_str::<Box<RawValue>>(&value).unwrap();
+        assert_eq!(value, r#"{"$serde_json::private::Number":"456"}"#);
     }
 
     #[test]
