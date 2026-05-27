@@ -22,24 +22,43 @@ use crate::{
     types::{ColumnSchema, SnapshotId, TableId, TableName, TableSchema},
 };
 
-/// A transaction that operates within the context of a replication slot.
+/// Builds a `COPY ... TO STDOUT` query that selects rows within a ctid range.
 ///
-/// The transaction borrows the client that created the slot. As long as this
-/// value is alive, the parent connection cannot be used for other commands.
-/// Child connections forked from this transaction rely on snapshots exported by
-/// it and must finish their snapshot-dependent work before this transaction is
-/// committed.
-pub struct PgReplicationTransaction<'a> {
-    /// Common transaction state and query helpers.
-    core: PgReplicationTransactionCore<'a>,
-    /// Settings used to fork child connections that import this transaction's
-    /// snapshot.
-    pg_connection_config: PgConnectionConfig,
-}
+/// The query applies an optional publication row filter in addition to the ctid
+/// bounds.
+fn build_ctid_copy_query(
+    table_name: &TableName,
+    column_list: &str,
+    row_filter: Option<&str>,
+    partition: &CtidPartition,
+) -> String {
+    let quoted_table_name = table_name.as_quoted_identifier();
+    let ctid_predicate = match partition {
+        CtidPartition::OpenStart { end_tid } => {
+            format!("ctid < {}::tid", quote_literal(end_tid))
+        }
+        CtidPartition::Closed { start_tid, end_tid } => {
+            format!(
+                "ctid >= {}::tid and ctid < {}::tid",
+                quote_literal(start_tid),
+                quote_literal(end_tid),
+            )
+        }
+        CtidPartition::OpenEnd { start_tid } => {
+            format!("ctid >= {}::tid", quote_literal(start_tid))
+        }
+    };
 
-impl fmt::Debug for PgReplicationTransaction<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PgReplicationTransaction").field("core", &self.core).finish_non_exhaustive()
+    if let Some(row_filter) = row_filter {
+        format!(
+            "copy (select {column_list} from {quoted_table_name} where {ctid_predicate} and \
+             ({row_filter})) to stdout with (format text);",
+        )
+    } else {
+        format!(
+            "copy (select {column_list} from {quoted_table_name} where {ctid_predicate}) to \
+             stdout with (format text);",
+        )
     }
 }
 
@@ -54,14 +73,6 @@ struct PgReplicationTransactionCore<'a> {
     server_version: Option<NonZeroI32>,
     /// Updates emitted by the owning connection task.
     connection_updates_rx: watch::Receiver<PostgresConnectionUpdate>,
-}
-
-impl fmt::Debug for PgReplicationTransactionCore<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PgReplicationTransactionCore")
-            .field("server_version", &self.server_version)
-            .finish_non_exhaustive()
-    }
 }
 
 impl<'a> PgReplicationTransactionCore<'a> {
@@ -566,6 +577,29 @@ impl<'a> PgReplicationTransactionCore<'a> {
     }
 }
 
+impl fmt::Debug for PgReplicationTransactionCore<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PgReplicationTransactionCore")
+            .field("server_version", &self.server_version)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A transaction that operates within the context of a replication slot.
+///
+/// The transaction borrows the client that created the slot. As long as this
+/// value is alive, the parent connection cannot be used for other commands.
+/// Child connections forked from this transaction rely on snapshots exported by
+/// it and must finish their snapshot-dependent work before this transaction is
+/// committed.
+pub struct PgReplicationTransaction<'a> {
+    /// Common transaction state and query helpers.
+    core: PgReplicationTransactionCore<'a>,
+    /// Settings used to fork child connections that import this transaction's
+    /// snapshot.
+    pg_connection_config: PgConnectionConfig,
+}
+
 impl<'a> PgReplicationTransaction<'a> {
     /// Wraps a transaction created from a replication client.
     pub(super) fn new(
@@ -677,6 +711,12 @@ impl<'a> PgReplicationTransaction<'a> {
     }
 }
 
+impl fmt::Debug for PgReplicationTransaction<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PgReplicationTransaction").field("core", &self.core).finish_non_exhaustive()
+    }
+}
+
 /// A transaction on a child connection pinned to an exported snapshot.
 ///
 /// The transaction borrows the child connection for its full lifetime, ensuring
@@ -687,14 +727,6 @@ impl<'a> PgReplicationTransaction<'a> {
 pub struct PgChildReplicationTransaction<'a> {
     /// Common transaction state and query helpers.
     core: PgReplicationTransactionCore<'a>,
-}
-
-impl fmt::Debug for PgChildReplicationTransaction<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PgChildReplicationTransaction")
-            .field("core", &self.core)
-            .finish_non_exhaustive()
-    }
 }
 
 impl<'a> PgChildReplicationTransaction<'a> {
@@ -755,43 +787,11 @@ impl<'a> PgChildReplicationTransaction<'a> {
     }
 }
 
-/// Builds a `COPY ... TO STDOUT` query that selects rows within a ctid range.
-///
-/// The query applies an optional publication row filter in addition to the ctid
-/// bounds.
-fn build_ctid_copy_query(
-    table_name: &TableName,
-    column_list: &str,
-    row_filter: Option<&str>,
-    partition: &CtidPartition,
-) -> String {
-    let quoted_table_name = table_name.as_quoted_identifier();
-    let ctid_predicate = match partition {
-        CtidPartition::OpenStart { end_tid } => {
-            format!("ctid < {}::tid", quote_literal(end_tid))
-        }
-        CtidPartition::Closed { start_tid, end_tid } => {
-            format!(
-                "ctid >= {}::tid and ctid < {}::tid",
-                quote_literal(start_tid),
-                quote_literal(end_tid),
-            )
-        }
-        CtidPartition::OpenEnd { start_tid } => {
-            format!("ctid >= {}::tid", quote_literal(start_tid))
-        }
-    };
-
-    if let Some(row_filter) = row_filter {
-        format!(
-            "copy (select {column_list} from {quoted_table_name} where {ctid_predicate} and \
-             ({row_filter})) to stdout with (format text);",
-        )
-    } else {
-        format!(
-            "copy (select {column_list} from {quoted_table_name} where {ctid_predicate}) to \
-             stdout with (format text);",
-        )
+impl fmt::Debug for PgChildReplicationTransaction<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PgChildReplicationTransaction")
+            .field("core", &self.core)
+            .finish_non_exhaustive()
     }
 }
 

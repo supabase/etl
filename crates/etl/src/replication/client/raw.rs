@@ -224,11 +224,6 @@ impl PgReplicationClient {
         self.server_version
     }
 
-    /// Returns this client as a query target.
-    fn target(&self) -> PgReplicationQueryTarget<'_, '_> {
-        PgReplicationQueryTarget::Client(&self.client)
-    }
-
     /// Returns the configured `wal_sender_timeout`, if PostgreSQL has it
     /// enabled.
     pub async fn get_wal_sender_timeout(&self) -> EtlResult<Option<Duration>> {
@@ -419,60 +414,6 @@ impl PgReplicationClient {
     /// any other error from [`PgReplicationClient::delete_slot`].
     pub async fn delete_slot_if_exists(&self, slot_name: &str) -> EtlResult<()> {
         self.delete_slot_internal(slot_name, false).await
-    }
-
-    /// Deletes a replication slot, optionally failing when the slot does not
-    /// exist.
-    async fn delete_slot_internal(&self, slot_name: &str, fail_if_missing: bool) -> EtlResult<()> {
-        info!(slot_name, "deleting replication slot");
-
-        // Do not convert the query or the options to lowercase, see comment in
-        // `create_slot_internal`.
-        let query = format!(r#"DROP_REPLICATION_SLOT {} WAIT;"#, quote_identifier(slot_name));
-
-        let Ok(delete_result) =
-            tokio::time::timeout(DELETE_SLOT_TIMEOUT, self.client.simple_query(&query)).await
-        else {
-            bail!(
-                ErrorKind::ReplicationSlotDeletionTimeout,
-                "Replication slot deletion timed out",
-                format!(
-                    "Timed out after {:?} while deleting replication slot '{}'",
-                    DELETE_SLOT_TIMEOUT, slot_name
-                )
-            )
-        };
-
-        match delete_result {
-            Ok(_) => {
-                info!(slot_name, "deleted replication slot");
-
-                Ok(())
-            }
-            Err(err) => {
-                if let Some(&SqlState::UNDEFINED_OBJECT) = err.code() {
-                    if fail_if_missing {
-                        warn!(slot_name, "attempted to delete non-existent replication slot");
-
-                        bail!(
-                            ErrorKind::ReplicationSlotNotFound,
-                            "Replication slot not found",
-                            format!(
-                                "Replication slot '{}' not found in database while attempting its \
-                                 deletion",
-                                slot_name
-                            )
-                        );
-                    }
-
-                    info!(slot_name, "replication slot not found, skipping deletion");
-
-                    return Ok(());
-                }
-
-                Err(err.into())
-            }
-        }
     }
 
     /// Checks if a publication with the given name exists.
@@ -667,6 +608,11 @@ impl PgReplicationClient {
         Ok(transaction)
     }
 
+    /// Returns this client as a query target.
+    fn target(&self) -> PgReplicationQueryTarget<'_, '_> {
+        PgReplicationQueryTarget::Client(&self.client)
+    }
+
     /// Internal helper method to create a replication slot.
     ///
     /// The `snapshot_action` controls how the slot's snapshot is handled during
@@ -677,5 +623,59 @@ impl PgReplicationClient {
         snapshot_action: SnapshotAction,
     ) -> EtlResult<CreateSlotResult> {
         self.target().create_slot(slot_name, snapshot_action).await
+    }
+
+    /// Deletes a replication slot, optionally failing when the slot does not
+    /// exist.
+    async fn delete_slot_internal(&self, slot_name: &str, fail_if_missing: bool) -> EtlResult<()> {
+        info!(slot_name, "deleting replication slot");
+
+        // Do not convert the query or the options to lowercase, see comment in
+        // `create_slot_internal`.
+        let query = format!(r#"DROP_REPLICATION_SLOT {} WAIT;"#, quote_identifier(slot_name));
+
+        let Ok(delete_result) =
+            tokio::time::timeout(DELETE_SLOT_TIMEOUT, self.client.simple_query(&query)).await
+        else {
+            bail!(
+                ErrorKind::ReplicationSlotDeletionTimeout,
+                "Replication slot deletion timed out",
+                format!(
+                    "Timed out after {:?} while deleting replication slot '{}'",
+                    DELETE_SLOT_TIMEOUT, slot_name
+                )
+            )
+        };
+
+        match delete_result {
+            Ok(_) => {
+                info!(slot_name, "deleted replication slot");
+
+                Ok(())
+            }
+            Err(err) => {
+                if let Some(&SqlState::UNDEFINED_OBJECT) = err.code() {
+                    if fail_if_missing {
+                        warn!(slot_name, "attempted to delete non-existent replication slot");
+
+                        bail!(
+                            ErrorKind::ReplicationSlotNotFound,
+                            "Replication slot not found",
+                            format!(
+                                "Replication slot '{}' not found in database while attempting its \
+                                 deletion",
+                                slot_name
+                            )
+                        );
+                    }
+
+                    info!(slot_name, "replication slot not found, skipping deletion");
+
+                    return Ok(());
+                }
+
+                Err(err.into())
+            }
+        }
     }
 }

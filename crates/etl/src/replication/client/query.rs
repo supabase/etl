@@ -22,19 +22,6 @@ pub(super) enum PgReplicationQueryTarget<'a, 'tx> {
 }
 
 impl PgReplicationQueryTarget<'_, '_> {
-    /// Executes a simple query on the target.
-    async fn simple_query(
-        self,
-        query: &str,
-    ) -> Result<Vec<SimpleQueryMessage>, tokio_postgres::Error> {
-        match self {
-            PgReplicationQueryTarget::Client(client) => client.simple_query(query).await,
-            PgReplicationQueryTarget::Transaction(transaction) => {
-                transaction.simple_query(query).await
-            }
-        }
-    }
-
     /// Creates a replication slot on this target.
     pub(super) async fn create_slot(
         self,
@@ -107,5 +94,18 @@ impl PgReplicationQueryTarget<'_, '_> {
         }
 
         Ok(false)
+    }
+
+    /// Executes a simple query on the target.
+    async fn simple_query(
+        self,
+        query: &str,
+    ) -> Result<Vec<SimpleQueryMessage>, tokio_postgres::Error> {
+        match self {
+            PgReplicationQueryTarget::Client(client) => client.simple_query(query).await,
+            PgReplicationQueryTarget::Transaction(transaction) => {
+                transaction.simple_query(query).await
+            }
+        }
     }
 }

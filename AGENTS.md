@@ -65,6 +65,10 @@
 - Keep top-level binaries focused on orchestration; move implementation detail into helpers or modules.
 - Prefer clear, boring code over clever abstractions.
 - Prefer existing workspace patterns over introducing new local conventions.
+- Keep item order local and readable: place supporting helpers and types before
+  their use when practical, and group type-centered code as `struct`, inherent
+  `impl`, then trait impls. Within inherent impls, put constructors first,
+  externally visible methods next, and private helpers last.
 - Do not add `#[must_use]` attributes unless the user explicitly asks for one.
 - Default to private visibility and only widen when a real caller requires it.
 - Prefer the narrowest working visibility in this order: private, `pub(super)`, `pub(crate)`, then `pub`.
