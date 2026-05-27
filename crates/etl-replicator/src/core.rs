@@ -223,7 +223,7 @@ pub(crate) async fn start_replicator_with_config(
         DestinationConfig::Snowflake {
             account_id,
             user,
-            private_key_path,
+            private_key,
             private_key_passphrase,
             database,
             schema,
@@ -236,7 +236,7 @@ pub(crate) async fn start_replicator_with_config(
             let auth = std::sync::Arc::new(
                 snowflake::AuthManager::new(
                     &config,
-                    private_key_path,
+                    private_key.expose_secret(),
                     private_key_passphrase.as_ref(),
                 )
                 .map_err(|e| ReplicatorError::config(std::io::Error::other(e.to_string())))?,
