@@ -11,10 +11,10 @@ use tokio_postgres::Client;
 use uuid::Uuid;
 
 use crate::{
-    destination::Destination,
+    destination::PipelineDestination,
     pipeline::Pipeline,
     state::table::TableReplicationPhaseType,
-    store::{cleanup::CleanupStore, schema::SchemaStore, state::StateStore},
+    store::PipelineStore,
     test_utils::{
         database::{spawn_source_database, test_table_name},
         memory_destination::MemoryDestination,
@@ -86,8 +86,8 @@ pub struct PipelineBuilder<S, D> {
 
 impl<S, D> PipelineBuilder<S, D>
 where
-    S: StateStore + SchemaStore + CleanupStore + Clone + Send + Sync + 'static,
-    D: Destination + Clone + Send + Sync + 'static,
+    S: PipelineStore,
+    D: PipelineDestination,
 {
     /// Creates a new pipeline builder with required parameters and default
     /// settings.
@@ -98,8 +98,7 @@ where
     /// * `pipeline_id` - Unique identifier for the pipeline
     /// * `publication_name` - Name of the PostgreSQL publication to replicate
     ///   from
-    /// * `store` - Store implementation for state, schema, and cleanup
-    ///   operations
+    /// * `store` - Store implementation for pipeline runtime operations
     /// * `destination` - Destination for replicated data
     ///
     /// # Default Settings
@@ -218,8 +217,8 @@ pub fn create_pipeline<S, D>(
     destination: D,
 ) -> Pipeline<S, D>
 where
-    S: StateStore + SchemaStore + CleanupStore + Clone + Send + Sync + 'static,
-    D: Destination + Clone + Send + Sync + 'static,
+    S: PipelineStore,
+    D: PipelineDestination,
 {
     PipelineBuilder::new(
         pg_connection_config.clone(),
@@ -245,8 +244,8 @@ pub fn create_pipeline_with_batch_config<S, D>(
     batch: BatchConfig,
 ) -> Pipeline<S, D>
 where
-    S: StateStore + SchemaStore + CleanupStore + Clone + Send + Sync + 'static,
-    D: Destination + Clone + Send + Sync + 'static,
+    S: PipelineStore,
+    D: PipelineDestination,
 {
     PipelineBuilder::new(
         pg_connection_config.clone(),
@@ -273,8 +272,8 @@ pub fn create_pipeline_with_table_sync_copy_config<S, D>(
     table_sync_copy: TableSyncCopyConfig,
 ) -> Pipeline<S, D>
 where
-    S: StateStore + SchemaStore + CleanupStore + Clone + Send + Sync + 'static,
-    D: Destination + Clone + Send + Sync + 'static,
+    S: PipelineStore,
+    D: PipelineDestination,
 {
     PipelineBuilder::new(
         pg_connection_config.clone(),

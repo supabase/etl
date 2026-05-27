@@ -14,7 +14,7 @@ use crate::{
         table::TableReplicationPhase,
     },
     store::{
-        cleanup::CleanupStore,
+        lifecycle::TableLifecycleStore,
         schema::{SchemaStore, TableSchemaRetention, TableSchemaSnapshots},
         state::{DestinationTablesMetadata, StateStore, TableReplicationStates},
     },
@@ -43,10 +43,10 @@ struct Inner {
 
 /// In-memory storage for ETL pipeline state and schema information.
 ///
-/// [`MemoryStore`] implements both [`StateStore`] and [`SchemaStore`] traits,
-/// providing a complete storage solution that keeps all data in memory. This is
-/// ideal for testing, development, and scenarios where persistence is not
-/// required.
+/// [`MemoryStore`] implements the store traits required by
+/// [`crate::store::PipelineStore`], providing a complete storage solution that
+/// keeps all data in memory. This is ideal for testing, development, and
+/// scenarios where persistence is not required.
 ///
 /// All state information including table replication phases, schema
 /// definitions, and destination table metadata are stored in memory and will be
@@ -54,6 +54,15 @@ struct Inner {
 #[derive(Debug, Clone)]
 pub struct MemoryStore {
     inner: Arc<Mutex<Inner>>,
+}
+
+/// Scope of table-scoped state removal.
+#[derive(Debug, Clone, Copy)]
+enum TableStateCleanupScope {
+    /// Clear state that belongs to the previous table copy.
+    CopyRestart,
+    /// Delete all ETL state for a table removed from the publication.
+    PipelineRemoval,
 }
 
 impl MemoryStore {
@@ -72,6 +81,26 @@ impl MemoryStore {
         };
 
         Self { inner: Arc::new(Mutex::new(inner)) }
+    }
+
+    /// Deletes table-scoped state according to the requested scope.
+    async fn delete_table_state_for_scope(
+        &self,
+        table_id: TableId,
+        scope: TableStateCleanupScope,
+    ) -> EtlResult<()> {
+        let mut inner = self.inner.lock().await;
+
+        if matches!(scope, TableStateCleanupScope::PipelineRemoval) {
+            Arc::make_mut(&mut inner.table_replication_states).remove(&table_id);
+            inner.table_state_history.remove(&table_id);
+        }
+
+        Arc::make_mut(&mut inner.table_schemas).remove_table(table_id);
+        Arc::make_mut(&mut inner.destination_tables_metadata).remove(&table_id);
+        inner.replication_progress.remove(&WorkerType::TableSync { table_id });
+
+        Ok(())
     }
 }
 
@@ -268,17 +297,12 @@ impl SchemaStore for MemoryStore {
     }
 }
 
-impl CleanupStore for MemoryStore {
-    async fn cleanup_table_state(&self, table_id: TableId) -> EtlResult<()> {
-        let mut inner = self.inner.lock().await;
+impl TableLifecycleStore for MemoryStore {
+    async fn clear_table_copy_state(&self, table_id: TableId) -> EtlResult<()> {
+        self.delete_table_state_for_scope(table_id, TableStateCleanupScope::CopyRestart).await
+    }
 
-        Arc::make_mut(&mut inner.table_replication_states).remove(&table_id);
-        inner.table_state_history.remove(&table_id);
-        // Remove all schema versions for this table.
-        Arc::make_mut(&mut inner.table_schemas).remove_table(table_id);
-        Arc::make_mut(&mut inner.destination_tables_metadata).remove(&table_id);
-        inner.replication_progress.remove(&WorkerType::TableSync { table_id });
-
-        Ok(())
+    async fn delete_table_pipeline_state(&self, table_id: TableId) -> EtlResult<()> {
+        self.delete_table_state_for_scope(table_id, TableStateCleanupScope::PipelineRemoval).await
     }
 }

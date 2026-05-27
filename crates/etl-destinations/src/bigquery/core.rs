@@ -1,7 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
     fmt::Display,
-    iter,
     str::FromStr,
     sync::Arc,
 };
@@ -11,12 +10,12 @@ use etl::{
     concurrency::TaskSet,
     destination::{
         Destination,
-        async_result::{TruncateTableResult, WriteEventsResult, WriteTableRowsResult},
+        async_result::{DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult},
     },
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
     state::destination_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus},
-    store::{schema::SchemaStore, state::StateStore},
+    store::DestinationStore,
     types::{
         Cell, Event, EventSequenceKey, IdentityType, OldTableRow, PipelineId,
         ReplicatedTableSchema, SchemaDiff, TableId, TableName, TableRow, UpdatedTableRow,
@@ -75,6 +74,16 @@ impl SequencedBigQueryTableId {
     /// Extracts the base BigQuery table ID without the sequence number.
     fn to_bigquery_table_id(&self) -> BigQueryTableId {
         self.0.clone()
+    }
+
+    /// Returns whether this sequenced table belongs to `base_table_id`.
+    fn belongs_to_base(&self, base_table_id: &BigQueryTableId) -> bool {
+        &self.0 == base_table_id
+    }
+
+    /// Parses a sequenced table id only when it belongs to `base_table_id`.
+    fn parse_for_base(table_id: &str, base_table_id: &BigQueryTableId) -> Option<Self> {
+        table_id.parse::<Self>().ok().filter(|table_id| table_id.belongs_to_base(base_table_id))
     }
 }
 
@@ -170,6 +179,12 @@ impl Inner {
     fn new() -> Self {
         Self { created_tables: HashSet::new(), created_views: HashMap::new() }
     }
+
+    /// Clears cached state for a destination table.
+    fn clear_table_cache(&mut self, base_table_id: &BigQueryTableId) {
+        self.created_views.remove(base_table_id);
+        self.created_tables.retain(|table_id| !table_id.belongs_to_base(base_table_id));
+    }
 }
 
 /// A BigQuery destination that implements the ETL [`Destination`] trait.
@@ -194,7 +209,7 @@ pub struct BigQueryDestination<S> {
 
 impl<S> BigQueryDestination<S>
 where
-    S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
+    S: DestinationStore,
 {
     /// Creates a new [`BigQueryDestination`] with a pre-configured client.
     ///
@@ -458,12 +473,15 @@ where
     }
 
     /// Adds a table to the creation cache to avoid redundant existence checks.
-    fn add_to_created_tables_cache(inner: &mut Inner, table_id: &SequencedBigQueryTableId) {
-        if inner.created_tables.contains(table_id) {
+    fn add_to_created_tables_cache(
+        inner: &mut Inner,
+        sequenced_bigquery_table_id: &SequencedBigQueryTableId,
+    ) {
+        if inner.created_tables.contains(sequenced_bigquery_table_id) {
             return;
         }
 
-        inner.created_tables.insert(table_id.clone());
+        inner.created_tables.insert(sequenced_bigquery_table_id.clone());
     }
 
     /// Retrieves the current sequenced table ID from the destination table
@@ -491,15 +509,15 @@ where
     async fn ensure_view_points_to_table(
         &self,
         inner: &mut Inner,
-        view_name: &BigQueryTableId,
-        target_table_id: &SequencedBigQueryTableId,
+        bigquery_table_id: &BigQueryTableId,
+        sequenced_bigquery_table_id: &SequencedBigQueryTableId,
     ) -> EtlResult<bool> {
-        if let Some(current_target) = inner.created_views.get(view_name)
-            && current_target == target_table_id
+        if let Some(current_target) = inner.created_views.get(bigquery_table_id)
+            && current_target == sequenced_bigquery_table_id
         {
             debug!(
-                %view_name,
-                %target_table_id,
+                %bigquery_table_id,
+                %sequenced_bigquery_table_id,
                 "view already points to target, skipping creation"
             );
 
@@ -507,19 +525,50 @@ where
         }
 
         self.client
-            .create_or_replace_view(&self.dataset_id, view_name, &target_table_id.to_string())
+            .create_or_replace_view(
+                &self.dataset_id,
+                bigquery_table_id,
+                &sequenced_bigquery_table_id.to_string(),
+            )
             .await?;
 
         // We insert/overwrite the cached view target.
-        inner.created_views.insert(view_name.clone(), target_table_id.clone());
+        inner.created_views.insert(bigquery_table_id.clone(), sequenced_bigquery_table_id.clone());
 
         debug!(
-            %view_name,
-            %target_table_id,
+            %bigquery_table_id,
+            %sequenced_bigquery_table_id,
             "view created/updated to point to target"
         );
 
         Ok(true)
+    }
+
+    /// Recreates a view for a target table even when the cached target is
+    /// unchanged.
+    async fn recreate_view_for_table(
+        &self,
+        bigquery_table_id: &BigQueryTableId,
+        sequenced_bigquery_table_id: &SequencedBigQueryTableId,
+    ) -> EtlResult<()> {
+        self.client
+            .create_or_replace_view(
+                &self.dataset_id,
+                bigquery_table_id,
+                &sequenced_bigquery_table_id.to_string(),
+            )
+            .await?;
+
+        let mut inner = self.inner.lock().await;
+        inner.created_views.insert(bigquery_table_id.clone(), sequenced_bigquery_table_id.clone());
+
+        debug!(
+            %bigquery_table_id,
+            %sequenced_bigquery_table_id,
+            "view recreated for target table"
+        );
+
+        Ok(())
     }
 
     /// Writes table-copy rows using the BigQuery upsert row format.
@@ -674,7 +723,7 @@ where
             current_replication_mask.clone(),
         );
 
-        let bigquery_table_id = metadata.destination_table_id.parse()?;
+        let sequenced_bigquery_table_id = metadata.destination_table_id.parse()?;
 
         // Mark as applying before making changes (with the NEW snapshot_id and mask).
         //
@@ -698,13 +747,18 @@ where
 
         // Compute and apply the diff.
         let diff = current_schema.diff(new_replicated_table_schema);
-        if let Err(err) = self.apply_schema_diff(&table_id, &bigquery_table_id, &diff).await {
+        if let Err(err) =
+            self.apply_schema_diff(&table_id, &sequenced_bigquery_table_id, &diff).await
+        {
             warn!(
                 "schema change failed for table {}: {}. Manual intervention may be required.",
                 table_id, err
             );
             return Err(err);
         }
+
+        let bigquery_table_id = sequenced_bigquery_table_id.to_bigquery_table_id();
+        self.recreate_view_for_table(&bigquery_table_id, &sequenced_bigquery_table_id).await?;
 
         // Mark as applied after successful changes.
         self.state_store
@@ -734,7 +788,7 @@ where
     async fn apply_schema_diff(
         &self,
         table_id: &TableId,
-        bigquery_table_id: &SequencedBigQueryTableId,
+        sequenced_bigquery_table_id: &SequencedBigQueryTableId,
         diff: &SchemaDiff,
     ) -> EtlResult<()> {
         if diff.is_empty() {
@@ -744,7 +798,7 @@ where
 
         info!(
             "applying schema changes to table {}: {} additions, {} removals, {} renames",
-            bigquery_table_id,
+            sequenced_bigquery_table_id,
             diff.columns_to_add.len(),
             diff.columns_to_remove.len(),
             diff.columns_to_rename.len()
@@ -753,7 +807,7 @@ where
         // Apply column additions first (safest operation).
         for column in &diff.columns_to_add {
             self.client
-                .add_column(&self.dataset_id, &bigquery_table_id.to_string(), column)
+                .add_column(&self.dataset_id, &sequenced_bigquery_table_id.to_string(), column)
                 .await?;
         }
 
@@ -763,7 +817,7 @@ where
             self.client
                 .rename_column(
                     &self.dataset_id,
-                    &bigquery_table_id.to_string(),
+                    &sequenced_bigquery_table_id.to_string(),
                     &rename.old_name,
                     &rename.new_name,
                 )
@@ -773,11 +827,15 @@ where
         // Apply column removals last.
         for column in &diff.columns_to_remove {
             self.client
-                .drop_column(&self.dataset_id, &bigquery_table_id.to_string(), &column.name)
+                .drop_column(
+                    &self.dataset_id,
+                    &sequenced_bigquery_table_id.to_string(),
+                    &column.name,
+                )
                 .await?;
         }
 
-        info!("schema changes applied successfully to table {}", bigquery_table_id);
+        info!("schema changes applied successfully to table {}", sequenced_bigquery_table_id);
 
         Ok(())
     }
@@ -1076,7 +1134,7 @@ where
             self.tasks
                 .spawn(async move {
                     if let Err(err) = client
-                        .drop_table(&dataset_id, &sequenced_bigquery_table_id.to_string())
+                        .drop_table_if_exists(&dataset_id, &sequenced_bigquery_table_id.to_string())
                         .await
                     {
                         warn!(
@@ -1093,6 +1151,46 @@ where
                 })
                 .await;
         }
+
+        Ok(())
+    }
+
+    /// Drops destination table objects before restarting a table copy.
+    async fn drop_table_for_copy_inner(
+        &self,
+        replicated_table_schema: &ReplicatedTableSchema,
+    ) -> EtlResult<()> {
+        let base_bigquery_table_id =
+            table_name_to_bigquery_table_id(replicated_table_schema.name())?;
+        let table_id = replicated_table_schema.id();
+        let mut table_ids = HashSet::new();
+
+        // Discover physical table versions from BigQuery instead of the local cache.
+        // Older processes may have created versions this process never cached.
+        let listed_table_ids =
+            self.client.list_sequenced_table_ids(&self.dataset_id, &base_bigquery_table_id).await?;
+        let listed_sequenced_table_ids =
+            listed_table_ids.into_iter().filter_map(|listed_table_id| {
+                SequencedBigQueryTableId::parse_for_base(&listed_table_id, &base_bigquery_table_id)
+            });
+        table_ids.extend(listed_sequenced_table_ids);
+
+        // We first drop the view, so that the table is not queriable anymore.
+        self.client.drop_view_if_exists(&self.dataset_id, &base_bigquery_table_id).await?;
+
+        // We then drop each table individually. If any of these operations fail, on the
+        // next restart the tables will be cleaned up.
+        for sequenced_bigquery_table_id in &table_ids {
+            self.client
+                .drop_table_if_exists(&self.dataset_id, &sequenced_bigquery_table_id.to_string())
+                .await?;
+        }
+
+        // Once destination cleanup is done, remove any stale local cache entries.
+        let mut inner = self.inner.lock().await;
+        inner.clear_table_cache(&base_bigquery_table_id);
+
+        info!(table_id = table_id.0, "dropped bigquery table before copy");
 
         Ok(())
     }
@@ -1160,7 +1258,7 @@ fn validate_bigquery_replica_identity(
 
 impl<S> Destination for BigQueryDestination<S>
 where
-    S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
+    S: DestinationStore,
 {
     fn name() -> &'static str {
         "bigquery"
@@ -1170,15 +1268,14 @@ where
         self.tasks.shutdown().await
     }
 
-    async fn truncate_table(
+    async fn drop_table_for_copy(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
-        async_result: TruncateTableResult<()>,
+        async_result: DropTableForCopyResult<()>,
     ) -> EtlResult<()> {
         self.tasks.try_reap().await?;
 
-        let result =
-            self.process_truncate_for_schemas(iter::once(replicated_table_schema.clone())).await;
+        let result = self.drop_table_for_copy_inner(replicated_table_schema).await;
         async_result.send(result);
 
         Ok(())
@@ -1766,6 +1863,66 @@ mod tests {
     fn sequenced_bigquery_table_id_to_bigquery_table_id_zero_sequence() {
         let table_id = SequencedBigQueryTableId("simple_table".to_owned(), 0);
         assert_eq!(table_id.to_bigquery_table_id(), "simple_table");
+    }
+
+    #[test]
+    fn sequenced_bigquery_table_id_belongs_to_base() {
+        let base_table_id = "users_table".to_owned();
+        let users_table_id = SequencedBigQueryTableId(base_table_id.clone(), 2);
+        let orders_table_id = SequencedBigQueryTableId("orders_table".to_owned(), 2);
+
+        assert!(users_table_id.belongs_to_base(&base_table_id));
+        assert!(!orders_table_id.belongs_to_base(&base_table_id));
+    }
+
+    #[test]
+    fn sequenced_bigquery_table_id_parse_for_base_ignores_unrelated_tables() {
+        let base_table_id = "users_table".to_owned();
+
+        assert_eq!(
+            SequencedBigQueryTableId::parse_for_base("users_table_2", &base_table_id),
+            Some(SequencedBigQueryTableId("users_table".to_owned(), 2))
+        );
+        assert_eq!(
+            SequencedBigQueryTableId::parse_for_base("users_table_backup", &base_table_id),
+            None
+        );
+        assert_eq!(
+            SequencedBigQueryTableId::parse_for_base("orders_table_2", &base_table_id),
+            None
+        );
+        assert_eq!(SequencedBigQueryTableId::parse_for_base("users_table", &base_table_id), None);
+    }
+
+    #[test]
+    fn clear_table_cache_removes_all_cached_table_state_for_base() {
+        let base_table_id = "users_table".to_owned();
+        let mut inner = Inner::new();
+
+        inner.created_tables.insert(SequencedBigQueryTableId(base_table_id.clone(), 0));
+        inner.created_tables.insert(SequencedBigQueryTableId(base_table_id.clone(), 1));
+        inner.created_tables.insert(SequencedBigQueryTableId("orders_table".to_owned(), 0));
+        inner
+            .created_views
+            .insert(base_table_id.clone(), SequencedBigQueryTableId(base_table_id.clone(), 1));
+        inner.created_views.insert(
+            "orders_table".to_owned(),
+            SequencedBigQueryTableId("orders_table".to_owned(), 0),
+        );
+
+        inner.clear_table_cache(&base_table_id);
+
+        assert_eq!(
+            inner.created_tables,
+            HashSet::from([SequencedBigQueryTableId("orders_table".to_owned(), 0)])
+        );
+        assert_eq!(
+            inner.created_views,
+            HashMap::from([(
+                "orders_table".to_owned(),
+                SequencedBigQueryTableId("orders_table".to_owned(), 0),
+            )])
+        );
     }
 
     #[test]

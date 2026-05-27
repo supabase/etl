@@ -10,7 +10,7 @@ use tracing::{Instrument, error, info, warn};
 use crate::{
     bail,
     concurrency::{BatchBudgetController, MemoryMonitor, ShutdownRx},
-    destination::Destination,
+    destination::PipelineDestination,
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
     metrics::{
@@ -22,7 +22,7 @@ use crate::{
         client::{GetOrCreateSlotResult, PgReplicationClient, SlotState},
     },
     state::table::{TableReplicationPhase, TableReplicationPhaseType},
-    store::{schema::SchemaStore, state::StateStore},
+    store::{PipelineStore, state::StateStore},
     types::PipelineId,
     workers::{
         TableSyncWorkerPool,
@@ -130,8 +130,8 @@ impl<S, D> ApplyWorker<S, D> {
 
 impl<S, D> ApplyWorker<S, D>
 where
-    S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
-    D: Destination + Clone + Send + Sync + 'static,
+    S: PipelineStore,
+    D: PipelineDestination,
 {
     /// Handles apply worker errors using policy-based retry and backoff.
     ///

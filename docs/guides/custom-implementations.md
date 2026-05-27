@@ -57,7 +57,11 @@ Create `src/custom_store.rs`. A store must implement three traits (see [Extensio
 
 - `SchemaStore` - Versioned table schema storage, retrieval, and pruning
 - `StateStore` - Replication progress and destination table metadata tracking
-- `CleanupStore` - Store cleanup when tables leave the publication
+- `TableLifecycleStore` - Store lifecycle operations for table-copy restarts and publication changes
+
+`SharedStateStore`, `DestinationStore`, and `PipelineStore` are
+blanket-implemented facades over these traits plus the required
+clone/thread-safety bounds, so custom stores do not implement those directly.
 
 ```rust
 use std::collections::{BTreeMap, HashMap};
@@ -66,12 +70,13 @@ use tokio::sync::Mutex;
 use tracing::info;
 
 use etl::error::EtlResult;
+use etl::replication::WorkerType;
 use etl::state::{
     AppliedDestinationTableMetadata, DestinationTableMetadata, TableReplicationPhase,
 };
-use etl::store::{CleanupStore, SchemaStore, StateStore, TableReplicationStates};
+use etl::store::{SchemaStore, StateStore, TableLifecycleStore, TableReplicationStates};
 use etl::store::schema::TableSchemaRetention;
-use etl::types::{SnapshotId, TableId, TableSchema};
+use etl::types::{PgLsn, SnapshotId, TableId, TableSchema};
 
 #[derive(Debug, Clone, Default)]
 struct TableEntry {
@@ -83,6 +88,7 @@ struct TableEntry {
 #[derive(Debug, Clone)]
 pub struct CustomStore {
     tables: Arc<Mutex<HashMap<TableId, TableEntry>>>,
+    progress: Arc<Mutex<HashMap<WorkerType, PgLsn>>>,
 }
 
 impl CustomStore {
@@ -90,6 +96,7 @@ impl CustomStore {
         info!("creating custom store");
         Self {
             tables: Arc::new(Mutex::new(HashMap::new())),
+            progress: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -213,6 +220,31 @@ impl StateStore for CustomStore {
         todo!("Implement rollback if needed")
     }
 
+    async fn get_replication_progress(
+        &self,
+        worker_type: WorkerType,
+    ) -> EtlResult<Option<PgLsn>> {
+        let progress = self.progress.lock().await;
+        Ok(progress.get(&worker_type).copied())
+    }
+
+    async fn upsert_replication_progress(
+        &self,
+        worker_type: WorkerType,
+        flush_lsn: PgLsn,
+    ) -> EtlResult<PgLsn> {
+        let mut progress = self.progress.lock().await;
+        let stored_lsn = progress.entry(worker_type).or_insert(flush_lsn);
+        *stored_lsn = (*stored_lsn).max(flush_lsn);
+        Ok(*stored_lsn)
+    }
+
+    async fn delete_replication_progress(&self, worker_type: WorkerType) -> EtlResult<()> {
+        let mut progress = self.progress.lock().await;
+        progress.remove(&worker_type);
+        Ok(())
+    }
+
     async fn get_destination_table_metadata(
         &self,
         table_id: TableId,
@@ -248,10 +280,23 @@ impl StateStore for CustomStore {
     }
 }
 
-impl CleanupStore for CustomStore {
-    async fn cleanup_table_state(&self, table_id: TableId) -> EtlResult<()> {
+impl TableLifecycleStore for CustomStore {
+    async fn clear_table_copy_state(&self, table_id: TableId) -> EtlResult<()> {
+        let mut tables = self.tables.lock().await;
+        if let Some(entry) = tables.get_mut(&table_id) {
+            entry.schemas.clear();
+            entry.destination_metadata = None;
+        }
+        let mut progress = self.progress.lock().await;
+        progress.remove(&WorkerType::TableSync { table_id });
+        Ok(())
+    }
+
+    async fn delete_table_pipeline_state(&self, table_id: TableId) -> EtlResult<()> {
         let mut tables = self.tables.lock().await;
         tables.remove(&table_id);
+        let mut progress = self.progress.lock().await;
+        progress.remove(&WorkerType::TableSync { table_id });
         Ok(())
     }
 }
@@ -264,11 +309,13 @@ impl CleanupStore for CustomStore {
 Create `src/http_destination.rs`. A destination implements the `Destination` trait with four required methods:
 
 - `name()` - Return an identifier for logging
-- `truncate_table()` - Clear table before bulk load using the current replicated table schema
+- `drop_table_for_copy()` - Idempotently drop destination objects and replay state before restarting a table copy using the previously stored replicated table schema
 - `write_table_rows()` - Receive rows during initial copy together with the current replicated table schema
 - `write_events()` - Receive streaming changes (batches may span multiple tables)
 
 There's also an optional `shutdown()` method with a default no-op implementation. Override it if your destination needs cleanup when the pipeline shuts down.
+
+ETL clears its own schema versions, destination metadata, and table-sync progress only after `drop_table_for_copy()` succeeds. That lets the destination use the supplied previously stored replicated schema and any existing destination metadata to find the object that must be removed. If the object is already gone, return success.
 
 ```rust
 use reqwest::Client;
@@ -277,7 +324,7 @@ use std::time::Duration;
 use tracing::{info, warn};
 
 use etl::destination::{
-    Destination, TruncateTableResult, WriteEventsResult, WriteTableRowsResult,
+    Destination, DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult,
 };
 use etl::error::{ErrorKind, EtlResult};
 use etl::types::{Event, ReplicatedTableSchema, TableRow};
@@ -323,15 +370,15 @@ impl Destination for HttpDestination {
         "http"
     }
 
-    async fn truncate_table(
+    async fn drop_table_for_copy(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
-        async_result: TruncateTableResult<()>,
+        async_result: DropTableForCopyResult<()>,
     ) -> EtlResult<()> {
         let table_name = replicated_table_schema.name().to_string();
-        info!("truncating table {}", table_name);
+        info!("dropping table before copy {}", table_name);
         let result = self
-            .post(&format!("tables/{table_name}/truncate"), json!({}))
+            .post(&format!("tables/{table_name}/drop-for-copy"), json!({}))
             .await;
         async_result.send(result);
         Ok(())
@@ -478,7 +525,7 @@ The pipeline will connect to Postgres and start replicating. You'll see your cus
 
 ## What You Built
 
-- **Custom Store** - In-memory implementation of `SchemaStore`, `StateStore`, and `CleanupStore`
+- **Custom Store** - In-memory implementation of `SchemaStore`, `StateStore`, and `TableLifecycleStore`
 - **HTTP Destination** - Forwards replicated data via HTTP POST with retry logic
 - **Working Pipeline** - Connects your custom components to the ETL core
 

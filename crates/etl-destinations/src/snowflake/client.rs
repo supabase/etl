@@ -1,6 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use etl::types::{ColumnSchema, PipelineId, SchemaDiff, TableId};
+use reqwest::StatusCode;
 use tokio::sync::{Mutex, RwLock};
 
 use crate::snowflake::{
@@ -155,6 +156,32 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
         let mut guard = self.get_channel(table_id).await?.lock_owned().await;
         self.sql_client.truncate_table(table_name).await?;
         guard.reset().await
+    }
+
+    /// Drop the table and destination-private replay state before a fresh copy.
+    pub async fn drop_table_for_copy(&self, table_id: TableId, table_name: &str) -> Result<()> {
+        let channel = self.channels.write().await.remove(&table_id);
+
+        let drop_channel_result = if let Some(channel) = channel {
+            let mut guard = channel.lock().await;
+            guard.drop_channel().await
+        } else {
+            let mut handle = ChannelHandle::new(
+                Arc::clone(&self.stream_client),
+                self.pipeline_id,
+                self.database.clone(),
+                self.schema.clone(),
+                table_name.to_owned(),
+            );
+            handle.drop_channel().await
+        };
+        match drop_channel_result {
+            Ok(()) => {}
+            Err(Error::HttpStatus { status: StatusCode::NOT_FOUND, .. }) => {}
+            Err(error) => return Err(error),
+        }
+
+        self.sql_client.drop_table(table_name).await
     }
 
     /// Refresh the table's ingestion state after a schema change.

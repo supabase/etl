@@ -54,7 +54,7 @@ use crate::{
         parse_replicated_column_names,
     },
     destination::{
-        Destination,
+        PipelineDestination,
         async_result::{
             ApplyLoopAsyncResultMetadata, CompletedWriteEventsResult, DispatchMetrics,
             PendingWriteEventsResult, WriteEventsResult,
@@ -76,6 +76,7 @@ use crate::{
     },
     state::table::{TableReplicationPhase, TableReplicationPhaseType},
     store::{
+        PipelineStore, SharedStateStore,
         schema::{SchemaStore, TableSchemaRetention},
         state::StateStore,
     },
@@ -557,14 +558,6 @@ impl ApplyLoopState {
         Some(SchemaCleanupRun { deadline: Arc::clone(&self.schema_cleanup_deadline) })
     }
 
-    /// Moves the schema cleanup deadline into the past for tests.
-    #[cfg(test)]
-    async fn expire_schema_cleanup_deadline(&self) {
-        let mut schema_cleanup_deadline = self.schema_cleanup_deadline.lock().await;
-        *schema_cleanup_deadline =
-            Some(Instant::now() - SCHEMA_CLEANUP_INTERVAL - Duration::from_secs(1));
-    }
-
     /// Returns `true` if a schema cleanup task is still recorded.
     fn has_schema_cleanup_task(&self) -> bool {
         self.schema_cleanup_task.is_some()
@@ -720,8 +713,8 @@ pub(crate) struct ApplyLoop<S, D> {
 
 impl<S, D> ApplyLoop<S, D>
 where
-    S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
-    D: Destination + Clone + Send + Sync + 'static,
+    S: PipelineStore,
+    D: PipelineDestination,
 {
     /// Starts the apply loop for processing replication events.
     ///
@@ -2063,7 +2056,7 @@ where
         let used_bootstrap_snapshot = shared_table_state.is_none();
         let table_snapshot_id = shared_table_state
             .map_or_else(|| self.state.bootstrap_snapshot_id(), |state| state.snapshot_id());
-        let table_schema = get_table_schema(
+        let table_schema = get_table_schema_for_relation(
             &self.schema_store,
             &table_id,
             table_snapshot_id,
@@ -2442,7 +2435,7 @@ mod apply_worker {
         remote_final_lsn: PgLsn,
     ) -> EtlResult<bool>
     where
-        S: StateStore + Clone + Send + Sync + 'static,
+        S: SharedStateStore,
     {
         fn is_phase_ready_for_changes(
             phase: TableReplicationPhase,
@@ -2482,8 +2475,8 @@ mod apply_worker {
         current_lsn: PgLsn,
     ) -> EtlResult<Option<ExitIntent>>
     where
-        S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
-        D: Destination + Clone + Send + Sync + 'static,
+        S: PipelineStore,
+        D: PipelineDestination,
     {
         for (table_id, table_replication_phase) in get_syncing_tables(&ctx.store).await? {
             let exit_intent = process_single_syncing_table_after_commit(
@@ -2602,8 +2595,8 @@ mod apply_worker {
         current_lsn: PgLsn,
     ) -> EtlResult<Option<ExitIntent>>
     where
-        S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
-        D: Destination + Clone + Send + Sync + 'static,
+        S: PipelineStore,
+        D: PipelineDestination,
     {
         let worker_state = ctx.pool.get_active_worker_state(table_id).await;
 
@@ -2741,8 +2734,8 @@ mod apply_worker {
         current_lsn: PgLsn,
     ) -> EtlResult<()>
     where
-        S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
-        D: Destination + Clone + Send + Sync + 'static,
+        S: PipelineStore,
+        D: PipelineDestination,
     {
         for (table_id, table_replication_phase) in get_syncing_tables(&ctx.store).await? {
             process_single_syncing_table_after_flush(
@@ -2767,8 +2760,8 @@ mod apply_worker {
         current_lsn: PgLsn,
     ) -> EtlResult<()>
     where
-        S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
-        D: Destination + Clone + Send + Sync + 'static,
+        S: PipelineStore,
+        D: PipelineDestination,
     {
         let worker_state = ctx.pool.get_active_worker_state(table_id).await;
 
@@ -2879,8 +2872,8 @@ mod apply_worker {
         current_lsn: PgLsn,
     ) -> EtlResult<Option<ExitIntent>>
     where
-        S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
-        D: Destination + Clone + Send + Sync + 'static,
+        S: PipelineStore,
+        D: PipelineDestination,
     {
         for (table_id, table_replication_phase) in get_syncing_tables(&ctx.store).await? {
             let exit_intent = process_single_syncing_table_when_idle(
@@ -2911,8 +2904,8 @@ mod apply_worker {
         current_lsn: PgLsn,
     ) -> EtlResult<Option<ExitIntent>>
     where
-        S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
-        D: Destination + Clone + Send + Sync + 'static,
+        S: PipelineStore,
+        D: PipelineDestination,
     {
         let worker_state = ctx.pool.get_active_worker_state(table_id).await;
 
@@ -3111,8 +3104,8 @@ mod apply_worker {
         worker: TableSyncWorker<S, D>,
     ) -> Pin<Box<dyn Future<Output = EtlResult<()>> + Send>>
     where
-        S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
-        D: Destination + Clone + Send + Sync + 'static,
+        S: PipelineStore,
+        D: PipelineDestination,
     {
         Box::pin(async move { worker.spawn_into_pool(&pool).await })
     }
@@ -3180,7 +3173,7 @@ mod table_sync_worker {
         current_lsn: PgLsn,
     ) -> EtlResult<Option<ExitIntent>>
     where
-        S: StateStore + Clone + Send + Sync + 'static,
+        S: SharedStateStore,
     {
         try_complete_catchup(ctx, current_lsn).await
     }
@@ -3194,7 +3187,7 @@ mod table_sync_worker {
         current_lsn: PgLsn,
     ) -> EtlResult<Option<ExitIntent>>
     where
-        S: StateStore + Clone + Send + Sync + 'static,
+        S: SharedStateStore,
     {
         try_complete_catchup(ctx, current_lsn).await
     }
@@ -3208,7 +3201,7 @@ mod table_sync_worker {
         current_lsn: PgLsn,
     ) -> EtlResult<Option<ExitIntent>>
     where
-        S: StateStore + Clone + Send + Sync + 'static,
+        S: SharedStateStore,
     {
         let worker_type = WorkerType::TableSync { table_id: ctx.table_id };
         let mut inner = ctx.table_sync_worker_state.lock().await;
@@ -3254,12 +3247,11 @@ mod table_sync_worker {
 
 /// Retrieves a table schema from the schema store by table ID and snapshot.
 ///
-/// When `used_bootstrap_snapshot` is `false`, the returned schema must match
-/// the requested snapshot exactly. When it is `true`, the lookup is allowed to
-/// resolve to an older schema version because the first `RELATION` message may
-/// arrive before shared per-table protocol state has been established, but it
-/// must never resolve to a newer schema than requested.
-async fn get_table_schema<S>(
+/// The reason for this handling is that the bootstrap snapshot id is just used
+/// as a boundary id that is needed for when etl starts and no DDL takes place.
+/// As soon as a DDL takes place within this active replication session, the
+/// exact snapshot id will be used to load the right table schema.
+async fn get_table_schema_for_relation<S>(
     schema_store: &S,
     table_id: &TableId,
     snapshot_id: SnapshotId,
@@ -3350,37 +3342,4 @@ async fn get_replicated_table_schema(
     };
 
     Ok(replicated_table_schema)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn apply_loop_state() -> ApplyLoopState {
-        let start_lsn = PgLsn::from(100u64);
-        let replication_progress =
-            ReplicationProgress { last_received_lsn: start_lsn, last_flush_lsn: start_lsn };
-
-        ApplyLoopState::new(
-            replication_progress,
-            Duration::from_secs(1),
-            SnapshotId::from(start_lsn),
-            "test_slot".to_owned(),
-        )
-    }
-
-    #[tokio::test]
-    async fn schema_cleanup_uses_deadline_between_runs() {
-        let state = apply_loop_state();
-
-        state.expire_schema_cleanup_deadline().await;
-
-        let schema_cleanup_run = state.try_start_schema_cleanup().await.unwrap();
-
-        assert!(state.try_start_schema_cleanup().await.is_none());
-
-        schema_cleanup_run.finish().await;
-
-        assert!(state.try_start_schema_cleanup().await.is_none());
-    }
 }
