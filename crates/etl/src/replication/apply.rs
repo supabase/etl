@@ -724,7 +724,7 @@ where
         pipeline_id: PipelineId,
         start_lsn: PgLsn,
         config: Arc<PipelineConfig>,
-        replication_client: PgReplicationClient,
+        replication_client: &PgReplicationClient,
         schema_store: S,
         destination: D,
         shared_table_cache: SharedTableCache,
@@ -740,7 +740,8 @@ where
         );
 
         let worker_type = worker_context.worker_type();
-        let keep_alive_deadline_duration = match replication_client.get_wal_sender_timeout().await {
+        let wal_sender_timeout_result = replication_client.get_wal_sender_timeout().await;
+        let keep_alive_deadline_duration = match wal_sender_timeout_result {
             Ok(Some(wal_sender_timeout)) => {
                 Self::compute_keep_alive_deadline_duration(wal_sender_timeout)
             }
@@ -796,7 +797,7 @@ where
     /// Runs the apply loop and performs teardown work before returning.
     async fn run_with_teardown(
         &mut self,
-        replication_client: PgReplicationClient,
+        replication_client: &PgReplicationClient,
         start_lsn: PgLsn,
     ) -> EtlResult<ApplyLoopResult> {
         let result = self.run(replication_client, start_lsn).await;
@@ -809,7 +810,7 @@ where
     /// Runs the main event processing loop.
     async fn run(
         &mut self,
-        replication_client: PgReplicationClient,
+        replication_client: &PgReplicationClient,
         start_lsn: PgLsn,
     ) -> EtlResult<ApplyLoopResult> {
         let logical_replication_stream = replication_client
@@ -834,7 +835,7 @@ where
                 ShutdownState::NoShutdown => {
                     self.run_active_iteration(
                         events_stream.as_mut(),
-                        &replication_client,
+                        replication_client,
                         &mut connection_updates_rx,
                     )
                     .await
@@ -1543,7 +1544,8 @@ where
         // If there is no message anymore, it means that the connection has been closed
         // or had some issues, we must handle this case.
         let Some(message) = maybe_message else {
-            return Err(self.build_stream_ended_error(replication_client));
+            let is_closed = replication_client.is_closed();
+            return Err(self.build_stream_ended_error(is_closed));
         };
 
         // If the Postgres had an error, we want to raise it immediately.
@@ -1553,10 +1555,10 @@ where
     }
 
     /// Creates an error for when the replication stream ends unexpectedly.
-    fn build_stream_ended_error(&self, replication_client: &PgReplicationClient) -> EtlError {
+    fn build_stream_ended_error(&self, is_closed: bool) -> EtlError {
         let worker_type = self.worker_context.worker_type();
 
-        if replication_client.is_closed() {
+        if is_closed {
             warn!(
                 %worker_type,
                 "replication stream ended: postgresql connection closed",
