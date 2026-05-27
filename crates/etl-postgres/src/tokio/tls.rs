@@ -35,7 +35,6 @@ pub struct MakeRustlsConnect {
 
 impl MakeRustlsConnect {
     /// Creates a new `MakeRustlsConnect` from the provided `ClientConfig`.
-    #[must_use]
     pub fn new(config: ClientConfig) -> Self {
         Self { config: Arc::new(config) }
     }

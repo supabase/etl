@@ -5,7 +5,6 @@ use etl_config::shared::TlsConfig;
 const DEFAULT_DATABASE_TLS_ROOT_CERT: &str = "target/postgres-tls/root.crt";
 
 /// Returns whether test database clients should require TLS.
-#[must_use]
 pub fn test_tls_enabled_from_env() -> bool {
     std::env::var("TESTS_DATABASE_TLS_ENABLED")
         .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "on"))
@@ -13,7 +12,6 @@ pub fn test_tls_enabled_from_env() -> bool {
 }
 
 /// Returns TLS settings for local test database clients.
-#[must_use]
 pub fn local_tls_config_from_env() -> TlsConfig {
     if !test_tls_enabled_from_env() {
         return TlsConfig::disabled();
@@ -27,14 +25,12 @@ pub fn local_tls_config_from_env() -> TlsConfig {
 }
 
 /// Returns the trusted root certificate path for local test TLS.
-#[must_use]
 pub fn test_tls_root_cert_path() -> PathBuf {
     std::env::var_os("TESTS_DATABASE_TLS_ROOT_CERT")
         .map_or_else(|| workspace_root().join(DEFAULT_DATABASE_TLS_ROOT_CERT), PathBuf::from)
 }
 
 /// Returns trusted root certificates for local test TLS when enabled.
-#[must_use]
 pub fn test_tls_root_certs_from_env() -> Option<String> {
     test_tls_enabled_from_env().then(|| local_tls_config_from_env().trusted_root_certs)
 }
