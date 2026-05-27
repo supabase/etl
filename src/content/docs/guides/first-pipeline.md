@@ -1,16 +1,19 @@
-# Build Your First ETL Pipeline
+---
+title: Build Your First ETL Pipeline
+description: Learn the fundamentals by building a working ETL pipeline.
+---
 
 **15 minutes**: Learn the fundamentals by building a working pipeline.
 
-By the end of this tutorial, you'll have a complete ETL pipeline that streams data changes from Postgres to a tiny custom destination in real-time.
+By the end of this tutorial, you'll have a complete ETL pipeline that streams **Postgres row changes** to a tiny custom destination in real time.
 
 ## What You'll Build
 
 A real-time data pipeline that:
 
-- Monitors a Postgres table for changes
-- Streams INSERT, UPDATE, and DELETE operations
-- Prints copied rows and streaming events through your own destination implementation
+- **Monitors** a Postgres table for changes
+- **Streams** `INSERT`, `UPDATE`, and `DELETE` operations
+- **Prints** copied rows and streaming events through your own `Destination` implementation
 
 ## Prerequisites
 
@@ -18,7 +21,7 @@ A real-time data pipeline that:
 - Postgres 14+ with logical replication enabled (`wal_level = logical` in `postgresql.conf`)
 - Basic familiarity with Rust and SQL
 
-New to Postgres logical replication? Read [Postgres Replication Concepts](../explanation/concepts.md) first.
+*New to Postgres logical replication?* Read [Postgres Replication Concepts](/etl/explanation/concepts/) first.
 
 ## Step 1: Create the Project
 
@@ -40,7 +43,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 ## Step 2: Set Up Postgres
 
-Connect to Postgres and create a test database:
+Connect to Postgres and create a **test database, table, seed rows, and publication**:
 
 ```sql
 CREATE DATABASE etl_tutorial;
@@ -126,6 +129,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let pg_config = PgConnectionConfig {
         host: "localhost".to_string(),
+        hostaddr: None,
         port: 5432,
         name: "etl_tutorial".to_string(),
         username: "postgres".to_string(),
@@ -169,7 +173,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 ```
 
 **Note:** Update the `password` field to match your Postgres credentials.
-`Pipeline::start()` installs the ETL source-side schema helpers before
+`Pipeline::start()` installs the ETL **source-side schema helpers** before
 replication begins, even when the tutorial keeps runtime state in `MemoryStore`.
 
 ## Step 4: Run the Pipeline
@@ -178,7 +182,7 @@ replication begins, even when the tutorial keeps runtime state in `MemoryStore`.
 RUST_LOG=info cargo run
 ```
 
-You should see ETL startup logs plus messages from `LoggingDestination` as the initial rows are copied. After that, the pipeline continues running and prints the size of each streaming event batch.
+You should see **ETL startup logs** plus messages from `LoggingDestination` as the initial rows are copied. After that, the pipeline keeps running and prints the size of each streaming event batch.
 
 ## Step 5: Test Real-Time Replication
 
@@ -192,7 +196,7 @@ UPDATE users SET name = 'Alice Cooper' WHERE email = 'alice@example.com';
 DELETE FROM users WHERE email = 'bob@example.com';
 ```
 
-Your pipeline terminal should show new streaming batches being received in real-time.
+Your pipeline terminal should show new **streaming batches** being received in real time.
 
 ## Cleanup
 
@@ -213,6 +217,6 @@ DROP DATABASE etl_tutorial;
 
 ## Next Steps
 
-- [Custom Stores and Destinations](custom-implementations.md): Build your own components
-- [Configure Postgres](configure-postgres.md): Production Postgres setup
-- [Architecture](../explanation/architecture.md): How ETL works internally
+- [Custom Stores and Destinations](/etl/guides/custom-implementations/): Build your own components
+- [Configure Postgres](/etl/guides/configure-postgres/): Production Postgres setup
+- [Architecture](/etl/explanation/architecture/): How ETL works internally

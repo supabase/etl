@@ -1,18 +1,24 @@
-# ETL
+---
+title: ETL
+description: Stream Postgres changes anywhere, in real-time.
+---
 
 **Stream Postgres changes anywhere, in real-time**
 
-ETL is a Rust framework for building change data capture (CDC) pipelines on Postgres. Stream inserts, updates, and deletes to stable BigQuery support, in-progress DuckLake support, or your own custom destinations. The Iceberg destination module is deprecated for now.
+**ETL** is a Rust framework for building **change data capture (CDC)** pipelines on **Postgres**. Stream inserts, updates, deletes, truncates, and schema events to feature-gated destination modules or your own custom destination. **BigQuery** is the recommended stable first production destination; DuckLake, ClickHouse, and Snowflake modules are available in `etl-destinations`, and the Iceberg module is deprecated for new deployments.
+
+*Using ETL with Supabase?* The Supabase product documentation for [database replication](https://supabase.com/docs/guides/database/replication) explains how replication works inside Supabase itself, including dashboard-level concepts that complement this library-focused guide.
 
 ## Start Here
 
 | Your background | Recommended path |
 |-----------------|------------------|
-| New to Postgres logical replication | [Postgres Replication Concepts](explanation/concepts.md) |
-| Ready to build | [Your First Pipeline](guides/first-pipeline.md) (15 min) |
-| Need custom destinations | [Custom Stores and Destinations](guides/custom-implementations.md) (30 min) |
-| Handling schema changes | [Schema Changes](explanation/schema-changes.md) |
-| Setting up Postgres | [Configure Postgres](guides/configure-postgres.md) |
+| New to Postgres logical replication | [Postgres Replication Concepts](/etl/explanation/concepts/) |
+| Using ETL with Supabase | [Supabase Database Replication](https://supabase.com/docs/guides/database/replication) |
+| Ready to build | [Your First Pipeline](/etl/guides/first-pipeline/) (15 min) |
+| Need custom destinations | [Custom Stores and Destinations](/etl/guides/custom-implementations/) (30 min) |
+| Handling schema changes | [Schema Changes](/etl/explanation/schema-changes/) |
+| Setting up Postgres | [Configure Postgres](/etl/guides/configure-postgres/) |
 
 ## Why ETL?
 
@@ -25,16 +31,16 @@ ETL is a Rust framework for building change data capture (CDC) pipelines on Post
 ## How It Works
 
 1. **Initial copy**: ETL copies existing table data to your destination
-2. **Streaming**: ETL streams [events](explanation/events.md) (Insert, Update, Delete, Relation, and more) in real-time
-3. **Recovery**: The [store](explanation/traits.md) persists state so pipelines resume after restarts
+2. **Streaming**: ETL streams [events](/etl/explanation/events/) (Insert, Update, Delete, Relation, and more) in real-time
+3. **Recovery**: The [store](/etl/explanation/traits/) persists state so pipelines resume after restarts
 
-See [Architecture](explanation/architecture.md) for details, and
-[Schema Changes](explanation/schema-changes.md) for DDL semantics and
+See [Architecture](/etl/explanation/architecture/) for details, and
+[Schema Changes](/etl/explanation/schema-changes/) for DDL semantics and
 limitations.
 
 ## Quick Example
 
-Add ETL to your project:
+**Install ETL** in your project:
 
 ```toml
 [dependencies]
@@ -42,7 +48,7 @@ etl = { git = "https://github.com/supabase/etl" }
 tokio = { version = "1.0", features = ["full"] }
 ```
 
-Create a pipeline:
+**Create a pipeline** with a source config, store, and destination:
 
 ```rust
 use etl::{
@@ -98,6 +104,7 @@ impl Destination for NoopDestination {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pg_config = PgConnectionConfig {
         host: "localhost".to_string(),
+        hostaddr: None,
         port: 5432,
         name: "mydb".to_string(),
         username: "postgres".to_string(),
@@ -136,22 +143,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-This snippet intentionally shows ETL used as a library with your own destination implementation.
-Built-in destination modules live in `etl-destinations`: BigQuery is stable,
-DuckLake is in progress, and Iceberg is deprecated for now. The shared pipeline,
-config, store, and event types should come from `etl`.
+This snippet intentionally shows **ETL used as a library** with your own `Destination` implementation.
+Feature-gated destination modules live in `etl-destinations`: BigQuery,
+DuckLake, ClickHouse, Snowflake, and the deprecated Iceberg module. The shared
+pipeline, config, store, and event types should come from `etl`.
 
-`Pipeline::start()` installs ETL's source-side schema helpers before
+`Pipeline::start()` installs ETL's **source-side schema helpers** before
 replication begins. If you use `PostgresStore` as the runtime store,
-`PostgresStore::new()` separately prepares the Postgres-backed state tables.
+`PostgresStore::new()` separately prepares the **Postgres-backed state tables**.
 
 ## Documentation
 
 | Section | What you'll find |
 |---------|------------------|
-| [Guides](guides/index.md) | Step-by-step instructions to get things done |
-| [Explanations](explanation/index.md) | Deep dives into concepts and architecture |
-| [Examples](https://github.com/supabase/etl/tree/main/etl-examples) | Runnable `bigquery` and `ducklake` example binaries |
+| [Your First Pipeline](/etl/guides/first-pipeline/) | Step-by-step instructions to get things done |
+| [Postgres Replication Concepts](/etl/explanation/concepts/) | Deep dives into concepts and architecture |
+| [Examples](https://github.com/supabase/etl/tree/main/crates/etl-examples) | Runnable `bigquery` and `ducklake` example binaries |
 
 ## Contributing
 

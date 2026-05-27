@@ -1,8 +1,13 @@
-# Configure Postgres for Replication
+---
+title: Configure Postgres for Replication
+description: Set up Postgres with the correct permissions and settings for ETL logical replication.
+---
 
 **Set up Postgres with the correct permissions and settings for ETL logical replication**
 
-This guide covers the essential Postgres concepts and configuration needed for logical replication with ETL.
+This guide covers the essential **Postgres settings, slots, publications, and version-specific features** needed for logical replication with ETL.
+
+*Using a Supabase-hosted database?* Also see the Supabase product guide to [database replication](https://supabase.com/docs/guides/database/replication). It covers the Supabase-facing replication workflow and is the best companion reference when you are using ETL against a Supabase project.
 
 ## Prerequisites
 
@@ -14,18 +19,18 @@ This guide covers the essential Postgres concepts and configuration needed for l
 
 ## Enable Logical WAL
 
-Set `wal_level = logical` to enable Postgres to record logical change data in the WAL, which external tools can then decode and stream.
+Set `wal_level = logical` to enable Postgres to record **logical change data** in the WAL, which external tools can then decode and stream.
 
 ```ini
 # postgresql.conf
 wal_level = logical
 ```
 
-Restart Postgres after changing this setting.
+**Restart Postgres** after changing this setting.
 
 ## Replication Slots
 
-Replication slots ensure Postgres retains WAL data for replication consumers, even if they disconnect temporarily. They are:
+Replication slots ensure Postgres retains **WAL data for replication consumers**, even if they disconnect temporarily. They are:
 
 - **Persistent markers** that track replication progress
 - **WAL retention mechanisms** that prevent cleanup until consumers catch up
@@ -57,7 +62,7 @@ SELECT pg_drop_replication_slot('my_slot');
 
 ## Max Replication Slots
 
-Controls how many replication slots Postgres can maintain simultaneously.
+Controls how many **replication slots** Postgres can maintain simultaneously.
 
 ```ini
 # postgresql.conf (default is 10)
@@ -73,7 +78,7 @@ ETL uses a **single replication slot** for its main apply worker. Additional slo
 
 ## Max WAL Senders
 
-Controls the maximum number of concurrent connections for streaming replication. Each replication slot uses one WAL sender connection.
+Controls the maximum number of concurrent connections for streaming replication. **Each replication slot uses one WAL sender connection.**
 
 ```ini
 # postgresql.conf (default is 10)
@@ -84,7 +89,7 @@ Set this to at least `max_replication_slots` to ensure all slots can connect.
 
 ## WAL Keep Size
 
-Determines how much WAL data to retain on disk, providing a safety buffer for replication consumers.
+Determines how much **WAL data** to retain on disk, providing a safety buffer for replication consumers.
 
 ```ini
 # postgresql.conf
@@ -99,7 +104,7 @@ This setting:
 
 ## WAL Buildup and Disk Usage
 
-Replication slots prevent Postgres from deleting WAL files until all consumers have processed them. This can cause significant disk usage if the pipeline falls behind or encounters errors.
+Replication slots prevent Postgres from deleting WAL files until all consumers have processed them. This can cause **significant disk usage** if the pipeline falls behind or encounters errors.
 
 ### Common Causes of WAL Buildup
 
@@ -157,7 +162,7 @@ FROM pg_ls_waldir();
 
 ## Publications
 
-Publications define which tables and operations to replicate.
+Publications define **which tables and operations** to replicate.
 
 ### Creating Publications
 
@@ -174,7 +179,7 @@ CREATE PUBLICATION inserts_only FOR TABLE users WITH (publish = 'insert');
 
 #### Partitioned Tables
 
-To replicate partitioned tables, use `publish_via_partition_root = true`. This tells Postgres to treat the [partitioned table as a single table](https://www.postgresql.org/docs/current/sql-createpublication.html#SQL-CREATEPUBLICATION-PARAMS-WITH-PUBLISH-VIA-PARTITION-ROOT) for replication purposes. All changes to any partition are published as changes to the parent table:
+To replicate partitioned tables, use `publish_via_partition_root = true`. This tells Postgres to treat the [partitioned table as a single table](https://www.postgresql.org/docs/current/sql-createpublication.html#SQL-CREATEPUBLICATION-PARAMS-WITH-PUBLISH-VIA-PARTITION-ROOT) for replication purposes. **All changes to any partition are published as changes to the parent table**:
 
 ```sql
 -- Create publication with partitioned table support
@@ -215,7 +220,7 @@ DROP PUBLICATION my_publication;
 
 ## Version-Specific Features
 
-ETL supports PostgreSQL versions 14 through 18, with enhanced features available in newer versions:
+ETL supports **PostgreSQL 14 through 18**, with enhanced publication features available in newer versions:
 
 ### PostgreSQL 15+ Features
 
@@ -289,6 +294,6 @@ After editing the configuration:
 
 ## Next Steps
 
-- [Your First Pipeline](first-pipeline.md): Hands-on tutorial using these settings
-- [Custom Stores and Destinations](custom-implementations.md): Build your own components
-- [ETL Architecture](../explanation/architecture.md): How ETL uses these settings
+- [Your First Pipeline](/etl/guides/first-pipeline/): Hands-on tutorial using these settings
+- [Custom Stores and Destinations](/etl/guides/custom-implementations/): Build your own components
+- [ETL Architecture](/etl/explanation/architecture/): How ETL uses these settings

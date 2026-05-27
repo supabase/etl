@@ -1,12 +1,15 @@
-# Extension Points
+---
+title: Extension Points
+description: Traits you implement to customize ETL behavior.
+---
 
 **Traits you implement to customize ETL behavior**
 
-ETL provides extension traits for customization. Implement these to control where data goes and how state is stored.
+ETL provides extension traits for customization. Implement these to control **where data goes** and **how state is stored**.
 
 ## Destination
 
-Receives replicated data. This is the primary extension point for sending data to custom systems.
+Receives replicated data. This is the **primary extension point** for sending data to custom systems. ETL is **at least once**, so destinations must tolerate duplicate writes and concurrent calls.
 
 ```rust
 pub trait Destination {
@@ -26,17 +29,19 @@ pub trait Destination {
 | `shutdown()` | Called when the pipeline shuts down. Default is a no-op. Override for cleanup or bookkeeping |
 | `drop_table_for_copy()` | Drops the existing destination object and destination-private replay state before restarting a table copy. Receives the previously stored replicated schema for locating the old object |
 | `write_table_rows()` | Writes rows during initial table copy. Receives the current replicated schema and may get an empty vector for tables with no data |
-| `write_events()` | Processes streaming replication events (inserts, updates, deletes). Batches may span multiple tables |
+| `write_events()` | Processes streaming replication events (inserts, updates, deletes, truncates, relations, and transaction markers). Batches may span multiple tables |
 
 ### Implementation Notes
 
-- `drop_table_for_copy()` should be idempotent. ETL calls it before clearing copy-scoped store state, so implementations can still use the supplied schema and existing destination metadata to locate the old object.
-- Other operations should be idempotent when possible (ETL may retry on failure)
-- Handle concurrent calls safely (parallel table sync workers)
-- Process events in order to maintain data consistency
-- All three write-like methods use async results, but ETL waits differently. `drop_table_for_copy()` waits immediately before copy-scoped store cleanup. `write_table_rows()` also waits immediately, requesting the next batch only after the current one finishes for that copy partition. `write_events()` is the method where ETL can keep processing while the destination finishes the current batch.
+- `drop_table_for_copy()` should be **idempotent**. ETL calls it before clearing copy-scoped store state, so implementations can still use the supplied schema and existing destination metadata to locate the old object.
+- `write_table_rows()` is called even for empty source tables so destinations can create or prepare initial destination state before streaming begins.
+- `write_table_rows()` and `write_events()` must tolerate **duplicate delivery** because ETL may retry or replay after failure.
+- Handle **concurrent calls** safely, especially from parallel table sync workers.
+- Preserve **per-table event order**. During initial copy and catch-up, transaction markers are not a reliable all-tables transaction boundary.
+- Always complete the supplied async result handle. Dropping it reports a destination error to ETL.
+- All three write-like methods use async results, but ETL waits differently. `drop_table_for_copy()` waits immediately before copy-scoped store cleanup. `write_table_rows()` also waits immediately, requesting the next batch only after the current one finishes for that copy partition. `write_events()` is the method where ETL can keep processing other work while the destination finishes the current batch; ETL still waits for that batch's async result before handing the destination the next streaming batch.
 
-See [Event Types](events.md) for details on the events received by `write_events()`.
+See [Event Types](/etl/explanation/events/) for details on the events received by `write_events()`.
 
 `PipelineDestination` is a blanket-implemented facade for destinations that
 also satisfy the pipeline runtime clone and thread-safety bounds. Pipeline
@@ -45,7 +50,7 @@ tasks, but custom destinations only implement `Destination` directly.
 
 ## SchemaStore
 
-Stores versioned table schema information (column names, types, primary keys,
+Stores **versioned table schema information** (column names, types, primary keys,
 and snapshot IDs).
 
 ```rust
@@ -62,15 +67,15 @@ pub trait SchemaStore {
 
 | Method | Purpose |
 |--------|---------|
-| `get_table_schema()` | Returns the schema version with the largest `snapshot_id <= requested_snapshot_id` |
-| `get_table_schemas()` | Returns all cached schemas |
+| `get_table_schema()` | Returns the schema version with the largest `snapshot_id <= requested_snapshot_id`. If it misses cache, it may load from persistent storage |
+| `get_table_schemas()` | Returns all cached schemas without reading persistent storage |
 | `load_table_schemas()` | Loads schemas from persistent storage into cache. Call once at startup. Returns the number of schemas loaded |
 | `store_table_schema()` | Saves a schema version to both cache and persistent storage and returns the cached `Arc` |
-| `prune_table_schemas()` | For the supplied per-table retention boundaries, preserves the newest schema version at or before each retention LSN and removes older versions. Implementations with both cache and persistent storage must prune both |
+| `prune_table_schemas()` | For the supplied per-table retention boundaries, preserves the newest schema version at or before each retention LSN, preserves versions newer than that LSN, and removes older versions. Implementations with both cache and persistent storage must prune both |
 
 ## StateStore
 
-Tracks replication progress and destination table metadata.
+Tracks **table states**, **durable replication progress**, and **destination table metadata**.
 
 ```rust
 pub trait StateStore {
@@ -108,7 +113,7 @@ pub trait StateStore {
 
 ### Durable Progress Methods
 
-Durable replication progress records the latest flushed LSN for the apply worker
+Durable replication progress records the **latest flushed LSN** for the apply worker
 and table sync workers. It lets ETL resume from a safe boundary even when a slot
 or worker restarts.
 
@@ -120,13 +125,13 @@ or worker restarts.
 
 ### Destination Metadata Methods
 
-Destination table metadata connects source table IDs to destination state, including the destination table identifier, the currently applied schema snapshot, and the replication mask.
+Destination table metadata connects source table IDs to destination state, including the **destination table identifier**, the **schema snapshot under management**, the **schema status** (`Applying` or `Applied`), and the **replication mask**. Only `AppliedDestinationTableMetadata` guarantees the destination schema is ready for normal reads and writes.
 
 | Method | Purpose |
 |--------|---------|
 | `get_destination_table_metadata()` | Returns destination table metadata for a source table from cache |
-| `get_applied_destination_table_metadata()` | Returns destination table metadata only when the destination schema is fully applied |
-| `load_destination_tables_metadata()` | Loads destination table metadata from persistent storage into cache |
+| `get_applied_destination_table_metadata()` | Returns destination table metadata only when the destination schema is fully applied. If metadata exists but is still `Applying`, this returns an error |
+| `load_destination_tables_metadata()` | Loads destination table metadata from persistent storage into cache. Call once during startup |
 | `store_destination_table_metadata()` | Saves destination table metadata to both cache and persistent storage |
 
 ### Table States
@@ -146,7 +151,7 @@ Tables progress through these states:
 
 ## TableLifecycleStore
 
-Removes ETL metadata for table-copy restarts and publication removals.
+Removes ETL metadata for **table-copy restarts** and **publication removals**.
 
 ```rust
 pub trait TableLifecycleStore {
@@ -162,7 +167,7 @@ pub trait TableLifecycleStore {
 
 ## Combining Traits
 
-A single type typically implements all store traits:
+A single type typically implements **all store traits**:
 
 ```rust
 pub struct MyStore { /* ... */ }
@@ -195,7 +200,7 @@ implementation you use.
 
 ## Thread Safety
 
-All trait implementations must be thread-safe. ETL calls these methods concurrently from:
+All trait implementations must be **thread-safe**. ETL calls these methods concurrently from:
 
 - Multiple table sync workers (parallel initial copy)
 - Apply worker (streaming changes)
@@ -205,6 +210,6 @@ Use `Arc<Mutex<_>>`, `RwLock`, or similar synchronization primitives for shared 
 
 ## Next Steps
 
-- [Custom Stores and Destinations](../guides/custom-implementations.md): Implement these traits
-- [Event Types](events.md): Events received by `write_events()`
-- [Architecture](architecture.md): How these components fit together
+- [Custom Stores and Destinations](/etl/guides/custom-implementations/): Implement these traits
+- [Event Types](/etl/explanation/events/): Events received by `write_events()`
+- [Architecture](/etl/explanation/architecture/): How these components fit together
