@@ -84,6 +84,10 @@ use crate::{
 /// are both best-effort background reads and can safely serialize.
 const DUCKLAKE_METADATA_PG_POOL_SIZE: u32 = 1;
 
+/// Prefix for ETL-owned tombstone columns that keep same-name replacement DDL
+/// replay-safe.
+pub(super) const DUCKLAKE_DROPPED_COLUMN_PREFIX: &str = "__etl_ducklake_dropped_";
+
 /// Builds the shared Postgres metadata pool used by background samplers.
 fn build_ducklake_metadata_pg_pool(catalog_url: &Url) -> EtlResult<PgPool> {
     PgPoolOptions::new()
@@ -424,36 +428,41 @@ struct DuckLakeSchemaDiffPlan {
     column_names: Vec<String>,
 }
 
-/// Rejects diffs whose dropped column names are reused in the same change.
-///
-/// DuckLake DDL is transactional, but the destination metadata update happens
-/// after the DuckLake commit. If the process stops between those two steps,
-/// replay only sees the final destination column names. A dropped name reused
-/// by an added column or rename target cannot be distinguished from the
-/// pre-change column, so applying it again could drop the replacement column.
-fn reject_removed_column_name_reuse_ducklake(diff: &SchemaDiff) -> EtlResult<()> {
-    let added_column_names: HashSet<_> =
-        diff.columns_to_add.iter().map(|column| column.name.as_str()).collect();
-    let rename_target_names: HashSet<_> =
-        diff.columns_to_rename.iter().map(|rename| rename.new_name.as_str()).collect();
-
-    for column in &diff.columns_to_remove {
-        if added_column_names.contains(column.name.as_str())
-            || rename_target_names.contains(column.name.as_str())
-        {
-            return Err(etl_error!(
-                ErrorKind::SourceSchemaError,
-                "DuckLake does not support reusing a dropped column name",
-                format!(
-                    "Column '{}' is removed and then reused in the same schema change. DuckLake \
-                     cannot replay that DDL safely after an interrupted metadata update.",
-                    column.name
-                )
-            ));
-        }
+/// Returns a deterministic hash for generated DuckLake identifiers.
+fn stable_ducklake_identifier_hash(value: &str) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in value.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
+    hash
+}
 
-    Ok(())
+/// Builds the tombstone name used when a dropped column name is reused.
+fn dropped_column_tombstone_name_ducklake(column: &ColumnSchema) -> String {
+    format!(
+        "{DUCKLAKE_DROPPED_COLUMN_PREFIX}{}_{:016x}",
+        column.ordinal_position,
+        stable_ducklake_identifier_hash(&column.name)
+    )
+}
+
+/// Returns ETL tombstone columns that are not active replicated columns.
+fn tombstone_columns_to_cleanup_ducklake(
+    column_names: &[String],
+    target_schema: &ReplicatedTableSchema,
+) -> Vec<String> {
+    let active_column_names: HashSet<_> =
+        target_schema.column_schemas().map(|column| column.name.as_str()).collect();
+
+    column_names
+        .iter()
+        .filter(|column_name| {
+            column_name.starts_with(DUCKLAKE_DROPPED_COLUMN_PREFIX)
+                && !active_column_names.contains(column_name.as_str())
+        })
+        .cloned()
+        .collect()
 }
 
 /// Plans idempotent DuckLake schema DDL for the current destination columns.
@@ -462,13 +471,69 @@ fn plan_schema_diff_sql_ducklake(
     mut column_names: Vec<String>,
     diff: &SchemaDiff,
 ) -> EtlResult<DuckLakeSchemaDiffPlan> {
-    reject_removed_column_name_reuse_ducklake(diff)?;
-
     let added_column_names: HashSet<_> =
         diff.columns_to_add.iter().map(|column| column.name.as_str()).collect();
+    let rename_target_names: HashSet<_> =
+        diff.columns_to_rename.iter().map(|rename| rename.new_name.as_str()).collect();
+    let reused_removed_column_names: HashSet<_> = diff
+        .columns_to_remove
+        .iter()
+        .filter(|column| {
+            added_column_names.contains(column.name.as_str())
+                || rename_target_names.contains(column.name.as_str())
+        })
+        .map(|column| column.name.as_str())
+        .collect();
     let mut statements = Vec::new();
 
     for column in &diff.columns_to_remove {
+        if reused_removed_column_names.contains(column.name.as_str()) {
+            let tombstone_name = dropped_column_tombstone_name_ducklake(column);
+            let old_index = find_ducklake_column(&column_names, &column.name);
+            let tombstone_index = find_ducklake_column(&column_names, &tombstone_name);
+
+            match (old_index, tombstone_index) {
+                (Some(index), None) => {
+                    statements.push(DuckLakeSchemaDdlStatement {
+                        sql: build_rename_column_sql_ducklake(
+                            table_name,
+                            &column.name,
+                            &tombstone_name,
+                        ),
+                        error_description: "DuckLake alter table rename dropped column failed",
+                    });
+                    column_names[index] = tombstone_name;
+                }
+                (Some(_), Some(_)) => {
+                    debug!(
+                        table = %table_name,
+                        column = %column.name,
+                        tombstone_column = %tombstone_name,
+                        "ducklake drop column skipped because reused column name was already \
+                         tombstoned"
+                    );
+                }
+                (None, Some(_)) => {
+                    debug!(
+                        table = %table_name,
+                        column = %column.name,
+                        tombstone_column = %tombstone_name,
+                        "ducklake drop column skipped because destination column is already \
+                         tombstoned"
+                    );
+                }
+                (None, None) => {
+                    debug!(
+                        table = %table_name,
+                        column = %column.name,
+                        "ducklake drop column skipped because destination column is already absent"
+                    );
+                }
+            }
+
+            continue;
+        }
+
         let Some(index) = find_ducklake_column(&column_names, &column.name) else {
             debug!(
                 table = %table_name,
@@ -1284,9 +1349,10 @@ where
         }
         self.reconcile_missing_replicated_columns(&table_name, new_replicated_table_schema).await?;
 
-        self.store
-            .store_destination_table_metadata(table_id, updated_metadata.to_applied())
-            .await?;
+        let applied_metadata = updated_metadata.to_applied();
+        self.store.store_destination_table_metadata(table_id, applied_metadata).await?;
+        self.cleanup_tombstone_columns_after_applied(&table_name, new_replicated_table_schema)
+            .await;
         self.created_tables.lock().insert(table_name.clone());
 
         info!(
@@ -1396,6 +1462,84 @@ where
         self.apply_schema_diff(table_name, &diff).await
     }
 
+    /// Drops ETL tombstone columns after schema metadata is durably `Applied`.
+    async fn cleanup_tombstone_columns(
+        &self,
+        table_name: &str,
+        target_schema: &ReplicatedTableSchema,
+    ) -> EtlResult<()> {
+        let _table_write_permit = self.acquire_table_write_slot(table_name).await?;
+        let _checkpoint_guard = self.acquire_mutation_guard().await;
+        let table_name = table_name.to_owned();
+        let target_schema = target_schema.clone();
+
+        run_duckdb_blocking(Arc::clone(&self.pool), Arc::clone(&self.blocking_slots), move |conn| {
+            let execute_ddl = |sql: &str, description: &'static str| -> EtlResult<()> {
+                conn.execute_batch(sql).map_err(|source| {
+                    etl_error!(
+                        ErrorKind::DestinationQueryFailed,
+                        description,
+                        format_query_error_detail(sql),
+                        source: source
+                    )
+                })
+            };
+
+            let column_names = read_ducklake_table_column_names_blocking(conn, &table_name)?;
+            let columns_to_drop =
+                tombstone_columns_to_cleanup_ducklake(&column_names, &target_schema);
+            if columns_to_drop.is_empty() {
+                return Ok(());
+            }
+
+            info!(
+                table = %table_name,
+                tombstone_column_count = columns_to_drop.len(),
+                "ducklake cleaning up tombstone columns"
+            );
+
+            execute_ddl("begin transaction", "DuckLake tombstone cleanup transaction failed")?;
+
+            let cleanup_result = (|| -> EtlResult<()> {
+                for column_name in columns_to_drop {
+                    let sql = build_drop_column_sql_ducklake(&table_name, &column_name);
+                    execute_ddl(&sql, "DuckLake tombstone column drop failed")?;
+                }
+
+                Ok(())
+            })();
+
+            if let Err(error) = cleanup_result {
+                if let Err(rollback_error) = conn.execute_batch("rollback") {
+                    warn!(
+                        error = %rollback_error,
+                        table = %table_name,
+                        "ducklake tombstone cleanup rollback failed"
+                    );
+                }
+                return Err(error);
+            }
+
+            execute_ddl("commit", "DuckLake tombstone cleanup transaction commit failed")
+        })
+        .await
+    }
+
+    /// Best-effort wrapper for post-`Applied` tombstone cleanup.
+    async fn cleanup_tombstone_columns_after_applied(
+        &self,
+        table_name: &str,
+        target_schema: &ReplicatedTableSchema,
+    ) {
+        if let Err(error) = self.cleanup_tombstone_columns(table_name, target_schema).await {
+            warn!(
+                error = %error,
+                table = %table_name,
+                "ducklake tombstone column cleanup failed"
+            );
+        }
+    }
+
     /// Reconciles persisted destination metadata with physical DuckLake tables.
     async fn reconcile_existing_tables_after_restart(&self) -> EtlResult<()> {
         let table_schemas = self.store.get_table_schemas().await?;
@@ -1433,6 +1577,7 @@ where
 
             self.issue_create_table_stmt(&table_name, &target_schema).await?;
             self.reconcile_missing_replicated_columns(&table_name, &target_schema).await?;
+            self.cleanup_tombstone_columns_after_applied(&table_name, &target_schema).await;
             self.created_tables.lock().insert(table_name);
         }
 
@@ -1849,6 +1994,39 @@ where
         Ok(table_schema)
     }
 
+    /// Loads the best available previous schema for interrupted DDL recovery.
+    async fn load_previous_recovery_table_schema(
+        &self,
+        table_id: TableId,
+        previous_snapshot_id: SnapshotId,
+    ) -> EtlResult<Arc<TableSchema>> {
+        let table_schema =
+            self.store.get_table_schema(&table_id, previous_snapshot_id).await?.ok_or_else(
+                || {
+                    etl_error!(
+                        ErrorKind::InvalidState,
+                        "DuckLake schema recovery previous schema not found",
+                        format!(
+                            "Could not find schema for table {} at or before snapshot_id {}",
+                            table_id, previous_snapshot_id
+                        )
+                    )
+                },
+            )?;
+
+        if table_schema.snapshot_id != previous_snapshot_id {
+            warn!(
+                table_id = %table_id,
+                requested_snapshot_id = %previous_snapshot_id,
+                found_snapshot_id = %table_schema.snapshot_id,
+                "ducklake schema recovery exact previous schema not found, using nearest \
+                 available schema"
+            );
+        }
+
+        Ok(table_schema)
+    }
+
     /// Resolves the target replicated schema for interrupted DDL recovery.
     async fn target_schema_for_recovery(
         &self,
@@ -1895,11 +2073,7 @@ where
         match metadata.previous_snapshot_id {
             Some(previous_snapshot_id) => {
                 let previous_table_schema = self
-                    .load_exact_table_schema(
-                        table_id,
-                        previous_snapshot_id,
-                        "DuckLake schema recovery previous schema not found",
-                    )
+                    .load_previous_recovery_table_schema(table_id, previous_snapshot_id)
                     .await?;
                 let previous_replication_mask = previous_replication_mask_for_recovery(
                     &previous_table_schema,
@@ -1921,6 +2095,7 @@ where
 
         let metadata = metadata.to_applied();
         self.store.store_destination_table_metadata(table_id, metadata.clone()).await?;
+        self.cleanup_tombstone_columns_after_applied(table_name, &target_schema).await;
         self.created_tables.lock().insert(table_name.to_owned());
 
         Ok(metadata)
@@ -2467,7 +2642,7 @@ mod tests {
             plan_schema_diff_sql_ducklake("users", vec!["id".to_owned(), "name".to_owned()], &diff)
                 .expect("schema diff should plan");
         let statement_sql: Vec<_> =
-            plan.statements.iter().map(|statement| statement.sql.as_str()).collect();
+            plan.statements.iter().map(|statement| statement.sql.clone()).collect();
 
         assert_eq!(
             statement_sql,
@@ -2510,17 +2685,13 @@ mod tests {
     }
 
     #[test]
-    fn plan_schema_diff_rejects_reusing_removed_column_name() {
+    fn plan_schema_diff_tombstones_removed_column_when_name_is_reused_by_rename() {
+        let removed_column =
+            ColumnSchema::new("status".to_owned(), PgType::TEXT, -1, 3, None, true);
+        let tombstone_name = dropped_column_tombstone_name_ducklake(&removed_column);
         let diff = SchemaDiff {
             columns_to_add: Vec::new(),
-            columns_to_remove: vec![ColumnSchema::new(
-                "status".to_owned(),
-                PgType::TEXT,
-                -1,
-                3,
-                None,
-                true,
-            )],
+            columns_to_remove: vec![removed_column],
             columns_to_rename: vec![ColumnRename {
                 old_name: "name".to_owned(),
                 new_name: "status".to_owned(),
@@ -2528,18 +2699,115 @@ mod tests {
             }],
         };
 
-        let error = plan_schema_diff_sql_ducklake(
+        let plan = plan_schema_diff_sql_ducklake(
             "users",
             vec!["id".to_owned(), "name".to_owned(), "status".to_owned()],
             &diff,
         )
-        .unwrap_err();
+        .expect("schema diff should tombstone reused removed name");
+        let statement_sql: Vec<_> =
+            plan.statements.iter().map(|statement| statement.sql.clone()).collect();
 
-        assert_eq!(error.kind(), ErrorKind::SourceSchemaError);
         assert_eq!(
-            error.description(),
-            Some("DuckLake does not support reusing a dropped column name")
+            statement_sql,
+            vec![
+                format!("alter table lake.users rename column status to {tombstone_name}"),
+                "alter table lake.users rename column name to status".to_owned(),
+            ]
         );
+        assert_eq!(plan.column_names, vec!["id", "status", tombstone_name.as_str()]);
+    }
+
+    #[test]
+    fn plan_schema_diff_tombstones_removed_column_when_name_is_reused_by_add() {
+        let removed_column = ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, None, true);
+        let tombstone_name = dropped_column_tombstone_name_ducklake(&removed_column);
+        let diff = SchemaDiff {
+            columns_to_add: vec![ColumnSchema::new(
+                "name".to_owned(),
+                PgType::TEXT,
+                -1,
+                3,
+                None,
+                true,
+            )],
+            columns_to_remove: vec![removed_column],
+            columns_to_rename: Vec::new(),
+        };
+
+        let plan =
+            plan_schema_diff_sql_ducklake("users", vec!["id".to_owned(), "name".to_owned()], &diff)
+                .expect("schema diff should tombstone reused removed name");
+        let statement_sql: Vec<_> =
+            plan.statements.iter().map(|statement| statement.sql.as_str()).collect();
+
+        assert_eq!(
+            statement_sql,
+            vec![
+                format!("alter table lake.users rename column name to {tombstone_name}"),
+                "alter table lake.users add column name varchar".to_owned(),
+            ]
+        );
+        assert_eq!(plan.column_names, vec!["id", tombstone_name.as_str(), "name"]);
+    }
+
+    #[test]
+    fn plan_schema_diff_skips_replayed_reused_removed_column_name() {
+        let removed_column = ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, None, true);
+        let tombstone_name = dropped_column_tombstone_name_ducklake(&removed_column);
+        let diff = SchemaDiff {
+            columns_to_add: vec![ColumnSchema::new(
+                "name".to_owned(),
+                PgType::TEXT,
+                -1,
+                3,
+                None,
+                true,
+            )],
+            columns_to_remove: vec![removed_column],
+            columns_to_rename: Vec::new(),
+        };
+
+        let plan = plan_schema_diff_sql_ducklake(
+            "users",
+            vec!["id".to_owned(), tombstone_name.clone(), "name".to_owned()],
+            &diff,
+        )
+        .expect("schema diff replay should plan");
+
+        assert!(plan.statements.is_empty());
+        assert_eq!(plan.column_names, vec!["id", tombstone_name.as_str(), "name"]);
+    }
+
+    #[test]
+    fn tombstone_columns_to_cleanup_keeps_active_prefixed_columns() {
+        let table_schema = Arc::new(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_owned(), "users".to_owned()),
+            vec![
+                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false),
+                ColumnSchema::new(
+                    "__etl_ducklake_dropped_business".to_owned(),
+                    PgType::TEXT,
+                    -1,
+                    2,
+                    None,
+                    true,
+                ),
+            ],
+        ));
+        let replicated_table_schema =
+            ReplicatedTableSchema::from_mask(table_schema, ReplicationMask::from_bytes(vec![1, 1]));
+        let column_names = vec![
+            "id".to_owned(),
+            "__etl_ducklake_dropped_business".to_owned(),
+            "__etl_ducklake_dropped_3_abcdef".to_owned(),
+        ];
+
+        let columns_to_cleanup =
+            tombstone_columns_to_cleanup_ducklake(&column_names, &replicated_table_schema);
+
+        assert_eq!(columns_to_cleanup, vec!["__etl_ducklake_dropped_3_abcdef"]);
     }
 
     #[test]
