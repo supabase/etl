@@ -108,6 +108,13 @@ export default defineConfig({
             defer: true,
           },
         },
+        {
+          tag: 'script',
+          attrs: {
+            src: '/etl/scripts/mobile-nav.js',
+            defer: true,
+          },
+        },
       ],
       credits: false,
     }),
