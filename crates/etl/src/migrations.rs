@@ -17,7 +17,7 @@ async fn create_migration_connection(
 
     let mut conn = PgConnection::connect_with(&options).await?;
 
-    // Suppress routine DDL notices so startup logs stay focused on important
+    // Suppress routine DDL notices so startup logs stay focused on phase-level
     // events.
     conn.execute("set client_min_messages = warning;").await?;
 
