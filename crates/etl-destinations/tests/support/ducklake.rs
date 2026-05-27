@@ -7,8 +7,8 @@ use std::{
 };
 
 use duckdb::{Config, Connection};
-use etl::config::{PgConnectionConfig, TcpKeepaliveConfig, TlsConfig};
-use etl_postgres::tokio::test_utils::PgDatabase;
+use etl::config::{PgConnectionConfig, TcpKeepaliveConfig};
+use etl_postgres::{test_utils::local_tls_config_from_env, tokio::test_utils::PgDatabase};
 use pg_escape::quote_literal;
 use tokio_postgres::{
     Client, Config as PgConfig,
@@ -20,7 +20,6 @@ use uuid::Uuid;
 const DUCKDB_EXTENSION_VERSION: &str = "1.5.2";
 const DUCKLAKE_EXTENSION_FILE: &str = "ducklake.duckdb_extension";
 const POSTGRES_SCANNER_EXTENSION_FILE: &str = "postgres_scanner.duckdb_extension";
-
 pub struct DuckLakeTestEnv {
     _catalog_database: PgDatabase<Client>,
     pub catalog_url: Url,
@@ -162,7 +161,7 @@ fn local_pg_connection_config(database_name: String) -> PgConnectionConfig {
         name: database_name,
         username: env::var("TESTS_DATABASE_USERNAME").expect("TESTS_DATABASE_USERNAME must be set"),
         password: env::var("TESTS_DATABASE_PASSWORD").ok().map(Into::into),
-        tls: TlsConfig { trusted_root_certs: String::new(), enabled: false },
+        tls: local_tls_config_from_env(),
         keepalive: TcpKeepaliveConfig::default(),
     }
 }

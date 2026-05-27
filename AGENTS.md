@@ -68,6 +68,7 @@
 - Keep top-level binaries focused on orchestration; move implementation detail into helpers or modules.
 - Prefer clear, boring code over clever abstractions.
 - Prefer existing workspace patterns over introducing new local conventions.
+- Do not add `#[must_use]` attributes unless the user explicitly asks for one.
 - Default to private visibility and only widen when a real caller requires it.
 - Prefer the narrowest working visibility in this order: private, `pub(super)`, `pub(crate)`, then `pub`.
 - Use `pub` only for intentional crate APIs consumed by other crates, integration tests, examples, or documented user-facing entrypoints.
@@ -129,6 +130,12 @@
   values. Prefer metadata that helps debugging without exposing values, such as
   table and column names, type names, counts, lengths, LSNs, IDs, and operation
   names.
+- When adding logs, metrics, traces, Sentry context, panic messages, or other
+  observability output, be extra careful not to leak customer data or detailed
+  table contents. Higher-level structural metadata, such as table names, column
+  names, type names, counts, lengths, IDs, and operation names, can be included
+  when useful for debugging; do not include cell values, row payloads, request
+  or response bodies, credentials, tokens, or secrets.
 - In production logs, key errors as `error = %err` or `error = %error`
   regardless of the local variable name. Do not use `err =`, `source =`, or
   debug formatting for the primary error field.

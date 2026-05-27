@@ -1617,7 +1617,7 @@ mod tests {
 
     use duckdb::{Config, Connection};
     use etl::{
-        config::{PgConnectionConfig, TcpKeepaliveConfig, TlsConfig},
+        config::{PgConnectionConfig, TcpKeepaliveConfig},
         store::{both::memory::MemoryStore, schema::SchemaStore},
         types::{
             Cell, ColumnSchema, IdentityMask, PartialTableRow, ReplicationMask, TableRow,
@@ -1625,7 +1625,7 @@ mod tests {
         },
     };
     use etl_maintenance::ducklake::flush_table_inlined_data;
-    use etl_postgres::tokio::test_utils::PgDatabase;
+    use etl_postgres::{test_utils::local_tls_config_from_env, tokio::test_utils::PgDatabase};
     use pg_escape::{quote_identifier, quote_literal};
     use tempfile::TempDir;
     use tokio_postgres::Client;
@@ -1740,7 +1740,7 @@ mod tests {
             username: env::var("TESTS_DATABASE_USERNAME")
                 .expect("TESTS_DATABASE_USERNAME must be set"),
             password: env::var("TESTS_DATABASE_PASSWORD").ok().map(Into::into),
-            tls: TlsConfig { trusted_root_certs: String::new(), enabled: false },
+            tls: local_tls_config_from_env(),
             keepalive: TcpKeepaliveConfig::default(),
         }
     }

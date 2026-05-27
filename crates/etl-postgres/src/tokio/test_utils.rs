@@ -2,6 +2,10 @@ use std::{num::NonZeroI32, time::Duration};
 
 use etl_config::shared::{IntoConnectOptions, PgConnectionConfig};
 use pg_escape::quote_identifier;
+use rustls::{
+    ClientConfig, RootCertStore,
+    pki_types::{CertificateDer, pem::PemObject},
+};
 use tokio::runtime::Handle;
 use tokio_postgres::{
     Client, GenericClient, NoTls, Transaction,
@@ -12,6 +16,7 @@ use tracing::info;
 use crate::{
     replication::extract_server_version,
     requires_version,
+    tokio::tls::MakeRustlsConnect,
     types::{ColumnSchema, TableId, TableName},
     version::POSTGRES_15,
 };
@@ -668,6 +673,65 @@ pub fn id_column_schema() -> ColumnSchema {
     ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, Some(1), false)
 }
 
+/// Connects with the TLS mode described by the test database configuration.
+async fn connect_with_config(
+    config: tokio_postgres::Config,
+    pg_connection_config: &PgConnectionConfig,
+) -> (Client, Option<NonZeroI32>) {
+    try_connect_with_config(config, pg_connection_config)
+        .await
+        .expect("failed to connect to Postgres")
+}
+
+/// Tries to connect with the TLS mode described by the test database
+/// configuration.
+async fn try_connect_with_config(
+    config: tokio_postgres::Config,
+    pg_connection_config: &PgConnectionConfig,
+) -> Result<(Client, Option<NonZeroI32>), String> {
+    if pg_connection_config.tls.enabled {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+        let mut root_store = RootCertStore::empty();
+        for cert in
+            CertificateDer::pem_slice_iter(pg_connection_config.tls.trusted_root_certs.as_bytes())
+        {
+            let cert = cert.map_err(|error| error.to_string())?;
+            root_store.add(cert).map_err(|error| error.to_string())?;
+        }
+
+        let tls_config =
+            ClientConfig::builder().with_root_certificates(root_store).with_no_client_auth();
+        let (client, connection) = config
+            .connect(MakeRustlsConnect::new(tls_config))
+            .await
+            .map_err(|error| error.to_string())?;
+        let server_version =
+            connection.parameter("server_version").and_then(extract_server_version);
+
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                info!(error = %e, "connection error");
+            }
+        });
+
+        Ok((client, server_version))
+    } else {
+        let (client, connection) =
+            config.connect(NoTls).await.map_err(|error| error.to_string())?;
+        let server_version =
+            connection.parameter("server_version").and_then(extract_server_version);
+
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                info!(error = %e, "connection error");
+            }
+        });
+
+        Ok((client, server_version))
+    }
+}
+
 /// Creates a new Postgres database and returns a connected client.
 ///
 /// Establishes connection to Postgres server, creates a new database,
@@ -677,17 +741,8 @@ pub fn id_column_schema() -> ColumnSchema {
 /// Panics if connection or database creation fails.
 pub async fn create_pg_database(config: &PgConnectionConfig) -> (Client, Option<NonZeroI32>) {
     // Create the database via a single connection
-    let (client, connection) = {
-        let config: tokio_postgres::Config = config.without_db(None);
-        config.connect(NoTls).await.expect("failed to connect to Postgres")
-    };
-
-    // Spawn the connection on a new task
-    tokio::spawn(async move {
-        if let Err(e) = connection.await {
-            info!(error = %e, "connection error");
-        }
-    });
+    let admin_config: tokio_postgres::Config = config.without_db(None);
+    let (client, _) = connect_with_config(admin_config, config).await;
 
     // Create the database
     client
@@ -710,20 +765,8 @@ pub async fn create_pg_database(config: &PgConnectionConfig) -> (Client, Option<
 /// Panics if connection fails.
 pub async fn connect_to_pg_database(config: &PgConnectionConfig) -> (Client, Option<NonZeroI32>) {
     // Create a new client connected to the created database
-    let (client, connection) = {
-        let config: tokio_postgres::Config = config.with_db(None);
-        config.connect(NoTls).await.expect("failed to connect to Postgres")
-    };
-    let server_version = connection.parameter("server_version").and_then(extract_server_version);
-
-    // Spawn the connection on a new task
-    tokio::spawn(async move {
-        if let Err(e) = connection.await {
-            info!(error = %e, "connection error");
-        }
-    });
-
-    (client, server_version)
+    let database_config: tokio_postgres::Config = config.with_db(None);
+    connect_with_config(database_config, config).await
 }
 
 /// Drops a Postgres database and cleans up all resources.
@@ -736,23 +779,14 @@ pub async fn connect_to_pg_database(config: &PgConnectionConfig) -> (Client, Opt
 /// or connections can't be established.
 pub async fn drop_pg_database(config: &PgConnectionConfig) {
     // Connect to the default database
-    let (client, connection) = {
-        let config: tokio_postgres::Config = config.without_db(None);
-        match config.connect(NoTls).await {
-            Ok(conn) => conn,
-            Err(e) => {
-                eprintln!("warning: failed to connect to Postgres for cleanup: {e}");
-                return;
-            }
+    let admin_config: tokio_postgres::Config = config.without_db(None);
+    let client = match try_connect_with_config(admin_config, config).await {
+        Ok((client, _)) => client,
+        Err(e) => {
+            eprintln!("warning: failed to connect to Postgres for cleanup: {e}");
+            return;
         }
     };
-
-    // Spawn the connection on a new task
-    tokio::spawn(async move {
-        if let Err(e) = connection.await {
-            info!(error = %e, "connection error");
-        }
-    });
 
     // Forcefully terminate any remaining connections to the database
     if let Err(e) = client

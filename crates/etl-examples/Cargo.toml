@@ -45,7 +45,6 @@ clap = { workspace = true, default-features = true, features = ["std", "derive",
 etl = { workspace = true }
 etl-config = { workspace = true }
 etl-destinations = { workspace = true }
-etl-telemetry = { workspace = true }
 k8s-openapi = { workspace = true, features = ["latest"] }
 rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
 secrecy = { workspace = true, optional = true }
