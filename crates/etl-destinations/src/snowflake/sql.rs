@@ -1,9 +1,11 @@
+use crate::sql::quote_double_identifier;
+
 /// Quotes a Snowflake SQL identifier.
 ///
 /// Snowflake quoted identifiers are enclosed in double quotes, preserve case,
 /// and escape embedded double quotes by writing two double quotes.
 pub(super) fn quote_identifier(name: &str) -> String {
-    crate::sql::quote_double_identifier(name)
+    quote_double_identifier(name)
 }
 
 /// Quotes a Snowflake SQL string literal.

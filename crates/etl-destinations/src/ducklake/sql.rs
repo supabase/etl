@@ -1,11 +1,11 @@
-use crate::ducklake::LAKE_CATALOG;
+use crate::{ducklake::LAKE_CATALOG, sql::quote_double_identifier};
 
 /// Quotes a DuckDB SQL identifier for DuckLake SQL.
 ///
 /// DuckDB quoted identifiers are enclosed in double quotes, and embedded double
 /// quotes are escaped by repeating the quote character.
 pub(super) fn quote_identifier(identifier: &str) -> String {
-    crate::sql::quote_double_identifier(identifier)
+    quote_double_identifier(identifier)
 }
 
 /// Quotes a DuckLake table name and qualifies it with the DuckLake catalog.
