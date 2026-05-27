@@ -6,7 +6,7 @@ use etl::{
     destination::async_result::{DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult},
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
-    state::destination_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus},
+    state::destination_table_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus},
     store::DestinationStore,
     types::{
         ColumnSchema, DeleteEvent, Event, InsertEvent, OldTableRow, ReplicatedTableSchema, TableId,

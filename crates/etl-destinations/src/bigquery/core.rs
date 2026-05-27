@@ -14,7 +14,7 @@ use etl::{
     },
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
-    state::destination_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus},
+    state::destination_table_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus},
     store::DestinationStore,
     types::{
         Cell, Event, EventSequenceKey, IdentityType, OldTableRow, PipelineId,

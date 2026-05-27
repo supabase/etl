@@ -4,7 +4,7 @@
 //! CLEANUP` cleanup, PK-less source rejection, and composite PK ORDER BY.
 
 use etl::{
-    state::table::{TableReplicationPhase, TableReplicationPhaseType},
+    state::{TableState, TableStateType},
     store::state::StateStore,
     test_utils::{
         database::{spawn_source_database, test_table_name},
@@ -73,8 +73,7 @@ async fn replacing_merge_tree_rejects_pkless_source_table() {
         .build_destination_with_engine(store.clone(), ClickHouseEngine::ReplacingMergeTree)
         .await;
 
-    let table_errored =
-        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Errored).await;
+    let table_errored = store.notify_on_table_state_type(table_id, TableStateType::Errored).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -88,20 +87,20 @@ async fn replacing_merge_tree_rejects_pkless_source_table() {
     table_errored.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
 
-    // --- THEN: the Errored phase reason names the PK-less rejection ---
-    let phase = store
-        .get_table_replication_state(table_id)
+    // --- THEN: the Errored state reason names the PK-less rejection ---
+    let state = store
+        .get_table_state(table_id)
         .await
-        .expect("state store should return the table's phase")
-        .expect("table should have a recorded replication phase");
-    match phase {
-        TableReplicationPhase::Errored { reason, .. } => {
+        .expect("state store should return the table's state")
+        .expect("table should have a recorded table state");
+    match state {
+        TableState::Errored { reason, .. } => {
             assert!(
                 reason.contains("primary key"),
                 "Errored reason should mention the PK requirement, got: {reason}"
             );
         }
-        other => panic!("expected Errored phase, got {other:?}"),
+        other => panic!("expected Errored state, got {other:?}"),
     }
 }
 
@@ -138,8 +137,7 @@ async fn replacing_merge_tree_same_lsn_tx_insert_then_update_keeps_update() {
             .await,
     );
 
-    let table_ready =
-        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
+    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -239,8 +237,7 @@ async fn replacing_merge_tree_same_lsn_tx_delete_then_insert_keeps_insert() {
             .await,
     );
 
-    let table_ready =
-        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
+    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -328,8 +325,7 @@ async fn replacing_merge_tree_current_view_exposes_user_columns_and_current_stat
             .await,
     );
 
-    let table_ready =
-        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
+    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -427,8 +423,7 @@ async fn composite_pk_pk_order_by_matches_pk_ordinal() {
         .build_destination_with_engine(store.clone(), ClickHouseEngine::ReplacingMergeTree)
         .await;
 
-    let table_ready =
-        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
+    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -511,8 +506,7 @@ async fn replacing_merge_tree_streamed_update_wins_over_initial_copy_row() {
             .await,
     );
 
-    let table_ready =
-        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
+    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -599,8 +593,7 @@ async fn replacing_merge_tree_optimize_cleanup_physically_removes_tombstoned_row
             .await,
     );
 
-    let table_ready =
-        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
+    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -701,8 +694,7 @@ async fn engine_mismatch_runs(first: ClickHouseEngine, second: ClickHouseEngine)
         let store = NotifyingStore::new();
         let pipeline_id: PipelineId = random();
         let destination = clickhouse_db.build_destination_with_engine(store.clone(), first).await;
-        let table_ready =
-            store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
+        let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
         let mut pipeline = create_pipeline(
             &database.config,
             pipeline_id,
@@ -720,8 +712,7 @@ async fn engine_mismatch_runs(first: ClickHouseEngine, second: ClickHouseEngine)
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
     let destination = clickhouse_db.build_destination_with_engine(store.clone(), second).await;
-    let table_errored =
-        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Errored).await;
+    let table_errored = store.notify_on_table_state_type(table_id, TableStateType::Errored).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -734,15 +725,15 @@ async fn engine_mismatch_runs(first: ClickHouseEngine, second: ClickHouseEngine)
     table_errored.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
 
-    // --- THEN: the Errored phase reason names the engine mismatch ---
-    let phase = store
-        .get_table_replication_state(table_id)
+    // --- THEN: the Errored state reason names the engine mismatch ---
+    let state = store
+        .get_table_state(table_id)
         .await
-        .expect("state store should return the table's phase")
-        .expect("table should have a recorded replication phase");
-    let reason = match phase {
-        TableReplicationPhase::Errored { reason, .. } => reason,
-        other => panic!("expected Errored phase, got {other:?}"),
+        .expect("state store should return the table's state")
+        .expect("table should have a recorded table state");
+    let reason = match state {
+        TableState::Errored { reason, .. } => reason,
+        other => panic!("expected Errored state, got {other:?}"),
     };
     assert!(
         reason.contains("engine mismatch") || reason.contains("engine"),

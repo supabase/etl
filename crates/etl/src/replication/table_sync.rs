@@ -22,7 +22,7 @@ use crate::{
     etl_error,
     metrics::{ETL_TABLE_COPY_DURATION_SECONDS, PARTITIONING_LABEL},
     replication::{client::PgReplicationClient, table_cache::SharedTableCache},
-    state::table::{TableReplicationPhase, TableReplicationPhaseType},
+    state::{TableState, TableStateType},
     store::{PipelineStore, schema::SchemaStore, state::StateStore},
     types::PipelineId,
     workers::{TableCopyResult, TableSyncWorkerState, table_copy},
@@ -108,59 +108,54 @@ where
     // state will be changed by the apply worker only if `SyncWait` is set,
     // which is not the case if we arrive here, so we are good to reduce the
     // length of the critical section.
-    let phase_type = {
+    let state_type = {
         let inner = table_sync_worker_state.lock().await;
-        let phase_type = inner.replication_phase().as_type();
+        let state_type = inner.table_state().as_type();
 
         // In case the work for this table has been already done, we don't want to
         // continue and we successfully return.
         if matches!(
-            phase_type,
-            TableReplicationPhaseType::SyncDone
-                | TableReplicationPhaseType::Ready
-                | TableReplicationPhaseType::Errored
+            state_type,
+            TableStateType::SyncDone | TableStateType::Ready | TableStateType::Errored
         ) {
             warn!(
                 table_id = table_id.0,
-                table_replication_phase_type = %phase_type,
+                table_state_type = %state_type,
                 "initial table sync not required"
             );
 
             return Ok(TableSyncResult::NotRequired);
         }
 
-        // In case the phase is different from the standard phases in which a table sync
+        // In case the state is different from the standard states in which a table sync
         // worker can perform table syncing, we want to return an error.
         if !matches!(
-            phase_type,
-            TableReplicationPhaseType::Init
-                | TableReplicationPhaseType::DataSync
-                | TableReplicationPhaseType::FinishedCopy
+            state_type,
+            TableStateType::Init | TableStateType::DataSync | TableStateType::FinishedCopy
         ) {
             warn!(
                 table_id = table_id.0,
-                table_replication_phase_type = %phase_type,
-                "invalid replication phase for table sync"
+                table_state_type = %state_type,
+                "invalid table state for table sync"
             );
 
             bail!(
                 ErrorKind::InvalidState,
-                "Invalid replication phase",
+                "Invalid table state",
                 format!(
-                    "Invalid replication phase '{:?}': expected 'Init', 'DataSync', or \
-                     'FinishedCopy'",
-                    phase_type
+                    "Invalid table state '{:?}': expected 'Init', 'DataSync', or 'FinishedCopy'",
+                    state_type
                 )
             );
         }
 
-        phase_type
+        state_type
     };
 
     let slot_name: String =
         EtlReplicationSlot::for_table_sync_worker(pipeline_id, table_id).try_into()?;
 
-    // There are three phases from which table sync can start:
+    // There are three states from which table sync can start:
     // - `Init` -> the table sync was never done or the table was reset, so we
     //   perform it.
     // - `DataSync` -> a previous copy did not complete, so we restart the copy from
@@ -172,18 +167,16 @@ where
     //   decoding state, including identity masks, and making handoff safe when no
     //   further `RELATION` message arrives.
     //
-    // In case the phase is any other phase, we will return an error.
-    let start_lsn = match phase_type {
-        TableReplicationPhaseType::Init
-        | TableReplicationPhaseType::DataSync
-        | TableReplicationPhaseType::FinishedCopy => {
+    // In case the state is any other state, we will return an error.
+    let start_lsn = match state_type {
+        TableStateType::Init | TableStateType::DataSync | TableStateType::FinishedCopy => {
             // We must drop the destination table before starting a copy to avoid data
             // inconsistencies when there is a previous table.
             //
             // Example scenario:
             // 1. The source table has a single row (id = 1) that is copied to the
             //    destination during the initial copy.
-            // 2. Before the table's phase is set to `FinishedCopy`, the process crashes.
+            // 2. Before the table's state is set to `FinishedCopy`, the process crashes.
             // 3. While down, the source deletes row id = 1 and inserts row id = 2.
             // 4. When restarted, the process sees the table in the `DataSync` state,
             //    deletes the slot, and copies again.
@@ -222,7 +215,7 @@ where
             info!(table_id = table_id.0, "starting data copy");
             {
                 let mut inner = table_sync_worker_state.lock().await;
-                inner.set_and_store(TableReplicationPhase::DataSync, &store).await?;
+                inner.set_and_store(TableState::DataSync, &store).await?;
             }
 
             // Fail point to test when the table sync fails before copying data.
@@ -363,13 +356,13 @@ where
             // We mark that we finished the copy of the table schema and data.
             {
                 let mut inner = table_sync_worker_state.lock().await;
-                inner.set_and_store(TableReplicationPhase::FinishedCopy, &store).await?;
+                inner.set_and_store(TableState::FinishedCopy, &store).await?;
             }
 
             // After we finished copying, we mark this table as ready in the cache, so
             // that we can start streaming and decoding immediately.
             //
-            // This is needed, since it could be that the apply loop for the `Catchup` phase
+            // This is needed, since it could be that the apply loop for the `Catchup` state
             // might be idle and progress only via keepalives and in that case no `Relation`
             // message will be received, so we want the apply worker to already be able to
             // start decoding.
@@ -377,7 +370,7 @@ where
 
             slot.consistent_point
         }
-        _ => unreachable!("phase type already validated above"),
+        _ => unreachable!("state type already validated above"),
     };
 
     // We mark this worker as `SyncWait` (in memory only) to signal the apply worker
@@ -386,16 +379,16 @@ where
     // LSN.
     {
         let mut inner = table_sync_worker_state.lock().await;
-        inner.set_and_store(TableReplicationPhase::SyncWait { lsn: start_lsn }, &store).await?;
+        inner.set_and_store(TableState::SyncWait { lsn: start_lsn }, &store).await?;
     }
 
     // We also wait to be signaled to catch up with the main apply worker up to a
     // specific lsn.
     let result = table_sync_worker_state
-        .wait_for_phase_type(&[TableReplicationPhaseType::Catchup], shutdown_rx.clone())
+        .wait_for_state_type(&[TableStateType::Catchup], shutdown_rx.clone())
         .await;
 
-    // If we are told to shut down while waiting for a phase change, we will signal
+    // If we are told to shut down while waiting for a state change, we will signal
     // this to the caller.
     if result.should_shutdown() {
         info!(table_id = table_id.0, "shutting down table sync while waiting for catchup");

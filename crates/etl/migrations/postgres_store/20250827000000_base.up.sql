@@ -3,7 +3,7 @@
 -- Ensure etl schema exists (also set by runtime, but safe here)
 create schema if not exists etl;
 
--- Enum for table replication state
+-- Enum for table state
 create type etl.table_state as enum (
     'init',
     'data_sync',
@@ -13,7 +13,7 @@ create type etl.table_state as enum (
     'errored'
 );
 
--- Replication state
+-- Table state
 create table etl.replication_state (
     id bigint generated always as identity primary key,
     pipeline_id bigint not null,

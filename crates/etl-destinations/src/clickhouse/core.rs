@@ -7,7 +7,7 @@ use etl::{
     },
     error::{ErrorKind, EtlResult},
     etl_error,
-    state::destination_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus},
+    state::destination_table_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus},
     store::{schema::SchemaStore, state::StateStore},
     types::{
         Cell, Event, EventSequenceKey, IdentityType, OldTableRow, PgLsn, ReplicatedTableSchema,

@@ -4,79 +4,75 @@ use crate::{
     error::EtlResult,
     replication::WorkerType,
     state::{
-        destination_metadata::{AppliedDestinationTableMetadata, DestinationTableMetadata},
-        table::TableReplicationPhase,
+        TableState,
+        destination_table_metadata::{AppliedDestinationTableMetadata, DestinationTableMetadata},
     },
     types::{PgLsn, TableId},
 };
 
-/// Arc-wrapped dictionary of table replication states.
-pub type TableReplicationStates = Arc<BTreeMap<TableId, TableReplicationPhase>>;
+/// Arc-wrapped dictionary of table states.
+pub type TableStates = Arc<BTreeMap<TableId, TableState>>;
 
 /// Arc-wrapped dictionary of destination table metadata.
 pub(crate) type DestinationTablesMetadata = Arc<BTreeMap<TableId, DestinationTableMetadata>>;
 
-/// Trait for storing and retrieving replication state, durable replication
-/// progress, and destination metadata.
+/// Trait for storing and retrieving table states, durable replication progress,
+/// and destination metadata.
 ///
 /// [`StateStore`] implementations are responsible for defining how table
-/// replication states, replication progress, and destination table metadata are
-/// stored and retrieved.
+/// states, replication progress, and destination table metadata are stored and
+/// retrieved.
 ///
 /// Implementations should ensure thread-safety and handle concurrent access to
 /// the data.
 pub trait StateStore {
-    /// Returns table replication state for table with id `table_id` from the
-    /// cache.
+    /// Returns table state for table with id `table_id` from the cache.
     ///
     /// Does not load any new data into the cache.
-    fn get_table_replication_state(
+    fn get_table_state(
         &self,
         table_id: TableId,
-    ) -> impl Future<Output = EtlResult<Option<TableReplicationPhase>>> + Send;
+    ) -> impl Future<Output = EtlResult<Option<TableState>>> + Send;
 
-    /// Returns the table replication states for all the tables from the cache.
+    /// Returns the table states for all the tables from the cache.
     ///
     /// Does not read from the persistent store.
-    fn get_table_replication_states(
-        &self,
-    ) -> impl Future<Output = EtlResult<TableReplicationStates>> + Send;
+    fn get_table_states(&self) -> impl Future<Output = EtlResult<TableStates>> + Send;
 
-    /// Loads the table replication states from the persistent state into the
-    /// cache.
+    /// Loads the table states from the persistent store into the cache.
     ///
     /// This should be called once at program start to load the state into the
-    /// cache and then use only the `get_X` methods to access the state.
-    /// Updating the state by calling the `update_table_replication_state`
+    /// cache and then use only the `get_X` methods to access the states.
+    /// Updating the state by calling the `update_table_state`
     /// updates in both the cache and the persistent store, so no need to
-    /// ever load the state again.
-    fn load_table_replication_states(&self) -> impl Future<Output = EtlResult<usize>> + Send;
+    /// ever load the states again.
+    fn load_table_states(&self) -> impl Future<Output = EtlResult<usize>> + Send;
 
-    /// Updates multiple table replication states atomically in both the cache
-    /// and the persistent store.
+    /// Updates multiple table states atomically in both the cache and the
+    /// persistent store.
     ///
     /// All state updates are applied as a single atomic operation. If any
     /// update fails, the entire operation is rolled back.
-    fn update_table_replication_states(
+    fn update_table_states(
         &self,
-        updates: Vec<(TableId, TableReplicationPhase)>,
+        updates: Vec<(TableId, TableState)>,
     ) -> impl Future<Output = EtlResult<()>> + Send;
 
-    /// Updates the table replicate state for a table with `table_id` in both
-    /// the cache and the persistent store.
-    fn update_table_replication_state(
+    /// Updates the table state for a table with `table_id` in both the cache
+    /// and the persistent store.
+    fn update_table_state(
         &self,
         table_id: TableId,
-        state: TableReplicationPhase,
+        state: TableState,
     ) -> impl Future<Output = EtlResult<()>> + Send {
-        self.update_table_replication_states(vec![(table_id, state)])
+        self.update_table_states(vec![(table_id, state)])
     }
 
-    /// Rolls back to the previous replication state.
-    fn rollback_table_replication_state(
+    /// Rolls back to the previous table state.
+    fn rollback_table_state(
         &self,
         table_id: TableId,
-    ) -> impl Future<Output = EtlResult<TableReplicationPhase>> + Send;
+    ) -> impl Future<Output = EtlResult<TableState>> + Send;
 
     /// Returns the durable flush LSN for a replication worker, if one has been
     /// stored.
@@ -126,7 +122,7 @@ pub trait StateStore {
         table_id: TableId,
     ) -> impl Future<Output = EtlResult<Option<AppliedDestinationTableMetadata>>> + Send;
 
-    /// Loads all destination table metadata from the persistent state into the
+    /// Loads all destination table metadata from the persistent store into the
     /// cache.
     ///
     /// This should be called during startup to load the metadata into the

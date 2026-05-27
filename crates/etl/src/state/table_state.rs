@@ -1,19 +1,19 @@
 use std::fmt;
 
-use etl_postgres::replication::state::{TableReplicationStateRow, TableReplicationStateType};
+use etl_postgres::replication::table_state::{StoredTableStateType, TableStateRow};
 use serde::{Deserialize, Serialize};
 
 use crate::{
     bail,
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
-    state::table::{RetryPolicy, TableReplicationError},
+    state::{TableError, TableRetryPolicy},
     types::PgLsn,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum TableReplicationPhase {
+pub enum TableState {
     /// Set by the pipeline when it first starts and encounters a table for the
     /// first time.
     Init,
@@ -28,7 +28,7 @@ pub enum TableReplicationPhase {
     /// `Catchup` and waits for the table-sync worker to reach `SyncDone` or
     /// `Errored`.
     ///
-    /// This phase is stored in memory only and not persisted to the state
+    /// This state is stored in memory only and not persisted to the state
     /// store.
     SyncWait {
         /// The LSN of the snapshot used for the initial table copy.
@@ -45,7 +45,7 @@ pub enum TableReplicationPhase {
     /// `SyncWait`. A restarted apply loop that finds an active worker already
     /// in `Catchup` must wait for that worker before reading more WAL.
     ///
-    /// This phase is stored in memory only and not persisted to the state
+    /// This state is stored in memory only and not persisted to the state
     /// store.
     Catchup {
         /// The LSN to catch up before shutting down the table sync worker and
@@ -54,10 +54,10 @@ pub enum TableReplicationPhase {
         lsn: PgLsn,
     },
 
-    /// Set by the table-sync worker when catch-up phase is completed and
+    /// Set by the table-sync worker when catch-up work is completed and the
     /// table-sync worker has caught up with the apply worker's LSN position.
     ///
-    /// The apply worker waits for this phase before continuing to process
+    /// The apply worker waits for this state before continuing to process
     /// events for the table.
     SyncDone {
         /// The LSN up to which the table-sync worker has caught up.
@@ -68,7 +68,7 @@ pub enum TableReplicationPhase {
     },
     /// Set by apply worker when it has caught up with the table-sync worker's
     /// catch-up LSN position. Tables with this state have successfully run
-    /// their initial table copy and catch-up phases and any changes to them
+    /// their initial table copy and catch-up work and any changes to them
     /// will now be applied by the apply worker only.
     Ready,
     /// Set by either the table-sync worker or the apply worker when a table
@@ -80,14 +80,14 @@ pub enum TableReplicationPhase {
         /// Optional suggestion for how to fix the issue.
         solution: Option<String>,
         /// Retry policy specifying how/when to retry.
-        retry_policy: RetryPolicy,
+        retry_policy: TableRetryPolicy,
         /// Original error that triggered the table error state.
         ///
         /// This field is **not persisted** — it is skipped during
         /// serialization and replaced with a generic placeholder on
-        /// deserialization. Code that reads phases from the state store should
+        /// deserialization. Code that reads states from the state store should
         /// not rely on `source_err` containing the original error; it is only
-        /// meaningful for the in-memory lifetime of the phase that produced it.
+        /// meaningful for the in-memory lifetime of the state that produced it.
         #[serde(skip, default = "default_source_err")]
         source_err: EtlError,
     },
@@ -98,38 +98,37 @@ fn default_source_err() -> EtlError {
     etl_error!(ErrorKind::Unknown, "Table replication error restored from state store")
 }
 
-impl TableReplicationPhase {
-    /// Returns this phase's type without associated data.
-    pub fn as_type(&self) -> TableReplicationPhaseType {
+impl TableState {
+    /// Returns this state's type without associated data.
+    pub fn as_type(&self) -> TableStateType {
         self.into()
     }
 
-    /// Returns whether this phase represents an errored state.
+    /// Returns whether this state represents an errored state.
     pub fn is_errored(&self) -> bool {
         matches!(self, Self::Errored { .. })
     }
 
-    /// Converts this phase to the database storage format.
+    /// Converts this state to the database storage format.
     ///
     /// Returns the state type enum and serialized JSON metadata for persisting
-    /// to the state store. Returns an error for in-memory-only phases that
+    /// to the state store. Returns an error for in-memory-only states that
     /// cannot be persisted.
-    pub fn to_storage_format(&self) -> EtlResult<(TableReplicationStateType, serde_json::Value)> {
-        let phase_type = self.as_type();
-        if !phase_type.should_store() {
+    pub fn to_storage_format(&self) -> EtlResult<(StoredTableStateType, serde_json::Value)> {
+        let state_type = self.as_type();
+        if !state_type.should_store() {
             bail!(
                 ErrorKind::InvalidState,
-                "In-memory replication phase cannot be persisted",
-                "In-memory table replication phases (SyncWait, Catchup) cannot be saved to state \
-                 store"
+                "In-memory table state cannot be persisted",
+                "In-memory table states (SyncWait, Catchup) cannot be saved to state store"
             );
         }
 
-        let state_type: TableReplicationStateType = phase_type.try_into()?;
+        let state_type: StoredTableStateType = state_type.try_into()?;
         let metadata = serde_json::to_value(self).map_err(|err| {
             etl_error!(
                 ErrorKind::SerializationError,
-                "Table replication phase serialization failed",
+                "Table state serialization failed",
                 source: err
             )
         })?;
@@ -137,31 +136,30 @@ impl TableReplicationPhase {
         Ok((state_type, metadata))
     }
 
-    /// Deserializes a [`TableReplicationPhase`] from a state store row's
+    /// Deserializes a [`TableState`] from a state store row's
     /// metadata.
-    pub fn from_state_row(row: TableReplicationStateRow) -> EtlResult<Self> {
+    pub fn from_state_row(row: TableStateRow) -> EtlResult<Self> {
         let Some(metadata) = row.metadata else {
             bail!(
                 ErrorKind::InvalidState,
-                "Table replication state not found",
-                "Table replication state does not exist in metadata column in PostgreSQL"
+                "Table state not found",
+                "Table state does not exist in metadata column in PostgreSQL"
             );
         };
 
         serde_json::from_value(metadata).map_err(|err| {
             etl_error!(
                 ErrorKind::DeserializationError,
-                "Table replication state deserialization failed",
+                "Table state deserialization failed",
                 format!(
-                    "Failed to deserialize table replication state from metadata column in \
-                     PostgreSQL: {err}"
+                    "Failed to deserialize table state from metadata column in PostgreSQL: {err}"
                 )
             )
         })
     }
 }
 
-impl fmt::Display for TableReplicationPhase {
+impl fmt::Display for TableState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Init => write!(f, "init"),
@@ -176,8 +174,8 @@ impl fmt::Display for TableReplicationPhase {
     }
 }
 
-impl From<TableReplicationError> for TableReplicationPhase {
-    fn from(value: TableReplicationError) -> Self {
+impl From<TableError> for TableState {
+    fn from(value: TableError) -> Self {
         Self::Errored {
             reason: value.reason,
             solution: value.solution,
@@ -187,10 +185,10 @@ impl From<TableReplicationError> for TableReplicationPhase {
     }
 }
 
-/// A variant of [`TableReplicationPhase`] that can be used to determine the
-/// current phase of a table without having to pattern match on the data fields.
+/// A variant of [`TableState`] that can be used to determine the
+/// current state of a table without having to pattern match on the data fields.
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
-pub enum TableReplicationPhaseType {
+pub enum TableStateType {
     Init,
     DataSync,
     FinishedCopy,
@@ -201,8 +199,8 @@ pub enum TableReplicationPhaseType {
     Errored,
 }
 
-impl TableReplicationPhaseType {
-    /// Returns `true` if the phase should be saved into the state store,
+impl TableStateType {
+    /// Returns `true` if the state should be saved into the state store,
     /// `false` otherwise.
     pub fn should_store(&self) -> bool {
         match self {
@@ -217,7 +215,7 @@ impl TableReplicationPhaseType {
         }
     }
 
-    /// Returns `true` if a table with this phase is done processing, `false`
+    /// Returns `true` if a table with this state is done processing, `false`
     /// otherwise.
     ///
     /// A table is done processing, when its events are being processed by the
@@ -235,67 +233,64 @@ impl TableReplicationPhaseType {
         }
     }
 
-    /// Returns `true` if a table with this phase is in error, `false`
+    /// Returns `true` if a table with this state is in error, `false`
     /// otherwise.
     pub fn is_errored(&self) -> bool {
         matches!(self, Self::Errored)
     }
 }
 
-impl From<TableReplicationPhaseType> for &'static str {
-    fn from(value: TableReplicationPhaseType) -> Self {
+impl From<TableStateType> for &'static str {
+    fn from(value: TableStateType) -> Self {
         match value {
-            TableReplicationPhaseType::Init => "init",
-            TableReplicationPhaseType::DataSync => "data_sync",
-            TableReplicationPhaseType::FinishedCopy => "finished_copy",
-            TableReplicationPhaseType::SyncWait => "sync_wait",
-            TableReplicationPhaseType::Catchup => "catchup",
-            TableReplicationPhaseType::SyncDone => "sync_done",
-            TableReplicationPhaseType::Ready => "ready",
-            TableReplicationPhaseType::Errored => "errored",
+            TableStateType::Init => "init",
+            TableStateType::DataSync => "data_sync",
+            TableStateType::FinishedCopy => "finished_copy",
+            TableStateType::SyncWait => "sync_wait",
+            TableStateType::Catchup => "catchup",
+            TableStateType::SyncDone => "sync_done",
+            TableStateType::Ready => "ready",
+            TableStateType::Errored => "errored",
         }
     }
 }
 
-impl TryFrom<TableReplicationPhaseType> for TableReplicationStateType {
+impl TryFrom<TableStateType> for StoredTableStateType {
     type Error = EtlError;
 
-    fn try_from(value: TableReplicationPhaseType) -> Result<Self, Self::Error> {
+    fn try_from(value: TableStateType) -> Result<Self, Self::Error> {
         match value {
-            TableReplicationPhaseType::Init => Ok(Self::Init),
-            TableReplicationPhaseType::DataSync => Ok(Self::DataSync),
-            TableReplicationPhaseType::FinishedCopy => Ok(Self::FinishedCopy),
-            TableReplicationPhaseType::SyncDone => Ok(Self::SyncDone),
-            TableReplicationPhaseType::Ready => Ok(Self::Ready),
-            TableReplicationPhaseType::Errored => Ok(Self::Errored),
-            TableReplicationPhaseType::SyncWait | TableReplicationPhaseType::Catchup => {
-                Err(etl_error!(
-                    ErrorKind::InvalidState,
-                    "In-memory replication phase cannot be converted to storage state",
-                    "In-memory table replication phases (SyncWait, Catchup) cannot be saved to \
-                     state store"
-                ))
-            }
+            TableStateType::Init => Ok(Self::Init),
+            TableStateType::DataSync => Ok(Self::DataSync),
+            TableStateType::FinishedCopy => Ok(Self::FinishedCopy),
+            TableStateType::SyncDone => Ok(Self::SyncDone),
+            TableStateType::Ready => Ok(Self::Ready),
+            TableStateType::Errored => Ok(Self::Errored),
+            TableStateType::SyncWait | TableStateType::Catchup => Err(etl_error!(
+                ErrorKind::InvalidState,
+                "In-memory table state cannot be converted to storage state",
+                "In-memory table states (SyncWait, Catchup) cannot be saved to state store"
+            )),
         }
     }
 }
 
-impl From<&TableReplicationPhase> for TableReplicationPhaseType {
-    fn from(phase: &TableReplicationPhase) -> Self {
-        match phase {
-            TableReplicationPhase::Init => Self::Init,
-            TableReplicationPhase::DataSync => Self::DataSync,
-            TableReplicationPhase::FinishedCopy => Self::FinishedCopy,
-            TableReplicationPhase::SyncWait { .. } => Self::SyncWait,
-            TableReplicationPhase::Catchup { .. } => Self::Catchup,
-            TableReplicationPhase::SyncDone { .. } => Self::SyncDone,
-            TableReplicationPhase::Ready => Self::Ready,
-            TableReplicationPhase::Errored { .. } => Self::Errored,
+impl From<&TableState> for TableStateType {
+    fn from(state: &TableState) -> Self {
+        match state {
+            TableState::Init => Self::Init,
+            TableState::DataSync => Self::DataSync,
+            TableState::FinishedCopy => Self::FinishedCopy,
+            TableState::SyncWait { .. } => Self::SyncWait,
+            TableState::Catchup { .. } => Self::Catchup,
+            TableState::SyncDone { .. } => Self::SyncDone,
+            TableState::Ready => Self::Ready,
+            TableState::Errored { .. } => Self::Errored,
         }
     }
 }
 
-impl fmt::Display for TableReplicationPhaseType {
+impl fmt::Display for TableStateType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let value: &'static str = (*self).into();
         f.write_str(value)
@@ -325,38 +320,38 @@ mod lsn_serde {
 
 #[cfg(test)]
 mod tests {
-    use etl_postgres::replication::state;
+    use etl_postgres::replication::table_state;
     use tokio_postgres::types::PgLsn;
 
     use crate::{
         error::ErrorKind,
         etl_error,
-        state::table::{RetryPolicy, TableReplicationPhase, TableReplicationPhaseType},
+        state::{TableRetryPolicy, TableState, TableStateType},
     };
 
     #[test]
-    fn table_replication_phase_serialization() {
-        let init = TableReplicationPhase::Init;
+    fn table_state_serialization() {
+        let init = TableState::Init;
         let json = serde_json::to_value(&init).unwrap();
         assert_eq!(json, serde_json::json!({"type": "init"}));
-        let deserialized: TableReplicationPhase = serde_json::from_value(json).unwrap();
-        assert!(matches!(deserialized, TableReplicationPhase::Init));
+        let deserialized: TableState = serde_json::from_value(json).unwrap();
+        assert!(matches!(deserialized, TableState::Init));
 
         let lsn = "0/1000000".parse::<PgLsn>().unwrap();
-        let sync_done = TableReplicationPhase::SyncDone { lsn };
+        let sync_done = TableState::SyncDone { lsn };
         let json = serde_json::to_value(&sync_done).unwrap();
         assert_eq!(json, serde_json::json!({"type": "sync_done", "lsn": "0/1000000"}));
-        let deserialized: TableReplicationPhase = serde_json::from_value(json).unwrap();
-        if let TableReplicationPhase::SyncDone { lsn: got } = deserialized {
+        let deserialized: TableState = serde_json::from_value(json).unwrap();
+        if let TableState::SyncDone { lsn: got } = deserialized {
             assert_eq!(got, lsn);
         } else {
             panic!("Expected SyncDone variant");
         }
 
-        let errored = TableReplicationPhase::Errored {
+        let errored = TableState::Errored {
             reason: "Test error".to_owned(),
             solution: Some("Test solution".to_owned()),
-            retry_policy: RetryPolicy::NoRetry,
+            retry_policy: TableRetryPolicy::NoRetry,
             source_err: etl_error!(ErrorKind::Unknown, "Test"),
         };
         let json = serde_json::to_value(&errored).unwrap();
@@ -371,88 +366,87 @@ mod tests {
         );
         assert!(!json.to_string().contains("source_err"));
 
-        let deserialized: TableReplicationPhase = serde_json::from_value(json).unwrap();
-        if let TableReplicationPhase::Errored { reason, solution, retry_policy, .. } = deserialized
-        {
+        let deserialized: TableState = serde_json::from_value(json).unwrap();
+        if let TableState::Errored { reason, solution, retry_policy, .. } = deserialized {
             assert_eq!(reason, "Test error");
             assert_eq!(solution, Some("Test solution".to_owned()));
-            assert!(matches!(retry_policy, RetryPolicy::NoRetry));
+            assert!(matches!(retry_policy, TableRetryPolicy::NoRetry));
         } else {
             panic!("Expected Errored variant");
         }
     }
 
     #[test]
-    fn to_storage_format_rejects_memory_only_phases() {
-        let sync_wait = TableReplicationPhase::SyncWait { lsn: "0/1000".parse::<PgLsn>().unwrap() };
+    fn to_storage_format_rejects_memory_only_states() {
+        let sync_wait = TableState::SyncWait { lsn: "0/1000".parse::<PgLsn>().unwrap() };
         assert!(sync_wait.to_storage_format().is_err());
 
-        let catchup = TableReplicationPhase::Catchup { lsn: "0/2000".parse::<PgLsn>().unwrap() };
+        let catchup = TableState::Catchup { lsn: "0/2000".parse::<PgLsn>().unwrap() };
         assert!(catchup.to_storage_format().is_err());
     }
 
     #[test]
-    fn phase_type_converts_to_static_label() {
-        let label: &'static str = TableReplicationPhaseType::Ready.into();
+    fn state_type_converts_to_static_label() {
+        let label: &'static str = TableStateType::Ready.into();
 
         assert_eq!(label, "ready");
     }
 
     #[test]
-    fn phase_type_converts_to_postgres_state_type() {
-        let state_type: state::TableReplicationStateType =
-            TableReplicationPhaseType::Ready.try_into().unwrap();
+    fn state_type_converts_to_postgres_state_type() {
+        let state_type: table_state::StoredTableStateType =
+            TableStateType::Ready.try_into().unwrap();
 
-        assert_eq!(state_type, state::TableReplicationStateType::Ready);
+        assert_eq!(state_type, table_state::StoredTableStateType::Ready);
     }
 
     #[test]
     fn from_state_row_fails_on_missing_metadata() {
-        let row = state::TableReplicationStateRow {
+        let row = table_state::TableStateRow {
             id: 1,
             pipeline_id: 1,
             table_id: sqlx::postgres::types::Oid(42),
-            state: state::TableReplicationStateType::Init,
+            state: table_state::StoredTableStateType::Init,
             metadata: None,
             prev: None,
             is_current: true,
         };
-        assert!(TableReplicationPhase::from_state_row(row).is_err());
+        assert!(TableState::from_state_row(row).is_err());
     }
 
     #[test]
     fn from_state_row_fails_on_invalid_json() {
-        let row = state::TableReplicationStateRow {
+        let row = table_state::TableStateRow {
             id: 1,
             pipeline_id: 1,
             table_id: sqlx::postgres::types::Oid(42),
-            state: state::TableReplicationStateType::Init,
+            state: table_state::StoredTableStateType::Init,
             metadata: Some(serde_json::json!({"type": "nonexistent_variant"})),
             prev: None,
             is_current: true,
         };
-        assert!(TableReplicationPhase::from_state_row(row).is_err());
+        assert!(TableState::from_state_row(row).is_err());
     }
 
     #[test]
     fn from_state_row_round_trip() {
-        let phases = vec![
-            TableReplicationPhase::Init,
-            TableReplicationPhase::DataSync,
-            TableReplicationPhase::FinishedCopy,
-            TableReplicationPhase::SyncDone { lsn: "0/1000000".parse::<PgLsn>().unwrap() },
-            TableReplicationPhase::Ready,
-            TableReplicationPhase::Errored {
+        let states = vec![
+            TableState::Init,
+            TableState::DataSync,
+            TableState::FinishedCopy,
+            TableState::SyncDone { lsn: "0/1000000".parse::<PgLsn>().unwrap() },
+            TableState::Ready,
+            TableState::Errored {
                 reason: "broken".to_owned(),
                 solution: Some("fix it".to_owned()),
-                retry_policy: RetryPolicy::ManualRetry,
+                retry_policy: TableRetryPolicy::ManualRetry,
                 source_err: etl_error!(ErrorKind::Unknown, "Test"),
             },
         ];
 
-        for phase in phases {
-            let (state_type, metadata) = phase.to_storage_format().unwrap();
-            let row = state::TableReplicationStateRow {
+        for state in states {
+            let (state_type, metadata) = state.to_storage_format().unwrap();
+            let row = table_state::TableStateRow {
                 id: 1,
                 pipeline_id: 1,
                 table_id: sqlx::postgres::types::Oid(42),
@@ -461,27 +455,16 @@ mod tests {
                 prev: None,
                 is_current: true,
             };
-            let restored = TableReplicationPhase::from_state_row(row).unwrap();
+            let restored = TableState::from_state_row(row).unwrap();
 
-            assert_eq!(phase.as_type(), restored.as_type());
-            match (&phase, &restored) {
+            assert_eq!(state.as_type(), restored.as_type());
+            match (&state, &restored) {
+                (TableState::SyncDone { lsn: a }, TableState::SyncDone { lsn: b }) => {
+                    assert_eq!(a, b)
+                }
                 (
-                    TableReplicationPhase::SyncDone { lsn: a },
-                    TableReplicationPhase::SyncDone { lsn: b },
-                ) => assert_eq!(a, b),
-                (
-                    TableReplicationPhase::Errored {
-                        reason: r1,
-                        solution: s1,
-                        retry_policy: rp1,
-                        ..
-                    },
-                    TableReplicationPhase::Errored {
-                        reason: r2,
-                        solution: s2,
-                        retry_policy: rp2,
-                        ..
-                    },
+                    TableState::Errored { reason: r1, solution: s1, retry_policy: rp1, .. },
+                    TableState::Errored { reason: r2, solution: s2, retry_policy: rp2, .. },
                 ) => {
                     assert_eq!(r1, r2);
                     assert_eq!(s1, s2);

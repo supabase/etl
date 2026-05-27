@@ -1,7 +1,7 @@
 use crate::{
     error::{ErrorKind, EtlError},
     etl_error,
-    state::table::RetryPolicy,
+    state::TableRetryPolicy,
     workers::ErrorHandlingPolicy,
 };
 
@@ -10,19 +10,19 @@ use crate::{
 /// Contains diagnostic information including the reason for failure, an
 /// optional solution suggestion, and the retry policy to apply.
 #[derive(Debug)]
-pub struct TableReplicationError {
+pub struct TableError {
     pub(super) reason: String,
     pub(super) solution: Option<String>,
-    pub(super) retry_policy: RetryPolicy,
+    pub(super) retry_policy: TableRetryPolicy,
     pub(super) source_err: EtlError,
 }
 
-impl TableReplicationError {
-    /// Creates a new [`TableReplicationError`] with a suggested solution.
+impl TableError {
+    /// Creates a new [`TableError`] with a suggested solution.
     pub fn with_solution(
         reason: impl ToString,
         solution: impl ToString,
-        retry_policy: RetryPolicy,
+        retry_policy: TableRetryPolicy,
     ) -> Self {
         let reason = reason.to_string();
         Self {
@@ -33,8 +33,8 @@ impl TableReplicationError {
         }
     }
 
-    /// Creates a new [`TableReplicationError`] without a suggested solution.
-    pub fn without_solution(reason: impl ToString, retry_policy: RetryPolicy) -> Self {
+    /// Creates a new [`TableError`] without a suggested solution.
+    pub fn without_solution(reason: impl ToString, retry_policy: TableRetryPolicy) -> Self {
         let reason = reason.to_string();
         Self {
             reason: reason.clone(),
@@ -45,22 +45,22 @@ impl TableReplicationError {
     }
 
     /// Returns the retry policy for this error.
-    pub fn retry_policy(&self) -> &RetryPolicy {
+    pub fn retry_policy(&self) -> &TableRetryPolicy {
         &self.retry_policy
     }
 
     /// Returns a copy of the error with the provided retry policy.
-    pub fn with_retry_policy(mut self, retry_policy: RetryPolicy) -> Self {
+    pub fn with_retry_policy(mut self, retry_policy: TableRetryPolicy) -> Self {
         self.retry_policy = retry_policy;
         self
     }
 
-    /// Builds a [`TableReplicationError`] from a shared handling policy and
+    /// Builds a [`TableError`] from a shared handling policy and
     /// worker retry policy.
     pub(crate) fn from_error_policy(
         error: &EtlError,
         policy: &ErrorHandlingPolicy,
-        retry_policy: RetryPolicy,
+        retry_policy: TableRetryPolicy,
     ) -> Self {
         match policy.solution() {
             Some(solution) => {

@@ -6,10 +6,7 @@ use etl::{
     error::ErrorKind,
     etl_error,
     replication::WorkerType,
-    state::{
-        destination_metadata::DestinationTableMetadata,
-        table::{RetryPolicy, TableReplicationPhase},
-    },
+    state::{TableRetryPolicy, TableState, destination_table_metadata::DestinationTableMetadata},
     store::{
         TableLifecycleStore,
         both::postgres::PostgresStore,
@@ -79,49 +76,49 @@ async fn state_store_operations() {
     let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
 
     // Test initial state - should be empty
-    let state = store.get_table_replication_state(table_id).await.unwrap();
+    let state = store.get_table_state(table_id).await.unwrap();
     assert!(state.is_none());
 
-    let all_states = store.get_table_replication_states().await.unwrap();
+    let all_states = store.get_table_states().await.unwrap();
     assert!(all_states.is_empty());
 
     // Test updating state
-    let init_phase = TableReplicationPhase::Init;
-    store.update_table_replication_state(table_id, init_phase.clone()).await.unwrap();
+    let init_state = TableState::Init;
+    store.update_table_state(table_id, init_state.clone()).await.unwrap();
 
-    let state = store.get_table_replication_state(table_id).await.unwrap();
-    assert_eq!(state, Some(init_phase.clone()));
+    let state = store.get_table_state(table_id).await.unwrap();
+    assert_eq!(state, Some(init_state.clone()));
 
-    let all_states = store.get_table_replication_states().await.unwrap();
+    let all_states = store.get_table_states().await.unwrap();
     assert_eq!(all_states.len(), 1);
-    assert_eq!(all_states.get(&table_id), Some(&init_phase));
+    assert_eq!(all_states.get(&table_id), Some(&init_state));
 
     // Test updating to a different state
-    let data_sync_phase = TableReplicationPhase::DataSync;
-    store.update_table_replication_state(table_id, data_sync_phase.clone()).await.unwrap();
+    let data_sync_state = TableState::DataSync;
+    store.update_table_state(table_id, data_sync_state.clone()).await.unwrap();
 
-    let state = store.get_table_replication_state(table_id).await.unwrap();
-    assert_eq!(state, Some(data_sync_phase.clone()));
+    let state = store.get_table_state(table_id).await.unwrap();
+    assert_eq!(state, Some(data_sync_state.clone()));
 
     // Test SyncDone state with LSN
     let lsn = "0/1000000".parse::<PgLsn>().unwrap();
-    let sync_done_phase = TableReplicationPhase::SyncDone { lsn };
-    store.update_table_replication_state(table_id, sync_done_phase.clone()).await.unwrap();
+    let sync_done_state = TableState::SyncDone { lsn };
+    store.update_table_state(table_id, sync_done_state.clone()).await.unwrap();
 
-    let state = store.get_table_replication_state(table_id).await.unwrap();
-    assert_eq!(state, Some(sync_done_phase));
+    let state = store.get_table_state(table_id).await.unwrap();
+    assert_eq!(state, Some(sync_done_state));
 
     // Test Errored state with retry policy
-    let errored_phase = TableReplicationPhase::Errored {
+    let errored_state = TableState::Errored {
         reason: "Test error".to_owned(),
         solution: Some("Test solution".to_owned()),
-        retry_policy: RetryPolicy::ManualRetry,
+        retry_policy: TableRetryPolicy::ManualRetry,
         source_err: etl_error!(ErrorKind::Unknown, "Test error"),
     };
-    store.update_table_replication_state(table_id, errored_phase.clone()).await.unwrap();
+    store.update_table_state(table_id, errored_state.clone()).await.unwrap();
 
-    let state = store.get_table_replication_state(table_id).await.unwrap();
-    assert_eq!(state, Some(errored_phase));
+    let state = store.get_table_state(table_id).await.unwrap();
+    assert_eq!(state, Some(errored_state));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -135,12 +132,12 @@ async fn state_store_rollback() {
     let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
 
     // Set initial state
-    let init_phase = TableReplicationPhase::Init;
-    store.update_table_replication_state(table_id, init_phase.clone()).await.unwrap();
+    let init_state = TableState::Init;
+    store.update_table_state(table_id, init_state.clone()).await.unwrap();
 
     // Update to a different state
-    let data_sync_phase = TableReplicationPhase::DataSync;
-    store.update_table_replication_state(table_id, data_sync_phase.clone()).await.unwrap();
+    let data_sync_state = TableState::DataSync;
+    store.update_table_state(table_id, data_sync_state.clone()).await.unwrap();
 
     // Verify two rows exist before rollback (init + data_sync)
     let pool = connect_to_source_database(&database.config, 1, 1, None)
@@ -157,16 +154,16 @@ async fn state_store_rollback() {
     assert_eq!(count_before, 2);
 
     // Verify current state
-    let state = store.get_table_replication_state(table_id).await.unwrap();
-    assert_eq!(state, Some(data_sync_phase));
+    let state = store.get_table_state(table_id).await.unwrap();
+    assert_eq!(state, Some(data_sync_state));
 
     // Rollback to previous state
-    let rolled_back_state = store.rollback_table_replication_state(table_id).await.unwrap();
-    assert_eq!(rolled_back_state, init_phase);
+    let rolled_back_state = store.rollback_table_state(table_id).await.unwrap();
+    assert_eq!(rolled_back_state, init_state);
 
     // Verify state was rolled back
-    let state = store.get_table_replication_state(table_id).await.unwrap();
-    assert_eq!(state, Some(init_phase));
+    let state = store.get_table_state(table_id).await.unwrap();
+    assert_eq!(state, Some(init_state));
 
     // Verify the rolled-from row was deleted to avoid buildup
     let count_after: i64 = sqlx::query_scalar(
@@ -180,7 +177,7 @@ async fn state_store_rollback() {
     assert_eq!(count_after, 1);
 
     // Test rollback when there's no previous state
-    let result = store.rollback_table_replication_state(table_id).await;
+    let result = store.rollback_table_state(table_id).await;
     assert!(result.is_err());
 }
 
@@ -196,28 +193,28 @@ async fn state_store_load_states() {
     let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
 
     // Add some states directly to the database
-    let init_phase = TableReplicationPhase::Init;
-    let data_sync_phase = TableReplicationPhase::DataSync;
+    let init_state = TableState::Init;
+    let data_sync_state = TableState::DataSync;
 
-    store.update_table_replication_state(table_id1, init_phase.clone()).await.unwrap();
-    store.update_table_replication_state(table_id2, data_sync_phase.clone()).await.unwrap();
+    store.update_table_state(table_id1, init_state.clone()).await.unwrap();
+    store.update_table_state(table_id2, data_sync_state.clone()).await.unwrap();
 
     // Create a new store instance (simulating restart)
     let new_store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
 
     // Initially empty (not loaded yet)
-    let states = new_store.get_table_replication_states().await.unwrap();
+    let states = new_store.get_table_states().await.unwrap();
     assert!(states.is_empty());
 
     // Load states from database
-    let loaded_count = new_store.load_table_replication_states().await.unwrap();
+    let loaded_count = new_store.load_table_states().await.unwrap();
     assert_eq!(loaded_count, 2);
 
     // Verify loaded states
-    let states = new_store.get_table_replication_states().await.unwrap();
+    let states = new_store.get_table_states().await.unwrap();
     assert_eq!(states.len(), 2);
-    assert_eq!(states.get(&table_id1), Some(&init_phase));
-    assert_eq!(states.get(&table_id2), Some(&data_sync_phase));
+    assert_eq!(states.get(&table_id1), Some(&init_state));
+    assert_eq!(states.get(&table_id2), Some(&data_sync_state));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -681,14 +678,14 @@ async fn multiple_pipelines_isolation() {
     let store2 = PostgresStore::new(pipeline_id2, database.config.clone()).await.unwrap();
 
     // Test state isolation
-    let init_phase = TableReplicationPhase::Init;
-    store1.update_table_replication_state(table_id, init_phase.clone()).await.unwrap();
+    let init_state = TableState::Init;
+    store1.update_table_state(table_id, init_state.clone()).await.unwrap();
 
-    let data_sync_phase = TableReplicationPhase::DataSync;
-    store2.update_table_replication_state(table_id, data_sync_phase.clone()).await.unwrap();
+    let data_sync_state = TableState::DataSync;
+    store2.update_table_state(table_id, data_sync_state.clone()).await.unwrap();
 
-    assert_eq!(store1.get_table_replication_state(table_id).await.unwrap(), Some(init_phase));
-    assert_eq!(store2.get_table_replication_state(table_id).await.unwrap(), Some(data_sync_phase));
+    assert_eq!(store1.get_table_state(table_id).await.unwrap(), Some(init_state));
+    assert_eq!(store2.get_table_state(table_id).await.unwrap(), Some(data_sync_state));
 
     // Test schema isolation
     let table_schema1 = create_sample_table_schema();
@@ -761,28 +758,28 @@ async fn errored_state_with_different_retry_policies() {
     let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
 
     // Test Errored state with NoRetry policy
-    let errored_no_retry = TableReplicationPhase::Errored {
+    let errored_no_retry = TableState::Errored {
         reason: "Fatal error".to_owned(),
         solution: None,
-        retry_policy: RetryPolicy::NoRetry,
+        retry_policy: TableRetryPolicy::NoRetry,
         source_err: etl_error!(ErrorKind::Unknown, "Test error"),
     };
-    store.update_table_replication_state(table_id, errored_no_retry.clone()).await.unwrap();
+    store.update_table_state(table_id, errored_no_retry.clone()).await.unwrap();
 
-    let state = store.get_table_replication_state(table_id).await.unwrap();
+    let state = store.get_table_state(table_id).await.unwrap();
     assert_eq!(state, Some(errored_no_retry));
 
     // Test Errored state with TimedRetry policy
     let next_retry = chrono::Utc::now() + chrono::Duration::minutes(5);
-    let errored_timed_retry = TableReplicationPhase::Errored {
+    let errored_timed_retry = TableState::Errored {
         reason: "Temporary error".to_owned(),
         solution: Some("Wait and retry".to_owned()),
-        retry_policy: RetryPolicy::TimedRetry { next_retry },
+        retry_policy: TableRetryPolicy::TimedRetry { next_retry },
         source_err: etl_error!(ErrorKind::Unknown, "Test error"),
     };
-    store.update_table_replication_state(table_id, errored_timed_retry.clone()).await.unwrap();
+    store.update_table_state(table_id, errored_timed_retry.clone()).await.unwrap();
 
-    let state = store.get_table_replication_state(table_id).await.unwrap();
+    let state = store.get_table_state(table_id).await.unwrap();
     assert_eq!(state, Some(errored_timed_retry));
 }
 
@@ -797,41 +794,41 @@ async fn state_transitions_and_history() {
     let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
 
     // Create a series of state transitions
-    let init_phase = TableReplicationPhase::Init;
-    store.update_table_replication_state(table_id, init_phase.clone()).await.unwrap();
+    let init_state = TableState::Init;
+    store.update_table_state(table_id, init_state.clone()).await.unwrap();
 
-    let data_sync_phase = TableReplicationPhase::DataSync;
-    store.update_table_replication_state(table_id, data_sync_phase.clone()).await.unwrap();
+    let data_sync_state = TableState::DataSync;
+    store.update_table_state(table_id, data_sync_state.clone()).await.unwrap();
 
-    let finished_copy_phase = TableReplicationPhase::FinishedCopy;
-    store.update_table_replication_state(table_id, finished_copy_phase.clone()).await.unwrap();
+    let finished_copy_state = TableState::FinishedCopy;
+    store.update_table_state(table_id, finished_copy_state.clone()).await.unwrap();
 
     let lsn = "0/2000000".parse::<PgLsn>().unwrap();
-    let sync_done_phase = TableReplicationPhase::SyncDone { lsn };
-    store.update_table_replication_state(table_id, sync_done_phase.clone()).await.unwrap();
+    let sync_done_state = TableState::SyncDone { lsn };
+    store.update_table_state(table_id, sync_done_state.clone()).await.unwrap();
 
-    let ready_phase = TableReplicationPhase::Ready;
-    store.update_table_replication_state(table_id, ready_phase.clone()).await.unwrap();
+    let ready_state = TableState::Ready;
+    store.update_table_state(table_id, ready_state.clone()).await.unwrap();
 
     // Verify final state
-    let state = store.get_table_replication_state(table_id).await.unwrap();
-    assert_eq!(state, Some(ready_phase));
+    let state = store.get_table_state(table_id).await.unwrap();
+    assert_eq!(state, Some(ready_state));
 
     // Test rollback through the history
-    let rolled_back_state = store.rollback_table_replication_state(table_id).await.unwrap();
-    assert_eq!(rolled_back_state, sync_done_phase);
+    let rolled_back_state = store.rollback_table_state(table_id).await.unwrap();
+    assert_eq!(rolled_back_state, sync_done_state);
 
-    let rolled_back_state = store.rollback_table_replication_state(table_id).await.unwrap();
-    assert_eq!(rolled_back_state, finished_copy_phase);
+    let rolled_back_state = store.rollback_table_state(table_id).await.unwrap();
+    assert_eq!(rolled_back_state, finished_copy_state);
 
-    let rolled_back_state = store.rollback_table_replication_state(table_id).await.unwrap();
-    assert_eq!(rolled_back_state, data_sync_phase);
+    let rolled_back_state = store.rollback_table_state(table_id).await.unwrap();
+    assert_eq!(rolled_back_state, data_sync_state);
 
-    let rolled_back_state = store.rollback_table_replication_state(table_id).await.unwrap();
-    assert_eq!(rolled_back_state, init_phase);
+    let rolled_back_state = store.rollback_table_state(table_id).await.unwrap();
+    assert_eq!(rolled_back_state, init_state);
 
     // No more rollbacks possible
-    let result = store.rollback_table_replication_state(table_id).await;
+    let result = store.rollback_table_state(table_id).await;
     assert!(result.is_err());
 }
 
@@ -855,11 +852,8 @@ async fn delete_table_pipeline_state_deletes_state_schema_and_metadata_for_table
     let table_2_id = table_2_schema.id;
 
     // Populate state, schema, and metadata for both tables.
-    store.update_table_replication_state(table_1_id, TableReplicationPhase::Ready).await.unwrap();
-    store
-        .update_table_replication_state(table_2_id, TableReplicationPhase::DataSync)
-        .await
-        .unwrap();
+    store.update_table_state(table_1_id, TableState::Ready).await.unwrap();
+    store.update_table_state(table_2_id, TableState::DataSync).await.unwrap();
 
     store.store_table_schema(table_1_schema.clone()).await.unwrap();
     store.store_table_schema(table_2_schema.clone()).await.unwrap();
@@ -879,7 +873,7 @@ async fn delete_table_pipeline_state_deletes_state_schema_and_metadata_for_table
     store.store_destination_table_metadata(table_2_id, metadata2).await.unwrap();
 
     // Sanity check before deleting state.
-    assert!(store.get_table_replication_state(table_1_id).await.unwrap().is_some());
+    assert!(store.get_table_state(table_1_id).await.unwrap().is_some());
     assert!(store.get_table_schema(&table_1_id, SnapshotId::max()).await.unwrap().is_some());
     assert!(store.get_applied_destination_table_metadata(table_1_id).await.unwrap().is_some());
 
@@ -887,28 +881,28 @@ async fn delete_table_pipeline_state_deletes_state_schema_and_metadata_for_table
     store.delete_table_pipeline_state(table_1_id).await.unwrap();
 
     // Verify in-memory cache for table 1 has been deleted.
-    assert!(store.get_table_replication_state(table_1_id).await.unwrap().is_none());
+    assert!(store.get_table_state(table_1_id).await.unwrap().is_none());
     assert!(store.get_table_schema(&table_1_id, SnapshotId::max()).await.unwrap().is_none());
     assert!(store.get_applied_destination_table_metadata(table_1_id).await.unwrap().is_none());
 
     // Verify other table is unaffected.
-    assert!(store.get_table_replication_state(table_2_id).await.unwrap().is_some());
+    assert!(store.get_table_state(table_2_id).await.unwrap().is_some());
     assert!(store.get_table_schema(&table_2_id, SnapshotId::max()).await.unwrap().is_some());
     assert!(store.get_applied_destination_table_metadata(table_2_id).await.unwrap().is_some());
 
     // Create a new store instance and load from DB to ensure persistence.
     let new_store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
-    new_store.load_table_replication_states().await.unwrap();
+    new_store.load_table_states().await.unwrap();
     new_store.load_table_schemas().await.unwrap();
     new_store.load_destination_tables_metadata().await.unwrap();
 
     // Table 1 should not be present after reload.
-    assert!(new_store.get_table_replication_state(table_1_id).await.unwrap().is_none());
+    assert!(new_store.get_table_state(table_1_id).await.unwrap().is_none());
     assert!(new_store.get_table_schema(&table_1_id, SnapshotId::max()).await.unwrap().is_none());
     assert!(new_store.get_applied_destination_table_metadata(table_1_id).await.unwrap().is_none());
 
     // Table 2 should still be present.
-    assert!(new_store.get_table_replication_state(table_2_id).await.unwrap().is_some());
+    assert!(new_store.get_table_state(table_2_id).await.unwrap().is_some());
     assert!(new_store.get_table_schema(&table_2_id, SnapshotId::max()).await.unwrap().is_some());
     assert!(new_store.get_applied_destination_table_metadata(table_2_id).await.unwrap().is_some());
 }
@@ -932,11 +926,8 @@ async fn clear_table_copy_state_keeps_replication_state_and_deletes_schema_metad
     let other_table_schema = create_another_table_schema();
     let other_table_id = other_table_schema.id;
 
-    store.update_table_replication_state(table_id, TableReplicationPhase::DataSync).await.unwrap();
-    store
-        .update_table_replication_state(other_table_id, TableReplicationPhase::Ready)
-        .await
-        .unwrap();
+    store.update_table_state(table_id, TableState::DataSync).await.unwrap();
+    store.update_table_state(other_table_id, TableState::Ready).await.unwrap();
 
     table_schema.snapshot_id = SnapshotId::initial();
     store.store_table_schema(table_schema.clone()).await.unwrap();
@@ -963,10 +954,7 @@ async fn clear_table_copy_state_keeps_replication_state_and_deletes_schema_metad
 
     store.clear_table_copy_state(table_id).await.unwrap();
 
-    assert_eq!(
-        store.get_table_replication_state(table_id).await.unwrap(),
-        Some(TableReplicationPhase::DataSync)
-    );
+    assert_eq!(store.get_table_state(table_id).await.unwrap(), Some(TableState::DataSync));
     assert!(store.get_table_schema(&table_id, SnapshotId::max()).await.unwrap().is_none());
     assert!(store.get_applied_destination_table_metadata(table_id).await.unwrap().is_none());
     assert!(
@@ -977,14 +965,11 @@ async fn clear_table_copy_state_keeps_replication_state_and_deletes_schema_metad
     assert!(store.get_applied_destination_table_metadata(other_table_id).await.unwrap().is_some());
 
     let new_store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
-    new_store.load_table_replication_states().await.unwrap();
+    new_store.load_table_states().await.unwrap();
     new_store.load_table_schemas().await.unwrap();
     new_store.load_destination_tables_metadata().await.unwrap();
 
-    assert_eq!(
-        new_store.get_table_replication_state(table_id).await.unwrap(),
-        Some(TableReplicationPhase::DataSync)
-    );
+    assert_eq!(new_store.get_table_state(table_id).await.unwrap(), Some(TableState::DataSync));
     assert!(new_store.get_table_schema(&table_id, SnapshotId::max()).await.unwrap().is_none());
     assert!(new_store.get_applied_destination_table_metadata(table_id).await.unwrap().is_none());
     assert!(

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use etl::{
-    state::destination_metadata::DestinationTableMetadata,
+    state::destination_table_metadata::DestinationTableMetadata,
     store::{schema::SchemaStore, state::StateStore},
     test_utils::notifying_store::NotifyingStore,
     types::{

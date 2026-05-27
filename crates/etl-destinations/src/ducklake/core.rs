@@ -16,7 +16,7 @@ use etl::{
     },
     error::{ErrorKind, EtlResult},
     etl_error,
-    state::destination_metadata::DestinationTableMetadata,
+    state::destination_table_metadata::DestinationTableMetadata,
     store::DestinationStore,
     types::{
         Event, EventSequenceKey, OldTableRow, PartialTableRow, ReplicatedTableSchema, TableId,

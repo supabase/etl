@@ -12,7 +12,7 @@ use etl::{
     },
     error::{ErrorKind, EtlResult},
     etl_error,
-    state::destination_metadata::DestinationTableMetadata,
+    state::destination_table_metadata::DestinationTableMetadata,
     store::SharedStateStore,
     types::{
         Cell, ColumnSchema, Event, IdentityType, OldTableRow, ReplicatedTableSchema, TableId,

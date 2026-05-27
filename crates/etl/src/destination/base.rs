@@ -114,7 +114,7 @@ pub trait Destination {
     /// the apply loop has already gone away, sending the result will fail
     /// and may be treated as an implicit cancellation.
     ///
-    /// During the initial copy phase, transaction boundaries are not a stable
+    /// During the initial copy stage, transaction boundaries are not a stable
     /// global invariant across all tables. A source transaction may be
     /// split across multiple streaming deliveries as some tables are
     /// already ready for streaming and others are still being copied. In
