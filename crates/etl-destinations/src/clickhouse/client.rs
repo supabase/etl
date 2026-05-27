@@ -192,20 +192,52 @@ impl ClickHouseClient {
         database: impl Into<String>,
         config: ClickHouseClientConfig,
     ) -> Self {
-        let mut client =
-            Client::default().with_url(url.to_string()).with_user(user).with_database(database);
+        Self::build(url, user, Some(database.into()), password, config)
+    }
 
-        if let Some(pw) = password {
-            client = client.with_password(pw);
+    /// Variant of [`Self::new`] that does not pin the client to a target
+    /// database. The server falls back to the user's profile default
+    /// database for every query, which lets the validator probe
+    /// connectivity / auth / database existence before the user-supplied
+    /// database is known to exist.
+    pub fn new_without_database(
+        url: Url,
+        user: impl Into<String>,
+        password: Option<String>,
+        config: ClickHouseClientConfig,
+    ) -> Self {
+        Self::build(url, user, None, password, config)
+    }
+
+    fn build(
+        url: Url,
+        user: impl Into<String>,
+        database: Option<String>,
+        password: Option<String>,
+        config: ClickHouseClientConfig,
+    ) -> Self {
+        Self {
+            inner: Arc::new({
+                let client = Client::default().with_url(url.to_string()).with_user(user);
+                let client = match database {
+                    Some(database) => client.with_database(database),
+                    None => client,
+                };
+                let client = match password {
+                    Some(password) => client.with_password(password),
+                    None => client,
+                };
+                client
+                    .with_option("connect_timeout", floor_secs(config.connectivity_check_timeout))
+                    .with_option(
+                        "http_connection_timeout",
+                        floor_secs(config.connectivity_check_timeout),
+                    )
+                    .with_option("http_send_timeout", floor_secs(config.insert_timeout))
+                    .with_option("http_receive_timeout", floor_secs(config.insert_timeout))
+            }),
+            config,
         }
-
-        client = client
-            .with_option("connect_timeout", floor_secs(config.connectivity_check_timeout))
-            .with_option("http_connection_timeout", floor_secs(config.connectivity_check_timeout))
-            .with_option("http_send_timeout", floor_secs(config.insert_timeout))
-            .with_option("http_receive_timeout", floor_secs(config.insert_timeout));
-
-        Self { inner: Arc::new(client), config }
     }
 
     /// Verifies that the ClickHouse server is reachable.
@@ -227,6 +259,28 @@ impl ClickHouseClient {
         )
         .await?;
         Ok(())
+    }
+
+    /// Returns whether `database` exists on the ClickHouse server.
+    ///
+    /// Queries `system.databases` directly so the result is independent of
+    /// the client's configured database. Pair with
+    /// [`Self::new_without_database`] to probe existence of a database
+    /// whose presence is unknown.
+    pub async fn database_exists(&self, database: &str) -> EtlResult<bool> {
+        let query = self
+            .inner
+            .query("SELECT count() FROM system.databases WHERE name = ?")
+            .bind(database)
+            .with_option("max_execution_time", floor_secs(self.config.connectivity_check_timeout));
+        let count = timeout_call(
+            ClickHouseOperationKind::ConnectivityCheck,
+            &self.config,
+            Some(&format!("database: {database}")),
+            query.fetch_one::<u64>(),
+        )
+        .await?;
+        Ok(count > 0)
     }
 
     /// Returns the major/minor version pair from `SELECT version()`.
