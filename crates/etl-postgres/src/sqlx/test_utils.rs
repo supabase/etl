@@ -54,13 +54,13 @@ pub async fn drop_pg_database(config: &PgConnectionConfig) {
     if let Err(e) =
         sqlx::query(AssertSqlSafe(terminate_connections_query)).execute(&mut connection).await
     {
-        eprintln!("warning: failed to terminate connections for database {}: {}", config.name, e);
+        eprintln!("warning: failed to terminate connections for test database: {e}");
     }
 
     // Drop the database.
     let drop_database_query =
         format!("drop database if exists {};", quote_identifier(&config.name));
     if let Err(e) = sqlx::query(AssertSqlSafe(drop_database_query)).execute(&mut connection).await {
-        eprintln!("warning: failed to drop database {}: {}", config.name, e);
+        eprintln!("warning: failed to drop test database: {e}");
     }
 }
