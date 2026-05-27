@@ -21,8 +21,10 @@ target/
 # macOS system files
 .DS_Store
 
-# mkdocs build directory
+# Docs build directories
+.astro/
 site/
+dist/
 
 # venv files
 /bin/
