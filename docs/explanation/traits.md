@@ -74,13 +74,13 @@ Tracks replication progress and destination table metadata.
 
 ```rust
 pub trait StateStore {
-    // Replication state
-    fn get_table_replication_state(&self, table_id: TableId) -> impl Future<Output = EtlResult<Option<TableReplicationPhase>>> + Send;
-    fn get_table_replication_states(&self) -> impl Future<Output = EtlResult<TableReplicationStates>> + Send;
-    fn load_table_replication_states(&self) -> impl Future<Output = EtlResult<usize>> + Send;
-    fn update_table_replication_states(&self, updates: Vec<(TableId, TableReplicationPhase)>) -> impl Future<Output = EtlResult<()>> + Send;
-    fn update_table_replication_state(&self, table_id: TableId, state: TableReplicationPhase) -> impl Future<Output = EtlResult<()>> + Send;
-    fn rollback_table_replication_state(&self, table_id: TableId) -> impl Future<Output = EtlResult<TableReplicationPhase>> + Send;
+    // Table state
+    fn get_table_state(&self, table_id: TableId) -> impl Future<Output = EtlResult<Option<TableState>>> + Send;
+    fn get_table_states(&self) -> impl Future<Output = EtlResult<TableStates>> + Send;
+    fn load_table_states(&self) -> impl Future<Output = EtlResult<usize>> + Send;
+    fn update_table_states(&self, updates: Vec<(TableId, TableState)>) -> impl Future<Output = EtlResult<()>> + Send;
+    fn update_table_state(&self, table_id: TableId, state: TableState) -> impl Future<Output = EtlResult<()>> + Send;
+    fn rollback_table_state(&self, table_id: TableId) -> impl Future<Output = EtlResult<TableState>> + Send;
 
     // Durable replication progress
     fn get_replication_progress(&self, worker_type: WorkerType) -> impl Future<Output = EtlResult<Option<PgLsn>>> + Send;
@@ -95,16 +95,16 @@ pub trait StateStore {
 }
 ```
 
-### Replication State Methods
+### Table State Methods
 
 | Method | Purpose |
 |--------|---------|
-| `get_table_replication_state()` | Returns current phase for a table from cache |
-| `get_table_replication_states()` | Returns phases for all tables from cache as [`TableReplicationStates`] |
-| `load_table_replication_states()` | Loads phases from persistent storage into cache. Call once at startup. Returns the number of states loaded |
-| `update_table_replication_states()` | Atomically updates multiple table phases in both cache and persistent storage |
-| `update_table_replication_state()` | Updates phase in both cache and persistent storage |
-| `rollback_table_replication_state()` | Reverts table to previous phase. Returns the phase after rollback |
+| `get_table_state()` | Returns current state for a table from cache |
+| `get_table_states()` | Returns states for all tables from cache as [`TableStates`] |
+| `load_table_states()` | Loads states from persistent storage into cache. Call once at startup. Returns the number of states loaded |
+| `update_table_states()` | Atomically updates multiple table states in both cache and persistent storage |
+| `update_table_state()` | Updates state in both cache and persistent storage |
+| `rollback_table_state()` | Reverts table to previous state. Returns the state after rollback |
 
 ### Durable Progress Methods
 
@@ -129,11 +129,11 @@ Destination table metadata connects source table IDs to destination state, inclu
 | `load_destination_tables_metadata()` | Loads destination table metadata from persistent storage into cache |
 | `store_destination_table_metadata()` | Saves destination table metadata to both cache and persistent storage |
 
-### Table Replication Phases
+### Table States
 
-Tables progress through these phases:
+Tables progress through these states:
 
-| Phase | Persisted | Description |
+| State | Persisted | Description |
 |-------|-----------|-------------|
 | `Init` | Yes | Table discovered, ready to start |
 | `DataSync` | Yes | Initial data being copied |
@@ -157,7 +157,7 @@ pub trait TableLifecycleStore {
 
 | Method | Purpose |
 |--------|---------|
-| `clear_table_copy_state()` | Clears destination metadata, schema versions, and durable table-sync progress while preserving the table replication phase. This is called only after the destination object was dropped for a fresh copy |
+| `clear_table_copy_state()` | Clears destination metadata, schema versions, and durable table-sync progress while preserving the table state. This is called only after the destination object was dropped for a fresh copy |
 | `delete_table_pipeline_state()` | Deletes all stored state for a table removed from the publication. Does not modify destination tables |
 
 ## Combining Traits

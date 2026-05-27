@@ -15,7 +15,8 @@ use crate::clickhouse::{
     core::{ClickHouseClientConfig, ClickHouseOperationKind},
     encoding::{ClickHouseValue, encode_to_row_binary},
     metrics::{ETL_CLICKHOUSE_DDL_DURATION_SECONDS, ETL_CLICKHOUSE_INSERT_DURATION_SECONDS},
-    schema::{clickhouse_column_type, quote_identifier},
+    schema::clickhouse_column_type,
+    sql::quote_identifier,
 };
 
 /// Formats a `Duration` as a whole-seconds string for ClickHouse
@@ -522,8 +523,8 @@ mod tests {
 
         assert_eq!(
             sql,
-            "ALTER TABLE \"table\"\"name\" ADD COLUMN IF NOT EXISTS \"new\"\"column\" \
-             Nullable(Int32) AFTER \"old\"\"column\""
+            "ALTER TABLE \"table\\\"name\" ADD COLUMN IF NOT EXISTS \"new\\\"column\" \
+             Nullable(Int32) AFTER \"old\\\"column\""
         );
     }
 
@@ -543,7 +544,7 @@ mod tests {
     fn drop_column_sql_quotes_identifiers() {
         let sql = build_drop_column_sql("table\"name", "old\"column");
 
-        assert_eq!(sql, "ALTER TABLE \"table\"\"name\" DROP COLUMN IF EXISTS \"old\"\"column\"");
+        assert_eq!(sql, "ALTER TABLE \"table\\\"name\" DROP COLUMN IF EXISTS \"old\\\"column\"");
     }
 
     #[test]
@@ -552,8 +553,8 @@ mod tests {
 
         assert_eq!(
             sql,
-            "ALTER TABLE \"table\"\"name\" RENAME COLUMN IF EXISTS \"old\"\"column\" TO \
-             \"new\"\"column\""
+            "ALTER TABLE \"table\\\"name\" RENAME COLUMN IF EXISTS \"old\\\"column\" TO \
+             \"new\\\"column\""
         );
     }
 
@@ -561,21 +562,21 @@ mod tests {
     fn truncate_table_sql_quotes_identifiers() {
         let sql = build_truncate_table_sql("table\"name");
 
-        assert_eq!(sql, "TRUNCATE TABLE IF EXISTS \"table\"\"name\"");
+        assert_eq!(sql, "TRUNCATE TABLE IF EXISTS \"table\\\"name\"");
     }
 
     #[test]
     fn drop_table_sql_quotes_identifiers() {
         let sql = build_drop_table_sql("table\"name");
 
-        assert_eq!(sql, "DROP TABLE IF EXISTS \"table\"\"name\"");
+        assert_eq!(sql, "DROP TABLE IF EXISTS \"table\\\"name\"");
     }
 
     #[test]
     fn insert_rows_sql_quotes_identifiers() {
         let sql = build_insert_rows_sql("table\"name");
 
-        assert_eq!(sql, "INSERT INTO \"table\"\"name\" FORMAT RowBinary");
+        assert_eq!(sql, "INSERT INTO \"table\\\"name\" FORMAT RowBinary");
     }
 
     /// # GIVEN

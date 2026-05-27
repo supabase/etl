@@ -4,7 +4,7 @@
 //! both engines.
 
 use etl::{
-    state::table::TableReplicationPhaseType,
+    state::TableStateType,
     test_utils::{
         database::{spawn_source_database, test_table_name},
         notifying_store::NotifyingStore,
@@ -80,8 +80,7 @@ async fn sequential_transactions_preserve_commit_order_merge_tree() {
             .await,
     );
 
-    let table_ready =
-        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
+    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     let mut pipeline = create_pipeline(
         &database_1.config,

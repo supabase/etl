@@ -2,10 +2,10 @@ use sqlx::{PgExecutor, Type, postgres::types::Oid as SqlxTableId, prelude::FromR
 
 use crate::types::TableId;
 
-/// Database enum type for table replication states.
+/// Database enum type for table states.
 #[derive(Debug, Clone, Copy, Type, PartialEq)]
 #[sqlx(type_name = "etl.table_state", rename_all = "snake_case")]
-pub enum TableReplicationStateType {
+pub enum StoredTableStateType {
     Init,
     DataSync,
     FinishedCopy,
@@ -14,36 +14,36 @@ pub enum TableReplicationStateType {
     Errored,
 }
 
-/// Database row representation of table replication state.
+/// Database row representation of table state.
 #[derive(Debug, FromRow)]
-pub struct TableReplicationStateRow {
+pub struct TableStateRow {
     pub id: i64,
     pub pipeline_id: i64,
     pub table_id: SqlxTableId,
-    pub state: TableReplicationStateType,
+    pub state: StoredTableStateType,
     pub metadata: Option<serde_json::Value>,
     pub prev: Option<i64>,
     pub is_current: bool,
 }
 
-impl TableReplicationStateRow {
+impl TableStateRow {
     /// Returns the state type without deserializing metadata.
-    pub fn state_type(&self) -> TableReplicationStateType {
+    pub fn state_type(&self) -> StoredTableStateType {
         self.state
     }
 }
 
-/// Fetches current replication state rows for a pipeline.
+/// Fetches current table state rows for a pipeline.
 ///
-/// Retrieves the current replication state records of all tables of a pipeline.
-pub async fn get_table_replication_state_rows<'c, E>(
+/// Retrieves the current table state records of all tables of a pipeline.
+pub async fn get_table_state_rows<'c, E>(
     executor: E,
     pipeline_id: i64,
-) -> sqlx::Result<Vec<TableReplicationStateRow>>
+) -> sqlx::Result<Vec<TableStateRow>>
 where
     E: PgExecutor<'c>,
 {
-    let states: Vec<TableReplicationStateRow> = sqlx::query_as(
+    let states: Vec<TableStateRow> = sqlx::query_as(
         r#"
         select id, pipeline_id, table_id, state, metadata, prev, is_current
         from etl.replication_state
@@ -57,15 +57,15 @@ where
     Ok(states)
 }
 
-/// Updates replication state using raw database types.
+/// Updates table state using raw database types.
 ///
 /// Performs the database update with pre-serialized state data and proper
 /// history chaining.
-pub async fn update_replication_state_raw<'c, E>(
+pub async fn update_table_state_raw<'c, E>(
     executor: E,
     pipeline_id: i64,
     table_id: TableId,
-    state: TableReplicationStateType,
+    state: StoredTableStateType,
     metadata: serde_json::Value,
 ) -> sqlx::Result<()>
 where
@@ -99,11 +99,11 @@ where
 ///
 /// Restores the previous state by updating the current flags in the database,
 /// returning the restored state if successful.
-pub async fn rollback_replication_state(
+pub async fn rollback_table_state(
     conn: &mut sqlx::PgConnection,
     pipeline_id: i64,
     table_id: TableId,
-) -> sqlx::Result<Option<TableReplicationStateRow>> {
+) -> sqlx::Result<Option<TableStateRow>> {
     // Get current row and its prev id
     let current_row: Option<(i64, Option<i64>)> = sqlx::query_as(
         r#"
@@ -144,7 +144,7 @@ pub async fn rollback_replication_state(
         .await?;
 
         // Fetch the restored row
-        let restored_row: TableReplicationStateRow = sqlx::query_as(
+        let restored_row: TableStateRow = sqlx::query_as(
             r#"
             select id, pipeline_id, table_id, state, metadata, prev, is_current
             from etl.replication_state
@@ -161,16 +161,16 @@ pub async fn rollback_replication_state(
     Ok(None)
 }
 
-/// Resets table replication state to initial state.
+/// Resets table state to initial state.
 ///
 /// Removes all existing state entries for the table (including history) and
 /// creates a new Init entry, effectively restarting replication from scratch.
 /// Destination table metadata and schemas are preserved for use on restart.
-pub async fn reset_replication_state(
+pub async fn reset_table_state(
     conn: &mut sqlx::PgConnection,
     pipeline_id: i64,
     table_id: TableId,
-) -> sqlx::Result<TableReplicationStateRow> {
+) -> sqlx::Result<TableStateRow> {
     // Delete all existing entries for this pipeline and table
     sqlx::query(
         r#"
@@ -185,7 +185,7 @@ pub async fn reset_replication_state(
 
     // Insert a new `Init` state entry and return it
     let metadata = serde_json::json!({"type": "init"});
-    let row: TableReplicationStateRow = sqlx::query_as(
+    let row: TableStateRow = sqlx::query_as(
         r#"
         insert into etl.replication_state (pipeline_id, table_id, state, metadata, prev, is_current)
         values ($1, $2, $3, $4, null, true)
@@ -194,7 +194,7 @@ pub async fn reset_replication_state(
     )
     .bind(pipeline_id)
     .bind(SqlxTableId(table_id.into_inner()))
-    .bind(TableReplicationStateType::Init)
+    .bind(StoredTableStateType::Init)
     .bind(metadata)
     .fetch_one(&mut *conn)
     .await?;
@@ -202,14 +202,11 @@ pub async fn reset_replication_state(
     Ok(row)
 }
 
-/// Deletes all replication state entries for a pipeline.
+/// Deletes all table state entries for a pipeline.
 ///
-/// Removes all replication state records including historical entries
+/// Removes all table state records including historical entries
 /// for the specified pipeline. Used during pipeline cleanup.
-pub async fn delete_replication_state_for_all_tables<'c, E>(
-    executor: E,
-    pipeline_id: i64,
-) -> sqlx::Result<u64>
+pub async fn delete_table_states<'c, E>(executor: E, pipeline_id: i64) -> sqlx::Result<u64>
 where
     E: PgExecutor<'c>,
 {
@@ -226,8 +223,8 @@ where
     Ok(result.rows_affected())
 }
 
-/// Deletes all replication state entries for a specific table in a pipeline.
-pub async fn delete_replication_state_for_table<'c, E>(
+/// Deletes all table state entries for a specific table in a pipeline.
+pub async fn delete_table_state<'c, E>(
     executor: E,
     pipeline_id: i64,
     table_id: TableId,
@@ -249,7 +246,7 @@ where
     Ok(result.rows_affected())
 }
 
-/// Gets all table IDs that have replication state for a given pipeline.
+/// Gets all table IDs that have table state for a given pipeline.
 ///
 /// Returns a vector of table IDs that are currently being replicated for the
 /// specified pipeline. This is useful for operations that need to act on all

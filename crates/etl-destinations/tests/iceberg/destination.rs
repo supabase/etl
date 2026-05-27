@@ -1,5 +1,5 @@
 use etl::{
-    state::table::TableReplicationPhaseType,
+    state::TableStateType,
     test_utils::{
         database::spawn_source_database,
         notifying_store::NotifyingStore,
@@ -99,16 +99,10 @@ async fn run_table_copy_test(destination_namespace: DestinationNamespace) {
 
     // Register notifications for table copy completion.
     let users_state_notify = store
-        .notify_on_table_state_type(
-            database_schema.users_schema().id,
-            TableReplicationPhaseType::Ready,
-        )
+        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
         .await;
     let orders_state_notify = store
-        .notify_on_table_state_type(
-            database_schema.orders_schema().id,
-            TableReplicationPhaseType::Ready,
-        )
+        .notify_on_table_state_type(database_schema.orders_schema().id, TableStateType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
@@ -254,16 +248,10 @@ async fn run_cdc_streaming_test(destination_namespace: DestinationNamespace) {
 
     // Register notifications for table copy completion (Ready for both tables).
     let users_state_notify = store
-        .notify_on_table_state_type(
-            database_schema.users_schema().id,
-            TableReplicationPhaseType::Ready,
-        )
+        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
         .await;
     let orders_state_notify = store
-        .notify_on_table_state_type(
-            database_schema.orders_schema().id,
-            TableReplicationPhaseType::Ready,
-        )
+        .notify_on_table_state_type(database_schema.orders_schema().id, TableStateType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
@@ -532,16 +520,10 @@ async fn run_cdc_streaming_with_truncate_test(destination_namespace: Destination
 
     // Register notifications for table copy completion (Ready for both tables).
     let users_state_notify = store
-        .notify_on_table_state_type(
-            database_schema.users_schema().id,
-            TableReplicationPhaseType::Ready,
-        )
+        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
         .await;
     let orders_state_notify = store
-        .notify_on_table_state_type(
-            database_schema.orders_schema().id,
-            TableReplicationPhaseType::Ready,
-        )
+        .notify_on_table_state_type(database_schema.orders_schema().id, TableStateType::Ready)
         .await;
 
     pipeline.start().await.unwrap();

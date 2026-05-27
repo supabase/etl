@@ -101,7 +101,7 @@ Each write-like method receives an async result handle. The intent is different 
 
 Persists pipeline state so replication can resume after restarts. Three traits work together:
 
-- **StateStore**: Tracks replication phase per table and destination table metadata
+- **StateStore**: Tracks table state and destination table metadata
 - **SchemaStore**: Stores versioned table schema information (columns, types, primary keys, snapshot IDs) and prunes obsolete schema versions after acknowledged progress
 - **TableLifecycleStore**: Clears copy-scoped state before a table copy restart and removes all stored state when a table leaves the publication
 
@@ -124,11 +124,11 @@ Destinations should use **primary keys** to deduplicate. When writing to the des
 
 The `start_lsn` and `commit_lsn` fields on events are useful for **ordering and checkpointing**. For example, BigQuery destinations use these to maintain correct event order in destination tables. See [Event Types](events.md#understanding-lsn-fields) for details on LSN semantics.
 
-## Table Replication Phases
+## Table States
 
-Each table progresses through these phases:
+Each table progresses through these states:
 
-| Phase | Set By | Description |
+| State | Set By | Description |
 |-------|--------|-------------|
 | **Init** | Pipeline | Table discovered, ready for initial copy |
 | **DataSync** | Table Sync Worker | Initial table copy in progress |

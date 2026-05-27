@@ -10,29 +10,29 @@ use crate::{
     etl_error,
     replication::WorkerType,
     state::{
-        destination_metadata::{AppliedDestinationTableMetadata, DestinationTableMetadata},
-        table::TableReplicationPhase,
+        TableState,
+        destination_table_metadata::{AppliedDestinationTableMetadata, DestinationTableMetadata},
     },
     store::{
         lifecycle::TableLifecycleStore,
         schema::{SchemaStore, TableSchemaRetention, TableSchemaSnapshots},
-        state::{DestinationTablesMetadata, StateStore, TableReplicationStates},
+        state::{DestinationTablesMetadata, StateStore, TableStates},
     },
     types::{PgLsn, SnapshotId, TableId, TableSchema},
 };
 
-/// Inner state of [`MemoryStore`]
+/// Inner state of [`MemoryStore`].
 #[derive(Debug)]
 struct Inner {
-    /// Current replication state for each table - this is the authoritative
+    /// Current table state for each table - this is the authoritative
     /// source of truth for table states. Every table being replicated must
     /// have an entry here.
-    table_replication_states: TableReplicationStates,
+    table_states: TableStates,
     /// Complete history of state transitions for each table, used for debugging
     /// and auditing. This is an append-only log that grows over time and
     /// provides visibility into table state evolution. Entries are
     /// chronologically ordered.
-    table_state_history: HashMap<TableId, Vec<TableReplicationPhase>>,
+    table_state_history: HashMap<TableId, Vec<TableState>>,
     /// Cached table schema snapshots.
     table_schemas: Arc<TableSchemaSnapshots>,
     /// Cached destination table metadata indexed by table ID.
@@ -48,7 +48,7 @@ struct Inner {
 /// keeps all data in memory. This is ideal for testing, development, and
 /// scenarios where persistence is not required.
 ///
-/// All state information including table replication phases, schema
+/// All state information, including table states, schema
 /// definitions, and destination table metadata are stored in memory and will be
 /// lost on process restart.
 #[derive(Debug, Clone)]
@@ -70,10 +70,10 @@ impl MemoryStore {
     ///
     /// The store initializes with empty collections for all state and schema
     /// data. As the pipeline runs, it will populate these collections with
-    /// replication state and schema information.
+    /// table state and schema information.
     pub fn new() -> Self {
         let inner = Inner {
-            table_replication_states: Arc::new(BTreeMap::new()),
+            table_states: Arc::new(BTreeMap::new()),
             table_state_history: HashMap::new(),
             table_schemas: Arc::new(TableSchemaSnapshots::default()),
             destination_tables_metadata: Arc::new(BTreeMap::new()),
@@ -92,7 +92,7 @@ impl MemoryStore {
         let mut inner = self.inner.lock().await;
 
         if matches!(scope, TableStateCleanupScope::PipelineRemoval) {
-            Arc::make_mut(&mut inner.table_replication_states).remove(&table_id);
+            Arc::make_mut(&mut inner.table_states).remove(&table_id);
             inner.table_state_history.remove(&table_id);
         }
 
@@ -111,39 +111,33 @@ impl Default for MemoryStore {
 }
 
 impl StateStore for MemoryStore {
-    async fn get_table_replication_state(
-        &self,
-        table_id: TableId,
-    ) -> EtlResult<Option<TableReplicationPhase>> {
+    async fn get_table_state(&self, table_id: TableId) -> EtlResult<Option<TableState>> {
         let inner = self.inner.lock().await;
 
-        Ok(inner.table_replication_states.get(&table_id).cloned())
+        Ok(inner.table_states.get(&table_id).cloned())
     }
 
-    async fn get_table_replication_states(&self) -> EtlResult<TableReplicationStates> {
+    async fn get_table_states(&self) -> EtlResult<TableStates> {
         let inner = self.inner.lock().await;
 
-        Ok(Arc::clone(&inner.table_replication_states))
+        Ok(Arc::clone(&inner.table_states))
     }
 
-    async fn load_table_replication_states(&self) -> EtlResult<usize> {
+    async fn load_table_states(&self) -> EtlResult<usize> {
         let inner = self.inner.lock().await;
 
-        Ok(inner.table_replication_states.len())
+        Ok(inner.table_states.len())
     }
 
-    async fn update_table_replication_states(
-        &self,
-        updates: Vec<(TableId, TableReplicationPhase)>,
-    ) -> EtlResult<()> {
+    async fn update_table_states(&self, updates: Vec<(TableId, TableState)>) -> EtlResult<()> {
         let mut guard = self.inner.lock().await;
-        // To enable split-borrow (`Arc::make_mut()` borrows `table_replication_states`
+        // To enable split-borrow (`Arc::make_mut()` borrows `table_states`
         // mutably, while `inner.table_state_history` borrows different field).
         let inner = &mut *guard;
 
-        let states = Arc::make_mut(&mut inner.table_replication_states);
+        let states = Arc::make_mut(&mut inner.table_states);
         for (table_id, state) in updates {
-            // Store the current state in history before updating
+            // Store the current state in history before updating.
             if let Some(current_state) = states.get(&table_id).cloned() {
                 inner
                     .table_state_history
@@ -158,13 +152,10 @@ impl StateStore for MemoryStore {
         Ok(())
     }
 
-    async fn rollback_table_replication_state(
-        &self,
-        table_id: TableId,
-    ) -> EtlResult<TableReplicationPhase> {
+    async fn rollback_table_state(&self, table_id: TableId) -> EtlResult<TableState> {
         let mut inner = self.inner.lock().await;
 
-        // Get the previous state from history
+        // Get the previous state from history.
         let previous_state =
             inner.table_state_history.get_mut(&table_id).and_then(Vec::pop).ok_or_else(|| {
                 etl_error!(
@@ -173,8 +164,8 @@ impl StateStore for MemoryStore {
                 )
             })?;
 
-        // Update the current state to the previous state
-        Arc::make_mut(&mut inner.table_replication_states).insert(table_id, previous_state.clone());
+        // Update the current state to the previous state.
+        Arc::make_mut(&mut inner.table_states).insert(table_id, previous_state.clone());
 
         Ok(previous_state)
     }

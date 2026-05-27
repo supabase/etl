@@ -23,7 +23,7 @@ impl<S> DestinationStore for S where S: StateStore + SchemaStore + Clone + Send 
 /// Store capabilities required by the pipeline runtime.
 ///
 /// This is a facade trait for code that needs the full runtime store surface:
-/// replication state, versioned schemas, table lifecycle operations, and the
+/// table state, versioned schemas, table lifecycle operations, and the
 /// concurrency bounds required by worker tasks.
 pub trait PipelineStore:
     StateStore + SchemaStore + TableLifecycleStore + Clone + Send + Sync + 'static

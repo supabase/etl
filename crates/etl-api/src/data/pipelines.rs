@@ -1,6 +1,6 @@
 use std::ops::DerefMut;
 
-use etl_postgres::replication::{destination_metadata, health, schema, slots, state};
+use etl_postgres::replication::{destination_table_metadata, health, schema, slots, table_state};
 use sqlx::{FromRow, PgConnection, PgExecutor, PgPool, PgTransaction};
 use thiserror::Error;
 
@@ -256,10 +256,9 @@ pub async fn delete_pipeline_source_state(
     // Delete state, schema, and destination table metadata from the source
     // database, only if ETL tables exist.
     if health::etl_tables_present(&mut *source_connection).await? {
-        state::delete_replication_state_for_all_tables(&mut *source_connection, pipeline_id)
-            .await?;
+        table_state::delete_table_states(&mut *source_connection, pipeline_id).await?;
         schema::delete_table_schemas_for_all_tables(&mut *source_connection, pipeline_id).await?;
-        destination_metadata::delete_destination_tables_metadata_for_all_tables(
+        destination_table_metadata::delete_destination_tables_metadata_for_all_tables(
             &mut *source_connection,
             pipeline_id,
         )

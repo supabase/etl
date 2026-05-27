@@ -13,7 +13,7 @@ use uuid::Uuid;
 use crate::{
     destination::PipelineDestination,
     pipeline::Pipeline,
-    state::table::TableReplicationPhaseType,
+    state::TableStateType,
     store::PipelineStore,
     test_utils::{
         database::{spawn_source_database, test_table_name},
@@ -331,7 +331,7 @@ pub async fn create_database_and_ready_pipeline_with_table(
     // advance on its own. To properly test all the table sync worker states, we
     // would need a way to programmatically drive execution, but we deemed
     // it too much work compared to the benefit it brings.
-    let ready = store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
+    let ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 

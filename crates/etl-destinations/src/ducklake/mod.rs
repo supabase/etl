@@ -7,6 +7,7 @@ mod external_maintenance;
 mod inline_size;
 mod metrics;
 mod schema;
+mod sql;
 
 /// The DuckDB catalog alias used in every `lake.<table>` qualified name.
 pub(super) const LAKE_CATALOG: &str = "lake";

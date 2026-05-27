@@ -71,17 +71,15 @@ use tracing::info;
 
 use etl::error::EtlResult;
 use etl::replication::WorkerType;
-use etl::state::{
-    AppliedDestinationTableMetadata, DestinationTableMetadata, TableReplicationPhase,
-};
-use etl::store::{SchemaStore, StateStore, TableLifecycleStore, TableReplicationStates};
+use etl::state::{AppliedDestinationTableMetadata, DestinationTableMetadata, TableState};
+use etl::store::{SchemaStore, StateStore, TableLifecycleStore, TableStates};
 use etl::store::schema::TableSchemaRetention;
 use etl::types::{PgLsn, SnapshotId, TableId, TableSchema};
 
 #[derive(Debug, Clone, Default)]
 struct TableEntry {
     schemas: HashMap<SnapshotId, Arc<TableSchema>>,
-    state: Option<TableReplicationPhase>,
+    state: Option<TableState>,
     destination_metadata: Option<DestinationTableMetadata>,
 }
 
@@ -177,17 +175,17 @@ impl SchemaStore for CustomStore {
 }
 
 impl StateStore for CustomStore {
-    async fn get_table_replication_state(
+    async fn get_table_state(
         &self,
         table_id: TableId,
-    ) -> EtlResult<Option<TableReplicationPhase>> {
+    ) -> EtlResult<Option<TableState>> {
         let tables = self.tables.lock().await;
         Ok(tables.get(&table_id).and_then(|e| e.state.clone()))
     }
 
-    async fn get_table_replication_states(
+    async fn get_table_states(
         &self,
-    ) -> EtlResult<TableReplicationStates> {
+    ) -> EtlResult<TableStates> {
         let tables = self.tables.lock().await;
         Ok(Arc::new(
             tables
@@ -197,13 +195,13 @@ impl StateStore for CustomStore {
         ))
     }
 
-    async fn load_table_replication_states(&self) -> EtlResult<usize> {
+    async fn load_table_states(&self) -> EtlResult<usize> {
         Ok(0)
     }
 
-    async fn update_table_replication_states(
+    async fn update_table_states(
         &self,
-        updates: Vec<(TableId, TableReplicationPhase)>,
+        updates: Vec<(TableId, TableState)>,
     ) -> EtlResult<()> {
         let mut tables = self.tables.lock().await;
         for (table_id, state) in updates {
@@ -213,10 +211,10 @@ impl StateStore for CustomStore {
         Ok(())
     }
 
-    async fn rollback_table_replication_state(
+    async fn rollback_table_state(
         &self,
         _table_id: TableId,
-    ) -> EtlResult<TableReplicationPhase> {
+    ) -> EtlResult<TableState> {
         todo!("Implement rollback if needed")
     }
 

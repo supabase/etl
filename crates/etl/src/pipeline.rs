@@ -20,7 +20,7 @@ use crate::{
     metrics::register_metrics,
     migrations,
     replication::{SharedTableCache, client::PgReplicationClient},
-    state::table::TableReplicationPhase,
+    state::TableState,
     store::PipelineStore,
     types::{PipelineId, TableId},
     workers::{ApplyWorker, ApplyWorkerHandle, TableSyncWorkerPool},
@@ -58,7 +58,7 @@ enum PipelineState {
 /// 2. **Continuous replication** - Streams ongoing changes from the replication
 ///    log
 ///
-/// Multiple table sync workers run in parallel during the initial phase, while
+/// Multiple table sync workers run in parallel during the initial stage, while
 /// a single apply worker processes the replication stream of table that were
 /// already copied.
 #[derive(Debug)]
@@ -160,7 +160,7 @@ where
         self.store.load_table_schemas().await?;
 
         // We load the table states by checking the table ids of a publication and
-        // loading/creating the table replication states based on the current
+        // loading/creating the table states based on the current
         // state.
         self.initialize_table_states(&replication_client).await?;
 
@@ -313,12 +313,12 @@ where
         self.wait().await
     }
 
-    /// Initializes table replication states for tables in the publication and
+    /// Initializes table states for tables in the publication and
     /// purges state for tables removed from it.
     ///
     /// Ensures each table currently in the Postgres publication has a
-    /// corresponding replication state; tables without existing states are
-    /// initialized to [`TableReplicationPhase::Init`].
+    /// corresponding table state; tables without existing states are
+    /// initialized to [`TableState::Init`].
     ///
     /// Also detects tables for which we have stored state but are no longer
     /// part of the publication, performs a best-effort cleanup of their table
@@ -382,16 +382,14 @@ where
             }
         }
 
-        // We load the current replication states.
-        self.store.load_table_replication_states().await?;
-        let table_replication_states = self.store.get_table_replication_states().await?;
+        // We load the current table states.
+        self.store.load_table_states().await?;
+        let table_states = self.store.get_table_states().await?;
 
         // Initialize states for newly added tables in the publication
         for table_id in &publication_table_ids {
-            if !table_replication_states.contains_key(table_id) {
-                self.store
-                    .update_table_replication_state(*table_id, TableReplicationPhase::Init)
-                    .await?;
+            if !table_states.contains_key(table_id) {
+                self.store.update_table_state(*table_id, TableState::Init).await?;
             }
         }
 
@@ -400,7 +398,7 @@ where
         // The purging doesn't delete any data in the destination, it just removes
         // internal state for that table.
         let publication_set: HashSet<TableId> = publication_table_ids.iter().copied().collect();
-        for &table_id in table_replication_states.keys() {
+        for &table_id in table_states.keys() {
             if !publication_set.contains(&table_id) {
                 info!(
                     table_id = table_id.0,
