@@ -261,11 +261,11 @@ mod tests {
         let sql = create_merge_tree_sql("sche\"ma_ta\"ble", &schemas);
 
         assert!(
-            sql.contains("CREATE TABLE IF NOT EXISTS \"sche\"\"ma_ta\"\"ble\""),
+            sql.contains("CREATE TABLE IF NOT EXISTS \"sche\\\"ma_ta\\\"ble\""),
             "schema-derived table name should be quoted and escaped: {sql}"
         );
         assert!(
-            sql.contains("\"id\"\"value\" Int32"),
+            sql.contains("\"id\\\"value\" Int32"),
             "column name should be quoted and escaped: {sql}"
         );
     }
@@ -512,7 +512,7 @@ mod tests {
     fn drop_current_view_sql_quotes_view_name() {
         let sql = drop_current_view_sql("public_us\"ers");
 
-        assert_eq!(sql, "DROP VIEW IF EXISTS \"public_us\"\"ers__current\"");
+        assert_eq!(sql, "DROP VIEW IF EXISTS \"public_us\\\"ers__current\"");
     }
 
     #[test]

@@ -460,7 +460,7 @@ mod tests {
             assert_eq!(state.as_type(), restored.as_type());
             match (&state, &restored) {
                 (TableState::SyncDone { lsn: a }, TableState::SyncDone { lsn: b }) => {
-                    assert_eq!(a, b)
+                    assert_eq!(a, b);
                 }
                 (
                     TableState::Errored { reason: r1, solution: s1, retry_policy: rp1, .. },
