@@ -34,6 +34,17 @@ const DELETE_SLOT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Default duration unit used when `pg_settings.unit` is empty.
 const PG_SETTINGS_DEFAULT_DURATION_UNIT: &str = "ms";
 
+/// Builds a rustls client config from PEM-encoded trusted root certificates.
+fn tls_client_config_from_root_certs(trusted_root_certs: &str) -> EtlResult<ClientConfig> {
+    let mut root_store = rustls::RootCertStore::empty();
+    for cert in CertificateDer::pem_slice_iter(trusted_root_certs.as_bytes()) {
+        let cert = cert?;
+        root_store.add(cert)?;
+    }
+
+    Ok(ClientConfig::builder().with_root_certificates(root_store).with_no_client_auth())
+}
+
 /// Spawns a background task to monitor a Postgres connection until it
 /// terminates.
 fn spawn_postgres_connection<T>(
@@ -440,19 +451,8 @@ impl PgReplicationClient {
             pg_connection_config.clone().with_db(Some(&ETL_REPLICATION_OPTIONS));
         config.replication_mode(ReplicationMode::Logical);
 
-        let mut root_store = rustls::RootCertStore::empty();
-        if pg_connection_config.tls.enabled {
-            for cert in CertificateDer::pem_slice_iter(
-                pg_connection_config.tls.trusted_root_certs.as_bytes(),
-            ) {
-                let cert = cert?;
-                root_store.add(cert)?;
-            }
-        };
-
         let tls_config =
-            ClientConfig::builder().with_root_certificates(root_store).with_no_client_auth();
-
+            tls_client_config_from_root_certs(&pg_connection_config.tls.trusted_root_certs)?;
         let (client, connection) = config.connect(MakeRustlsConnect::new(tls_config)).await?;
 
         let server_version =
@@ -493,17 +493,8 @@ impl PgReplicationClient {
         let config: Config =
             self.pg_connection_config.as_ref().clone().with_db(Some(&ETL_REPLICATION_OPTIONS));
 
-        let mut root_store = rustls::RootCertStore::empty();
-        for cert in CertificateDer::pem_slice_iter(
-            self.pg_connection_config.tls.trusted_root_certs.as_bytes(),
-        ) {
-            let cert = cert?;
-            root_store.add(cert)?;
-        }
-
         let tls_config =
-            ClientConfig::builder().with_root_certificates(root_store).with_no_client_auth();
-
+            tls_client_config_from_root_certs(&self.pg_connection_config.tls.trusted_root_certs)?;
         let (client, connection) = config.connect(MakeRustlsConnect::new(tls_config)).await?;
         let connection_updates_rx = spawn_postgres_connection::<MakeRustlsConnect>(connection);
 

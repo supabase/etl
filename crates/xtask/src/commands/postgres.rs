@@ -81,8 +81,6 @@ struct StartArgs {
 
 /// Paths to generated TLS files used by local Postgres containers.
 struct TlsFiles {
-    /// Trusted root certificate used by test clients.
-    root_cert: PathBuf,
     /// Server certificate copied into Postgres containers.
     server_cert: PathBuf,
     /// Server private key copied into Postgres containers.
@@ -136,12 +134,10 @@ impl StartArgs {
             self.wait_for_pg(port)?;
         }
 
-        if let Some(tls_files) = tls_files {
+        if tls_files.is_some() {
             eprintln!(
-                "source Postgres supports TLS using root certificate {}. Local tests use \
-                 plaintext by default; set TESTS_DATABASE_TLS_ENABLED=true to require verified \
-                 TLS.",
-                tls_files.root_cert.display()
+                "source Postgres supports TLS. Local tests use plaintext by default; set \
+                 TESTS_DATABASE_TLS_ENABLED=true to require verified TLS.",
             );
         }
 
@@ -178,7 +174,7 @@ impl StartArgs {
         let server_ext = cert_dir.join(TLS_SERVER_EXT_FILE);
 
         if root_cert.is_file() && server_cert.is_file() && server_key.is_file() {
-            return Ok(TlsFiles { root_cert, server_cert, server_key });
+            return Ok(TlsFiles { server_cert, server_key });
         }
 
         fs::create_dir_all(&cert_dir).context("failed to create Postgres TLS certificate dir")?;
@@ -234,7 +230,7 @@ impl StartArgs {
             path_str(&server_ext)?,
         ])?;
 
-        Ok(TlsFiles { root_cert, server_cert, server_key })
+        Ok(TlsFiles { server_cert, server_key })
     }
 
     fn docker_compose_up(

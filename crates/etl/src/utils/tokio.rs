@@ -28,9 +28,8 @@ mod tests {
         let password =
             std::env::var("TESTS_DATABASE_PASSWORD").unwrap_or_else(|_| "postgres".to_owned());
         let root_cert_path = test_tls_root_cert_path();
-        let trusted_root_certs = std::fs::read_to_string(&root_cert_path).unwrap_or_else(|_| {
-            panic!("Failed to read TESTS_DATABASE_TLS_ROOT_CERT at {}", root_cert_path.display())
-        });
+        let trusted_root_certs = std::fs::read_to_string(&root_cert_path)
+            .expect("Failed to read TESTS_DATABASE_TLS_ROOT_CERT");
 
         let mut root_store = RootCertStore::empty();
         for cert in CertificateDer::pem_slice_iter(trusted_root_certs.as_bytes()) {

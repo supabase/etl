@@ -20,9 +20,8 @@ pub fn local_tls_config_from_env() -> TlsConfig {
     }
 
     let root_cert_path = test_tls_root_cert_path();
-    let trusted_root_certs = std::fs::read_to_string(&root_cert_path).unwrap_or_else(|_| {
-        panic!("Failed to read TESTS_DATABASE_TLS_ROOT_CERT at {}", root_cert_path.display())
-    });
+    let trusted_root_certs = std::fs::read_to_string(&root_cert_path)
+        .expect("Failed to read TESTS_DATABASE_TLS_ROOT_CERT");
 
     TlsConfig { trusted_root_certs, enabled: true }
 }
