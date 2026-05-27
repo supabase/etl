@@ -15,7 +15,8 @@ use crate::clickhouse::{
     core::{ClickHouseClientConfig, ClickHouseOperationKind},
     encoding::{ClickHouseValue, encode_to_row_binary},
     metrics::{ETL_CLICKHOUSE_DDL_DURATION_SECONDS, ETL_CLICKHOUSE_INSERT_DURATION_SECONDS},
-    schema::{clickhouse_column_type, quote_identifier},
+    schema::clickhouse_column_type,
+    sql::quote_identifier,
 };
 
 /// Formats a `Duration` as a whole-seconds string for ClickHouse

@@ -695,7 +695,7 @@ fn validate_iceberg_replica_identity(
     match replicated_table_schema.identity_type() {
         IdentityType::Full => Ok(()),
         identity_type => Err(etl_error!(
-            ErrorKind::SourceSchemaError,
+            ErrorKind::SourceReplicaIdentityError,
             "Iceberg requires full replica identity",
             format!(
                 "Table '{}' uses replica identity {:?}, but Iceberg only supports source tables \
@@ -1004,7 +1004,7 @@ mod tests {
         let replicated_table_schema = replicated_schema(IdentityType::PrimaryKey);
 
         let error = validate_iceberg_replica_identity(&replicated_table_schema).unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::SourceSchemaError);
+        assert_eq!(error.kind(), ErrorKind::SourceReplicaIdentityError);
     }
 
     #[test]
@@ -1012,7 +1012,7 @@ mod tests {
         let replicated_table_schema = replicated_schema(IdentityType::AlternativeKey);
 
         let error = validate_iceberg_replica_identity(&replicated_table_schema).unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::SourceSchemaError);
+        assert_eq!(error.kind(), ErrorKind::SourceReplicaIdentityError);
     }
 
     #[test]
@@ -1020,6 +1020,6 @@ mod tests {
         let replicated_table_schema = replicated_schema(IdentityType::Missing);
 
         let error = validate_iceberg_replica_identity(&replicated_table_schema).unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::SourceSchemaError);
+        assert_eq!(error.kind(), ErrorKind::SourceReplicaIdentityError);
     }
 }

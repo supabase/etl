@@ -5,6 +5,8 @@ use etl::{
 };
 use etl_config::shared::ClickHouseEngine;
 
+use crate::clickhouse::sql::quote_identifier;
+
 /// (For MergeTree engine) CDC operation column.
 pub(crate) const CDC_OPERATION_COLUMN_NAME: &str = "cdc_operation";
 /// (For MergeTree engine) CDC LSN column (commit_lsn).
@@ -73,11 +75,6 @@ fn postgres_array_element_clickhouse_sql(typ: &Type) -> &'static str {
         &Type::OID_ARRAY => "UInt32",
         _ => "String",
     }
-}
-
-/// Quotes a ClickHouse identifier, escaping embedded double quotes.
-pub(crate) fn quote_identifier(identifier: &str) -> String {
-    format!("\"{}\"", identifier.replace('"', "\"\""))
 }
 
 /// Returns the full ClickHouse type string for a column, with Nullable
@@ -248,12 +245,6 @@ pub(super) fn drop_current_view_sql(table_name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn quote_identifier_escapes_embedded_quotes() {
-        assert_eq!(quote_identifier("plain"), "\"plain\"");
-        assert_eq!(quote_identifier("has\"quote"), "\"has\"\"quote\"");
-    }
 
     #[test]
     fn create_merge_tree_sql_quotes_identifiers() {

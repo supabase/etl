@@ -22,7 +22,7 @@ use crate::{
         destination_metadata::{
             AppliedDestinationTableMetadata, DestinationTableMetadata, DestinationTableSchemaStatus,
         },
-        table::TableReplicationPhase,
+        table::{TableReplicationPhase, TableReplicationPhaseType},
     },
     store::{
         lifecycle::TableLifecycleStore,
@@ -75,9 +75,10 @@ fn create_database_pool(config: &PgConnectionConfig) -> PgPool {
 
 /// Emits table-related metrics which quantify the total number of tables in
 /// each phase.
-fn emit_table_metrics(counts_by_phase: &HashMap<&'static str, u64>) {
+fn emit_table_metrics(counts_by_phase: &HashMap<TableReplicationPhaseType, u64>) {
     for (phase, count) in counts_by_phase {
-        gauge!(ETL_TABLES_TOTAL, PHASE_LABEL => *phase).set(*count as f64);
+        let label: &'static str = (*phase).into();
+        gauge!(ETL_TABLES_TOTAL, PHASE_LABEL => label).set(*count as f64);
     }
 }
 
@@ -89,7 +90,7 @@ fn emit_table_metrics(counts_by_phase: &HashMap<&'static str, u64>) {
 #[derive(Debug)]
 struct Inner {
     /// Count of number of tables in each phase. Used for metrics.
-    phase_counts: HashMap<&'static str, u64>,
+    phase_counts: HashMap<TableReplicationPhaseType, u64>,
     /// Cached table replication states indexed by table ID.
     table_states: TableReplicationStates,
     /// Cached table schema snapshots.
@@ -109,7 +110,8 @@ impl Inner {
     fn init_phase_counts(&mut self, table_states: &BTreeMap<TableId, TableReplicationPhase>) {
         let mut phase_counts = HashMap::new();
         for phase in table_states.values() {
-            *phase_counts.entry(phase.as_type().as_static_str()).or_insert(0u64) += 1;
+            let phase_type: TableReplicationPhaseType = phase.into();
+            *phase_counts.entry(phase_type).or_insert(0u64) += 1;
         }
         self.phase_counts = phase_counts;
     }
@@ -120,14 +122,14 @@ impl Inner {
 
         // Decrement old phase count if the state existed.
         if let Some(old_state) = states.get(&table_id) {
-            let old_phase = old_state.as_type().as_static_str();
-            if let Some(count) = self.phase_counts.get_mut(old_phase) {
+            let old_phase: TableReplicationPhaseType = old_state.into();
+            if let Some(count) = self.phase_counts.get_mut(&old_phase) {
                 *count = count.saturating_sub(1);
             }
         }
 
         // Increment new phase count.
-        let new_phase = state.as_type().as_static_str();
+        let new_phase: TableReplicationPhaseType = (&state).into();
         let phase_count = self.phase_counts.entry(new_phase).or_default();
         *phase_count = phase_count.saturating_add(1);
 
@@ -138,8 +140,8 @@ impl Inner {
     fn remove_table_state(&mut self, table_id: TableId) {
         let states = Arc::make_mut(&mut self.table_states);
         if let Some(old_state) = states.remove(&table_id) {
-            let old_phase = old_state.as_type().as_static_str();
-            if let Some(count) = self.phase_counts.get_mut(old_phase) {
+            let old_phase: TableReplicationPhaseType = (&old_state).into();
+            if let Some(count) = self.phase_counts.get_mut(&old_phase) {
                 *count = count.saturating_sub(1);
             }
         }

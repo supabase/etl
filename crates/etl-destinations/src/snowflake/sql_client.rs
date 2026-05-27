@@ -6,7 +6,11 @@ use tracing::{debug, warn};
 
 use crate::{
     retry::{RetryDecision, RetryPolicy, retry_with_backoff},
-    snowflake::{Config, Error, Result, auth::TokenProvider, schema::quote_identifier},
+    snowflake::{
+        Config, Error, Result,
+        auth::TokenProvider,
+        sql::{quote_identifier, quote_string_literal},
+    },
 };
 
 /// Retry policy for transient HTTP errors (408, 429, 5xx) during SQL API calls.
@@ -99,14 +103,13 @@ impl<T: TokenProvider> SqlClient<T> {
     pub async fn table_exists(&self, table_name: &str) -> Result<bool> {
         let db = quote_identifier(&self.config.database);
         let schema = quote_identifier(&self.config.schema);
-        let escaped = table_name
-            .replace('\\', "\\\\")
-            .replace('\'', "''")
-            .replace('_', "\\_")
-            .replace('%', "\\%");
-        let sql = format!("SHOW TABLES LIKE '{escaped}' IN SCHEMA {db}.{schema}");
+        let name_prefix = quote_string_literal(table_name);
+        let sql = format!("SHOW TERSE TABLES IN SCHEMA {db}.{schema} STARTS WITH {name_prefix}");
         let resp = self.execute_statement(&sql).await?;
-        Ok(resp.data.is_some_and(|rows| !rows.is_empty()))
+        Ok(resp.data.is_some_and(|rows| {
+            rows.iter()
+                .any(|row| row.get(1).and_then(serde_json::Value::as_str) == Some(table_name))
+        }))
     }
 
     /// Add a nullable column to an existing table.

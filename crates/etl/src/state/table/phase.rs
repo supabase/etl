@@ -1,248 +1,15 @@
 use std::fmt;
 
-use chrono::{DateTime, Duration, Utc};
-use etl_postgres::replication::state;
+use etl_postgres::replication::state::{TableReplicationStateRow, TableReplicationStateType};
 use serde::{Deserialize, Serialize};
 
 use crate::{
     bail,
-    config::PipelineConfig,
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
-    types::{PgLsn, TableId},
-    workers::ErrorHandlingPolicy,
+    state::table::{RetryPolicy, TableReplicationError},
+    types::PgLsn,
 };
-
-/// Represents an error that occurred during table replication.
-///
-/// Contains diagnostic information including the table that failed, the reason
-/// for failure, an optional solution suggestion, and the retry policy to apply.
-#[derive(Debug)]
-pub struct TableReplicationError {
-    table_id: TableId,
-    reason: String,
-    solution: Option<String>,
-    retry_policy: RetryPolicy,
-    source_err: EtlError,
-}
-
-impl TableReplicationError {
-    /// Creates a new [`TableReplicationError`] with a suggested solution.
-    pub fn with_solution(
-        table_id: TableId,
-        reason: impl ToString,
-        solution: impl ToString,
-        retry_policy: RetryPolicy,
-    ) -> Self {
-        let reason = reason.to_string();
-        Self {
-            table_id,
-            reason: reason.clone(),
-            solution: Some(solution.to_string()),
-            retry_policy,
-            source_err: etl_error!(ErrorKind::Unknown, "Table replication error", reason),
-        }
-    }
-
-    /// Creates a new [`TableReplicationError`] without a suggested solution.
-    pub fn without_solution(
-        table_id: TableId,
-        reason: impl ToString,
-        retry_policy: RetryPolicy,
-    ) -> Self {
-        let reason = reason.to_string();
-        Self {
-            table_id,
-            reason: reason.clone(),
-            solution: None,
-            retry_policy,
-            source_err: etl_error!(ErrorKind::Unknown, "Table replication error", reason),
-        }
-    }
-
-    /// Returns the [`TableId`] of the table that failed replication.
-    pub fn table_id(&self) -> TableId {
-        self.table_id
-    }
-
-    /// Returns the retry policy for this error.
-    pub fn retry_policy(&self) -> &RetryPolicy {
-        &self.retry_policy
-    }
-
-    /// Returns a copy of the error with the provided retry policy.
-    pub fn with_retry_policy(mut self, retry_policy: RetryPolicy) -> Self {
-        self.retry_policy = retry_policy;
-        self
-    }
-
-    /// Converts an [`EtlError`] to a [`TableReplicationError`] for a specific
-    /// table.
-    ///
-    /// Determines appropriate retry policies based on the error kind.
-    ///
-    /// Note that this conversion is constantly improving since during testing
-    /// and operation of ETL we might notice edge cases that could be
-    /// manually handled.
-    pub fn from_etl_error(config: &PipelineConfig, table_id: TableId, error: &EtlError) -> Self {
-        let retry_duration = Duration::milliseconds(config.table_error_retry_delay_ms as i64);
-        let source_err = error.clone();
-        let mut result = match error.kind() {
-            // Errors that can be retried automatically
-            ErrorKind::SourceConnectionFailed
-            | ErrorKind::DestinationConnectionFailed
-            | ErrorKind::DestinationTimeout
-            | ErrorKind::SourceOperationCanceled
-            | ErrorKind::SourceDatabaseShutdown
-            | ErrorKind::SourceLockTimeout
-            | ErrorKind::SourceDatabaseInRecovery => {
-                Self::without_solution(table_id, error, RetryPolicy::retry_in(retry_duration))
-            }
-
-            // Errors with manual retry and explicit solution
-            ErrorKind::SourceAuthenticationError => Self::with_solution(
-                table_id,
-                error,
-                "Verify database credentials and authentication token validity.",
-                RetryPolicy::ManualRetry,
-            ),
-            ErrorKind::SourceSchemaError => Self::with_solution(
-                table_id,
-                error,
-                "Update the Postgres database schema to resolve compatibility issues.",
-                RetryPolicy::ManualRetry,
-            ),
-            ErrorKind::ConfigError => Self::with_solution(
-                table_id,
-                error,
-                "Update the application or service configuration settings.",
-                RetryPolicy::ManualRetry,
-            ),
-            ErrorKind::ReplicationSlotAlreadyExists => Self::with_solution(
-                table_id,
-                error,
-                "Remove the existing replication slot from the Postgres database.",
-                RetryPolicy::ManualRetry,
-            ),
-            ErrorKind::ReplicationSlotNotCreated => Self::with_solution(
-                table_id,
-                error,
-                "Verify the Postgres database allows creation of new replication slots.",
-                RetryPolicy::ManualRetry,
-            ),
-            ErrorKind::SourceConfigurationLimitExceeded => Self::with_solution(
-                table_id,
-                error,
-                "Verify the configured limits for Postgres, for example, the maximum number of \
-                 replication slots.",
-                RetryPolicy::ManualRetry,
-            ),
-            ErrorKind::NullValuesNotSupportedInArrayInDestination => Self::with_solution(
-                table_id,
-                error,
-                "Remove NULL values from array columns in the Postgres tables.",
-                RetryPolicy::ManualRetry,
-            ),
-            ErrorKind::UnsupportedValueInDestination => Self::with_solution(
-                table_id,
-                error,
-                "Update the value in the Postgres table.",
-                RetryPolicy::ManualRetry,
-            ),
-            ErrorKind::SourceSnapshotTooOld => Self::with_solution(
-                table_id,
-                error,
-                "Check replication slot status and database configuration.",
-                RetryPolicy::ManualRetry,
-            ),
-            ErrorKind::CorruptedTableSchema => Self::with_solution(
-                table_id,
-                error,
-                "Reset the table state and restart the replication.",
-                RetryPolicy::ManualRetry,
-            ),
-
-            // Special handling for error kinds used during failure injection.
-            #[cfg(feature = "failpoints")]
-            ErrorKind::WithNoRetry => Self::with_solution(
-                table_id,
-                error,
-                "Cannot retry this error.",
-                RetryPolicy::NoRetry,
-            ),
-            #[cfg(feature = "failpoints")]
-            ErrorKind::WithManualRetry => Self::with_solution(
-                table_id,
-                error,
-                "Manually trigger retry after resolving the issue.",
-                RetryPolicy::ManualRetry,
-            ),
-            #[cfg(feature = "failpoints")]
-            ErrorKind::WithTimedRetry => Self::with_solution(
-                table_id,
-                error,
-                "Will automatically retry after the configured delay.",
-                RetryPolicy::retry_in(retry_duration),
-            ),
-
-            // By default, all errors are retriable but without a solution. The reason for why we do
-            // this is to let customers fix the system on their own, since right now we don't have
-            // a clean understanding of all possible recoverable cases of the system (since we can't
-            // infer that only by looking at the statically defined errors).
-            _ => Self::with_solution(
-                table_id,
-                error,
-                "There is no explicit solution for this error, if the issue persists after \
-                 rollback, please contact support.",
-                RetryPolicy::ManualRetry,
-            ),
-        };
-
-        result.source_err = source_err;
-        result
-    }
-
-    /// Builds a [`TableReplicationError`] from a shared handling policy and
-    /// worker retry policy.
-    pub(crate) fn from_error_policy(
-        table_id: TableId,
-        error: &EtlError,
-        policy: &ErrorHandlingPolicy,
-        retry_policy: RetryPolicy,
-    ) -> Self {
-        match policy.solution() {
-            Some(solution) => Self::with_solution(table_id, error, solution, retry_policy)
-                .with_source_err(error.clone()),
-            None => {
-                Self::without_solution(table_id, error, retry_policy).with_source_err(error.clone())
-            }
-        }
-    }
-
-    /// Returns a copy of the error with the provided source error attached.
-    pub fn with_source_err(mut self, source_err: EtlError) -> Self {
-        self.source_err = source_err;
-        self
-    }
-}
-
-/// Defines the retry strategy for a failed table replication.
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum RetryPolicy {
-    /// No retry should be attempted, the system has to be fixed by hand.
-    NoRetry,
-    /// Retry after it was manually triggered.
-    ManualRetry,
-    /// Retry after the specified timestamp.
-    TimedRetry { next_retry: DateTime<Utc> },
-}
-
-impl RetryPolicy {
-    pub fn retry_in(duration: Duration) -> Self {
-        Self::TimedRetry { next_retry: Utc::now() + duration }
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -267,9 +34,9 @@ pub enum TableReplicationPhase {
         /// The LSN of the snapshot used for the initial table copy.
         ///
         /// This LSN represents the consistent point from which the table sync
-        /// worker will start streaming changes. The apply worker will
-        /// use `max(this LSN, current_lsn)` when setting the Catchup
-        /// LSN to ensure no data loss, following PostgreSQL's pattern.
+        /// worker will start streaming changes. The apply worker will use
+        /// `max(this LSN, current_lsn)` when setting the Catchup LSN to ensure
+        /// no data loss, following PostgreSQL's pattern.
         #[serde(with = "lsn_serde")]
         lsn: PgLsn,
     },
@@ -288,8 +55,7 @@ pub enum TableReplicationPhase {
     },
 
     /// Set by the table-sync worker when catch-up phase is completed and
-    /// table-sync worker has caught up with the apply worker's LSN
-    /// position.
+    /// table-sync worker has caught up with the apply worker's LSN position.
     ///
     /// The apply worker waits for this phase before continuing to process
     /// events for the table.
@@ -306,8 +72,8 @@ pub enum TableReplicationPhase {
     /// will now be applied by the apply worker only.
     Ready,
     /// Set by either the table-sync worker or the apply worker when a table
-    /// encounters an error during replication. Contains diagnostic
-    /// information and retry policy.
+    /// encounters an error during replication. Contains diagnostic information
+    /// and retry policy.
     Errored {
         /// Human-readable description of what went wrong.
         reason: String,
@@ -317,22 +83,23 @@ pub enum TableReplicationPhase {
         retry_policy: RetryPolicy,
         /// Original error that triggered the table error state.
         ///
-        /// This field is **not persisted** — it is skipped during serialization
-        /// and replaced with a generic placeholder on deserialization.
-        /// Code that reads phases from the state store should not rely
-        /// on `source_err` containing the original error; it is only
-        /// meaningful for the in-memory lifetime of the phase that
-        /// produced it.
+        /// This field is **not persisted** — it is skipped during
+        /// serialization and replaced with a generic placeholder on
+        /// deserialization. Code that reads phases from the state store should
+        /// not rely on `source_err` containing the original error; it is only
+        /// meaningful for the in-memory lifetime of the phase that produced it.
         #[serde(skip, default = "default_source_err")]
         source_err: EtlError,
     },
 }
 
+/// Builds a fallback source error when restoring state from storage.
 fn default_source_err() -> EtlError {
     etl_error!(ErrorKind::Unknown, "Table replication error restored from state store")
 }
 
 impl TableReplicationPhase {
+    /// Returns this phase's type without associated data.
     pub fn as_type(&self) -> TableReplicationPhaseType {
         self.into()
     }
@@ -347,10 +114,9 @@ impl TableReplicationPhase {
     /// Returns the state type enum and serialized JSON metadata for persisting
     /// to the state store. Returns an error for in-memory-only phases that
     /// cannot be persisted.
-    pub fn to_storage_format(
-        &self,
-    ) -> EtlResult<(state::TableReplicationStateType, serde_json::Value)> {
-        if !self.as_type().should_store() {
+    pub fn to_storage_format(&self) -> EtlResult<(TableReplicationStateType, serde_json::Value)> {
+        let phase_type = self.as_type();
+        if !phase_type.should_store() {
             bail!(
                 ErrorKind::InvalidState,
                 "In-memory replication phase cannot be persisted",
@@ -359,21 +125,7 @@ impl TableReplicationPhase {
             );
         }
 
-        let state_type = match self.as_type() {
-            TableReplicationPhaseType::Init => state::TableReplicationStateType::Init,
-            TableReplicationPhaseType::DataSync => state::TableReplicationStateType::DataSync,
-            TableReplicationPhaseType::FinishedCopy => {
-                state::TableReplicationStateType::FinishedCopy
-            }
-            TableReplicationPhaseType::SyncDone => state::TableReplicationStateType::SyncDone,
-            TableReplicationPhaseType::Ready => state::TableReplicationStateType::Ready,
-            TableReplicationPhaseType::Errored => state::TableReplicationStateType::Errored,
-            // Covered by should_store() check above.
-            TableReplicationPhaseType::SyncWait | TableReplicationPhaseType::Catchup => {
-                unreachable!()
-            }
-        };
-
+        let state_type: TableReplicationStateType = phase_type.try_into()?;
         let metadata = serde_json::to_value(self).map_err(|err| {
             etl_error!(
                 ErrorKind::SerializationError,
@@ -387,7 +139,7 @@ impl TableReplicationPhase {
 
     /// Deserializes a [`TableReplicationPhase`] from a state store row's
     /// metadata.
-    pub fn from_state_row(row: state::TableReplicationStateRow) -> EtlResult<Self> {
+    pub fn from_state_row(row: TableReplicationStateRow) -> EtlResult<Self> {
         let Some(metadata) = row.metadata else {
             bail!(
                 ErrorKind::InvalidState,
@@ -437,7 +189,7 @@ impl From<TableReplicationError> for TableReplicationPhase {
 
 /// A variant of [`TableReplicationPhase`] that can be used to determine the
 /// current phase of a table without having to pattern match on the data fields.
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub enum TableReplicationPhaseType {
     Init,
     DataSync,
@@ -483,13 +235,16 @@ impl TableReplicationPhaseType {
         }
     }
 
-    /// Return `true` if a table with this phase is in error, `false` otherwise.
+    /// Returns `true` if a table with this phase is in error, `false`
+    /// otherwise.
     pub fn is_errored(&self) -> bool {
         matches!(self, Self::Errored)
     }
+}
 
-    pub fn as_static_str(&self) -> &'static str {
-        match self {
+impl From<TableReplicationPhaseType> for &'static str {
+    fn from(value: TableReplicationPhaseType) -> Self {
+        match value {
             TableReplicationPhaseType::Init => "init",
             TableReplicationPhaseType::DataSync => "data_sync",
             TableReplicationPhaseType::FinishedCopy => "finished_copy",
@@ -502,8 +257,31 @@ impl TableReplicationPhaseType {
     }
 }
 
-impl<'a> From<&'a TableReplicationPhase> for TableReplicationPhaseType {
-    fn from(phase: &'a TableReplicationPhase) -> Self {
+impl TryFrom<TableReplicationPhaseType> for TableReplicationStateType {
+    type Error = EtlError;
+
+    fn try_from(value: TableReplicationPhaseType) -> Result<Self, Self::Error> {
+        match value {
+            TableReplicationPhaseType::Init => Ok(Self::Init),
+            TableReplicationPhaseType::DataSync => Ok(Self::DataSync),
+            TableReplicationPhaseType::FinishedCopy => Ok(Self::FinishedCopy),
+            TableReplicationPhaseType::SyncDone => Ok(Self::SyncDone),
+            TableReplicationPhaseType::Ready => Ok(Self::Ready),
+            TableReplicationPhaseType::Errored => Ok(Self::Errored),
+            TableReplicationPhaseType::SyncWait | TableReplicationPhaseType::Catchup => {
+                Err(etl_error!(
+                    ErrorKind::InvalidState,
+                    "In-memory replication phase cannot be converted to storage state",
+                    "In-memory table replication phases (SyncWait, Catchup) cannot be saved to \
+                     state store"
+                ))
+            }
+        }
+    }
+}
+
+impl From<&TableReplicationPhase> for TableReplicationPhaseType {
+    fn from(phase: &TableReplicationPhase) -> Self {
         match phase {
             TableReplicationPhase::Init => Self::Init,
             TableReplicationPhase::DataSync => Self::DataSync,
@@ -519,7 +297,8 @@ impl<'a> From<&'a TableReplicationPhase> for TableReplicationPhaseType {
 
 impl fmt::Display for TableReplicationPhaseType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.as_static_str())
+        let value: &'static str = (*self).into();
+        f.write_str(value)
     }
 }
 
@@ -546,47 +325,23 @@ mod lsn_serde {
 
 #[cfg(test)]
 mod tests {
-    use chrono::Utc;
+    use etl_postgres::replication::state;
     use tokio_postgres::types::PgLsn;
 
-    use super::*;
-
-    #[test]
-    fn retry_policy_serialization() {
-        let no_retry = RetryPolicy::NoRetry;
-        let json = serde_json::to_value(&no_retry).unwrap();
-        assert_eq!(json, serde_json::json!({"type": "no_retry"}));
-        let deserialized: RetryPolicy = serde_json::from_value(json).unwrap();
-        assert!(matches!(deserialized, RetryPolicy::NoRetry));
-
-        let manual_retry = RetryPolicy::ManualRetry;
-        let json = serde_json::to_value(&manual_retry).unwrap();
-        assert_eq!(json, serde_json::json!({"type": "manual_retry"}));
-        let deserialized: RetryPolicy = serde_json::from_value(json).unwrap();
-        assert!(matches!(deserialized, RetryPolicy::ManualRetry));
-
-        let timestamp = Utc::now();
-        let timed_retry = RetryPolicy::TimedRetry { next_retry: timestamp };
-        let json = serde_json::to_value(&timed_retry).unwrap();
-        assert_eq!(json, serde_json::json!({"type": "timed_retry", "next_retry": timestamp}));
-        let deserialized: RetryPolicy = serde_json::from_value(json).unwrap();
-        if let RetryPolicy::TimedRetry { next_retry } = deserialized {
-            assert_eq!(next_retry, timestamp);
-        } else {
-            panic!("Expected TimedRetry variant");
-        }
-    }
+    use crate::{
+        error::ErrorKind,
+        etl_error,
+        state::table::{RetryPolicy, TableReplicationPhase, TableReplicationPhaseType},
+    };
 
     #[test]
     fn table_replication_phase_serialization() {
-        // Init round-trip
         let init = TableReplicationPhase::Init;
         let json = serde_json::to_value(&init).unwrap();
         assert_eq!(json, serde_json::json!({"type": "init"}));
         let deserialized: TableReplicationPhase = serde_json::from_value(json).unwrap();
         assert!(matches!(deserialized, TableReplicationPhase::Init));
 
-        // SyncDone round-trip (exercises lsn_serde)
         let lsn = "0/1000000".parse::<PgLsn>().unwrap();
         let sync_done = TableReplicationPhase::SyncDone { lsn };
         let json = serde_json::to_value(&sync_done).unwrap();
@@ -598,7 +353,6 @@ mod tests {
             panic!("Expected SyncDone variant");
         }
 
-        // Errored round-trip (source_err is skipped)
         let errored = TableReplicationPhase::Errored {
             reason: "Test error".to_owned(),
             solution: Some("Test solution".to_owned()),
@@ -615,7 +369,6 @@ mod tests {
                 "retry_policy": {"type": "no_retry"}
             })
         );
-        // source_err should NOT appear in the JSON
         assert!(!json.to_string().contains("source_err"));
 
         let deserialized: TableReplicationPhase = serde_json::from_value(json).unwrap();
@@ -636,6 +389,21 @@ mod tests {
 
         let catchup = TableReplicationPhase::Catchup { lsn: "0/2000".parse::<PgLsn>().unwrap() };
         assert!(catchup.to_storage_format().is_err());
+    }
+
+    #[test]
+    fn phase_type_converts_to_static_label() {
+        let label: &'static str = TableReplicationPhaseType::Ready.into();
+
+        assert_eq!(label, "ready");
+    }
+
+    #[test]
+    fn phase_type_converts_to_postgres_state_type() {
+        let state_type: state::TableReplicationStateType =
+            TableReplicationPhaseType::Ready.try_into().unwrap();
+
+        assert_eq!(state_type, state::TableReplicationStateType::Ready);
     }
 
     #[test]
@@ -695,7 +463,6 @@ mod tests {
             };
             let restored = TableReplicationPhase::from_state_row(row).unwrap();
 
-            // Compare everything except source_err (which is lossy by design)
             assert_eq!(phase.as_type(), restored.as_type());
             match (&phase, &restored) {
                 (

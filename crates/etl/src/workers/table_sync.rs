@@ -36,7 +36,7 @@ use crate::{
 
 /// Formats phase types without using debug output.
 fn format_phase_types(phase_types: &[TableReplicationPhaseType]) -> String {
-    phase_types.iter().map(TableReplicationPhaseType::as_static_str).collect::<Vec<_>>().join(",")
+    phase_types.iter().copied().map(Into::into).collect::<Vec<&'static str>>().join(",")
 }
 
 /// Result for a table sync worker task.
@@ -413,7 +413,7 @@ where
             RetryDirective::NoRetry => RetryPolicy::NoRetry,
         };
         let mut table_error =
-            TableReplicationError::from_error_policy(table_id, &err, &policy, retry_policy.clone());
+            TableReplicationError::from_error_policy(&err, &policy, retry_policy.clone());
 
         let mut state_guard = state.lock().await;
 

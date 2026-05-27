@@ -243,7 +243,7 @@ where
             UpdatedTableRow::Full(row) => row,
             UpdatedTableRow::Partial(_) => {
                 bail!(
-                    ErrorKind::InvalidData,
+                    ErrorKind::SourceReplicaIdentityError,
                     "Partial update rows not supported",
                     "Snowflake destination requires REPLICA IDENTITY FULL for update events"
                 );

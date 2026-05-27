@@ -895,14 +895,8 @@ where
                         let table_row = match update.updated_table_row {
                             UpdatedTableRow::Full(row) => row,
                             UpdatedTableRow::Partial(_) => {
-                                return Err(etl_error!(
-                                    ErrorKind::InvalidState,
-                                    "BigQuery update requires a full new row image",
-                                    format!(
-                                        "Table '{}' emitted a partial update row. BigQuery CDC \
-                                         UPSERT does not preserve omitted columns.",
-                                        update.replicated_table_schema.name()
-                                    )
+                                return Err(bigquery_partial_update_row_error(
+                                    &update.replicated_table_schema,
                                 ));
                             }
                         };
@@ -1243,7 +1237,7 @@ fn validate_bigquery_replica_identity(
         IdentityType::PrimaryKey | IdentityType::Full => Ok(()),
         identity_type => {
             bail!(
-                ErrorKind::SourceSchemaError,
+                ErrorKind::SourceReplicaIdentityError,
                 "BigQuery requires primary-key or full replica identity",
                 format!(
                     "Table '{}' uses replica identity {:?}, but BigQuery only supports source \
@@ -1398,6 +1392,19 @@ fn bigquery_update_rows(
     Ok(rows)
 }
 
+/// Builds an error for a partial update row BigQuery cannot safely apply.
+fn bigquery_partial_update_row_error(replicated_table_schema: &ReplicatedTableSchema) -> EtlError {
+    etl_error!(
+        ErrorKind::SourceReplicaIdentityError,
+        "BigQuery update requires a full new row image",
+        format!(
+            "Table '{}' emitted a partial update row. BigQuery CDC UPSERT does not preserve \
+             omitted columns.",
+            replicated_table_schema.name()
+        )
+    )
+}
+
 /// Returns whether an update changed the destination primary key.
 fn bigquery_primary_key_changed(
     replicated_table_schema: &ReplicatedTableSchema,
@@ -1444,7 +1451,7 @@ fn bigquery_primary_key_changed(
         OldTableRow::Key(row) => {
             if !replicated_table_schema.identity_matches_primary_key() {
                 bail!(
-                    ErrorKind::InvalidState,
+                    ErrorKind::SourceReplicaIdentityError,
                     "BigQuery key image does not match the source primary key",
                     format!(
                         "Table '{}' emitted a key image for replica identity {:?}, but BigQuery \
@@ -1536,7 +1543,7 @@ fn bigquery_primary_key_tagged_cells_from_old_row(
         OldTableRow::Key(row) => {
             if !replicated_table_schema.identity_matches_primary_key() {
                 bail!(
-                    ErrorKind::InvalidState,
+                    ErrorKind::SourceReplicaIdentityError,
                     "BigQuery key image does not match the source primary key",
                     format!(
                         "Table '{}' emitted a key image for replica identity {:?}, but BigQuery \
@@ -1944,7 +1951,7 @@ mod tests {
         let replicated_table_schema = replicated_schema(IdentityType::AlternativeKey);
 
         let error = validate_bigquery_replica_identity(&replicated_table_schema).unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::SourceSchemaError);
+        assert_eq!(error.kind(), ErrorKind::SourceReplicaIdentityError);
     }
 
     #[test]
@@ -1952,7 +1959,17 @@ mod tests {
         let replicated_table_schema = replicated_schema(IdentityType::Missing);
 
         let error = validate_bigquery_replica_identity(&replicated_table_schema).unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::SourceSchemaError);
+        assert_eq!(error.kind(), ErrorKind::SourceReplicaIdentityError);
+    }
+
+    #[test]
+    fn bigquery_partial_update_row_error_uses_replica_identity_kind() {
+        let replicated_table_schema = replicated_schema(IdentityType::PrimaryKey);
+
+        let error = bigquery_partial_update_row_error(&replicated_table_schema);
+
+        assert_eq!(error.kind(), ErrorKind::SourceReplicaIdentityError);
+        assert!(error.to_string().contains("emitted a partial update row"));
     }
 
     #[test]
