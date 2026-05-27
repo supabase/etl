@@ -43,11 +43,13 @@ impl PgReplicationQueryTarget<'_, '_> {
         }
     }
 
-    /// Executes a copy-out query on the target.
-    async fn copy_out(self, query: &str) -> Result<CopyOutStream, tokio_postgres::Error> {
+    /// Executes a simple-protocol copy-out query on the target.
+    async fn copy_out_simple(self, query: &str) -> Result<CopyOutStream, tokio_postgres::Error> {
         match self {
             PgReplicationQueryTarget::Client(client) => client.copy_out_simple(query).await,
-            PgReplicationQueryTarget::Transaction(transaction) => transaction.copy_out(query).await,
+            PgReplicationQueryTarget::Transaction(transaction) => {
+                transaction.client().copy_out_simple(query).await
+            }
         }
     }
 
@@ -471,7 +473,7 @@ impl PgReplicationQueryTarget<'_, '_> {
             )
         };
 
-        let stream = self.copy_out(&copy_query).await?;
+        let stream = self.copy_out_simple(&copy_query).await?;
 
         Ok(stream)
     }
@@ -497,7 +499,7 @@ impl PgReplicationQueryTarget<'_, '_> {
         let query =
             build_ctid_copy_query(&table_name, &column_list, row_filter.as_deref(), partition);
 
-        let stream = self.copy_out(&query).await?;
+        let stream = self.copy_out_simple(&query).await?;
 
         Ok(stream)
     }
