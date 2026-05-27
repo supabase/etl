@@ -45,10 +45,8 @@ tracing = { workspace = true, default-features = true }
 url = { workspace = true, optional = true }
 
 [dev-dependencies]
-etl-telemetry = { workspace = true }
 k8s-openapi = { workspace = true, features = ["latest"] }
 serde_json = { workspace = true }
-tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 
 [lints]

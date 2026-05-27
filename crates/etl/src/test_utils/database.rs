@@ -19,8 +19,10 @@
 //!
 //! See `scripts/docker-compose.yaml` for the test database configuration.
 
-use etl_config::shared::{PgConnectionConfig, TcpKeepaliveConfig, TlsConfig};
-use etl_postgres::{tokio::test_utils::PgDatabase, types::TableName};
+use etl_config::shared::{PgConnectionConfig, TcpKeepaliveConfig};
+use etl_postgres::{
+    test_utils::local_tls_config_from_env, tokio::test_utils::PgDatabase, types::TableName,
+};
 use pg_escape::quote_identifier;
 use tokio_postgres::Client;
 use uuid::Uuid;
@@ -37,7 +39,6 @@ const DEFAULT_DATABASE_HOST: &str = "localhost";
 const DEFAULT_DATABASE_PORT: &str = "5430";
 const DEFAULT_DATABASE_USERNAME: &str = "postgres";
 const DEFAULT_DATABASE_PASSWORD: &str = "postgres";
-
 /// Creates a [`TableName`] in the test schema.
 ///
 /// This helper function constructs a [`TableName`] with the schema set to the
@@ -60,6 +61,9 @@ pub fn test_table_name(name: &str) -> TableName {
 /// - `TESTS_DATABASE_PORT`: Postgres server port (default: `5430`)
 /// - `TESTS_DATABASE_USERNAME`: Database user (default: `postgres`)
 /// - `TESTS_DATABASE_PASSWORD`: Database password (default: `postgres`)
+/// - `TESTS_DATABASE_TLS_ENABLED`: Whether test clients use TLS (default:
+///   `false`)
+/// - `TESTS_DATABASE_TLS_ROOT_CERT`: Path to the trusted root certificate
 fn local_pg_connection_config() -> PgConnectionConfig {
     PgConnectionConfig {
         host: std::env::var("TESTS_DATABASE_HOST").unwrap_or(DEFAULT_DATABASE_HOST.into()),
@@ -75,7 +79,7 @@ fn local_pg_connection_config() -> PgConnectionConfig {
             .ok()
             .or(Some(DEFAULT_DATABASE_PASSWORD.into()))
             .map(Into::into),
-        tls: TlsConfig { trusted_root_certs: String::new(), enabled: false },
+        tls: local_tls_config_from_env(),
         keepalive: TcpKeepaliveConfig::default(),
     }
 }

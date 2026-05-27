@@ -128,6 +128,8 @@ POSTGRES_DATA_VOLUME=/path/to/data cargo x init
 
 PostgreSQL 18+ containers store data under `/var/lib/postgresql/<major>/data`, so the Docker Compose setup mounts the parent `/var/lib/postgresql` directory to keep upgrades compatible.
 
+The source PostgreSQL container started by `cargo x init` or `cargo xtask postgres start` supports TLS by default. The task runner generates a local test CA and server certificate under `target/postgres-tls/`, then copies the server certificate and key into the container. Local clients may still connect without TLS; set `TESTS_DATABASE_TLS_ENABLED=true` when running tests to require verified TLS using the generated root certificate.
+
 The same Docker Compose stack also starts ClickHouse on `http://localhost:8123` by default, which is enough for local destination development and ClickHouse integration tests.
 
 ### Manual Setup
@@ -407,6 +409,8 @@ All tests that interact with PostgreSQL require the following environment variab
 | `TESTS_DATABASE_PORT` | **Yes** | PostgreSQL server port (e.g., `5430`) |
 | `TESTS_DATABASE_USERNAME` | **Yes** | Database user (e.g., `postgres`) |
 | `TESTS_DATABASE_PASSWORD` | No | Database password (optional) |
+| `TESTS_DATABASE_TLS_ENABLED` | No | Require verified TLS for Postgres test clients when set to `true` |
+| `TESTS_DATABASE_TLS_ROOT_CERT` | No | Path to the trusted root certificate; defaults to `target/postgres-tls/root.crt` |
 
 **Note:** Each test creates a unique database with a UUID-based name to ensure test isolation. The test databases are automatically cleaned up after tests complete.
 
@@ -477,6 +481,8 @@ export TESTS_DATABASE_HOST=localhost
 export TESTS_DATABASE_PORT=5430
 export TESTS_DATABASE_USERNAME=postgres
 export TESTS_DATABASE_PASSWORD=postgres
+# Optional when using the local Docker Compose Postgres from cargo x init.
+export TESTS_DATABASE_TLS_ENABLED=true
 
 # BigQuery test configuration (optional - only needed for BigQuery tests)
 export TESTS_BIGQUERY_PROJECT_ID=your-gcp-project-id

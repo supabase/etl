@@ -6,12 +6,12 @@ use etl_api::{
 };
 use etl_config::{
     SerializableSecretString,
-    shared::{
-        ETL_MIGRATION_OPTIONS, IntoConnectOptions, PgConnectionConfig, TcpKeepaliveConfig,
-        TlsConfig,
-    },
+    shared::{ETL_MIGRATION_OPTIONS, IntoConnectOptions, PgConnectionConfig, TcpKeepaliveConfig},
 };
-use etl_postgres::sqlx::test_utils::create_pg_database;
+use etl_postgres::{
+    sqlx::test_utils::create_pg_database,
+    test_utils::{local_tls_config_from_env, test_tls_enabled_from_env},
+};
 use pg_escape::{quote_identifier, quote_literal};
 use secrecy::ExposeSecret;
 use sqlx::{AssertSqlSafe, Connection, PgConnection, PgPool};
@@ -23,7 +23,6 @@ const DEFAULT_DATABASE_HOST: &str = "localhost";
 const DEFAULT_DATABASE_PORT: &str = "5430";
 const DEFAULT_DATABASE_USERNAME: &str = "postgres";
 const DEFAULT_DATABASE_PASSWORD: &str = "postgres";
-
 /// Creates a database configuration from TESTS_DATABASE_* environment
 /// variables.
 ///
@@ -44,7 +43,7 @@ pub(crate) fn get_test_db_config() -> PgConnectionConfig {
             .ok()
             .or(Some(DEFAULT_DATABASE_PASSWORD.into()))
             .map(Into::into),
-        tls: TlsConfig::disabled(),
+        tls: local_tls_config_from_env(),
         keepalive: TcpKeepaliveConfig::default(),
     }
 }
@@ -62,6 +61,16 @@ pub(crate) async fn create_etl_api_database(config: &PgConnectionConfig) -> PgPo
         .run(&connection_pool)
         .await
         .expect("Failed to migrate the database");
+
+    if test_tls_enabled_from_env() {
+        let ssl = sqlx::query_scalar::<_, bool>(
+            "select ssl from pg_stat_ssl where pid = pg_backend_pid()",
+        )
+        .fetch_one(&connection_pool)
+        .await
+        .expect("failed to inspect API database TLS mode");
+        assert!(ssl, "ETL API test database connection must use TLS");
+    }
 
     connection_pool
 }
