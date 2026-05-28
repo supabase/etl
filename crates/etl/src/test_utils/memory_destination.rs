@@ -9,7 +9,7 @@ use crate::{
         async_result::{DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult},
     },
     error::EtlResult,
-    state::destination_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus},
+    state::destination_table_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus},
     store::SharedStateStore,
     types::{Event, ReplicatedTableSchema, TableId, TableRow},
 };

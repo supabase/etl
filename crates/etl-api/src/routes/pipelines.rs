@@ -6,9 +6,9 @@ use actix_web::{
     post,
     web::{Data, Json, Path},
 };
-use etl::state::table::{RetryPolicy, TableReplicationPhase};
+use etl::state::{TableRetryPolicy, TableState};
 use etl_postgres::{
-    replication::{TableLookupError, get_table_names_from_table_ids, health, lag, state},
+    replication::{TableLookupError, get_table_names_from_table_ids, health, lag, table_state},
     types::TableId,
 };
 use serde::{Deserialize, Serialize};
@@ -74,11 +74,11 @@ pub enum PipelineError {
     #[error(transparent)]
     TenantId(#[from] TenantIdError),
 
-    #[error("The table replication state is not present")]
-    MissingTableReplicationState,
+    #[error("The table state is not present")]
+    MissingTableState,
 
-    #[error("The table replication state is not valid: {0}")]
-    InvalidTableReplicationState(serde_json::Error),
+    #[error("The table state is not valid: {0}")]
+    InvalidTableState(serde_json::Error),
 
     #[error("Table cannot be rolled back: {0}")]
     NotRollbackable(String),
@@ -184,8 +184,8 @@ impl PipelineError {
             | PipelineError::MaintenanceMaterialization(_)
             | PipelineError::K8s(_)
             | PipelineError::MissingEnvironment
-            | PipelineError::MissingTableReplicationState
-            | PipelineError::InvalidTableReplicationState(_)
+            | PipelineError::MissingTableState
+            | PipelineError::InvalidTableState(_)
             | PipelineError::Validation(
                 ValidationError::TrustedRootCerts(_) | ValidationError::Environment(_),
             ) => "Internal server error".to_owned(),
@@ -214,9 +214,9 @@ impl ResponseError for PipelineError {
             | PipelineError::TrustedRootCerts(_)
             | PipelineError::Database(_)
             | PipelineError::TableLookup(_)
-            | PipelineError::InvalidTableReplicationState(_)
+            | PipelineError::InvalidTableState(_)
             | PipelineError::MissingEnvironment
-            | PipelineError::MissingTableReplicationState => StatusCode::INTERNAL_SERVER_ERROR,
+            | PipelineError::MissingTableState => StatusCode::INTERNAL_SERVER_ERROR,
             PipelineError::Validation(error) => route_utils::validation_error_status_code(error),
             PipelineError::ActivePipeline(_) | PipelineError::DuplicatePipeline => {
                 StatusCode::CONFLICT
@@ -305,11 +305,11 @@ pub struct GetPipelineStatusResponse {
     pub status: PipelineStatus,
 }
 
-/// UI-friendly representation of table replication state
+/// UI-friendly representation of table state.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 #[serde(tag = "name")]
-pub enum SimpleTableReplicationState {
+pub enum SimpleTableState {
     Queued,
     CopyingTable,
     CopiedTable,
@@ -322,7 +322,7 @@ pub enum SimpleTableReplicationState {
     },
 }
 
-/// Simplified retry policy for UI display
+/// Simplified retry policy for UI display.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 #[serde(tag = "policy")]
@@ -335,42 +335,38 @@ pub enum SimpleRetryPolicy {
     },
 }
 
-impl From<TableReplicationPhase> for SimpleTableReplicationState {
-    fn from(phase: TableReplicationPhase) -> Self {
-        match phase {
-            TableReplicationPhase::Init => SimpleTableReplicationState::Queued,
-            TableReplicationPhase::DataSync => SimpleTableReplicationState::CopyingTable,
-            TableReplicationPhase::FinishedCopy => SimpleTableReplicationState::CopiedTable,
-            TableReplicationPhase::SyncDone { .. }
-            | TableReplicationPhase::SyncWait { .. }
-            | TableReplicationPhase::Catchup { .. }
-            | TableReplicationPhase::Ready => SimpleTableReplicationState::FollowingWal,
-            TableReplicationPhase::Errored { reason, solution, retry_policy, .. } => {
+impl From<TableState> for SimpleTableState {
+    fn from(state: TableState) -> Self {
+        match state {
+            TableState::Init => SimpleTableState::Queued,
+            TableState::DataSync => SimpleTableState::CopyingTable,
+            TableState::FinishedCopy => SimpleTableState::CopiedTable,
+            TableState::SyncDone { .. }
+            | TableState::SyncWait { .. }
+            | TableState::Catchup { .. }
+            | TableState::Ready => SimpleTableState::FollowingWal,
+            TableState::Errored { reason, solution, retry_policy, .. } => {
                 let simple_retry_policy = match retry_policy {
-                    RetryPolicy::NoRetry => SimpleRetryPolicy::NoRetry,
-                    RetryPolicy::ManualRetry => SimpleRetryPolicy::ManualRetry,
-                    RetryPolicy::TimedRetry { next_retry } => {
+                    TableRetryPolicy::NoRetry => SimpleRetryPolicy::NoRetry,
+                    TableRetryPolicy::ManualRetry => SimpleRetryPolicy::ManualRetry,
+                    TableRetryPolicy::TimedRetry { next_retry } => {
                         SimpleRetryPolicy::TimedRetry { next_retry: next_retry.to_rfc3339() }
                     }
                 };
 
-                SimpleTableReplicationState::Error {
-                    reason,
-                    solution,
-                    retry_policy: simple_retry_policy,
-                }
+                SimpleTableState::Error { reason, solution, retry_policy: simple_retry_policy }
             }
         }
     }
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct TableReplicationStatus {
+pub struct TableStatus {
     #[schema(example = 1)]
     pub table_id: u32,
     #[schema(example = "public.users")]
     pub table_name: String,
-    pub state: SimpleTableReplicationState,
+    pub state: SimpleTableState,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = true)]
     pub table_sync_lag: Option<SlotLagMetricsResponse>,
@@ -418,7 +414,7 @@ pub struct GetPipelineReplicationStatusResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = true)]
     pub apply_lag: Option<SlotLagMetricsResponse>,
-    pub table_statuses: Vec<TableReplicationStatus>,
+    pub table_statuses: Vec<TableStatus>,
 }
 
 #[derive(Debug, Copy, Clone, Serialize, Deserialize, ToSchema)]
@@ -450,7 +446,7 @@ pub struct RollbackTablesRequest {
 pub struct RolledBackTable {
     #[schema(example = 1)]
     pub table_id: u32,
-    pub new_state: SimpleTableReplicationState,
+    pub new_state: SimpleTableState,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -1122,9 +1118,8 @@ pub(crate) async fn get_pipeline_replication_status(
         return Err(PipelineError::EtlStateNotInitialized);
     }
 
-    // Fetch replication state for all tables in this pipeline
-    let state_rows =
-        state::get_table_replication_state_rows(source_txn.deref_mut(), pipeline_id).await?;
+    // Fetch table state for all tables in this pipeline
+    let state_rows = table_state::get_table_state_rows(source_txn.deref_mut(), pipeline_id).await?;
     let mut lag_metrics =
         lag::get_pipeline_lag_metrics(source_txn.deref_mut(), pipeline_id as u64).await?;
     let apply_lag = lag_metrics.apply.map(Into::into);
@@ -1135,22 +1130,22 @@ pub(crate) async fn get_pipeline_replication_status(
     let table_names = get_table_names_from_table_ids(source_txn.deref_mut(), &table_ids).await?;
 
     // Convert database states to UI-friendly format
-    let mut tables: Vec<TableReplicationStatus> = Vec::with_capacity(state_rows.len());
+    let mut tables: Vec<TableStatus> = Vec::with_capacity(state_rows.len());
     for row in state_rows {
         let table_id = TableId::new(row.table_id.0);
         let table_name =
             table_names.get(&table_id).ok_or(TableLookupError::TableNotFound(table_id))?;
 
         // Extract the metadata row from the database
-        let phase: TableReplicationPhase =
-            row.metadata.ok_or(PipelineError::MissingTableReplicationState).and_then(|m| {
-                serde_json::from_value(m).map_err(PipelineError::InvalidTableReplicationState)
-            })?;
+        let state: TableState = row
+            .metadata
+            .ok_or(PipelineError::MissingTableState)
+            .and_then(|m| serde_json::from_value(m).map_err(PipelineError::InvalidTableState))?;
 
-        tables.push(TableReplicationStatus {
+        tables.push(TableStatus {
             table_id: table_id.into_inner(),
             table_name: table_name.to_string(),
-            state: phase.into(),
+            state: state.into(),
             table_sync_lag: lag_metrics.table_sync.remove(&table_id).map(Into::into),
         });
     }
@@ -1163,7 +1158,7 @@ pub(crate) async fn get_pipeline_replication_status(
 
 #[utoipa::path(
     summary = "Roll back tables",
-    description = "Rolls back the replication state of tables in the pipeline. Supports rolling back a single table, all errored tables or all tables.",
+    description = "Rolls back the table state of tables in the pipeline. Supports rolling back a single table, all errored tables or all tables.",
     request_body = RollbackTablesRequest,
     params(
         ("pipeline_id" = i64, Path, description = "Unique ID of the pipeline"),
@@ -1221,15 +1216,14 @@ pub(crate) async fn rollback_tables(
     }
 
     // Get all table states for this pipeline
-    let state_rows =
-        state::get_table_replication_state_rows(source_txn.deref_mut(), pipeline_id).await?;
+    let state_rows = table_state::get_table_state_rows(source_txn.deref_mut(), pipeline_id).await?;
 
     // Determine which tables to rollback based on target
     let target_table_ids: Vec<u32> = match &rollback_request.target {
         RollbackTablesTarget::SingleTable { table_id } => {
             // Single table mode, validate the table exists
             if !state_rows.iter().any(|row| row.table_id.0 == *table_id) {
-                return Err(PipelineError::MissingTableReplicationState);
+                return Err(PipelineError::MissingTableState);
             }
 
             vec![*table_id]
@@ -1239,9 +1233,8 @@ pub(crate) async fn rollback_tables(
             let mut errored_table_ids = Vec::new();
             for row in &state_rows {
                 if let Some(metadata) = &row.metadata
-                    && let Ok(phase) =
-                        serde_json::from_value::<TableReplicationPhase>(metadata.clone())
-                    && phase.is_errored()
+                    && let Ok(state) = serde_json::from_value::<TableState>(metadata.clone())
+                    && state.is_errored()
                 {
                     errored_table_ids.push(row.table_id.0);
                 }
@@ -1271,7 +1264,7 @@ pub(crate) async fn rollback_tables(
     for table_id in target_table_ids {
         let new_state_row = match rollback_type {
             RollbackType::Individual => {
-                let Some(new_state_row) = state::rollback_replication_state(
+                let Some(new_state_row) = table_state::rollback_table_state(
                     source_txn.deref_mut(),
                     pipeline_id,
                     TableId::new(table_id),
@@ -1286,7 +1279,7 @@ pub(crate) async fn rollback_tables(
                 new_state_row
             }
             RollbackType::Full => {
-                state::reset_replication_state(
+                table_state::reset_table_state(
                     source_txn.deref_mut(),
                     pipeline_id,
                     TableId::new(table_id),
@@ -1295,12 +1288,12 @@ pub(crate) async fn rollback_tables(
             }
         };
 
-        let new_phase: TableReplicationPhase =
-            new_state_row.metadata.ok_or(PipelineError::MissingTableReplicationState).and_then(
-                |m| serde_json::from_value(m).map_err(PipelineError::InvalidTableReplicationState),
-            )?;
+        let new_state: TableState = new_state_row
+            .metadata
+            .ok_or(PipelineError::MissingTableState)
+            .and_then(|m| serde_json::from_value(m).map_err(PipelineError::InvalidTableState))?;
 
-        rolled_back_tables.push(RolledBackTable { table_id, new_state: new_phase.into() });
+        rolled_back_tables.push(RolledBackTable { table_id, new_state: new_state.into() });
     }
 
     source_txn.commit().await?;

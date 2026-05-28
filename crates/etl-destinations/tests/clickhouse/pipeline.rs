@@ -1,5 +1,5 @@
 use etl::{
-    state::table::TableReplicationPhaseType,
+    state::TableStateType,
     store::state::StateStore,
     test_utils::{
         database::{spawn_source_database, test_table_name},
@@ -226,8 +226,7 @@ async fn all_types_table_copy_inner(engine: ClickHouseEngine) {
     let pipeline_id: PipelineId = random();
     let destination = clickhouse_db.build_destination_with_engine(store.clone(), engine).await;
 
-    let table_ready =
-        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
+    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -351,8 +350,7 @@ async fn updates_are_streamed_to_clickhouse_inner(engine: ClickHouseEngine) {
         clickhouse_db.build_destination_with_engine(store.clone(), engine).await,
     );
 
-    let table_ready =
-        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
+    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -502,8 +500,7 @@ async fn boundary_values_table_copy_inner(engine: ClickHouseEngine) {
     let pipeline_id: PipelineId = random();
     let destination = clickhouse_db.build_destination_with_engine(store.clone(), engine).await;
 
-    let table_ready =
-        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
+    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -656,8 +653,7 @@ async fn pre_1970_and_far_future_dates_round_trip_inner(engine: ClickHouseEngine
     let pipeline_id: PipelineId = random();
     let destination = clickhouse_db.build_destination_with_engine(store.clone(), engine).await;
 
-    let table_ready =
-        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
+    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -770,8 +766,7 @@ async fn deletes_are_streamed_to_clickhouse_inner(engine: ClickHouseEngine) {
         clickhouse_db.build_destination_with_engine(store.clone(), engine).await,
     );
 
-    let table_ready =
-        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
+    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -869,8 +864,7 @@ async fn pipeline_restart_resumes_streaming_inner(engine: ClickHouseEngine) {
         clickhouse_db.build_destination_with_engine(store.clone(), engine).await,
     );
 
-    let table_ready =
-        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
+    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -988,8 +982,7 @@ async fn table_copy_reset_drops_destination_table_before_recopy_inner(engine: Cl
         destination,
     );
 
-    let table_ready =
-        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
+    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 
@@ -1028,8 +1021,7 @@ async fn table_copy_reset_drops_destination_table_before_recopy_inner(engine: Cl
         destination.clone(),
     );
 
-    let table_ready =
-        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
+    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 
@@ -1090,8 +1082,7 @@ async fn truncate_clears_table_and_accepts_new_inserts_inner(engine: ClickHouseE
         clickhouse_db.build_destination_with_engine(store.clone(), engine).await,
     );
 
-    let table_ready =
-        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
+    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -1201,8 +1192,7 @@ async fn intermediate_flush_preserves_all_rows_inner(engine: ClickHouseEngine) {
         )
         .await;
 
-    let table_ready =
-        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
+    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     // --- WHEN: pipeline copies data with aggressive flush splitting ---
     let mut pipeline = create_pipeline(
@@ -1309,10 +1299,8 @@ async fn multiple_tables_receive_independent_writes_inner(engine: ClickHouseEngi
         clickhouse_db.build_destination_with_engine(store.clone(), engine).await,
     );
 
-    let table_a_ready =
-        store.notify_on_table_state_type(table_a_id, TableReplicationPhaseType::Ready).await;
-    let table_b_ready =
-        store.notify_on_table_state_type(table_b_id, TableReplicationPhaseType::Ready).await;
+    let table_a_ready = store.notify_on_table_state_type(table_a_id, TableStateType::Ready).await;
+    let table_b_ready = store.notify_on_table_state_type(table_b_id, TableStateType::Ready).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -1487,8 +1475,7 @@ async fn delete_with_default_replica_identity_inner(engine: ClickHouseEngine) {
         clickhouse_db.build_destination_with_engine(store.clone(), engine).await,
     );
 
-    let table_ready =
-        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
+    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -1615,8 +1602,7 @@ async fn exclusive_large_batch_table_copy_inner(engine: ClickHouseEngine) {
     let pipeline_id: PipelineId = random();
     let destination = clickhouse_db.build_destination_with_engine(store.clone(), engine).await;
 
-    let table_ready =
-        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
+    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     // --- WHEN: pipeline copies all rows ---
     let mut pipeline = create_pipeline(
@@ -1767,8 +1753,7 @@ async fn schema_change_add_column_inner(engine: ClickHouseEngine) {
         clickhouse_db.build_destination_with_engine(store.clone(), engine).await,
     );
 
-    let table_ready =
-        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
+    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -1980,8 +1965,7 @@ async fn schema_change_add_drop_rename_inner(engine: ClickHouseEngine) {
         clickhouse_db.build_destination_with_engine(store.clone(), engine).await,
     );
 
-    let table_ready =
-        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
+    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     let mut pipeline = create_pipeline(
         &database.config,

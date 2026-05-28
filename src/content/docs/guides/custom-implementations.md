@@ -1,24 +1,27 @@
-# Build Custom Stores and Destinations
+---
+title: Build Custom Stores and Destinations
+description: Implement your own stores and destinations.
+---
 
 **30 minutes**: Implement your own stores and destinations.
 
-**Prerequisites:** Completed [Your First Pipeline](first-pipeline.md) or familiar with ETL basics.
+**Prerequisites:** Completed [Your First Pipeline](/etl/guides/first-pipeline/) or familiar with ETL basics.
 
 ## Understanding the Destination Trait
 
-ETL delivers data to destinations in two phases:
+ETL delivers data to destinations in **two phases**:
 
 | Phase | Method | When | Data Type |
 |-------|--------|------|-----------|
 | Initial Copy | `write_table_rows()` | Startup | `Vec<TableRow>` |
-| Streaming | `write_events()` | After copy | `Vec<Event>` including `Relation` schema events |
+| Streaming | `write_events()` | During catch-up and continuous replication | `Vec<Event>` including `Relation` schema events |
 
-**Note:** During initial copy, parallel table sync workers each process their own replication slot, so `Begin` and `Commit` transaction markers may appear multiple times. This does not duplicate actual row data.
+**Note:** During initial copy, parallel table sync workers each process their own replication slot, so `Begin` and `Commit` transaction markers may appear multiple times. These repeated markers do not by themselves duplicate row events, but ETL is at-least-once, so destination writes should still be idempotent across retries and restarts.
 
 Schema changes are surfaced through `Event::Relation`. If your destination
 keeps physical schemas, flush pending writes before handling a relation event,
 apply the supported add/drop/rename diff, then process following row events
-with the new schema. See [Schema Changes](../explanation/schema-changes.md) for
+with the new schema. See [Schema Changes](/etl/explanation/schema-changes/) for
 the current semantics and limitations.
 
 ## Step 1: Create the Project
@@ -53,10 +56,10 @@ tracing-subscriber = "0.3"
 
 ## Step 2: Implement a Custom Store
 
-Create `src/custom_store.rs`. A store must implement three traits (see [Extension Points](../explanation/traits.md) for full details):
+Create `src/custom_store.rs`. A store must implement **three traits** (see [Extension Points](/etl/explanation/traits/) for full details):
 
 - `SchemaStore` - Versioned table schema storage, retrieval, and pruning
-- `StateStore` - Replication progress and destination table metadata tracking
+- `StateStore` - Table state, durable replication progress, and destination table metadata tracking
 - `TableLifecycleStore` - Store lifecycle operations for table-copy restarts and publication changes
 
 `SharedStateStore`, `DestinationStore`, and `PipelineStore` are
@@ -71,17 +74,15 @@ use tracing::info;
 
 use etl::error::EtlResult;
 use etl::replication::WorkerType;
-use etl::state::{
-    AppliedDestinationTableMetadata, DestinationTableMetadata, TableReplicationPhase,
-};
-use etl::store::{SchemaStore, StateStore, TableLifecycleStore, TableReplicationStates};
+use etl::state::{AppliedDestinationTableMetadata, DestinationTableMetadata, TableState};
+use etl::store::{SchemaStore, StateStore, TableLifecycleStore, TableStates};
 use etl::store::schema::TableSchemaRetention;
 use etl::types::{PgLsn, SnapshotId, TableId, TableSchema};
 
 #[derive(Debug, Clone, Default)]
 struct TableEntry {
     schemas: HashMap<SnapshotId, Arc<TableSchema>>,
-    state: Option<TableReplicationPhase>,
+    state: Option<TableState>,
     destination_metadata: Option<DestinationTableMetadata>,
 }
 
@@ -177,17 +178,17 @@ impl SchemaStore for CustomStore {
 }
 
 impl StateStore for CustomStore {
-    async fn get_table_replication_state(
+    async fn get_table_state(
         &self,
         table_id: TableId,
-    ) -> EtlResult<Option<TableReplicationPhase>> {
+    ) -> EtlResult<Option<TableState>> {
         let tables = self.tables.lock().await;
         Ok(tables.get(&table_id).and_then(|e| e.state.clone()))
     }
 
-    async fn get_table_replication_states(
+    async fn get_table_states(
         &self,
-    ) -> EtlResult<TableReplicationStates> {
+    ) -> EtlResult<TableStates> {
         let tables = self.tables.lock().await;
         Ok(Arc::new(
             tables
@@ -197,13 +198,13 @@ impl StateStore for CustomStore {
         ))
     }
 
-    async fn load_table_replication_states(&self) -> EtlResult<usize> {
+    async fn load_table_states(&self) -> EtlResult<usize> {
         Ok(0)
     }
 
-    async fn update_table_replication_states(
+    async fn update_table_states(
         &self,
-        updates: Vec<(TableId, TableReplicationPhase)>,
+        updates: Vec<(TableId, TableState)>,
     ) -> EtlResult<()> {
         let mut tables = self.tables.lock().await;
         for (table_id, state) in updates {
@@ -213,10 +214,10 @@ impl StateStore for CustomStore {
         Ok(())
     }
 
-    async fn rollback_table_replication_state(
+    async fn rollback_table_state(
         &self,
         _table_id: TableId,
-    ) -> EtlResult<TableReplicationPhase> {
+    ) -> EtlResult<TableState> {
         todo!("Implement rollback if needed")
     }
 
@@ -306,7 +307,7 @@ impl TableLifecycleStore for CustomStore {
 
 ## Step 3: Implement a Custom Destination
 
-Create `src/http_destination.rs`. A destination implements the `Destination` trait with four required methods:
+Create `src/http_destination.rs`. A destination implements the `Destination` trait with **four required methods**:
 
 - `name()` - Return an identifier for logging
 - `drop_table_for_copy()` - Idempotently drop destination objects and replay state before restarting a table copy using the previously stored replicated table schema
@@ -315,7 +316,9 @@ Create `src/http_destination.rs`. A destination implements the `Destination` tra
 
 There's also an optional `shutdown()` method with a default no-op implementation. Override it if your destination needs cleanup when the pipeline shuts down.
 
-ETL clears its own schema versions, destination metadata, and table-sync progress only after `drop_table_for_copy()` succeeds. That lets the destination use the supplied previously stored replicated schema and any existing destination metadata to find the object that must be removed. If the object is already gone, return success.
+ETL clears its own schema versions, destination metadata, and table-sync progress **only after `drop_table_for_copy()` succeeds**. That lets the destination use the supplied previously stored replicated schema and any existing destination metadata to find the object that must be removed. If the object is already gone, return success.
+
+All write-like methods must complete their async result handle. Treat the method return value as the place for immediate dispatch or setup failures, and send the final write result through `async_result`. ETL is **at least once**, so make row and event writes idempotent. `write_events()` preserves per-table ordering, but batches can include multiple tables and transaction markers are not a complete all-tables boundary during initial copy and catch-up.
 
 ```rust
 use reqwest::Client;
@@ -471,6 +474,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let pg_config = PgConnectionConfig {
         host: "localhost".to_string(),
+        hostaddr: None,
         port: 5432,
         name: "your_database".to_string(),
         username: "postgres".to_string(),
@@ -521,7 +525,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 cargo run
 ```
 
-The pipeline will connect to Postgres and start replicating. You'll see your custom store logging state transitions and your destination receiving HTTP calls.
+The pipeline will connect to Postgres and start replicating. You'll see your custom store logging **state transitions** and your destination receiving **HTTP calls**.
 
 ## What You Built
 
@@ -531,7 +535,7 @@ The pipeline will connect to Postgres and start replicating. You'll see your cus
 
 ## Next Steps
 
-- [Extension Points](../explanation/traits.md) - Full trait API documentation
-- [Event Types](../explanation/events.md) - Details on all events your destination receives
-- [Configure Postgres](configure-postgres.md) - Production database setup
-- [Architecture](../explanation/architecture.md) - How ETL works internally
+- [Extension Points](/etl/explanation/traits/) - Full trait API documentation
+- [Event Types](/etl/explanation/events/) - Details on all events your destination receives
+- [Configure Postgres](/etl/guides/configure-postgres/) - Production database setup
+- [Architecture](/etl/explanation/architecture/) - How ETL works internally

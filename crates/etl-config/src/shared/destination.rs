@@ -157,8 +157,8 @@ pub enum DestinationConfig {
         account_id: String,
         /// Snowflake user with RSA public key configured.
         user: String,
-        /// Path to RSA private key file (PEM/PKCS8 format).
-        private_key_path: String,
+        /// RSA private key in PEM format (PKCS#8 or PKCS#1).
+        private_key: SecretString,
         /// Optional passphrase for encrypted private key.
         private_key_passphrase: Option<SecretString>,
         /// Target database name.
@@ -371,8 +371,6 @@ pub enum DestinationConfigWithoutSecrets {
         account_id: String,
         /// Snowflake user with RSA public key configured.
         user: String,
-        /// Path to RSA private key file (PEM/PKCS8 format).
-        private_key_path: String,
         /// Target database name.
         database: String,
         /// Target schema name.
@@ -436,7 +434,7 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
             DestinationConfig::Snowflake {
                 account_id,
                 user,
-                private_key_path,
+                private_key: _,
                 private_key_passphrase: _,
                 database,
                 schema,
@@ -444,7 +442,6 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
             } => DestinationConfigWithoutSecrets::Snowflake {
                 account_id,
                 user,
-                private_key_path,
                 database,
                 schema,
                 role,

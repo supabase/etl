@@ -1,13 +1,17 @@
-# Schema Changes
+---
+title: Schema Changes
+description: How ETL handles DDL and evolving table schemas.
+---
 
 **How ETL handles DDL and evolving table schemas**
 
 ETL supports schema changes, and this area is actively being improved. The
 current implementation is intentionally conservative: the source-side event
 trigger captures a rich PostgreSQL-shaped snapshot, while ETL currently models
-only simple, well-understood column changes: adds, drops, and renames. Built-in
-destination support varies: BigQuery applies these changes today, DuckLake is
-in progress, and Iceberg is deprecated for now.
+only simple, well-understood column changes: **adds, drops, and renames**. Built-in
+destination support varies: **BigQuery, ClickHouse, and Snowflake** apply these
+simple changes today; **DuckLake does not apply automatic schema-change DDL yet**;
+and Iceberg is deprecated for new deployments.
 
 ## Short Version
 
@@ -32,7 +36,7 @@ ETL installs a PostgreSQL `ddl_command_end` event trigger named
 published permanent table, the trigger emits a transactional logical message
 with prefix `supabase_etl_ddl`.
 
-That message is internal plumbing. Destinations do not receive it directly.
+That message is **internal plumbing**. Destinations do not receive it directly.
 Instead, ETL:
 
 1. Parses the schema-change message.
@@ -50,25 +54,24 @@ The important public boundary is:
 ... -> internal DDL message -> Relation(new schema) -> Insert/Update/Delete ...
 ```
 
-Destinations should treat `Event::Relation` as the point where the active
-schema changes for following row events.
+Destinations should treat `Event::Relation` as the point where the **active schema changes** for following row events.
 
 ## Destination-Specific DDL Behavior
 
-ETL has one shared schema-change signal, but DDL behavior is implemented per
-destination. A destination may choose to apply DDL automatically, reject a
-schema change, or require operator handling.
+ETL has one shared schema-change signal, but **DDL behavior is implemented per destination**. A destination may choose to apply DDL automatically, reject a schema change, or require operator handling.
 
 | Destination | Current DDL behavior |
 |-------------|----------------------|
 | BigQuery | Stable support for simple add, drop, and rename column changes. |
-| DuckLake | In progress. Do not rely on automatic DDL behavior yet. |
+| ClickHouse | Supports simple add, drop, and rename column changes. `ReplacingMergeTree` rejects primary-key drops or renames because the ordering expression cannot be rewritten safely. |
+| Snowflake | Supports simple add, drop, and rename column changes. |
+| DuckLake | Does not apply automatic schema-change DDL yet. Do not rely on `Relation` events to alter DuckLake tables. |
 | Iceberg | Deprecated for now. Schema-change DDL is not a supported path for new deployments. |
 | Custom destinations | Destination authors decide which `Event::Relation` changes to apply, reject, or handle manually. |
 
 ## Diff Semantics
 
-ETL stores schemas in PostgreSQL column ordinal order (`pg_attribute.attnum`)
+ETL stores schemas in **PostgreSQL column ordinal order** (`pg_attribute.attnum`)
 and computes destination schema diffs over replicated columns only.
 
 The current diff rules are:
@@ -92,14 +95,18 @@ A practical flow is:
    relation event.
 2. Compare the old destination schema with the relation event's new
    `ReplicatedTableSchema`.
-3. Apply supported destination DDL for adds, drops, and renames.
-4. Persist destination metadata only after the destination schema is applied.
-5. Process following row events with the new schema.
+3. Mark destination metadata as `Applying` if the destination needs recovery
+   bookkeeping for the DDL transition.
+4. Apply supported destination DDL for adds, drops, and renames.
+5. Mark destination metadata as `Applied` only after the destination schema is
+   actually ready for following row events.
+6. Process following row events with the new schema.
 
-The built-in BigQuery destination follows this shape: it marks destination
-schema metadata as `Applying`, applies add/rename/drop operations, then marks
-the schema as `Applied`. Because BigQuery DDL is not transactional, a crash
-while metadata is `Applying` may require manual intervention.
+The built-in BigQuery, ClickHouse, and Snowflake destinations follow this
+shape: they mark destination schema metadata as `Applying`, apply the supported
+add/rename/drop operations, then mark the schema as `Applied`. Because
+destination DDL is not always transactional, a crash while metadata is
+`Applying` may require manual intervention.
 
 Other destination modules may support a narrower schema-change surface. Treat
 `Event::Relation` as the stable ETL contract, then check the destination's
@@ -122,7 +129,7 @@ databases.
 
 ## Current Limitations
 
-These behaviors are not full destination DDL semantics yet:
+These behaviors are **not full destination DDL semantics** yet:
 
 - Only `ALTER TABLE` is captured by the ETL DDL trigger today.
 - Type changes, nullability changes, default changes, constraint changes,

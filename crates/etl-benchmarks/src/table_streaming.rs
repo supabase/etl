@@ -6,10 +6,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use etl::{
-    pipeline::Pipeline, state::table::TableReplicationPhaseType,
-    test_utils::notifying_store::NotifyingStore,
-};
+use etl::{pipeline::Pipeline, state::TableStateType, test_utils::notifying_store::NotifyingStore};
 use etl_config::shared::TableSyncCopyConfig;
 use etl_postgres::types::TableId;
 use serde::Serialize;
@@ -372,12 +369,10 @@ async fn register_table_ready_notifications(
     let mut notifications = Vec::with_capacity(table_ids.len());
     for table_id in table_ids {
         let table_id = *table_id;
-        let ready = store
-            .notify_on_table_state_type(TableId::new(table_id), TableReplicationPhaseType::Ready)
-            .await;
-        let errored = store
-            .notify_on_table_state_type(TableId::new(table_id), TableReplicationPhaseType::Errored)
-            .await;
+        let ready =
+            store.notify_on_table_state_type(TableId::new(table_id), TableStateType::Ready).await;
+        let errored =
+            store.notify_on_table_state_type(TableId::new(table_id), TableStateType::Errored).await;
         notifications.push(TableReadyNotifications { table_id, ready, errored });
     }
 

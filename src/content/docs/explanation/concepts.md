@@ -1,8 +1,11 @@
-# Postgres Logical Replication Concepts
+---
+title: Postgres Logical Replication Concepts
+description: Essential background for understanding how ETL works.
+---
 
 **Essential background for understanding how ETL works**
 
-This page explains the Postgres concepts that ETL builds on. If you're new to logical replication, read this first.
+This page explains the **Postgres concepts ETL builds on**. If you're new to logical replication, read this first.
 
 ## What is Logical Replication?
 
@@ -13,20 +16,20 @@ Postgres supports two types of replication:
 | **Physical** | Exact byte-for-byte copy of data files | Disaster recovery, read replicas |
 | **Logical** | Decoded row changes (INSERT, UPDATE, DELETE) | Data integration, ETL, CDC |
 
-Physical replication creates identical Postgres instances. Logical replication decodes changes into a format that any system can consume - not just another Postgres server.
+**Physical replication** creates identical Postgres instances. **Logical replication** decodes changes into a format that any system can consume - not just another Postgres server.
 
-ETL uses logical replication to stream changes to downstream systems.
+ETL uses **logical replication** to stream changes to downstream systems.
 
 ## The Write-Ahead Log (WAL)
 
-Before Postgres modifies data on disk, it first writes the change to the **Write-Ahead Log (WAL)**. This guarantees durability - if Postgres crashes, it can replay the WAL to recover.
+Before Postgres modifies data on disk, it first writes the change to the **Write-Ahead Log (WAL)**. This guarantees durability: if Postgres crashes, it can replay the WAL to recover.
 
 ```mermaid
 flowchart LR
     A[Transaction commits] --> B[Written to WAL] --> C[Later flushed to data files]
 ```
 
-For logical replication, Postgres decodes the WAL back into logical changes:
+For logical replication, Postgres decodes the WAL back into **logical changes**:
 
 ```mermaid
 flowchart LR
@@ -44,7 +47,7 @@ Postgres must be configured to record enough information for logical decoding:
 wal_level = logical
 ```
 
-With `wal_level = logical`, Postgres records additional metadata needed to reconstruct row changes. Lower levels (`replica`, `minimal`) don't capture enough detail.
+With `wal_level = logical`, Postgres records additional metadata needed to reconstruct row changes. Lower levels (`replica`, `minimal`) **do not capture enough detail**.
 
 ## Publications
 
@@ -58,7 +61,7 @@ CREATE PUBLICATION my_publication FOR TABLE users, orders;
 CREATE PUBLICATION my_publication FOR ALL TABLES;
 ```
 
-When you create an ETL pipeline, you specify which publication to consume. Only changes to tables in that publication are streamed.
+When you create an ETL pipeline, you specify which publication to consume. **Only changes to tables in that publication are streamed.**
 
 ### What Publications Control
 
@@ -73,9 +76,9 @@ A **replication slot** is a bookmark that tracks how far a consumer has read in 
 
 ### Why Slots Exist
 
-Without slots, Postgres would delete old WAL files when it no longer needs them for crash recovery. But if ETL disconnects temporarily, it needs those WAL files to catch up when it reconnects.
+Without slots, Postgres would delete old WAL files when it no longer needs them for crash recovery. If ETL disconnects temporarily, it needs those WAL files to catch up when it reconnects.
 
-Replication slots tell Postgres: "Don't delete WAL files until this consumer has processed them."
+Replication slots tell Postgres: **"Don't delete WAL files until this consumer has processed them."**
 
 ```sql
 -- View existing slots
@@ -96,7 +99,7 @@ The Apply Worker uses one persistent slot. Table Sync Workers create temporary s
 
 ### Slot Risks
 
-Slots prevent WAL cleanup. If ETL stops consuming (due to crashes, network issues, or a slow consumer), WAL files accumulate on disk. This can fill your disk.
+Slots prevent WAL cleanup. If ETL stops consuming because of crashes, network issues, or a slow consumer, WAL files accumulate on disk. **This can fill your disk.**
 
 To mitigate this risk:
 
@@ -104,7 +107,7 @@ To mitigate this risk:
 - Set `max_slot_wal_keep_size` to limit WAL retention
 - Alert when slots fall behind
 
-See [Configure Postgres](../guides/configure-postgres.md#wal-buildup-and-disk-usage) for details.
+See [Configure Postgres](/etl/guides/configure-postgres/#wal-buildup-and-disk-usage) for details.
 
 ## The pgoutput Decoder
 
@@ -126,11 +129,11 @@ ETL receives these messages and converts them to events.
 
 ## Why Two Phases?
 
-ETL replicates data in two phases:
+ETL replicates data in **two phases**:
 
 ### Phase 1: Initial Copy
 
-Logical replication only captures **changes**. It doesn't know about data that existed before replication started.
+Logical replication only captures **changes**. It does not know about data that existed before replication started.
 
 So ETL first copies all existing rows using Postgres's `COPY` command:
 
@@ -138,7 +141,7 @@ So ETL first copies all existing rows using Postgres's `COPY` command:
 2. COPY all rows from the table
 3. Start streaming changes from the snapshot point
 
-The slot ensures no changes are lost between the snapshot and when streaming begins.
+The slot ensures **no changes are lost** between the snapshot and when streaming begins.
 
 ### Phase 2: Streaming
 
@@ -149,7 +152,7 @@ flowchart LR
     A[Postgres WAL] --> B[Decoder] --> C[ETL] --> D[Destination]
 ```
 
-Each change is delivered as an event (Insert, Update, Delete) through `write_events()`.
+Each change is delivered as an `Event` through `write_events()`.
 
 ### Why This Matters
 
@@ -171,7 +174,7 @@ The important nuance is that PostgreSQL does **not** always send an old-side tup
 Under key-based replica identity, it only sends a key image when it is needed.
 For `DELETE`, PostgreSQL sends an old-side tuple whenever the delete is publishable.
 
-This means replica identity is both a PostgreSQL logging rule and a contract for
+This means replica identity is both a **PostgreSQL logging rule** and a **consumer contract** for
 downstream consumers. It determines whether an event contains enough old-row
 data to match an existing row, detect key changes, or compare before-and-after
 values.
@@ -216,23 +219,23 @@ source statement is rejected instead.
 The Rust event API keeps the old-row fields optional at the boundary, but those
 `None` cases are broader than the PostgreSQL pgoutput shapes described here.
 
-TOAST adds one more wrinkle. PostgreSQL can mark unchanged toasted update values
+**TOAST adds one more wrinkle.** PostgreSQL can mark unchanged toasted update values
 as `UnchangedToast` instead of resending the value. ETL can reconstruct those
 values only if the old-side row image contains them, so tables with toasted
 columns can produce partial update rows unless they use `REPLICA IDENTITY FULL`
 or the missing values are present in a logged key image.
 
-If you need old values for auditing, comparison, complete replacement rows, or
-reliable reconstruction of unchanged toasted columns, set `REPLICA IDENTITY FULL`
-on those tables. If a consumer only needs stable key values, `DEFAULT` with a
-primary key or `USING INDEX` is usually enough, but update events will not always
-include `old_table_row`.
+If you need **old values** for auditing, comparison, complete replacement rows,
+or reliable reconstruction of unchanged toasted columns, set
+`REPLICA IDENTITY FULL` on those tables. If a consumer only needs stable key
+values, `DEFAULT` with a primary key or `USING INDEX` is usually enough, but
+update events will not always include `old_table_row`.
 
 ## LSN (Log Sequence Number)
 
 Every position in the WAL has a unique **LSN** - a monotonically increasing pointer.
 
-```
+```text
 Format: 0/16B3748 (segment/offset)
 ```
 
@@ -249,7 +252,7 @@ Multiple events in the same transaction share the same `commit_lsn` but have dif
 
 ## Why Persist State?
 
-ETL persists replication state (schemas, progress, destination table metadata) for recovery.
+ETL persists operational state - **table states, schemas, progress, and destination table metadata** - for recovery.
 
 ### Without Persistence
 
@@ -265,9 +268,10 @@ ETL stores:
 
 | State | Purpose |
 |-------|---------|
-| Replication phase | Know whether to copy or stream for each table |
-| Table schemas | Validate incoming data against expected schema |
-| Destination table metadata | Route events to correct downstream tables |
+| Table state | Know whether to copy or stream for each table |
+| Durable replication progress | Resume workers from a safe flushed LSN |
+| Table schemas | Decode events against the correct versioned schema |
+| Destination table metadata | Track destination table IDs, applied schema snapshots, and replication masks |
 
 On restart, ETL loads this state and resumes from where it left off.
 
@@ -292,7 +296,7 @@ Here's the complete flow:
 
 ## Next Steps
 
-- [Architecture](architecture.md): How ETL's components work together
-- [Event Types](events.md): All events emitted by ETL
-- [Configure Postgres](../guides/configure-postgres.md): Production setup
-- [First Pipeline](../guides/first-pipeline.md): Build something
+- [Architecture](/etl/explanation/architecture/): How ETL's components work together
+- [Event Types](/etl/explanation/events/): All events emitted by ETL
+- [Configure Postgres](/etl/guides/configure-postgres/): Production setup
+- [First Pipeline](/etl/guides/first-pipeline/): Build something

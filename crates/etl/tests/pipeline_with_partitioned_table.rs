@@ -1,6 +1,6 @@
 use etl::{
     error::ErrorKind,
-    state::table::TableReplicationPhaseType,
+    state::TableStateType,
     test_utils::{
         database::{spawn_source_database, test_table_name},
         event::group_events_by_type_and_table_id,
@@ -54,9 +54,8 @@ async fn partitioned_table_copy_replicates_existing_data() {
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
     // Register notification for initial copy completion.
-    let parent_ready_notify = state_store
-        .notify_on_table_state_type(parent_table_id, TableReplicationPhaseType::Ready)
-        .await;
+    let parent_ready_notify =
+        state_store.notify_on_table_state_type(parent_table_id, TableStateType::Ready).await;
 
     let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
@@ -109,7 +108,7 @@ async fn partitioned_table_copy_replicates_existing_data() {
     let total_rows: usize = table_rows.values().map(Vec::len).sum();
     assert_eq!(total_rows, 3);
 
-    let table_states = state_store.get_table_replication_states().await;
+    let table_states = state_store.get_table_states().await;
     assert!(table_states.contains_key(&parent_table_id));
     assert_eq!(table_states.len(), 1);
 
@@ -154,9 +153,8 @@ async fn partitioned_table_copy_and_streams_new_data_from_new_partition() {
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
     // Register notification for initial copy completion.
-    let parent_ready_notify = state_store
-        .notify_on_table_state_type(parent_table_id, TableReplicationPhaseType::Ready)
-        .await;
+    let parent_ready_notify =
+        state_store.notify_on_table_state_type(parent_table_id, TableStateType::Ready).await;
 
     let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
@@ -244,9 +242,8 @@ async fn partition_drop_does_not_emit_delete_or_truncate() {
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
-    let parent_ready_notify = state_store
-        .notify_on_table_state_type(parent_table_id, TableReplicationPhaseType::Ready)
-        .await;
+    let parent_ready_notify =
+        state_store.notify_on_table_state_type(parent_table_id, TableStateType::Ready).await;
 
     let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
@@ -338,9 +335,8 @@ async fn parent_table_truncate_does_emit_truncate_event() {
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
-    let parent_ready_notify = state_store
-        .notify_on_table_state_type(parent_table_id, TableReplicationPhaseType::Ready)
-        .await;
+    let parent_ready_notify =
+        state_store.notify_on_table_state_type(parent_table_id, TableStateType::Ready).await;
 
     let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
@@ -406,9 +402,8 @@ async fn child_table_truncate_does_not_emit_truncate_event() {
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
-    let parent_ready_notify = state_store
-        .notify_on_table_state_type(parent_table_id, TableReplicationPhaseType::Ready)
-        .await;
+    let parent_ready_notify =
+        state_store.notify_on_table_state_type(parent_table_id, TableStateType::Ready).await;
 
     let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
@@ -489,9 +484,8 @@ async fn partition_detach_with_explicit_publication_does_not_replicate_detached_
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
-    let parent_ready_notify = state_store
-        .notify_on_table_state_type(parent_table_id, TableReplicationPhaseType::Ready)
-        .await;
+    let parent_ready_notify =
+        state_store.notify_on_table_state_type(parent_table_id, TableStateType::Ready).await;
 
     let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
@@ -598,9 +592,8 @@ async fn partition_detach_with_all_tables_publication_does_not_replicate_detache
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
-    let parent_ready_notify = state_store
-        .notify_on_table_state_type(parent_table_id, TableReplicationPhaseType::Ready)
-        .await;
+    let parent_ready_notify =
+        state_store.notify_on_table_state_type(parent_table_id, TableStateType::Ready).await;
 
     let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
@@ -615,7 +608,7 @@ async fn partition_detach_with_all_tables_publication_does_not_replicate_detache
     parent_ready_notify.notified().await;
 
     // Verify the initial state. The parent table is the only table tracked.
-    let table_states_before = state_store.get_table_replication_states().await;
+    let table_states_before = state_store.get_table_states().await;
     assert!(table_states_before.contains_key(&parent_table_id));
     assert!(!table_states_before.contains_key(&p1_table_id));
 
@@ -676,7 +669,7 @@ async fn partition_detach_with_all_tables_publication_does_not_replicate_detache
 
     // The pipeline state should still only track the parent table (not the detached
     // partition) because it hasn't re-scanned for new tables.
-    let table_states_after = state_store.get_table_replication_states().await;
+    let table_states_after = state_store.get_table_states().await;
     assert!(table_states_after.contains_key(&parent_table_id));
 
     // The detached partition insert should NOT be replicated in this pipeline run
@@ -721,9 +714,8 @@ async fn partition_detach_with_all_tables_publication_does_replicate_detached_in
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
     // Start pipeline and wait for initial sync.
-    let parent_ready_notify = state_store
-        .notify_on_table_state_type(parent_table_id, TableReplicationPhaseType::Ready)
-        .await;
+    let parent_ready_notify =
+        state_store.notify_on_table_state_type(parent_table_id, TableStateType::Ready).await;
 
     let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
@@ -738,7 +730,7 @@ async fn partition_detach_with_all_tables_publication_does_replicate_detached_in
     parent_ready_notify.notified().await;
 
     // Verify the initial state. The parent table is the only table tracked.
-    let table_states_before = state_store.get_table_replication_states().await;
+    let table_states_before = state_store.get_table_states().await;
     assert!(table_states_before.contains_key(&parent_table_id));
     assert!(!table_states_before.contains_key(&p1_table_id));
 
@@ -770,7 +762,7 @@ async fn partition_detach_with_all_tables_publication_does_replicate_detached_in
     // Restart the pipeline. It should now discover the detached partition as a new
     // table.
     let detached_ready_notify =
-        state_store.notify_on_table_state_type(p1_table_id, TableReplicationPhaseType::Ready).await;
+        state_store.notify_on_table_state_type(p1_table_id, TableStateType::Ready).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -788,7 +780,7 @@ async fn partition_detach_with_all_tables_publication_does_replicate_detached_in
     let _ = pipeline.shutdown_and_wait().await;
 
     // Verify the detached partition was discovered and synced.
-    let table_states_after = state_store.get_table_replication_states().await;
+    let table_states_after = state_store.get_table_states().await;
     assert!(table_states_after.contains_key(&p1_table_id));
 
     // Verify the data from the detached partition was copied.
@@ -838,9 +830,8 @@ async fn partition_detach_with_schema_publication_does_not_replicate_detached_in
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
-    let parent_ready_notify = state_store
-        .notify_on_table_state_type(parent_table_id, TableReplicationPhaseType::Ready)
-        .await;
+    let parent_ready_notify =
+        state_store.notify_on_table_state_type(parent_table_id, TableStateType::Ready).await;
 
     let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
@@ -855,7 +846,7 @@ async fn partition_detach_with_schema_publication_does_not_replicate_detached_in
     parent_ready_notify.notified().await;
 
     // Verify initial state.
-    let table_states_before = state_store.get_table_replication_states().await;
+    let table_states_before = state_store.get_table_states().await;
     assert!(table_states_before.contains_key(&parent_table_id));
     assert!(!table_states_before.contains_key(&p1_table_id));
 
@@ -914,7 +905,7 @@ async fn partition_detach_with_schema_publication_does_not_replicate_detached_in
     let _ = pipeline.shutdown_and_wait().await;
 
     // The pipeline state should still only track the parent table.
-    let table_states_after = state_store.get_table_replication_states().await;
+    let table_states_after = state_store.get_table_states().await;
     assert!(table_states_after.contains_key(&parent_table_id));
 
     // Verify events.
@@ -972,9 +963,8 @@ async fn partition_detach_with_schema_publication_does_replicate_detached_insert
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
     // Start pipeline and wait for initial sync.
-    let parent_ready_notify = state_store
-        .notify_on_table_state_type(parent_table_id, TableReplicationPhaseType::Ready)
-        .await;
+    let parent_ready_notify =
+        state_store.notify_on_table_state_type(parent_table_id, TableStateType::Ready).await;
 
     let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
@@ -989,7 +979,7 @@ async fn partition_detach_with_schema_publication_does_replicate_detached_insert
     parent_ready_notify.notified().await;
 
     // Verify initial state.
-    let table_states_before = state_store.get_table_replication_states().await;
+    let table_states_before = state_store.get_table_states().await;
     assert!(table_states_before.contains_key(&parent_table_id));
     assert!(!table_states_before.contains_key(&p1_table_id));
 
@@ -1021,7 +1011,7 @@ async fn partition_detach_with_schema_publication_does_replicate_detached_insert
     // Restart the pipeline. It should now discover the detached partition as a new
     // table.
     let detached_ready_notify =
-        state_store.notify_on_table_state_type(p1_table_id, TableReplicationPhaseType::Ready).await;
+        state_store.notify_on_table_state_type(p1_table_id, TableStateType::Ready).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -1039,7 +1029,7 @@ async fn partition_detach_with_schema_publication_does_replicate_detached_insert
     let _ = pipeline.shutdown_and_wait().await;
 
     // Verify the detached partition was discovered and synced.
-    let table_states_after = state_store.get_table_replication_states().await;
+    let table_states_after = state_store.get_table_states().await;
     assert!(table_states_after.contains_key(&p1_table_id));
 
     // Verify the data from the detached partition was copied.
@@ -1215,9 +1205,8 @@ async fn nested_partitioned_table_copy_and_cdc() {
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
     // Register notification for initial copy completion.
-    let parent_ready_notify = state_store
-        .notify_on_table_state_type(parent_table_id, TableReplicationPhaseType::Ready)
-        .await;
+    let parent_ready_notify =
+        state_store.notify_on_table_state_type(parent_table_id, TableStateType::Ready).await;
 
     let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
@@ -1278,7 +1267,7 @@ async fn nested_partitioned_table_copy_and_cdc() {
 
     // Verify only the parent table is tracked (not intermediate or leaf
     // partitions).
-    let table_states = state_store.get_table_replication_states().await;
+    let table_states = state_store.get_table_states().await;
     assert!(table_states.contains_key(&parent_table_id));
     assert_eq!(table_states.len(), 1);
 

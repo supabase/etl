@@ -41,11 +41,17 @@ pub fn load_test_config() -> Config {
 }
 
 /// Load the private key path from `TESTS_SNOWFLAKE_PRIVATE_KEY_PATH`.
-pub fn load_test_private_key_path() -> PathBuf {
+fn load_test_private_key_path() -> PathBuf {
     PathBuf::from(
         std::env::var(SNOWFLAKE_PRIVATE_KEY_PATH_ENV)
             .unwrap_or_else(|_| panic!("{SNOWFLAKE_PRIVATE_KEY_PATH_ENV} must be set")),
     )
+}
+
+/// Load the private key PEM text.
+pub fn load_test_private_key_pem() -> String {
+    std::fs::read_to_string(load_test_private_key_path())
+        .unwrap_or_else(|e| panic!("failed to read {SNOWFLAKE_PRIVATE_KEY_PATH_ENV}: {e}"))
 }
 
 /// Execute a SELECT query and return result rows. Requires an active warehouse.

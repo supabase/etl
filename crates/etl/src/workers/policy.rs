@@ -70,6 +70,16 @@ pub(crate) fn build_error_handling_policy(error: &EtlError) -> ErrorHandlingPoli
             RetryDirective::Manual,
             Some("Update the Postgres database schema to resolve compatibility issues."),
         ),
+        ErrorKind::SourceReplicaIdentityError => ErrorHandlingPolicy::new(
+            RetryDirective::Manual,
+            Some(
+                "Configure the affected Postgres table with the least costly replica identity \
+                 supported by the destination. Use REPLICA IDENTITY DEFAULT with a primary key, \
+                 or USING INDEX when supported, if stable key values are enough. Use REPLICA \
+                 IDENTITY FULL only when the destination needs full old-row images or complete \
+                 replacement rows.",
+            ),
+        ),
         ErrorKind::NullValuesNotSupportedInArrayInDestination => ErrorHandlingPolicy::new(
             RetryDirective::Manual,
             Some("Remove NULL values from array columns in the Postgres tables."),
@@ -123,5 +133,25 @@ pub(crate) fn build_error_handling_policy(error: &EtlError) -> ErrorHandlingPoli
                  persists after rollback and targeted fixes, please contact support.",
             ),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        error::{ErrorKind, EtlError},
+        workers::policy::{RetryDirective, build_error_handling_policy},
+    };
+
+    #[test]
+    fn source_replica_identity_errors_have_specific_manual_remediation() {
+        let error = EtlError::from((ErrorKind::SourceReplicaIdentityError, "Replica identity"));
+
+        let policy = build_error_handling_policy(&error);
+
+        assert_eq!(policy.retry_directive(), RetryDirective::Manual);
+        let solution = policy.solution().expect("replica identity errors should have a solution");
+        assert!(solution.contains("least costly replica identity"));
+        assert!(solution.contains("REPLICA IDENTITY FULL only"));
     }
 }

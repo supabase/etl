@@ -1,9 +1,12 @@
-# Event Types
+---
+title: Event Types
+description: Understanding the events ETL emits from Postgres logical replication.
+---
 
 **Understanding the events ETL emits from Postgres logical replication**
 
 ETL streams events from Postgres logical replication via `write_events()`.
-This page documents the event types and the PostgreSQL semantics they preserve.
+This page documents the **event types** and the **PostgreSQL semantics** they preserve.
 
 ## Event Overview
 
@@ -20,11 +23,11 @@ This page documents the event types and the PostgreSQL semantics they preserve.
 
 ## Data Modification Events
 
-These events carry row data and are associated with specific tables.
+These events carry **row data** and are associated with specific tables.
 
 ### Row Images
 
-Data modification events use row-image helper types:
+Data modification events use **row-image helper types**:
 
 ```rust
 pub enum UpdatedTableRow {
@@ -38,16 +41,16 @@ pub enum OldTableRow {
 }
 ```
 
-`TableRow` is a complete dense row. Its values are ordered to match the
+`TableRow` is a **complete dense row**. Its values are ordered to match the
 replicated table-column order.
 
-`PartialTableRow` is used when an update row is not complete. It exposes:
+`PartialTableRow` is used when an update row is **not complete**. It exposes:
 
 - `total_columns()`: the number of replicated columns in the table schema;
 - `values()`: present values in replicated table-column order, excluding missing columns;
 - `missing_column_indexes()`: zero-based replicated-column indexes for values ETL could not reconstruct.
 
-`OldTableRow::Full(row)` contains a complete old row. `OldTableRow::Key(row)`
+`OldTableRow::Full(row)` contains a **complete old row**. `OldTableRow::Key(row)`
 contains only replica-identity columns, densely packed in replicated
 table-column order.
 
@@ -80,12 +83,12 @@ pub struct UpdateEvent {
 }
 ```
 
-`updated_table_row` is the authoritative post-update payload:
+`updated_table_row` is the **authoritative post-update payload**:
 
 - `UpdatedTableRow::Full` when ETL knows every replicated column value after decoding the update.
 - `UpdatedTableRow::Partial` when PostgreSQL emitted `UnchangedToast` fields that ETL could not reconstruct safely.
 
-The `old_table_row` field is auxiliary old-side context that may be needed for
+The `old_table_row` field is **auxiliary old-side context** that may be needed for
 row matching, key changes, or reconstruction logic.
 
 #### Unchanged Toast
@@ -145,7 +148,7 @@ Under `FULL`, PostgreSQL sends a full old row for every published update.
 A `FULL` update with `old_table_row = None` is not a shape emitted by
 PostgreSQL pgoutput.
 
-Key points for update handling:
+**Key points for update handling:**
 
 - `old_table_row = None` on an update is a valid `pgoutput` shape for `DEFAULT` or `USING INDEX`. It does not mean the table has no replica identity.
 - `OldTableRow::Key(row)` contains only replica-identity columns, in replicated table-column order. It is not necessarily the source primary key.
@@ -153,7 +156,7 @@ Key points for update handling:
 - Consumers that match source rows by another key, such as the source primary key, can project the old or new row down to that key.
 - Consumers that need before-and-after values for arbitrary columns need `REPLICA IDENTITY FULL`; key-based identity only gives old identity columns, and only when PostgreSQL logs them.
 
-For destination implementations, a practical update flow is:
+For destination implementations, a **practical update flow** is:
 
 1. Treat `updated_table_row` as the post-update payload.
 2. Handle `UpdatedTableRow::Partial` before constructing a complete replacement row.
@@ -185,7 +188,7 @@ For `DELETE`, valid PostgreSQL publications send an old-side image:
 | `USING INDEX` | `Some(OldTableRow::Key(row))` |
 | `NOTHING` | Source `DELETE` is rejected when the table publishes deletes |
 
-Important implications:
+**Important implications:**
 
 - Deletes do not carry a new row image. `old_table_row` is the delete payload.
 - `OldTableRow::Key(row)` again means replica-identity columns only, not necessarily the table's primary key.
@@ -210,7 +213,7 @@ pub struct TruncateEvent {
 }
 ```
 
-Note: A single Truncate event can affect multiple tables when using `TRUNCATE ... CASCADE`.
+**Note:** A single `Truncate` event can affect multiple tables when using `TRUNCATE ... CASCADE`.
 
 ## Transaction Events
 
@@ -249,7 +252,7 @@ pub struct CommitEvent {
 
 ### Relation
 
-Provides table schema information. Sent before data events for a table and
+Provides **table schema information**. Sent before data events for a table and
 again after supported schema changes.
 
 ```rust
@@ -273,15 +276,15 @@ schemas are also ordered by `attnum`, so
 `ReplicatedTableSchema::column_schemas()` becomes a positional view that matches
 the tuple payloads exactly, even when a publication filters columns.
 
-For DDL behavior, including add/drop/rename semantics and current limitations,
-see [Schema Changes](schema-changes.md).
+For DDL behavior, including **add/drop/rename semantics** and current limitations,
+see [Schema Changes](/etl/explanation/schema-changes/).
 
 ## Begin/Commit Behavior
 
-During initial copy, `Begin` and `Commit` events may be delivered **multiple times** due to parallel Table Sync Workers creating separate replication slots. Row data (Insert, Update, Delete) is delivered exactly once.
+During initial copy, `Begin` and `Commit` events may be delivered **multiple times** due to parallel Table Sync Workers creating separate replication slots. These repeated markers do not by themselves duplicate row events, but ETL is an **at-least-once** system, so destinations must still make row writes idempotent across retries and restarts.
 
 Handle this by either:
-- Tracking LSNs to detect duplicate Begin/Commit events
+- Tracking `commit_lsn` plus `tx_ordinal` to identify repeated Begin/Commit markers
 - Ignoring Begin/Commit if transaction markers are not required
 
 ```rust
@@ -310,49 +313,58 @@ async fn write_events(&self, events: Vec<Event>, async_result: WriteEventsResult
 
 ## Understanding LSN Fields
 
-Every event includes two LSN (Log Sequence Number) fields that are critical for understanding event ordering and deduplication.
+Every event includes **LSN (Log Sequence Number)** fields plus a transaction-local
+ordinal that are critical for understanding event ordering, checkpointing, and
+idempotent destination writes.
 
 ### What is an LSN?
 
-An LSN is a pointer to a position in Postgres's Write-Ahead Log (WAL). It's a monotonically increasing 64-bit integer that uniquely identifies a location in the transaction log. Format: `0/16B3748` (segment/offset).
+An LSN is a pointer to a position in Postgres's **Write-Ahead Log (WAL)**. It's a monotonically increasing 64-bit integer that uniquely identifies a location in the transaction log. Format: `0/16B3748` (segment/offset).
 
-### start_lsn vs commit_lsn
+### start_lsn, commit_lsn, and tx_ordinal
 
 | Field | Meaning | Use Case |
 |-------|---------|----------|
-| `start_lsn` | Position where this event was recorded in the WAL | Deduplication, ordering within transaction |
+| `start_lsn` | Position where this event was recorded in the WAL | Debugging and WAL-position context |
 | `commit_lsn` | Position where the transaction will commit | Transaction grouping, recovery checkpoints |
+| `tx_ordinal` | Zero-based order of the event within its transaction | Ordering and idempotency within a transaction |
 
-**Key insight:** Multiple events share the same `commit_lsn` (same transaction) but each has a unique `start_lsn`.
+**Key insight:** Multiple events share the same `commit_lsn` when they belong
+to the same transaction. ETL uses `commit_lsn` plus `tx_ordinal` as the stable
+sequence key for ordered CDC writes.
 
 ### Example
 
 Consider a transaction that inserts two rows:
 
-```
+```sql
 BEGIN;                    -- Transaction starts
 INSERT INTO users ...;    -- start_lsn: 0/16B3700, commit_lsn: 0/16B3800
 INSERT INTO users ...;    -- start_lsn: 0/16B3750, commit_lsn: 0/16B3800
 COMMIT;                   -- Transaction commits at 0/16B3800
 ```
 
-Both inserts have the same `commit_lsn` (they commit together) but different `start_lsn` values (they're distinct events).
+Both inserts have the same `commit_lsn` because they commit together. Their
+`tx_ordinal` values distinguish their order within the transaction.
 
 ### Using LSNs
 
-**For ordering:** Events are delivered in `start_lsn` order within a transaction, and transactions are ordered by `commit_lsn`.
+**For ordering:** Use `commit_lsn` to order transactions and `tx_ordinal` to
+order events within the same transaction.
 
-**For deduplication:** If you see the same `start_lsn` twice, it's a duplicate event (can happen with Begin/Commit during initial copy).
+**For idempotency:** Use the event sequence key, equivalent to
+`(commit_lsn, tx_ordinal)`, together with the destination's table or row key
+when detecting replays.
 
 **For checkpointing:** Store the highest `commit_lsn` you've processed. On restart, you can resume from that point.
 
 ## Event Batching
 
-ETL batches events before calling `write_events()`. A batch may contain events from multiple tables, multiple transactions, and mixed event types.
+ETL batches events before calling `write_events()`. A batch may contain events from **multiple tables, multiple transactions, and mixed event types**.
 
 **Ordering requirement:** Events affecting the same row (by primary key) must be processed in order. Events for different rows can be processed concurrently.
 
 ## Next Steps
 
-- [Custom Destinations](../guides/custom-implementations.md): Implement your own event handling
-- [Architecture](architecture.md): How events flow through ETL
+- [Custom Destinations](/etl/guides/custom-implementations/): Implement your own event handling
+- [Architecture](/etl/explanation/architecture/): How events flow through ETL

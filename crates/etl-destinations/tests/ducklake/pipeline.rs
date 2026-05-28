@@ -5,7 +5,7 @@
 
 use duckdb::Connection;
 use etl::{
-    state::table::TableReplicationPhaseType,
+    state::TableStateType,
     test_utils::{
         database::spawn_source_database,
         notifying_store::NotifyingStore,
@@ -155,16 +155,10 @@ async fn table_copy_and_streaming_with_restart() {
     );
 
     let users_ready = store
-        .notify_on_table_state_type(
-            database_schema.users_schema().id,
-            TableReplicationPhaseType::Ready,
-        )
+        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
         .await;
     let orders_ready = store
-        .notify_on_table_state_type(
-            database_schema.orders_schema().id,
-            TableReplicationPhaseType::Ready,
-        )
+        .notify_on_table_state_type(database_schema.orders_schema().id, TableStateType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
@@ -272,7 +266,7 @@ async fn table_copy_reset_drops_destination_table_before_recopy() {
     );
 
     let users_ready =
-        store.notify_on_table_state_type(users_schema.id, TableReplicationPhaseType::Ready).await;
+        store.notify_on_table_state_type(users_schema.id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 
@@ -312,7 +306,7 @@ async fn table_copy_reset_drops_destination_table_before_recopy() {
     );
 
     let users_ready =
-        store.notify_on_table_state_type(users_schema.id, TableReplicationPhaseType::Ready).await;
+        store.notify_on_table_state_type(users_schema.id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 
@@ -366,16 +360,10 @@ async fn table_copy_and_streaming_without_restart() {
     );
 
     let users_ready = store
-        .notify_on_table_state_type(
-            database_schema.users_schema().id,
-            TableReplicationPhaseType::Ready,
-        )
+        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
         .await;
     let orders_ready = store
-        .notify_on_table_state_type(
-            database_schema.orders_schema().id,
-            TableReplicationPhaseType::Ready,
-        )
+        .notify_on_table_state_type(database_schema.orders_schema().id, TableStateType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
@@ -437,10 +425,7 @@ async fn table_insert_update_delete() {
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
     let users_ready = store
-        .notify_on_table_state_type(
-            database_schema.users_schema().id,
-            TableReplicationPhaseType::Ready,
-        )
+        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
         .await;
 
     let destination = build_destination(&catalog_url, &data_url, store.clone()).await;
@@ -562,16 +547,10 @@ async fn cdc_streaming_with_truncate() {
     );
 
     let users_ready = store
-        .notify_on_table_state_type(
-            database_schema.users_schema().id,
-            TableReplicationPhaseType::Ready,
-        )
+        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
         .await;
     let orders_ready = store
-        .notify_on_table_state_type(
-            database_schema.orders_schema().id,
-            TableReplicationPhaseType::Ready,
-        )
+        .notify_on_table_state_type(database_schema.orders_schema().id, TableStateType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
