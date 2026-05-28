@@ -284,10 +284,10 @@ For BigQuery workflow runs, set the repository secret
 `BENCHMARK_BQ_SA_KEY_JSON`, then pass `destination=bigquery`,
 `bq_project_id`, and an existing `bq_dataset_id`.
 
-For Snowflake workflow runs, set repository secrets
-`BENCHMARK_SF_ACCOUNT`, `BENCHMARK_SF_USER`, `BENCHMARK_SF_PRIVATE_KEY`,
-`BENCHMARK_SF_DATABASE`, and `BENCHMARK_SF_SCHEMA`, then pass
-`destination=snowflake`.
+For Snowflake workflow runs, set two repository secrets and pass `destination=snowflake`:
+
+- `BENCH_SNOWFLAKE_CONNECTION`: colon-separated `account:user:database:schema`.
+- `BENCH_SNOWFLAKE_PRIVATE_KEY`: full PEM contents of the RSA private key.
 
 The workflow starts only source Postgres, installs pinned `go-tpc`, runs
 `cargo xtask benchmark` with three measured samples plus one warmup sample,
