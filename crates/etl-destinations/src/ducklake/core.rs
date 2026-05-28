@@ -429,6 +429,44 @@ struct DuckLakeSchemaDiffPlan {
     column_names: Vec<String>,
 }
 
+/// Ordered CDC mutations that all use the same replicated table schema.
+struct TableMutationSegment {
+    /// Replicated schema used to encode every mutation in this segment.
+    replicated_table_schema: ReplicatedTableSchema,
+    /// Ordered mutations for the schema.
+    mutations: Vec<TrackedTableMutation>,
+}
+
+/// Returns whether two replicated schemas have the same row shape and identity.
+fn replicated_table_schemas_match(
+    left: &ReplicatedTableSchema,
+    right: &ReplicatedTableSchema,
+) -> bool {
+    left.id() == right.id()
+        && left.inner().snapshot_id == right.inner().snapshot_id
+        && left.replication_mask() == right.replication_mask()
+        && left.identity_mask() == right.identity_mask()
+}
+
+/// Appends a mutation to the latest compatible schema segment.
+fn push_table_mutation_segment(
+    segments: &mut Vec<TableMutationSegment>,
+    replicated_table_schema: ReplicatedTableSchema,
+    mutation: TrackedTableMutation,
+) {
+    if let Some(segment) = segments.last_mut()
+        && replicated_table_schemas_match(
+            &segment.replicated_table_schema,
+            &replicated_table_schema,
+        )
+    {
+        segment.mutations.push(mutation);
+        return;
+    }
+
+    segments.push(TableMutationSegment { replicated_table_schema, mutations: vec![mutation] });
+}
+
 /// Returns a deterministic hash for generated DuckLake identifiers.
 fn stable_ducklake_identifier_hash(value: &str) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
@@ -1605,10 +1643,8 @@ where
         let mut event_iter = events.into_iter().peekable();
 
         while event_iter.peek().is_some() {
-            let mut table_id_to_mutations: HashMap<
-                TableId,
-                (ReplicatedTableSchema, Vec<TrackedTableMutation>),
-            > = HashMap::new();
+            let mut table_id_to_mutations: HashMap<TableId, Vec<TableMutationSegment>> =
+                HashMap::new();
 
             // Accumulate row events, stopping at the first DDL or truncate boundary.
             while let Some(event) = event_iter.peek() {
@@ -1622,16 +1658,17 @@ where
                 match event {
                     Event::Insert(insert) => {
                         let table_id = insert.replicated_table_schema.id();
-                        let entry = table_id_to_mutations.entry(table_id).or_insert_with(|| {
-                            (insert.replicated_table_schema.clone(), Vec::new())
-                        });
-                        entry.0 = insert.replicated_table_schema;
-                        entry.1.push(TrackedTableMutation::new(
+                        let mutation = TrackedTableMutation::new(
                             insert.start_lsn,
                             insert.commit_lsn,
                             insert.tx_ordinal,
                             TableMutation::Insert(insert.table_row),
-                        ));
+                        );
+                        push_table_mutation_segment(
+                            table_id_to_mutations.entry(table_id).or_default(),
+                            insert.replicated_table_schema,
+                            mutation,
+                        );
                     }
                     Event::Update(update) => {
                         validate_ducklake_replica_identity(
@@ -1639,20 +1676,22 @@ where
                             "update",
                         )?;
                         let table_id = update.replicated_table_schema.id();
-                        let entry = table_id_to_mutations.entry(table_id).or_insert_with(|| {
-                            (update.replicated_table_schema.clone(), Vec::new())
-                        });
-                        entry.0 = update.replicated_table_schema;
+                        let replicated_table_schema = update.replicated_table_schema;
                         let table_row = update.updated_table_row;
                         let old_table_row = update.old_table_row;
-                        let mutations = &mut entry.1;
+                        let segments = table_id_to_mutations.entry(table_id).or_default();
                         if let Some(old_row) = old_table_row {
-                            mutations.push(TrackedTableMutation::new(
+                            let mutation = TrackedTableMutation::new(
                                 update.start_lsn,
                                 update.commit_lsn,
                                 update.tx_ordinal,
                                 TableMutation::Update { delete_row: old_row, new_row: table_row },
-                            ));
+                            );
+                            push_table_mutation_segment(
+                                segments,
+                                replicated_table_schema,
+                                mutation,
+                            );
                         } else {
                             match table_row {
                                 UpdatedTableRow::Full(table_row) => {
@@ -1660,23 +1699,28 @@ where
                                         "update event has no old row, deleting by replica \
                                          identity from new row"
                                     );
-                                    mutations.push(TrackedTableMutation::new(
+                                    let mutation = TrackedTableMutation::new(
                                         update.start_lsn,
                                         update.commit_lsn,
                                         update.tx_ordinal,
                                         TableMutation::Replace(table_row),
-                                    ));
+                                    );
+                                    push_table_mutation_segment(
+                                        segments,
+                                        replicated_table_schema,
+                                        mutation,
+                                    );
                                 }
                                 UpdatedTableRow::Partial(partial_row) => {
                                     let key_row = Self::key_row_from_updated_partial_row(
-                                        &entry.0,
+                                        &replicated_table_schema,
                                         &partial_row,
                                     )?;
                                     debug!(
                                         "update event has no old row, building key image from \
                                          partial new row"
                                     );
-                                    mutations.push(TrackedTableMutation::new(
+                                    let mutation = TrackedTableMutation::new(
                                         update.start_lsn,
                                         update.commit_lsn,
                                         update.tx_ordinal,
@@ -1684,7 +1728,12 @@ where
                                             delete_row: OldTableRow::Key(key_row),
                                             new_row: UpdatedTableRow::Partial(partial_row),
                                         },
-                                    ));
+                                    );
+                                    push_table_mutation_segment(
+                                        segments,
+                                        replicated_table_schema,
+                                        mutation,
+                                    );
                                 }
                             }
                         }
@@ -1706,16 +1755,17 @@ where
                             ));
                         };
                         let table_id = delete.replicated_table_schema.id();
-                        let entry = table_id_to_mutations.entry(table_id).or_insert_with(|| {
-                            (delete.replicated_table_schema.clone(), Vec::new())
-                        });
-                        entry.0 = delete.replicated_table_schema;
-                        entry.1.push(TrackedTableMutation::new(
+                        let mutation = TrackedTableMutation::new(
                             delete.start_lsn,
                             delete.commit_lsn,
                             delete.tx_ordinal,
                             TableMutation::Delete(old_row),
-                        ));
+                        );
+                        push_table_mutation_segment(
+                            table_id_to_mutations.entry(table_id).or_default(),
+                            delete.replicated_table_schema,
+                            mutation,
+                        );
                     }
                     event => {
                         debug!(event_type = %event.event_type(), "skipping unsupported event type");
@@ -1728,73 +1778,84 @@ where
                 self.ensure_streaming_progress_table_exists().await?;
                 let mut join_set = JoinSet::new();
 
-                for (_, (replicated_table_schema, mutations)) in table_id_to_mutations {
-                    let table_name = self.ensure_table_exists(&replicated_table_schema).await?;
-                    let table_write_permit = self.acquire_table_write_slot(&table_name).await?;
-                    let checkpoint_gate = Arc::clone(&self.checkpoint_gate);
-                    let pool = Arc::clone(&self.pool);
-                    let blocking_slots = Arc::clone(&self.blocking_slots);
-                    let destination_table_name = table_name.clone();
+                for (_, mutation_segments) in table_id_to_mutations {
+                    let destination = self.clone();
 
                     join_set.spawn(async move {
-                        let _table_write_permit = table_write_permit;
-                        let checkpoint_wait_started = tokio::time::Instant::now();
-                        info!(
-                            table = %destination_table_name,
-                            "ducklake waiting for checkpoint gate before streaming write: table={}",
-                            destination_table_name
-                        );
-                        let _checkpoint_guard = checkpoint_gate.read_owned().await;
-                        let checkpoint_wait = checkpoint_wait_started.elapsed();
-                        info!(
-                            table = %destination_table_name,
-                            checkpoint_wait_ms = checkpoint_wait.as_millis() as u64,
-                            "ducklake acquired checkpoint gate before streaming write: table={}, checkpoint_wait_ms={}",
-                            destination_table_name,
-                            checkpoint_wait.as_millis()
-                        );
-                        let last_sequence_key =
-                            read_table_streaming_progress_sequence_key_blocking(
-                                Arc::clone(&pool),
-                                Arc::clone(&blocking_slots),
-                                destination_table_name.clone(),
-                            )
-                            .await?;
-                        let pending_mutations =
-                            retain_mutations_after_sequence_key(mutations, last_sequence_key);
-                        if pending_mutations.is_empty() {
-                            debug!(
+                        for segment in mutation_segments {
+                            let destination_table_name = destination
+                                .ensure_table_ready_for_streaming_schema(
+                                    &segment.replicated_table_schema,
+                                )
+                                .await?;
+                            let _table_write_permit =
+                                destination.acquire_table_write_slot(&destination_table_name).await?;
+                            let checkpoint_wait_started = tokio::time::Instant::now();
+                            info!(
                                 table = %destination_table_name,
-                                "ducklake streaming mutation replay skipped, no pending events: table={}",
+                                "ducklake waiting for checkpoint gate before streaming write: table={}",
                                 destination_table_name
                             );
-                            return Ok::<(), etl::error::EtlError>(());
-                        }
-                        let is_first_streaming_batch = last_sequence_key.is_none();
-                        info!(
-                            table = %destination_table_name,
-                            pending_mutation_count = pending_mutations.len(),
-                            is_first_streaming_batch,
-                            "ducklake applying streaming mutations: table={}, pending_mutation_count={}, is_first_streaming_batch={}",
-                            destination_table_name,
-                            pending_mutations.len(),
-                            is_first_streaming_batch
-                        );
+                            let _checkpoint_guard =
+                                Arc::clone(&destination.checkpoint_gate).read_owned().await;
+                            let checkpoint_wait = checkpoint_wait_started.elapsed();
+                            info!(
+                                table = %destination_table_name,
+                                checkpoint_wait_ms = checkpoint_wait.as_millis() as u64,
+                                "ducklake acquired checkpoint gate before streaming write: table={}, checkpoint_wait_ms={}",
+                                destination_table_name,
+                                checkpoint_wait.as_millis()
+                            );
+                            let last_sequence_key =
+                                read_table_streaming_progress_sequence_key_blocking(
+                                    Arc::clone(&destination.pool),
+                                    Arc::clone(&destination.blocking_slots),
+                                    destination_table_name.clone(),
+                                )
+                                .await?;
+                            let pending_mutations = retain_mutations_after_sequence_key(
+                                segment.mutations,
+                                last_sequence_key,
+                            );
+                            if pending_mutations.is_empty() {
+                                debug!(
+                                    table = %destination_table_name,
+                                    "ducklake streaming mutation replay skipped, no pending events: table={}",
+                                    destination_table_name
+                                );
+                                continue;
+                            }
+                            let is_first_streaming_batch = last_sequence_key.is_none();
+                            info!(
+                                table = %destination_table_name,
+                                pending_mutation_count = pending_mutations.len(),
+                                is_first_streaming_batch,
+                                "ducklake applying streaming mutations: table={}, pending_mutation_count={}, is_first_streaming_batch={}",
+                                destination_table_name,
+                                pending_mutations.len(),
+                                is_first_streaming_batch
+                            );
 
-                        let prepared_batches = prepare_mutation_table_batches(
-                            &replicated_table_schema,
-                            destination_table_name.clone(),
-                            pending_mutations,
-                        )?;
-                        apply_table_batches_with_retry(pool, blocking_slots, prepared_batches)
+                            let prepared_batches = prepare_mutation_table_batches(
+                                &segment.replicated_table_schema,
+                                destination_table_name.clone(),
+                                pending_mutations,
+                            )?;
+                            apply_table_batches_with_retry(
+                                Arc::clone(&destination.pool),
+                                Arc::clone(&destination.blocking_slots),
+                                prepared_batches,
+                            )
                             .await?;
-                        info!(
-                            table = %destination_table_name,
-                            is_first_streaming_batch,
-                            "ducklake applied streaming mutations: table={}, is_first_streaming_batch={}",
-                            destination_table_name,
-                            is_first_streaming_batch
-                        );
+                            info!(
+                                table = %destination_table_name,
+                                is_first_streaming_batch,
+                                "ducklake applied streaming mutations: table={}, is_first_streaming_batch={}",
+                                destination_table_name,
+                                is_first_streaming_batch
+                            );
+                        }
+
                         Ok::<(), etl::error::EtlError>(())
                     });
                 }
@@ -2174,6 +2235,25 @@ where
         }
 
         Ok(table_name)
+    }
+
+    /// Ensures destination metadata and physical columns can accept a row
+    /// schema.
+    async fn ensure_table_ready_for_streaming_schema(
+        &self,
+        replicated_table_schema: &ReplicatedTableSchema,
+    ) -> EtlResult<DuckLakeTableName> {
+        let table_id = replicated_table_schema.id();
+        if let Some(metadata) = self.store.get_destination_table_metadata(table_id).await?
+            && metadata.is_applied()
+            && (metadata.snapshot_id < replicated_table_schema.inner().snapshot_id
+                || (metadata.snapshot_id == replicated_table_schema.inner().snapshot_id
+                    && &metadata.replication_mask != replicated_table_schema.replication_mask()))
+        {
+            self.handle_relation_event(replicated_table_schema).await?;
+        }
+
+        self.ensure_table_exists(replicated_table_schema).await
     }
 
     /// Ensures the ETL-managed replay marker table exists.

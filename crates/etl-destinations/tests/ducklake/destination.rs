@@ -1037,6 +1037,89 @@ async fn write_events() {
     assert_eq!(name, "Gadget");
 }
 
+/// `write_events` preserves row/schema pairing when a single destination batch
+/// contains DML for multiple schema versions of the same table.
+#[tokio::test(flavor = "multi_thread")]
+async fn write_events_splits_same_table_batch_by_replicated_schema() {
+    use etl::types::{InsertEvent, PgLsn};
+
+    let lake = create_test_lake("write_events_splits_same_table_batch_by_replicated_schema").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
+
+    let old_schema = make_schema(47, "public", "schema_segmented_products");
+    let new_schema = make_schema_with_email(&old_schema, 200);
+    let old_replicated_table_schema = make_replicated_table_schema(&old_schema);
+    let new_replicated_table_schema = make_replicated_table_schema(&new_schema);
+    let table_name = table_name_to_ducklake_table_name(&old_schema.name).unwrap();
+
+    let store = MemoryStore::new();
+    store.store_table_schema(old_schema).await.unwrap();
+    store.store_table_schema(new_schema).await.unwrap();
+
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .unwrap();
+
+    destination
+        .write_events(vec![
+            Event::Insert(InsertEvent {
+                start_lsn: PgLsn::from(100_u64),
+                commit_lsn: PgLsn::from(100_u64),
+                tx_ordinal: 0,
+                replicated_table_schema: old_replicated_table_schema,
+                table_row: TableRow::new(vec![Cell::I32(1), Cell::String("Before DDL".to_owned())]),
+            }),
+            Event::Insert(InsertEvent {
+                start_lsn: PgLsn::from(201_u64),
+                commit_lsn: PgLsn::from(201_u64),
+                tx_ordinal: 0,
+                replicated_table_schema: new_replicated_table_schema,
+                table_row: TableRow::new(vec![
+                    Cell::I32(2),
+                    Cell::String("After DDL".to_owned()),
+                    Cell::String("after@example.com".to_owned()),
+                ]),
+            }),
+        ])
+        .await
+        .expect("write_events should keep each row with its own schema");
+
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
+    let mut statement = conn
+        .prepare(&format!(
+            "select id, name, email from {}.{} order by id",
+            quote_identifier("lake"),
+            quote_identifier(&table_name)
+        ))
+        .expect("failed to prepare segmented schema query");
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, i32>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?))
+        })
+        .expect("failed to query segmented schema table")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("failed to read segmented schema rows");
+
+    assert_eq!(
+        rows,
+        vec![
+            (1, "Before DDL".to_owned(), None),
+            (2, "After DDL".to_owned(), Some("after@example.com".to_owned())),
+        ]
+    );
+}
+
 /// `write_events` recovers interrupted DDL before handling a relation event.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_recovers_applying_metadata_before_relation_event() {
