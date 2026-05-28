@@ -2,13 +2,44 @@ import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 import starlightLlmsTxt from 'starlight-llms-txt';
 
+const docsBase = '/etl';
+const publicAsset = (path) => `${docsBase}${path}`;
+
+function bundledMermaid() {
+  return {
+    name: 'bundled-mermaid',
+    hooks: {
+      'astro:config:setup': ({ injectScript }) => {
+        injectScript(
+          'page',
+          `window.loadMermaid = async () => {
+  if (!window.mermaid) {
+    const module = await import('mermaid');
+    window.mermaid = module.default;
+    window.dispatchEvent(new Event('mermaid:ready'));
+  }
+
+  return window.mermaid;
+};`,
+        );
+      },
+    },
+  };
+}
+
 export default defineConfig({
   site: 'https://supabase.github.io',
-  base: '/etl',
+  base: docsBase,
   markdown: {
     smartypants: false,
   },
+  vite: {
+    build: {
+      chunkSizeWarningLimit: 800,
+    },
+  },
   integrations: [
+    bundledMermaid(),
     starlight({
       title: 'ETL',
       description:
@@ -90,28 +121,21 @@ export default defineConfig({
         {
           tag: 'script',
           attrs: {
-            src: 'https://unpkg.com/mermaid@10.6.1/dist/mermaid.min.js',
+            src: publicAsset('/scripts/code-labels.js'),
             defer: true,
           },
         },
         {
           tag: 'script',
           attrs: {
-            src: '/etl/scripts/code-labels.js',
+            src: publicAsset('/scripts/mermaid-init.js'),
             defer: true,
           },
         },
         {
           tag: 'script',
           attrs: {
-            src: '/etl/scripts/mermaid-init.js',
-            defer: true,
-          },
-        },
-        {
-          tag: 'script',
-          attrs: {
-            src: '/etl/scripts/mobile-nav.js',
+            src: publicAsset('/scripts/mobile-nav.js'),
             defer: true,
           },
         },

@@ -68,6 +68,18 @@ header.header {
   height: 1.45rem;
 }
 
+site-search button {
+  border-color: var(--sl-color-hairline);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--sl-color-bg) 86%, transparent);
+  box-shadow: 0 8px 28px color-mix(in srgb, var(--sl-color-black) 7%, transparent);
+}
+
+site-search button:hover {
+  border-color: color-mix(in srgb, var(--sl-color-accent) 42%, var(--sl-color-hairline));
+  background: color-mix(in srgb, var(--sl-color-accent-low) 18%, var(--sl-color-bg));
+}
+
 mobile-starlight-toc nav {
   border-top: 0;
 }
@@ -82,6 +94,35 @@ mobile-starlight-toc summary {
 
 .sidebar {
   border-inline-end: 1px solid var(--sl-color-hairline);
+}
+
+#starlight__sidebar a {
+  border-radius: 6px;
+  line-height: 1.35;
+}
+
+#starlight__sidebar a[aria-current='page'] {
+  background: color-mix(in srgb, var(--sl-color-accent) 18%, transparent);
+  color: var(--sl-color-accent-high);
+  font-weight: 650;
+}
+
+#starlight__sidebar summary {
+  border-radius: 6px;
+}
+
+.right-sidebar-panel {
+  font-size: 0.86rem;
+}
+
+.right-sidebar-panel a {
+  line-height: 1.35;
+  text-underline-offset: 0.18em;
+}
+
+.right-sidebar-panel a[aria-current='true'] {
+  color: var(--sl-color-accent-high);
+  font-weight: 650;
 }
 
 .content-panel {
@@ -104,6 +145,17 @@ mobile-starlight-toc summary {
   color: var(--sl-color-gray-3);
   font-size: 0.95rem;
   line-height: 1.72;
+}
+
+@media (min-width: 50.001rem) {
+  .sl-markdown-content {
+    font-size: 1rem;
+    line-height: 1.74;
+  }
+
+  .sl-markdown-content h2 {
+    margin-top: 2.5rem;
+  }
 }
 
 .sl-markdown-content > :first-child {
@@ -254,6 +306,51 @@ mobile-starlight-toc summary {
   text-underline-offset: 0.2em;
 }
 
+.doc-path-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+  margin-block: 1rem 1.75rem;
+}
+
+.doc-path-card {
+  display: flex;
+  min-height: 9.5rem;
+  flex-direction: column;
+  gap: 0.45rem;
+  padding: 0.85rem;
+  border: 1px solid var(--sl-color-hairline);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--sl-color-bg-sidebar) 54%, transparent);
+  color: var(--sl-color-gray-3);
+  text-decoration: none;
+}
+
+.doc-path-card:hover {
+  border-color: color-mix(in srgb, var(--sl-color-accent) 46%, var(--sl-color-hairline));
+  background: color-mix(in srgb, var(--sl-color-accent-low) 20%, var(--sl-color-bg));
+  text-decoration: none;
+}
+
+.doc-path-card strong {
+  color: var(--sl-color-gray-1);
+  font-size: 1.02rem;
+  line-height: 1.25;
+}
+
+.doc-path-card span:last-child {
+  line-height: 1.55;
+}
+
+.doc-path-kicker {
+  color: var(--sl-color-accent);
+  font-family: var(--sl-font-mono);
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
 .sl-markdown-content code:not(:where(pre code)) {
   border: 1px solid color-mix(in srgb, var(--sl-color-accent) 28%, transparent);
   border-radius: 5px;
@@ -265,6 +362,8 @@ mobile-starlight-toc summary {
 
 .expressive-code {
   --ec-brdRad: 8px;
+  --ec-codeFontSize: 0.84rem;
+  --ec-codeLineHt: 1.55;
   margin-block: 1.25rem;
   max-width: 100%;
   overflow-x: auto;
@@ -446,6 +545,12 @@ mobile-starlight-toc summary {
     white-space: normal;
   }
 
+  #starlight__sidebar .top-level a span,
+  #starlight__sidebar .top-level summary span {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
   #starlight__sidebar .top-level a {
     padding: 0.55rem 0.65rem;
   }
@@ -517,6 +622,7 @@ mobile-starlight-toc summary {
   mobile-starlight-toc summary .display-current {
     flex: 1 1 auto;
     min-width: 0;
+    max-width: 45%;
     margin-left: auto;
     overflow: hidden;
     color: var(--sl-color-gray-3);
@@ -571,5 +677,19 @@ mobile-starlight-toc summary {
     display: block;
     overflow-x: auto;
     font-size: 0.9rem;
+  }
+
+  .doc-path-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .doc-path-card {
+    min-height: 0;
+  }
+}
+
+@media (max-width: 24rem) {
+  mobile-starlight-toc summary .display-current {
+    display: none;
   }
 }
