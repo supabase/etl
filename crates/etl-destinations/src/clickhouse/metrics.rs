@@ -29,8 +29,16 @@ pub(super) const ETL_CLICKHOUSE_INSERT_ROWS: &str = "etl_clickhouse_insert_rows"
 /// Labels: `source` (`copy`, `streaming`).
 pub(super) const ETL_CLICKHOUSE_INSERT_BYTES: &str = "etl_clickhouse_insert_bytes";
 
-/// INSERT statement failures. Labels: `source` (`copy`, `streaming`) and
-/// `outcome` (`timeout`, `failed`).
+/// Rows rejected by RowBinary encoding before any network round-trip.
+/// Complementary to [`ETL_CLICKHOUSE_INSERT_ERRORS_TOTAL`], which counts only
+/// network/server failures. Labels: `source` (`copy`, `streaming`).
+pub(super) const ETL_CLICKHOUSE_INSERT_ENCODING_ERRORS_TOTAL: &str =
+    "etl_clickhouse_insert_encoding_errors_total";
+
+/// INSERT statement failures during the ClickHouse round-trip. Does not cover
+/// RowBinary encoding rejections; see
+/// [`ETL_CLICKHOUSE_INSERT_ENCODING_ERRORS_TOTAL`]. Labels: `source` (`copy`,
+/// `streaming`) and `outcome` (`timeout`, `failed`).
 pub(super) const ETL_CLICKHOUSE_INSERT_ERRORS_TOTAL: &str = "etl_clickhouse_insert_errors_total";
 
 /// Number of INSERT statements committed for a single logical write batch.
@@ -83,9 +91,17 @@ pub(super) fn register_metrics() {
         );
 
         describe_counter!(
+            ETL_CLICKHOUSE_INSERT_ENCODING_ERRORS_TOTAL,
+            Unit::Count,
+            "Total rows rejected by RowBinary encoding before any network round-trip, labeled by \
+             source"
+        );
+
+        describe_counter!(
             ETL_CLICKHOUSE_INSERT_ERRORS_TOTAL,
             Unit::Count,
-            "Total INSERT statement failures, labeled by source and outcome"
+            "Total INSERT statement failures during the ClickHouse round-trip, labeled by source \
+             and outcome"
         );
 
         describe_histogram!(

@@ -17,9 +17,9 @@ use crate::clickhouse::{
     metrics::{
         ETL_CLICKHOUSE_CONNECTIVITY_CHECK_DURATION_SECONDS, ETL_CLICKHOUSE_DDL_DURATION_SECONDS,
         ETL_CLICKHOUSE_DDL_ERRORS_TOTAL, ETL_CLICKHOUSE_INSERT_BYTES,
-        ETL_CLICKHOUSE_INSERT_DURATION_SECONDS, ETL_CLICKHOUSE_INSERT_ERRORS_TOTAL,
-        ETL_CLICKHOUSE_INSERT_ROWS, ETL_CLICKHOUSE_SCHEMA_QUERY_DURATION_SECONDS,
-        ETL_CLICKHOUSE_STATEMENTS_PER_BATCH,
+        ETL_CLICKHOUSE_INSERT_DURATION_SECONDS, ETL_CLICKHOUSE_INSERT_ENCODING_ERRORS_TOTAL,
+        ETL_CLICKHOUSE_INSERT_ERRORS_TOTAL, ETL_CLICKHOUSE_INSERT_ROWS,
+        ETL_CLICKHOUSE_SCHEMA_QUERY_DURATION_SECONDS, ETL_CLICKHOUSE_STATEMENTS_PER_BATCH,
     },
     schema::clickhouse_column_type,
     sql::quote_identifier,
@@ -522,7 +522,13 @@ impl ClickHouseClient {
             while bytes < max_bytes_per_insert {
                 let Some(row) = rows.next() else { break };
                 row_buf.clear();
-                encode_to_row_binary(row, nullable_flags, &mut row_buf)?;
+                encode_to_row_binary(row, nullable_flags, &mut row_buf).inspect_err(|_| {
+                    metrics::counter!(
+                        ETL_CLICKHOUSE_INSERT_ENCODING_ERRORS_TOTAL,
+                        "source" => source,
+                    )
+                    .increment(1);
+                })?;
                 insert.write_buffered(&row_buf);
                 bytes += row_buf.len() as u64;
                 rows_in_statement += 1;

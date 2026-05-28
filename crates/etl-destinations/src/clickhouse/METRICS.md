@@ -22,6 +22,7 @@ fixed set of DDL operation types. `outcome` is bounded to `timeout` and
 - `etl_clickhouse_insert_duration_seconds`
 - `etl_clickhouse_insert_rows`
 - `etl_clickhouse_insert_bytes`
+- `etl_clickhouse_insert_encoding_errors_total`
 - `etl_clickhouse_insert_errors_total`
 - `etl_clickhouse_statements_per_batch`
 
@@ -38,8 +39,13 @@ plot throughput (rows or bytes per second).
 failing in the last N minutes?". The `outcome` label distinguishes
 `timeout` (client deadline fired) from `failed` (server returned an error
 before the deadline). Specific error codes are in logs. It counts only
-network/server failures of the INSERT round-trip; RowBinary encoding errors
-(invalid source data) bubble up earlier and are not included.
+network/server failures of the INSERT round-trip.
+
+`etl_clickhouse_insert_encoding_errors_total` is the complementary counter for
+the pre-network step: rows rejected by the RowBinary encoder (type mismatch,
+null in a non-nullable column, length mismatch). These are upstream data-shape
+issues, not destination-side failures, and have a different remediation path,
+so they are tracked separately. The specific reason is in logs.
 
 `etl_clickhouse_statements_per_batch` shows how many INSERT statements were
 committed for a single logical write batch. It exceeds 1 only when
