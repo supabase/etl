@@ -6,16 +6,6 @@ mod pipeline;
 mod source;
 
 use async_trait::async_trait;
-use secrecy::ExposeSecret;
-
-use super::{ValidationContext, ValidationError, ValidationFailure, Validator};
-use crate::configs::{
-    destination::FullApiDestinationConfig,
-    pipeline::FullApiPipelineConfig,
-};
-
-pub(super) use source::SourceValidator;
-
 use bigquery::BigQueryValidator;
 use clickhouse::ClickHouseValidator;
 use ducklake::DucklakeValidator;
@@ -25,6 +15,11 @@ use pipeline::{
     PublicationHasTablesValidator, ReplicationPermissionsValidator, ReplicationSlotsValidator,
     WalLevelValidator,
 };
+use secrecy::ExposeSecret;
+pub(super) use source::SourceValidator;
+
+use super::{ValidationContext, ValidationError, ValidationFailure, Validator};
+use crate::configs::{destination::FullApiDestinationConfig, pipeline::FullApiPipelineConfig};
 
 /// Composite validator for pipeline prerequisites.
 #[derive(Debug)]

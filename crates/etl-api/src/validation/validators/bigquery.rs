@@ -12,11 +12,7 @@ pub(super) struct BigQueryValidator {
 }
 
 impl BigQueryValidator {
-    pub(super) fn new(
-        project_id: String,
-        dataset_id: String,
-        service_account_key: String,
-    ) -> Self {
+    pub(super) fn new(project_id: String, dataset_id: String, service_account_key: String) -> Self {
         Self { project_id, dataset_id, service_account_key }
     }
 }

@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
-use etl_destinations::iceberg::{IcebergClient, S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_SECRET_ACCESS_KEY};
+use etl_destinations::iceberg::{
+    IcebergClient, S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_SECRET_ACCESS_KEY,
+};
 use secrecy::ExposeSecret;
 
 use super::super::{ValidationContext, ValidationError, ValidationFailure, Validator};
