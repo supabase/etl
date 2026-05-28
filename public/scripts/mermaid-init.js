@@ -51,6 +51,28 @@
     });
   }
 
+  function waitForMermaid() {
+    if (window.mermaid) {
+      return Promise.resolve(true);
+    }
+
+    if (typeof window.loadMermaid === 'function') {
+      return window.loadMermaid().then(Boolean).catch(() => false);
+    }
+
+    return new Promise((resolve) => {
+      const timeout = window.setTimeout(() => resolve(false), 3000);
+      window.addEventListener(
+        'mermaid:ready',
+        () => {
+          window.clearTimeout(timeout);
+          resolve(true);
+        },
+        { once: true },
+      );
+    });
+  }
+
   function collectMermaidBlocks() {
     document.querySelectorAll('pre[data-language="mermaid"], pre code.language-mermaid').forEach((block) => {
       const pre = block.matches('pre') ? block : block.parentElement;
@@ -80,7 +102,7 @@
   }
 
   async function renderMermaidBlocks({ force = false } = {}) {
-    if (!window.mermaid) {
+    if (!(await waitForMermaid())) {
       return;
     }
 
