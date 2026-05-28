@@ -56,6 +56,7 @@ on:
         options:
           - "null"
           - bigquery
+          - snowflake
         default: "null"
       bq_project_id:
         description: BigQuery project ID when destination is bigquery.
@@ -153,6 +154,36 @@ jobs:
           fi
           printf '%s' "${BQ_SA_KEY_JSON}" > "$RUNNER_TEMP/bigquery-key.json"
 
+      - name: Prepare Snowflake credentials
+        if: inputs.destination == 'snowflake'
+        env:
+          # Format: account:user:database:schema
+          SF_CONNECTION: ${{ secrets.BENCH_SNOWFLAKE_CONNECTION }}
+          SF_PRIVATE_KEY: ${{ secrets.BENCH_SNOWFLAKE_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${SF_CONNECTION}" ]]; then
+            echo "BENCH_SNOWFLAKE_CONNECTION secret is required for Snowflake benchmarks." >&2
+            exit 1
+          fi
+          if [[ -z "${SF_PRIVATE_KEY}" ]]; then
+            echo "BENCH_SNOWFLAKE_PRIVATE_KEY secret is required for Snowflake benchmarks." >&2
+            exit 1
+          fi
+          IFS=':' read -r account user database schema <<< "${SF_CONNECTION}"
+          for field in account user database schema; do
+            if [[ -z "${!field}" ]]; then
+              echo "BENCH_SNOWFLAKE_CONNECTION is missing ${field} (format: account:user:database:schema)." >&2
+              exit 1
+            fi
+          done
+          {
+            echo "BENCH_SNOWFLAKE_ACCOUNT=${account}"
+            echo "BENCH_SNOWFLAKE_USER=${user}"
+            echo "BENCH_SNOWFLAKE_DATABASE=${database}"
+            echo "BENCH_SNOWFLAKE_SCHEMA=${schema}"
+          } >> "$GITHUB_ENV"
+
       - name: Record benchmark environment
         env:
           BENCHMARK_RUNNER_INPUT: ${{ inputs.benchmark_runner }}
@@ -217,6 +248,7 @@ jobs:
           STREAMING_DURATION_SECONDS_INPUT: ${{ inputs.streaming_duration_seconds }}
           TPCC_THREADS_INPUT: ${{ inputs.tpcc_threads }}
           WAREHOUSES_INPUT: ${{ inputs.warehouses }}
+          BENCH_SNOWFLAKE_PRIVATE_KEY: ${{ secrets.BENCH_SNOWFLAKE_PRIVATE_KEY }}
         run: |
           set -euo pipefail
 
