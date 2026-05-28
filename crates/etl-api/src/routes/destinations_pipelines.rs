@@ -15,7 +15,7 @@ use super::{ErrorMessage, IntoInner, TenantIdError, error_response, extract_tena
 use crate::{
     config::ApiConfig,
     configs::{
-        destination::FullApiDestinationConfig, encryption::EncryptionKey,
+        destination::FullApiDestinationConfig, encryption::EncryptionKeyring,
         pipeline::FullApiPipelineConfig,
     },
     data,
@@ -238,7 +238,7 @@ fn validate_pipeline_request(
 pub(crate) async fn create_destination_and_pipeline(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,
-    Extension(encryption_key): Extension<Arc<EncryptionKey>>,
+    Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
     feature_flags_client: Option<Extension<FeatureFlagsClient>>,
     destination_and_pipeline: Json<CreateDestinationPipelineRequest>,
 ) -> Result<impl IntoResponse, DestinationPipelineError> {
@@ -316,7 +316,7 @@ pub(crate) async fn update_destination_and_pipeline(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,
     destination_and_pipeline_ids: Path<(i64, i64)>,
-    Extension(encryption_key): Extension<Arc<EncryptionKey>>,
+    Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
     destination_and_pipeline: Json<UpdateDestinationPipelineRequest>,
 ) -> Result<impl IntoResponse, DestinationPipelineError> {
     let tenant_id = extract_tenant_id(&headers)?;
@@ -399,7 +399,7 @@ pub(crate) async fn delete_destination_and_pipeline(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,
     Extension(api_config): Extension<Arc<ApiConfig>>,
-    Extension(encryption_key): Extension<Arc<EncryptionKey>>,
+    Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
     Extension(k8s_client): Extension<Arc<dyn K8sClient>>,
     Extension(trusted_root_certs_cache): Extension<Arc<TrustedRootCertsCache>>,
     destination_and_pipeline_ids: Path<(i64, i64)>,

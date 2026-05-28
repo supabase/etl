@@ -158,6 +158,39 @@ pub(crate) mod destinations {
         )
         .await
     }
+
+    /// Returns a default Snowflake destination config.
+    pub(crate) fn new_snowflake_destination_config() -> FullApiDestinationConfig {
+        FullApiDestinationConfig::Snowflake {
+            account_id: "myorg-myaccount".to_owned(),
+            user: "etl_user".to_owned(),
+            private_key: SerializableSecretString::from(
+                "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBg...\n-----END PRIVATE KEY-----"
+                    .to_owned(),
+            ),
+            private_key_passphrase: None,
+            database: "my_database".to_owned(),
+            schema: "public".to_owned(),
+            role: Some("etl_role".to_owned()),
+        }
+    }
+
+    /// Returns an updated Snowflake destination config.
+    pub(crate) fn updated_snowflake_destination_config() -> FullApiDestinationConfig {
+        FullApiDestinationConfig::Snowflake {
+            account_id: "updatedorg-updatedaccount".to_owned(),
+            user: "updated_etl_user".to_owned(),
+            private_key: SerializableSecretString::from(
+                "-----BEGIN PRIVATE KEY-----\nUPDATED...\n-----END PRIVATE KEY-----".to_owned(),
+            ),
+            private_key_passphrase: Some(SerializableSecretString::from(
+                "passphrase123".to_owned(),
+            )),
+            database: "updated_database".to_owned(),
+            schema: "updated_schema".to_owned(),
+            role: Some("updated_role".to_owned()),
+        }
+    }
 }
 
 /// Source helpers.

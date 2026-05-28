@@ -570,7 +570,8 @@ async fn spawn_test_app_with_services(
     let key_bytes = generate_random_bytes::<32>();
     let key =
         RandomizedNonceKey::new(&AES_256_GCM, &key_bytes).expect("failed to create encryption key");
-    let encryption_key = encryption::EncryptionKey { id: 0, key };
+    let encryption_keyring =
+        encryption::EncryptionKeyring::from(encryption::EncryptionKey { id: 0, key });
 
     // Generate a random API key for tests
     let api_key_bytes = generate_random_bytes::<32>();
@@ -581,6 +582,7 @@ async fn spawn_test_app_with_services(
         application: ApplicationSettings { host: base_address.to_owned(), port },
         k8s: K8sConfig::default(),
         encryption_key: ConfigEncryptionKey { id: 0, key: BASE64_STANDARD.encode(key_bytes) },
+        encryption_keys: Vec::new(),
         api_keys: vec![api_key.clone()],
         sentry: None,
         supabase_api_url: None,
@@ -595,7 +597,7 @@ async fn spawn_test_app_with_services(
         config.clone(),
         listener,
         api_db_pool,
-        encryption_key,
+        encryption_keyring,
         k8s_client,
         trusted_root_certs_cache,
         None,

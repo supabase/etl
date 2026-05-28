@@ -4,7 +4,7 @@ use sqlx::{PgConnection, PgExecutor};
 use thiserror::Error;
 
 use crate::configs::{
-    encryption::EncryptionKey,
+    encryption::EncryptionKeyring,
     serde::{
         DbDeserializationError, DbSerializationError, decrypt_and_deserialize_from_value,
         encrypt_and_serialize,
@@ -43,7 +43,7 @@ pub async fn create_source<'c, E>(
     tenant_id: &str,
     name: &str,
     config: FullApiSourceConfig,
-    encryption_key: &EncryptionKey,
+    encryption_key: &EncryptionKeyring,
 ) -> Result<i64, SourcesDbError>
 where
     E: PgExecutor<'c>,
@@ -73,7 +73,7 @@ pub async fn read_source<'c, E>(
     executor: E,
     tenant_id: &str,
     source_id: i64,
-    encryption_key: &EncryptionKey,
+    encryption_key: &EncryptionKeyring,
 ) -> Result<Option<Source>, SourcesDbError>
 where
     E: PgExecutor<'c>,
@@ -109,7 +109,7 @@ pub async fn read_source_connection<'c, E>(
     executor: E,
     tenant_id: &str,
     source_id: i64,
-    encryption_key: &EncryptionKey,
+    encryption_key: &EncryptionKeyring,
 ) -> Result<Option<SourceConnection>, SourcesDbError>
 where
     E: PgExecutor<'c>,
@@ -147,7 +147,7 @@ pub async fn update_source<'c, E>(
     name: &str,
     source_id: i64,
     config: FullApiSourceConfig,
-    encryption_key: &EncryptionKey,
+    encryption_key: &EncryptionKeyring,
 ) -> Result<Option<i64>, SourcesDbError>
 where
     E: PgExecutor<'c>,
@@ -201,7 +201,7 @@ where
 pub async fn read_all_sources<'c, E>(
     executor: E,
     tenant_id: &str,
-    encryption_key: &EncryptionKey,
+    encryption_key: &EncryptionKeyring,
 ) -> Result<Vec<Source>, SourcesDbError>
 where
     E: PgExecutor<'c>,
@@ -257,7 +257,7 @@ where
 pub async fn read_all_source_connections<'c, E>(
     executor: E,
     tenant_id: &str,
-    encryption_key: &EncryptionKey,
+    encryption_key: &EncryptionKeyring,
 ) -> Result<Vec<SourceConnection>, SourcesDbError>
 where
     E: PgExecutor<'c>,

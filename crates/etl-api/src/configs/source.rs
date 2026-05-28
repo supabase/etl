@@ -10,7 +10,7 @@ use utoipa::ToSchema;
 
 use crate::configs::{
     encryption::{
-        Decrypt, DecryptionError, Encrypt, EncryptedValue, EncryptionError, EncryptionKey,
+        Decrypt, DecryptionError, Encrypt, EncryptedValue, EncryptionError, EncryptionKeyring,
         decrypt_text, encrypt_text,
     },
     store::Store,
@@ -122,7 +122,7 @@ impl From<FullApiSourceConfig> for StoredSourceConfig {
 impl Encrypt<EncryptedStoredSourceConfig> for StoredSourceConfig {
     fn encrypt(
         self,
-        encryption_key: &EncryptionKey,
+        encryption_key: &EncryptionKeyring,
     ) -> Result<EncryptedStoredSourceConfig, EncryptionError> {
         let mut encrypted_password = None;
         if let Some(password) = self.password {
@@ -157,7 +157,7 @@ impl Store for EncryptedStoredSourceConfig {}
 impl Decrypt<StoredSourceConfig> for EncryptedStoredSourceConfig {
     fn decrypt(
         self,
-        encryption_key: &EncryptionKey,
+        encryption_key: &EncryptionKeyring,
     ) -> Result<StoredSourceConfig, DecryptionError> {
         let mut decrypted_password = None;
         if let Some(password) = self.password {
@@ -179,7 +179,7 @@ impl Decrypt<StoredSourceConfig> for EncryptedStoredSourceConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::configs::encryption::{EncryptionKey, generate_random_key};
+    use crate::configs::encryption::{EncryptionKey, EncryptionKeyring, generate_random_key};
 
     #[test]
     fn stored_source_config_encryption_decryption() {
@@ -192,7 +192,10 @@ mod tests {
             password: Some(SerializableSecretString::from("password".to_owned())),
         };
 
-        let key = EncryptionKey { id: 1, key: generate_random_key::<32>().unwrap() };
+        let key = EncryptionKeyring::from(EncryptionKey {
+            id: 1,
+            key: generate_random_key::<32>().unwrap(),
+        });
 
         let encrypted = config.clone().encrypt(&key).unwrap();
         let decrypted = encrypted.decrypt(&key).unwrap();

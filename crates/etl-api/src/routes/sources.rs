@@ -14,7 +14,7 @@ use utoipa::ToSchema;
 use crate::{
     config::ApiConfig,
     configs::{
-        encryption::EncryptionKey,
+        encryption::EncryptionKeyring,
         source::{FullApiSourceConfig, StoredSourceConfig, StrippedApiSourceConfig},
     },
     data,
@@ -200,7 +200,7 @@ pub(crate) async fn create_source(
     Extension(pool): Extension<PgPool>,
     Extension(api_config): Extension<Arc<ApiConfig>>,
     Extension(trusted_root_certs_cache): Extension<Arc<TrustedRootCertsCache>>,
-    Extension(encryption_key): Extension<Arc<EncryptionKey>>,
+    Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
     source: Json<CreateSourceRequest>,
 ) -> Result<impl IntoResponse, SourceError> {
     let tenant_id = extract_tenant_id(&headers)?;
@@ -284,7 +284,7 @@ pub(crate) async fn validate_source(
 pub(crate) async fn read_source(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,
-    Extension(encryption_key): Extension<Arc<EncryptionKey>>,
+    Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
     source_id: Path<i64>,
 ) -> Result<impl IntoResponse, SourceError> {
     let tenant_id = extract_tenant_id(&headers)?;
@@ -327,7 +327,7 @@ pub(crate) async fn update_source(
     Extension(api_config): Extension<Arc<ApiConfig>>,
     Extension(trusted_root_certs_cache): Extension<Arc<TrustedRootCertsCache>>,
     source_id: Path<i64>,
-    Extension(encryption_key): Extension<Arc<EncryptionKey>>,
+    Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
     source: Json<UpdateSourceRequest>,
 ) -> Result<impl IntoResponse, SourceError> {
     let tenant_id = extract_tenant_id(&headers)?;
@@ -425,7 +425,7 @@ pub(crate) async fn delete_source(
 pub(crate) async fn read_all_sources(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,
-    Extension(encryption_key): Extension<Arc<EncryptionKey>>,
+    Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
 ) -> Result<impl IntoResponse, SourceError> {
     let tenant_id = extract_tenant_id(&headers)?;
 

@@ -1019,6 +1019,10 @@ impl Validator for DestinationValidator {
                 );
                 validator.validate(ctx).await
             }
+            FullApiDestinationConfig::Snowflake { .. } => {
+                // Snowflake validator added in ETL-639
+                Ok(vec![])
+            }
         }
     }
 }

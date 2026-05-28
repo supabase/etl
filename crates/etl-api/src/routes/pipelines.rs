@@ -18,7 +18,7 @@ use utoipa::ToSchema;
 
 use crate::{
     config::ApiConfig,
-    configs::{encryption::EncryptionKey, pipeline::FullApiPipelineConfig},
+    configs::{encryption::EncryptionKeyring, pipeline::FullApiPipelineConfig},
     data,
     data::{
         connect_to_source_database_from_api,
@@ -548,7 +548,7 @@ pub struct ValidatePipelineResponse {
 pub(crate) async fn create_pipeline(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,
-    Extension(encryption_key): Extension<Arc<EncryptionKey>>,
+    Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
     feature_flags_client: Option<Extension<FeatureFlagsClient>>,
     pipeline: Json<CreatePipelineRequest>,
 ) -> Result<impl IntoResponse, PipelineError> {
@@ -669,7 +669,7 @@ pub(crate) async fn update_pipeline(
     Extension(trusted_root_certs_cache): Extension<Arc<TrustedRootCertsCache>>,
     Extension(api_config): Extension<Arc<ApiConfig>>,
     Extension(k8s_client): Extension<Arc<dyn K8sClient>>,
-    Extension(encryption_key): Extension<Arc<EncryptionKey>>,
+    Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
     pipeline_id: Path<i64>,
     pipeline: Json<UpdatePipelineRequest>,
 ) -> Result<impl IntoResponse, PipelineError> {
@@ -750,7 +750,7 @@ pub(crate) async fn delete_pipeline(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,
     Extension(api_config): Extension<Arc<ApiConfig>>,
-    Extension(encryption_key): Extension<Arc<EncryptionKey>>,
+    Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
     Extension(k8s_client): Extension<Arc<dyn K8sClient>>,
     Extension(trusted_root_certs_cache): Extension<Arc<TrustedRootCertsCache>>,
     pipeline_id: Path<i64>,
@@ -872,7 +872,7 @@ pub(crate) async fn read_all_pipelines(
 pub(crate) async fn start_pipeline(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,
-    Extension(encryption_key): Extension<Arc<EncryptionKey>>,
+    Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
     Extension(k8s_client): Extension<Arc<dyn K8sClient>>,
     Extension(trusted_root_certs_cache): Extension<Arc<TrustedRootCertsCache>>,
     Extension(api_config): Extension<Arc<ApiConfig>>,
@@ -1086,7 +1086,7 @@ pub(crate) async fn get_pipeline_replication_status(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,
     Extension(api_config): Extension<Arc<ApiConfig>>,
-    Extension(encryption_key): Extension<Arc<EncryptionKey>>,
+    Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
     Extension(trusted_root_certs_cache): Extension<Arc<TrustedRootCertsCache>>,
     pipeline_id: Path<i64>,
 ) -> Result<impl IntoResponse, PipelineError> {
@@ -1182,7 +1182,7 @@ pub(crate) async fn rollback_tables(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,
     Extension(api_config): Extension<Arc<ApiConfig>>,
-    Extension(encryption_key): Extension<Arc<EncryptionKey>>,
+    Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
     Extension(trusted_root_certs_cache): Extension<Arc<TrustedRootCertsCache>>,
     pipeline_id: Path<i64>,
     rollback_request: Json<RollbackTablesRequest>,
@@ -1330,7 +1330,7 @@ pub(crate) async fn rollback_tables(
 pub(crate) async fn update_pipeline_version(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,
-    Extension(encryption_key): Extension<Arc<EncryptionKey>>,
+    Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
     Extension(k8s_client): Extension<Arc<dyn K8sClient>>,
     Extension(trusted_root_certs_cache): Extension<Arc<TrustedRootCertsCache>>,
     Extension(api_config): Extension<Arc<ApiConfig>>,
@@ -1434,7 +1434,7 @@ pub(crate) async fn validate_pipeline(
     Extension(pool): Extension<PgPool>,
     Extension(api_config): Extension<Arc<ApiConfig>>,
     Extension(trusted_root_certs_cache): Extension<Arc<TrustedRootCertsCache>>,
-    Extension(encryption_key): Extension<Arc<EncryptionKey>>,
+    Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
     request: Json<ValidatePipelineRequest>,
 ) -> Result<impl IntoResponse, PipelineError> {
     let tenant_id = extract_tenant_id(&headers)?;

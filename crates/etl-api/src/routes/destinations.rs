@@ -13,7 +13,7 @@ use thiserror::Error;
 use utoipa::ToSchema;
 
 use crate::{
-    configs::{destination::FullApiDestinationConfig, encryption::EncryptionKey},
+    configs::{destination::FullApiDestinationConfig, encryption::EncryptionKeyring},
     data,
     data::{
         destinations::{DestinationsDbError, destination_exists},
@@ -180,7 +180,7 @@ pub struct ValidateDestinationResponse {
 pub(crate) async fn create_destination(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,
-    Extension(encryption_key): Extension<Arc<EncryptionKey>>,
+    Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
     destination: Json<CreateDestinationRequest>,
 ) -> Result<impl IntoResponse, DestinationError> {
     let tenant_id = extract_tenant_id(&headers)?;
@@ -219,7 +219,7 @@ pub(crate) async fn create_destination(
 pub(crate) async fn read_destination(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,
-    Extension(encryption_key): Extension<Arc<EncryptionKey>>,
+    Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
     destination_id: Path<i64>,
 ) -> Result<impl IntoResponse, DestinationError> {
     let tenant_id = extract_tenant_id(&headers)?;
@@ -260,7 +260,7 @@ pub(crate) async fn update_destination(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,
     destination_id: Path<i64>,
-    Extension(encryption_key): Extension<Arc<EncryptionKey>>,
+    Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
     destination: Json<UpdateDestinationRequest>,
 ) -> Result<impl IntoResponse, DestinationError> {
     let tenant_id = extract_tenant_id(&headers)?;
@@ -352,7 +352,7 @@ pub(crate) async fn delete_destination(
 pub(crate) async fn read_all_destinations(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,
-    Extension(encryption_key): Extension<Arc<EncryptionKey>>,
+    Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
 ) -> Result<impl IntoResponse, DestinationError> {
     let tenant_id = extract_tenant_id(&headers)?;
 

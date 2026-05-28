@@ -522,6 +522,21 @@ impl K8sClient for HttpK8sClient {
         Ok(())
     }
 
+    async fn create_or_update_snowflake_secret(
+        &self,
+        _prefix: &str,
+        _private_key: &str,
+        _private_key_passphrase: Option<&str>,
+    ) -> Result<(), K8sError> {
+        // Stub: real implementation in ETL-641
+        Ok(())
+    }
+
+    async fn delete_snowflake_secret(&self, _prefix: &str) -> Result<(), K8sError> {
+        // Stub: real implementation in ETL-641
+        Ok(())
+    }
+
     async fn get_config_map(&self, config_map_name: &str) -> Result<ConfigMap, K8sError> {
         debug!("getting config map");
 
@@ -1183,6 +1198,13 @@ fn create_container_environment_json(
                     "value": ducklake_maintenance.min_active_data_files.to_string()
                 }));
             }
+        }
+        DestinationType::Snowflake => {
+            let postgres_secret_name = create_postgres_secret_name(prefix);
+            let postgres_secret_env_var_json =
+                create_postgres_secret_env_var_json(&postgres_secret_name);
+            container_environment.push(postgres_secret_env_var_json);
+            // Snowflake-specific env vars to be added in ETL-641
         }
     }
     container_environment

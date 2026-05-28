@@ -1,5 +1,6 @@
 use std::{io, net::TcpListener, sync::Arc};
 
+use anyhow::Context;
 use aws_lc_rs::aead::{AES_256_GCM, RandomizedNonceKey};
 use axum::{
     Extension, Router, middleware,
@@ -21,7 +22,7 @@ use utoipa_swagger_ui::SwaggerUi;
 
 use crate::{
     authentication::auth_validator,
-    config::ApiConfig,
+    config::{ApiConfig, EncryptionKey as ConfigEncryptionKey},
     configs::encryption,
     data::publications::Publication,
     feature_flags::{FeatureFlagsClient, init_feature_flags},
@@ -107,9 +108,7 @@ impl Application {
         let listener = TcpListener::bind(address)?;
         let port = listener.local_addr()?.port();
 
-        let key_bytes = BASE64_STANDARD.decode(&config.encryption_key.key)?;
-        let key = RandomizedNonceKey::new(&AES_256_GCM, &key_bytes)?;
-        let encryption_key = encryption::EncryptionKey { id: config.encryption_key.id, key };
+        let encryption_keyring = build_encryption_keyring(&config)?;
 
         // Try to create Kubernetes client, but continue without it if unavailable
         let kube_client_result = match Environment::load() {
@@ -156,7 +155,7 @@ impl Application {
             config,
             listener,
             connection_pool,
-            encryption_key,
+            encryption_keyring,
             k8s_client,
             trusted_root_certs_cache,
             feature_flags_client,
@@ -208,6 +207,69 @@ async fn test_orbstack_connection(client: &kube::Client) -> Result<(), K8sError>
     Ok(())
 }
 
+/// Builds the encryption keyring from legacy and multi-key configuration.
+pub fn build_encryption_keyring(
+    config: &ApiConfig,
+) -> Result<encryption::EncryptionKeyring, anyhow::Error> {
+    let mut key_configs = Vec::new();
+
+    push_encryption_key_config(&mut key_configs, &config.encryption_key)?;
+
+    for key in &config.encryption_keys {
+        push_encryption_key_config(&mut key_configs, key)?;
+    }
+
+    let keys = key_configs
+        .iter()
+        .map(|key_config| decode_encryption_key(key_config))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    encryption::EncryptionKeyring::new(keys).map_err(Into::into)
+}
+
+/// Adds a configured encryption key while allowing exact legacy duplicates.
+fn push_encryption_key_config<'a>(
+    key_configs: &mut Vec<&'a ConfigEncryptionKey>,
+    key_config: &'a ConfigEncryptionKey,
+) -> Result<(), anyhow::Error> {
+    if let Some(existing_key_config) =
+        key_configs.iter().find(|existing_key_config| existing_key_config.id == key_config.id)
+    {
+        if existing_key_config.key != key_config.key {
+            anyhow::bail!("Duplicate encryption key id in configuration: {}", key_config.id);
+        }
+
+        return Ok(());
+    }
+
+    key_configs.push(key_config);
+
+    Ok(())
+}
+
+/// Decodes one configured encryption key into runtime key material.
+fn decode_encryption_key(
+    key_config: &ConfigEncryptionKey,
+) -> Result<encryption::EncryptionKey, anyhow::Error> {
+    let key_bytes = BASE64_STANDARD
+        .decode(&key_config.key)
+        .with_context(|| format!("Decoding encryption key {}", key_config.id))?;
+
+    if key_bytes.len() != AES_256_GCM.key_len() {
+        anyhow::bail!(
+            "Encryption key {} must decode to {} bytes, got {}",
+            key_config.id,
+            AES_256_GCM.key_len(),
+            key_bytes.len()
+        );
+    }
+
+    let key = RandomizedNonceKey::new(&AES_256_GCM, &key_bytes)
+        .with_context(|| format!("Creating encryption key {}", key_config.id))?;
+
+    Ok(encryption::EncryptionKey { id: key_config.id, key })
+}
+
 /// Creates a Postgres connection pool from the provided configuration.
 ///
 /// Connects to the API's own metadata database using server defaults (no custom
@@ -225,14 +287,14 @@ pub fn run(
     config: ApiConfig,
     listener: TcpListener,
     connection_pool: PgPool,
-    encryption_key: encryption::EncryptionKey,
+    encryption_keyring: encryption::EncryptionKeyring,
     k8s_client: Option<Arc<dyn K8sClient>>,
     trusted_root_certs_cache: Option<TrustedRootCertsCache>,
     feature_flags_client: Option<FeatureFlagsClient>,
 ) -> Result<Server, anyhow::Error> {
     let prometheus_handle = init_metrics_handle()?;
     let config = Arc::new(config);
-    let encryption_key = Arc::new(encryption_key);
+    let encryption_keyring = Arc::new(encryption_keyring);
     let trusted_root_certs_cache = trusted_root_certs_cache.map(Arc::new);
 
     #[derive(OpenApi)]
@@ -443,7 +505,7 @@ pub fn run(
         .layer(Extension(prometheus_handle))
         .layer(Extension(Arc::clone(&config)))
         .layer(Extension(connection_pool))
-        .layer(Extension(Arc::clone(&encryption_key)))
+        .layer(Extension(Arc::clone(&encryption_keyring)))
         .layer(sentry_layer)
         .layer(trace_layer);
 
