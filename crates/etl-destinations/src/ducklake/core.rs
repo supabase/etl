@@ -16,7 +16,7 @@ use etl::{
     },
     error::{ErrorKind, EtlResult},
     etl_error,
-    state::destination_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus},
+    state::destination_table_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus},
     store::DestinationStore,
     types::{
         ColumnSchema, Event, EventSequenceKey, OldTableRow, PartialTableRow, ReplicatedTableSchema,
@@ -26,7 +26,7 @@ use etl::{
 };
 use metrics::gauge;
 use parking_lot::Mutex;
-use pg_escape::{quote_identifier, quote_literal};
+use pg_escape::{quote_identifier as quote_postgres_identifier, quote_literal};
 use sqlx::{AssertSqlSafe, PgPool, postgres::PgPoolOptions};
 #[cfg(unix)]
 use tokio::signal::unix::{SignalKind, signal};
@@ -71,9 +71,10 @@ use crate::{
             resolve_ducklake_metadata_schema_blocking, spawn_ducklake_metrics_sampler,
         },
         schema::{
-            build_add_column_sql_ducklake, build_drop_column_sql_ducklake,
-            build_qualified_create_table_sql_ducklake, build_rename_column_sql_ducklake,
+            build_add_column_sql_ducklake, build_create_table_sql_ducklake,
+            build_drop_column_sql_ducklake, build_rename_column_sql_ducklake,
         },
+        sql::qualified_lake_table_name,
     },
     table_name::try_stringify_table_name,
 };
@@ -336,7 +337,7 @@ fn validate_ducklake_replica_identity(
             _ => "DuckLake mutation requires a replica identity",
         };
         return Err(etl_error!(
-            ErrorKind::InvalidState,
+            ErrorKind::SourceReplicaIdentityError,
             description,
             format!(
                 "Table '{}' has no replicated replica-identity columns",
@@ -733,7 +734,7 @@ where
                 missing_indexes.next();
                 if is_identity {
                     return Err(etl_error!(
-                        ErrorKind::InvalidState,
+                        ErrorKind::SourceReplicaIdentityError,
                         "DuckLake partial update is missing replica-identity columns",
                         format!(
                             "Table '{}' emitted a partial update without key column '{}'",
@@ -1099,8 +1100,8 @@ where
             })?;
 
             let result = (|| -> EtlResult<()> {
-                let truncate_table_sql =
-                    format!(r#"TRUNCATE TABLE {LAKE_CATALOG}."{table_name}";"#);
+                let target_table = qualified_lake_table_name(&table_name);
+                let truncate_table_sql = format!("TRUNCATE TABLE {target_table};");
                 conn.execute_batch(&truncate_table_sql).map_err(|e| {
                     etl_error!(
                         ErrorKind::DestinationQueryFailed,
@@ -1171,9 +1172,8 @@ where
             })?;
 
             let result = (|| -> EtlResult<()> {
-                let quoted_table_name = quote_identifier(&table_name_for_drop).into_owned();
-                let drop_table_sql =
-                    format!("DROP TABLE IF EXISTS {LAKE_CATALOG}.{quoted_table_name};");
+                let table_name = qualified_lake_table_name(&table_name_for_drop);
+                let drop_table_sql = format!("DROP TABLE IF EXISTS {table_name};");
                 conn.execute_batch(&drop_table_sql).map_err(|e| {
                     etl_error!(
                         ErrorKind::DestinationQueryFailed,
@@ -1935,7 +1935,7 @@ where
         replicated_table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<()> {
         let column_schemas: Vec<_> = replicated_table_schema.column_schemas().cloned().collect();
-        let ddl = build_qualified_create_table_sql_ducklake(table_name, &column_schemas);
+        let ddl = build_create_table_sql_ducklake(table_name, &column_schemas);
         let created_tables = Arc::clone(&self.created_tables);
         let table_name = table_name.to_owned();
         let _checkpoint_guard = self.acquire_mutation_guard().await;
@@ -2376,8 +2376,8 @@ where
     async fn list_active_ducklake_tables(&self) -> EtlResult<Vec<String>> {
         let sql = format!(
             "SELECT table_name FROM {}.{} WHERE end_snapshot IS NULL ORDER BY table_name",
-            quote_identifier(self.metadata_schema.as_ref()),
-            quote_identifier("ducklake_table")
+            quote_postgres_identifier(self.metadata_schema.as_ref()),
+            quote_postgres_identifier("ducklake_table")
         );
         let rows: Vec<(String,)> = sqlx::query_as(AssertSqlSafe(sql))
             .fetch_all(&self.metadata_pg_pool)
@@ -2521,7 +2521,7 @@ mod tests {
 
     use duckdb::{Config, Connection};
     use etl::{
-        config::{PgConnectionConfig, TcpKeepaliveConfig, TlsConfig},
+        config::{PgConnectionConfig, TcpKeepaliveConfig},
         store::{both::memory::MemoryStore, schema::SchemaStore},
         types::{
             Cell, ColumnRename, ColumnSchema, IdentityMask, PartialTableRow, ReplicationMask,
@@ -2529,7 +2529,7 @@ mod tests {
         },
     };
     use etl_maintenance::ducklake::flush_table_inlined_data;
-    use etl_postgres::tokio::test_utils::PgDatabase;
+    use etl_postgres::{test_utils::local_tls_config_from_env, tokio::test_utils::PgDatabase};
     use pg_escape::{quote_identifier, quote_literal};
     use tempfile::TempDir;
     use tokio_postgres::Client;
@@ -2538,6 +2538,7 @@ mod tests {
 
     use super::*;
     use crate::ducklake::{
+        LAKE_CATALOG,
         config::catalog_conninfo_from_url,
         metrics::{query_catalog_maintenance_metrics, query_table_storage_metrics},
     };
@@ -2623,7 +2624,7 @@ mod tests {
         )
         .unwrap_err();
 
-        assert_eq!(error.kind(), ErrorKind::InvalidState);
+        assert_eq!(error.kind(), ErrorKind::SourceReplicaIdentityError);
         assert_eq!(error.description(), Some("DuckLake update requires a replica identity"));
     }
 
@@ -2655,8 +2656,8 @@ mod tests {
         assert_eq!(
             statement_sql,
             vec![
-                "alter table lake.users rename column name to full_name",
-                "alter table lake.users add column name varchar",
+                r#"alter table "lake"."users" rename column "name" to "full_name""#,
+                r#"alter table "lake"."users" add column "name" varchar"#,
             ]
         );
         assert_eq!(plan.column_names, vec!["id", "full_name", "name"]);
@@ -2743,7 +2744,7 @@ mod tests {
         let statement_sql: Vec<_> =
             plan.statements.iter().map(|statement| statement.sql.as_str()).collect();
 
-        assert_eq!(statement_sql, vec!["alter table lake.users drop column ddl_col_4_1"]);
+        assert_eq!(statement_sql, vec![r#"alter table "lake"."users" drop column "ddl_col_4_1""#]);
         assert_eq!(plan.column_names, vec!["id", "ddl_col_4_0"]);
     }
 
@@ -2774,8 +2775,10 @@ mod tests {
         assert_eq!(
             statement_sql,
             vec![
-                format!("alter table lake.users rename column status to {tombstone_name}"),
-                "alter table lake.users rename column name to status".to_owned(),
+                format!(
+                    r#"alter table "lake"."users" rename column "status" to "{tombstone_name}""#
+                ),
+                r#"alter table "lake"."users" rename column "name" to "status""#.to_owned(),
             ]
         );
         assert_eq!(plan.column_names, vec!["id", "status", tombstone_name.as_str()]);
@@ -2807,8 +2810,8 @@ mod tests {
         assert_eq!(
             statement_sql,
             vec![
-                format!("alter table lake.users rename column name to {tombstone_name}"),
-                "alter table lake.users add column name varchar".to_owned(),
+                format!(r#"alter table "lake"."users" rename column "name" to "{tombstone_name}""#),
+                r#"alter table "lake"."users" add column "name" varchar"#.to_owned(),
             ]
         );
         assert_eq!(plan.column_names, vec!["id", tombstone_name.as_str(), "name"]);
@@ -2972,7 +2975,7 @@ mod tests {
             username: env::var("TESTS_DATABASE_USERNAME")
                 .expect("TESTS_DATABASE_USERNAME must be set"),
             password: env::var("TESTS_DATABASE_PASSWORD").ok().map(Into::into),
-            tls: TlsConfig { trusted_root_certs: String::new(), enabled: false },
+            tls: local_tls_config_from_env(),
             keepalive: TcpKeepaliveConfig::default(),
         }
     }

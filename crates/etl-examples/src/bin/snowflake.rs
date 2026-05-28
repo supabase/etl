@@ -181,7 +181,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         keepalive: TcpKeepaliveConfig::default(),
     };
 
-    // Create a persistent store for tracking table replication states and
+    // Create a persistent store for tracking table states and
     // schemas. This runs the Postgres store migrations; Pipeline::start()
     // runs the source migrations required by replication.
     let pipeline_id = 1;
@@ -221,11 +221,9 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
     // Build the auth manager using key-pair authentication
     let passphrase: Option<SecretString> =
         args.sf_args.snowflake_private_key_passphrase.map(SecretString::from);
-    let auth = Arc::new(AuthManager::new(
-        &sf_config,
-        &args.sf_args.snowflake_private_key_path,
-        passphrase.as_ref(),
-    )?);
+    let private_key_pem = std::fs::read_to_string(&args.sf_args.snowflake_private_key_path)
+        .expect("failed to read private key file");
+    let auth = Arc::new(AuthManager::new(&sf_config, &private_key_pem, passphrase.as_ref())?);
 
     // Initialize Snowflake destination -- tables will be automatically created
     // to match the Postgres schema

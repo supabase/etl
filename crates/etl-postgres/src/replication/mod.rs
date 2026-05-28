@@ -1,11 +1,11 @@
 mod db;
-pub mod destination_metadata;
+pub mod destination_table_metadata;
 pub mod health;
 pub mod lag;
 pub mod progress;
 pub mod schema;
 pub mod slots;
-pub mod state;
+pub mod table_state;
 
 pub use db::{
     TableLookupError, connect_to_source_database, extract_server_version,

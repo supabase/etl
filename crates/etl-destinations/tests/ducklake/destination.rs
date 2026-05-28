@@ -29,7 +29,7 @@ use duckdb::Connection;
 use etl::{
     destination::Destination,
     error::ErrorKind,
-    state::destination_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus},
+    state::destination_table_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus},
     store::{both::memory::MemoryStore, schema::SchemaStore, state::StateStore},
     types::{
         Cell, ColumnSchema, DeleteEvent, Event, IdentityMask, OldTableRow, PartialTableRow, PgLsn,
@@ -2160,7 +2160,7 @@ async fn write_events_without_replica_identity_rejects_mutations() {
         })])
         .await
         .unwrap_err();
-    assert_eq!(update_error.kind(), ErrorKind::InvalidState);
+    assert_eq!(update_error.kind(), ErrorKind::SourceReplicaIdentityError);
     assert_eq!(update_error.description(), Some("DuckLake update requires a replica identity"));
 
     let delete_lsn = PgLsn::from(451u64);
@@ -2174,7 +2174,7 @@ async fn write_events_without_replica_identity_rejects_mutations() {
         })])
         .await
         .unwrap_err();
-    assert_eq!(delete_error.kind(), ErrorKind::InvalidState);
+    assert_eq!(delete_error.kind(), ErrorKind::SourceReplicaIdentityError);
     assert_eq!(delete_error.description(), Some("DuckLake delete requires a replica identity"));
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;

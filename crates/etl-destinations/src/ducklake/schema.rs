@@ -1,7 +1,6 @@
 use etl::types::{ColumnSchema, Type, is_array_type};
-use pg_escape::quote_identifier;
 
-use crate::ducklake::LAKE_CATALOG;
+use crate::ducklake::sql::{qualified_lake_table_name, quote_identifier};
 
 /// Returns the DuckLake SQL type string for a given Postgres scalar type.
 fn postgres_scalar_type_to_ducklake_sql(typ: &Type) -> &'static str {
@@ -64,11 +63,6 @@ fn postgres_column_type_to_ducklake_sql(typ: &Type) -> &'static str {
     }
 }
 
-/// Returns a quoted table name qualified by the DuckLake catalog alias.
-fn qualified_ducklake_table_name(table_name: &str) -> String {
-    format!("{}.{}", quote_identifier(LAKE_CATALOG), quote_identifier(table_name))
-}
-
 /// Builds one DuckLake column definition.
 ///
 /// For example, a non-null source `name text` column becomes
@@ -85,23 +79,11 @@ fn ducklake_column_definition(column_schema: &ColumnSchema, include_not_null: bo
 ///
 /// The supplied columns are the destination-visible replicated columns in
 /// write order.
-#[cfg(test)]
-fn build_create_table_sql_ducklake(table_name: &str, column_schemas: &[ColumnSchema]) -> String {
-    let table_name = quote_identifier(table_name);
-    let col_defs: Vec<String> = column_schemas
-        .iter()
-        .map(|col| format!("  {}", ducklake_column_definition(col, true)))
-        .collect();
-
-    format!("create table if not exists {table_name} ({})", col_defs.join(",\n"))
-}
-
-/// Builds a DuckLake-catalog qualified `create table if not exists` statement.
-pub(super) fn build_qualified_create_table_sql_ducklake(
+pub(super) fn build_create_table_sql_ducklake(
     table_name: &str,
     column_schemas: &[ColumnSchema],
 ) -> String {
-    let table_name = qualified_ducklake_table_name(table_name);
+    let table_name = qualified_lake_table_name(table_name);
     let col_defs: Vec<String> = column_schemas
         .iter()
         .map(|col| format!("  {}", ducklake_column_definition(col, true)))
@@ -118,7 +100,7 @@ pub(super) fn build_add_column_sql_ducklake(
     table_name: &str,
     column_schema: &ColumnSchema,
 ) -> String {
-    let table_name = qualified_ducklake_table_name(table_name);
+    let table_name = qualified_lake_table_name(table_name);
     let column_definition = ducklake_column_definition(column_schema, false);
 
     format!("alter table {table_name} add column {column_definition}")
@@ -126,7 +108,7 @@ pub(super) fn build_add_column_sql_ducklake(
 
 /// Builds a DuckLake `alter table drop column` statement.
 pub(super) fn build_drop_column_sql_ducklake(table_name: &str, column_name: &str) -> String {
-    let table_name = qualified_ducklake_table_name(table_name);
+    let table_name = qualified_lake_table_name(table_name);
     let column_name = quote_identifier(column_name);
 
     format!("alter table {table_name} drop column {column_name}")
@@ -138,7 +120,7 @@ pub(super) fn build_rename_column_sql_ducklake(
     old_name: &str,
     new_name: &str,
 ) -> String {
-    let table_name = qualified_ducklake_table_name(table_name);
+    let table_name = qualified_lake_table_name(table_name);
     let old_name = quote_identifier(old_name);
     let new_name = quote_identifier(new_name);
 
@@ -180,24 +162,13 @@ mod tests {
     }
 
     #[test]
-    fn build_create_table_sql_quotes_identifiers() {
+    fn build_create_table_sql_qualifies_lake_catalog() {
         let sql = build_create_table_sql_ducklake(
             "odd\"table",
             &[ColumnSchema::new("select".to_owned(), Type::INT4, -1, 1, Some(1), false)],
         );
 
-        assert!(sql.starts_with("create table if not exists \"odd\"\"table\""));
-        assert!(sql.contains("  \"select\" integer not null"));
-    }
-
-    #[test]
-    fn build_qualified_create_table_sql_qualifies_lake_catalog() {
-        let sql = build_qualified_create_table_sql_ducklake(
-            "odd\"table",
-            &[ColumnSchema::new("select".to_owned(), Type::INT4, -1, 1, Some(1), false)],
-        );
-
-        assert!(sql.starts_with("create table if not exists lake.\"odd\"\"table\""));
+        assert!(sql.starts_with("create table if not exists \"lake\".\"odd\"\"table\""));
         assert!(sql.contains("  \"select\" integer not null"));
     }
 
@@ -208,14 +179,14 @@ mod tests {
             &ColumnSchema::new("score".to_owned(), Type::INT4, -1, 4, None, false),
         );
 
-        assert_eq!(sql, "alter table lake.test_table add column score integer");
+        assert_eq!(sql, r#"alter table "lake"."test_table" add column "score" integer"#);
     }
 
     #[test]
     fn build_drop_column_sql_quotes_identifiers() {
         let sql = build_drop_column_sql_ducklake("table\"name", "old\"column");
 
-        assert_eq!(sql, "alter table lake.\"table\"\"name\" drop column \"old\"\"column\"");
+        assert_eq!(sql, r#"alter table "lake"."table""name" drop column "old""column""#);
     }
 
     #[test]
@@ -224,8 +195,7 @@ mod tests {
 
         assert_eq!(
             sql,
-            "alter table lake.\"table\"\"name\" rename column \"old\"\"column\" to \
-             \"new\"\"column\""
+            r#"alter table "lake"."table""name" rename column "old""column" to "new""column""#
         );
     }
 }

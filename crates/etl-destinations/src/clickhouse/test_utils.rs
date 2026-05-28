@@ -6,7 +6,9 @@ use tokio::runtime::Handle;
 use url::Url;
 use uuid::Uuid;
 
-use crate::clickhouse::{ClickHouseClientConfig, ClickHouseDestination, ClickHouseInserterConfig};
+use crate::clickhouse::{
+    ClickHouseClientConfig, ClickHouseDestination, ClickHouseInserterConfig, sql::quote_identifier,
+};
 
 /// ClickHouse HTTP URL (e.g. `http://localhost:8123`).
 pub const CLICKHOUSE_URL_ENV: &str = "TESTS_CLICKHOUSE_URL";
@@ -87,7 +89,8 @@ impl ClickHouseTestDatabase {
 
     /// Creates the test database in ClickHouse, retrying on transient errors.
     pub async fn create_database(&self) {
-        let query = format!("CREATE DATABASE IF NOT EXISTS `{}`", self.database);
+        let database = quote_identifier(&self.database);
+        let query = format!("CREATE DATABASE IF NOT EXISTS {database}");
         for attempt in 1..=5 {
             match self.root_client.query(&query).execute().await {
                 Ok(()) => return,
@@ -104,8 +107,9 @@ impl ClickHouseTestDatabase {
 
     /// Drops the test database from ClickHouse.
     pub async fn drop_database(&self) {
+        let database = quote_identifier(&self.database);
         self.root_client
-            .query(&format!("DROP DATABASE IF EXISTS `{}`", self.database))
+            .query(&format!("DROP DATABASE IF EXISTS {database}"))
             .execute()
             .await
             .expect("Failed to drop test ClickHouse database");
@@ -219,13 +223,13 @@ impl ClickHouseTestDatabase {
 impl Drop for ClickHouseTestDatabase {
     fn drop(&mut self) {
         let root_client = self.root_client.clone();
-        let database = self.database.clone();
+        let database = quote_identifier(&self.database);
 
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             tokio::task::block_in_place(move || {
                 Handle::current().block_on(async move {
                     if let Err(error) = root_client
-                        .query(&format!("DROP DATABASE IF EXISTS `{database}`"))
+                        .query(&format!("DROP DATABASE IF EXISTS {database}"))
                         .execute()
                         .await
                     {

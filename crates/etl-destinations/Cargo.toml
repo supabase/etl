@@ -69,7 +69,6 @@ clickhouse = [
 snowflake = [
     "dep:base64",
     "dep:bytes",
-    "dep:hex",
     "dep:jsonwebtoken",
     "dep:metrics",
     "dep:reqwest",
@@ -104,12 +103,10 @@ etl-config = { workspace = true }
 etl-maintenance = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
 gcp-bigquery-client = { workspace = true, optional = true, features = ["rust-tls", "aws-lc-rs"] }
-hex = { workspace = true, optional = true }
 humantime = { workspace = true, optional = true }
 iceberg = { workspace = true, optional = true }
 iceberg-catalog-rest = { workspace = true, optional = true }
 jsonwebtoken = { workspace = true, optional = true }
-kube = { workspace = true, optional = true, features = ["client", "rustls-tls"] }
 metrics = { workspace = true, optional = true }
 parking_lot = { workspace = true, optional = true }
 parquet = { workspace = true, optional = true, features = ["async", "arrow"] }

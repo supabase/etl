@@ -25,4 +25,4 @@ pub use both::{memory::MemoryStore, postgres::PostgresStore};
 pub use capabilities::{DestinationStore, PipelineStore, SharedStateStore};
 pub use lifecycle::TableLifecycleStore;
 pub use schema::SchemaStore;
-pub use state::{StateStore, TableReplicationStates};
+pub use state::{StateStore, TableStates};

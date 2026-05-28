@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use etl::{
     pipeline::Pipeline,
-    state::table::TableReplicationPhaseType,
+    state::TableStateType,
     test_utils::{notify::TimedNotify, notifying_store::NotifyingStore},
 };
 use etl_config::shared::TableSyncCopyConfig;
@@ -248,14 +248,10 @@ async fn register_table_copy_notifications(
     for table_id in table_ids {
         let table_id = *table_id;
         let finished = store
-            .notify_on_table_state_type(
-                TableId::new(table_id),
-                TableReplicationPhaseType::FinishedCopy,
-            )
+            .notify_on_table_state_type(TableId::new(table_id), TableStateType::FinishedCopy)
             .await;
-        let errored = store
-            .notify_on_table_state_type(TableId::new(table_id), TableReplicationPhaseType::Errored)
-            .await;
+        let errored =
+            store.notify_on_table_state_type(TableId::new(table_id), TableStateType::Errored).await;
         notifications.push(TableCopyNotifications { table_id, finished, errored });
     }
 

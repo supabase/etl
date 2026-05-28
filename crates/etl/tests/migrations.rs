@@ -4,14 +4,13 @@ use etl::{
     config::{
         BatchConfig, ETL_MIGRATION_OPTIONS, IntoConnectOptions, InvalidatedSlotBehavior,
         MemoryBackpressureConfig, PgConnectionConfig, PipelineConfig, TableSyncCopyConfig,
-        TlsConfig,
     },
     migrations::run_source_migrations,
     pipeline::Pipeline,
     store::{MemoryStore, PostgresStore},
     test_utils::memory_destination::MemoryDestination,
 };
-use etl_postgres::tokio::test_utils::PgDatabase;
+use etl_postgres::{test_utils::local_tls_config_from_env, tokio::test_utils::PgDatabase};
 use etl_telemetry::tracing::init_test_tracing;
 use sqlx::{Connection, Executor, PgConnection, migrate::Migrator, postgres::PgConnectOptions};
 use tokio_postgres::Client;
@@ -21,7 +20,6 @@ const DEFAULT_DATABASE_HOST: &str = "localhost";
 const DEFAULT_DATABASE_PORT: &str = "5430";
 const DEFAULT_DATABASE_USERNAME: &str = "postgres";
 const DEFAULT_DATABASE_PASSWORD: &str = "postgres";
-
 const POSTGRES_STORE_BASE_VERSION: i64 = 20250827000000;
 
 fn local_pg_connection_config() -> PgConnectionConfig {
@@ -39,7 +37,7 @@ fn local_pg_connection_config() -> PgConnectionConfig {
             .ok()
             .or(Some(DEFAULT_DATABASE_PASSWORD.into()))
             .map(Into::into),
-        tls: TlsConfig { trusted_root_certs: String::new(), enabled: false },
+        tls: local_tls_config_from_env(),
         keepalive: Default::default(),
     }
 }

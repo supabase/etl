@@ -38,11 +38,11 @@
 //! ## Store
 //! The [`store::PipelineStore`] trait defines the complete store surface needed
 //! by the pipeline runtime. It combines narrower capabilities for table
-//! schemas, replication state, destination table metadata, and table lifecycle
+//! schemas, table state, destination table metadata, and table lifecycle
 //! operations. These stores are critical to a pipeline's operation, as they
 //! allow it to be safely paused and resumed.
 //!
-//! The [`store::state::StateStore`] trait handles table replication states,
+//! The [`store::state::StateStore`] trait handles table states,
 //! durable replication progress, and destination table metadata, providing a
 //! single interface for all state-related storage operations.
 //!

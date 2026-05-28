@@ -177,6 +177,8 @@ jobs:
       NUM_LOCAL_DATABASES: 4
       TESTS_DATABASE_USERNAME: postgres
       TESTS_DATABASE_PASSWORD: postgres
+      TESTS_DATABASE_TLS_ENABLED: "true"
+      TESTS_DATABASE_TLS_ROOT_CERT: ${{ github.workspace }}/target/postgres-tls/root.crt
       TESTS_CLICKHOUSE_URL: http://localhost:8123
       TESTS_CLICKHOUSE_USER: etl
       TESTS_CLICKHOUSE_PASSWORD: etl

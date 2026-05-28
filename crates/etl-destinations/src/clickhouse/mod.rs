@@ -3,6 +3,7 @@ mod core;
 mod encoding;
 mod metrics;
 mod schema;
+mod sql;
 #[cfg(feature = "test-utils")]
 pub mod test_utils;
 

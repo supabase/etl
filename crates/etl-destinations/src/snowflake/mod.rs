@@ -6,6 +6,7 @@ mod encoding;
 mod error;
 mod metrics;
 mod schema;
+mod sql;
 mod sql_client;
 mod streaming;
 

@@ -21,7 +21,7 @@ use crate::{
         WorkerType,
         client::{GetOrCreateSlotResult, PgReplicationClient, SlotState},
     },
-    state::table::{TableReplicationPhase, TableReplicationPhaseType},
+    state::{TableState, TableStateType},
     store::{PipelineStore, state::StateStore},
     types::PipelineId,
     workers::{
@@ -306,7 +306,7 @@ where
             self.pipeline_id,
             start_lsn,
             self.config,
-            replication_client,
+            &replication_client,
             self.store,
             self.destination,
             self.shared_table_cache,
@@ -507,16 +507,16 @@ async fn handle_invalidated_slot<S: StateStore>(
             // We update all tables to Init to reset their state, but no slots are deleted
             // for table sync workers since the deletion will be handled by the
             // worker itself when starting up again.
-            let table_states_updates: Vec<_> = store
-                .get_table_replication_states()
+            let table_state_updates: Vec<_> = store
+                .get_table_states()
                 .await?
                 .keys()
-                .map(|table_id| (*table_id, TableReplicationPhase::Init))
+                .map(|table_id| (*table_id, TableState::Init))
                 .collect();
-            let reset_count = table_states_updates.len();
-            store.update_table_replication_states(table_states_updates).await?;
+            let reset_count = table_state_updates.len();
+            store.update_table_states(table_state_updates).await?;
 
-            info!(reset_count, "reset table replication states to init for resync");
+            info!(reset_count, "reset table states to init for resync");
 
             store.delete_replication_progress(WorkerType::Apply).await?;
 
@@ -542,12 +542,12 @@ async fn handle_invalidated_slot<S: StateStore>(
 /// indicates the table was synchronized based on a different apply worker
 /// lineage.
 async fn validate_tables_in_init_state<S: StateStore>(store: &S) -> EtlResult<()> {
-    let table_states = store.get_table_replication_states().await?;
+    let table_states = store.get_table_states().await?;
 
     let non_init_tables: Vec<_> = table_states
         .iter()
-        .filter(|(_, phase)| phase.as_type() != TableReplicationPhaseType::Init)
-        .map(|(table_id, phase)| (*table_id, phase.as_type()))
+        .filter(|(_, state)| state.as_type() != TableStateType::Init)
+        .map(|(table_id, state)| (*table_id, state.as_type()))
         .collect();
 
     if non_init_tables.is_empty() {
@@ -555,7 +555,7 @@ async fn validate_tables_in_init_state<S: StateStore>(store: &S) -> EtlResult<()
     }
 
     let table_details: Vec<String> =
-        non_init_tables.iter().map(|(id, phase)| format!("table {id} in state {phase}")).collect();
+        non_init_tables.iter().map(|(id, state)| format!("table {id} in state {state}")).collect();
 
     bail!(
         ErrorKind::InvalidState,
