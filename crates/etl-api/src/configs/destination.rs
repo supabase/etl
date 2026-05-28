@@ -1374,39 +1374,33 @@ mod tests {
     }
 
     #[test]
-    fn full_api_destination_config_serializes_preserve_bigquery_strategies() {
-        let full_config = FullApiDestinationConfig::BigQuery {
-            project_id: "test-project".to_owned(),
-            dataset_id: "test_dataset".to_owned(),
-            service_account_key: SerializableSecretString::from("{\"test\": \"key\"}".to_owned()),
-            max_staleness_mins: None,
-            connection_pool_size: None,
-            type_strategy: TypeStrategy::StringIfRisky,
-            value_strategy: ValueStrategy::Preserve,
-        };
+    fn full_api_destination_config_serializes_bigquery_strategies() {
+        for (type_strategy, value_strategy, expected_type_strategy, expected_value_strategy) in [
+            (TypeStrategy::StringIfRisky, ValueStrategy::Preserve, "string_if_risky", "preserve"),
+            (
+                TypeStrategy::NativeOrString,
+                ValueStrategy::Normalize,
+                "native_or_string",
+                "normalize",
+            ),
+        ] {
+            let full_config = FullApiDestinationConfig::BigQuery {
+                project_id: "test-project".to_owned(),
+                dataset_id: "test_dataset".to_owned(),
+                service_account_key: SerializableSecretString::from(
+                    "{\"test\": \"key\"}".to_owned(),
+                ),
+                max_staleness_mins: None,
+                connection_pool_size: None,
+                type_strategy,
+                value_strategy,
+            };
 
-        let value = serde_json::to_value(full_config).unwrap();
+            let value = serde_json::to_value(full_config).unwrap();
 
-        assert_eq!(value["big_query"]["type_strategy"], "string_if_risky");
-        assert_eq!(value["big_query"]["value_strategy"], "preserve");
-    }
-
-    #[test]
-    fn full_api_destination_config_serializes_normalize_bigquery_strategies() {
-        let full_config = FullApiDestinationConfig::BigQuery {
-            project_id: "test-project".to_owned(),
-            dataset_id: "test_dataset".to_owned(),
-            service_account_key: SerializableSecretString::from("{\"test\": \"key\"}".to_owned()),
-            max_staleness_mins: None,
-            connection_pool_size: None,
-            type_strategy: TypeStrategy::NativeOrString,
-            value_strategy: ValueStrategy::Normalize,
-        };
-
-        let value = serde_json::to_value(full_config).unwrap();
-
-        assert_eq!(value["big_query"]["type_strategy"], "native_or_string");
-        assert_eq!(value["big_query"]["value_strategy"], "normalize");
+            assert_eq!(value["big_query"]["type_strategy"], expected_type_strategy);
+            assert_eq!(value["big_query"]["value_strategy"], expected_value_strategy);
+        }
     }
 
     #[test]

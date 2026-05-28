@@ -1648,7 +1648,10 @@ fn invalid_from_etl_error(error: EtlError) -> BigQueryCellMaterializationResult 
 
 /// Returns the number of fractional digits in a numeric string.
 fn bigquery_bignumeric_scale(value: &PgNumeric) -> usize {
-    value.to_string().split_once('.').map_or(0, |(_, fractional)| fractional.len())
+    match value {
+        PgNumeric::Value { scale, .. } => *scale as usize,
+        _ => 0,
+    }
 }
 
 /// Returns whether a numeric value is in BigQuery `BIGNUMERIC` range.
