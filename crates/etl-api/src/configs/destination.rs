@@ -149,6 +149,31 @@ pub enum FullApiDestinationConfig {
         #[serde(default)]
         maintenance_mode: DuckLakeMaintenanceMode,
     },
+    Snowflake {
+        #[schema(example = "ORGNAME-ACCOUNTNAME")]
+        #[serde(deserialize_with = "crate::utils::trim_string")]
+        account_id: String,
+        #[schema(example = "ETL_USER")]
+        #[serde(deserialize_with = "crate::utils::trim_string")]
+        user: String,
+        #[schema(example = "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADA...")]
+        private_key: SerializableSecretString,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        private_key_passphrase: Option<SerializableSecretString>,
+        #[schema(example = "ANALYTICS")]
+        #[serde(deserialize_with = "crate::utils::trim_string")]
+        database: String,
+        #[schema(example = "PUBLIC")]
+        #[serde(deserialize_with = "crate::utils::trim_string")]
+        schema: String,
+        #[schema(example = "ETL_ROLE")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "crate::utils::trim_option_string"
+        )]
+        role: Option<String>,
+    },
 }
 
 impl From<StoredDestinationConfig> for FullApiDestinationConfig {
@@ -239,6 +264,23 @@ impl From<StoredDestinationConfig> for FullApiDestinationConfig {
                 expire_snapshots_older_than,
                 maintenance_mode,
             },
+            StoredDestinationConfig::Snowflake {
+                account_id,
+                user,
+                private_key,
+                private_key_passphrase,
+                database,
+                schema,
+                role,
+            } => Self::Snowflake {
+                account_id,
+                user,
+                private_key,
+                private_key_passphrase,
+                database,
+                schema,
+                role,
+            },
         }
     }
 }
@@ -277,6 +319,15 @@ pub enum StoredDestinationConfig {
         maintenance_target_file_size: Option<String>,
         expire_snapshots_older_than: Option<String>,
         maintenance_mode: DuckLakeMaintenanceMode,
+    },
+    Snowflake {
+        account_id: String,
+        user: String,
+        private_key: SerializableSecretString,
+        private_key_passphrase: Option<SerializableSecretString>,
+        database: String,
+        schema: String,
+        role: Option<String>,
     },
 }
 
@@ -374,6 +425,23 @@ impl StoredDestinationConfig {
                 expire_snapshots_older_than,
                 maintenance_mode,
             },
+            Self::Snowflake {
+                account_id,
+                user,
+                private_key,
+                private_key_passphrase,
+                database,
+                schema,
+                role,
+            } => DestinationConfig::Snowflake {
+                account_id,
+                user,
+                private_key: private_key.into(),
+                private_key_passphrase: private_key_passphrase.map(Into::into),
+                database,
+                schema,
+                role,
+            },
         }
     }
 }
@@ -466,6 +534,23 @@ impl From<FullApiDestinationConfig> for StoredDestinationConfig {
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
                 maintenance_mode,
+            },
+            FullApiDestinationConfig::Snowflake {
+                account_id,
+                user,
+                private_key,
+                private_key_passphrase,
+                database,
+                schema,
+                role,
+            } => Self::Snowflake {
+                account_id,
+                user,
+                private_key,
+                private_key_passphrase,
+                database,
+                schema,
+                role,
             },
         }
     }
@@ -604,6 +689,31 @@ impl Encrypt<EncryptedStoredDestinationConfig> for StoredDestinationConfig {
                     maintenance_mode,
                 })
             }
+            Self::Snowflake {
+                account_id,
+                user,
+                private_key,
+                private_key_passphrase,
+                database,
+                schema,
+                role,
+            } => {
+                let encrypted_private_key =
+                    encrypt_text(private_key.expose_secret().to_owned(), encryption_key)?;
+                let encrypted_private_key_passphrase = private_key_passphrase
+                    .map(|p| encrypt_text(p.expose_secret().to_owned(), encryption_key))
+                    .transpose()?;
+
+                Ok(EncryptedStoredDestinationConfig::Snowflake {
+                    account_id,
+                    user,
+                    private_key: encrypted_private_key,
+                    private_key_passphrase: encrypted_private_key_passphrase,
+                    database,
+                    schema,
+                    role,
+                })
+            }
         }
     }
 }
@@ -648,6 +758,15 @@ pub enum EncryptedStoredDestinationConfig {
         expire_snapshots_older_than: Option<String>,
         #[serde(default)]
         maintenance_mode: DuckLakeMaintenanceMode,
+    },
+    Snowflake {
+        account_id: String,
+        user: String,
+        private_key: EncryptedValue,
+        private_key_passphrase: Option<EncryptedValue>,
+        database: String,
+        schema: String,
+        role: Option<String>,
     },
 }
 
@@ -799,6 +918,32 @@ impl Decrypt<StoredDestinationConfig> for EncryptedStoredDestinationConfig {
                 expire_snapshots_older_than,
                 maintenance_mode,
             }),
+            Self::Snowflake {
+                account_id,
+                user,
+                private_key,
+                private_key_passphrase,
+                database,
+                schema,
+                role,
+            } => {
+                let private_key =
+                    SerializableSecretString::from(decrypt_text(private_key, encryption_key)?);
+                let private_key_passphrase = private_key_passphrase
+                    .map(|p| decrypt_text(p, encryption_key))
+                    .transpose()?
+                    .map(SerializableSecretString::from);
+
+                Ok(StoredDestinationConfig::Snowflake {
+                    account_id,
+                    user,
+                    private_key,
+                    private_key_passphrase,
+                    database,
+                    schema,
+                    role,
+                })
+            }
         }
     }
 }
