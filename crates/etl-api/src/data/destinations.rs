@@ -7,7 +7,7 @@ use crate::configs::{
     destination::{
         EncryptedStoredDestinationConfig, FullApiDestinationConfig, StoredDestinationConfig,
     },
-    encryption::EncryptionKey,
+    encryption::EncryptionKeyring,
     serde::{
         DbDeserializationError, DbSerializationError, decrypt_and_deserialize_from_value,
         encrypt_and_serialize,
@@ -39,7 +39,7 @@ pub async fn create_destination<'c, E>(
     tenant_id: &str,
     name: &str,
     config: FullApiDestinationConfig,
-    encryption_key: &EncryptionKey,
+    encryption_key: &EncryptionKeyring,
 ) -> Result<i64, DestinationsDbError>
 where
     E: PgExecutor<'c>,
@@ -66,7 +66,7 @@ pub async fn read_destination<'c, E>(
     executor: E,
     tenant_id: &str,
     destination_id: i64,
-    encryption_key: &EncryptionKey,
+    encryption_key: &EncryptionKeyring,
 ) -> Result<Option<Destination>, DestinationsDbError>
 where
     E: PgExecutor<'c>,
@@ -111,7 +111,7 @@ pub async fn update_destination<'c, E>(
     name: &str,
     destination_id: i64,
     config: FullApiDestinationConfig,
-    encryption_key: &EncryptionKey,
+    encryption_key: &EncryptionKeyring,
 ) -> Result<Option<i64>, DestinationsDbError>
 where
     E: PgExecutor<'c>,
@@ -162,7 +162,7 @@ where
 pub async fn read_all_destinations<'c, E>(
     executor: E,
     tenant_id: &str,
-    encryption_key: &EncryptionKey,
+    encryption_key: &EncryptionKeyring,
 ) -> Result<Vec<Destination>, DestinationsDbError>
 where
     E: PgExecutor<'c>,

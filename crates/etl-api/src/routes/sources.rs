@@ -12,7 +12,7 @@ use utoipa::ToSchema;
 use crate::{
     config::ApiConfig,
     configs::{
-        encryption::EncryptionKey,
+        encryption::EncryptionKeyring,
         source::{FullApiSourceConfig, StoredSourceConfig, StrippedApiSourceConfig},
     },
     data,
@@ -200,7 +200,7 @@ pub(crate) async fn create_source(
     pool: Data<PgPool>,
     api_config: Data<ApiConfig>,
     trusted_root_certs_cache: Data<TrustedRootCertsCache>,
-    encryption_key: Data<EncryptionKey>,
+    encryption_key: Data<EncryptionKeyring>,
     source: Json<CreateSourceRequest>,
 ) -> Result<impl Responder, SourceError> {
     let tenant_id = extract_tenant_id(&req)?;
@@ -282,7 +282,7 @@ pub(crate) async fn validate_source(
 pub(crate) async fn read_source(
     req: HttpRequest,
     pool: Data<PgPool>,
-    encryption_key: Data<EncryptionKey>,
+    encryption_key: Data<EncryptionKeyring>,
     source_id: Path<i64>,
 ) -> Result<impl Responder, SourceError> {
     let tenant_id = extract_tenant_id(&req)?;
@@ -324,7 +324,7 @@ pub(crate) async fn update_source(
     api_config: Data<ApiConfig>,
     trusted_root_certs_cache: Data<TrustedRootCertsCache>,
     source_id: Path<i64>,
-    encryption_key: Data<EncryptionKey>,
+    encryption_key: Data<EncryptionKeyring>,
     source: Json<UpdateSourceRequest>,
 ) -> Result<impl Responder, SourceError> {
     let tenant_id = extract_tenant_id(&req)?;
@@ -420,7 +420,7 @@ pub(crate) async fn delete_source(
 pub(crate) async fn read_all_sources(
     req: HttpRequest,
     pool: Data<PgPool>,
-    encryption_key: Data<EncryptionKey>,
+    encryption_key: Data<EncryptionKeyring>,
 ) -> Result<impl Responder, SourceError> {
     let tenant_id = extract_tenant_id(&req)?;
 

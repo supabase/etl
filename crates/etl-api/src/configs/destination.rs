@@ -9,7 +9,7 @@ use utoipa::ToSchema;
 
 use crate::configs::{
     encryption::{
-        Decrypt, DecryptionError, Encrypt, EncryptedValue, EncryptionError, EncryptionKey,
+        Decrypt, DecryptionError, Encrypt, EncryptedValue, EncryptionError, EncryptionKeyring,
         decrypt_text, encrypt_text,
     },
     store::Store,
@@ -559,7 +559,7 @@ impl From<FullApiDestinationConfig> for StoredDestinationConfig {
 impl Encrypt<EncryptedStoredDestinationConfig> for StoredDestinationConfig {
     fn encrypt(
         self,
-        encryption_key: &EncryptionKey,
+        encryption_key: &EncryptionKeyring,
     ) -> Result<EncryptedStoredDestinationConfig, EncryptionError> {
         match self {
             Self::BigQuery {
@@ -775,7 +775,7 @@ impl Store for EncryptedStoredDestinationConfig {}
 impl Decrypt<StoredDestinationConfig> for EncryptedStoredDestinationConfig {
     fn decrypt(
         self,
-        encryption_key: &EncryptionKey,
+        encryption_key: &EncryptionKeyring,
     ) -> Result<StoredDestinationConfig, DecryptionError> {
         match self {
             Self::BigQuery {
@@ -1045,7 +1045,7 @@ mod tests {
     use insta::assert_json_snapshot;
 
     use super::*;
-    use crate::configs::encryption::{EncryptionKey, generate_random_key};
+    use crate::configs::encryption::{EncryptionKey, EncryptionKeyring, generate_random_key};
 
     #[test]
     fn stored_destination_config_encryption_decryption_bigquery() {
@@ -1057,7 +1057,10 @@ mod tests {
             connection_pool_size: 8,
         };
 
-        let key = EncryptionKey { id: 1, key: generate_random_key::<32>().unwrap() };
+        let key = EncryptionKeyring::from(EncryptionKey {
+            id: 1,
+            key: generate_random_key::<32>().unwrap(),
+        });
 
         let encrypted = config.clone().encrypt(&key).unwrap();
         let decrypted = encrypted.decrypt(&key).unwrap();
@@ -1104,7 +1107,10 @@ mod tests {
             },
         };
 
-        let key = EncryptionKey { id: 1, key: generate_random_key::<32>().unwrap() };
+        let key = EncryptionKeyring::from(EncryptionKey {
+            id: 1,
+            key: generate_random_key::<32>().unwrap(),
+        });
 
         let encrypted = config.clone().encrypt(&key).unwrap();
         let decrypted = encrypted.decrypt(&key).unwrap();
@@ -1169,7 +1175,10 @@ mod tests {
             },
         };
 
-        let key = EncryptionKey { id: 1, key: generate_random_key::<32>().unwrap() };
+        let key = EncryptionKeyring::from(EncryptionKey {
+            id: 1,
+            key: generate_random_key::<32>().unwrap(),
+        });
 
         let encrypted = config.clone().encrypt(&key).unwrap();
         let decrypted = encrypted.decrypt(&key).unwrap();
@@ -1226,7 +1235,10 @@ mod tests {
             engine: ClickHouseEngine::MergeTree,
         };
 
-        let key = EncryptionKey { id: 1, key: generate_random_key::<32>().unwrap() };
+        let key = EncryptionKeyring::from(EncryptionKey {
+            id: 1,
+            key: generate_random_key::<32>().unwrap(),
+        });
 
         let encrypted = config.clone().encrypt(&key).unwrap();
         let decrypted = encrypted.decrypt(&key).unwrap();
@@ -1597,7 +1609,10 @@ mod tests {
             maintenance_mode: DuckLakeMaintenanceMode::Kubernetes,
         };
 
-        let key = EncryptionKey { id: 1, key: generate_random_key::<32>().unwrap() };
+        let key = EncryptionKeyring::from(EncryptionKey {
+            id: 1,
+            key: generate_random_key::<32>().unwrap(),
+        });
 
         let encrypted = config.clone().encrypt(&key).unwrap();
         let decrypted = encrypted.decrypt(&key).unwrap();

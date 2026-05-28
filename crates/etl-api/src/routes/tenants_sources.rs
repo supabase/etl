@@ -13,7 +13,7 @@ use utoipa::ToSchema;
 use crate::{
     config::ApiConfig,
     configs::{
-        encryption::EncryptionKey,
+        encryption::EncryptionKeyring,
         source::{FullApiSourceConfig, StoredSourceConfig},
     },
     data::{self, tenants::TenantsDbError, tenants_sources::TenantSourceDbError},
@@ -140,7 +140,7 @@ pub(crate) async fn create_tenant_and_source(
     api_config: Data<ApiConfig>,
     trusted_root_certs_cache: Data<TrustedRootCertsCache>,
     tenant_and_source: Json<CreateTenantSourceRequest>,
-    encryption_key: Data<EncryptionKey>,
+    encryption_key: Data<EncryptionKeyring>,
     root_span: RootSpan,
 ) -> Result<impl Responder, TenantSourceError> {
     let tenant_and_source = tenant_and_source.into_inner();
