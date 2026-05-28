@@ -13,6 +13,7 @@ This guide covers the essential **Postgres settings, slots, publications, and ve
 
 - **PostgreSQL 14, 15, 16, 17, or 18** (officially supported and tested versions)
   - PostgreSQL 15+ recommended for advanced publication filtering (column-level, row-level, `FOR ALL TABLES IN SCHEMA`)
+  - PostgreSQL 16+ required when logical replication is read from a physical read replica
   - PostgreSQL 14 supported with table-level filtering only
 - Superuser access to the Postgres server
 - Ability to restart Postgres (required for `wal_level` changes)
@@ -160,6 +161,72 @@ FROM pg_ls_waldir();
 - Address errored tables promptly to prevent indefinite WAL accumulation
 - Size initial sync workers appropriately (`max_table_sync_workers`) to balance parallelism with resource usage
 
+## Read Replicas
+
+ETL can read logical replication from a physical read replica when the replica runs **PostgreSQL 16 or newer**. PostgreSQL 14 and 15 can still be used with ETL, but logical decoding must run on the primary. See the PostgreSQL documentation on [logical slots on hot standby](https://www.postgresql.org/docs/16/logicaldecoding-explanation.html#LOGICALDECODING-REPLICATION-SLOTS).
+
+When using a read replica:
+
+- Configure `pg_connection` to point at the replica. ETL uses this connection for logical replication, table copy, schema reads, publications, slots, keepalives, and status updates.
+- Configure `store_pg_connection` when using `PostgresStore` and `pg_connection` points at a read-only replica. The store connection must be writable because it runs store migrations and persists pipeline state.
+- Apply ETL source migrations on the primary before starting the pipeline. Standby connections are read-only, so ETL skips source migration execution when the configured source is in recovery.
+- Let ETL create its logical replication slots on the read replica. Do not pre-create ETL logical slots on the primary for this mode.
+
+Publication, table, and ETL source-migration changes are ordinary WAL records. When you create them on the primary, the read replica can only see them after replay reaches that WAL position. Do not wait a fixed number of seconds; wait for a concrete replay LSN:
+
+```sql
+-- Run on the primary after creating tables, source migrations, and publications.
+SELECT pg_current_wal_flush_lsn();
+```
+
+Then wait on the read replica until replay reaches that LSN:
+
+```sql
+-- Run on the read replica before starting ETL.
+SELECT pg_last_wal_replay_lsn() >= '0/16B6C50'::pg_lsn AS ready;
+```
+
+For extra confidence, also check that the expected publication is visible on the replica:
+
+```sql
+SELECT 1 FROM pg_publication WHERE pubname = 'my_publication';
+```
+
+If ETL only receives the replica `pg_connection`, it cannot derive the primary's setup LSN itself. The orchestrator that creates or updates the source-side schema and publication should perform this LSN barrier before starting the pipeline, or should retry pipeline startup until the replica catches up. Once the logical slot exists on the replica, ongoing primary writes can lag normally; ETL will decode them as the replica replays WAL and the slot keeps the replica-side restart position.
+
+The primary must generate logical WAL, and each server needs enough sender and slot capacity for the role it plays. On the primary, count the physical slots used by read replicas. On the read replica, count the logical slots ETL creates for its apply worker and table sync workers:
+
+```ini
+wal_level = logical
+max_replication_slots = 20
+max_wal_senders = 20
+```
+
+For the physical replication link between the primary and the read replica, use a [physical replication slot](https://www.postgresql.org/docs/16/warm-standby.html#STREAMING-REPLICATION-SLOTS) and enable standby feedback:
+
+```ini
+# on the standby
+primary_conninfo = 'host=primary.example.com port=5432 dbname=postgres user=replicator password=...'
+primary_slot_name = 'etl_read_replica'
+hot_standby = on
+hot_standby_feedback = on
+wal_receiver_status_interval = '1s'
+```
+
+`hot_standby_feedback` helps prevent required catalog rows from being vacuumed away on the primary while standby logical slots need them. A physical slot between the primary and the standby keeps that protection across standby reconnects and restarts.
+
+If initial copies can run for longer than your standby conflict delay, tune `max_standby_streaming_delay` for that replica. A larger value reduces copy cancellations at the cost of allowing more replay lag while conflicting standby queries finish.
+
+Logical slot creation on a standby needs information about transactions running on the primary. If the primary is idle, creating a logical slot on the standby can wait until the primary emits that snapshot information. To speed this up during setup or tests, run this on the primary:
+
+```sql
+SELECT pg_log_standby_snapshot();
+```
+
+This is only a setup-time nudge for slot creation. ETL uses the regular PostgreSQL logical replication protocol for keepalives and status updates after streaming starts.
+
+PostgreSQL 17+ also has logical failover slot synchronization, where failover-enabled logical slots on the primary are synchronized to standbys. That is a separate high-availability feature for resuming logical replication after promoting a standby. It is not required for ETL to read from a current read replica, and synchronized standby slots cannot be consumed on the standby while they are marked as synced.
+
 ## Publications
 
 Publications define **which tables and operations** to replicate.
@@ -222,6 +289,12 @@ DROP PUBLICATION my_publication;
 
 ETL supports **PostgreSQL 14 through 18**, with enhanced publication features available in newer versions:
 
+### PostgreSQL 16+ Features
+
+**Logical decoding on read replicas:**
+
+PostgreSQL 16 introduced logical replication slots on hot standby servers. Use this when ETL should read WAL from a physical read replica instead of the primary.
+
 ### PostgreSQL 15+ Features
 
 **Column-Level Filtering:**
@@ -251,13 +324,14 @@ PostgreSQL 14 supports table-level publication filtering only. Column-level and 
 
 ### Feature Compatibility Matrix
 
-| Feature | PostgreSQL 14 | PostgreSQL 15+ |
-|---------|--------------|----------------|
-| Table-level publication | Yes | Yes |
-| Column-level filtering | No | Yes |
-| Row-level filtering | No | Yes |
-| `FOR ALL TABLES IN SCHEMA` | No | Yes |
-| Partitioned table support | Yes | Yes |
+| Feature | PostgreSQL 14 | PostgreSQL 15 | PostgreSQL 16+ |
+|---------|---------------|---------------|----------------|
+| Table-level publication | Yes | Yes | Yes |
+| Column-level filtering | No | Yes | Yes |
+| Row-level filtering | No | Yes | Yes |
+| `FOR ALL TABLES IN SCHEMA` | No | Yes | Yes |
+| Partitioned table support | Yes | Yes | Yes |
+| Logical decoding on physical read replicas | No | No | Yes |
 
 ## Complete Configuration Example
 

@@ -111,12 +111,15 @@ impl StartArgs {
         }
 
         eprintln!(
-            "starting {} Postgres {} clusters on ports {}..{}{}.",
+            "starting {} Postgres {} clusters on ports {}..{} with read replicas on ports \
+             {}..{}{}.",
             self.shards,
             self.pg_version,
             self.base_port,
             self.base_port + self.shards - 1,
-            if self.source_only { " with source Postgres only" } else { "" },
+            self.base_port + READ_REPLICA_PORT_OFFSET,
+            self.base_port + READ_REPLICA_PORT_OFFSET + self.shards - 1,
+            if self.source_only { " with source services only" } else { "" },
         );
 
         let tls_files = if self.no_tls { None } else { Some(self.prepare_tls_files()?) };

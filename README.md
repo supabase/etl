@@ -88,6 +88,9 @@ ETL officially supports and tests against **PostgreSQL 14, 15, 16, 17, and
   - Column-level filtering
   - Row-level filtering with `WHERE` clauses
   - `FOR ALL TABLES IN SCHEMA` syntax
+- **PostgreSQL 16+** is required when the ETL replication connection points at
+  a physical read replica. Earlier versions support logical decoding only on
+  the primary.
 - **PostgreSQL 14** is supported with table-level publication filtering.
 
 For detailed configuration instructions, see the [Configure Postgres documentation](https://supabase.github.io/etl/guides/configure-postgres/).
@@ -155,6 +158,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         id: pipeline_id,
         publication_name: "my_publication".into(),
         pg_connection: pg,
+        store_pg_connection: None,
         batch: BatchConfig {
             max_fill_ms: 5000,
             memory_budget_ratio: 0.2,

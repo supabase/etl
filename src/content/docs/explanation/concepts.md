@@ -276,9 +276,11 @@ ETL stores:
 On restart, ETL loads this state and resumes from where it left off.
 
 The built-in `PostgresStore` persists to your Postgres database and runs its
-state-store migrations when it is created. `MemoryStore` is for testing only -
-state is lost on restart. `Pipeline::start()` runs the ETL source migrations
-that install schema helpers and the DDL event trigger before replication begins.
+state-store migrations when it is created. If the pipeline reads from a
+read-only replica, configure `store_pg_connection` to point at a writable
+Postgres endpoint for this state. `MemoryStore` is for testing only - state is
+lost on restart. `Pipeline::start()` runs the ETL source migrations that install
+schema helpers and the DDL event trigger before replication begins.
 
 ## Putting It Together
 

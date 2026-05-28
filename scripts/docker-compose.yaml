@@ -30,9 +30,9 @@ services:
       -N 1000
       -c listen_addresses=*
       -c wal_level=logical
-      -c max_wal_senders=100
-      -c max_replication_slots=100
-      -c wal_sender_timeout=10s
+      -c max_wal_senders=${POSTGRES_MAX_WAL_SENDERS:-100}
+      -c max_replication_slots=${POSTGRES_MAX_REPLICATION_SLOTS:-100}
+      -c wal_sender_timeout=${POSTGRES_WAL_SENDER_TIMEOUT:-10s}
       -c hba_file=/etc/postgresql/pg_hba.conf
       ${POSTGRES_SSL_ARGS:-}
     restart: unless-stopped
@@ -49,6 +49,11 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
       POSTGRES_DB: ${POSTGRES_DB:-postgres}
       PGDATA: /var/lib/postgresql/data
+      POSTGRES_MAX_WAL_SENDERS: ${POSTGRES_MAX_WAL_SENDERS:-100}
+      POSTGRES_MAX_REPLICATION_SLOTS: ${POSTGRES_MAX_REPLICATION_SLOTS:-100}
+      POSTGRES_WAL_SENDER_TIMEOUT: ${POSTGRES_WAL_SENDER_TIMEOUT:-10s}
+      POSTGRES_REPLICA_WAL_RECEIVER_STATUS_INTERVAL: ${POSTGRES_REPLICA_WAL_RECEIVER_STATUS_INTERVAL:-1s}
+      POSTGRES_REPLICA_MAX_STANDBY_STREAMING_DELAY: ${POSTGRES_REPLICA_MAX_STANDBY_STREAMING_DELAY:--1}
     ports:
       - "${POSTGRES_REPLICA_PORT:-6430}:5432"
     shm_size: 1gb

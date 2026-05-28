@@ -65,11 +65,14 @@ impl NextestArgs {
         let pg_env = PgEnv::from_env();
 
         eprintln!(
-            "running sharded {} with {} Postgres clusters on ports {}..{}.",
+            "running sharded {} with {} Postgres clusters on ports {}..{} and read replicas on \
+             ports {}..{}.",
             self.mode_label(),
             self.shards,
             self.base_port,
             self.base_port + self.shards - 1,
+            self.base_port + READ_REPLICA_PORT_OFFSET,
+            self.base_port + READ_REPLICA_PORT_OFFSET + self.shards - 1,
         );
 
         if matches!(self.mode, Mode::LlvmCov) {
