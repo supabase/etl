@@ -116,6 +116,7 @@ POSTGRES_DATA_VOLUME=/path/to/data cargo x init
 | `POSTGRES_PASSWORD` | `postgres` | Database password |
 | `POSTGRES_DB` | `postgres` | Database name |
 | `POSTGRES_PORT` | `5430` | Database port |
+| `POSTGRES_REPLICA_PORT` | `6430` | Read replica database port |
 | `POSTGRES_HOST` | `localhost` | Database host |
 | `CLICKHOUSE_HTTP_PORT` | `8123` | ClickHouse HTTP port |
 | `CLICKHOUSE_NATIVE_PORT` | `9000` | ClickHouse native TCP port |
@@ -123,6 +124,7 @@ POSTGRES_DATA_VOLUME=/path/to/data cargo x init
 | `CLICKHOUSE_PASSWORD` | `etl` | ClickHouse password for the local Docker Compose setup |
 | `SKIP_DOCKER` | (empty) | Skip Docker Compose if set |
 | `POSTGRES_DATA_VOLUME` | (empty) | Path for PostgreSQL persistent storage |
+| `POSTGRES_REPLICA_DATA_VOLUME` | (empty) | Path for PostgreSQL read replica persistent storage |
 | `CLICKHOUSE_DATA_VOLUME` | (empty) | Path for ClickHouse persistent storage |
 | `REPLICATOR_IMAGE` | `ramsup/etl-replicator:latest` | Default replicator image |
 

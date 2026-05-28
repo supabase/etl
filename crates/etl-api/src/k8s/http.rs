@@ -1889,6 +1889,7 @@ mod tests {
                     tls: TlsConfig::disabled(),
                     keepalive: TcpKeepaliveConfig::default(),
                 },
+                store_pg_connection: None,
                 batch: BatchConfig {
                     max_fill_ms: 1_000,
                     memory_budget_ratio: 0.2,

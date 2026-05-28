@@ -239,7 +239,8 @@ impl Default for MemoryBackpressureConfig {
 /// Configuration for an ETL pipeline.
 ///
 /// Contains all settings required to run a replication pipeline including
-/// source database connection, batching parameters, and worker limits.
+/// source database connection, optional store database connection, batching
+/// parameters, and worker limits.
 ///
 /// This intentionally does not implement [`Serialize`] to avoid accidentally
 /// leaking secrets in the config into serialized forms.
@@ -255,6 +256,14 @@ pub struct PipelineConfig {
     /// The connection configuration for the Postgres instance to which the
     /// pipeline connects for replication.
     pub pg_connection: PgConnectionConfig,
+    /// Optional Postgres connection configuration for pipeline state storage.
+    ///
+    /// When `None`, the pipeline state store should use
+    /// [`Self::pg_connection`]. This allows logical replication and table
+    /// copy to read from a standby while keeping the Postgres-backed state
+    /// store on a writable endpoint.
+    #[serde(default)]
+    pub store_pg_connection: Option<PgConnectionConfig>,
     /// Batch processing configuration.
     #[serde(default)]
     pub batch: BatchConfig,
@@ -352,6 +361,11 @@ impl PipelineConfig {
 
         Ok(())
     }
+
+    /// Returns the Postgres connection configuration for state storage.
+    pub fn store_pg_connection(&self) -> &PgConnectionConfig {
+        self.store_pg_connection.as_ref().unwrap_or(&self.pg_connection)
+    }
 }
 
 const fn default_table_error_retry_delay_ms() -> u64 {
@@ -393,6 +407,11 @@ pub struct PipelineConfigWithoutSecrets {
     /// The connection configuration for the Postgres instance to which the
     /// pipeline connects for replication.
     pub pg_connection: PgConnectionConfigWithoutSecrets,
+    /// Optional Postgres connection configuration for pipeline state storage.
+    ///
+    /// When `None`, state storage uses [`Self::pg_connection`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store_pg_connection: Option<PgConnectionConfigWithoutSecrets>,
     /// Batch processing configuration.
     #[serde(default)]
     pub batch: BatchConfig,
@@ -440,6 +459,7 @@ impl From<PipelineConfig> for PipelineConfigWithoutSecrets {
             id: value.id,
             publication_name: value.publication_name,
             pg_connection: value.pg_connection.into(),
+            store_pg_connection: value.store_pg_connection.map(Into::into),
             batch: value.batch,
             table_error_retry_delay_ms: value.table_error_retry_delay_ms,
             table_error_retry_max_attempts: value.table_error_retry_max_attempts,
@@ -456,6 +476,20 @@ impl From<PipelineConfig> for PipelineConfigWithoutSecrets {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shared::{TcpKeepaliveConfig, TlsConfig};
+
+    fn pg_connection(host: &str, port: u16) -> PgConnectionConfig {
+        PgConnectionConfig {
+            host: host.to_owned(),
+            hostaddr: None,
+            port,
+            name: "postgres".to_owned(),
+            username: "postgres".to_owned(),
+            password: None,
+            tls: TlsConfig::disabled(),
+            keepalive: TcpKeepaliveConfig::default(),
+        }
+    }
 
     #[test]
     fn batch_config_deserializes_without_max_bytes() {
@@ -511,5 +545,50 @@ mod tests {
         let decoded: TableSyncCopyConfig = serde_json::from_str(&json).unwrap();
 
         assert_eq!(selection, decoded);
+    }
+
+    #[test]
+    fn pipeline_config_store_pg_connection_defaults_to_pg_connection() {
+        let pg_connection = pg_connection("replica.local", 5432);
+        let config = PipelineConfig {
+            id: 1,
+            publication_name: "publication".to_owned(),
+            pg_connection,
+            store_pg_connection: None,
+            batch: BatchConfig::default(),
+            table_error_retry_delay_ms: PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_DELAY_MS,
+            table_error_retry_max_attempts: PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS,
+            max_table_sync_workers: PipelineConfig::DEFAULT_MAX_TABLE_SYNC_WORKERS,
+            max_copy_connections_per_table: PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE,
+            memory_refresh_interval_ms: PipelineConfig::DEFAULT_MEMORY_REFRESH_INTERVAL_MS,
+            memory_backpressure: Some(MemoryBackpressureConfig::default()),
+            table_sync_copy: TableSyncCopyConfig::default(),
+            invalidated_slot_behavior: InvalidatedSlotBehavior::default(),
+        };
+
+        assert_eq!(config.store_pg_connection().host, "replica.local");
+        assert_eq!(config.store_pg_connection().port, 5432);
+    }
+
+    #[test]
+    fn pipeline_config_store_pg_connection_uses_override() {
+        let config = PipelineConfig {
+            id: 1,
+            publication_name: "publication".to_owned(),
+            pg_connection: pg_connection("replica.local", 5432),
+            store_pg_connection: Some(pg_connection("primary.local", 6432)),
+            batch: BatchConfig::default(),
+            table_error_retry_delay_ms: PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_DELAY_MS,
+            table_error_retry_max_attempts: PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS,
+            max_table_sync_workers: PipelineConfig::DEFAULT_MAX_TABLE_SYNC_WORKERS,
+            max_copy_connections_per_table: PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE,
+            memory_refresh_interval_ms: PipelineConfig::DEFAULT_MEMORY_REFRESH_INTERVAL_MS,
+            memory_backpressure: Some(MemoryBackpressureConfig::default()),
+            table_sync_copy: TableSyncCopyConfig::default(),
+            invalidated_slot_behavior: InvalidatedSlotBehavior::default(),
+        };
+
+        assert_eq!(config.store_pg_connection().host, "primary.local");
+        assert_eq!(config.store_pg_connection().port, 6432);
     }
 }

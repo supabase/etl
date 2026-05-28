@@ -9,7 +9,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
 
-use super::shared::{DEFAULT_BASE_PORT, DEFAULT_PG_SHARD_COUNT};
+use super::shared::{DEFAULT_BASE_PORT, DEFAULT_PG_SHARD_COUNT, READ_REPLICA_PORT_OFFSET};
 
 const COMPOSE_FILE: &str = "./scripts/docker-compose.yaml";
 
@@ -101,8 +101,13 @@ impl StartArgs {
             bail!("--shards must be at least 1");
         }
 
-        if self.base_port.checked_add(self.shards - 1).is_none() {
-            bail!("--base-port + --shards exceeds the valid port range");
+        if self
+            .base_port
+            .checked_add(READ_REPLICA_PORT_OFFSET)
+            .and_then(|port| port.checked_add(self.shards - 1))
+            .is_none()
+        {
+            bail!("--base-port + --shards + read replica port offset exceeds the valid port range");
         }
 
         eprintln!(
@@ -118,20 +123,29 @@ impl StartArgs {
 
         // Start the full stack on the base port unless the caller only needs source
         // Postgres.
-        let first_shard_services = if self.source_only { &["source-postgres"][..] } else { &[] };
+        let first_shard_services = if self.source_only {
+            &["source-postgres", "source-postgres-read-replica"][..]
+        } else {
+            &[]
+        };
         self.start_cluster(None, first_shard_services, tls_files.as_ref())?;
 
         // Start additional source-postgres containers on subsequent ports.
         for shard in 2..=self.shards {
             let port = self.base_port + shard - 1;
             let project = format!("etl-stack-pg-{}-shard-{shard}", self.pg_version);
-            self.start_cluster(Some((&project, port)), &["source-postgres"], tls_files.as_ref())?;
+            self.start_cluster(
+                Some((&project, port)),
+                &["source-postgres", "source-postgres-read-replica"],
+                tls_files.as_ref(),
+            )?;
         }
 
         // Wait for all clusters to accept connections.
         for shard in 1..=self.shards {
             let port = self.base_port + shard - 1;
             self.wait_for_pg(port)?;
+            self.wait_for_pg(port + READ_REPLICA_PORT_OFFSET)?;
         }
 
         if tls_files.is_some() {
@@ -308,6 +322,7 @@ impl StartArgs {
         if let Some((project, port)) = project_and_port {
             cmd.args(["-p", project]);
             cmd.env("POSTGRES_PORT", port.to_string());
+            cmd.env("POSTGRES_REPLICA_PORT", (port + READ_REPLICA_PORT_OFFSET).to_string());
         }
 
         cmd

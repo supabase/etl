@@ -17,7 +17,7 @@ const SHARED_PG_FILTER: &str = "\
                                 (binary_id(etl-destinations) & \
                                 test(/ducklake::core::tests::postgres_backed::/))";
 
-use super::shared::{DEFAULT_BASE_PORT, DEFAULT_PG_SHARD_COUNT};
+use super::shared::{DEFAULT_BASE_PORT, DEFAULT_PG_SHARD_COUNT, READ_REPLICA_PORT_OFFSET};
 
 #[derive(Clone, Copy, ValueEnum)]
 pub(crate) enum Mode {
@@ -53,8 +53,13 @@ impl NextestArgs {
             bail!("--shards must be at least 1");
         }
 
-        if self.base_port.checked_add(self.shards - 1).is_none() {
-            bail!("--base-port + --shards exceeds the valid port range");
+        if self
+            .base_port
+            .checked_add(READ_REPLICA_PORT_OFFSET)
+            .and_then(|port| port.checked_add(self.shards - 1))
+            .is_none()
+        {
+            bail!("--base-port + --shards + read replica port offset exceeds the valid port range");
         }
 
         let pg_env = PgEnv::from_env();
@@ -157,14 +162,20 @@ struct Lane {
 #[derive(Clone)]
 struct PgEnv {
     host: String,
+    replica_host: String,
     username: String,
     password: String,
 }
 
 impl PgEnv {
     fn from_env() -> Self {
+        let host = std::env::var("TESTS_DATABASE_HOST").unwrap_or_else(|_| "localhost".to_owned());
+        let replica_host =
+            std::env::var("TESTS_DATABASE_REPLICA_HOST").unwrap_or_else(|_| host.clone());
+
         Self {
-            host: std::env::var("TESTS_DATABASE_HOST").unwrap_or_else(|_| "localhost".to_owned()),
+            host,
+            replica_host,
             username: std::env::var("TESTS_DATABASE_USERNAME")
                 .unwrap_or_else(|_| "postgres".to_owned()),
             password: std::env::var("TESTS_DATABASE_PASSWORD")
@@ -203,6 +214,8 @@ fn run_lane(lane: &Lane, mode: Mode, extra: &[String], pg_env: &PgEnv) -> Result
     if let Some(port) = lane.pg_port {
         cmd.env("TESTS_DATABASE_HOST", &pg_env.host);
         cmd.env("TESTS_DATABASE_PORT", port.to_string());
+        cmd.env("TESTS_DATABASE_REPLICA_HOST", &pg_env.replica_host);
+        cmd.env("TESTS_DATABASE_REPLICA_PORT", (port + READ_REPLICA_PORT_OFFSET).to_string());
         cmd.env("TESTS_DATABASE_USERNAME", &pg_env.username);
         cmd.env("TESTS_DATABASE_PASSWORD", &pg_env.password);
     }

@@ -2,6 +2,7 @@
 
 mod migrations;
 mod pipeline;
+mod pipeline_read_replica;
 mod pipeline_replica_identity;
 #[cfg(feature = "failpoints")]
 mod pipeline_with_failpoints;

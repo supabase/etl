@@ -20,6 +20,7 @@ services:
     shm_size: 1gb
     volumes:
       - ${POSTGRES_DATA_VOLUME:-postgres_data}:/var/lib/postgresql
+      - ./postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
     # These parameters are configured for local testing only.
     # In production, use PostgreSQL defaults or your own tuned values.
     # `wal_sender_timeout/2` is the keepalive timeout for streaming replication, we set it to 10s to make tests
@@ -32,6 +33,7 @@ services:
       -c max_wal_senders=100
       -c max_replication_slots=100
       -c wal_sender_timeout=10s
+      -c hba_file=/etc/postgresql/pg_hba.conf
       ${POSTGRES_SSL_ARGS:-}
     restart: unless-stopped
     healthcheck:
@@ -39,6 +41,31 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+
+  source-postgres-read-replica:
+    image: ${POSTGRES_IMAGE:-postgres:18}
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-postgres}
+      PGDATA: /var/lib/postgresql/data
+    ports:
+      - "${POSTGRES_REPLICA_PORT:-6430}:5432"
+    shm_size: 1gb
+    volumes:
+      - ${POSTGRES_REPLICA_DATA_VOLUME:-postgres_replica_data}:/var/lib/postgresql
+      - ./postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+      - ./postgres/start-read-replica.sh:/usr/local/bin/start-read-replica.sh:ro
+    entrypoint: ["bash", "/usr/local/bin/start-read-replica.sh"]
+    restart: unless-stopped
+    depends_on:
+      source-postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   clickhouse:
     image: clickhouse/clickhouse-server:latest
@@ -186,6 +213,8 @@ services:
 
 volumes:
   postgres_data:
+    driver: local
+  postgres_replica_data:
     driver: local
   clickhouse_data:
     driver: local
