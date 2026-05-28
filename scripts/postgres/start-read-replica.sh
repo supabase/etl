@@ -13,6 +13,38 @@ wal_sender_timeout="${POSTGRES_WAL_SENDER_TIMEOUT:-10s}"
 wal_receiver_status_interval="${POSTGRES_REPLICA_WAL_RECEIVER_STATUS_INTERVAL:-1s}"
 max_standby_streaming_delay="${POSTGRES_REPLICA_MAX_STANDBY_STREAMING_DELAY:--1}"
 
+run_as_postgres() {
+  if command -v gosu >/dev/null 2>&1; then
+    gosu postgres "$@"
+  elif command -v su-exec >/dev/null 2>&1; then
+    su-exec postgres "$@"
+  elif command -v runuser >/dev/null 2>&1; then
+    runuser -u postgres -- "$@"
+  elif [ "$(id -u)" = "$(id -u postgres)" ]; then
+    "$@"
+  else
+    local command
+    printf -v command "%q " "$@"
+    su postgres -c "$command"
+  fi
+}
+
+exec_as_postgres() {
+  if command -v gosu >/dev/null 2>&1; then
+    exec gosu postgres "$@"
+  elif command -v su-exec >/dev/null 2>&1; then
+    exec su-exec postgres "$@"
+  elif command -v runuser >/dev/null 2>&1; then
+    exec runuser -u postgres -- "$@"
+  elif [ "$(id -u)" = "$(id -u postgres)" ]; then
+    exec "$@"
+  else
+    local command
+    printf -v command "%q " "$@"
+    exec su postgres -c "$command"
+  fi
+}
+
 mkdir -p "$pgdata"
 chown -R postgres:postgres "$(dirname "$pgdata")"
 
@@ -23,7 +55,7 @@ if [ ! -s "$pgdata/PG_VERSION" ]; then
 
   export PGPASSWORD="$postgres_password"
 
-  until gosu postgres psql \
+  until run_as_postgres psql \
     --host="$primary_host" \
     --port="$primary_port" \
     --username="$postgres_user" \
@@ -34,7 +66,7 @@ if [ ! -s "$pgdata/PG_VERSION" ]; then
     sleep 1
   done
 
-  gosu postgres pg_basebackup \
+  run_as_postgres pg_basebackup \
     --host="$primary_host" \
     --port="$primary_port" \
     --username="$postgres_user" \
@@ -63,7 +95,7 @@ fi
 chown -R postgres:postgres "$pgdata"
 chmod 700 "$pgdata"
 
-exec gosu postgres postgres \
+exec_as_postgres postgres \
   -D "$pgdata" \
   -N 1000 \
   -c listen_addresses='*' \
