@@ -1675,6 +1675,117 @@ async fn startup_after_restart_recovers_applying_schema_change() {
     assert_eq!(table_column_names(&conn, &table_name), vec!["id", "name", "email"]);
 }
 
+/// Startup should recover when the target rename column already exists and a
+/// stale old physical column is still present.
+#[tokio::test(flavor = "multi_thread")]
+async fn startup_after_restart_drops_stale_rename_source_when_target_exists() {
+    let lake =
+        create_test_lake("startup_after_restart_drops_stale_rename_source_when_target_exists")
+            .await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
+
+    let old_schema = TableSchema::new(
+        TableId::new(53),
+        TableName::new("public".to_owned(), "restart_stale_rename_source".to_owned()),
+        vec![
+            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false),
+            ColumnSchema::new("ddl_col_4_1".to_owned(), PgType::TEXT, -1, 4, None, true),
+        ],
+    );
+    let new_schema = TableSchema::with_snapshot_id(
+        old_schema.id,
+        old_schema.name.clone(),
+        vec![
+            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false),
+            ColumnSchema::new("ddl_col_4_0".to_owned(), PgType::TEXT, -1, 4, None, true),
+        ],
+        SnapshotId::from(54_u64),
+    );
+    let old_replicated_table_schema = make_replicated_table_schema(&old_schema);
+    let new_replicated_table_schema = make_replicated_table_schema(&new_schema);
+    let table_name = table_name_to_ducklake_table_name(&old_schema.name).unwrap();
+
+    let store = MemoryStore::new();
+    store.store_table_schema(old_schema.clone()).await.unwrap();
+    store.store_table_schema(new_schema.clone()).await.unwrap();
+
+    let destination = new_test_destination(&catalog_url, &data_url, store.clone()).await;
+    destination
+        .write_table_rows(
+            &old_replicated_table_schema,
+            vec![TableRow::new(vec![Cell::I32(1), Cell::String("existing".to_owned())])],
+        )
+        .await
+        .unwrap();
+
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
+    conn.execute_batch(&format!(
+        "alter table {}.{} add column {} varchar;
+         update {}.{} set {} = {};",
+        quote_identifier("lake"),
+        quote_identifier(&table_name),
+        quote_identifier("ddl_col_4_0"),
+        quote_identifier("lake"),
+        quote_identifier(&table_name),
+        quote_identifier("ddl_col_4_0"),
+        quote_identifier("ddl_col_4_1"),
+    ))
+    .expect("failed to create stale physical rename-source shape");
+    drop(conn);
+
+    let applying_metadata = DestinationTableMetadata::new_applied(
+        table_name.clone(),
+        old_schema.snapshot_id,
+        old_replicated_table_schema.replication_mask().clone(),
+    )
+    .with_schema_change(
+        new_schema.snapshot_id,
+        new_replicated_table_schema.replication_mask().clone(),
+        DestinationTableSchemaStatus::Applying,
+    );
+    store.store_destination_table_metadata(old_schema.id, applying_metadata).await.unwrap();
+
+    destination.shutdown().await.unwrap();
+    drop(destination);
+
+    let restarted_destination = new_test_destination(&catalog_url, &data_url, store.clone()).await;
+    restarted_destination.startup().await.unwrap();
+    restarted_destination
+        .write_table_rows(
+            &new_replicated_table_schema,
+            vec![TableRow::new(vec![Cell::I32(2), Cell::String("new".to_owned())])],
+        )
+        .await
+        .unwrap();
+
+    let metadata = store
+        .get_destination_table_metadata(old_schema.id)
+        .await
+        .unwrap()
+        .expect("destination metadata should exist");
+    assert!(metadata.is_applied());
+    assert_eq!(metadata.snapshot_id, new_schema.snapshot_id);
+
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
+    assert_eq!(table_column_names(&conn, &table_name), vec!["id", "ddl_col_4_0"]);
+
+    let mut statement = conn
+        .prepare(&format!(
+            "select id, ddl_col_4_0 from {}.{} order by id",
+            quote_identifier("lake"),
+            quote_identifier(&table_name)
+        ))
+        .expect("failed to prepare state query");
+    let rows = statement
+        .query_map([], |row| Ok((row.get::<_, i32>(0)?, row.get::<_, String>(1)?)))
+        .expect("failed to query recovered rename table")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("failed to read recovered rename rows");
+
+    assert_eq!(rows, vec![(1, "existing".to_owned()), (2, "new".to_owned())]);
+}
+
 /// Startup recovery may need to use an older retained schema when the exact
 /// previous schema snapshot has already been pruned.
 #[tokio::test(flavor = "multi_thread")]

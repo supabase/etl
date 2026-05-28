@@ -585,7 +585,10 @@ fn plan_schema_diff_sql_ducklake(
                     )
                 ));
             }
-            (Some(_), Some(_)) if added_column_names.contains(rename.old_name.as_str()) => {
+            (Some(_), Some(_))
+                if added_column_names.contains(rename.old_name.as_str())
+                    || rename_target_names.contains(rename.old_name.as_str()) =>
+            {
                 debug!(
                     table = %table_name,
                     old_column = %rename.old_name,
@@ -593,15 +596,20 @@ fn plan_schema_diff_sql_ducklake(
                     "ducklake rename column skipped because destination has both names after replay"
                 );
             }
-            (Some(_), Some(_)) => {
-                return Err(etl_error!(
-                    ErrorKind::CorruptedTableSchema,
-                    "DuckLake destination column rename is ambiguous",
-                    format!(
-                        "Table '{table_name}' has both old column '{}' and new column '{}'",
-                        rename.old_name, rename.new_name
-                    )
-                ));
+            (Some(index), Some(_)) => {
+                debug!(
+                    table = %table_name,
+                    old_column = %rename.old_name,
+                    new_column = %rename.new_name,
+                    "ducklake dropping stale rename source column because destination already has \
+                     target name"
+                );
+                statements.push(DuckLakeSchemaDdlStatement {
+                    sql: build_drop_column_sql_ducklake(table_name, &rename.old_name),
+                    error_description: "DuckLake alter table drop stale rename source column \
+                                        failed",
+                });
+                column_names.remove(index);
             }
         }
     }
@@ -2682,6 +2690,61 @@ mod tests {
 
         assert!(plan.statements.is_empty());
         assert_eq!(plan.column_names, vec!["id", "full_name", "name"]);
+    }
+
+    #[test]
+    fn plan_schema_diff_skips_replayed_rename_with_source_name_as_rename_target() {
+        let diff = SchemaDiff {
+            columns_to_add: Vec::new(),
+            columns_to_remove: Vec::new(),
+            columns_to_rename: vec![
+                ColumnRename {
+                    old_name: "name".to_owned(),
+                    new_name: "full_name".to_owned(),
+                    ordinal_position: 2,
+                },
+                ColumnRename {
+                    old_name: "email".to_owned(),
+                    new_name: "name".to_owned(),
+                    ordinal_position: 3,
+                },
+            ],
+        };
+
+        let plan = plan_schema_diff_sql_ducklake(
+            "users",
+            vec!["id".to_owned(), "full_name".to_owned(), "name".to_owned()],
+            &diff,
+        )
+        .expect("schema diff replay should plan");
+
+        assert!(plan.statements.is_empty());
+        assert_eq!(plan.column_names, vec!["id", "full_name", "name"]);
+    }
+
+    #[test]
+    fn plan_schema_diff_drops_stale_rename_source_when_target_exists() {
+        let diff = SchemaDiff {
+            columns_to_add: Vec::new(),
+            columns_to_remove: Vec::new(),
+            columns_to_rename: vec![ColumnRename {
+                old_name: "ddl_col_4_1".to_owned(),
+                new_name: "ddl_col_4_0".to_owned(),
+                ordinal_position: 4,
+            }],
+        };
+
+        let plan = plan_schema_diff_sql_ducklake(
+            "users",
+            vec!["id".to_owned(), "ddl_col_4_1".to_owned(), "ddl_col_4_0".to_owned()],
+            &diff,
+        )
+        .expect("schema diff with stale rename source should plan");
+        let statement_sql: Vec<_> =
+            plan.statements.iter().map(|statement| statement.sql.as_str()).collect();
+
+        assert_eq!(statement_sql, vec!["alter table lake.users drop column ddl_col_4_1"]);
+        assert_eq!(plan.column_names, vec!["id", "ddl_col_4_0"]);
     }
 
     #[test]
