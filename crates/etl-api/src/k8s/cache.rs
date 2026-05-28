@@ -203,6 +203,19 @@ mod tests {
             Ok(())
         }
 
+        async fn create_or_update_snowflake_secret(
+            &self,
+            _prefix: &str,
+            _private_key: &str,
+            _private_key_passphrase: Option<&str>,
+        ) -> Result<(), K8sError> {
+            Ok(())
+        }
+
+        async fn delete_snowflake_secret(&self, _prefix: &str) -> Result<(), K8sError> {
+            Ok(())
+        }
+
         async fn get_config_map(&self, config_map_name: &str) -> Result<ConfigMap, K8sError> {
             if config_map_name == TRUSTED_ROOT_CERT_CONFIG_MAP_NAME {
                 let mut map = BTreeMap::new();

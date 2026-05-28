@@ -147,6 +147,20 @@ impl K8sClient for MockK8sClient {
         Ok(())
     }
 
+    async fn create_or_update_snowflake_secret(
+        &self,
+        _prefix: &str,
+        _private_key: &str,
+        _private_key_passphrase: Option<&str>,
+    ) -> Result<(), K8sError> {
+        self.record_create_call();
+        Ok(())
+    }
+
+    async fn delete_snowflake_secret(&self, _prefix: &str) -> Result<(), K8sError> {
+        Ok(())
+    }
+
     async fn get_config_map(&self, config_map_name: &str) -> Result<ConfigMap, K8sError> {
         // For tests to pass the TRUSTED_ROOT_CERT_CONFIG_MAP_NAME config map expects
         // a key named TRUSTED_ROOT_CERT_KEY_NAME to be present with non-empty certs
