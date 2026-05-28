@@ -551,10 +551,10 @@ impl BenchDestination {
                     .context("Snowflake schema is required for Snowflake benchmarks")?;
 
                 let mut config = SnowflakeConfig::new(&account, &user, &database, &schema);
-                if let Some(role) = &destination_args.sf_role {
-                    if !role.trim().is_empty() {
-                        config = config.with_role(role);
-                    }
+                if let Some(role) = &destination_args.sf_role
+                    && !role.trim().is_empty()
+                {
+                    config = config.with_role(role);
                 }
 
                 let auth = AuthManager::new(&config, &private_key, None)?;
