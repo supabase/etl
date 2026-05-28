@@ -87,6 +87,7 @@ fn create_pipeline_config(publication_name: &str) -> FullApiPipelineConfig {
 }
 
 #[tokio::test]
+#[ignore = "requires a running Lakekeeper instance on localhost:8182"]
 async fn validate_iceberg_connection_success() {
     let lakekeeper = LakekeeperClient::new(LAKEKEEPER_URL);
     let (warehouse_name, warehouse_id) =
@@ -102,6 +103,7 @@ async fn validate_iceberg_connection_success() {
 }
 
 #[tokio::test]
+#[ignore = "requires a running Lakekeeper instance on localhost:8182"]
 async fn validate_iceberg_connection_failure() {
     let ctx = create_validation_context();
     let config = create_iceberg_config("nonexistent-warehouse");
