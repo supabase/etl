@@ -727,13 +727,13 @@ where
         // Note that this connection must be tied to the lifetime of this worker,
         // otherwise there will be problems when cleaning up the replication
         // slot.
-        let replication_client =
+        let mut replication_client =
             PgReplicationClient::connect(self.config.pg_connection.clone()).await?;
 
         let table_sync_result = start_table_sync(
             self.pipeline_id,
             Arc::clone(&self.config),
-            replication_client.clone(),
+            &mut replication_client,
             self.table_id,
             state.clone(),
             self.store.clone(),
@@ -773,7 +773,7 @@ where
             self.pipeline_id,
             start_lsn,
             Arc::clone(&self.config),
-            replication_client.clone(),
+            &replication_client,
             self.store.clone(),
             self.destination.clone(),
             self.shared_table_cache.clone(),
@@ -794,7 +794,7 @@ where
                 // Catchup has completed, so cleanup failures should not turn a
                 // completed table sync into a replication failure.
                 if let Err(err) =
-                    self.cleanup_resources(replication_client, self.store.clone()).await
+                    self.cleanup_resources(&replication_client, self.store.clone()).await
                 {
                     warn!(
                         table_id = self.table_id.0,
@@ -824,7 +824,7 @@ where
     /// does not leave stale progress for a completed table sync worker.
     async fn cleanup_resources(
         &self,
-        replication_client: PgReplicationClient,
+        replication_client: &PgReplicationClient,
         store: S,
     ) -> EtlResult<()> {
         store

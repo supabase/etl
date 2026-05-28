@@ -88,7 +88,7 @@ where
 pub(crate) async fn start_table_sync<S, D>(
     pipeline_id: PipelineId,
     config: Arc<PipelineConfig>,
-    replication_client: PgReplicationClient,
+    replication_client: &mut PgReplicationClient,
     table_id: TableId,
     table_sync_worker_state: TableSyncWorkerState,
     store: S,
@@ -228,7 +228,7 @@ where
             // If a slot already exists at this point, we could delete it and try to
             // recover, but it means that the state was somehow reset without
             // the slot being deleted, and we want to surface this.
-            let (transaction, slot) =
+            let (replication_transaction, slot) =
                 replication_client.create_slot_with_transaction(&slot_name).await?;
 
             // We copy the table schema and write it both to the state store and
@@ -244,7 +244,7 @@ where
             //  data.
             info!(%table_id, "fetching table schema");
             let (table_schema, identity) =
-                transaction.get_table_schema_with_identity(table_id).await?;
+                replication_transaction.get_table_schema_with_identity(table_id).await?;
 
             if !table_schema.has_primary_keys() {
                 bail!(
@@ -262,7 +262,7 @@ where
             // Get the names of columns being replicated based on the publication's column
             // filter. This must be done in the same transaction as
             // `get_table_schema` for consistency.
-            let replicated_column_names = transaction
+            let replicated_column_names = replication_transaction
                 .get_replicated_column_names(table_id, &table_schema, &config.publication_name)
                 .await?;
 
@@ -294,7 +294,7 @@ where
             // We check if the table should be copied, or we can skip it.
             if config.table_sync_copy.should_copy_table(table_id.into_inner()) {
                 let result = table_copy(
-                    &transaction,
+                    &replication_transaction,
                     table_id,
                     replicated_table_schema.clone(),
                     Some(&config.publication_name),
@@ -327,7 +327,7 @@ where
             // We commit the transaction before starting the apply loop, otherwise it will
             // fail since no transactions can be running while replication is
             // started.
-            transaction.commit().await?;
+            replication_transaction.commit().await?;
 
             // If no table rows were written, we call the method nonetheless with no rows,
             // to kickstart table creation.
