@@ -30,10 +30,7 @@ pub struct ApiConfig {
     /// Source database configuration and validation settings.
     #[serde(default)]
     pub source: SourceConfig,
-    /// Fallback single encryption key configuration.
-    pub encryption_key: EncryptionKey,
-    /// Additional encryption key configurations.
-    #[serde(default)]
+    /// Encryption key configurations.
     pub encryption_keys: Vec<EncryptionKey>,
     /// List of base64-encoded API keys.
     ///
