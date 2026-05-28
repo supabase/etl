@@ -12,12 +12,12 @@ use etl::{
     concurrency::TaskSet,
     destination::{
         Destination,
-        async_result::{TruncateTableResult, WriteEventsResult, WriteTableRowsResult},
+        async_result::{DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult},
     },
     error::{ErrorKind, EtlResult},
     etl_error,
-    state::destination_metadata::DestinationTableMetadata,
-    store::{schema::SchemaStore, state::StateStore},
+    state::destination_table_metadata::DestinationTableMetadata,
+    store::DestinationStore,
     types::{
         Event, EventSequenceKey, OldTableRow, PartialTableRow, ReplicatedTableSchema, TableId,
         TableName, TableRow, UpdatedTableRow,
@@ -25,7 +25,7 @@ use etl::{
 };
 use metrics::gauge;
 use parking_lot::Mutex;
-use pg_escape::quote_identifier;
+use pg_escape::quote_identifier as quote_postgres_identifier;
 use sqlx::{AssertSqlSafe, PgPool, postgres::PgPoolOptions};
 #[cfg(feature = "test-utils")]
 use tokio::sync::oneshot;
@@ -41,7 +41,7 @@ use url::Url;
 
 use crate::{
     ducklake::{
-        DuckLakeTableName, LAKE_CATALOG, S3Config,
+        DuckLakeTableName, S3Config,
         batches::{
             DuckLakeTableBatchKind, TableMutation, TrackedTableMutation, TrackedTruncateEvent,
             apply_table_batch_with_retry, apply_table_batches_with_retry,
@@ -52,15 +52,15 @@ use crate::{
             retain_truncates_after_sequence_key,
         },
         client::{
-            DuckDbBlockingOperationKind, DuckLakeConnectionManager, DuckLakeInterruptRegistry,
-            build_warm_ducklake_pool, format_query_error_detail, run_duckdb_blocking,
+            DuckLakeConnectionManager, DuckLakeInterruptRegistry, build_warm_ducklake_pool,
+            format_query_error_detail, run_duckdb_blocking,
         },
         config::{
             MAINTENANCE_TARGET_FILE_SIZE, build_setup_plan, current_duckdb_extension_strategy,
             maintenance_target_file_size_sql, resolve_expire_snapshots_older_than,
             validate_expire_snapshots_older_than_sql,
         },
-        external_maintenance::{ExternalMaintenanceOperations, run_external_maintenance_watcher},
+        external_maintenance::ExternalMaintenanceOperations,
         inline_size::DuckLakePendingInlineSizeSampler,
         metrics::{
             DuckLakeMetricsSampler, ETL_DUCKLAKE_POOL_SIZE, query_catalog_maintenance_metrics,
@@ -68,6 +68,7 @@ use crate::{
             resolve_ducklake_metadata_schema_blocking, spawn_ducklake_metrics_sampler,
         },
         schema::build_create_table_sql_ducklake,
+        sql::qualified_lake_table_name,
     },
     table_name::try_stringify_table_name,
 };
@@ -156,6 +157,42 @@ pub struct DuckLakeExternalMaintenancePause {
     _guard: OwnedRwLockWriteGuard<()>,
 }
 
+/// Runtime backend used for DuckLake external maintenance coordination.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DuckLakeMaintenanceMode {
+    #[default]
+    Disabled,
+    Kubernetes,
+    Postgres,
+}
+
+/// Runtime configuration for DuckLake external maintenance coordination.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DuckLakeExternalMaintenanceConfig {
+    pub mode: DuckLakeMaintenanceMode,
+    pub pipeline_id: u64,
+}
+
+impl DuckLakeExternalMaintenanceConfig {
+    pub const fn disabled() -> Self {
+        Self { mode: DuckLakeMaintenanceMode::Disabled, pipeline_id: 0 }
+    }
+
+    pub const fn kubernetes(pipeline_id: u64) -> Self {
+        Self { mode: DuckLakeMaintenanceMode::Kubernetes, pipeline_id }
+    }
+
+    pub const fn postgres(pipeline_id: u64) -> Self {
+        Self { mode: DuckLakeMaintenanceMode::Postgres, pipeline_id }
+    }
+}
+
+impl Default for DuckLakeExternalMaintenanceConfig {
+    fn default() -> Self {
+        Self::disabled()
+    }
+}
+
 /// Returns the table-local semaphore shared by concurrent foreground writes.
 fn table_write_slot(
     table_write_slots: &Arc<Mutex<HashMap<DuckLakeTableName, Arc<Semaphore>>>>,
@@ -168,7 +205,7 @@ fn table_write_slot(
 
 impl<S> Destination for DuckLakeDestination<S>
 where
-    S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
+    S: DestinationStore,
 {
     fn name() -> &'static str {
         "ducklake"
@@ -186,12 +223,12 @@ where
         Ok(())
     }
 
-    async fn truncate_table(
+    async fn drop_table_for_copy(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
-        async_result: TruncateTableResult<()>,
+        async_result: DropTableForCopyResult<()>,
     ) -> EtlResult<()> {
-        let result = self.truncate_table(replicated_table_schema).await;
+        let result = self.drop_table_for_copy_inner(replicated_table_schema).await;
         async_result.send(result);
 
         Ok(())
@@ -245,7 +282,7 @@ fn validate_ducklake_replica_identity(
             _ => "DuckLake mutation requires a replica identity",
         };
         return Err(etl_error!(
-            ErrorKind::InvalidState,
+            ErrorKind::SourceReplicaIdentityError,
             description,
             format!(
                 "Table '{}' has no replicated replica-identity columns",
@@ -259,7 +296,7 @@ fn validate_ducklake_replica_identity(
 
 impl<S> DuckLakeDestination<S>
 where
-    S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
+    S: DestinationStore,
 {
     /// Builds a key-only row from a partial update row when PostgreSQL omits
     /// the old key image because the replica identity did not change.
@@ -315,7 +352,7 @@ where
                 missing_indexes.next();
                 if is_identity {
                     return Err(etl_error!(
-                        ErrorKind::InvalidState,
+                        ErrorKind::SourceReplicaIdentityError,
                         "DuckLake partial update is missing replica-identity columns",
                         format!(
                             "Table '{}' emitted a partial update without key column '{}'",
@@ -434,6 +471,36 @@ where
         expire_snapshots_older_than: Option<String>,
         store: S,
     ) -> EtlResult<Self> {
+        Self::new_with_external_maintenance(
+            catalog_url,
+            data_path,
+            pool_size,
+            s3,
+            metadata_schema,
+            duckdb_memory_cache_limit,
+            maintenance_target_file_size,
+            expire_snapshots_older_than,
+            DuckLakeExternalMaintenanceConfig::default(),
+            store,
+        )
+        .await
+    }
+
+    /// Creates a new DuckLake destination with explicit external maintenance
+    /// runtime configuration.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn new_with_external_maintenance(
+        catalog_url: Url,
+        data_path: Url,
+        pool_size: u32,
+        s3: Option<S3Config>,
+        metadata_schema: Option<String>,
+        duckdb_memory_cache_limit: Option<String>,
+        maintenance_target_file_size: Option<String>,
+        expire_snapshots_older_than: Option<String>,
+        external_maintenance: DuckLakeExternalMaintenanceConfig,
+        store: S,
+    ) -> EtlResult<Self> {
         register_metrics();
 
         if !matches!(catalog_url.scheme(), "postgres" | "postgresql") {
@@ -493,7 +560,6 @@ where
         run_duckdb_blocking(
             Arc::clone(&pool),
             Arc::clone(&blocking_slots),
-            DuckDbBlockingOperationKind::Foreground,
             move |conn| -> EtlResult<()> {
                 conn.execute_batch(&target_file_size_sql).map_err(|error| {
                     etl_error!(
@@ -512,7 +578,6 @@ where
         run_duckdb_blocking(
             Arc::clone(&pool),
             Arc::clone(&blocking_slots),
-            DuckDbBlockingOperationKind::Foreground,
             move |conn| -> EtlResult<()> {
                 conn.query_row(&expire_snapshots_validation_sql, [], |_row| Ok(())).map_err(
                     |source| {
@@ -537,7 +602,6 @@ where
                 run_duckdb_blocking(
                     Arc::clone(&pool),
                     Arc::clone(&blocking_slots),
-                    DuckDbBlockingOperationKind::Foreground,
                     resolve_ducklake_metadata_schema_blocking,
                 )
                 .await?
@@ -575,18 +639,53 @@ where
             )?
             .into(),
         );
-        let watcher_destination = destination.clone();
-        destination
-            .tasks
-            .spawn(async move {
-                if let Err(error) = run_external_maintenance_watcher(watcher_destination).await {
-                    warn!(
-                        error = %error,
-                        "ducklake external maintenance watcher exited"
-                    );
-                }
-            })
-            .await;
+        match external_maintenance.mode {
+            DuckLakeMaintenanceMode::Disabled => {
+                info!("ducklake external maintenance watcher disabled by configuration");
+            }
+            DuckLakeMaintenanceMode::Kubernetes => {
+                use crate::ducklake::external_maintenance::run_kubernetes_external_maintenance_watcher;
+
+                let watcher_destination = destination.clone();
+                destination
+                    .tasks
+                    .spawn(async move {
+                        if let Err(error) =
+                            run_kubernetes_external_maintenance_watcher(watcher_destination).await
+                        {
+                            warn!(
+                                error = %error,
+                                "ducklake external maintenance watcher exited"
+                            );
+                        }
+                    })
+                    .await;
+            }
+            DuckLakeMaintenanceMode::Postgres => {
+                use crate::ducklake::external_maintenance::run_postgres_external_maintenance_watcher;
+
+                let watcher_destination = destination.clone();
+                let maintenance_pool = metadata_pg_pool.clone();
+                let pipeline_id = external_maintenance.pipeline_id as i64;
+                destination
+                    .tasks
+                    .spawn(async move {
+                        if let Err(error) = run_postgres_external_maintenance_watcher(
+                            watcher_destination,
+                            pipeline_id,
+                            maintenance_pool,
+                        )
+                        .await
+                        {
+                            warn!(
+                                error = %error,
+                                "ducklake external maintenance watcher exited"
+                            );
+                        }
+                    })
+                    .await;
+            }
+        }
 
         Ok(destination)
     }
@@ -601,67 +700,140 @@ where
         self.ensure_applied_batches_table_exists().await?;
         self.ensure_streaming_progress_table_exists().await?;
         let _checkpoint_guard = self.acquire_mutation_guard().await;
-        self.run_duckdb_blocking(
-            DuckDbBlockingOperationKind::Foreground,
-            move |conn| -> EtlResult<()> {
-                conn.execute_batch("BEGIN TRANSACTION").map_err(|e| {
+        self.run_duckdb_blocking(move |conn| -> EtlResult<()> {
+            conn.execute_batch("BEGIN TRANSACTION").map_err(|e| {
+                etl_error!(
+                    ErrorKind::DestinationQueryFailed,
+                    "DuckLake BEGIN TRANSACTION failed",
+                    source: e
+                )
+            })?;
+
+            let result = (|| -> EtlResult<()> {
+                let target_table = qualified_lake_table_name(&table_name);
+                let truncate_table_sql = format!("TRUNCATE TABLE {target_table};");
+                conn.execute_batch(&truncate_table_sql).map_err(|e| {
                     etl_error!(
                         ErrorKind::DestinationQueryFailed,
-                        "DuckLake BEGIN TRANSACTION failed",
+                        "DuckLake TRUNCATE TABLE failed",
+                        format_query_error_detail(&truncate_table_sql),
                         source: e
                     )
                 })?;
 
-                let result = (|| -> EtlResult<()> {
-                    let truncate_table_sql =
-                        format!(r#"TRUNCATE TABLE {LAKE_CATALOG}."{table_name}";"#);
-                    conn.execute_batch(&truncate_table_sql).map_err(|e| {
-                        etl_error!(
-                            ErrorKind::DestinationQueryFailed,
-                            "DuckLake TRUNCATE TABLE failed",
-                            format_query_error_detail(&truncate_table_sql),
-                            source: e
-                        )
-                    })?;
+                clear_applied_batch_markers_for_kind(
+                    conn,
+                    &table_name,
+                    DuckLakeTableBatchKind::Copy,
+                )?;
+                clear_applied_batch_markers_for_kind(
+                    conn,
+                    &table_name,
+                    DuckLakeTableBatchKind::Mutation,
+                )?;
+                clear_applied_batch_markers_for_kind(
+                    conn,
+                    &table_name,
+                    DuckLakeTableBatchKind::Truncate,
+                )?;
+                clear_table_streaming_progress(conn, &table_name)?;
+                Ok(())
+            })();
 
-                    clear_applied_batch_markers_for_kind(
-                        conn,
-                        &table_name,
-                        DuckLakeTableBatchKind::Copy,
-                    )?;
-                    clear_applied_batch_markers_for_kind(
-                        conn,
-                        &table_name,
-                        DuckLakeTableBatchKind::Mutation,
-                    )?;
-                    clear_applied_batch_markers_for_kind(
-                        conn,
-                        &table_name,
-                        DuckLakeTableBatchKind::Truncate,
-                    )?;
-                    clear_table_streaming_progress(conn, &table_name)?;
-                    Ok(())
-                })();
-
-                match result {
-                    Ok(()) => conn.execute_batch("COMMIT").map_err(|e| {
-                        etl_error!(
-                            ErrorKind::DestinationQueryFailed,
-                            "DuckLake COMMIT failed",
-                            source: e
-                        )
-                    }),
-                    Err(error) => {
-                        let err = conn.execute_batch("ROLLBACK");
-                        if let Err(err) = err {
-                            tracing::error!(error = %err, "error rollback");
-                        }
-                        Err(error)
+            match result {
+                Ok(()) => conn.execute_batch("COMMIT").map_err(|e| {
+                    etl_error!(
+                        ErrorKind::DestinationQueryFailed,
+                        "DuckLake COMMIT failed",
+                        source: e
+                    )
+                }),
+                Err(error) => {
+                    let err = conn.execute_batch("ROLLBACK");
+                    if let Err(err) = err {
+                        tracing::error!(error = %err, "error rollback");
                     }
+                    Err(error)
                 }
-            },
-        )
+            }
+        })
         .await
+    }
+
+    /// Drops the destination table and replay markers before restarting a copy.
+    async fn drop_table_for_copy_inner(
+        &self,
+        replicated_table_schema: &ReplicatedTableSchema,
+    ) -> EtlResult<()> {
+        let table_name = self.resolve_destination_table_name(replicated_table_schema).await?;
+        let _table_write_permit = self.acquire_table_write_slot(&table_name).await?;
+        self.ensure_applied_batches_table_exists().await?;
+        self.ensure_streaming_progress_table_exists().await?;
+        let _checkpoint_guard = self.acquire_mutation_guard().await;
+        let table_name_for_drop = table_name.clone();
+
+        self.run_duckdb_blocking(move |conn| -> EtlResult<()> {
+            conn.execute_batch("BEGIN TRANSACTION").map_err(|e| {
+                etl_error!(
+                    ErrorKind::DestinationQueryFailed,
+                    "DuckLake BEGIN TRANSACTION failed",
+                    source: e
+                )
+            })?;
+
+            let result = (|| -> EtlResult<()> {
+                let table_name = qualified_lake_table_name(&table_name_for_drop);
+                let drop_table_sql = format!("DROP TABLE IF EXISTS {table_name};");
+                conn.execute_batch(&drop_table_sql).map_err(|e| {
+                    etl_error!(
+                        ErrorKind::DestinationQueryFailed,
+                        "DuckLake DROP TABLE failed",
+                        format_query_error_detail(&drop_table_sql),
+                        source: e
+                    )
+                })?;
+
+                clear_applied_batch_markers_for_kind(
+                    conn,
+                    &table_name_for_drop,
+                    DuckLakeTableBatchKind::Copy,
+                )?;
+                clear_applied_batch_markers_for_kind(
+                    conn,
+                    &table_name_for_drop,
+                    DuckLakeTableBatchKind::Mutation,
+                )?;
+                clear_applied_batch_markers_for_kind(
+                    conn,
+                    &table_name_for_drop,
+                    DuckLakeTableBatchKind::Truncate,
+                )?;
+                clear_table_streaming_progress(conn, &table_name_for_drop)?;
+                Ok(())
+            })();
+
+            match result {
+                Ok(()) => conn.execute_batch("COMMIT").map_err(|e| {
+                    etl_error!(
+                        ErrorKind::DestinationQueryFailed,
+                        "DuckLake COMMIT failed",
+                        source: e
+                    )
+                }),
+                Err(error) => {
+                    let err = conn.execute_batch("ROLLBACK");
+                    if let Err(err) = err {
+                        tracing::error!(error = %err, "error rollback");
+                    }
+                    Err(error)
+                }
+            }
+        })
+        .await?;
+
+        self.created_tables.lock().remove(&table_name);
+
+        Ok(())
     }
 
     /// Bulk-inserts rows into the destination table inside a single
@@ -1017,7 +1189,7 @@ where
         replicated_table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<DuckLakeTableName> {
         let table_id = replicated_table_schema.id();
-        let table_name = self.get_or_create_destination_table_name(replicated_table_schema).await?;
+        let table_name = self.resolve_destination_table_name(replicated_table_schema).await?;
 
         // Fast path: already created.
         {
@@ -1054,16 +1226,10 @@ where
         );
         self.store.store_destination_table_metadata(table_id, metadata.clone()).await?;
 
-        // `build_create_table_sql_ducklake` generates `CREATE TABLE IF NOT EXISTS
-        // "name" (...)`. Prefix the table name with the catalog alias so
-        // DuckLake knows which catalog to create the table in.
         let ddl = build_create_table_sql_ducklake(
             &table_name,
             &replicated_table_schema.inner().column_schemas,
         );
-        let quoted_table_name = quote_identifier(&table_name).into_owned();
-        let qualified_ddl =
-            ddl.replace(&quoted_table_name, &format!("{LAKE_CATALOG}.{quoted_table_name}"));
 
         let created_tables = Arc::clone(&self.created_tables);
         let table_name_clone = table_name.clone();
@@ -1072,13 +1238,12 @@ where
         run_duckdb_blocking(
             Arc::clone(&self.pool),
             Arc::clone(&self.blocking_slots),
-            DuckDbBlockingOperationKind::Foreground,
             move |conn| -> EtlResult<()> {
                 debug!(
                     table = %table_name_clone,
                     "ducklake create table begin"
                 );
-                match conn.execute_batch(&qualified_ddl) {
+                match conn.execute_batch(&ddl) {
                     Ok(()) => {
                         created_tables.lock().insert(table_name_clone.clone());
                     }
@@ -1089,7 +1254,7 @@ where
                         return Err(etl_error!(
                             ErrorKind::DestinationQueryFailed,
                             "DuckLake CREATE TABLE failed",
-                            format_query_error_detail(&qualified_ddl),
+                            format_query_error_detail(&ddl),
                             source: e
                         ));
                     }
@@ -1131,9 +1296,8 @@ where
         .await
     }
 
-    /// Returns the stored destination table name for `table_id`, creating a
-    /// default name if none exists yet.
-    async fn get_or_create_destination_table_name(
+    /// Returns the stored destination table name or the deterministic default.
+    async fn resolve_destination_table_name(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<DuckLakeTableName> {
@@ -1296,6 +1460,11 @@ where
             }
         }
 
+        if operations.rewrite_data_files {
+            operations.merge_adjacent_files = true;
+            operations.cleanup_old_files = true;
+        }
+
         Ok(operations)
     }
 
@@ -1303,8 +1472,8 @@ where
     async fn list_active_ducklake_tables(&self) -> EtlResult<Vec<String>> {
         let sql = format!(
             "SELECT table_name FROM {}.{} WHERE end_snapshot IS NULL ORDER BY table_name",
-            quote_identifier(self.metadata_schema.as_ref()),
-            quote_identifier("ducklake_table")
+            quote_postgres_identifier(self.metadata_schema.as_ref()),
+            quote_postgres_identifier("ducklake_table")
         );
         let rows: Vec<(String,)> = sqlx::query_as(AssertSqlSafe(sql))
             .fetch_all(&self.metadata_pg_pool)
@@ -1322,22 +1491,13 @@ where
 
     /// Runs one DuckDB operation on Tokio's blocking pool after acquiring a
     /// permit that matches the configured DuckDB concurrency limit.
-    async fn run_duckdb_blocking<R, F>(
-        &self,
-        operation_kind: DuckDbBlockingOperationKind,
-        operation: F,
-    ) -> EtlResult<R>
+    async fn run_duckdb_blocking<R, F>(&self, operation: F) -> EtlResult<R>
     where
         R: Send + 'static,
         F: FnOnce(&duckdb::Connection) -> EtlResult<R> + Send + 'static,
     {
-        run_duckdb_blocking(
-            Arc::clone(&self.pool),
-            Arc::clone(&self.blocking_slots),
-            operation_kind,
-            operation,
-        )
-        .await
+        run_duckdb_blocking(Arc::clone(&self.pool), Arc::clone(&self.blocking_slots), operation)
+            .await
     }
 
     /// Stops the background DuckLake metrics sampler.
@@ -1374,12 +1534,9 @@ async fn read_table_streaming_progress_sequence_key_blocking(
     blocking_slots: Arc<Semaphore>,
     table_name: DuckLakeTableName,
 ) -> EtlResult<Option<EventSequenceKey>> {
-    run_duckdb_blocking(
-        pool,
-        blocking_slots,
-        DuckDbBlockingOperationKind::Foreground,
-        move |conn| read_table_streaming_progress_sequence_key(conn, &table_name),
-    )
+    run_duckdb_blocking(pool, blocking_slots, move |conn| {
+        read_table_streaming_progress_sequence_key(conn, &table_name)
+    })
     .await
 }
 
@@ -1460,14 +1617,15 @@ mod tests {
 
     use duckdb::{Config, Connection};
     use etl::{
-        config::{PgConnectionConfig, TcpKeepaliveConfig, TlsConfig},
+        config::{PgConnectionConfig, TcpKeepaliveConfig},
         store::{both::memory::MemoryStore, schema::SchemaStore},
         types::{
             Cell, ColumnSchema, IdentityMask, PartialTableRow, ReplicationMask, TableRow,
             TableSchema, Type as PgType,
         },
     };
-    use etl_postgres::tokio::test_utils::PgDatabase;
+    use etl_maintenance::ducklake::flush_table_inlined_data;
+    use etl_postgres::{test_utils::local_tls_config_from_env, tokio::test_utils::PgDatabase};
     use pg_escape::{quote_identifier, quote_literal};
     use tempfile::TempDir;
     use tokio_postgres::Client;
@@ -1476,8 +1634,8 @@ mod tests {
 
     use super::*;
     use crate::ducklake::{
+        LAKE_CATALOG,
         config::catalog_conninfo_from_url,
-        maintenance_runner::flush_table_inlined_data,
         metrics::{query_catalog_maintenance_metrics, query_table_storage_metrics},
     };
 
@@ -1562,7 +1720,7 @@ mod tests {
         )
         .unwrap_err();
 
-        assert_eq!(error.kind(), ErrorKind::InvalidState);
+        assert_eq!(error.kind(), ErrorKind::SourceReplicaIdentityError);
         assert_eq!(error.description(), Some("DuckLake update requires a replica identity"));
     }
 
@@ -1582,7 +1740,7 @@ mod tests {
             username: env::var("TESTS_DATABASE_USERNAME")
                 .expect("TESTS_DATABASE_USERNAME must be set"),
             password: env::var("TESTS_DATABASE_PASSWORD").ok().map(Into::into),
-            tls: TlsConfig { trusted_root_certs: String::new(), enabled: false },
+            tls: local_tls_config_from_env(),
             keepalive: TcpKeepaliveConfig::default(),
         }
     }

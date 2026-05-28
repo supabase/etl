@@ -12,13 +12,13 @@ use crate::{
     etl_error,
     replication::WorkerType,
     state::{
-        destination_metadata::{AppliedDestinationTableMetadata, DestinationTableMetadata},
-        table::{TableReplicationPhase, TableReplicationPhaseType},
+        TableState, TableStateType,
+        destination_table_metadata::{AppliedDestinationTableMetadata, DestinationTableMetadata},
     },
     store::{
-        cleanup::CleanupStore,
+        lifecycle::TableLifecycleStore,
         schema::{SchemaStore, TableSchemaRetention, TableSchemaSnapshots},
-        state::{DestinationTablesMetadata, StateStore, TableReplicationStates},
+        state::{DestinationTablesMetadata, StateStore, TableStates},
     },
     test_utils::notify::TimedNotify,
     types::PgLsn,
@@ -26,22 +26,21 @@ use crate::{
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StateStoreMethod {
-    GetTableReplicationState,
-    GetTableReplicationStates,
-    LoadTableReplicationStates,
-    StoreTableReplicationState,
-    RollbackTableReplicationState,
+    GetTableState,
+    GetTableStates,
+    LoadTableStates,
+    StoreTableState,
+    RollbackTableState,
 }
 
-type TableStateTypeCondition = (TableId, TableReplicationPhaseType, Arc<Notify>);
-type TableStateCondition =
-    (TableId, Arc<Notify>, Box<dyn Fn(&TableReplicationPhase) -> bool + Send + Sync>);
+type TableStateTypeCondition = (TableId, TableStateType, Arc<Notify>);
+type TableStateCondition = (TableId, Arc<Notify>, Box<dyn Fn(&TableState) -> bool + Send + Sync>);
 type TableSchemaCountCondition = (TableId, usize, Arc<Notify>);
 type TableSchemaPruneCondition = Arc<Notify>;
 
 struct Inner {
-    table_replication_states: TableReplicationStates,
-    table_state_history: HashMap<TableId, Vec<TableReplicationPhase>>,
+    table_states: TableStates,
+    table_state_history: HashMap<TableId, Vec<TableState>>,
     table_schemas: Arc<TableSchemaSnapshots>,
     destination_tables_metadata: DestinationTablesMetadata,
     replication_progress: HashMap<WorkerType, PgLsn>,
@@ -54,7 +53,7 @@ struct Inner {
 
 impl Inner {
     fn check_conditions(&mut self) {
-        let table_states = Arc::clone(&self.table_replication_states);
+        let table_states = Arc::clone(&self.table_states);
         self.table_state_type_conditions.retain(|(tid, expected_state, notify)| {
             if let Some(state) = table_states.get(tid) {
                 let should_retain = *expected_state != state.as_type();
@@ -108,11 +107,20 @@ pub struct NotifyingStore {
     inner: Arc<RwLock<Inner>>,
 }
 
+/// Scope of table-scoped state removal.
+#[derive(Debug, Clone, Copy)]
+enum TableStateCleanupScope {
+    /// Clear state that belongs to the previous table copy.
+    CopyRestart,
+    /// Delete all ETL state for a table removed from the publication.
+    PipelineRemoval,
+}
+
 impl NotifyingStore {
     /// Creates an empty notifying store.
     pub fn new() -> Self {
         let inner = Inner {
-            table_replication_states: Arc::new(BTreeMap::new()),
+            table_states: Arc::new(BTreeMap::new()),
             table_state_history: HashMap::new(),
             table_schemas: Arc::new(TableSchemaSnapshots::default()),
             destination_tables_metadata: Arc::new(BTreeMap::new()),
@@ -127,10 +135,10 @@ impl NotifyingStore {
         Self { inner: Arc::new(RwLock::new(inner)) }
     }
 
-    /// Returns the current table replication states.
-    pub async fn get_table_replication_states(&self) -> TableReplicationStates {
+    /// Returns the current table states.
+    pub async fn get_table_states(&self) -> TableStates {
         let inner = self.inner.read().await;
-        Arc::clone(&inner.table_replication_states)
+        Arc::clone(&inner.table_states)
     }
 
     /// Returns the latest schema snapshot stored for each table.
@@ -176,7 +184,7 @@ impl NotifyingStore {
     pub async fn notify_on_table_state_type(
         &self,
         table_id: TableId,
-        expected_state: TableReplicationPhaseType,
+        expected_state: TableStateType,
     ) -> TimedNotify {
         let notify = Arc::new(Notify::new());
         let mut inner = self.inner.write().await;
@@ -193,7 +201,7 @@ impl NotifyingStore {
     /// from hanging indefinitely.
     pub async fn notify_on_table_state<F>(&self, table_id: TableId, condition: F) -> TimedNotify
     where
-        F: Fn(&TableReplicationPhase) -> bool + Send + Sync + 'static,
+        F: Fn(&TableState) -> bool + Send + Sync + 'static,
     {
         let notify = Arc::new(Notify::new());
         let mut inner = self.inner.write().await;
@@ -229,15 +237,36 @@ impl NotifyingStore {
         TimedNotify::new(notify)
     }
 
-    /// Resets one table to [`TableReplicationPhase::Init`] and clears its state
+    /// Resets one table to [`TableState::Init`] and clears its state
     /// history.
     pub async fn reset_table_state(&self, table_id: TableId) -> EtlResult<()> {
         let mut inner = self.inner.write().await;
         inner.table_state_history.remove(&table_id);
 
-        let states = Arc::make_mut(&mut inner.table_replication_states);
+        let states = Arc::make_mut(&mut inner.table_states);
         states.remove(&table_id);
-        states.insert(table_id, TableReplicationPhase::Init);
+        states.insert(table_id, TableState::Init);
+
+        Ok(())
+    }
+
+    /// Deletes table-scoped state according to the requested scope.
+    async fn delete_table_state_for_scope(
+        &self,
+        table_id: TableId,
+        scope: TableStateCleanupScope,
+    ) -> EtlResult<()> {
+        let mut inner = self.inner.write().await;
+
+        if matches!(scope, TableStateCleanupScope::PipelineRemoval) {
+            Arc::make_mut(&mut inner.table_states).remove(&table_id);
+            inner.table_state_history.remove(&table_id);
+        }
+
+        Arc::make_mut(&mut inner.table_schemas).remove_table(table_id);
+        Arc::make_mut(&mut inner.destination_tables_metadata).remove(&table_id);
+        inner.replication_progress.remove(&WorkerType::TableSync { table_id });
+        inner.check_conditions();
 
         Ok(())
     }
@@ -250,44 +279,38 @@ impl Default for NotifyingStore {
 }
 
 impl StateStore for NotifyingStore {
-    async fn get_table_replication_state(
-        &self,
-        table_id: TableId,
-    ) -> EtlResult<Option<TableReplicationPhase>> {
+    async fn get_table_state(&self, table_id: TableId) -> EtlResult<Option<TableState>> {
         let inner = self.inner.read().await;
-        let result = Ok(inner.table_replication_states.get(&table_id).cloned());
+        let result = Ok(inner.table_states.get(&table_id).cloned());
 
-        inner.dispatch_method_notification(StateStoreMethod::GetTableReplicationState);
+        inner.dispatch_method_notification(StateStoreMethod::GetTableState);
 
         result
     }
 
-    async fn get_table_replication_states(&self) -> EtlResult<TableReplicationStates> {
+    async fn get_table_states(&self) -> EtlResult<TableStates> {
         let inner = self.inner.read().await;
-        let result = Ok(Arc::clone(&inner.table_replication_states));
+        let result = Ok(Arc::clone(&inner.table_states));
 
-        inner.dispatch_method_notification(StateStoreMethod::GetTableReplicationStates);
+        inner.dispatch_method_notification(StateStoreMethod::GetTableStates);
 
         result
     }
 
-    async fn load_table_replication_states(&self) -> EtlResult<usize> {
+    async fn load_table_states(&self) -> EtlResult<usize> {
         let inner = self.inner.read().await;
-        let table_replication_states_len = inner.table_replication_states.len();
+        let table_states_len = inner.table_states.len();
 
-        inner.dispatch_method_notification(StateStoreMethod::LoadTableReplicationStates);
+        inner.dispatch_method_notification(StateStoreMethod::LoadTableStates);
 
-        Ok(table_replication_states_len)
+        Ok(table_states_len)
     }
 
-    async fn update_table_replication_states(
-        &self,
-        updates: Vec<(TableId, TableReplicationPhase)>,
-    ) -> EtlResult<()> {
+    async fn update_table_states(&self, updates: Vec<(TableId, TableState)>) -> EtlResult<()> {
         let mut guard = self.inner.write().await;
         let inner = &mut *guard;
 
-        let states = Arc::make_mut(&mut inner.table_replication_states);
+        let states = Arc::make_mut(&mut inner.table_states);
         for (table_id, state) in updates {
             // Store the current state in history before updating.
             if let Some(current_state) = states.get(&table_id).cloned() {
@@ -302,15 +325,12 @@ impl StateStore for NotifyingStore {
         }
 
         guard.check_conditions();
-        guard.dispatch_method_notification(StateStoreMethod::StoreTableReplicationState);
+        guard.dispatch_method_notification(StateStoreMethod::StoreTableState);
 
         Ok(())
     }
 
-    async fn rollback_table_replication_state(
-        &self,
-        table_id: TableId,
-    ) -> EtlResult<TableReplicationPhase> {
+    async fn rollback_table_state(&self, table_id: TableId) -> EtlResult<TableState> {
         let mut inner = self.inner.write().await;
 
         // Get the previous state from history.
@@ -323,10 +343,10 @@ impl StateStore for NotifyingStore {
             })?;
 
         // Update the current state to the previous state.
-        Arc::make_mut(&mut inner.table_replication_states).insert(table_id, previous_state.clone());
+        Arc::make_mut(&mut inner.table_states).insert(table_id, previous_state.clone());
         inner.check_conditions();
 
-        inner.dispatch_method_notification(StateStoreMethod::RollbackTableReplicationState);
+        inner.dispatch_method_notification(StateStoreMethod::RollbackTableState);
 
         Ok(previous_state)
     }
@@ -451,17 +471,13 @@ impl SchemaStore for NotifyingStore {
     }
 }
 
-impl CleanupStore for NotifyingStore {
-    async fn cleanup_table_state(&self, table_id: TableId) -> EtlResult<()> {
-        let mut inner = self.inner.write().await;
+impl TableLifecycleStore for NotifyingStore {
+    async fn clear_table_copy_state(&self, table_id: TableId) -> EtlResult<()> {
+        self.delete_table_state_for_scope(table_id, TableStateCleanupScope::CopyRestart).await
+    }
 
-        Arc::make_mut(&mut inner.table_replication_states).remove(&table_id);
-        inner.table_state_history.remove(&table_id);
-        Arc::make_mut(&mut inner.table_schemas).remove_table(table_id);
-        Arc::make_mut(&mut inner.destination_tables_metadata).remove(&table_id);
-        inner.replication_progress.remove(&WorkerType::TableSync { table_id });
-
-        Ok(())
+    async fn delete_table_pipeline_state(&self, table_id: TableId) -> EtlResult<()> {
+        self.delete_table_state_for_scope(table_id, TableStateCleanupScope::PipelineRemoval).await
     }
 }
 

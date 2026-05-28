@@ -1,256 +1,49 @@
-// This code is copied from the tokio-postgres-rustls library (https://github.com/jbg/tokio-postgres-rustls),
-// available under the MIT License, which provides Rustls-based TLS support for
-// secure asynchronous Postgres connections using the tokio-postgres client.
-
-use std::{
-    io,
-    pin::Pin,
-    sync::Arc,
-    task::{Context, Poll},
-};
-
-use aws_lc_rs::digest;
-use const_oid::db::{
-    rfc5912::{
-        ECDSA_WITH_SHA_256, ECDSA_WITH_SHA_384, ID_SHA_1, ID_SHA_256, ID_SHA_384, ID_SHA_512,
-        SHA_1_WITH_RSA_ENCRYPTION, SHA_256_WITH_RSA_ENCRYPTION, SHA_384_WITH_RSA_ENCRYPTION,
-        SHA_512_WITH_RSA_ENCRYPTION,
-    },
-    rfc8410::ID_ED_25519,
-};
-use futures::FutureExt;
-use rustls::{ClientConfig, pki_types::ServerName};
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio_postgres::tls::{ChannelBinding, MakeTlsConnect, TlsConnect};
-use tokio_rustls::{TlsConnector, client::TlsStream};
-use x509_cert::{TbsCertificate, der::Decode};
-
-/// A `MakeTlsConnect` implementation using `rustls`.
-///
-/// That way you can connect to Postgres using `rustls` as the TLS stack.
-#[derive(Clone)]
-pub(crate) struct MakeRustlsConnect {
-    config: Arc<ClientConfig>,
-}
-
-impl MakeRustlsConnect {
-    /// Creates a new `MakeRustlsConnect` from the provided `ClientConfig`.
-    #[must_use]
-    pub(crate) fn new(config: ClientConfig) -> Self {
-        Self { config: Arc::new(config) }
-    }
-}
-
-impl<S> MakeTlsConnect<S> for MakeRustlsConnect
-where
-    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-{
-    type Stream = RustlsStream<S>;
-    type TlsConnect = RustlsConnect;
-    type Error = rustls::pki_types::InvalidDnsNameError;
-
-    fn make_tls_connect(&mut self, hostname: &str) -> Result<Self::TlsConnect, Self::Error> {
-        ServerName::try_from(hostname).map(|dns_name| {
-            RustlsConnect(RustlsConnectData {
-                hostname: dns_name.to_owned(),
-                connector: Arc::clone(&self.config).into(),
-            })
-        })
-    }
-}
-
-pub(crate) struct TlsConnectFuture<S> {
-    inner: tokio_rustls::Connect<S>,
-}
-
-impl<S> Future for TlsConnectFuture<S>
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-{
-    type Output = io::Result<RustlsStream<S>>;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        self.get_mut().inner.poll_unpin(cx).map_ok(RustlsStream)
-    }
-}
-
-pub(crate) struct RustlsConnect(RustlsConnectData);
-
-pub(crate) struct RustlsConnectData {
-    hostname: ServerName<'static>,
-    connector: TlsConnector,
-}
-
-impl<S> TlsConnect<S> for RustlsConnect
-where
-    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-{
-    type Stream = RustlsStream<S>;
-    type Error = io::Error;
-    type Future = TlsConnectFuture<S>;
-
-    fn connect(self, stream: S) -> Self::Future {
-        TlsConnectFuture { inner: self.0.connector.connect(self.0.hostname, stream) }
-    }
-}
-
-pub(crate) struct RustlsStream<S>(TlsStream<S>);
-
-impl<S> RustlsStream<S>
-where
-    S: Unpin,
-{
-    fn project_stream(self: Pin<&mut Self>) -> Pin<&mut TlsStream<S>> {
-        Pin::new(&mut self.get_mut().0)
-    }
-}
-
-impl<S> tokio_postgres::tls::TlsStream for RustlsStream<S>
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-{
-    fn channel_binding(&self) -> ChannelBinding {
-        let (_, session) = self.0.get_ref();
-        match session.peer_certificates() {
-            Some(certs) if !certs.is_empty() => TbsCertificate::from_der(&certs[0])
-                .ok()
-                .and_then(|cert| {
-                    let digest = match cert.signature.oid {
-                        // Note: SHA1 is upgraded to SHA256 as per https://datatracker.ietf.org/doc/html/rfc5929#section-4.1
-                        ID_SHA_1
-                        | ID_SHA_256
-                        | SHA_1_WITH_RSA_ENCRYPTION
-                        | SHA_256_WITH_RSA_ENCRYPTION
-                        | ECDSA_WITH_SHA_256 => &digest::SHA256,
-                        ID_SHA_384 | SHA_384_WITH_RSA_ENCRYPTION | ECDSA_WITH_SHA_384 => {
-                            &digest::SHA384
-                        }
-                        ID_SHA_512 | SHA_512_WITH_RSA_ENCRYPTION | ID_ED_25519 => &digest::SHA512,
-                        _ => return None,
-                    };
-
-                    Some(digest)
-                })
-                .map_or_else(ChannelBinding::none, |algorithm| {
-                    let hash = digest::digest(algorithm, certs[0].as_ref());
-                    ChannelBinding::tls_server_end_point(hash.as_ref().into())
-                }),
-            _ => ChannelBinding::none(),
-        }
-    }
-}
-
-impl<S> AsyncRead for RustlsStream<S>
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-{
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
-        self.project_stream().poll_read(cx, buf)
-    }
-}
-
-impl<S> AsyncWrite for RustlsStream<S>
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-{
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        self.project_stream().poll_write(cx, buf)
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.project_stream().poll_flush(cx)
-    }
-
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.project_stream().poll_shutdown(cx)
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use rustls::{
-        Error, SignatureScheme,
-        client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
-        pki_types::{CertificateDer, UnixTime},
+    use etl_postgres::{
+        test_utils::{test_tls_enabled_from_env, test_tls_root_cert_path},
+        tokio::tls::MakeRustlsConnect,
     };
+    use rustls::{
+        ClientConfig, RootCertStore,
+        pki_types::{CertificateDer, pem::PemObject},
+    };
+    use tokio_postgres::config::SslMode;
 
-    use super::*;
-
-    #[derive(Debug)]
-    struct AcceptAllVerifier {}
-    impl ServerCertVerifier for AcceptAllVerifier {
-        fn verify_server_cert(
-            &self,
-            _end_entity: &CertificateDer<'_>,
-            _intermediates: &[CertificateDer<'_>],
-            _server_name: &ServerName<'_>,
-            _ocsp_response: &[u8],
-            _now: UnixTime,
-        ) -> Result<ServerCertVerified, Error> {
-            Ok(ServerCertVerified::assertion())
-        }
-
-        fn verify_tls12_signature(
-            &self,
-            _message: &[u8],
-            _cert: &CertificateDer<'_>,
-            _dss: &rustls::DigitallySignedStruct,
-        ) -> Result<HandshakeSignatureValid, Error> {
-            Ok(HandshakeSignatureValid::assertion())
-        }
-
-        fn verify_tls13_signature(
-            &self,
-            _message: &[u8],
-            _cert: &CertificateDer<'_>,
-            _dss: &rustls::DigitallySignedStruct,
-        ) -> Result<HandshakeSignatureValid, Error> {
-            Ok(HandshakeSignatureValid::assertion())
-        }
-
-        fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-            vec![
-                SignatureScheme::ECDSA_NISTP384_SHA384,
-                SignatureScheme::ECDSA_NISTP256_SHA256,
-                SignatureScheme::RSA_PSS_SHA512,
-                SignatureScheme::RSA_PSS_SHA384,
-                SignatureScheme::RSA_PSS_SHA256,
-                SignatureScheme::ED25519,
-            ]
-        }
-    }
-
-    // TODO: setup Postgres with TLS in CI to have this test pass.
     #[tokio::test]
-    #[ignore]
-    async fn it_works() {
-        rustls::crypto::aws_lc_rs::default_provider()
-            .install_default()
-            .expect("failed to install default crypto provider");
+    async fn connects_with_rustls_when_test_tls_is_enabled() {
+        if !test_tls_enabled_from_env() {
+            return;
+        }
 
-        let mut config = ClientConfig::builder()
-            .with_root_certificates(rustls::RootCertStore::empty())
-            .with_no_client_auth();
-        config.dangerous().set_certificate_verifier(Arc::new(AcceptAllVerifier {}));
-
-        let tls = MakeRustlsConnect::new(config);
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
         let host = std::env::var("TESTS_DATABASE_HOST").unwrap_or_else(|_| "localhost".to_owned());
-        let port = std::env::var("TESTS_DATABASE_PORT").unwrap_or_else(|_| "5430".to_owned());
+        let port = std::env::var("TESTS_DATABASE_PORT")
+            .unwrap_or_else(|_| "5430".to_owned())
+            .parse()
+            .expect("TESTS_DATABASE_PORT must be a valid port number");
         let user =
             std::env::var("TESTS_DATABASE_USERNAME").unwrap_or_else(|_| "postgres".to_owned());
-        let connection_string = format!("sslmode=require host={host} port={port} user={user}");
+        let password =
+            std::env::var("TESTS_DATABASE_PASSWORD").unwrap_or_else(|_| "postgres".to_owned());
+        let root_cert_path = test_tls_root_cert_path();
+        let trusted_root_certs = std::fs::read_to_string(&root_cert_path)
+            .expect("Failed to read TESTS_DATABASE_TLS_ROOT_CERT");
 
-        let (client, conn) =
-            tokio_postgres::connect(&connection_string, tls).await.expect("connect");
+        let mut root_store = RootCertStore::empty();
+        for cert in CertificateDer::pem_slice_iter(trusted_root_certs.as_bytes()) {
+            root_store.add(cert.expect("failed to parse root certificate")).unwrap();
+        }
+
+        let tls_config =
+            ClientConfig::builder().with_root_certificates(root_store).with_no_client_auth();
+        let tls = MakeRustlsConnect::new(tls_config);
+
+        let mut config = tokio_postgres::Config::new();
+        config.host(host).port(port).user(user).password(password).ssl_mode(SslMode::VerifyFull);
+
+        let (client, conn) = config.connect(tls).await.expect("connect");
 
         tokio::task::spawn(async move { conn.await.map_err(|e| panic!("{e:?}")) });
 

@@ -18,7 +18,9 @@ use crate::{
     },
     data::{self, tenants::TenantsDbError, tenants_sources::TenantSourceDbError},
     k8s::TrustedRootCertsCache,
-    routes::{ErrorMessage, IntoInner, common, error_response, utils},
+    routes::{
+        ErrorMessage, IntoInner, TenantIdError, common, error_response, utils, validate_tenant_id,
+    },
     validation::ValidationError,
 };
 
@@ -35,6 +37,9 @@ pub(crate) enum TenantSourceError {
 
     #[error("Validation failed: {0}")]
     ValidationFailed(String),
+
+    #[error(transparent)]
+    TenantId(#[from] TenantIdError),
 }
 
 impl TenantSourceError {
@@ -66,6 +71,7 @@ impl IntoResponse for TenantSourceError {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
             TenantSourceError::Validation(error) => utils::validation_error_status_code(error),
+            TenantSourceError::TenantId(_) => StatusCode::BAD_REQUEST,
             TenantSourceError::ValidationFailed(_) => StatusCode::UNPROCESSABLE_ENTITY,
         };
 
@@ -135,6 +141,7 @@ pub(crate) async fn create_tenant_and_source(
     tenant_and_source: Json<CreateTenantSourceRequest>,
 ) -> Result<impl IntoResponse, TenantSourceError> {
     let tenant_and_source = tenant_and_source.into_inner();
+    validate_tenant_id(&tenant_and_source.tenant_id)?;
 
     tracing::Span::current().record("project", &tenant_and_source.tenant_id);
 

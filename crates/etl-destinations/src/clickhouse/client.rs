@@ -6,7 +6,7 @@ use std::{
 
 use clickhouse::Client;
 use etl::{
-    error::{ErrorKind, EtlResult},
+    error::{ErrorKind, EtlError, EtlResult},
     etl_error,
 };
 use url::Url;
@@ -14,9 +14,42 @@ use url::Url;
 use crate::clickhouse::{
     core::{ClickHouseClientConfig, ClickHouseOperationKind},
     encoding::{ClickHouseValue, encode_to_row_binary},
-    metrics::{ETL_CLICKHOUSE_DDL_DURATION_SECONDS, ETL_CLICKHOUSE_INSERT_DURATION_SECONDS},
-    schema::{clickhouse_column_type, quote_identifier},
+    metrics::{
+        ETL_CLICKHOUSE_CONNECTIVITY_CHECK_DURATION_SECONDS, ETL_CLICKHOUSE_DDL_DURATION_SECONDS,
+        ETL_CLICKHOUSE_DDL_ERRORS_TOTAL, ETL_CLICKHOUSE_INSERT_BYTES,
+        ETL_CLICKHOUSE_INSERT_DURATION_SECONDS, ETL_CLICKHOUSE_INSERT_ENCODING_ERRORS_TOTAL,
+        ETL_CLICKHOUSE_INSERT_ERRORS_TOTAL, ETL_CLICKHOUSE_INSERT_ROWS,
+        ETL_CLICKHOUSE_SCHEMA_QUERY_DURATION_SECONDS, ETL_CLICKHOUSE_STATEMENTS_PER_BATCH,
+    },
+    schema::clickhouse_column_type,
+    sql::quote_identifier,
 };
+
+/// Returns the `outcome` label for an error returned by [`timeout_call`]:
+/// `"timeout"` when the client-side deadline fired, `"failed"` otherwise.
+fn outcome_label(err: &EtlError) -> &'static str {
+    if err.kind() == ErrorKind::DestinationTimeout { "timeout" } else { "failed" }
+}
+
+/// Records the duration histogram for a DDL operation and, on failure,
+/// increments the DDL error counter. Centralized so DDL paths that bypass
+/// [`ClickHouseClient::execute_ddl`] (notably `truncate_table`, which carries
+/// extra error context) record the same metric shape.
+fn record_ddl_metrics(kind: DdlKind, start: Instant, err: Option<&EtlError>) {
+    metrics::histogram!(
+        ETL_CLICKHOUSE_DDL_DURATION_SECONDS,
+        "kind" => kind.as_label(),
+    )
+    .record(start.elapsed().as_secs_f64());
+    if let Some(err) = err {
+        metrics::counter!(
+            ETL_CLICKHOUSE_DDL_ERRORS_TOTAL,
+            "kind" => kind.as_label(),
+            "outcome" => outcome_label(err),
+        )
+        .increment(1);
+    }
+}
 
 /// Formats a `Duration` as a whole-seconds string for ClickHouse
 /// `.with_option(...)` settings, floored at `"1"`. ClickHouse interprets `"0"`
@@ -130,6 +163,12 @@ fn build_truncate_table_sql(table_name: &str) -> String {
     format!("TRUNCATE TABLE IF EXISTS {table_name}")
 }
 
+/// Builds the SQL used to drop a ClickHouse table.
+fn build_drop_table_sql(table_name: &str) -> String {
+    let table_name = quote_identifier(table_name);
+    format!("DROP TABLE IF EXISTS {table_name}")
+}
+
 /// Builds the SQL used to insert RowBinary rows into a ClickHouse table.
 fn build_insert_rows_sql(table_name: &str) -> String {
     let table_name = quote_identifier(table_name);
@@ -142,6 +181,10 @@ fn build_insert_rows_sql(table_name: &str) -> String {
 #[derive(Copy, Clone)]
 pub(crate) enum DdlKind {
     CreateTable,
+    CreateView,
+    DropTable,
+    DropView,
+    TruncateTable,
     AddColumn,
     DropColumn,
     RenameColumn,
@@ -151,6 +194,10 @@ impl DdlKind {
     fn as_label(self) -> &'static str {
         match self {
             DdlKind::CreateTable => "create_table",
+            DdlKind::CreateView => "create_view",
+            DdlKind::DropTable => "drop_table",
+            DdlKind::DropView => "drop_view",
+            DdlKind::TruncateTable => "truncate_table",
             DdlKind::AddColumn => "add_column",
             DdlKind::DropColumn => "drop_column",
             DdlKind::RenameColumn => "rename_column",
@@ -180,20 +227,52 @@ impl ClickHouseClient {
         database: impl Into<String>,
         config: ClickHouseClientConfig,
     ) -> Self {
-        let mut client =
-            Client::default().with_url(url.to_string()).with_user(user).with_database(database);
+        Self::build(url, user, Some(database.into()), password, config)
+    }
 
-        if let Some(pw) = password {
-            client = client.with_password(pw);
+    /// Variant of [`Self::new`] that does not pin the client to a target
+    /// database. The server falls back to the user's profile default
+    /// database for every query, which lets the validator probe
+    /// connectivity / auth / database existence before the user-supplied
+    /// database is known to exist.
+    pub fn new_without_database(
+        url: Url,
+        user: impl Into<String>,
+        password: Option<String>,
+        config: ClickHouseClientConfig,
+    ) -> Self {
+        Self::build(url, user, None, password, config)
+    }
+
+    fn build(
+        url: Url,
+        user: impl Into<String>,
+        database: Option<String>,
+        password: Option<String>,
+        config: ClickHouseClientConfig,
+    ) -> Self {
+        Self {
+            inner: Arc::new({
+                let client = Client::default().with_url(url.to_string()).with_user(user);
+                let client = match database {
+                    Some(database) => client.with_database(database),
+                    None => client,
+                };
+                let client = match password {
+                    Some(password) => client.with_password(password),
+                    None => client,
+                };
+                client
+                    .with_option("connect_timeout", floor_secs(config.connectivity_check_timeout))
+                    .with_option(
+                        "http_connection_timeout",
+                        floor_secs(config.connectivity_check_timeout),
+                    )
+                    .with_option("http_send_timeout", floor_secs(config.insert_timeout))
+                    .with_option("http_receive_timeout", floor_secs(config.insert_timeout))
+            }),
+            config,
         }
-
-        client = client
-            .with_option("connect_timeout", floor_secs(config.connectivity_check_timeout))
-            .with_option("http_connection_timeout", floor_secs(config.connectivity_check_timeout))
-            .with_option("http_send_timeout", floor_secs(config.insert_timeout))
-            .with_option("http_receive_timeout", floor_secs(config.insert_timeout));
-
-        Self { inner: Arc::new(client), config }
     }
 
     /// Verifies that the ClickHouse server is reachable.
@@ -207,14 +286,67 @@ impl ClickHouseClient {
             .inner
             .query("SELECT 1")
             .with_option("max_execution_time", floor_secs(self.config.connectivity_check_timeout));
-        timeout_call(
+        let start = Instant::now();
+        let result = timeout_call(
             ClickHouseOperationKind::ConnectivityCheck,
             &self.config,
             None,
             query.fetch_one::<u8>(),
         )
-        .await?;
+        .await;
+        metrics::histogram!(ETL_CLICKHOUSE_CONNECTIVITY_CHECK_DURATION_SECONDS)
+            .record(start.elapsed().as_secs_f64());
+        result?;
         Ok(())
+    }
+
+    /// Returns whether `database` exists on the ClickHouse server.
+    ///
+    /// Queries `system.databases` directly so the result is independent of
+    /// the client's configured database. Pair with
+    /// [`Self::new_without_database`] to probe existence of a database
+    /// whose presence is unknown.
+    pub async fn database_exists(&self, database: &str) -> EtlResult<bool> {
+        let query = self
+            .inner
+            .query("SELECT count() FROM system.databases WHERE name = ?")
+            .bind(database)
+            .with_option("max_execution_time", floor_secs(self.config.connectivity_check_timeout));
+        let start = Instant::now();
+        let result = timeout_call(
+            ClickHouseOperationKind::ConnectivityCheck,
+            &self.config,
+            Some(&format!("database: {database}")),
+            query.fetch_one::<u64>(),
+        )
+        .await;
+        metrics::histogram!(ETL_CLICKHOUSE_CONNECTIVITY_CHECK_DURATION_SECONDS)
+            .record(start.elapsed().as_secs_f64());
+        Ok(result? > 0)
+    }
+
+    /// Returns the major/minor version pair from `SELECT version()`.
+    ///
+    /// Trailing components (patch, build) are ignored. Used at destination
+    /// construction to gate engine-specific feature requirements (e.g.
+    /// ReplacingMergeTree needs >= 23.5).
+    pub(crate) async fn server_version(&self) -> EtlResult<(u32, u32)> {
+        let raw = self.inner.query("SELECT version()").fetch_one::<String>().await.map_err(
+            |err| etl_error!(ErrorKind::Unknown, "ClickHouse version query failed", source: err),
+        )?;
+
+        let mut parts = raw.split('.');
+        let major = parts.next().and_then(|s| s.parse::<u32>().ok());
+        let minor = parts.next().and_then(|s| s.parse::<u32>().ok());
+
+        match (major, minor) {
+            (Some(major), Some(minor)) => Ok((major, minor)),
+            _ => Err(etl_error!(
+                ErrorKind::Unknown,
+                "Unable to parse ClickHouse server version",
+                format!("server returned '{raw}'")
+            )),
+        }
     }
 
     /// Executes a DDL statement (e.g. `CREATE TABLE IF NOT EXISTS …`) and
@@ -230,12 +362,31 @@ impl ClickHouseClient {
             .with_option("lock_acquire_timeout", &ddl_secs);
         let result =
             timeout_call(ClickHouseOperationKind::Ddl, &self.config, None, query.execute()).await;
-        metrics::histogram!(
-            ETL_CLICKHOUSE_DDL_DURATION_SECONDS,
-            "kind" => kind.as_label(),
-        )
-        .record(ddl_start.elapsed().as_secs_f64());
+        record_ddl_metrics(kind, ddl_start, result.as_ref().err());
         result
+    }
+
+    /// Returns the ClickHouse engine name for a table, or `None` if the table
+    /// does not exist in the current database.
+    pub(crate) async fn table_engine(&self, table_name: &str) -> EtlResult<Option<String>> {
+        let rows: Vec<String> = self
+            .inner
+            .query(
+                "SELECT engine FROM system.tables WHERE database = currentDatabase() AND name = ?",
+            )
+            .bind(table_name)
+            .fetch_all::<String>()
+            .await
+            .map_err(|err| {
+                etl_error!(
+                    ErrorKind::Unknown,
+                    "ClickHouse engine lookup failed",
+                    format!("table: {table_name}"),
+                    source: err
+                )
+            })?;
+
+        Ok(rows.into_iter().next())
     }
 
     /// Returns ClickHouse columns for a table in position order.
@@ -252,13 +403,17 @@ impl ClickHouseClient {
             )
             .with_option("max_execution_time", &schema_secs)
             .bind(table_name);
-        timeout_call(
+        let start = Instant::now();
+        let result = timeout_call(
             ClickHouseOperationKind::SchemaQuery,
             &self.config,
             Some(&format!("table: {table_name}")),
             query.fetch_all::<ClickHouseTableColumn>(),
         )
-        .await
+        .await;
+        metrics::histogram!(ETL_CLICKHOUSE_SCHEMA_QUERY_DURATION_SECONDS)
+            .record(start.elapsed().as_secs_f64());
+        result
     }
 
     /// Adds a column to an existing ClickHouse table.
@@ -304,19 +459,28 @@ impl ClickHouseClient {
 
     /// Executes `TRUNCATE TABLE IF EXISTS` for the supplied table.
     pub(crate) async fn truncate_table(&self, table_name: &str) -> EtlResult<()> {
+        let ddl_start = Instant::now();
         let ddl_secs = floor_secs(self.config.ddl_timeout);
         let query = self
             .inner
             .query(&build_truncate_table_sql(table_name))
             .with_option("max_execution_time", &ddl_secs)
             .with_option("lock_acquire_timeout", &ddl_secs);
-        timeout_call(
+        let result = timeout_call(
             ClickHouseOperationKind::Ddl,
             &self.config,
             Some(&format!("table: {table_name}")),
             query.execute(),
         )
-        .await
+        .await;
+        record_ddl_metrics(DdlKind::TruncateTable, ddl_start, result.as_ref().err());
+        result
+    }
+
+    /// Executes `DROP TABLE IF EXISTS` for the supplied table.
+    pub(crate) async fn drop_table(&self, table_name: &str) -> EtlResult<()> {
+        let sql = build_drop_table_sql(table_name);
+        self.execute_ddl(DdlKind::DropTable, &sql).await
     }
 
     /// Inserts `rows` into `table_name` using the RowBinary format.
@@ -344,6 +508,7 @@ impl ClickHouseClient {
         let sql = build_insert_rows_sql(table_name);
         let mut rows = rows.into_iter().peekable();
         let mut row_buf = Vec::new();
+        let mut statements = 0u64;
 
         while rows.peek().is_some() {
             let mut insert = self
@@ -351,28 +516,68 @@ impl ClickHouseClient {
                 .insert_formatted_with(sql.clone())
                 .buffered_with_capacity(BUFFERED_CAPACITY);
             let mut bytes = 0u64;
+            let mut rows_in_statement = 0u64;
             let insert_start = Instant::now();
 
             while bytes < max_bytes_per_insert {
                 let Some(row) = rows.next() else { break };
                 row_buf.clear();
-                encode_to_row_binary(row, nullable_flags, &mut row_buf)?;
+                encode_to_row_binary(row, nullable_flags, &mut row_buf).inspect_err(|_| {
+                    metrics::counter!(
+                        ETL_CLICKHOUSE_INSERT_ENCODING_ERRORS_TOTAL,
+                        "source" => source,
+                    )
+                    .increment(1);
+                })?;
                 insert.write_buffered(&row_buf);
                 bytes += row_buf.len() as u64;
+                rows_in_statement += 1;
             }
 
-            timeout_call(
+            let result = timeout_call(
                 ClickHouseOperationKind::Insert,
                 &self.config,
                 Some(&format!("table: {table_name}")),
                 insert.end(),
             )
-            .await?;
+            .await;
+            match result.as_ref() {
+                Ok(_) => {
+                    metrics::histogram!(
+                        ETL_CLICKHOUSE_INSERT_DURATION_SECONDS,
+                        "source" => source,
+                    )
+                    .record(insert_start.elapsed().as_secs_f64());
+                    metrics::histogram!(
+                        ETL_CLICKHOUSE_INSERT_ROWS,
+                        "source" => source,
+                    )
+                    .record(rows_in_statement as f64);
+                    metrics::histogram!(
+                        ETL_CLICKHOUSE_INSERT_BYTES,
+                        "source" => source,
+                    )
+                    .record(bytes as f64);
+                }
+                Err(err) => {
+                    metrics::counter!(
+                        ETL_CLICKHOUSE_INSERT_ERRORS_TOTAL,
+                        "source" => source,
+                        "outcome" => outcome_label(err),
+                    )
+                    .increment(1);
+                }
+            }
+            result?;
+            statements += 1;
+        }
+
+        if statements > 0 {
             metrics::histogram!(
-                ETL_CLICKHOUSE_INSERT_DURATION_SECONDS,
+                ETL_CLICKHOUSE_STATEMENTS_PER_BATCH,
                 "source" => source,
             )
-            .record(insert_start.elapsed().as_secs_f64());
+            .record(statements as f64);
         }
 
         Ok(())
@@ -403,8 +608,8 @@ mod tests {
 
         assert_eq!(
             sql,
-            "ALTER TABLE \"table\"\"name\" ADD COLUMN IF NOT EXISTS \"new\"\"column\" \
-             Nullable(Int32) AFTER \"old\"\"column\""
+            "ALTER TABLE \"table\\\"name\" ADD COLUMN IF NOT EXISTS \"new\\\"column\" \
+             Nullable(Int32) AFTER \"old\\\"column\""
         );
     }
 
@@ -424,7 +629,7 @@ mod tests {
     fn drop_column_sql_quotes_identifiers() {
         let sql = build_drop_column_sql("table\"name", "old\"column");
 
-        assert_eq!(sql, "ALTER TABLE \"table\"\"name\" DROP COLUMN IF EXISTS \"old\"\"column\"");
+        assert_eq!(sql, "ALTER TABLE \"table\\\"name\" DROP COLUMN IF EXISTS \"old\\\"column\"");
     }
 
     #[test]
@@ -433,8 +638,8 @@ mod tests {
 
         assert_eq!(
             sql,
-            "ALTER TABLE \"table\"\"name\" RENAME COLUMN IF EXISTS \"old\"\"column\" TO \
-             \"new\"\"column\""
+            "ALTER TABLE \"table\\\"name\" RENAME COLUMN IF EXISTS \"old\\\"column\" TO \
+             \"new\\\"column\""
         );
     }
 
@@ -442,14 +647,21 @@ mod tests {
     fn truncate_table_sql_quotes_identifiers() {
         let sql = build_truncate_table_sql("table\"name");
 
-        assert_eq!(sql, "TRUNCATE TABLE IF EXISTS \"table\"\"name\"");
+        assert_eq!(sql, "TRUNCATE TABLE IF EXISTS \"table\\\"name\"");
+    }
+
+    #[test]
+    fn drop_table_sql_quotes_identifiers() {
+        let sql = build_drop_table_sql("table\"name");
+
+        assert_eq!(sql, "DROP TABLE IF EXISTS \"table\\\"name\"");
     }
 
     #[test]
     fn insert_rows_sql_quotes_identifiers() {
         let sql = build_insert_rows_sql("table\"name");
 
-        assert_eq!(sql, "INSERT INTO \"table\"\"name\" FORMAT RowBinary");
+        assert_eq!(sql, "INSERT INTO \"table\\\"name\" FORMAT RowBinary");
     }
 
     /// # GIVEN

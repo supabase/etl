@@ -5,7 +5,7 @@
 
 use duckdb::Connection;
 use etl::{
-    state::table::TableReplicationPhaseType,
+    state::TableStateType,
     test_utils::{
         database::spawn_source_database,
         notifying_store::NotifyingStore,
@@ -155,16 +155,10 @@ async fn table_copy_and_streaming_with_restart() {
     );
 
     let users_ready = store
-        .notify_on_table_state_type(
-            database_schema.users_schema().id,
-            TableReplicationPhaseType::Ready,
-        )
+        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
         .await;
     let orders_ready = store
-        .notify_on_table_state_type(
-            database_schema.orders_schema().id,
-            TableReplicationPhaseType::Ready,
-        )
+        .notify_on_table_state_type(database_schema.orders_schema().id, TableStateType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
@@ -237,6 +231,98 @@ async fn table_copy_and_streaming_with_restart() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn table_copy_reset_drops_destination_table_before_recopy() {
+    init_test_tracing();
+
+    let database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+    let lake = create_test_lake("table_copy_reset_drops_destination_table_before_recopy").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
+
+    let users_schema = database_schema.users_schema();
+    let users_table_name = table_name_to_ducklake_table_name(&users_schema.name)
+        .expect("failed to build DuckLake users table name");
+    let store = NotifyingStore::new();
+    let pipeline_id: PipelineId = random();
+
+    database
+        .insert_values(users_schema.name.clone(), &["name", "age"], &[&"before_1", &1])
+        .await
+        .unwrap();
+    database
+        .insert_values(users_schema.name.clone(), &["name", "age"], &[&"before_2", &2])
+        .await
+        .unwrap();
+
+    let destination = build_destination(&catalog_url, &data_url, store.clone()).await;
+
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    let users_ready =
+        store.notify_on_table_state_type(users_schema.id, TableStateType::Ready).await;
+
+    pipeline.start().await.unwrap();
+
+    users_ready.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    checkpoint_lake(&catalog_url, &data_url);
+
+    let conn = open_lake_conn(&catalog_url, &data_url);
+    assert_eq!(
+        query_user_rows(&conn, &users_table_name),
+        vec![(1, "before_1".to_owned(), 1), (2, "before_2".to_owned(), 2)]
+    );
+    drop(conn);
+    drop(destination);
+    checkpoint_lake(&catalog_url, &data_url);
+
+    database
+        .run_sql(&format!("delete from {} where true", users_schema.name.as_quoted_identifier()))
+        .await
+        .unwrap();
+    database
+        .insert_values(users_schema.name.clone(), &["name", "age"], &[&"after", &3])
+        .await
+        .unwrap();
+    store.reset_table_state(users_schema.id).await.unwrap();
+
+    let destination = build_destination(&catalog_url, &data_url, store.clone()).await;
+
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    let users_ready =
+        store.notify_on_table_state_type(users_schema.id, TableStateType::Ready).await;
+
+    pipeline.start().await.unwrap();
+
+    users_ready.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    assert!(destination.was_table_dropped_for_copy(users_schema.id).await);
+    drop(destination);
+    checkpoint_lake(&catalog_url, &data_url);
+
+    let conn = open_lake_conn(&catalog_url, &data_url);
+    assert_eq!(query_user_rows(&conn, &users_table_name), vec![(3, "after".to_owned(), 3)]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn table_copy_and_streaming_without_restart() {
     init_test_tracing();
 
@@ -274,16 +360,10 @@ async fn table_copy_and_streaming_without_restart() {
     );
 
     let users_ready = store
-        .notify_on_table_state_type(
-            database_schema.users_schema().id,
-            TableReplicationPhaseType::Ready,
-        )
+        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
         .await;
     let orders_ready = store
-        .notify_on_table_state_type(
-            database_schema.orders_schema().id,
-            TableReplicationPhaseType::Ready,
-        )
+        .notify_on_table_state_type(database_schema.orders_schema().id, TableStateType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
@@ -345,10 +425,7 @@ async fn table_insert_update_delete() {
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
     let users_ready = store
-        .notify_on_table_state_type(
-            database_schema.users_schema().id,
-            TableReplicationPhaseType::Ready,
-        )
+        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
         .await;
 
     let destination = build_destination(&catalog_url, &data_url, store.clone()).await;
@@ -470,16 +547,10 @@ async fn cdc_streaming_with_truncate() {
     );
 
     let users_ready = store
-        .notify_on_table_state_type(
-            database_schema.users_schema().id,
-            TableReplicationPhaseType::Ready,
-        )
+        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
         .await;
     let orders_ready = store
-        .notify_on_table_state_type(
-            database_schema.orders_schema().id,
-            TableReplicationPhaseType::Ready,
-        )
+        .notify_on_table_state_type(database_schema.orders_schema().id, TableStateType::Ready)
         .await;
 
     pipeline.start().await.unwrap();

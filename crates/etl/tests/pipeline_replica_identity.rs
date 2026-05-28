@@ -1,5 +1,5 @@
 use etl::{
-    state::table::TableReplicationPhaseType,
+    state::TableStateType,
     test_utils::{
         database::{spawn_source_database, test_table_name},
         memory_destination::MemoryDestination,
@@ -241,7 +241,7 @@ async fn run_replica_identity_scenario(
     );
 
     let table_ready_notify =
-        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
     table_ready_notify.notified().await;

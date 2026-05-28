@@ -86,7 +86,7 @@ where
                 histogram!(ETL_ROW_SIZE_BYTES, EVENT_TYPE_LABEL => "copy")
                     .record(row_size_bytes as f64);
 
-                // CONVERSION PHASE: Transform raw bytes into structured TableRow
+                // Conversion step: transform raw bytes into structured TableRow.
                 // This is where most errors occur due to data format or type issues
                 match parse_table_row_from_postgres_copy_bytes(&row, this.column_schemas.clone()) {
                     Ok(row) => Poll::Ready(Some(Ok(row))),

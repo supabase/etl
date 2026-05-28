@@ -6,7 +6,7 @@
 use std::{fmt, path::Path, str::FromStr, time::Duration};
 
 use etl::{
-    store::{schema::SchemaStore, state::StateStore},
+    store::DestinationStore,
     types::{PipelineId, TableName},
 };
 use gcp_bigquery_client::{
@@ -53,9 +53,15 @@ pub const BIGQUERY_PROJECT_ID_ENV: &str = "TESTS_BIGQUERY_PROJECT_ID";
 /// Environment variable name for the BigQuery service account key path.
 pub const BIGQUERY_SA_KEY_PATH_ENV: &str = "TESTS_BIGQUERY_SA_KEY_PATH";
 
+/// When set, tests panic instead of skipping when BigQuery credentials are
+/// missing.
+pub const REQUIRE_BIGQUERY_CREDENTIALS_ENV: &str = "REQUIRE_BIGQUERY_CREDENTIALS";
+
 /// Returns whether BigQuery integration tests should be skipped.
 ///
 /// Prints a warning and returns `true` when credentials are unavailable.
+/// Panics if [`REQUIRE_BIGQUERY_CREDENTIALS_ENV`] is set, and credentials are
+/// not provided.
 pub fn skip_if_missing_bigquery_env_vars() -> bool {
     let sa_key_path = std::env::var_os(BIGQUERY_SA_KEY_PATH_ENV);
     let has_project_id = std::env::var_os(BIGQUERY_PROJECT_ID_ENV).is_some();
@@ -65,10 +71,17 @@ pub fn skip_if_missing_bigquery_env_vars() -> bool {
         return false;
     }
 
+    let require = std::env::var_os(REQUIRE_BIGQUERY_CREDENTIALS_ENV).is_some_and(|v| !v.is_empty());
     let mut missing_env_vars = Vec::new();
     if !has_sa_key_path {
         missing_env_vars.push(BIGQUERY_SA_KEY_PATH_ENV);
     } else if !has_sa_key_file {
+        if require {
+            panic!(
+                "BigQuery credentials required but {BIGQUERY_SA_KEY_PATH_ENV} does not point to \
+                 an existing file"
+            );
+        }
         eprintln!(
             "skipping bigquery integration test: {BIGQUERY_SA_KEY_PATH_ENV} does not point to an \
              existing file"
@@ -79,6 +92,10 @@ pub fn skip_if_missing_bigquery_env_vars() -> bool {
 
     if !has_project_id {
         missing_env_vars.push(BIGQUERY_PROJECT_ID_ENV);
+    }
+
+    if require {
+        panic!("BigQuery credentials required but missing: {}", missing_env_vars.join(", "));
     }
 
     eprintln!("skipping bigquery integration test: missing {}", missing_env_vars.join(", "));
@@ -278,6 +295,26 @@ impl BigQueryDatabase {
         }
     }
 
+    /// Gets the logical view schema from the BigQuery table metadata API.
+    pub async fn get_view_schema(&self, table_name: TableName) -> Option<BigQueryTableSchema> {
+        let table_id = table_name_to_bigquery_table_id(&table_name).unwrap();
+
+        self.get_table_schema_by_id(&table_id).await
+    }
+
+    /// Gets a table or view schema from the BigQuery table metadata API.
+    pub async fn get_table_schema_by_id(&self, table_id: &str) -> Option<BigQueryTableSchema> {
+        let table =
+            match self.client.table().get(&self.project_id, &self.dataset_id, table_id, None).await
+            {
+                Ok(table) => table,
+                Err(BQError::ResponseError { error }) if error.error.code == 404 => return None,
+                Err(err) => panic!("Failed to get BigQuery table metadata: {err:?}"),
+            };
+
+        Some(BigQueryTableSchema::from_table_fields(table.schema.fields.unwrap_or_default()))
+    }
+
     /// Manually creates a table in the test dataset using column definitions.
     ///
     /// Creates a table by generating a DDL statement from the provided column
@@ -308,7 +345,7 @@ impl BigQueryDatabase {
         schema_store: S,
     ) -> BigQueryDestination<S>
     where
-        S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
+        S: DestinationStore,
     {
         BigQueryDestination::new_with_key_path(
             self.project_id.clone(),
@@ -376,21 +413,26 @@ impl BigQueryTableSchema {
         Self(columns)
     }
 
+    /// Creates a schema wrapper from BigQuery table metadata fields.
+    pub fn from_table_fields(
+        fields: Vec<gcp_bigquery_client::model::table_field_schema::TableFieldSchema>,
+    ) -> Self {
+        let columns = fields
+            .into_iter()
+            .enumerate()
+            .map(|(index, field)| BigQueryColumnSchema {
+                column_name: field.name,
+                data_type: format!("{:?}", field.r#type),
+                ordinal_position: index as i64 + 1,
+            })
+            .collect();
+
+        Self(columns)
+    }
+
     /// Returns true if a column with the given name exists in the schema.
     pub fn has_column(&self, name: &str) -> bool {
         self.0.iter().any(|c| c.column_name == name)
-    }
-
-    /// Asserts that a column with the given name exists in the schema.
-    ///
-    /// Panics with a descriptive message if the column is not found.
-    pub fn assert_has_column(&self, name: &str) {
-        assert!(
-            self.has_column(name),
-            "expected column '{}' to exist in schema, but it was not found. Columns: {:?}",
-            name,
-            self.column_names()
-        );
     }
 
     /// Asserts that a column with the given name does not exist in the schema.
@@ -433,11 +475,6 @@ impl BigQueryTableSchema {
     /// Returns the names of all columns in the schema.
     pub fn column_names(&self) -> Vec<&str> {
         self.0.iter().map(|c| c.column_name.as_str()).collect()
-    }
-
-    /// Returns a reference to the underlying column schemas.
-    pub fn columns(&self) -> &[BigQueryColumnSchema] {
-        &self.0
     }
 }
 

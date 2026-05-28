@@ -2,7 +2,7 @@
 <p align="center">
   <a href="https://supabase.com">
     <picture>
-      <img alt="ETL by Supabase" width="100%" src="docs/assets/etl-logo-extended.png">
+      <img alt="ETL by Supabase" width="100%" src="public/assets/etl-logo-extended.png">
     </picture>
   </a>
 
@@ -97,6 +97,11 @@ For detailed configuration instructions, see the [Configure Postgres documentati
 ETL is currently installed from Git while we prepare for a crates.io release.
 Choose the destination features you need.
 
+For DuckLake, external maintenance coordination is selected at runtime with
+`maintenance_mode`: `disabled`, `kubernetes`, or `postgres`. The default is
+`disabled`; `postgres` uses the same Postgres catalog connection as DuckLake
+and stores coordination state in the `etl` schema.
+
 For a first production deployment, start with the stable BigQuery module:
 
 ```toml
@@ -124,6 +129,7 @@ use etl_destinations::bigquery::BigQueryDestination;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pg = PgConnectionConfig {
         host: "localhost".into(),
+        hostaddr: None,
         port: 5432,
         name: "mydb".into(),
         username: "postgres".into(),

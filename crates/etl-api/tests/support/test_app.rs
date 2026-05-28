@@ -31,7 +31,7 @@ use etl_api::{
     startup::run,
 };
 use etl_config::{Environment, shared::PgConnectionConfig};
-use etl_postgres::sqlx::test_utils::drop_pg_database;
+use etl_postgres::{sqlx::test_utils::drop_pg_database, test_utils::test_tls_enabled_from_env};
 use reqwest::{IntoUrl, RequestBuilder};
 use tokio::{runtime::Handle, time::sleep};
 
@@ -585,7 +585,10 @@ async fn spawn_test_app_with_services(
         sentry: None,
         supabase_api_url: None,
         configcat_sdk_key: None,
-        source: SourceConfig { tls_enabled: false, trusted_username: trusted_source_username },
+        source: SourceConfig {
+            tls_enabled: test_tls_enabled_from_env(),
+            trusted_username: trusted_source_username,
+        },
     };
 
     let server = run(

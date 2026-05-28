@@ -30,7 +30,7 @@ use etl::{
 use metrics::{counter, histogram};
 #[cfg(feature = "test-utils")]
 use parking_lot::Mutex;
-use pg_escape::{quote_identifier, quote_literal};
+use pg_escape::quote_literal;
 use rand::Rng;
 use tokio::{sync::Semaphore, time::Instant};
 use tokio_postgres::types::PgLsn;
@@ -39,10 +39,7 @@ use tracing::{debug, trace, warn};
 use crate::{
     ducklake::{
         DuckLakeTableName, LAKE_CATALOG,
-        client::{
-            DuckDbBlockingOperationKind, DuckLakeConnectionManager, format_query_error_detail,
-            run_duckdb_blocking,
-        },
+        client::{DuckLakeConnectionManager, format_query_error_detail, run_duckdb_blocking},
         core::is_create_table_conflict,
         encoding::{
             PreparedRows, cell_to_sql_literal_ref, prepare_rows, table_row_to_sql_literal_ref,
@@ -54,6 +51,7 @@ use crate::{
             ETL_DUCKLAKE_RETRIES_TOTAL, ETL_DUCKLAKE_UPSERT_ROWS, PREPARED_ROWS_KIND_LABEL,
             RETRY_SCOPE_LABEL, SUB_BATCH_KIND_LABEL,
         },
+        sql::{qualified_lake_table_name, quote_identifier},
     },
     retry::{RetryAttempt, RetryDecision, RetryPolicy, retry_with_backoff},
 };
@@ -319,42 +317,37 @@ pub(super) async fn ensure_applied_batches_table_exists(
     let created = Arc::clone(&applied_batches_table_created);
     let table_name = APPLIED_BATCHES_TABLE.to_owned();
 
-    run_duckdb_blocking(
-        pool,
-        blocking_slots,
-        DuckDbBlockingOperationKind::Foreground,
-        move |conn| -> EtlResult<()> {
-            match conn.execute_batch(&ddl) {
-                Ok(()) => {}
-                Err(error) if is_create_table_conflict(&error, &table_name) => {}
-                Err(error) => {
-                    return Err(etl_error!(
-                        ErrorKind::DestinationQueryFailed,
-                        "DuckLake CREATE TABLE failed",
-                        format_query_error_detail(&ddl),
-                        source: error
-                    ));
-                }
-            }
-
-            let set_option_sql = format!(
-                "CALL {LAKE_CATALOG}.set_option('data_inlining_row_limit', {}, table_name => {});",
-                APPLIED_BATCHES_TABLE_DATA_INLINING_ROW_LIMIT,
-                quote_literal(APPLIED_BATCHES_TABLE),
-            );
-            conn.execute_batch(&set_option_sql).map_err(|err| {
-                etl_error!(
+    run_duckdb_blocking(pool, blocking_slots, move |conn| -> EtlResult<()> {
+        match conn.execute_batch(&ddl) {
+            Ok(()) => {}
+            Err(error) if is_create_table_conflict(&error, &table_name) => {}
+            Err(error) => {
+                return Err(etl_error!(
                     ErrorKind::DestinationQueryFailed,
-                    "DuckLake set_option failed",
-                    format_query_error_detail(&set_option_sql),
-                    source: err
-                )
-            })?;
+                    "DuckLake CREATE TABLE failed",
+                    format_query_error_detail(&ddl),
+                    source: error
+                ));
+            }
+        }
 
-            created.store(true, Ordering::Relaxed);
-            Ok(())
-        },
-    )
+        let set_option_sql = format!(
+            "CALL {LAKE_CATALOG}.set_option('data_inlining_row_limit', {}, table_name => {});",
+            APPLIED_BATCHES_TABLE_DATA_INLINING_ROW_LIMIT,
+            quote_literal(APPLIED_BATCHES_TABLE),
+        );
+        conn.execute_batch(&set_option_sql).map_err(|err| {
+            etl_error!(
+                ErrorKind::DestinationQueryFailed,
+                "DuckLake set_option failed",
+                format_query_error_detail(&set_option_sql),
+                source: err
+            )
+        })?;
+
+        created.store(true, Ordering::Relaxed);
+        Ok(())
+    })
     .await
 }
 
@@ -388,42 +381,37 @@ pub(super) async fn ensure_streaming_progress_table_exists(
     let created = Arc::clone(&streaming_progress_table_created);
     let table_name = STREAMING_PROGRESS_TABLE.to_owned();
 
-    run_duckdb_blocking(
-        pool,
-        blocking_slots,
-        DuckDbBlockingOperationKind::Foreground,
-        move |conn| -> EtlResult<()> {
-            match conn.execute_batch(&ddl) {
-                Ok(()) => {}
-                Err(err) if is_create_table_conflict(&err, &table_name) => {}
-                Err(err) => {
-                    return Err(etl_error!(
-                        ErrorKind::DestinationQueryFailed,
-                        "DuckLake CREATE TABLE failed",
-                        format_query_error_detail(&ddl),
-                        source: err
-                    ));
-                }
-            }
-
-            let set_option_sql = format!(
-                "CALL {LAKE_CATALOG}.set_option('data_inlining_row_limit', {}, table_name => {});",
-                STREAMING_PROGRESS_TABLE_DATA_INLINING_ROW_LIMIT,
-                quote_literal(STREAMING_PROGRESS_TABLE),
-            );
-            conn.execute_batch(&set_option_sql).map_err(|error| {
-                etl_error!(
+    run_duckdb_blocking(pool, blocking_slots, move |conn| -> EtlResult<()> {
+        match conn.execute_batch(&ddl) {
+            Ok(()) => {}
+            Err(err) if is_create_table_conflict(&err, &table_name) => {}
+            Err(err) => {
+                return Err(etl_error!(
                     ErrorKind::DestinationQueryFailed,
-                    "DuckLake set_option failed",
-                    format_query_error_detail(&set_option_sql),
-                    source: error
-                )
-            })?;
+                    "DuckLake CREATE TABLE failed",
+                    format_query_error_detail(&ddl),
+                    source: err
+                ));
+            }
+        }
 
-            created.store(true, Ordering::Relaxed);
-            Ok(())
-        },
-    )
+        let set_option_sql = format!(
+            "CALL {LAKE_CATALOG}.set_option('data_inlining_row_limit', {}, table_name => {});",
+            STREAMING_PROGRESS_TABLE_DATA_INLINING_ROW_LIMIT,
+            quote_literal(STREAMING_PROGRESS_TABLE),
+        );
+        conn.execute_batch(&set_option_sql).map_err(|error| {
+            etl_error!(
+                ErrorKind::DestinationQueryFailed,
+                "DuckLake set_option failed",
+                format_query_error_detail(&set_option_sql),
+                source: error
+            )
+        })?;
+
+        created.store(true, Ordering::Relaxed);
+        Ok(())
+    })
     .await
 }
 
@@ -471,15 +459,10 @@ pub(super) async fn apply_table_batches_with_retry(
             let pool = Arc::clone(&pool);
             let blocking_slots = Arc::clone(&blocking_slots);
             async move {
-                run_duckdb_blocking(
-                    pool,
-                    blocking_slots,
-                    DuckDbBlockingOperationKind::Foreground,
-                    move |conn| {
-                        apply_table_batches(conn, attempt_batches.as_ref())?;
-                        Ok(())
-                    },
-                )
+                run_duckdb_blocking(pool, blocking_slots, move |conn| {
+                    apply_table_batches(conn, attempt_batches.as_ref())?;
+                    Ok(())
+                })
                 .await
             }
         },
@@ -543,25 +526,20 @@ pub(super) async fn apply_table_batch_with_retry(
             let pool = Arc::clone(&pool);
             let blocking_slots = Arc::clone(&blocking_slots);
             async move {
-                run_duckdb_blocking(
-                    pool,
-                    blocking_slots,
-                    DuckDbBlockingOperationKind::Foreground,
-                    move |conn| {
-                        if batch_kind == DuckLakeTableBatchKind::Copy {
-                            if applied_batch_marker_exists(conn, attempt_batch.as_ref())? {
-                                record_replayed_batch_skip(attempt_batch.as_ref());
-                                return Ok(());
-                            }
-
-                            apply_table_batch(conn, attempt_batch.as_ref())?;
+                run_duckdb_blocking(pool, blocking_slots, move |conn| {
+                    if batch_kind == DuckLakeTableBatchKind::Copy {
+                        if applied_batch_marker_exists(conn, attempt_batch.as_ref())? {
+                            record_replayed_batch_skip(attempt_batch.as_ref());
                             return Ok(());
                         }
 
-                        apply_table_batches(conn, std::slice::from_ref(attempt_batch.as_ref()))?;
-                        Ok(())
-                    },
-                )
+                        apply_table_batch(conn, attempt_batch.as_ref())?;
+                        return Ok(());
+                    }
+
+                    apply_table_batches(conn, std::slice::from_ref(attempt_batch.as_ref()))?;
+                    Ok(())
+                })
                 .await
             }
         },
@@ -1106,7 +1084,7 @@ fn delete_predicate_from_row<'a>(
         replicated_table_schema.identity_column_schemas().collect();
     if identity_column_schemas.is_empty() {
         return Err(etl_error!(
-            ErrorKind::InvalidState,
+            ErrorKind::SourceReplicaIdentityError,
             "DuckLake delete requires a replica identity",
             format!(
                 "Table '{}' has no replicated replica-identity columns",
@@ -1174,7 +1152,7 @@ fn delete_predicate_from_row<'a>(
 
     let mut predicates = Vec::new();
     for (column_schema, value) in key_values {
-        let quoted_column = quote_identifier(&column_schema.name).into_owned();
+        let quoted_column = quote_identifier(&column_schema.name);
         let predicate = match value {
             Cell::Null => format!("{quoted_column} IS NULL"),
             _ => format!("{quoted_column} = {}", cell_to_sql_literal_ref(value)),
@@ -1250,7 +1228,7 @@ fn update_assignments_from_partial_row(
                 )
             ));
         };
-        let quoted_column = quote_identifier(&column_schema.name).into_owned();
+        let quoted_column = quote_identifier(&column_schema.name);
         assignments.push(format!("{quoted_column} = {}", cell_to_sql_literal_ref(value)));
     }
 
@@ -1359,7 +1337,7 @@ fn delete_predicate_from_copy_row(
             continue;
         }
 
-        let quoted_column = quote_identifier(&column_schema.name).into_owned();
+        let quoted_column = quote_identifier(&column_schema.name);
         let predicate = match value {
             Cell::Null => format!("{quoted_column} IS NULL"),
             _ => format!("{quoted_column} = {}", cell_to_sql_literal_ref(value)),
@@ -1579,11 +1557,9 @@ impl ReusableStagingTable {
         self.prepare(conn)?;
         self.load_rows(conn, prepared_rows)?;
 
-        let sql = format!(
-            r#"INSERT INTO {LAKE_CATALOG}."{table_name}" SELECT * FROM {staging:?};"#,
-            table_name = &self.table_name,
-            staging = &self.staging_name,
-        );
+        let target_table = qualified_lake_table_name(&self.table_name);
+        let staging_table = quote_identifier(&self.staging_name);
+        let sql = format!("INSERT INTO {target_table} SELECT * FROM {staging_table};");
         conn.execute_batch(&sql).map_err(|err| {
             tracing::error!(error = %err, "error INSERT INTO");
             etl_error!(
@@ -1602,18 +1578,17 @@ impl ReusableStagingTable {
             return;
         }
 
-        if let Err(error) = conn.execute_batch(&format!(
-            "DROP TABLE IF EXISTS {staging:?}",
-            staging = &self.staging_name
-        )) {
+        let staging_table = quote_identifier(&self.staging_name);
+        if let Err(error) = conn.execute_batch(&format!("DROP TABLE IF EXISTS {staging_table}")) {
             tracing::error!(error = %error, "error drop table staging");
         }
     }
 
     /// Creates the temp table once, then clears it before each reuse.
     fn prepare(&mut self, conn: &duckdb::Connection) -> EtlResult<()> {
+        let staging_table = quote_identifier(&self.staging_name);
         if self.created {
-            let sql = format!("TRUNCATE TABLE {staging:?};", staging = &self.staging_name);
+            let sql = format!("TRUNCATE TABLE {staging_table};");
             conn.execute_batch(&sql).map_err(|error| {
                 tracing::error!(error = %error, "error clear staging");
                 etl_error!(
@@ -1631,11 +1606,10 @@ impl ReusableStagingTable {
             *counts.entry(self.table_name.clone()).or_default() += 1;
         }
 
+        let target_table = qualified_lake_table_name(&self.table_name);
         conn.execute_batch(&format!(
-            r#"CREATE OR REPLACE TEMP TABLE {staging:?} AS
-             SELECT * FROM {LAKE_CATALOG}."{table_name}" LIMIT 0;"#,
-            staging = &self.staging_name,
-            table_name = &self.table_name,
+            "CREATE OR REPLACE TEMP TABLE {staging_table} AS
+             SELECT * FROM {target_table} LIMIT 0;"
         ))
         .map_err(|error| {
             tracing::error!(error = %error, "error CREATE TEMP TABLE");
@@ -1791,7 +1765,8 @@ fn apply_table_batch(
 
 /// Applies the truncate action inside an open transaction.
 fn apply_truncate_batch_action(conn: &duckdb::Connection, table_name: &str) -> EtlResult<()> {
-    let sql = format!(r#"TRUNCATE TABLE {LAKE_CATALOG}."{table_name}";"#);
+    let target_table = qualified_lake_table_name(table_name);
+    let sql = format!("TRUNCATE TABLE {target_table};");
     conn.execute_batch(&sql).map_err(|error| {
         tracing::error!(error = %error, "error TRUNCATE TABLE");
         etl_error!(
@@ -1872,12 +1847,12 @@ fn apply_delete_mutation(
         return Ok(());
     }
 
+    let target_table = qualified_lake_table_name(table_name);
     for chunk in predicates.chunks(SQL_DELETE_BATCH_SIZE) {
         let where_clause =
             chunk.iter().map(|predicate| format!("({predicate})")).collect::<Vec<_>>().join(" OR ");
 
-        let sql_query =
-            format!(r#"DELETE FROM {LAKE_CATALOG}."{table_name}" WHERE {where_clause};"#);
+        let sql_query = format!("DELETE FROM {target_table} WHERE {where_clause};");
         conn.execute_batch(&sql_query).map_err(|error| {
             tracing::error!(error = %error, "error DELETE FROM");
             etl_error!(
@@ -1904,8 +1879,8 @@ fn apply_update_mutation(
     }
 
     let set_clause = assignments.join(", ");
-    let sql_query =
-        format!(r#"UPDATE {LAKE_CATALOG}."{table_name}" SET {set_clause} WHERE {predicate};"#);
+    let target_table = qualified_lake_table_name(table_name);
+    let sql_query = format!("UPDATE {target_table} SET {set_clause} WHERE {predicate};");
     conn.execute_batch(&sql_query).map_err(|err| {
         tracing::error!(error = %err, "error UPDATE");
         etl_error!(
@@ -1987,8 +1962,9 @@ fn insert_rows_into_staging_with_sql(
     staging: &str,
     row_literals: &[String],
 ) -> EtlResult<()> {
+    let staging_table = quote_identifier(staging);
     for chunk in row_literals.chunks(SQL_INSERT_BATCH_SIZE) {
-        conn.execute_batch(&format!("INSERT INTO {staging:?} VALUES {};", chunk.join(", ")))
+        conn.execute_batch(&format!("INSERT INTO {staging_table} VALUES {};", chunk.join(", ")))
             .map_err(|err| {
                 tracing::error!(error = %err, "error insert_rows_into_staging_with_sql");
                 etl_error!(
@@ -2128,7 +2104,7 @@ mod tests {
 
         assert_eq!(
             delete_predicate_from_row(&replicated_table_schema, &row).unwrap(),
-            "tenant_id = 7 AND id = 42"
+            "\"tenant_id\" = 7 AND \"id\" = 42"
         );
     }
 
@@ -2156,7 +2132,7 @@ mod tests {
 
         assert_eq!(
             delete_predicate_from_row(&replicated_table_schema, &row).unwrap(),
-            "email = 'alice@example.com'"
+            "\"email\" = 'alice@example.com'"
         );
     }
 
@@ -2184,7 +2160,7 @@ mod tests {
 
         assert_eq!(
             delete_predicate_from_row(&replicated_table_schema, &row).unwrap(),
-            "id = 7 AND email = 'alice@example.com' AND name = 'alice'"
+            "\"id\" = 7 AND \"email\" = 'alice@example.com' AND \"name\" = 'alice'"
         );
     }
 
@@ -2200,7 +2176,7 @@ mod tests {
 
         let error = delete_predicate_from_row(&replicated_table_schema, &row).unwrap_err();
 
-        assert_eq!(error.kind(), ErrorKind::InvalidState);
+        assert_eq!(error.kind(), ErrorKind::SourceReplicaIdentityError);
         assert_eq!(error.description(), Some("DuckLake delete requires a replica identity"));
     }
 
@@ -2216,7 +2192,7 @@ mod tests {
         assert_eq!(prepared.len(), 2);
         match &prepared[0] {
             PreparedTableMutation::Delete { predicates, origin } => {
-                assert_eq!(predicates, &vec!["id = 1".to_owned()]);
+                assert_eq!(predicates, &vec!["\"id\" = 1".to_owned()]);
                 assert_eq!(origin, &"replace");
             }
             PreparedTableMutation::Upsert(_) | PreparedTableMutation::Update { .. } => {
@@ -2255,8 +2231,11 @@ mod tests {
         assert_eq!(prepared.len(), 1);
         match &prepared[0] {
             PreparedTableMutation::Update { assignments, predicate } => {
-                assert_eq!(assignments, &vec!["id = 1".to_owned(), "name = 'after'".to_owned()]);
-                assert_eq!(predicate, "id = 1");
+                assert_eq!(
+                    assignments,
+                    &vec!["\"id\" = 1".to_owned(), "\"name\" = 'after'".to_owned()]
+                );
+                assert_eq!(predicate, "\"id\" = 1");
             }
             PreparedTableMutation::Upsert(_) | PreparedTableMutation::Delete { .. } => {
                 panic!("expected update")
@@ -2307,12 +2286,12 @@ mod tests {
                 assert_eq!(
                     assignments,
                     &vec![
-                        "id = 1".to_owned(),
-                        "email = 'alice@new.example.com'".to_owned(),
-                        "name = 'ripe'".to_owned(),
+                        "\"id\" = 1".to_owned(),
+                        "\"email\" = 'alice@new.example.com'".to_owned(),
+                        "\"name\" = 'ripe'".to_owned(),
                     ]
                 );
-                assert_eq!(predicate, "email = 'alice@example.com'");
+                assert_eq!(predicate, "\"email\" = 'alice@example.com'");
             }
             PreparedTableMutation::Upsert(_) | PreparedTableMutation::Delete { .. } => {
                 panic!("expected update")
@@ -2366,15 +2345,15 @@ mod tests {
                 assert_eq!(
                     assignments,
                     &vec![
-                        "id = 1".to_owned(),
-                        "email = 'alice@example.com'".to_owned(),
-                        "name = 'grown'".to_owned(),
+                        "\"id\" = 1".to_owned(),
+                        "\"email\" = 'alice@example.com'".to_owned(),
+                        "\"name\" = 'grown'".to_owned(),
                     ]
                 );
                 assert_eq!(
                     predicate,
-                    "id = 1 AND email = 'alice@example.com' AND name = 'seed' AND payload = \
-                     'toast'"
+                    "\"id\" = 1 AND \"email\" = 'alice@example.com' AND \"name\" = 'seed' AND \
+                     \"payload\" = 'toast'"
                 );
             }
             PreparedTableMutation::Upsert(_) | PreparedTableMutation::Delete { .. } => {
@@ -2526,7 +2505,10 @@ mod tests {
                 match &prepared[0] {
                     PreparedTableMutation::Delete { predicates, origin } => {
                         assert_eq!(origin, &"delete");
-                        assert_eq!(predicates, &vec!["id = 1".to_owned(), "id = 2".to_owned()]);
+                        assert_eq!(
+                            predicates,
+                            &vec!["\"id\" = 1".to_owned(), "\"id\" = 2".to_owned()]
+                        );
                     }
                     PreparedTableMutation::Upsert(_) | PreparedTableMutation::Update { .. } => {
                         panic!("expected delete batch")

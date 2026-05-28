@@ -26,21 +26,29 @@ path = "src/bin/ducklake.rs"
 required-features = ["ducklake"]
 test = false
 
+[[bin]]
+name = "snowflake"
+path = "src/bin/snowflake.rs"
+required-features = ["snowflake"]
+test = false
+
 [features]
 default = []
 bigquery = ["etl-destinations/bigquery"]
 clickhouse = ["etl-destinations/clickhouse"]
 ducklake = ["etl-destinations/ducklake"]
+snowflake = ["etl-destinations/snowflake", "dep:secrecy"]
 
 [dependencies]
 
-clap = { workspace = true, default-features = true, features = ["std", "derive"] }
+clap = { workspace = true, default-features = true, features = ["std", "derive", "env"] }
 etl = { workspace = true }
+etl-config = { workspace = true }
 etl-destinations = { workspace = true }
-etl-telemetry = { workspace = true }
 k8s-openapi = { workspace = true, features = ["latest"] }
 rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
-tokio = { workspace = true, features = ["macros", "signal"] }
+secrecy = { workspace = true, optional = true }
+tokio = { workspace = true, features = ["macros", "signal", "time"] }
 tracing = { workspace = true, default-features = true }
 tracing-subscriber = { workspace = true, default-features = true, features = ["env-filter"] }
 url = { workspace = true }

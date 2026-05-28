@@ -13,16 +13,16 @@
   - `crates/etl-benchmarks/`: benchmarks.
   - `crates/xtask/`: workspace automation commands.
 - Docs live in `docs/`.
-- Local development and ops tooling live in `scripts/` and `DEVELOPMENT.md`.
+- Local development and ops tooling live in `crates/xtask/` (run via `cargo x`) and `DEVELOPMENT.md`.
 - Tests live next to code in `src/` or `tests/`.
 
 ## Commands
 - Build everything:
   - `cargo build --workspace --all-targets --all-features`
 - Format:
-  - `./scripts/fmt`
+  - `cargo x fmt`
 - Check formatting:
-  - `./scripts/fmt-check`
+  - `cargo x fmt --check`
 - Lint:
   - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
 - Run unit tests (no Postgres required):
@@ -43,7 +43,10 @@
 - Do not add dependencies unless they are justified by the task.
 - If you change workflow assumptions, build or test the smallest relevant target and report what actually ran.
 - Never create commits, push branches, open pull requests, or perform other git write actions unless the user explicitly instructs you to do so.
-- Keep the workspace on the stable toolchain from `rust-toolchain.toml` for build, lint, and test commands; use the pinned nightly formatter only through `./scripts/fmt` and `./scripts/fmt-check`.
+- Never modify migration files unless the user explicitly asks for a migration
+  change. This includes changing comments or other non-executable text inside
+  migration files.
+- Keep the workspace on the stable toolchain from `rust-toolchain.toml` for build, lint, and test commands; use the pinned nightly formatter only through `cargo x fmt` and `cargo x fmt --check`.
 - Treat `Cargo.toml` workspace lints, `rustfmt.toml`, and compiler diagnostics as the source of truth for enforceable style and correctness rules. Prefer adding or tightening static checks over adding prose rules here.
 - Run Clippy, builds, and tests intentionally when they are relevant: for example
   after changing Rust code, when compiler/lint diagnostics indicate a problem,
@@ -60,10 +63,16 @@
 ## Rust Style
 - This section is only for project-specific judgment that is not already covered by rustfmt, rustc, or Clippy.
 - Prefer absolute crate imports for shared module items, for example `use crate::metrics::{PIPELINE_ID_LABEL, APP_TYPE_LABEL};`, instead of `use super::{...};`.
+- Write SQL queries with lowercase SQL keywords and identifiers, unless quoting or an external API requires specific casing.
 - When multiple files share constants, helpers, or a single entrypoint, prefer a module directory with `mod.rs`.
 - Keep top-level binaries focused on orchestration; move implementation detail into helpers or modules.
 - Prefer clear, boring code over clever abstractions.
 - Prefer existing workspace patterns over introducing new local conventions.
+- Keep item order local and readable: place supporting helpers and types before
+  their use when practical, and group type-centered code as `struct`, inherent
+  `impl`, then trait impls. Within inherent impls, put constructors first,
+  externally visible methods next, and private helpers last.
+- Do not add `#[must_use]` attributes unless the user explicitly asks for one.
 - Default to private visibility and only widen when a real caller requires it.
 - Prefer the narrowest working visibility in this order: private, `pub(super)`, `pub(crate)`, then `pub`.
 - Use `pub` only for intentional crate APIs consumed by other crates, integration tests, examples, or documented user-facing entrypoints.
@@ -104,6 +113,12 @@
 ## Documentation
 - Document all items, public and private, using concise stdlib-style prose.
 - Link types and methods as [`Type`] and [`Type::method`].
+- In public or module-level docs, prefer fully qualified rustdoc links such as
+  [`crate::store::PipelineStore`] when referencing items outside the current
+  module.
+- In item docs where the type is already imported and central to the code,
+  short rustdoc links such as [`StateStore`] are fine.
+- Do not add imports solely to make rustdoc links shorter.
 - Keep comments and docs precise, short, and punctuated.
 - Normal comments should always end with `.`.
 - Do not add code examples in rustdoc for this repository.
@@ -119,15 +134,20 @@
   values. Prefer metadata that helps debugging without exposing values, such as
   table and column names, type names, counts, lengths, LSNs, IDs, and operation
   names.
+- When adding logs, metrics, traces, Sentry context, panic messages, or other
+  observability output, be extra careful not to leak customer data or detailed
+  table contents. Higher-level structural metadata, such as table names, column
+  names, type names, counts, lengths, IDs, and operation names, can be included
+  when useful for debugging; do not include cell values, row payloads, request
+  or response bodies, credentials, tokens, or secrets.
 - In production logs, key errors as `error = %err` or `error = %error`
   regardless of the local variable name. Do not use `err =`, `source =`, or
   debug formatting for the primary error field.
 - Prefer `Display` formatting (`%`) or explicit structured fields over
   `Debug` formatting (`?`) for structs in logs, unless the type is known not to
   contain sensitive values.
-- For table replication phase logs, always use
-  `table_replication_phase_type` for one phase and
-  `table_replication_phase_types` for lists.
+- For table state logs, always use `table_state_type` for one state and
+  `table_state_types` for lists.
 - For Sentry, wrap sensitive API route groups with the sensitive Sentry scope
   marker and scrub request/response body capture from marked events. Do not
   duplicate route sensitivity with separate path matchers in the scrubber.

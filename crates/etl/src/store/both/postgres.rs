@@ -5,7 +5,10 @@ use std::{
     time::Duration,
 };
 
-use etl_postgres::replication::{destination_metadata, progress, schema, state};
+use etl_postgres::replication::{
+    destination_table_metadata as pg_destination_table_metadata, progress, schema,
+    table_state as pg_table_state,
+};
 use metrics::gauge;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use tokio::sync::Mutex;
@@ -15,19 +18,17 @@ use crate::{
     config::{ETL_STATE_MANAGEMENT_OPTIONS, IntoConnectOptions, PgConnectionConfig},
     error::{ErrorKind, EtlResult},
     etl_error,
-    metrics::{ETL_TABLES_TOTAL, PHASE_LABEL},
+    metrics::{ETL_TABLES_TOTAL, STATE_LABEL},
     migrations,
     replication::WorkerType,
     state::{
-        destination_metadata::{
-            AppliedDestinationTableMetadata, DestinationTableMetadata, DestinationTableSchemaStatus,
-        },
-        table::TableReplicationPhase,
+        AppliedDestinationTableMetadata, DestinationTableMetadata, DestinationTableSchemaStatus,
+        TableState, TableStateType,
     },
     store::{
-        cleanup::CleanupStore,
+        lifecycle::TableLifecycleStore,
         schema::{SchemaStore, TableSchemaRetention, TableSchemaSnapshots},
-        state::{DestinationTablesMetadata, StateStore, TableReplicationStates},
+        state::{DestinationTablesMetadata, StateStore, TableStates},
     },
     types::{PgLsn, PipelineId, ReplicationMask, SnapshotId, TableId, TableSchema},
 };
@@ -45,6 +46,15 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 /// need more than 2 schema versions for any given table.
 const MAX_CACHED_SCHEMAS_PER_TABLE: usize = 2;
 
+/// Scope of table-scoped state removal.
+#[derive(Debug, Clone, Copy)]
+enum TableStateCleanupScope {
+    /// Clear state that belongs to the previous table copy.
+    CopyRestart,
+    /// Delete all ETL state for a table removed from the publication.
+    PipelineRemoval,
+}
+
 /// Creates a lazily connected pool with automatic idle connection cleanup.
 ///
 /// This function returns immediately without establishing any connections.
@@ -53,7 +63,7 @@ const MAX_CACHED_SCHEMAS_PER_TABLE: usize = 2;
 ///
 /// This is ideal for the store connection since we might want a connection to
 /// be open for a while and then closed when it's unnecessary since after the
-/// first table copy phase, we don't update the state so often.
+/// first table copy state, we don't update the state so often.
 fn create_database_pool(config: &PgConnectionConfig) -> PgPool {
     let options = config.with_db(Some(&ETL_STATE_MANAGEMENT_OPTIONS));
 
@@ -65,10 +75,11 @@ fn create_database_pool(config: &PgConnectionConfig) -> PgPool {
 }
 
 /// Emits table-related metrics which quantify the total number of tables in
-/// each phase.
-fn emit_table_metrics(counts_by_phase: &HashMap<&'static str, u64>) {
-    for (phase, count) in counts_by_phase {
-        gauge!(ETL_TABLES_TOTAL, PHASE_LABEL => *phase).set(*count as f64);
+/// each state.
+fn emit_table_metrics(counts_by_state: &HashMap<TableStateType, u64>) {
+    for (state, count) in counts_by_state {
+        let label: &'static str = (*state).into();
+        gauge!(ETL_TABLES_TOTAL, STATE_LABEL => label).set(*count as f64);
     }
 }
 
@@ -79,10 +90,10 @@ fn emit_table_metrics(counts_by_phase: &HashMap<&'static str, u64>) {
 /// per-table locking algorithm would improve throughput.
 #[derive(Debug)]
 struct Inner {
-    /// Count of number of tables in each phase. Used for metrics.
-    phase_counts: HashMap<&'static str, u64>,
-    /// Cached table replication states indexed by table ID.
-    table_states: TableReplicationStates,
+    /// Count of number of tables in each state. Used for metrics.
+    state_counts: HashMap<TableStateType, u64>,
+    /// Cached table states indexed by table ID.
+    table_states: TableStates,
     /// Cached table schema snapshots.
     ///
     /// This cache is optimized for keeping the most actively used schemas in
@@ -96,41 +107,42 @@ struct Inner {
 }
 
 impl Inner {
-    /// Initializes phase counts from an existing table states map.
-    fn init_phase_counts(&mut self, table_states: &BTreeMap<TableId, TableReplicationPhase>) {
-        let mut phase_counts = HashMap::new();
-        for phase in table_states.values() {
-            *phase_counts.entry(phase.as_type().as_static_str()).or_insert(0u64) += 1;
+    /// Initializes state counts from an existing table state map.
+    fn init_state_counts(&mut self, table_states: &BTreeMap<TableId, TableState>) {
+        let mut state_counts = HashMap::new();
+        for state in table_states.values() {
+            let state_type: TableStateType = state.into();
+            *state_counts.entry(state_type).or_insert(0u64) += 1;
         }
-        self.phase_counts = phase_counts;
+        self.state_counts = state_counts;
     }
 
-    /// Inserts or updates a table state and adjusts phase counts accordingly.
-    fn set_table_state(&mut self, table_id: TableId, state: TableReplicationPhase) {
+    /// Inserts or updates a table state and adjusts state counts accordingly.
+    fn set_table_state(&mut self, table_id: TableId, state: TableState) {
         let states = Arc::make_mut(&mut self.table_states);
 
-        // Decrement old phase count if the state existed.
+        // Decrement old state count if the state existed.
         if let Some(old_state) = states.get(&table_id) {
-            let old_phase = old_state.as_type().as_static_str();
-            if let Some(count) = self.phase_counts.get_mut(old_phase) {
+            let old_state_type: TableStateType = old_state.into();
+            if let Some(count) = self.state_counts.get_mut(&old_state_type) {
                 *count = count.saturating_sub(1);
             }
         }
 
-        // Increment new phase count.
-        let new_phase = state.as_type().as_static_str();
-        let phase_count = self.phase_counts.entry(new_phase).or_default();
-        *phase_count = phase_count.saturating_add(1);
+        // Increment new state count.
+        let new_state: TableStateType = (&state).into();
+        let state_count = self.state_counts.entry(new_state).or_default();
+        *state_count = state_count.saturating_add(1);
 
         states.insert(table_id, state);
     }
 
-    /// Removes a table state and adjusts phase counts accordingly.
+    /// Removes a table state and adjusts state counts accordingly.
     fn remove_table_state(&mut self, table_id: TableId) {
         let states = Arc::make_mut(&mut self.table_states);
         if let Some(old_state) = states.remove(&table_id) {
-            let old_phase = old_state.as_type().as_static_str();
-            if let Some(count) = self.phase_counts.get_mut(old_phase) {
+            let old_state_type: TableStateType = (&old_state).into();
+            if let Some(count) = self.state_counts.get_mut(&old_state_type) {
                 *count = count.saturating_sub(1);
             }
         }
@@ -139,8 +151,9 @@ impl Inner {
 
 /// Postgres-backed storage for ETL pipeline state and schema information.
 ///
-/// [`PostgresStore`] implements both [`StateStore`] and [`SchemaStore`] traits,
-/// providing persistent storage of replication state and schema information
+/// [`PostgresStore`] implements the store traits required by
+/// [`crate::store::PipelineStore`], providing persistent storage of replication
+/// state, schema information, table lifecycle data, and destination metadata
 /// directly in the source Postgres database. This ensures durability and
 /// consistency of the pipeline state across restarts.
 ///
@@ -175,7 +188,7 @@ impl PostgresStore {
 
         let pool = create_database_pool(&source_config);
         let inner = Inner {
-            phase_counts: HashMap::new(),
+            state_counts: HashMap::new(),
             table_states: Arc::new(BTreeMap::new()),
             table_schemas: Arc::new(TableSchemaSnapshots::default()),
             destination_tables_metadata: Arc::new(BTreeMap::new()),
@@ -183,81 +196,137 @@ impl PostgresStore {
 
         Ok(Self { pipeline_id, pool, inner: Arc::new(Mutex::new(inner)) })
     }
+
+    /// Deletes table-scoped persistent and cached state according to the
+    /// requested scope.
+    async fn delete_table_state_for_scope(
+        &self,
+        table_id: TableId,
+        scope: TableStateCleanupScope,
+    ) -> EtlResult<()> {
+        let mut inner = self.inner.lock().await;
+        let mut tx = self.pool.begin().await?;
+
+        pg_destination_table_metadata::delete_destination_table_metadata(
+            &mut *tx,
+            self.pipeline_id as i64,
+            table_id,
+        )
+        .await
+        .map_err(|err| {
+            etl_error!(
+                ErrorKind::SourceQueryFailed,
+                "Destination table metadata deletion failed",
+                source: err
+            )
+        })?;
+
+        schema::delete_table_schema_for_table(&mut *tx, self.pipeline_id as i64, table_id)
+            .await
+            .map_err(|err| {
+                etl_error!(
+                    ErrorKind::SourceQueryFailed,
+                    "Table schema deletion failed",
+                    source: err
+                )
+            })?;
+
+        if matches!(scope, TableStateCleanupScope::PipelineRemoval) {
+            pg_table_state::delete_table_state(&mut *tx, self.pipeline_id as i64, table_id).await?;
+        }
+
+        progress::delete_replication_progress_for_table(
+            &mut *tx,
+            self.pipeline_id as i64,
+            table_id,
+        )
+        .await
+        .map_err(|err| {
+            etl_error!(
+                ErrorKind::SourceQueryFailed,
+                "Replication progress deletion failed",
+                source: err
+            )
+        })?;
+
+        tx.commit().await?;
+
+        if matches!(scope, TableStateCleanupScope::PipelineRemoval) {
+            inner.remove_table_state(table_id);
+            emit_table_metrics(&inner.state_counts);
+        }
+
+        Arc::make_mut(&mut inner.table_schemas).remove_table(table_id);
+        Arc::make_mut(&mut inner.destination_tables_metadata).remove(&table_id);
+
+        Ok(())
+    }
 }
 
 impl StateStore for PostgresStore {
-    /// Retrieves the replication state for a specific table from cache.
+    /// Retrieves the table state for a specific table from cache.
     ///
-    /// This method provides fast access to table replication states by reading
+    /// This method provides fast access to table states by reading
     /// from the in-memory cache. The cache is populated during startup and
     /// updated as states change during replication processing.
-    async fn get_table_replication_state(
-        &self,
-        table_id: TableId,
-    ) -> EtlResult<Option<TableReplicationPhase>> {
+    async fn get_table_state(&self, table_id: TableId) -> EtlResult<Option<TableState>> {
         let inner = self.inner.lock().await;
 
         Ok(inner.table_states.get(&table_id).cloned())
     }
 
-    /// Retrieves all table replication states from cache.
+    /// Retrieves all table states from cache.
     ///
-    /// This method returns a complete snapshot of all cached table replication
-    /// states. It's useful for pipeline initialization and state inspection
-    /// operations that need visibility into all tables.
-    async fn get_table_replication_states(&self) -> EtlResult<TableReplicationStates> {
+    /// This method returns a complete snapshot of all cached table states. It's
+    /// useful for pipeline initialization and state inspection operations that
+    /// need visibility into all tables.
+    async fn get_table_states(&self) -> EtlResult<TableStates> {
         let inner = self.inner.lock().await;
 
         Ok(Arc::clone(&inner.table_states))
     }
 
-    /// Loads table replication states from Postgres into memory cache.
+    /// Loads table states from Postgres into memory cache.
     ///
     /// This method connects to the source database, retrieves all table
-    /// replication state rows for this pipeline, deserializes the state
+    /// table state rows for this pipeline, deserializes the state
     /// metadata, and populates the in-memory cache. It's typically called
     /// during pipeline startup to restore state from previous runs.
-    async fn load_table_replication_states(&self) -> EtlResult<usize> {
-        debug!("loading table replication states from postgres state store");
+    async fn load_table_states(&self) -> EtlResult<usize> {
+        debug!("loading table states from postgres state store");
 
         let mut inner = self.inner.lock().await;
         let replication_state_rows =
-            state::get_table_replication_state_rows(&self.pool, self.pipeline_id as i64).await?;
+            pg_table_state::get_table_state_rows(&self.pool, self.pipeline_id as i64).await?;
 
-        let mut table_states: BTreeMap<TableId, TableReplicationPhase> = BTreeMap::new();
+        let mut table_states: BTreeMap<TableId, TableState> = BTreeMap::new();
         for row in replication_state_rows {
             let table_id = TableId::new(row.table_id.0);
-            let phase = TableReplicationPhase::from_state_row(row)?;
-            table_states.insert(table_id, phase);
+            let state = TableState::from_state_row(row)?;
+            table_states.insert(table_id, state);
         }
 
         let table_states_len = table_states.len();
 
-        inner.init_phase_counts(&table_states);
+        inner.init_state_counts(&table_states);
         inner.table_states = Arc::new(table_states);
-        emit_table_metrics(&inner.phase_counts);
+        emit_table_metrics(&inner.state_counts);
 
-        info!(
-            count = table_states_len,
-            "loaded table replication states from postgres state store"
-        );
+        info!(count = table_states_len, "loaded table states from postgres state store");
 
         Ok(table_states_len)
     }
 
-    /// Updates multiple table replication states atomically in both database
+    /// Updates multiple table states atomically in both database
     /// and cache.
-    async fn update_table_replication_states(
-        &self,
-        updates: Vec<(TableId, TableReplicationPhase)>,
-    ) -> EtlResult<()> {
+    async fn update_table_states(&self, updates: Vec<(TableId, TableState)>) -> EtlResult<()> {
         // Convert all states upfront to catch any conversion errors before starting the
-        // transaction
-        let db_updates: Vec<(TableId, state::TableReplicationStateType, serde_json::Value)> =
+        // transaction.
+        let db_updates: Vec<(TableId, pg_table_state::StoredTableStateType, serde_json::Value)> =
             updates
                 .iter()
-                .map(|(table_id, phase)| {
-                    let (state_type, metadata) = phase.to_storage_format()?;
+                .map(|(table_id, state)| {
+                    let (state_type, metadata) = state.to_storage_format()?;
                     Ok((*table_id, state_type, metadata))
                 })
                 .collect::<EtlResult<Vec<_>>>()?;
@@ -267,7 +336,7 @@ impl StateStore for PostgresStore {
         // Perform all database updates in a single transaction.
         let mut tx = self.pool.begin().await?;
         for (table_id, state_type, metadata) in db_updates {
-            state::update_replication_state_raw(
+            pg_table_state::update_table_state_raw(
                 &mut *tx,
                 self.pipeline_id as i64,
                 table_id,
@@ -282,23 +351,20 @@ impl StateStore for PostgresStore {
         for (table_id, state) in updates {
             inner.set_table_state(table_id, state);
         }
-        emit_table_metrics(&inner.phase_counts);
+        emit_table_metrics(&inner.state_counts);
 
         Ok(())
     }
 
-    /// Rolls back a table's replication state to the previous version.
+    /// Rolls back a table's table state to the previous version.
     ///
     /// Returns the restored state, or an error if no previous state exists.
-    async fn rollback_table_replication_state(
-        &self,
-        table_id: TableId,
-    ) -> EtlResult<TableReplicationPhase> {
+    async fn rollback_table_state(&self, table_id: TableId) -> EtlResult<TableState> {
         let mut inner = self.inner.lock().await;
         let mut tx = self.pool.begin().await?;
 
         let restored_row =
-            state::rollback_replication_state(tx.deref_mut(), self.pipeline_id as i64, table_id)
+            pg_table_state::rollback_table_state(tx.deref_mut(), self.pipeline_id as i64, table_id)
                 .await?
                 .ok_or_else(|| {
                     etl_error!(
@@ -308,13 +374,13 @@ impl StateStore for PostgresStore {
                     )
                 })?;
 
-        let restored_phase = TableReplicationPhase::from_state_row(restored_row)?;
+        let restored_state = TableState::from_state_row(restored_row)?;
         tx.commit().await?;
 
-        inner.set_table_state(table_id, restored_phase.clone());
-        emit_table_metrics(&inner.phase_counts);
+        inner.set_table_state(table_id, restored_state.clone());
+        emit_table_metrics(&inner.state_counts);
 
-        Ok(restored_phase)
+        Ok(restored_state)
     }
 
     async fn get_replication_progress(&self, worker_type: WorkerType) -> EtlResult<Option<PgLsn>> {
@@ -410,7 +476,7 @@ impl StateStore for PostgresStore {
         debug!("loading destination tables metadata from postgres state store");
 
         let mut inner = self.inner.lock().await;
-        let rows = destination_metadata::load_destination_tables_metadata(
+        let rows = pg_destination_table_metadata::load_destination_tables_metadata(
             &self.pool,
             self.pipeline_id as i64,
         )
@@ -458,7 +524,7 @@ impl StateStore for PostgresStore {
         );
 
         let mut inner = self.inner.lock().await;
-        destination_metadata::store_destination_table_metadata(
+        pg_destination_table_metadata::store_destination_table_metadata(
             &self.pool,
             self.pipeline_id as i64,
             table_id,
@@ -636,85 +702,42 @@ impl SchemaStore for PostgresStore {
     }
 }
 
-impl CleanupStore for PostgresStore {
+impl TableLifecycleStore for PostgresStore {
+    async fn clear_table_copy_state(&self, table_id: TableId) -> EtlResult<()> {
+        self.delete_table_state_for_scope(table_id, TableStateCleanupScope::CopyRestart).await
+    }
+
     /// Removes all state for a table from both database and cache.
-    async fn cleanup_table_state(&self, table_id: TableId) -> EtlResult<()> {
-        let mut inner = self.inner.lock().await;
-        let mut tx = self.pool.begin().await?;
-
-        destination_metadata::delete_destination_table_metadata(
-            &mut *tx,
-            self.pipeline_id as i64,
-            table_id,
-        )
-        .await
-        .map_err(|err| {
-            etl_error!(
-                ErrorKind::SourceQueryFailed,
-                "Destination table metadata deletion failed",
-                format!("Failed to delete destination table metadata in PostgreSQL: {}", err)
-            )
-        })?;
-
-        schema::delete_table_schema_for_table(&mut *tx, self.pipeline_id as i64, table_id)
-            .await
-            .map_err(|err| {
-                etl_error!(
-                    ErrorKind::SourceQueryFailed,
-                    "Table schema deletion failed",
-                    format!("Failed to delete table schema in PostgreSQL: {}", err)
-                )
-            })?;
-
-        state::delete_replication_state_for_table(&mut *tx, self.pipeline_id as i64, table_id)
-            .await?;
-
-        progress::delete_replication_progress_for_table(
-            &mut *tx,
-            self.pipeline_id as i64,
-            table_id,
-        )
-        .await
-        .map_err(|err| {
-            etl_error!(
-                ErrorKind::SourceQueryFailed,
-                "Replication progress deletion failed",
-                source: err
-            )
-        })?;
-
-        tx.commit().await?;
-
-        inner.remove_table_state(table_id);
-        Arc::make_mut(&mut inner.table_schemas).remove_table(table_id);
-        Arc::make_mut(&mut inner.destination_tables_metadata).remove(&table_id);
-        emit_table_metrics(&inner.phase_counts);
-
-        Ok(())
+    async fn delete_table_pipeline_state(&self, table_id: TableId) -> EtlResult<()> {
+        self.delete_table_state_for_scope(table_id, TableStateCleanupScope::PipelineRemoval).await
     }
 }
 
-impl From<destination_metadata::DestinationTableSchemaStatus> for DestinationTableSchemaStatus {
-    fn from(value: destination_metadata::DestinationTableSchemaStatus) -> Self {
+impl From<pg_destination_table_metadata::DestinationTableSchemaStatus>
+    for DestinationTableSchemaStatus
+{
+    fn from(value: pg_destination_table_metadata::DestinationTableSchemaStatus) -> Self {
         match value {
-            destination_metadata::DestinationTableSchemaStatus::Applying => {
+            pg_destination_table_metadata::DestinationTableSchemaStatus::Applying => {
                 DestinationTableSchemaStatus::Applying
             }
-            destination_metadata::DestinationTableSchemaStatus::Applied => {
+            pg_destination_table_metadata::DestinationTableSchemaStatus::Applied => {
                 DestinationTableSchemaStatus::Applied
             }
         }
     }
 }
 
-impl From<DestinationTableSchemaStatus> for destination_metadata::DestinationTableSchemaStatus {
+impl From<DestinationTableSchemaStatus>
+    for pg_destination_table_metadata::DestinationTableSchemaStatus
+{
     fn from(value: DestinationTableSchemaStatus) -> Self {
         match value {
             DestinationTableSchemaStatus::Applying => {
-                destination_metadata::DestinationTableSchemaStatus::Applying
+                pg_destination_table_metadata::DestinationTableSchemaStatus::Applying
             }
             DestinationTableSchemaStatus::Applied => {
-                destination_metadata::DestinationTableSchemaStatus::Applied
+                pg_destination_table_metadata::DestinationTableSchemaStatus::Applied
             }
         }
     }

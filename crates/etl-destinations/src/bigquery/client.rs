@@ -13,7 +13,11 @@ use gcp_bigquery_client::{
         cloud::bigquery::storage::v1::{RowError, StorageError, storage_error::StorageErrorCode},
         rpc::Status as GoogleRpcStatus,
     },
-    model::{query_request::QueryRequest, query_response::ResultSet},
+    model::{
+        query_parameter::QueryParameter, query_parameter_type::QueryParameterType,
+        query_parameter_value::QueryParameterValue, query_request::QueryRequest,
+        query_response::ResultSet,
+    },
     storage::{
         BatchAppendRequest, BatchAppendResult, ColumnMode, ColumnType, FieldDescriptor,
         StorageApiConfig, StreamName, TableBatch, TableDescriptor,
@@ -32,6 +36,7 @@ use crate::bigquery::{
     metrics::{
         ETL_BQ_APPEND_BATCHES_BATCH_ERRORS_TOTAL, ETL_BQ_APPEND_BATCHES_BATCH_ROW_ERRORS_TOTAL,
     },
+    sql::{quote_identifier, quote_information_schema_tables_path, quote_table_path},
 };
 
 /// Multiplier for calculating max inflight requests from pool size.
@@ -45,15 +50,16 @@ const MAX_INFLIGHT_REQUESTS_PER_CONNECTION: usize = 100;
 /// This upper bound ensures reasonable memory usage and prevents overflow when
 /// computing max inflight requests from connection pool size.
 const MAX_SAFE_INFLIGHT_REQUESTS: usize = 100_000;
-/// Maximum time to retry appends while BigQuery propagates a schema change.
+/// Maximum time to retry writes while the BigQuery Storage Write API is still
+/// using stale table metadata.
 ///
 /// Google documents schema update detection as happening on the order of
 /// minutes.
-const SCHEMA_PROPAGATION_RETRY_TIMEOUT: Duration = Duration::from_secs(180);
-/// Initial backoff when retrying appends during schema propagation.
-const SCHEMA_PROPAGATION_RETRY_DELAY: Duration = Duration::from_secs(1);
-/// Maximum backoff when retrying appends during schema propagation.
-const SCHEMA_PROPAGATION_MAX_RETRY_DELAY: Duration = Duration::from_secs(15);
+const STORAGE_WRITE_METADATA_LAG_RETRY_TIMEOUT: Duration = Duration::from_secs(180);
+/// Initial backoff when retrying writes during storage write metadata lag.
+const STORAGE_WRITE_METADATA_LAG_RETRY_DELAY: Duration = Duration::from_secs(1);
+/// Maximum backoff when retrying writes during storage write metadata lag.
+const STORAGE_WRITE_METADATA_LAG_MAX_RETRY_DELAY: Duration = Duration::from_secs(15);
 /// Protobuf type name for BigQuery storage errors embedded in gRPC status
 /// details.
 const BIGQUERY_STORAGE_ERROR_TYPE_NAME: &str = "google.cloud.bigquery.storage.v1.StorageError";
@@ -79,18 +85,23 @@ pub(super) enum BigQueryOperationType {
 }
 
 impl BigQueryOperationType {
+    /// Returns the BigQuery CDC operation string.
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Upsert => "UPSERT",
+            Self::Delete => "DELETE",
+        }
+    }
+
     /// Converts the operation type into a [`Cell`] for streaming.
     pub(super) fn into_cell(self) -> Cell {
-        Cell::String(self.to_string())
+        Cell::String(self.as_str().to_owned())
     }
 }
 
 impl fmt::Display for BigQueryOperationType {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            BigQueryOperationType::Upsert => write!(f, "UPSERT"),
-            BigQueryOperationType::Delete => write!(f, "DELETE"),
-        }
+        write!(f, "{}", self.as_str())
     }
 }
 
@@ -99,8 +110,8 @@ impl fmt::Display for BigQueryOperationType {
 enum BatchProcessResult {
     /// Batch succeeded with byte metrics.
     Success { bytes_sent: usize, bytes_received: usize },
-    /// Batch hit schema propagation after DDL and should be retried.
-    RetryableSchemaPropagation { detail: String },
+    /// Batch hit storage write metadata lag after DDL and should be retried.
+    RetryableStorageWriteMetadataLag { detail: String },
     /// Batch had row-level errors.
     RowErrors { errors: Vec<RowError> },
     /// Batch had a request-level error.
@@ -122,18 +133,21 @@ enum AppendProcessingResult {
     Error(EtlError),
 }
 
-/// A batch append request that should be retried after schema propagation
-/// finishes.
+/// A batch append request that should be retried after Storage Write metadata
+/// lag clears.
 #[derive(Debug)]
 struct RetryableAppendRequest {
     request: BatchAppendRequest<BigQueryTableRow>,
     detail: String,
 }
 
-/// Builds a concise description for a set of schema-propagation retries.
-fn format_retryable_append_requests(requests: &[RetryableAppendRequest]) -> String {
+/// Builds a concise description for a set of Storage Write metadata lag
+/// retries.
+fn format_retryable_storage_write_metadata_lag_requests(
+    requests: &[RetryableAppendRequest],
+) -> String {
     match requests.split_first() {
-        None => "schema propagation error".to_owned(),
+        None => "storage write metadata lag error".to_owned(),
         Some((first, [])) => first.detail.clone(),
         Some((first, rest)) => {
             let distinct_other_details =
@@ -237,9 +251,7 @@ fn append_processing_result_from_request_error(
     error: BQError,
     append_requests: Vec<BatchAppendRequest<BigQueryTableRow>>,
 ) -> AppendProcessingResult {
-    if is_retryable_schema_propagation_error(&error) {
-        let detail =
-            bq_error_to_etl_error(error).detail().unwrap_or("schema propagation error").to_owned();
+    if let Some(detail) = retryable_storage_write_metadata_lag_detail(&error) {
         AppendProcessingResult::Retry {
             pending_requests: append_requests
                 .into_iter()
@@ -253,19 +265,19 @@ fn append_processing_result_from_request_error(
     }
 }
 
-/// Builds the error returned when local schema-propagation retries are
+/// Builds the error returned when local Storage Write metadata lag retries are
 /// exhausted.
 ///
-/// The destination absorbs the common short propagation delay locally. If
-/// BigQuery still has not accepted the schema once that bounded window expires,
-/// the worker-level timed retry policy should take over.
-fn schema_propagation_timeout_error(detail: &str) -> EtlError {
+/// The destination absorbs the common short lag window locally. If
+/// BigQuery still has not accepted the storage write metadata once that bounded
+/// window expires, the worker-level timed retry policy should take over.
+fn storage_write_metadata_lag_timeout_error(detail: &str) -> EtlError {
     etl_error!(
         ErrorKind::DestinationAtomicBatchRetryable,
-        "BigQuery schema propagation timed out",
+        "BigQuery storage write metadata lag timed out",
         format!(
-            "BigQuery did not accept the updated schema within {} seconds after DDL: {}",
-            SCHEMA_PROPAGATION_RETRY_TIMEOUT.as_secs(),
+            "BigQuery did not accept the storage write metadata within {} seconds after DDL: {}",
+            STORAGE_WRITE_METADATA_LAG_RETRY_TIMEOUT.as_secs(),
             detail
         )
     )
@@ -278,8 +290,8 @@ fn row_error_to_etl_error(err: RowError) -> EtlError {
 
 /// Converts a request-level append error into a [`BatchProcessResult`].
 fn batch_process_result_from_request_error(error: BQError) -> BatchProcessResult {
-    if is_retryable_schema_propagation_error(&error) {
-        BatchProcessResult::RetryableSchemaPropagation { detail: error.to_string() }
+    if retryable_storage_write_metadata_lag_detail(&error).is_some() {
+        BatchProcessResult::RetryableStorageWriteMetadataLag { detail: error.to_string() }
     } else {
         BatchProcessResult::RequestError { error }
     }
@@ -485,7 +497,7 @@ fn decode_storage_error_codes(status: &tonic::Status) -> Vec<&'static str> {
 }
 
 /// Returns true when the request-level BigQuery error matches the documented
-/// schema propagation case.
+/// storage write metadata lag case.
 ///
 /// BigQuery documents `StorageErrorCode::SCHEMA_MISMATCH_EXTRA_FIELDS` as the
 /// structured signal for schema mismatch during appends. We fall back to the
@@ -513,6 +525,31 @@ fn is_retryable_schema_propagation_error(error: &BQError) -> bool {
         || message.contains("extra proto fields")
         || message.contains("schema_mismatch_extra_field")
         || message.contains("schema_mismatch_extra_fields")
+}
+
+/// Returns true for BigQuery's transient default-stream error after a table is
+/// dropped and recreated with the same name.
+fn is_retryable_table_recreation_error(error: &BQError) -> bool {
+    let BQError::TonicStatusError(status) = error else {
+        return false;
+    };
+
+    status.code() == Code::NotFound
+        && status.message().to_ascii_lowercase().contains("is re-created")
+}
+
+/// Returns retry detail when a Storage Write append failed due to BigQuery
+/// metadata propagation after DDL.
+fn retryable_storage_write_metadata_lag_detail(error: &BQError) -> Option<String> {
+    if is_retryable_schema_propagation_error(error) {
+        return Some(error.to_string());
+    }
+
+    if is_retryable_table_recreation_error(error) {
+        return Some(error.to_string());
+    }
+
+    None
 }
 
 /// Client for interacting with Google BigQuery.
@@ -625,11 +662,7 @@ impl BigQueryClient {
         dataset_id: &BigQueryDatasetId,
         table_id: &BigQueryTableId,
     ) -> EtlResult<String> {
-        let project_id = Self::sanitize_identifier(&self.project_id, "BigQuery project id")?;
-        let dataset_id = Self::sanitize_identifier(dataset_id, "BigQuery dataset id")?;
-        let table_id = Self::sanitize_identifier(table_id, "BigQuery table id")?;
-
-        Ok(format!("`{project_id}.{dataset_id}.{table_id}`"))
+        quote_table_path(&self.project_id, dataset_id, table_id)
     }
 
     /// Creates a table in BigQuery if it doesn't already exist, otherwise
@@ -769,10 +802,29 @@ impl BigQueryClient {
         Ok(())
     }
 
+    /// Drops a view from BigQuery.
+    ///
+    /// Executes a DROP VIEW statement to remove the logical view if it exists.
+    pub async fn drop_view_if_exists(
+        &self,
+        dataset_id: &BigQueryDatasetId,
+        view_name: &BigQueryTableId,
+    ) -> EtlResult<()> {
+        let full_view_name = self.full_table_name(dataset_id, view_name)?;
+
+        info!(%full_view_name, "dropping view from bigquery");
+
+        let query = format!("drop view if exists {full_view_name}");
+
+        let _ = self.query(QueryRequest::new(query)).await?;
+
+        Ok(())
+    }
+
     /// Drops a table from BigQuery.
     ///
     /// Executes a DROP TABLE statement to remove the table and all its data.
-    pub async fn drop_table(
+    pub async fn drop_table_if_exists(
         &self,
         dataset_id: &BigQueryDatasetId,
         table_id: &BigQueryTableId,
@@ -788,6 +840,52 @@ impl BigQueryClient {
         Ok(())
     }
 
+    /// Lists physical sequenced table ids for a base table.
+    ///
+    /// Queries `INFORMATION_SCHEMA.TABLES` instead of using the destination's
+    /// local cache so reset cleanup can remove versions left behind by earlier
+    /// processes.
+    pub async fn list_sequenced_table_ids(
+        &self,
+        dataset_id: &BigQueryDatasetId,
+        base_table_id: &BigQueryTableId,
+    ) -> EtlResult<Vec<BigQueryTableId>> {
+        info!(%dataset_id, %base_table_id, "listing sequenced tables from bigquery");
+
+        let information_schema_tables =
+            quote_information_schema_tables_path(&self.project_id, dataset_id)?;
+        let query = format!(
+            "select table_name from {information_schema_tables} where table_type = 'BASE TABLE' \
+             and starts_with(table_name, @table_name_prefix) order by table_name"
+        );
+        let mut request = QueryRequest::new(query);
+        request.parameter_mode = Some("NAMED".to_owned());
+        request.query_parameters = Some(vec![QueryParameter {
+            name: Some("table_name_prefix".to_owned()),
+            parameter_type: Some(QueryParameterType {
+                r#type: "STRING".to_owned(),
+                ..Default::default()
+            }),
+            parameter_value: Some(QueryParameterValue {
+                value: Some(format!("{base_table_id}_")),
+                ..Default::default()
+            }),
+        }]);
+
+        let mut result_set = self.query(request).await?;
+        let mut table_ids = Vec::new();
+
+        while result_set.next_row() {
+            if let Some(table_id) =
+                result_set.get_string_by_name("table_name").map_err(bq_error_to_etl_error)?
+            {
+                table_ids.push(table_id);
+            }
+        }
+
+        Ok(table_ids)
+    }
+
     /// Adds a column to an existing BigQuery table.
     ///
     /// Executes an ALTER TABLE ADD COLUMN statement to add a new column with
@@ -799,18 +897,15 @@ impl BigQueryClient {
         column_schema: &ColumnSchema,
     ) -> EtlResult<()> {
         let full_table_name = self.full_table_name(dataset_id, table_id)?;
-        let column_name = Self::sanitize_identifier(&column_schema.name, "BigQuery column name")?;
+        let column_name = quote_identifier(&column_schema.name, "BigQuery column name")?;
         let column_type = Self::postgres_to_bigquery_type(&column_schema.typ);
 
-        info!(
-            "adding column `{column_name}` ({column_type}) to table {full_table_name} in BigQuery"
-        );
+        info!("adding column {column_name} ({column_type}) to table {full_table_name} in BigQuery");
 
         // BigQuery requires new columns to be nullable (no NOT NULL constraint
         // allowed). Also, we wouldn't be able to add it nonetheless since we
         // don't have a way to set a default value for past columns.
-        let query =
-            format!("alter table {full_table_name} add column `{column_name}` {column_type}");
+        let query = format!("alter table {full_table_name} add column {column_name} {column_type}");
 
         let _ = self.query(QueryRequest::new(query)).await?;
 
@@ -828,11 +923,11 @@ impl BigQueryClient {
         column_name: &str,
     ) -> EtlResult<()> {
         let full_table_name = self.full_table_name(dataset_id, table_id)?;
-        let column_name = Self::sanitize_identifier(column_name, "BigQuery column name")?;
+        let column_name = quote_identifier(column_name, "BigQuery column name")?;
 
-        info!("dropping column `{column_name}` from table {full_table_name} in BigQuery");
+        info!("dropping column {column_name} from table {full_table_name} in BigQuery");
 
-        let query = format!("alter table {full_table_name} drop column `{column_name}`");
+        let query = format!("alter table {full_table_name} drop column {column_name}");
 
         let _ = self.query(QueryRequest::new(query)).await?;
 
@@ -851,15 +946,12 @@ impl BigQueryClient {
         new_name: &str,
     ) -> EtlResult<()> {
         let full_table_name = self.full_table_name(dataset_id, table_id)?;
-        let old_name = Self::sanitize_identifier(old_name, "BigQuery column name")?;
-        let new_name = Self::sanitize_identifier(new_name, "BigQuery column name")?;
+        let old_name = quote_identifier(old_name, "BigQuery column name")?;
+        let new_name = quote_identifier(new_name, "BigQuery column name")?;
 
-        info!(
-            "renaming column `{old_name}` to `{new_name}` in table {full_table_name} in BigQuery"
-        );
+        info!("renaming column {old_name} to {new_name} in table {full_table_name} in BigQuery");
 
-        let query =
-            format!("alter table {full_table_name} rename column `{old_name}` to `{new_name}`");
+        let query = format!("alter table {full_table_name} rename column {old_name} to {new_name}");
 
         let _ = self.query(QueryRequest::new(query)).await?;
 
@@ -904,7 +996,7 @@ impl BigQueryClient {
     ///
     /// Retries for transient request and transport failures are handled inside
     /// the underlying Storage Write API library. This method also retries
-    /// the narrow class of schema propagation failures that can happen
+    /// the narrow class of storage write metadata lag failures that can happen
     /// after DDL, then converts final failures into ETL errors.
     pub(super) async fn append_table_batches(
         &self,
@@ -920,7 +1012,7 @@ impl BigQueryClient {
 
         let started_at = Instant::now();
         let mut attempt = 1;
-        let mut retry_delay = SCHEMA_PROPAGATION_RETRY_DELAY;
+        let mut retry_delay = STORAGE_WRITE_METADATA_LAG_RETRY_DELAY;
 
         loop {
             match self.append_table_batches_once(pending_requests).await? {
@@ -938,7 +1030,9 @@ impl BigQueryClient {
                     total_bytes_sent += bytes_sent;
                     total_bytes_received += bytes_received;
 
-                    let retry_summary = format_retryable_append_requests(&next_pending_requests);
+                    let retry_summary = format_retryable_storage_write_metadata_lag_requests(
+                        &next_pending_requests,
+                    );
                     pending_requests =
                         next_pending_requests.into_iter().map(|request| request.request).collect();
 
@@ -949,16 +1043,16 @@ impl BigQueryClient {
 
                     let elapsed = started_at.elapsed();
                     let remaining_timeout =
-                        SCHEMA_PROPAGATION_RETRY_TIMEOUT.saturating_sub(elapsed);
+                        STORAGE_WRITE_METADATA_LAG_RETRY_TIMEOUT.saturating_sub(elapsed);
 
                     if remaining_timeout.is_zero() {
-                        return Err(schema_propagation_timeout_error(&retry_summary));
+                        return Err(storage_write_metadata_lag_timeout_error(&retry_summary));
                     }
 
                     let sleep_delay = retry_delay.min(remaining_timeout);
 
                     if sleep_delay.is_zero() {
-                        return Err(schema_propagation_timeout_error(&retry_summary));
+                        return Err(storage_write_metadata_lag_timeout_error(&retry_summary));
                     }
 
                     warn!(
@@ -966,12 +1060,12 @@ impl BigQueryClient {
                         pending_batch_count,
                         retry_delay_ms = sleep_delay.as_millis() as u64,
                         error_detail = %retry_summary,
-                        "bigquery schema change still propagating, retrying append"
+                        "bigquery storage write metadata still lagging, retrying append"
                     );
 
                     sleep(sleep_delay).await;
 
-                    retry_delay = (retry_delay * 2).min(SCHEMA_PROPAGATION_MAX_RETRY_DELAY);
+                    retry_delay = (retry_delay * 2).min(STORAGE_WRITE_METADATA_LAG_MAX_RETRY_DELAY);
                     attempt += 1;
                 }
                 AppendProcessingResult::Error(error) => return Err(error),
@@ -1025,7 +1119,7 @@ impl BigQueryClient {
                     total_bytes_sent += bytes_sent;
                     total_bytes_received += bytes_received;
                 }
-                BatchProcessResult::RetryableSchemaPropagation { detail } => {
+                BatchProcessResult::RetryableStorageWriteMetadataLag { detail } => {
                     retryable_batch_details[batch_index] = Some(detail);
                 }
                 BatchProcessResult::RowErrors { errors: row_errors } => {
@@ -1129,52 +1223,12 @@ impl BigQueryClient {
         Ok(ResultSet::new_from_query_response(query_response))
     }
 
-    /// Sanitizes a BigQuery identifier for safe backtick quoting.
-    ///
-    /// Rejects empty identifiers and identifiers containing control characters.
-    /// Internal backticks are escaped by doubling them so the resulting
-    /// value can be wrapped in backticks without altering the identifier or
-    /// allowing statement breaks.
-    fn sanitize_identifier(identifier: &str, context: &str) -> EtlResult<String> {
-        if identifier.is_empty() {
-            return Err(etl_error!(
-                ErrorKind::DestinationTableNameInvalid,
-                "Invalid BigQuery identifier",
-                format!("{context} cannot be empty")
-            ));
-        }
-
-        if identifier.chars().any(char::is_control) {
-            return Err(etl_error!(
-                ErrorKind::DestinationTableNameInvalid,
-                "Invalid BigQuery identifier",
-                format!("{context} contains control characters")
-            ));
-        }
-
-        let mut escaped = String::with_capacity(identifier.len());
-
-        for ch in identifier.chars() {
-            match ch {
-                // Backticks delimit identifiers in BigQuery. Escape with a backslash
-                // per GoogleSQL lexical rules to keep the identifier intact.
-                '`' => escaped.push_str("\\`"),
-                // Backslash is the escape character; escape it to avoid altering
-                // the meaning of the identifier when parsed.
-                '\\' => escaped.push_str("\\\\"),
-                _ => escaped.push(ch),
-            }
-        }
-
-        Ok(escaped)
-    }
-
     /// Generates SQL column specification for CREATE TABLE statements.
     fn column_spec(column_schema: &ColumnSchema) -> EtlResult<String> {
-        let column_name = Self::sanitize_identifier(&column_schema.name, "BigQuery column name")?;
+        let column_name = quote_identifier(&column_schema.name, "BigQuery column name")?;
 
         let mut column_spec =
-            format!("`{}` {}", column_name, Self::postgres_to_bigquery_type(&column_schema.typ));
+            format!("{} {}", column_name, Self::postgres_to_bigquery_type(&column_schema.typ));
 
         if !column_schema.nullable && !is_array_type(&column_schema.typ) {
             column_spec.push_str(" not null");
@@ -1206,10 +1260,7 @@ impl BigQueryClient {
 
         let primary_key_columns: Vec<String> = primary_key_columns
             .into_iter()
-            .map(|c| {
-                Self::sanitize_identifier(&c.name, "BigQuery primary key column")
-                    .map(|name| format!("`{name}`"))
-            })
+            .map(|c| quote_identifier(&c.name, "BigQuery primary key column"))
             .collect::<EtlResult<Vec<_>>>()?;
 
         let primary_key_clause =
@@ -1540,16 +1591,6 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_identifier_rejects_control_chars() {
-        let result = BigQueryClient::sanitize_identifier("bad\nname", "column");
-
-        assert!(matches!(
-            result,
-            Err(err) if err.kind() == ErrorKind::DestinationTableNameInvalid
-        ));
-    }
-
-    #[test]
     fn add_primary_key_clause() {
         let columns_with_pk = vec![
             test_column("id", Type::INT4, 1, false, Some(1)),
@@ -1702,7 +1743,7 @@ mod tests {
             bytes_sent: 128,
         });
 
-        assert!(matches!(result, BatchProcessResult::RetryableSchemaPropagation { .. }));
+        assert!(matches!(result, BatchProcessResult::RetryableStorageWriteMetadataLag { .. }));
     }
 
     #[test]
@@ -1716,7 +1757,7 @@ mod tests {
             bytes_sent: 128,
         });
 
-        assert!(matches!(result, BatchProcessResult::RetryableSchemaPropagation { .. }));
+        assert!(matches!(result, BatchProcessResult::RetryableStorageWriteMetadataLag { .. }));
     }
 
     #[test]
@@ -1730,14 +1771,41 @@ mod tests {
             bytes_sent: 128,
         });
 
-        assert!(matches!(result, BatchProcessResult::RetryableSchemaPropagation { .. }));
+        assert!(matches!(result, BatchProcessResult::RetryableStorageWriteMetadataLag { .. }));
     }
 
     #[test]
-    fn schema_propagation_timeout_error_is_worker_retryable() {
-        let error = schema_propagation_timeout_error("schema lag");
+    fn process_single_batch_append_result_retries_table_recreation_propagation() {
+        let result = process_single_batch_append_result(BatchAppendResult {
+            batch_index: 0,
+            responses: vec![Err(tonic::Status::not_found(
+                "Table 123:dataset.test_users_0 is re-created. Entity: \
+                 projects/project/datasets/dataset/tables/test_users_0/streams/_default",
+            ))],
+            bytes_sent: 128,
+        });
+
+        assert!(matches!(result, BatchProcessResult::RetryableStorageWriteMetadataLag { .. }));
+    }
+
+    #[test]
+    fn process_single_batch_append_result_does_not_retry_generic_not_found() {
+        let result = process_single_batch_append_result(BatchAppendResult {
+            batch_index: 0,
+            responses: vec![Err(tonic::Status::not_found(
+                "Table 123:dataset.test_users_0 was not found.",
+            ))],
+            bytes_sent: 128,
+        });
+
+        assert!(matches!(result, BatchProcessResult::RequestError { .. }));
+    }
+
+    #[test]
+    fn storage_write_metadata_lag_timeout_error_is_worker_retryable() {
+        let error = storage_write_metadata_lag_timeout_error("storage write metadata lag");
 
         assert_eq!(error.kind(), ErrorKind::DestinationAtomicBatchRetryable);
-        assert_eq!(error.description(), Some("BigQuery schema propagation timed out"));
+        assert_eq!(error.description(), Some("BigQuery storage write metadata lag timed out"));
     }
 }

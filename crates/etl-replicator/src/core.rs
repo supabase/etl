@@ -2,26 +2,30 @@ use std::collections::HashMap;
 
 use etl::{
     config::IcebergConfig,
-    destination::Destination,
+    destination::PipelineDestination,
     pipeline::Pipeline,
-    store::{
-        both::postgres::PostgresStore, cleanup::CleanupStore, schema::SchemaStore,
-        state::StateStore,
-    },
+    store::{PipelineStore, both::postgres::PostgresStore},
     types::PipelineId,
 };
 use etl_config::{
     Environment, parse_ducklake_url,
-    shared::{DestinationConfig, PgConnectionConfig, ReplicatorConfig},
+    shared::{
+        DestinationConfig, DuckLakeMaintenanceMode as ConfigDuckLakeMaintenanceMode,
+        PgConnectionConfig, ReplicatorConfig,
+    },
 };
 use etl_destinations::{
     bigquery::BigQueryDestination,
     clickhouse::{ClickHouseClientConfig, ClickHouseDestination, ClickHouseInserterConfig},
-    ducklake::{DuckLakeDestination, S3Config as DucklakeS3Config},
+    ducklake::{
+        DuckLakeDestination, DuckLakeExternalMaintenanceConfig, DuckLakeMaintenanceMode,
+        S3Config as DucklakeS3Config,
+    },
     iceberg::{
         DestinationNamespace, IcebergClient, IcebergDestination, S3_ACCESS_KEY_ID, S3_ENDPOINT,
         S3_SECRET_ACCESS_KEY,
     },
+    snowflake,
 };
 use secrecy::ExposeSecret;
 use tokio::signal::unix::{SignalKind, signal};
@@ -36,7 +40,7 @@ use crate::{
 
 /// Starts the replicator service with the provided configuration.
 ///
-/// Initializes the state store, creates the appropriate destination based on
+/// Initializes the store, creates the appropriate destination based on
 /// configuration, and starts the pipeline.
 pub(crate) async fn start_replicator_with_config(
     replicator_config: ReplicatorConfig,
@@ -44,8 +48,9 @@ pub(crate) async fn start_replicator_with_config(
 ) -> ReplicatorResult<()> {
     let pipeline_id = replicator_config.pipeline.id;
 
-    // We initialize the state store, which for the replicator is not configurable.
-    let state_store = init_store(
+    // We initialize the store, which for the replicator is not
+    // configurable.
+    let store = init_store(
         pipeline_id,
         replicator_config.pipeline.pg_connection.clone(),
         notification_client,
@@ -70,11 +75,11 @@ pub(crate) async fn start_replicator_with_config(
                 *max_staleness_mins,
                 *connection_pool_size,
                 pipeline_id,
-                state_store.clone(),
+                store.clone(),
             )
             .await?;
 
-            let pipeline = Pipeline::new(replicator_config.pipeline, state_store, destination);
+            let pipeline = Pipeline::new(replicator_config.pipeline, store, destination);
             start_pipeline(pipeline).await?;
         }
         DestinationConfig::Iceberg {
@@ -105,9 +110,9 @@ pub(crate) async fn start_replicator_with_config(
                 Some(ns) => DestinationNamespace::Single(ns.clone()),
                 None => DestinationNamespace::OnePerSchema,
             };
-            let destination = IcebergDestination::new(client, namespace, state_store.clone());
+            let destination = IcebergDestination::new(client, namespace, store.clone());
 
-            let pipeline = Pipeline::new(replicator_config.pipeline, state_store, destination);
+            let pipeline = Pipeline::new(replicator_config.pipeline, store, destination);
             start_pipeline(pipeline).await?;
         }
         DestinationConfig::Iceberg {
@@ -136,9 +141,9 @@ pub(crate) async fn start_replicator_with_config(
                 Some(ns) => DestinationNamespace::Single(ns.clone()),
                 None => DestinationNamespace::OnePerSchema,
             };
-            let destination = IcebergDestination::new(client, namespace, state_store.clone());
+            let destination = IcebergDestination::new(client, namespace, store.clone());
 
-            let pipeline = Pipeline::new(replicator_config.pipeline, state_store, destination);
+            let pipeline = Pipeline::new(replicator_config.pipeline, store, destination);
             start_pipeline(pipeline).await?;
         }
         DestinationConfig::Ducklake {
@@ -155,6 +160,7 @@ pub(crate) async fn start_replicator_with_config(
             duckdb_memory_cache_limit,
             maintenance_target_file_size,
             expire_snapshots_older_than,
+            maintenance_mode,
         } => {
             let s3_config = match (s3_access_key_id, s3_secret_access_key) {
                 (Some(access_key_id), Some(secret_access_key)) => Some(DucklakeS3Config {
@@ -174,7 +180,15 @@ pub(crate) async fn start_replicator_with_config(
                 }
             };
 
-            let destination = DuckLakeDestination::new(
+            let maintenance_mode = match maintenance_mode {
+                ConfigDuckLakeMaintenanceMode::Disabled => DuckLakeMaintenanceMode::Disabled,
+                ConfigDuckLakeMaintenanceMode::Kubernetes => DuckLakeMaintenanceMode::Kubernetes,
+                ConfigDuckLakeMaintenanceMode::Postgres => DuckLakeMaintenanceMode::Postgres,
+            };
+            let external_maintenance =
+                DuckLakeExternalMaintenanceConfig { mode: maintenance_mode, pipeline_id };
+
+            let destination = DuckLakeDestination::new_with_external_maintenance(
                 parse_ducklake_url(catalog_url).map_err(ReplicatorError::config)?,
                 parse_ducklake_url(data_path).map_err(ReplicatorError::config)?,
                 *pool_size,
@@ -183,25 +197,54 @@ pub(crate) async fn start_replicator_with_config(
                 duckdb_memory_cache_limit.clone(),
                 maintenance_target_file_size.clone(),
                 expire_snapshots_older_than.clone(),
-                state_store.clone(),
+                external_maintenance,
+                store.clone(),
             )
             .await?;
 
-            let pipeline = Pipeline::new(replicator_config.pipeline, state_store, destination);
+            let pipeline = Pipeline::new(replicator_config.pipeline, store, destination);
             start_pipeline(pipeline).await?;
         }
-        DestinationConfig::ClickHouse { url, user, password, database } => {
+        DestinationConfig::ClickHouse { url, user, password, database, engine } => {
             let destination = ClickHouseDestination::new(
                 url.clone(),
                 user,
                 password.as_ref().map(|p| p.expose_secret().to_owned()),
                 database,
-                ClickHouseInserterConfig::default(),
+                ClickHouseInserterConfig { engine: *engine, ..Default::default() },
                 ClickHouseClientConfig::default(),
-                state_store.clone(),
+                store.clone(),
             )?;
+            destination.validate_engine_support().await?;
 
-            let pipeline = Pipeline::new(replicator_config.pipeline, state_store, destination);
+            let pipeline = Pipeline::new(replicator_config.pipeline, store, destination);
+            start_pipeline(pipeline).await?;
+        }
+        DestinationConfig::Snowflake {
+            account_id,
+            user,
+            private_key,
+            private_key_passphrase,
+            database,
+            schema,
+            role,
+        } => {
+            let mut config = snowflake::Config::new(account_id, user, database, schema);
+            if let Some(r) = role {
+                config = config.with_role(r);
+            }
+            let auth = std::sync::Arc::new(
+                snowflake::AuthManager::new(
+                    &config,
+                    private_key.expose_secret(),
+                    private_key_passphrase.as_ref(),
+                )
+                .map_err(|e| ReplicatorError::config(std::io::Error::other(e.to_string())))?,
+            );
+            let client = snowflake::Client::new(config, auth, pipeline_id);
+            let destination = snowflake::Destination::new(client, store.clone());
+
+            let pipeline = Pipeline::new(replicator_config.pipeline, store, destination);
             start_pipeline(pipeline).await?;
         }
     }
@@ -223,16 +266,16 @@ fn create_props(
     props
 }
 
-/// Initializes the state store.
+/// Initializes the store.
 ///
 /// Creates a [`PostgresStore`] instance for the given pipeline and connection
-/// configuration. The pipeline itself owns state-store migration startup.
+/// configuration. The pipeline itself owns store migration startup.
 async fn init_store(
     pipeline_id: PipelineId,
     pg_connection_config: PgConnectionConfig,
     notification_client: Option<ErrorNotificationClient>,
-) -> ReplicatorResult<impl StateStore + SchemaStore + CleanupStore + Clone> {
-    info!("initializing postgres state store");
+) -> ReplicatorResult<impl PipelineStore> {
+    info!("initializing postgres store");
 
     Ok(ErrorReportingStateStore::new(
         PostgresStore::new(pipeline_id, pg_connection_config).await?,
@@ -248,8 +291,8 @@ async fn init_store(
 #[tracing::instrument(skip(pipeline))]
 async fn start_pipeline<S, D>(mut pipeline: Pipeline<S, D>) -> ReplicatorResult<()>
 where
-    S: StateStore + SchemaStore + CleanupStore + Clone + Send + Sync + 'static,
-    D: Destination + Clone + Send + Sync + 'static,
+    S: PipelineStore,
+    D: PipelineDestination,
 {
     // Start the pipeline.
     pipeline.start().await?;
@@ -265,7 +308,7 @@ where
         // Listen for SIGTERM, sent by Kubernetes before SIGKILL during pod termination.
         //
         // If the process is killed before shutdown completes, the pipeline may become
-        // corrupted, depending on the state store and destination
+        // corrupted, depending on the store and destination
         // implementations.
         let Ok(mut sigterm) = signal(SignalKind::terminate()) else {
             error!("failed to register sigterm handler, shutting down pipeline");

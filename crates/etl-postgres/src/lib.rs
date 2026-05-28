@@ -8,6 +8,8 @@
 pub mod replication;
 #[cfg(feature = "sqlx")]
 pub mod sqlx;
+#[cfg(feature = "test-utils")]
+pub mod test_utils;
 #[cfg(feature = "tokio")]
 pub mod tokio;
 pub mod types;

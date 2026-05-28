@@ -28,7 +28,7 @@ check_sqlx() {
   if ! [ -x "$(command -v sqlx)" ]; then
     echo >&2 "Error: SQLx CLI is not installed."
     echo >&2 "To install it, run:"
-    echo >&2 "    cargo install --version='~0.7' sqlx-cli --no-default-features --features rustls,postgres"
+    echo >&2 "    cargo install --version 0.9.0-alpha.1 sqlx-cli --no-default-features --features rustls,postgres --locked"
     exit 1
   fi
 }
@@ -49,6 +49,13 @@ setup_database_url() {
   DB_HOST="${POSTGRES_HOST:=localhost}"
 
   export DATABASE_URL="postgres://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}"
+
+  if [[ "${TESTS_DATABASE_TLS_ENABLED:-false}" =~ ^(1|true|TRUE|yes|on)$ ]]; then
+    local ssl_root_cert="${TESTS_DATABASE_TLS_ROOT_CERT:-${ROOT_DIR}/target/postgres-tls/root.crt}"
+    export DATABASE_URL="${DATABASE_URL}?sslmode=verify-full&sslrootcert=${ssl_root_cert}"
+    export PGSSLMODE="verify-full"
+    export PGSSLROOTCERT="${ssl_root_cert}"
+  fi
 }
 
 run_etl_api_migrations() {
@@ -88,7 +95,11 @@ run_etl_migrations() {
   # Create a temporary sqlx-cli compatible database URL that sets the search_path.
   # This ensures the _sqlx_migrations table is created in the etl schema.
   local sqlx_migrations_opts="options=-csearch_path%3Detl"
-  local migration_url="${DATABASE_URL}?${sqlx_migrations_opts}"
+  local separator="?"
+  if [[ "${DATABASE_URL}" == *\?* ]]; then
+    separator="&"
+  fi
+  local migration_url="${DATABASE_URL}${separator}${sqlx_migrations_opts}"
 
   sqlx database create --database-url "${DATABASE_URL}"
   sqlx migrate run --source "$store_migrations_dir" --database-url "${migration_url}" --ignore-missing

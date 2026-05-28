@@ -40,7 +40,7 @@ impl std::fmt::Display for TableSyncWorkerId {
 /// Pool for managing multiple table synchronization workers.
 ///
 /// [`TableSyncWorkerPool`] coordinates the execution of multiple table sync
-/// workers that run in parallel during the initial synchronization phase of ETL
+/// workers that run in parallel during the initial synchronization stage of ETL
 /// pipelines. It provides methods for spawning workers, tracking their
 /// progress, and waiting for completion of all synchronization operations.
 ///

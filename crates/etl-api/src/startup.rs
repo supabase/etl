@@ -48,20 +48,22 @@ use crate::{
         pipelines::{
             CreatePipelineRequest, CreatePipelineResponse, GetPipelineReplicationStatusResponse,
             GetPipelineStatusResponse, GetPipelineVersionResponse, ReadPipelineResponse,
-            ReadPipelinesResponse, SimpleTableReplicationState, TableReplicationStatus,
-            UpdatePipelineRequest, UpdatePipelineVersionRequest, ValidatePipelineRequest,
-            ValidatePipelineResponse, create_pipeline, delete_pipeline,
-            get_pipeline_replication_status, get_pipeline_status, get_pipeline_version,
-            read_all_pipelines, read_pipeline, rollback_tables, start_pipeline, stop_all_pipelines,
-            stop_pipeline, update_pipeline, update_pipeline_version, validate_pipeline,
+            ReadPipelinesResponse, SimpleTableState, TableStatus, UpdatePipelineRequest,
+            UpdatePipelineVersionRequest, ValidatePipelineRequest, ValidatePipelineResponse,
+            create_pipeline, delete_pipeline, get_pipeline_replication_status, get_pipeline_status,
+            get_pipeline_version, read_all_pipelines, read_pipeline, rollback_tables,
+            start_pipeline, stop_all_pipelines, stop_pipeline, update_pipeline,
+            update_pipeline_version, validate_pipeline,
         },
         sources::{
             CreateSourceRequest, CreateSourceResponse, ReadSourceResponse, ReadSourcesResponse,
             UpdateSourceRequest, ValidateSourceRequest, ValidateSourceResponse, create_source,
             delete_source,
             publications::{
-                CreatePublicationRequest, UpdatePublicationRequest, create_publication,
-                delete_publication, read_all_publications, read_publication, update_publication,
+                CreatePublicationRequest, UpdatePublicationRequest, add_tables_to_publication,
+                create_publication, delete_publication, drop_tables_from_publication,
+                read_all_publications, read_publication, set_publication_tables,
+                update_publication,
             },
             read_all_sources, read_source,
             tables::read_table_names,
@@ -254,8 +256,8 @@ pub fn run(
             UpdatePipelineVersionRequest,
             GetPipelineStatusResponse,
             GetPipelineReplicationStatusResponse,
-            TableReplicationStatus,
-            SimpleTableReplicationState,
+            TableStatus,
+            SimpleTableState,
             CreateTenantRequest,
             CreateTenantResponse,
             CreateOrUpdateTenantRequest,
@@ -327,6 +329,9 @@ pub fn run(
         crate::routes::sources::publications::update_publication,
         crate::routes::sources::publications::delete_publication,
         crate::routes::sources::publications::read_all_publications,
+        crate::routes::sources::publications::add_tables_to_publication,
+        crate::routes::sources::publications::drop_tables_from_publication,
+        crate::routes::sources::publications::set_publication_tables,
         crate::routes::sources::tables::read_table_names,
         crate::routes::destinations::create_destination,
         crate::routes::destinations::read_destination,
@@ -345,6 +350,11 @@ pub fn run(
     let openapi = ApiDoc::openapi();
 
     let sensitive_routes = Router::new()
+        // Routes in this scope can carry source/destination credentials,
+        // connection config, table/publication metadata, replication config, or
+        // source-derived data. Keep new routes here when their request, response,
+        // path/query values, validation errors, or Sentry extras may include secrets
+        // or customer data. Leave only low-sensitivity metadata routes outside.
         // sources
         .route("/sources", post(create_source).get(read_all_sources))
         .route("/sources/validate", post(validate_source))
@@ -358,6 +368,12 @@ pub fn run(
         .route(
             "/sources/{source_id}/publications/{publication_name}",
             get(read_publication).post(update_publication).delete(delete_publication),
+        )
+        .route(
+            "/sources/{source_id}/publications/{publication_name}/tables",
+            post(add_tables_to_publication)
+                .put(set_publication_tables)
+                .delete(drop_tables_from_publication),
         )
         // destinations
         .route("/destinations", post(create_destination).get(read_all_destinations))

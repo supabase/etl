@@ -6,7 +6,9 @@ use tokio::runtime::Handle;
 use url::Url;
 use uuid::Uuid;
 
-use crate::clickhouse::{ClickHouseClientConfig, ClickHouseDestination, ClickHouseInserterConfig};
+use crate::clickhouse::{
+    ClickHouseClientConfig, ClickHouseDestination, ClickHouseInserterConfig, sql::quote_identifier,
+};
 
 /// ClickHouse HTTP URL (e.g. `http://localhost:8123`).
 pub const CLICKHOUSE_URL_ENV: &str = "TESTS_CLICKHOUSE_URL";
@@ -87,7 +89,8 @@ impl ClickHouseTestDatabase {
 
     /// Creates the test database in ClickHouse, retrying on transient errors.
     pub async fn create_database(&self) {
-        let query = format!("CREATE DATABASE IF NOT EXISTS `{}`", self.database);
+        let database = quote_identifier(&self.database);
+        let query = format!("CREATE DATABASE IF NOT EXISTS {database}");
         for attempt in 1..=5 {
             match self.root_client.query(&query).execute().await {
                 Ok(()) => return,
@@ -104,8 +107,9 @@ impl ClickHouseTestDatabase {
 
     /// Drops the test database from ClickHouse.
     pub async fn drop_database(&self) {
+        let database = quote_identifier(&self.database);
         self.root_client
-            .query(&format!("DROP DATABASE IF EXISTS `{}`", self.database))
+            .query(&format!("DROP DATABASE IF EXISTS {database}"))
             .execute()
             .await
             .expect("Failed to drop test ClickHouse database");
@@ -113,20 +117,36 @@ impl ClickHouseTestDatabase {
 
     /// Builds a [`ClickHouseDestination`] scoped to this test database with
     /// default inserter config (100 MiB per INSERT -- large enough that tests
-    /// never hit an intermediate flush).
-    pub fn build_destination<S>(&self, store: S) -> ClickHouseDestination<S>
+    /// never hit an intermediate flush). Validates engine support eagerly so
+    /// tests fail fast on engine/version mismatch.
+    pub async fn build_destination<S>(&self, store: S) -> ClickHouseDestination<S>
+    where
+        S: StateStore + SchemaStore + Send + Sync,
+    {
+        self.build_destination_with_engine(store, etl_config::shared::ClickHouseEngine::default())
+            .await
+    }
+
+    /// Builds a [`ClickHouseDestination`] for the given engine.
+    pub async fn build_destination_with_engine<S>(
+        &self,
+        store: S,
+        engine: etl_config::shared::ClickHouseEngine,
+    ) -> ClickHouseDestination<S>
     where
         S: StateStore + SchemaStore + Send + Sync,
     {
         self.build_destination_with_config(
             store,
-            ClickHouseInserterConfig { max_bytes_per_insert: 100 * 1024 * 1024 },
+            ClickHouseInserterConfig { max_bytes_per_insert: 100 * 1024 * 1024, engine },
         )
+        .await
     }
 
     /// Builds a [`ClickHouseDestination`] scoped to this test database with
-    /// a caller-supplied [`ClickHouseInserterConfig`].
-    pub fn build_destination_with_config<S>(
+    /// a caller-supplied [`ClickHouseInserterConfig`]. Validates engine support
+    /// eagerly so tests fail fast on engine/version mismatch.
+    pub async fn build_destination_with_config<S>(
         &self,
         store: S,
         config: ClickHouseInserterConfig,
@@ -134,7 +154,7 @@ impl ClickHouseTestDatabase {
     where
         S: StateStore + SchemaStore + Send + Sync,
     {
-        ClickHouseDestination::new(
+        let destination = ClickHouseDestination::new(
             self.url.clone(),
             &self.user,
             self.password.clone(),
@@ -143,7 +163,12 @@ impl ClickHouseTestDatabase {
             ClickHouseClientConfig::default(),
             store,
         )
-        .expect("Failed to create ClickHouseDestination for test")
+        .expect("Failed to create ClickHouseDestination for test");
+        destination
+            .validate_engine_support()
+            .await
+            .expect("ClickHouse engine support check failed in test setup");
+        destination
     }
 
     /// Fetches all rows from a ClickHouse table using the given SQL query.
@@ -164,13 +189,14 @@ impl ClickHouseTestDatabase {
     }
 
     /// Returns the column names of a ClickHouse table in position order,
-    /// excluding the CDC columns (`cdc_operation`, `cdc_lsn`).
+    /// excluding both engines' trailing CDC columns.
     pub async fn column_names(&self, table_name: &str) -> Vec<String> {
         self.column_types(table_name).await.into_iter().map(|(name, _)| name).collect()
     }
 
     /// Returns the column names and ClickHouse type strings in position order,
-    /// excluding the CDC columns (`cdc_operation`, `cdc_lsn`).
+    /// excluding both engines' trailing CDC columns (`cdc_operation`,
+    /// `cdc_lsn`, `_etl_version`, `_etl_deleted`).
     pub async fn column_types(&self, table_name: &str) -> Vec<(String, String)> {
         #[derive(clickhouse::Row, serde::Deserialize)]
         struct Col {
@@ -180,7 +206,8 @@ impl ClickHouseTestDatabase {
         self.db_client
             .query(
                 "SELECT name, type AS type_name FROM system.columns WHERE database = ? AND table \
-                 = ? AND name NOT IN ('cdc_operation', 'cdc_lsn') ORDER BY position",
+                 = ? AND name NOT IN ('cdc_operation', 'cdc_lsn', '_etl_version', '_etl_deleted') \
+                 ORDER BY position",
             )
             .bind(&self.database)
             .bind(table_name)
@@ -196,13 +223,13 @@ impl ClickHouseTestDatabase {
 impl Drop for ClickHouseTestDatabase {
     fn drop(&mut self) {
         let root_client = self.root_client.clone();
-        let database = self.database.clone();
+        let database = quote_identifier(&self.database);
 
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             tokio::task::block_in_place(move || {
                 Handle::current().block_on(async move {
                     if let Err(error) = root_client
-                        .query(&format!("DROP DATABASE IF EXISTS `{database}`"))
+                        .query(&format!("DROP DATABASE IF EXISTS {database}"))
                         .execute()
                         .await
                     {

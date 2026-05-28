@@ -7,7 +7,7 @@ use etl_api::{
             CreatePipelineRequest, CreatePipelineResponse, GetPipelineReplicationStatusResponse,
             GetPipelineVersionResponse, ReadPipelineResponse, ReadPipelinesResponse,
             RollbackTablesRequest, RollbackTablesResponse, RollbackTablesTarget, RollbackType,
-            SimpleTableReplicationState, UpdatePipelineRequest, UpdatePipelineVersionRequest,
+            SimpleTableState, UpdatePipelineRequest, UpdatePipelineVersionRequest,
         },
     },
 };
@@ -51,7 +51,7 @@ async fn setup_basic_pipeline() -> (TestApp, String, i64, i64, i64) {
     (app, tenant_id, source_id, destination_id, pipeline_id)
 }
 
-/// Creates a pipeline setup with a real source database for replication state
+/// Creates a pipeline setup with a real source database for table state
 /// tests.
 async fn setup_pipeline_with_source_db() -> (TestApp, String, i64, PgPool, PgConnectionConfig) {
     let app = spawn_test_app().await;
@@ -75,7 +75,7 @@ async fn setup_pipeline_with_source_db() -> (TestApp, String, i64, PgPool, PgCon
     (app, tenant_id, pipeline_id, source_db_pool, source_db_config)
 }
 
-/// Creates a table with a chain of replication states.
+/// Creates a table with a chain of table states.
 /// Each state in the chain becomes the previous state of the next one.
 async fn create_table_with_state_chain(
     source_db_pool: &PgPool,
@@ -293,13 +293,13 @@ async fn pipeline_with_another_tenants_source_cannot_be_created() {
     let tenant1_id = &create_tenant_with_id_and_name(
         &app,
         "abcdefghijklmnopqrst".to_owned(),
-        "tenant_1".to_owned(),
+        "tenant-1".to_owned(),
     )
     .await;
     let tenant2_id = &create_tenant_with_id_and_name(
         &app,
         "tsrqponmlkjihgfedcba".to_owned(),
-        "tenant_2".to_owned(),
+        "tenant-2".to_owned(),
     )
     .await;
     let source2_id = create_source(&app, tenant2_id).await;
@@ -326,13 +326,13 @@ async fn pipeline_with_another_tenants_destination_cannot_be_created() {
     let tenant1_id = &create_tenant_with_id_and_name(
         &app,
         "abcdefghijklmnopqrst".to_owned(),
-        "tenant_1".to_owned(),
+        "tenant-1".to_owned(),
     )
     .await;
     let tenant2_id = &create_tenant_with_id_and_name(
         &app,
         "tsrqponmlkjihgfedcba".to_owned(),
-        "tenant_2".to_owned(),
+        "tenant-2".to_owned(),
     )
     .await;
     let source1_id = create_source(&app, tenant1_id).await;
@@ -548,13 +548,13 @@ async fn pipeline_with_another_tenants_source_cannot_be_updated() {
     let tenant1_id = &create_tenant_with_id_and_name(
         &app,
         "abcdefghijklmnopqrst".to_owned(),
-        "tenant_1".to_owned(),
+        "tenant-1".to_owned(),
     )
     .await;
     let tenant2_id = &create_tenant_with_id_and_name(
         &app,
         "tsrqponmlkjihgfedcba".to_owned(),
-        "tenant_2".to_owned(),
+        "tenant-2".to_owned(),
     )
     .await;
     let source1_id = create_source(&app, tenant1_id).await;
@@ -592,13 +592,13 @@ async fn pipeline_with_another_tenants_destination_cannot_be_updated() {
     let tenant1_id = &create_tenant_with_id_and_name(
         &app,
         "abcdefghijklmnopqrst".to_owned(),
-        "tenant_1".to_owned(),
+        "tenant-1".to_owned(),
     )
     .await;
     let tenant2_id = &create_tenant_with_id_and_name(
         &app,
         "tsrqponmlkjihgfedcba".to_owned(),
-        "tenant_2".to_owned(),
+        "tenant-2".to_owned(),
     )
     .await;
     let source1_id = create_source(&app, tenant1_id).await;
@@ -1079,10 +1079,10 @@ async fn pipeline_replication_status_returns_table_states_and_names() {
 
         match table_name.as_str() {
             "test.test_table_users" => {
-                assert!(matches!(table_status.state, SimpleTableReplicationState::CopyingTable));
+                assert!(matches!(table_status.state, SimpleTableState::CopyingTable));
             }
             "test.test_table_orders" => {
-                assert!(matches!(table_status.state, SimpleTableReplicationState::FollowingWal));
+                assert!(matches!(table_status.state, SimpleTableState::FollowingWal));
             }
             _ => panic!("Unexpected table name: {table_name}"),
         }
@@ -1128,7 +1128,7 @@ async fn rollback_tables_succeeds_for_any_error_type() {
     // Verify we rolled back to the ready state (maps to FollowingWal)
     assert_eq!(response.tables.len(), 1);
     assert_eq!(response.tables[0].table_id, table_oid.0);
-    assert!(matches!(response.tables[0].new_state, SimpleTableReplicationState::FollowingWal));
+    assert!(matches!(response.tables[0].new_state, SimpleTableState::FollowingWal));
 
     drop_pg_database(&source_db_config).await;
 }
@@ -1216,7 +1216,7 @@ async fn rollback_tables_with_full_reset_succeeds() {
     assert_eq!(response.pipeline_id, pipeline_id);
     assert_eq!(response.tables.len(), 1);
     assert_eq!(response.tables[0].table_id, table_oid.0);
-    assert!(matches!(response.tables[0].new_state, SimpleTableReplicationState::Queued));
+    assert!(matches!(response.tables[0].new_state, SimpleTableState::Queued));
 
     // Verify only one row exists (the reset init state)
     let count: i64 = sqlx::query_scalar(
@@ -1322,7 +1322,7 @@ async fn rollback_to_init_keeps_schemas_and_metadata() {
     .unwrap();
 
     assert_eq!(response.tables.len(), 1);
-    assert!(matches!(response.tables[0].new_state, SimpleTableReplicationState::Queued));
+    assert!(matches!(response.tables[0].new_state, SimpleTableState::Queued));
 
     // Verify table schema was preserved (schemas are no longer deleted during
     // rollback)
@@ -1418,7 +1418,7 @@ async fn rollback_to_non_starting_state_keeps_schemas_and_metadata() {
     .unwrap();
 
     assert_eq!(response.tables.len(), 1);
-    assert!(matches!(response.tables[0].new_state, SimpleTableReplicationState::FollowingWal));
+    assert!(matches!(response.tables[0].new_state, SimpleTableState::FollowingWal));
 
     // Verify table schema was NOT deleted (because we rolled back to ready, not a
     // starting state)
@@ -1743,21 +1743,21 @@ async fn rollback_tables_all_errored_succeeds() {
         .iter()
         .find(|t| t.table_id == table1_oid.0)
         .expect("table1 should be in response");
-    assert!(matches!(table1_result.new_state, SimpleTableReplicationState::FollowingWal));
+    assert!(matches!(table1_result.new_state, SimpleTableState::FollowingWal));
 
     let table2_result = response
         .tables
         .iter()
         .find(|t| t.table_id == table2_oid.0)
         .expect("table2 should be in response");
-    assert!(matches!(table2_result.new_state, SimpleTableReplicationState::CopyingTable));
+    assert!(matches!(table2_result.new_state, SimpleTableState::CopyingTable));
 
     let table4_result = response
         .tables
         .iter()
         .find(|t| t.table_id == table4_oid.0)
         .expect("table4 should be in response");
-    assert!(matches!(table4_result.new_state, SimpleTableReplicationState::Queued));
+    assert!(matches!(table4_result.new_state, SimpleTableState::Queued));
 
     drop_pg_database(&source_db_config).await;
 }
@@ -1865,21 +1865,21 @@ async fn rollback_tables_all_tables_succeeds() {
         .iter()
         .find(|t| t.table_id == table1_oid.0)
         .expect("table1 should be in response");
-    assert!(matches!(table1_result.new_state, SimpleTableReplicationState::Queued));
+    assert!(matches!(table1_result.new_state, SimpleTableState::Queued));
 
     let table2_result = response
         .tables
         .iter()
         .find(|t| t.table_id == table2_oid.0)
         .expect("table2 should be in response");
-    assert!(matches!(table2_result.new_state, SimpleTableReplicationState::CopyingTable));
+    assert!(matches!(table2_result.new_state, SimpleTableState::CopyingTable));
 
     let table3_result = response
         .tables
         .iter()
         .find(|t| t.table_id == table3_oid.0)
         .expect("table3 should be in response");
-    assert!(matches!(table3_result.new_state, SimpleTableReplicationState::Queued));
+    assert!(matches!(table3_result.new_state, SimpleTableState::Queued));
 
     drop_pg_database(&source_db_config).await;
 }

@@ -19,7 +19,10 @@ use tokio::{
 };
 use tracing::{info, warn};
 
-use crate::ducklake::{DuckLakeTableName, LAKE_CATALOG, client::format_query_error_detail};
+use crate::ducklake::{
+    DuckLakeTableName, LAKE_CATALOG, client::format_query_error_detail,
+    inline_size::DuckLakePendingInlineSizeSampler,
+};
 
 static REGISTER_METRICS: Once = Once::new();
 
@@ -50,6 +53,8 @@ pub(crate) const ETL_DUCKLAKE_FAILED_BATCHES_TOTAL: &str = "etl_ducklake_failed_
 pub(crate) const ETL_DUCKLAKE_REPLAYED_BATCHES_TOTAL: &str = "etl_ducklake_replayed_batches_total";
 pub(crate) const ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_PAUSE_DURATION_SECONDS: &str =
     "etl_ducklake_external_maintenance_pause_duration_seconds";
+pub(crate) const ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_PAUSE_ACTIVE: &str =
+    "etl_ducklake_external_maintenance_pause_active";
 pub(crate) const ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_TRIGGERED_TOTAL: &str =
     "etl_ducklake_external_maintenance_triggered_total";
 pub(crate) const ETL_DUCKLAKE_TABLE_ACTIVE_DATA_FILES: &str =
@@ -85,7 +90,6 @@ pub(crate) const SUB_BATCH_KIND_LABEL: &str = "sub_batch_kind";
 pub(crate) const PREPARED_ROWS_KIND_LABEL: &str = "prepared_rows_kind";
 pub(crate) const DELETE_ORIGIN_LABEL: &str = "delete_origin";
 pub(crate) const RETRY_SCOPE_LABEL: &str = "retry_scope";
-pub(crate) const RESULT_LABEL: &str = "result";
 pub(crate) const MAINTENANCE_OPERATION_LABEL: &str = "operation";
 pub(crate) const MAINTENANCE_REASON_LABEL: &str = "reason";
 pub(crate) const MAINTENANCE_OUTCOME_LABEL: &str = "outcome";
@@ -229,6 +233,11 @@ pub(crate) fn register_metrics() {
             "Duration that DuckLake foreground ingestion was paused for an external maintenance \
              run, labeled by outcome."
         );
+        describe_gauge!(
+            ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_PAUSE_ACTIVE,
+            Unit::Count,
+            "External DuckLake maintenance foreground-ingestion pause current state (0 or 1)."
+        );
         describe_counter!(
             ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_TRIGGERED_TOTAL,
             Unit::Count,
@@ -342,6 +351,8 @@ async fn run_ducklake_metrics_sampler(
     let mut interval =
         tokio::time::interval_at(Instant::now() + METRICS_POLL_INTERVAL, METRICS_POLL_INTERVAL);
     interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let inline_sampler =
+        DuckLakePendingInlineSizeSampler::new(metadata_schema.clone(), metadata_pg_pool.clone());
 
     loop {
         tokio::select! {
@@ -379,6 +390,14 @@ async fn run_ducklake_metrics_sampler(
                             table = %table_name,
                             error = %error,
                             "ducklake table storage metrics collection failed"
+                        );
+                    }
+
+                    if let Err(error) = inline_sampler.sample_table(&table_name).await {
+                        warn!(
+                            table = %table_name,
+                            error = %error,
+                            "ducklake table active inlined data metrics collection failed"
                         );
                     }
                 }

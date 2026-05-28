@@ -4,7 +4,7 @@ use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use etl::{
     config::BatchConfig,
     error::ErrorKind,
-    state::table::{TableReplicationPhase, TableReplicationPhaseType},
+    state::{TableState, TableStateType},
     store::state::StateStore,
     test_utils::{
         database::{spawn_source_database, test_table_name},
@@ -117,16 +117,10 @@ async fn table_copy_and_streaming_with_restart() {
 
     // Register notifications for table copy completion.
     let users_state_notify = store
-        .notify_on_table_state_type(
-            database_schema.users_schema().id,
-            TableReplicationPhaseType::Ready,
-        )
+        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
         .await;
     let orders_state_notify = store
-        .notify_on_table_state_type(
-            database_schema.orders_schema().id,
-            TableReplicationPhaseType::Ready,
-        )
+        .notify_on_table_state_type(database_schema.orders_schema().id, TableStateType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
@@ -214,6 +208,95 @@ async fn table_copy_and_streaming_with_restart() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn table_copy_reset_drops_destination_table_before_recopy() {
+    if skip_if_missing_bigquery_env_vars() {
+        return;
+    }
+
+    init_test_tracing();
+    install_crypto_provider();
+
+    let database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+    let bigquery_database = setup_bigquery_database().await;
+    let users_schema = database_schema.users_schema();
+    let store = NotifyingStore::new();
+    let pipeline_id: PipelineId = random();
+
+    database
+        .insert_values(users_schema.name.clone(), &["name", "age"], &[&"before_1", &1])
+        .await
+        .unwrap();
+    database
+        .insert_values(users_schema.name.clone(), &["name", "age"], &[&"before_2", &2])
+        .await
+        .unwrap();
+
+    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
+    let destination = TestDestinationWrapper::wrap(raw_destination);
+
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    let users_ready =
+        store.notify_on_table_state_type(users_schema.id, TableStateType::Ready).await;
+
+    pipeline.start().await.unwrap();
+
+    users_ready.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let users_rows = bigquery_database.query_table(users_schema.name.clone()).await.unwrap();
+    assert_eq!(
+        parse_bigquery_table_rows::<BigQueryUser>(users_rows),
+        vec![BigQueryUser::new(1, "before_1", 1), BigQueryUser::new(2, "before_2", 2),]
+    );
+
+    database
+        .run_sql(&format!("delete from {} where true", users_schema.name.as_quoted_identifier()))
+        .await
+        .unwrap();
+    database
+        .insert_values(users_schema.name.clone(), &["name", "age"], &[&"after", &3])
+        .await
+        .unwrap();
+    store.reset_table_state(users_schema.id).await.unwrap();
+
+    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
+    let destination = TestDestinationWrapper::wrap(raw_destination);
+
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    let users_ready =
+        store.notify_on_table_state_type(users_schema.id, TableStateType::Ready).await;
+
+    pipeline.start().await.unwrap();
+
+    users_ready.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    assert!(destination.was_table_dropped_for_copy(users_schema.id).await);
+    let users_rows = bigquery_database.query_table(users_schema.name).await.unwrap();
+    assert_eq!(
+        parse_bigquery_table_rows::<BigQueryUser>(users_rows),
+        vec![BigQueryUser::new(3, "after", 3)]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn table_insert_update_delete() {
     if skip_if_missing_bigquery_env_vars() {
         return;
@@ -243,10 +326,7 @@ async fn table_insert_update_delete() {
 
     // Register notifications for table copy completion.
     let users_state_notify = store
-        .notify_on_table_state_type(
-            database_schema.users_schema().id,
-            TableReplicationPhaseType::Ready,
-        )
+        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
@@ -344,10 +424,7 @@ async fn table_subsequent_updates() {
 
     // Register notifications for table copy completion.
     let users_state_notify = store
-        .notify_on_table_state_type(
-            database_schema.users_schema().id,
-            TableReplicationPhaseType::Ready,
-        )
+        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
@@ -439,10 +516,7 @@ async fn table_primary_key_update_rewrites_row() {
     );
 
     let users_state_notify = store
-        .notify_on_table_state_type(
-            database_schema.users_schema().id,
-            TableReplicationPhaseType::Ready,
-        )
+        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
@@ -557,7 +631,7 @@ async fn table_full_replica_identity_update_preserves_unchanged_toasted_columns(
     );
 
     let table_ready_notify =
-        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 
@@ -655,16 +729,10 @@ async fn table_truncate_with_batching() {
 
     // Register notifications for table copy completion.
     let users_state_notify = store
-        .notify_on_table_state_type(
-            database_schema.users_schema().id,
-            TableReplicationPhaseType::Ready,
-        )
+        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
         .await;
     let orders_state_notify = store
-        .notify_on_table_state_type(
-            database_schema.orders_schema().id,
-            TableReplicationPhaseType::Ready,
-        )
+        .notify_on_table_state_type(database_schema.orders_schema().id, TableStateType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
@@ -783,7 +851,7 @@ async fn table_nullable_scalar_columns() {
     );
 
     let table_sync_done_notification =
-        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 
@@ -980,7 +1048,7 @@ async fn table_nullable_array_columns() {
     );
 
     let table_sync_done_notification =
-        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 
@@ -1197,7 +1265,7 @@ async fn table_non_nullable_scalar_columns() {
     );
 
     let table_sync_done_notification =
-        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 
@@ -1435,7 +1503,7 @@ async fn table_non_nullable_array_columns() {
     );
 
     let table_sync_done_notification =
-        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 
@@ -1683,7 +1751,7 @@ async fn table_array_with_null_values() {
     );
 
     let table_sync_done_notification =
-        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 
@@ -1741,7 +1809,7 @@ async fn table_array_with_null_values() {
     );
 
     let table_sync_done_notification =
-        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 
@@ -1945,32 +2013,24 @@ async fn table_validation_out_of_bounds_values() {
         destination.clone(),
     );
 
-    // Register notifications for errored replication phase
-    let huge_numeric_error_notify = store
-        .notify_on_table_state_type(huge_numeric_table_id, TableReplicationPhaseType::Errored)
-        .await;
+    // Register notifications for errored table state
+    let huge_numeric_error_notify =
+        store.notify_on_table_state_type(huge_numeric_table_id, TableStateType::Errored).await;
 
-    let infinite_numeric_error_notify = store
-        .notify_on_table_state_type(infinite_numeric_table_id, TableReplicationPhaseType::Errored)
-        .await;
+    let infinite_numeric_error_notify =
+        store.notify_on_table_state_type(infinite_numeric_table_id, TableStateType::Errored).await;
 
-    let old_date_error_notify = store
-        .notify_on_table_state_type(old_date_table_id, TableReplicationPhaseType::Errored)
-        .await;
+    let old_date_error_notify =
+        store.notify_on_table_state_type(old_date_table_id, TableStateType::Errored).await;
 
-    let nan_array_error_notify = store
-        .notify_on_table_state_type(nan_array_table_id, TableReplicationPhaseType::Errored)
-        .await;
+    let nan_array_error_notify =
+        store.notify_on_table_state_type(nan_array_table_id, TableStateType::Errored).await;
 
-    let wide_json_error_notify = store
-        .notify_on_table_state_type(wide_json_table_id, TableReplicationPhaseType::Errored)
-        .await;
+    let wide_json_error_notify =
+        store.notify_on_table_state_type(wide_json_table_id, TableStateType::Errored).await;
 
     let imprecise_json_integer_error_notify = store
-        .notify_on_table_state_type(
-            imprecise_json_integer_table_id,
-            TableReplicationPhaseType::Errored,
-        )
+        .notify_on_table_state_type(imprecise_json_integer_table_id, TableStateType::Errored)
         .await;
 
     pipeline.start().await.unwrap();
@@ -1993,13 +2053,16 @@ async fn table_validation_out_of_bounds_values() {
         wide_json_table_id,
         imprecise_json_integer_table_id,
     ] {
-        let table_state = store.get_table_replication_state(table_id).await.unwrap().unwrap();
-        assert!(matches!(table_state, TableReplicationPhase::Errored { .. }));
+        let table_state = store.get_table_state(table_id).await.unwrap().unwrap();
+        assert!(matches!(table_state, TableState::Errored { .. }));
     }
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn table_schema_change() {
+    if skip_if_missing_bigquery_env_vars() {
+        return;
+    }
     init_test_tracing();
     install_crypto_provider();
 
@@ -2035,7 +2098,7 @@ async fn table_schema_change() {
     );
 
     let table_sync_done =
-        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::SyncDone).await;
+        store.notify_on_table_state_type(table_id, TableStateType::SyncDone).await;
 
     pipeline.start().await.unwrap();
     table_sync_done.notified().await;
@@ -2054,6 +2117,8 @@ async fn table_schema_change() {
     // Verify initial schema.
     let initial_schema = bigquery_database.query_table_schema(table_name.clone()).await.unwrap();
     initial_schema.assert_columns(&["id", "name", "age", "status"]);
+    let initial_view_schema = bigquery_database.get_view_schema(table_name.clone()).await.unwrap();
+    initial_view_schema.assert_columns(&["id", "name", "age", "status"]);
 
     // Verify destination schema state is applied after initial table creation.
     let initial_state = store
@@ -2112,15 +2177,6 @@ async fn table_schema_change() {
 
     pipeline.shutdown_and_wait().await.unwrap();
 
-    // Verify the final schema:
-    // - name should be renamed to full_name
-    // - status should be dropped
-    // - email should be added
-    let final_schema = bigquery_database.query_table_schema(table_name.clone()).await.unwrap();
-    final_schema.assert_columns(&["id", "full_name", "age", "email"]);
-    final_schema.assert_no_column("name");
-    final_schema.assert_no_column("status");
-
     // Verify destination schema state is applied after schema changes.
     let final_state = store
         .get_applied_destination_table_metadata(table_id)
@@ -2131,6 +2187,20 @@ async fn table_schema_change() {
         final_state.snapshot_id > initial_snapshot_id,
         "snapshot_id should have increased after schema change"
     );
+
+    // Verify the final schema:
+    // - name should be renamed to full_name
+    // - status should be dropped
+    // - email should be added
+    let final_schema =
+        bigquery_database.get_table_schema_by_id(&final_state.destination_table_id).await.unwrap();
+    final_schema.assert_columns(&["id", "full_name", "age", "email"]);
+    final_schema.assert_no_column("name");
+    final_schema.assert_no_column("status");
+    let final_view_schema = bigquery_database.get_view_schema(table_name.clone()).await.unwrap();
+    final_view_schema.assert_columns(&["id", "full_name", "age", "email"]);
+    final_view_schema.assert_no_column("name");
+    final_view_schema.assert_no_column("status");
 
     // Verify data was inserted correctly.
     let rows = bigquery_database.query_table(table_name).await.unwrap();

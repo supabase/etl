@@ -54,7 +54,7 @@ use crate::{
         parse_replicated_column_names,
     },
     destination::{
-        Destination,
+        PipelineDestination,
         async_result::{
             ApplyLoopAsyncResultMetadata, CompletedWriteEventsResult, DispatchMetrics,
             PendingWriteEventsResult, WriteEventsResult,
@@ -74,8 +74,9 @@ use crate::{
         EventsStream, SharedTableCache, StatusUpdateResult, StatusUpdateType, WorkerType,
         client::{PgReplicationClient, PostgresConnectionUpdate},
     },
-    state::table::{TableReplicationPhase, TableReplicationPhaseType},
+    state::{TableState, TableStateType},
     store::{
+        PipelineStore, SharedStateStore,
         schema::{SchemaStore, TableSchemaRetention},
         state::StateStore,
     },
@@ -193,7 +194,7 @@ pub(crate) struct ApplyWorkerContext<S, D> {
     pub(crate) config: Arc<PipelineConfig>,
     /// Pool of table sync workers that this worker coordinates.
     pub(crate) pool: Arc<TableSyncWorkerPool>,
-    /// State store for tracking table replication progress.
+    /// State store for tracking table state and replication progress.
     pub(crate) store: S,
     /// Destination where replicated data is written.
     pub(crate) destination: D,
@@ -557,14 +558,6 @@ impl ApplyLoopState {
         Some(SchemaCleanupRun { deadline: Arc::clone(&self.schema_cleanup_deadline) })
     }
 
-    /// Moves the schema cleanup deadline into the past for tests.
-    #[cfg(test)]
-    async fn expire_schema_cleanup_deadline(&self) {
-        let mut schema_cleanup_deadline = self.schema_cleanup_deadline.lock().await;
-        *schema_cleanup_deadline =
-            Some(Instant::now() - SCHEMA_CLEANUP_INTERVAL - Duration::from_secs(1));
-    }
-
     /// Returns `true` if a schema cleanup task is still recorded.
     fn has_schema_cleanup_task(&self) -> bool {
         self.schema_cleanup_task.is_some()
@@ -720,8 +713,8 @@ pub(crate) struct ApplyLoop<S, D> {
 
 impl<S, D> ApplyLoop<S, D>
 where
-    S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
-    D: Destination + Clone + Send + Sync + 'static,
+    S: PipelineStore,
+    D: PipelineDestination,
 {
     /// Starts the apply loop for processing replication events.
     ///
@@ -731,7 +724,7 @@ where
         pipeline_id: PipelineId,
         start_lsn: PgLsn,
         config: Arc<PipelineConfig>,
-        replication_client: PgReplicationClient,
+        replication_client: &PgReplicationClient,
         schema_store: S,
         destination: D,
         shared_table_cache: SharedTableCache,
@@ -747,7 +740,8 @@ where
         );
 
         let worker_type = worker_context.worker_type();
-        let keep_alive_deadline_duration = match replication_client.get_wal_sender_timeout().await {
+        let wal_sender_timeout_result = replication_client.get_wal_sender_timeout().await;
+        let keep_alive_deadline_duration = match wal_sender_timeout_result {
             Ok(Some(wal_sender_timeout)) => {
                 Self::compute_keep_alive_deadline_duration(wal_sender_timeout)
             }
@@ -803,7 +797,7 @@ where
     /// Runs the apply loop and performs teardown work before returning.
     async fn run_with_teardown(
         &mut self,
-        replication_client: PgReplicationClient,
+        replication_client: &PgReplicationClient,
         start_lsn: PgLsn,
     ) -> EtlResult<ApplyLoopResult> {
         let result = self.run(replication_client, start_lsn).await;
@@ -816,7 +810,7 @@ where
     /// Runs the main event processing loop.
     async fn run(
         &mut self,
-        replication_client: PgReplicationClient,
+        replication_client: &PgReplicationClient,
         start_lsn: PgLsn,
     ) -> EtlResult<ApplyLoopResult> {
         let logical_replication_stream = replication_client
@@ -841,7 +835,7 @@ where
                 ShutdownState::NoShutdown => {
                     self.run_active_iteration(
                         events_stream.as_mut(),
-                        &replication_client,
+                        replication_client,
                         &mut connection_updates_rx,
                     )
                     .await
@@ -972,9 +966,9 @@ where
         Ok(self.try_finish_active_iteration())
     }
 
-    /// Runs one iteration of the shutdown drain phase.
+    /// Runs one iteration of the shutdown drain state.
     ///
-    /// This mirrors the active phase but omits shutdown handling and new WAL
+    /// This mirrors the active state but omits shutdown handling and new WAL
     /// intake.
     ///
     /// Priority order:
@@ -1051,7 +1045,7 @@ where
         self.state.exit_result().unwrap_or(ApplyLoopResult::Paused)
     }
 
-    /// Returns the final loop result for the active phase if all exit barriers
+    /// Returns the final loop result for the active state if all exit barriers
     /// have been resolved.
     fn try_finish_active_iteration(&self) -> Option<ApplyLoopResult> {
         if self.state.shutdown_state.is_requested() || self.state.has_unresolved_batch_work() {
@@ -1550,7 +1544,8 @@ where
         // If there is no message anymore, it means that the connection has been closed
         // or had some issues, we must handle this case.
         let Some(message) = maybe_message else {
-            return Err(self.build_stream_ended_error(replication_client));
+            let is_closed = replication_client.is_closed();
+            return Err(self.build_stream_ended_error(is_closed));
         };
 
         // If the Postgres had an error, we want to raise it immediately.
@@ -1560,10 +1555,10 @@ where
     }
 
     /// Creates an error for when the replication stream ends unexpectedly.
-    fn build_stream_ended_error(&self, replication_client: &PgReplicationClient) -> EtlError {
+    fn build_stream_ended_error(&self, is_closed: bool) -> EtlError {
         let worker_type = self.worker_context.worker_type();
 
-        if replication_client.is_closed() {
+        if is_closed {
             warn!(
                 %worker_type,
                 "replication stream ended: postgresql connection closed",
@@ -2063,7 +2058,7 @@ where
         let used_bootstrap_snapshot = shared_table_state.is_none();
         let table_snapshot_id = shared_table_state
             .map_or_else(|| self.state.bootstrap_snapshot_id(), |state| state.snapshot_id());
-        let table_schema = get_table_schema(
+        let table_schema = get_table_schema_for_relation(
             &self.schema_store,
             &table_id,
             table_snapshot_id,
@@ -2406,11 +2401,11 @@ where
 }
 
 /// Returns tables that are still synchronizing.
-async fn get_syncing_tables<S>(store: &S) -> EtlResult<Vec<(TableId, TableReplicationPhase)>>
+async fn get_syncing_tables<S>(store: &S) -> EtlResult<Vec<(TableId, TableState)>>
 where
     S: StateStore,
 {
-    let states = store.get_table_replication_states().await?;
+    let states = store.get_table_states().await?;
     Ok(states
         .iter()
         .filter(|(_, state)| !state.as_type().is_done())
@@ -2434,7 +2429,7 @@ mod apply_worker {
     /// Determines whether changes should be applied for a given table.
     ///
     /// If an active worker exists for the table, its state is checked while
-    /// holding the lock. Otherwise, the replication phase is read from the
+    /// holding the lock. Otherwise, the table state is read from the
     /// store.
     pub(super) async fn should_apply_changes<S, D>(
         ctx: &ApplyWorkerContext<S, D>,
@@ -2442,15 +2437,12 @@ mod apply_worker {
         remote_final_lsn: PgLsn,
     ) -> EtlResult<bool>
     where
-        S: StateStore + Clone + Send + Sync + 'static,
+        S: SharedStateStore,
     {
-        fn is_phase_ready_for_changes(
-            phase: TableReplicationPhase,
-            remote_final_lsn: PgLsn,
-        ) -> bool {
-            match phase {
-                TableReplicationPhase::Ready => true,
-                TableReplicationPhase::SyncDone { lsn } => lsn <= remote_final_lsn,
+        fn is_state_ready_for_changes(state: TableState, remote_final_lsn: PgLsn) -> bool {
+            match state {
+                TableState::Ready => true,
+                TableState::SyncDone { lsn } => lsn <= remote_final_lsn,
                 _ => false,
             }
         }
@@ -2459,17 +2451,17 @@ mod apply_worker {
 
         if let Some(active_worker_state) = active_worker_state {
             let inner = active_worker_state.lock().await;
-            return Ok(is_phase_ready_for_changes(inner.replication_phase(), remote_final_lsn));
+            return Ok(is_state_ready_for_changes(inner.table_state(), remote_final_lsn));
         }
 
-        // If we didn't find an active worker, we need to read the replication phase
+        // If we didn't find an active worker, we need to read the table state
         // from the store. This could happen if the event is from a table that
         // has to be synced, or it was synced.
-        let Some(phase) = ctx.store.get_table_replication_state(table_id).await? else {
+        let Some(state) = ctx.store.get_table_state(table_id).await? else {
             return Ok(false);
         };
 
-        Ok(is_phase_ready_for_changes(phase, remote_final_lsn))
+        Ok(is_state_ready_for_changes(state, remote_final_lsn))
     }
 
     /// Processes syncing tables after commit.
@@ -2482,17 +2474,13 @@ mod apply_worker {
         current_lsn: PgLsn,
     ) -> EtlResult<Option<ExitIntent>>
     where
-        S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
-        D: Destination + Clone + Send + Sync + 'static,
+        S: PipelineStore,
+        D: PipelineDestination,
     {
-        for (table_id, table_replication_phase) in get_syncing_tables(&ctx.store).await? {
-            let exit_intent = process_single_syncing_table_after_commit(
-                ctx,
-                table_id,
-                table_replication_phase,
-                current_lsn,
-            )
-            .await?;
+        for (table_id, table_state) in get_syncing_tables(&ctx.store).await? {
+            let exit_intent =
+                process_single_syncing_table_after_commit(ctx, table_id, table_state, current_lsn)
+                    .await?;
 
             if exit_intent.is_some() {
                 return Ok(exit_intent);
@@ -2549,20 +2537,20 @@ mod apply_worker {
         // We wait for both states since if the table sync worker errors, we don't want
         // to stall forever.
         let result = worker_state
-            .wait_for_phase_type(
-                &[TableReplicationPhaseType::SyncDone, TableReplicationPhaseType::Errored],
+            .wait_for_state_type(
+                &[TableStateType::SyncDone, TableStateType::Errored],
                 ctx.shutdown_rx.clone(),
             )
             .await;
 
         match result {
             ShutdownResult::Ok(result) => {
-                let final_phase = result.replication_phase();
-                if final_phase.as_type().is_errored() {
+                let final_state = result.table_state();
+                if final_state.as_type().is_errored() {
                     info!(
                         worker_type = %WorkerType::Apply,
                         table_id = table_id.0,
-                        table_replication_phase_type = %final_phase.as_type(),
+                        table_state_type = %final_state.as_type(),
                         "apply worker unblocked: table sync worker errored, skipping table",
                     );
 
@@ -2572,7 +2560,7 @@ mod apply_worker {
                 info!(
                     worker_type = %WorkerType::Apply,
                     table_id = table_id.0,
-                    table_replication_phase_type = %final_phase.as_type(),
+                    table_state_type = %final_state.as_type(),
                     "apply worker unblocked: table sync worker reached sync_done",
                 );
 
@@ -2598,29 +2586,29 @@ mod apply_worker {
     async fn process_single_syncing_table_after_commit<S, D>(
         ctx: &mut ApplyWorkerContext<S, D>,
         table_id: TableId,
-        table_replication_phase: TableReplicationPhase,
+        table_state: TableState,
         current_lsn: PgLsn,
     ) -> EtlResult<Option<ExitIntent>>
     where
-        S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
-        D: Destination + Clone + Send + Sync + 'static,
+        S: PipelineStore,
+        D: PipelineDestination,
     {
         let worker_state = ctx.pool.get_active_worker_state(table_id).await;
 
         if let Some(worker_state) = worker_state {
             let mut worker_state_guard = worker_state.lock().await;
-            let phase = worker_state_guard.replication_phase();
+            let state = worker_state_guard.table_state();
 
             debug!(
                 worker_type = %WorkerType::Apply,
                 table_id = table_id.0,
-                table_replication_phase_type = %phase.as_type(),
+                table_state_type = %state.as_type(),
                 %current_lsn,
                 "checking table with active worker after commit",
             );
 
-            match phase {
-                TableReplicationPhase::SyncWait { lsn: snapshot_lsn } => {
+            match state {
+                TableState::SyncWait { lsn: snapshot_lsn } => {
                     // The catchup lsn is determined via max since it could be that the table sync
                     // worker is started from a lsn which is far in the future
                     // compared to where the apply worker is.
@@ -2636,10 +2624,7 @@ mod apply_worker {
                     );
 
                     worker_state_guard
-                        .set_and_store(
-                            TableReplicationPhase::Catchup { lsn: catchup_lsn },
-                            &ctx.store,
-                        )
+                        .set_and_store(TableState::Catchup { lsn: catchup_lsn }, &ctx.store)
                         .await?;
 
                     // It's important to drop the state guard before waiting, otherwise we deadlock.
@@ -2657,7 +2642,7 @@ mod apply_worker {
                         return Ok(Some(exit_intent));
                     }
                 }
-                TableReplicationPhase::SyncDone { lsn } => {
+                TableState::SyncDone { lsn } => {
                     debug!(
                         worker_type = %WorkerType::Apply,
                         table_id = table_id.0,
@@ -2665,7 +2650,7 @@ mod apply_worker {
                         "table in sync_done state, will transition to ready after batch flush",
                     );
                 }
-                TableReplicationPhase::Catchup { lsn: catchup_lsn } => {
+                TableState::Catchup { lsn: catchup_lsn } => {
                     drop(worker_state_guard);
 
                     if let Some(exit_intent) = wait_for_table_sync_worker_catchup(
@@ -2684,8 +2669,8 @@ mod apply_worker {
                     debug!(
                         worker_type = %WorkerType::Apply,
                         table_id = table_id.0,
-                        table_replication_phase_type = %phase.as_type(),
-                        "no action needed for current phase after commit",
+                        table_state_type = %state.as_type(),
+                        "no action needed for current state after commit",
                     );
                 }
             }
@@ -2693,13 +2678,13 @@ mod apply_worker {
             debug!(
                 worker_type = %WorkerType::Apply,
                 table_id = table_id.0,
-                table_replication_phase_type = %table_replication_phase.as_type(),
+                table_state_type = %table_state.as_type(),
                 "checking table without active worker after commit",
             );
 
             // No active worker exists, potentially start a new worker.
-            match table_replication_phase {
-                TableReplicationPhase::SyncDone { lsn } => {
+            match table_state {
+                TableState::SyncDone { lsn } => {
                     debug!(
                         worker_type = %WorkerType::Apply,
                         table_id = table_id.0,
@@ -2711,7 +2696,7 @@ mod apply_worker {
                     debug!(
                         worker_type = %WorkerType::Apply,
                         table_id = table_id.0,
-                        table_replication_phase_type = %table_replication_phase.as_type(),
+                        table_state_type = %table_state.as_type(),
                         "spawning new table sync worker",
                     );
                     // Start a new worker for this table.
@@ -2741,17 +2726,12 @@ mod apply_worker {
         current_lsn: PgLsn,
     ) -> EtlResult<()>
     where
-        S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
-        D: Destination + Clone + Send + Sync + 'static,
+        S: PipelineStore,
+        D: PipelineDestination,
     {
-        for (table_id, table_replication_phase) in get_syncing_tables(&ctx.store).await? {
-            process_single_syncing_table_after_flush(
-                ctx,
-                table_id,
-                table_replication_phase,
-                current_lsn,
-            )
-            .await?;
+        for (table_id, table_state) in get_syncing_tables(&ctx.store).await? {
+            process_single_syncing_table_after_flush(ctx, table_id, table_state, current_lsn)
+                .await?;
         }
 
         Ok(())
@@ -2763,12 +2743,12 @@ mod apply_worker {
     async fn process_single_syncing_table_after_flush<S, D>(
         ctx: &mut ApplyWorkerContext<S, D>,
         table_id: TableId,
-        table_replication_phase: TableReplicationPhase,
+        table_state: TableState,
         current_lsn: PgLsn,
     ) -> EtlResult<()>
     where
-        S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
-        D: Destination + Clone + Send + Sync + 'static,
+        S: PipelineStore,
+        D: PipelineDestination,
     {
         let worker_state = ctx.pool.get_active_worker_state(table_id).await;
 
@@ -2777,17 +2757,17 @@ mod apply_worker {
         // switch the table to ready state or start a new worker for that table.
         if let Some(worker_state) = worker_state {
             let worker_state_guard = worker_state.lock().await;
-            let phase = worker_state_guard.replication_phase();
+            let state = worker_state_guard.table_state();
 
             debug!(
                 worker_type = %WorkerType::Apply,
                 table_id = table_id.0,
-                table_replication_phase_type = %phase.as_type(),
+                table_state_type = %state.as_type(),
                 %current_lsn,
                 "checking table with active worker after batch flush",
             );
 
-            if let TableReplicationPhase::SyncDone { lsn: sync_done_lsn } = phase {
+            if let TableState::SyncDone { lsn: sync_done_lsn } = state {
                 if current_lsn >= sync_done_lsn {
                     info!(
                         worker_type = %WorkerType::Apply,
@@ -2797,9 +2777,7 @@ mod apply_worker {
                         "transitioning sync_done -> ready",
                     );
 
-                    ctx.store
-                        .update_table_replication_state(table_id, TableReplicationPhase::Ready)
-                        .await?;
+                    ctx.store.update_table_state(table_id, TableState::Ready).await?;
                 } else {
                     debug!(
                         worker_type = %WorkerType::Apply,
@@ -2814,12 +2792,12 @@ mod apply_worker {
             debug!(
                 worker_type = %WorkerType::Apply,
                 table_id = table_id.0,
-                table_replication_phase_type = %table_replication_phase.as_type(),
+                table_state_type = %table_state.as_type(),
                 "checking table without active worker after batch flush",
             );
 
-            match table_replication_phase {
-                TableReplicationPhase::SyncDone { lsn: sync_done_lsn } => {
+            match table_state {
+                TableState::SyncDone { lsn: sync_done_lsn } => {
                     if current_lsn >= sync_done_lsn {
                         info!(
                             worker_type = %WorkerType::Apply,
@@ -2829,9 +2807,7 @@ mod apply_worker {
                             "transitioning sync_done -> ready",
                         );
 
-                        ctx.store
-                            .update_table_replication_state(table_id, TableReplicationPhase::Ready)
-                            .await?;
+                        ctx.store.update_table_state(table_id, TableState::Ready).await?;
                     } else {
                         debug!(
                             worker_type = %WorkerType::Apply,
@@ -2846,7 +2822,7 @@ mod apply_worker {
                     debug!(
                         worker_type = %WorkerType::Apply,
                         table_id = table_id.0,
-                        table_replication_phase_type = %table_replication_phase.as_type(),
+                        table_state_type = %table_state.as_type(),
                         "spawning new table sync worker",
                     );
 
@@ -2879,17 +2855,13 @@ mod apply_worker {
         current_lsn: PgLsn,
     ) -> EtlResult<Option<ExitIntent>>
     where
-        S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
-        D: Destination + Clone + Send + Sync + 'static,
+        S: PipelineStore,
+        D: PipelineDestination,
     {
-        for (table_id, table_replication_phase) in get_syncing_tables(&ctx.store).await? {
-            let exit_intent = process_single_syncing_table_when_idle(
-                ctx,
-                table_id,
-                table_replication_phase,
-                current_lsn,
-            )
-            .await?;
+        for (table_id, table_state) in get_syncing_tables(&ctx.store).await? {
+            let exit_intent =
+                process_single_syncing_table_when_idle(ctx, table_id, table_state, current_lsn)
+                    .await?;
 
             if exit_intent.is_some() {
                 return Ok(exit_intent);
@@ -2907,12 +2879,12 @@ mod apply_worker {
     async fn process_single_syncing_table_when_idle<S, D>(
         ctx: &mut ApplyWorkerContext<S, D>,
         table_id: TableId,
-        table_replication_phase: TableReplicationPhase,
+        table_state: TableState,
         current_lsn: PgLsn,
     ) -> EtlResult<Option<ExitIntent>>
     where
-        S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
-        D: Destination + Clone + Send + Sync + 'static,
+        S: PipelineStore,
+        D: PipelineDestination,
     {
         let worker_state = ctx.pool.get_active_worker_state(table_id).await;
 
@@ -2922,18 +2894,18 @@ mod apply_worker {
         // table to ready state or start a new worker for that table.
         if let Some(worker_state) = worker_state {
             let mut worker_state_guard = worker_state.lock().await;
-            let phase = worker_state_guard.replication_phase();
+            let state = worker_state_guard.table_state();
 
             debug!(
                 worker_type = %WorkerType::Apply,
                 table_id = table_id.0,
-                table_replication_phase_type = %phase.as_type(),
+                table_state_type = %state.as_type(),
                 %current_lsn,
                 "checking table with active worker when idle",
             );
 
-            match phase {
-                TableReplicationPhase::SyncWait { lsn: snapshot_lsn } => {
+            match state {
+                TableState::SyncWait { lsn: snapshot_lsn } => {
                     // The catchup lsn is determined via max since it could be that the table sync
                     // worker is started from a lsn which is far in the future
                     // compared to where the apply worker is.
@@ -2949,10 +2921,7 @@ mod apply_worker {
                     );
 
                     worker_state_guard
-                        .set_and_store(
-                            TableReplicationPhase::Catchup { lsn: catchup_lsn },
-                            &ctx.store,
-                        )
+                        .set_and_store(TableState::Catchup { lsn: catchup_lsn }, &ctx.store)
                         .await?;
 
                     // It's important to drop the state guard before waiting, otherwise we deadlock.
@@ -2970,7 +2939,7 @@ mod apply_worker {
                         return Ok(Some(exit_intent));
                     }
                 }
-                TableReplicationPhase::SyncDone { lsn: sync_done_lsn } => {
+                TableState::SyncDone { lsn: sync_done_lsn } => {
                     if current_lsn >= sync_done_lsn {
                         info!(
                             worker_type = %WorkerType::Apply,
@@ -2980,9 +2949,7 @@ mod apply_worker {
                             "transitioning sync_done -> ready",
                         );
 
-                        ctx.store
-                            .update_table_replication_state(table_id, TableReplicationPhase::Ready)
-                            .await?;
+                        ctx.store.update_table_state(table_id, TableState::Ready).await?;
                     } else {
                         debug!(
                             worker_type = %WorkerType::Apply,
@@ -2993,7 +2960,7 @@ mod apply_worker {
                         );
                     }
                 }
-                TableReplicationPhase::Catchup { lsn: catchup_lsn } => {
+                TableState::Catchup { lsn: catchup_lsn } => {
                     drop(worker_state_guard);
 
                     if let Some(exit_intent) = wait_for_table_sync_worker_catchup(
@@ -3012,8 +2979,8 @@ mod apply_worker {
                     debug!(
                         worker_type = %WorkerType::Apply,
                         table_id = table_id.0,
-                        table_replication_phase_type = %phase.as_type(),
-                        "no action needed for current phase when idle",
+                        table_state_type = %state.as_type(),
+                        "no action needed for current state when idle",
                     );
                 }
             }
@@ -3021,12 +2988,12 @@ mod apply_worker {
             debug!(
                 worker_type = %WorkerType::Apply,
                 table_id = table_id.0,
-                table_replication_phase_type = %table_replication_phase.as_type(),
+                table_state_type = %table_state.as_type(),
                 "checking table without active worker when idle",
             );
 
-            match table_replication_phase {
-                TableReplicationPhase::SyncDone { lsn: sync_done_lsn } => {
+            match table_state {
+                TableState::SyncDone { lsn: sync_done_lsn } => {
                     if current_lsn >= sync_done_lsn {
                         info!(
                             worker_type = %WorkerType::Apply,
@@ -3036,16 +3003,14 @@ mod apply_worker {
                             "transitioning sync_done -> ready",
                         );
 
-                        ctx.store
-                            .update_table_replication_state(table_id, TableReplicationPhase::Ready)
-                            .await?;
+                        ctx.store.update_table_state(table_id, TableState::Ready).await?;
                     }
                 }
                 _ => {
                     debug!(
                         worker_type = %WorkerType::Apply,
                         table_id = table_id.0,
-                        table_replication_phase_type = %table_replication_phase.as_type(),
+                        table_state_type = %table_state.as_type(),
                         "spawning new table sync worker",
                     );
 
@@ -3111,8 +3076,8 @@ mod apply_worker {
         worker: TableSyncWorker<S, D>,
     ) -> Pin<Box<dyn Future<Output = EtlResult<()>> + Send>>
     where
-        S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
-        D: Destination + Clone + Send + Sync + 'static,
+        S: PipelineStore,
+        D: PipelineDestination,
     {
         Box::pin(async move { worker.spawn_into_pool(&pool).await })
     }
@@ -3147,7 +3112,7 @@ mod table_sync_worker {
         // Check if catchup position reached, if so, signal end batch but don't update
         // the state yet.
         let inner = ctx.table_sync_worker_state.lock().await;
-        if let TableReplicationPhase::Catchup { lsn: catchup_lsn } = inner.replication_phase() {
+        if let TableState::Catchup { lsn: catchup_lsn } = inner.table_state() {
             if current_lsn >= catchup_lsn {
                 info!(
                     %worker_type,
@@ -3180,7 +3145,7 @@ mod table_sync_worker {
         current_lsn: PgLsn,
     ) -> EtlResult<Option<ExitIntent>>
     where
-        S: StateStore + Clone + Send + Sync + 'static,
+        S: SharedStateStore,
     {
         try_complete_catchup(ctx, current_lsn).await
     }
@@ -3194,7 +3159,7 @@ mod table_sync_worker {
         current_lsn: PgLsn,
     ) -> EtlResult<Option<ExitIntent>>
     where
-        S: StateStore + Clone + Send + Sync + 'static,
+        S: SharedStateStore,
     {
         try_complete_catchup(ctx, current_lsn).await
     }
@@ -3208,13 +3173,13 @@ mod table_sync_worker {
         current_lsn: PgLsn,
     ) -> EtlResult<Option<ExitIntent>>
     where
-        S: StateStore + Clone + Send + Sync + 'static,
+        S: SharedStateStore,
     {
         let worker_type = WorkerType::TableSync { table_id: ctx.table_id };
         let mut inner = ctx.table_sync_worker_state.lock().await;
-        let phase = inner.replication_phase();
+        let state = inner.table_state();
 
-        if let TableReplicationPhase::Catchup { lsn: catchup_lsn } = phase {
+        if let TableState::Catchup { lsn: catchup_lsn } = state {
             if current_lsn >= catchup_lsn {
                 info!(
                     %worker_type,
@@ -3224,10 +3189,7 @@ mod table_sync_worker {
                 );
 
                 inner
-                    .set_and_store(
-                        TableReplicationPhase::SyncDone { lsn: current_lsn },
-                        &ctx.state_store,
-                    )
+                    .set_and_store(TableState::SyncDone { lsn: current_lsn }, &ctx.state_store)
                     .await?;
 
                 info!(
@@ -3254,12 +3216,11 @@ mod table_sync_worker {
 
 /// Retrieves a table schema from the schema store by table ID and snapshot.
 ///
-/// When `used_bootstrap_snapshot` is `false`, the returned schema must match
-/// the requested snapshot exactly. When it is `true`, the lookup is allowed to
-/// resolve to an older schema version because the first `RELATION` message may
-/// arrive before shared per-table protocol state has been established, but it
-/// must never resolve to a newer schema than requested.
-async fn get_table_schema<S>(
+/// The reason for this handling is that the bootstrap snapshot id is just used
+/// as a boundary id that is needed for when etl starts and no DDL takes place.
+/// As soon as a DDL takes place within this active replication session, the
+/// exact snapshot id will be used to load the right table schema.
+async fn get_table_schema_for_relation<S>(
     schema_store: &S,
     table_id: &TableId,
     snapshot_id: SnapshotId,
@@ -3350,37 +3311,4 @@ async fn get_replicated_table_schema(
     };
 
     Ok(replicated_table_schema)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn apply_loop_state() -> ApplyLoopState {
-        let start_lsn = PgLsn::from(100u64);
-        let replication_progress =
-            ReplicationProgress { last_received_lsn: start_lsn, last_flush_lsn: start_lsn };
-
-        ApplyLoopState::new(
-            replication_progress,
-            Duration::from_secs(1),
-            SnapshotId::from(start_lsn),
-            "test_slot".to_owned(),
-        )
-    }
-
-    #[tokio::test]
-    async fn schema_cleanup_uses_deadline_between_runs() {
-        let state = apply_loop_state();
-
-        state.expire_schema_cleanup_deadline().await;
-
-        let schema_cleanup_run = state.try_start_schema_cleanup().await.unwrap();
-
-        assert!(state.try_start_schema_cleanup().await.is_none());
-
-        schema_cleanup_run.finish().await;
-
-        assert!(state.try_start_schema_cleanup().await.is_none());
-    }
 }

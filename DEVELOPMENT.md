@@ -4,6 +4,7 @@ This guide covers setting up your development environment, running migrations, a
 
 ## Table of Contents
 
+- [Task Runner](#task-runner)
 - [Prerequisites](#prerequisites)
 - [Quick Start](#quick-start)
 - [Database Setup](#database-setup)
@@ -31,7 +32,7 @@ Before starting, ensure you have the following installed:
 Install SQLx CLI:
 
 ```bash
-cargo install --version='~0.8.6' sqlx-cli --no-default-features --features rustls,postgres
+cargo install --version 0.9.0-alpha.1 sqlx-cli --no-default-features --features rustls,postgres --locked
 ```
 
 ### Optional Tools
@@ -40,29 +41,45 @@ cargo install --version='~0.8.6' sqlx-cli --no-default-features --features rustl
   - [Install OrbStack](https://orbstack.dev)
   - Enable Kubernetes in OrbStack settings
 
+## Task Runner
+
+Common development tasks are available through `cargo x`, a shorthand alias for `cargo xtask`.
+Run `cargo x --help` to see all available commands.
+
+```bash
+cargo x fmt              # format code with nightly rustfmt
+cargo x fmt --check      # check formatting without changes
+cargo x check            # pre-PR gate: fmt, sort, clippy
+cargo x fix              # auto-fix: clippy --fix, fmt, sort
+cargo x msrv             # verify MSRV consistency
+cargo x init             # set up local dev environment
+cargo x migrate          # run database migrations
+cargo x deploy-local     # deploy replicator to local OrbStack k8s
+cargo x test-clickhouse  # run ClickHouse integration tests
+cargo x vendor-duckdb    # download and vendor DuckDB extensions
+```
+
 ## Formatting
 
 The workspace stays on the stable toolchain pinned in `rust-toolchain.toml` for builds, tests, and linting.
 Formatting is the only workflow that uses nightly Rust, because the repository relies on nightly-only
 `rustfmt` options for import grouping and layout.
 
-Use the pinned formatter scripts from the project root:
-
 ```bash
-./scripts/fmt
-./scripts/fmt-check
+cargo x fmt
+cargo x fmt --check
 ```
 
-Both scripts default to `nightly-2026-04-15`. You can temporarily override the formatter toolchain with
+Both default to `nightly-2026-04-15`. You can temporarily override the formatter toolchain with
 `RUSTFMT_NIGHTLY_TOOLCHAIN`, but CI and the repository defaults should stay pinned so formatting does not drift.
 
 ## Quick Start
 
-The fastest way to get started is using the setup script:
+The fastest way to get started:
 
 ```bash
 # From the project root
-./scripts/init.sh
+cargo x init
 ```
 
 This script will:
@@ -75,20 +92,20 @@ This script will:
 
 ### Using the Setup Script
 
-The `scripts/init.sh` script provides a complete development environment setup:
+`cargo x init` provides a complete development environment setup:
 
 ```bash
 # Use default settings (Postgres on port 5430)
-./scripts/init.sh
+cargo x init
 
 # Customize database settings
-POSTGRES_PORT=5432 POSTGRES_DB=mydb ./scripts/init.sh
+POSTGRES_PORT=5432 POSTGRES_DB=mydb cargo x init
 
 # Skip Docker if you already have Postgres running
-SKIP_DOCKER=1 ./scripts/init.sh
+SKIP_DOCKER=1 cargo x init
 
 # Use persistent storage
-POSTGRES_DATA_VOLUME=/path/to/data ./scripts/init.sh
+POSTGRES_DATA_VOLUME=/path/to/data cargo x init
 ```
 
 **Environment Variables:**
@@ -111,6 +128,8 @@ POSTGRES_DATA_VOLUME=/path/to/data ./scripts/init.sh
 
 PostgreSQL 18+ containers store data under `/var/lib/postgresql/<major>/data`, so the Docker Compose setup mounts the parent `/var/lib/postgresql` directory to keep upgrades compatible.
 
+The source PostgreSQL container started by `cargo x init` or `cargo xtask postgres start` supports TLS by default. The task runner generates a local test CA and server certificate under `target/postgres-tls/`, then copies the server certificate and key into the container. Local clients may still connect without TLS; set `TESTS_DATABASE_TLS_ENABLED=true` when running tests to require verified TLS using the generated root certificate.
+
 The same Docker Compose stack also starts ClickHouse on `http://localhost:8123` by default, which is enough for local destination development and ClickHouse integration tests.
 
 ### Manual Setup
@@ -130,7 +149,7 @@ If using one database for both the API and ETL source/store objects:
 export DATABASE_URL=postgres://USER:PASSWORD@HOST:PORT/DB
 
 # Run all migrations on the same database
-./scripts/run_migrations.sh
+cargo x migrate
 ```
 
 #### Separate Database Setup
@@ -140,11 +159,11 @@ If using separate databases (recommended for production):
 ```bash
 # API migrations on the control plane database
 export DATABASE_URL=postgres://USER:PASSWORD@API_HOST:PORT/API_DB
-./scripts/run_migrations.sh etl-api
+cargo x migrate etl-api
 
 # ETL migrations on the source database
 export DATABASE_URL=postgres://USER:PASSWORD@SOURCE_HOST:PORT/SOURCE_DB
-./scripts/run_migrations.sh etl
+cargo x migrate etl
 ```
 
 This separation allows you to:
@@ -164,7 +183,7 @@ Located in `crates/etl-api/migrations/`, these create the control plane schema (
 
 ```bash
 # From project root
-./scripts/run_migrations.sh etl-api
+cargo x migrate etl-api
 
 # Or manually with SQLx CLI
 sqlx migrate run --source crates/etl-api/migrations
@@ -211,7 +230,7 @@ mismatch.
 
 ```bash
 # From project root
-./scripts/run_migrations.sh etl
+cargo x migrate etl
 
 # Or manually with SQLx CLI (requires setting search_path)
 psql $DATABASE_URL -c "create schema if not exists etl;"
@@ -390,6 +409,8 @@ All tests that interact with PostgreSQL require the following environment variab
 | `TESTS_DATABASE_PORT` | **Yes** | PostgreSQL server port (e.g., `5430`) |
 | `TESTS_DATABASE_USERNAME` | **Yes** | Database user (e.g., `postgres`) |
 | `TESTS_DATABASE_PASSWORD` | No | Database password (optional) |
+| `TESTS_DATABASE_TLS_ENABLED` | No | Require verified TLS for Postgres test clients when set to `true` |
+| `TESTS_DATABASE_TLS_ROOT_CERT` | No | Path to the trusted root certificate; defaults to `target/postgres-tls/root.crt` |
 
 **Note:** Each test creates a unique database with a UUID-based name to ensure test isolation. The test databases are automatically cleaned up after tests complete.
 
@@ -425,7 +446,7 @@ ClickHouse destination tests require a reachable ClickHouse HTTP endpoint:
 | `TESTS_CLICKHOUSE_USER` | **Yes** | ClickHouse user name (for the local Docker Compose setup, use `etl`) |
 | `TESTS_CLICKHOUSE_PASSWORD` | No | ClickHouse password; for the local Docker Compose setup, use `etl` |
 
-**Note:** ClickHouse tests are only run when the `clickhouse` and `test-utils` features are enabled. Each test creates a unique database in ClickHouse and drops it automatically when the test finishes. The Docker Compose setup started by `./scripts/init.sh` is sufficient for these tests.
+**Note:** ClickHouse tests are only run when the `clickhouse` and `test-utils` features are enabled. Each test creates a unique database in ClickHouse and drops it automatically when the test finishes. The Docker Compose setup started by `cargo x init` is sufficient for these tests.
 
 #### Test Output and Logging
 
@@ -460,6 +481,8 @@ export TESTS_DATABASE_HOST=localhost
 export TESTS_DATABASE_PORT=5430
 export TESTS_DATABASE_USERNAME=postgres
 export TESTS_DATABASE_PASSWORD=postgres
+# Optional when using the local Docker Compose Postgres from cargo x init.
+export TESTS_DATABASE_TLS_ENABLED=true
 
 # BigQuery test configuration (optional - only needed for BigQuery tests)
 export TESTS_BIGQUERY_PROJECT_ID=your-gcp-project-id

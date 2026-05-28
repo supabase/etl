@@ -6,7 +6,7 @@ use etl_config::{
     load_config, parse_ducklake_url,
     shared::{DestinationConfig, ReplicatorConfig},
 };
-use etl_destinations::ducklake::{
+use etl_maintenance::ducklake::{
     CleanupOldFilesMaintenanceConfig, DuckLakeMaintenanceConfig, ExpireSnapshotsMaintenanceConfig,
     InlineFlushMaintenanceConfig, MergeAdjacentFilesMaintenanceConfig,
     RewriteDataFilesMaintenanceConfig, S3Config as DuckLakeS3Config, run_maintenance_once,
@@ -184,7 +184,7 @@ fn init_crypto_provider() {
 /// Initializes direct stdout logging for short-lived Kubernetes Jobs.
 fn init_stdout_tracing() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        EnvFilter::new("etl_ducklake_maintenance=info,etl_destinations::ducklake=info")
+        EnvFilter::new("etl_ducklake_maintenance=info,etl_maintenance::ducklake=info")
     });
     let _ = tracing_subscriber::registry()
         .with(filter)
