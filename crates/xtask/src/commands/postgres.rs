@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, bail};
@@ -32,6 +32,7 @@ fn docker_compose_command() -> (&'static str, &'static [&'static str]) {
 const DEFAULT_PG_VERSION: &str = "18";
 const DEFAULT_PG_USER: &str = "postgres";
 const HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+const POSTGRES_READY_TIMEOUT: Duration = Duration::from_secs(180);
 const TLS_CERT_DIR: &str = "target/postgres-tls";
 const TLS_ROOT_CERT_FILE: &str = "root.crt";
 const TLS_ROOT_KEY_FILE: &str = "root.key";
@@ -149,8 +150,15 @@ impl StartArgs {
         // Wait for all clusters to accept connections.
         for shard in 1..=self.shards {
             let port = self.base_port + shard - 1;
-            self.wait_for_pg(port)?;
-            self.wait_for_pg(port + READ_REPLICA_PORT_OFFSET)?;
+            let project = if shard == 1 {
+                None
+            } else {
+                Some(format!("etl-stack-pg-{}-shard-{shard}", self.pg_version))
+            };
+            let project_and_port = project.as_deref().map(|project| (project, port));
+
+            self.wait_for_pg(project_and_port, port)?;
+            self.wait_for_pg(project_and_port, port + READ_REPLICA_PORT_OFFSET)?;
         }
 
         if tls_files.is_some() {
@@ -175,8 +183,8 @@ impl StartArgs {
         self.docker_compose_up(project_and_port, services, false, false)?;
 
         if let Some(tls_files) = tls_files {
-            self.wait_for_pg(port)?;
-            self.wait_for_pg(port + READ_REPLICA_PORT_OFFSET)?;
+            self.wait_for_pg(project_and_port, port)?;
+            self.wait_for_pg(project_and_port, port + READ_REPLICA_PORT_OFFSET)?;
 
             for service in SOURCE_POSTGRES_SERVICES {
                 self.install_tls_files(project_and_port, tls_files, service)?;
@@ -353,7 +361,9 @@ impl StartArgs {
         cmd
     }
 
-    fn wait_for_pg(&self, port: u16) -> Result<()> {
+    fn wait_for_pg(&self, project_and_port: Option<(&str, u16)>, port: u16) -> Result<()> {
+        let started_at = Instant::now();
+
         loop {
             let status = Command::new("pg_isready")
                 .args(["-h", "localhost", "-p", &port.to_string(), "-U", &self.pg_user])
@@ -364,8 +374,34 @@ impl StartArgs {
                 return Ok(());
             }
 
+            if started_at.elapsed() >= POSTGRES_READY_TIMEOUT {
+                self.dump_docker_compose_diagnostics(project_and_port);
+                bail!(
+                    "Postgres on localhost:{} did not become ready within {:?}",
+                    port,
+                    POSTGRES_READY_TIMEOUT
+                );
+            }
+
             thread::sleep(HEALTH_CHECK_INTERVAL);
         }
+    }
+
+    /// Prints compose state and recent logs to help diagnose startup failures.
+    fn dump_docker_compose_diagnostics(&self, project_and_port: Option<(&str, u16)>) {
+        eprintln!("Postgres readiness timed out; dumping docker compose diagnostics.");
+
+        let mut ps = self.docker_compose_base_command(project_and_port);
+        ps.arg("ps");
+        let _ = ps.status();
+
+        let mut logs = self.docker_compose_base_command(project_and_port);
+        logs.args(["logs", "--tail", "200", SOURCE_POSTGRES_SERVICE]);
+        let _ = logs.status();
+
+        let mut replica_logs = self.docker_compose_base_command(project_and_port);
+        replica_logs.args(["logs", "--tail", "200", SOURCE_POSTGRES_READ_REPLICA_SERVICE]);
+        let _ = replica_logs.status();
     }
 }
 
