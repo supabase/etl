@@ -15,6 +15,7 @@ use etl_destinations::{
     },
     iceberg::test_utils::{
         LAKEKEEPER_URL, LakekeeperClient, MINIO_PASSWORD, MINIO_URL, MINIO_USERNAME,
+        skip_if_lakekeeper_not_running,
     },
 };
 use etl_postgres::sqlx::test_utils::{create_pg_database, drop_pg_database};
@@ -87,8 +88,10 @@ fn create_pipeline_config(publication_name: &str) -> FullApiPipelineConfig {
 }
 
 #[tokio::test]
-#[ignore = "requires a running Lakekeeper instance on localhost:8182"]
 async fn validate_iceberg_connection_success() {
+    if skip_if_lakekeeper_not_running() {
+        return;
+    }
     let lakekeeper = LakekeeperClient::new(LAKEKEEPER_URL);
     let (warehouse_name, warehouse_id) =
         lakekeeper.create_warehouse().await.expect("Failed to create warehouse");
@@ -103,8 +106,10 @@ async fn validate_iceberg_connection_success() {
 }
 
 #[tokio::test]
-#[ignore = "requires a running Lakekeeper instance on localhost:8182"]
 async fn validate_iceberg_connection_failure() {
+    if skip_if_lakekeeper_not_running() {
+        return;
+    }
     let ctx = create_validation_context();
     let config = create_iceberg_config("nonexistent-warehouse");
     let failures = validate_destination(&ctx, &config).await.unwrap();

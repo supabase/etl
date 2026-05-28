@@ -8,6 +8,8 @@ use std::collections::HashMap;
 use iceberg::io::{S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_SECRET_ACCESS_KEY};
 use uuid::Uuid;
 
+const LAKEKEEPER_ADDR: &str = "localhost:8182";
+
 /// Default Lakekeeper URL for local testing.
 pub const LAKEKEEPER_URL: &str = "http://localhost:8182";
 
@@ -19,6 +21,11 @@ pub const MINIO_USERNAME: &str = "minio-admin";
 
 /// Default MinIO password for local testing.
 pub const MINIO_PASSWORD: &str = "minio-admin-password";
+
+/// Returns `true` when the local Lakekeeper instance is not reachable.
+pub fn skip_if_lakekeeper_not_running() -> bool {
+    std::net::TcpStream::connect(LAKEKEEPER_ADDR).is_err()
+}
 
 /// Returns the Lakekeeper catalog URL.
 pub fn get_catalog_url() -> String {
