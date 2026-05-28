@@ -6,7 +6,7 @@ use std::{
 
 use clickhouse::Client;
 use etl::{
-    error::{ErrorKind, EtlResult},
+    error::{ErrorKind, EtlError, EtlResult},
     etl_error,
 };
 use url::Url;
@@ -14,10 +14,42 @@ use url::Url;
 use crate::clickhouse::{
     core::{ClickHouseClientConfig, ClickHouseOperationKind},
     encoding::{ClickHouseValue, encode_to_row_binary},
-    metrics::{ETL_CLICKHOUSE_DDL_DURATION_SECONDS, ETL_CLICKHOUSE_INSERT_DURATION_SECONDS},
+    metrics::{
+        ETL_CLICKHOUSE_CONNECTIVITY_CHECK_DURATION_SECONDS, ETL_CLICKHOUSE_DDL_DURATION_SECONDS,
+        ETL_CLICKHOUSE_DDL_ERRORS_TOTAL, ETL_CLICKHOUSE_INSERT_BYTES,
+        ETL_CLICKHOUSE_INSERT_DURATION_SECONDS, ETL_CLICKHOUSE_INSERT_ENCODING_ERRORS_TOTAL,
+        ETL_CLICKHOUSE_INSERT_ERRORS_TOTAL, ETL_CLICKHOUSE_INSERT_ROWS,
+        ETL_CLICKHOUSE_SCHEMA_QUERY_DURATION_SECONDS, ETL_CLICKHOUSE_STATEMENTS_PER_BATCH,
+    },
     schema::clickhouse_column_type,
     sql::quote_identifier,
 };
+
+/// Returns the `outcome` label for an error returned by [`timeout_call`]:
+/// `"timeout"` when the client-side deadline fired, `"failed"` otherwise.
+fn outcome_label(err: &EtlError) -> &'static str {
+    if err.kind() == ErrorKind::DestinationTimeout { "timeout" } else { "failed" }
+}
+
+/// Records the duration histogram for a DDL operation and, on failure,
+/// increments the DDL error counter. Centralized so DDL paths that bypass
+/// [`ClickHouseClient::execute_ddl`] (notably `truncate_table`, which carries
+/// extra error context) record the same metric shape.
+fn record_ddl_metrics(kind: DdlKind, start: Instant, err: Option<&EtlError>) {
+    metrics::histogram!(
+        ETL_CLICKHOUSE_DDL_DURATION_SECONDS,
+        "kind" => kind.as_label(),
+    )
+    .record(start.elapsed().as_secs_f64());
+    if let Some(err) = err {
+        metrics::counter!(
+            ETL_CLICKHOUSE_DDL_ERRORS_TOTAL,
+            "kind" => kind.as_label(),
+            "outcome" => outcome_label(err),
+        )
+        .increment(1);
+    }
+}
 
 /// Formats a `Duration` as a whole-seconds string for ClickHouse
 /// `.with_option(...)` settings, floored at `"1"`. ClickHouse interprets `"0"`
@@ -152,6 +184,7 @@ pub(crate) enum DdlKind {
     CreateView,
     DropTable,
     DropView,
+    TruncateTable,
     AddColumn,
     DropColumn,
     RenameColumn,
@@ -164,6 +197,7 @@ impl DdlKind {
             DdlKind::CreateView => "create_view",
             DdlKind::DropTable => "drop_table",
             DdlKind::DropView => "drop_view",
+            DdlKind::TruncateTable => "truncate_table",
             DdlKind::AddColumn => "add_column",
             DdlKind::DropColumn => "drop_column",
             DdlKind::RenameColumn => "rename_column",
@@ -252,13 +286,17 @@ impl ClickHouseClient {
             .inner
             .query("SELECT 1")
             .with_option("max_execution_time", floor_secs(self.config.connectivity_check_timeout));
-        timeout_call(
+        let start = Instant::now();
+        let result = timeout_call(
             ClickHouseOperationKind::ConnectivityCheck,
             &self.config,
             None,
             query.fetch_one::<u8>(),
         )
-        .await?;
+        .await;
+        metrics::histogram!(ETL_CLICKHOUSE_CONNECTIVITY_CHECK_DURATION_SECONDS)
+            .record(start.elapsed().as_secs_f64());
+        result?;
         Ok(())
     }
 
@@ -274,14 +312,17 @@ impl ClickHouseClient {
             .query("SELECT count() FROM system.databases WHERE name = ?")
             .bind(database)
             .with_option("max_execution_time", floor_secs(self.config.connectivity_check_timeout));
-        let count = timeout_call(
+        let start = Instant::now();
+        let result = timeout_call(
             ClickHouseOperationKind::ConnectivityCheck,
             &self.config,
             Some(&format!("database: {database}")),
             query.fetch_one::<u64>(),
         )
-        .await?;
-        Ok(count > 0)
+        .await;
+        metrics::histogram!(ETL_CLICKHOUSE_CONNECTIVITY_CHECK_DURATION_SECONDS)
+            .record(start.elapsed().as_secs_f64());
+        Ok(result? > 0)
     }
 
     /// Returns the major/minor version pair from `SELECT version()`.
@@ -321,11 +362,7 @@ impl ClickHouseClient {
             .with_option("lock_acquire_timeout", &ddl_secs);
         let result =
             timeout_call(ClickHouseOperationKind::Ddl, &self.config, None, query.execute()).await;
-        metrics::histogram!(
-            ETL_CLICKHOUSE_DDL_DURATION_SECONDS,
-            "kind" => kind.as_label(),
-        )
-        .record(ddl_start.elapsed().as_secs_f64());
+        record_ddl_metrics(kind, ddl_start, result.as_ref().err());
         result
     }
 
@@ -366,13 +403,17 @@ impl ClickHouseClient {
             )
             .with_option("max_execution_time", &schema_secs)
             .bind(table_name);
-        timeout_call(
+        let start = Instant::now();
+        let result = timeout_call(
             ClickHouseOperationKind::SchemaQuery,
             &self.config,
             Some(&format!("table: {table_name}")),
             query.fetch_all::<ClickHouseTableColumn>(),
         )
-        .await
+        .await;
+        metrics::histogram!(ETL_CLICKHOUSE_SCHEMA_QUERY_DURATION_SECONDS)
+            .record(start.elapsed().as_secs_f64());
+        result
     }
 
     /// Adds a column to an existing ClickHouse table.
@@ -418,19 +459,22 @@ impl ClickHouseClient {
 
     /// Executes `TRUNCATE TABLE IF EXISTS` for the supplied table.
     pub(crate) async fn truncate_table(&self, table_name: &str) -> EtlResult<()> {
+        let ddl_start = Instant::now();
         let ddl_secs = floor_secs(self.config.ddl_timeout);
         let query = self
             .inner
             .query(&build_truncate_table_sql(table_name))
             .with_option("max_execution_time", &ddl_secs)
             .with_option("lock_acquire_timeout", &ddl_secs);
-        timeout_call(
+        let result = timeout_call(
             ClickHouseOperationKind::Ddl,
             &self.config,
             Some(&format!("table: {table_name}")),
             query.execute(),
         )
-        .await
+        .await;
+        record_ddl_metrics(DdlKind::TruncateTable, ddl_start, result.as_ref().err());
+        result
     }
 
     /// Executes `DROP TABLE IF EXISTS` for the supplied table.
@@ -464,6 +508,7 @@ impl ClickHouseClient {
         let sql = build_insert_rows_sql(table_name);
         let mut rows = rows.into_iter().peekable();
         let mut row_buf = Vec::new();
+        let mut statements = 0u64;
 
         while rows.peek().is_some() {
             let mut insert = self
@@ -471,28 +516,68 @@ impl ClickHouseClient {
                 .insert_formatted_with(sql.clone())
                 .buffered_with_capacity(BUFFERED_CAPACITY);
             let mut bytes = 0u64;
+            let mut rows_in_statement = 0u64;
             let insert_start = Instant::now();
 
             while bytes < max_bytes_per_insert {
                 let Some(row) = rows.next() else { break };
                 row_buf.clear();
-                encode_to_row_binary(row, nullable_flags, &mut row_buf)?;
+                encode_to_row_binary(row, nullable_flags, &mut row_buf).inspect_err(|_| {
+                    metrics::counter!(
+                        ETL_CLICKHOUSE_INSERT_ENCODING_ERRORS_TOTAL,
+                        "source" => source,
+                    )
+                    .increment(1);
+                })?;
                 insert.write_buffered(&row_buf);
                 bytes += row_buf.len() as u64;
+                rows_in_statement += 1;
             }
 
-            timeout_call(
+            let result = timeout_call(
                 ClickHouseOperationKind::Insert,
                 &self.config,
                 Some(&format!("table: {table_name}")),
                 insert.end(),
             )
-            .await?;
+            .await;
+            match result.as_ref() {
+                Ok(_) => {
+                    metrics::histogram!(
+                        ETL_CLICKHOUSE_INSERT_DURATION_SECONDS,
+                        "source" => source,
+                    )
+                    .record(insert_start.elapsed().as_secs_f64());
+                    metrics::histogram!(
+                        ETL_CLICKHOUSE_INSERT_ROWS,
+                        "source" => source,
+                    )
+                    .record(rows_in_statement as f64);
+                    metrics::histogram!(
+                        ETL_CLICKHOUSE_INSERT_BYTES,
+                        "source" => source,
+                    )
+                    .record(bytes as f64);
+                }
+                Err(err) => {
+                    metrics::counter!(
+                        ETL_CLICKHOUSE_INSERT_ERRORS_TOTAL,
+                        "source" => source,
+                        "outcome" => outcome_label(err),
+                    )
+                    .increment(1);
+                }
+            }
+            result?;
+            statements += 1;
+        }
+
+        if statements > 0 {
             metrics::histogram!(
-                ETL_CLICKHOUSE_INSERT_DURATION_SECONDS,
+                ETL_CLICKHOUSE_STATEMENTS_PER_BATCH,
                 "source" => source,
             )
-            .record(insert_start.elapsed().as_secs_f64());
+            .record(statements as f64);
         }
 
         Ok(())
