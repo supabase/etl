@@ -22,6 +22,7 @@ Both benchmarks support:
 - `null`: acknowledges and discards writes. Use this to measure source extraction,
   decoding, batching, and pipeline overhead without destination write cost.
 - `bigquery`: writes to BigQuery. Use this for end-to-end destination throughput.
+- `snowflake`: writes to Snowflake. Use this for end-to-end destination throughput.
 
 Both benchmarks print a human-readable summary. When `--report-path` is set, they
 also persist a pretty JSON report for automation. `xtask` always sets
@@ -212,6 +213,31 @@ BigQuery runs are the comparable end-to-end destination benchmark.
 The BigQuery dataset must already exist; the benchmark creates destination
 tables and views inside it, but it does not create the dataset.
 
+## Snowflake Runs
+
+Snowflake credentials are read from environment variables.
+
+Set them in `.env` (see `.env.example`) or pass them as CLI args:
+
+```bash
+cargo xtask benchmark \
+  --destination snowflake \
+  --warehouses 1 \
+  --streaming-duration-seconds 10
+```
+
+Required environment variables (or their `--sf-*` CLI equivalents):
+
+- `BENCH_SNOWFLAKE_ACCOUNT`: account identifier in `ORG-ACCOUNT` format.
+- `BENCH_SNOWFLAKE_USER`: Snowflake user configured for key-pair auth.
+- `BENCH_SNOWFLAKE_PRIVATE_KEY`: PEM contents or path to the RSA private key file (.p8).
+- `BENCH_SNOWFLAKE_DATABASE`: target database.
+- `BENCH_SNOWFLAKE_SCHEMA`: target schema.
+
+Optional:
+
+- `BENCH_SNOWFLAKE_ROLE`: Snowflake role to assume.
+
 ## GitHub Actions
 
 The `Benchmark` workflow is manual and runs through `workflow_dispatch`.
@@ -249,7 +275,7 @@ Important workflow inputs:
   bytes. Defaults to `0.2`.
 - `enable_memory_backpressure`: opt into ETL memory backpressure. Defaults to
   `false` for benchmark runs.
-- `destination`: `null` or `bigquery`.
+- `destination`: `null`, `bigquery`, or `snowflake`.
 - `force_prepare`: drop and regenerate TPC-C tables before running.
 - `skip_table_copy`: skip table copy.
 - `skip_table_streaming`: skip table streaming.
@@ -257,6 +283,11 @@ Important workflow inputs:
 For BigQuery workflow runs, set the repository secret
 `BENCHMARK_BQ_SA_KEY_JSON`, then pass `destination=bigquery`,
 `bq_project_id`, and an existing `bq_dataset_id`.
+
+For Snowflake workflow runs, set repository secrets
+`BENCHMARK_SF_ACCOUNT`, `BENCHMARK_SF_USER`, `BENCHMARK_SF_PRIVATE_KEY`,
+`BENCHMARK_SF_DATABASE`, and `BENCHMARK_SF_SCHEMA`, then pass
+`destination=snowflake`.
 
 The workflow starts only source Postgres, installs pinned `go-tpc`, runs
 `cargo xtask benchmark` with three measured samples plus one warmup sample,

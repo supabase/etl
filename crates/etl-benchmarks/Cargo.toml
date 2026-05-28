@@ -15,6 +15,7 @@ doctest = false
 [features]
 default = []
 bigquery = ["dep:etl-destinations", "etl-destinations/bigquery"]
+snowflake = ["dep:etl-destinations", "etl-destinations/snowflake"]
 
 [dependencies]
 anyhow = { workspace = true }

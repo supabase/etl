@@ -1,4 +1,4 @@
-#[cfg(feature = "bigquery")]
+#[cfg(any(feature = "bigquery", feature = "snowflake"))]
 use std::sync::Once;
 use std::{
     fs,
@@ -30,6 +30,11 @@ use etl_config::{
 };
 #[cfg(feature = "bigquery")]
 use etl_destinations::bigquery::BigQueryDestination;
+#[cfg(feature = "snowflake")]
+use etl_destinations::snowflake::{
+    AuthManager, Client as SnowflakeClient, Config as SnowflakeConfig,
+    Destination as SnowflakeDestination,
+};
 use etl_telemetry::tracing::{LogFlusher, init_tracing};
 use serde::Serialize;
 use sqlx::{
@@ -43,7 +48,7 @@ use tracing::info;
 pub const BENCHMARK_DEFAULT_BATCH_MAX_FILL_MS: u64 = 1_000;
 
 /// Ensures crypto provider is only initialized once.
-#[cfg(feature = "bigquery")]
+#[cfg(any(feature = "bigquery", feature = "snowflake"))]
 static INIT_CRYPTO: Once = Once::new();
 
 /// Where benchmark logs should be written.
@@ -74,6 +79,9 @@ pub enum DestinationType {
     /// Use BigQuery as the destination.
     #[value(name = "bigquery")]
     BigQuery,
+    /// Use Snowflake as the destination.
+    #[value(name = "snowflake")]
+    Snowflake,
 }
 
 #[cfg(test)]
@@ -161,6 +169,24 @@ pub struct DestinationArgs {
     /// BigQuery connection pool size.
     #[arg(long, default_value_t = 32)]
     pub bq_connection_pool_size: usize,
+    /// Snowflake account identifier.
+    #[arg(long)]
+    pub sf_account: Option<String>,
+    /// Snowflake username.
+    #[arg(long)]
+    pub sf_user: Option<String>,
+    /// Snowflake private key PEM contents.
+    #[arg(long, allow_hyphen_values = true)]
+    pub sf_private_key: Option<String>,
+    /// Snowflake database.
+    #[arg(long)]
+    pub sf_database: Option<String>,
+    /// Snowflake schema.
+    #[arg(long)]
+    pub sf_schema: Option<String>,
+    /// Snowflake role.
+    #[arg(long)]
+    pub sf_role: Option<String>,
 }
 
 /// Snapshot of destination-side benchmark counters.
@@ -431,7 +457,7 @@ impl Destination for NullDestination {
 }
 
 /// Benchmark destination variants.
-#[cfg_attr(feature = "bigquery", expect(clippy::large_enum_variant))]
+#[cfg_attr(any(feature = "bigquery", feature = "snowflake"), expect(clippy::large_enum_variant))]
 #[derive(Clone)]
 pub enum BenchDestination {
     /// Null destination variant.
@@ -439,17 +465,20 @@ pub enum BenchDestination {
     /// BigQuery destination variant.
     #[cfg(feature = "bigquery")]
     BigQuery(CountingDestination<BigQueryDestination<NotifyingStore>>),
+    /// Snowflake destination variant.
+    #[cfg(feature = "snowflake")]
+    Snowflake(CountingDestination<SnowflakeDestination<NotifyingStore>>),
 }
 
 impl BenchDestination {
     /// Creates a benchmark destination from CLI arguments.
-    #[cfg_attr(not(feature = "bigquery"), expect(clippy::unused_async))]
+    #[cfg_attr(not(any(feature = "bigquery", feature = "snowflake")), expect(clippy::unused_async))]
     pub async fn new(
         destination_args: &DestinationArgs,
         pipeline_id: u64,
         store: NotifyingStore,
     ) -> Result<Self> {
-        #[cfg(not(feature = "bigquery"))]
+        #[cfg(not(any(feature = "bigquery", feature = "snowflake")))]
         let _ = (pipeline_id, &store);
 
         match destination_args.destination {
@@ -491,6 +520,53 @@ impl BenchDestination {
             DestinationType::BigQuery => {
                 bail!("BigQuery benchmarks require the etl-benchmarks bigquery feature")
             }
+            #[cfg(feature = "snowflake")]
+            DestinationType::Snowflake => {
+                install_crypto_provider();
+
+                let account = destination_args
+                    .sf_account
+                    .clone()
+                    .filter(|a| !a.trim().is_empty())
+                    .context("Snowflake account is required for Snowflake benchmarks")?;
+                let user = destination_args
+                    .sf_user
+                    .clone()
+                    .filter(|u| !u.trim().is_empty())
+                    .context("Snowflake user is required for Snowflake benchmarks")?;
+                let private_key = destination_args
+                    .sf_private_key
+                    .clone()
+                    .filter(|k| !k.trim().is_empty())
+                    .context("Snowflake private key is required for Snowflake benchmarks")?;
+                let database = destination_args
+                    .sf_database
+                    .clone()
+                    .filter(|d| !d.trim().is_empty())
+                    .context("Snowflake database is required for Snowflake benchmarks")?;
+                let schema = destination_args
+                    .sf_schema
+                    .clone()
+                    .filter(|s| !s.trim().is_empty())
+                    .context("Snowflake schema is required for Snowflake benchmarks")?;
+
+                let mut config = SnowflakeConfig::new(&account, &user, &database, &schema);
+                if let Some(role) = &destination_args.sf_role {
+                    if !role.trim().is_empty() {
+                        config = config.with_role(role);
+                    }
+                }
+
+                let auth = AuthManager::new(&config, &private_key, None)?;
+                let client = SnowflakeClient::new(config, Arc::new(auth), pipeline_id);
+                let destination = SnowflakeDestination::new(client, store);
+
+                Ok(Self::Snowflake(CountingDestination::new(destination)))
+            }
+            #[cfg(not(feature = "snowflake"))]
+            DestinationType::Snowflake => {
+                bail!("Snowflake benchmarks require the etl-benchmarks snowflake feature")
+            }
         }
     }
 
@@ -500,6 +576,8 @@ impl BenchDestination {
             Self::Null(destination) => destination.stats(),
             #[cfg(feature = "bigquery")]
             Self::BigQuery(destination) => destination.stats(),
+            #[cfg(feature = "snowflake")]
+            Self::Snowflake(destination) => destination.stats(),
         }
     }
 
@@ -509,6 +587,8 @@ impl BenchDestination {
             Self::Null(destination) => destination.reset_cdc_stats(),
             #[cfg(feature = "bigquery")]
             Self::BigQuery(destination) => destination.reset_cdc_stats(),
+            #[cfg(feature = "snowflake")]
+            Self::Snowflake(destination) => destination.reset_cdc_stats(),
         }
     }
 
@@ -518,6 +598,8 @@ impl BenchDestination {
             Self::Null(destination) => destination.set_cdc_target(target),
             #[cfg(feature = "bigquery")]
             Self::BigQuery(destination) => destination.set_cdc_target(target),
+            #[cfg(feature = "snowflake")]
+            Self::Snowflake(destination) => destination.set_cdc_target(target),
         }
     }
 
@@ -527,6 +609,8 @@ impl BenchDestination {
             Self::Null(destination) => destination.wait_for_cdc_target().await,
             #[cfg(feature = "bigquery")]
             Self::BigQuery(destination) => destination.wait_for_cdc_target().await,
+            #[cfg(feature = "snowflake")]
+            Self::Snowflake(destination) => destination.wait_for_cdc_target().await,
         }
     }
 }
@@ -541,6 +625,8 @@ impl Destination for BenchDestination {
             Self::Null(destination) => destination.shutdown().await,
             #[cfg(feature = "bigquery")]
             Self::BigQuery(destination) => destination.shutdown().await,
+            #[cfg(feature = "snowflake")]
+            Self::Snowflake(destination) => destination.shutdown().await,
         }
     }
 
@@ -555,6 +641,10 @@ impl Destination for BenchDestination {
             }
             #[cfg(feature = "bigquery")]
             Self::BigQuery(destination) => {
+                destination.drop_table_for_copy(replicated_table_schema, async_result).await
+            }
+            #[cfg(feature = "snowflake")]
+            Self::Snowflake(destination) => {
                 destination.drop_table_for_copy(replicated_table_schema, async_result).await
             }
         }
@@ -578,6 +668,12 @@ impl Destination for BenchDestination {
                     .write_table_rows(replicated_table_schema, table_rows, async_result)
                     .await
             }
+            #[cfg(feature = "snowflake")]
+            Self::Snowflake(destination) => {
+                destination
+                    .write_table_rows(replicated_table_schema, table_rows, async_result)
+                    .await
+            }
         }
     }
 
@@ -590,6 +686,8 @@ impl Destination for BenchDestination {
             Self::Null(destination) => destination.write_events(events, async_result).await,
             #[cfg(feature = "bigquery")]
             Self::BigQuery(destination) => destination.write_events(events, async_result).await,
+            #[cfg(feature = "snowflake")]
+            Self::Snowflake(destination) => destination.write_events(events, async_result).await,
         }
     }
 }
@@ -891,7 +989,7 @@ async fn drop_replication_slot(pool: &PgPool, slot_name: &str) {
     .await;
 }
 
-#[cfg(feature = "bigquery")]
+#[cfg(any(feature = "bigquery", feature = "snowflake"))]
 fn install_crypto_provider() {
     INIT_CRYPTO.call_once(|| {
         rustls::crypto::aws_lc_rs::default_provider()

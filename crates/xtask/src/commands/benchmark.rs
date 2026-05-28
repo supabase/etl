@@ -76,6 +76,24 @@ pub(crate) struct BenchmarkArgs {
     /// BigQuery service account key file.
     #[arg(long, env = "BQ_SA_KEY_FILE")]
     bq_sa_key_file: Option<PathBuf>,
+    /// Snowflake account identifier.
+    #[arg(long, env = "BENCH_SNOWFLAKE_ACCOUNT")]
+    sf_account: Option<String>,
+    /// Snowflake username.
+    #[arg(long, env = "BENCH_SNOWFLAKE_USER")]
+    sf_user: Option<String>,
+    /// Snowflake private key: PEM contents or path to a .p8 key file.
+    #[arg(long, env = "BENCH_SNOWFLAKE_PRIVATE_KEY")]
+    sf_private_key: Option<String>,
+    /// Snowflake database.
+    #[arg(long, env = "BENCH_SNOWFLAKE_DATABASE")]
+    sf_database: Option<String>,
+    /// Snowflake schema.
+    #[arg(long, env = "BENCH_SNOWFLAKE_SCHEMA")]
+    sf_schema: Option<String>,
+    /// Snowflake role.
+    #[arg(long, env = "BENCH_SNOWFLAKE_ROLE")]
+    sf_role: Option<String>,
     /// Run the TPC-C streaming workload for this many seconds.
     #[arg(long)]
     streaming_duration_seconds: Option<u64>,
@@ -116,6 +134,8 @@ enum Destination {
     Null,
     #[value(name = "bigquery")]
     BigQuery,
+    #[value(name = "snowflake")]
+    Snowflake,
 }
 
 impl BenchmarkArgs {
@@ -251,6 +271,28 @@ impl BenchmarkArgs {
                     "BigQuery service account key file does not exist: {}",
                     sa_key_file.display()
                 );
+            }
+        }
+
+        if matches!(self.destination, Destination::Snowflake) {
+            if self.sf_account.as_deref().is_none_or(|id| id.trim().is_empty()) {
+                bail!("--sf-account is required for --destination snowflake");
+            }
+
+            if self.sf_user.as_deref().is_none_or(|user| user.trim().is_empty()) {
+                bail!("--sf-user is required for --destination snowflake");
+            }
+
+            if self.sf_private_key.as_deref().is_none_or(|key| key.trim().is_empty()) {
+                bail!("--sf-private-key is required for --destination snowflake");
+            }
+
+            if self.sf_database.as_deref().is_none_or(|db| db.trim().is_empty()) {
+                bail!("--sf-database is required for --destination snowflake");
+            }
+
+            if self.sf_schema.as_deref().is_none_or(|schema| schema.trim().is_empty()) {
+                bail!("--sf-schema is required for --destination snowflake");
             }
         }
 
@@ -487,7 +529,7 @@ impl BenchmarkArgs {
         let mut args = vec!["--log-target".to_owned(), "terminal".to_owned(), "run".to_owned()];
         self.push_common_benchmark_args(&mut args);
         self.push_tuning_args(&mut args);
-        self.push_destination_args(&mut args);
+        self.push_destination_args(&mut args)?;
         args.extend([
             "--report-path".to_owned(),
             report_path.display().to_string(),
@@ -562,7 +604,7 @@ impl BenchmarkArgs {
         let mut args = vec!["--log-target".to_owned(), "terminal".to_owned(), "run".to_owned()];
         self.push_common_benchmark_args(&mut args);
         self.push_tuning_args(&mut args);
-        self.push_destination_args(&mut args);
+        self.push_destination_args(&mut args)?;
         args.extend([
             "--report-path".to_owned(),
             report_path.display().to_string(),
@@ -652,24 +694,59 @@ impl BenchmarkArgs {
         }
     }
 
-    fn push_destination_args(&self, args: &mut Vec<String>) {
+    fn push_destination_args(&self, args: &mut Vec<String>) -> Result<()> {
         args.extend(["--destination".to_owned(), self.destination.as_arg().to_owned()]);
 
-        if !matches!(self.destination, Destination::BigQuery) {
-            return;
+        match self.destination {
+            Destination::BigQuery => {
+                if let Some(project_id) = &self.bq_project_id {
+                    args.extend(["--bq-project-id".to_owned(), project_id.clone()]);
+                }
+
+                if let Some(dataset_id) = &self.bq_dataset_id {
+                    args.extend(["--bq-dataset-id".to_owned(), dataset_id.clone()]);
+                }
+
+                if let Some(sa_key_file) = &self.bq_sa_key_file {
+                    args.extend(["--bq-sa-key-file".to_owned(), sa_key_file.display().to_string()]);
+                }
+            }
+            Destination::Snowflake => {
+                if let Some(account) = &self.sf_account {
+                    args.extend(["--sf-account".to_owned(), account.clone()]);
+                }
+
+                if let Some(user) = &self.sf_user {
+                    args.extend(["--sf-user".to_owned(), user.clone()]);
+                }
+
+                if let Some(key) = &self.sf_private_key {
+                    let pem = if key.starts_with("-----") {
+                        key.clone()
+                    } else {
+                        std::fs::read_to_string(key).with_context(|| {
+                            format!("failed to read Snowflake private key file: {key}")
+                        })?
+                    };
+                    args.extend(["--sf-private-key".to_owned(), pem]);
+                }
+
+                if let Some(database) = &self.sf_database {
+                    args.extend(["--sf-database".to_owned(), database.clone()]);
+                }
+
+                if let Some(schema) = &self.sf_schema {
+                    args.extend(["--sf-schema".to_owned(), schema.clone()]);
+                }
+
+                if let Some(role) = &self.sf_role {
+                    args.extend(["--sf-role".to_owned(), role.clone()]);
+                }
+            }
+            Destination::Null => {}
         }
 
-        if let Some(project_id) = &self.bq_project_id {
-            args.extend(["--bq-project-id".to_owned(), project_id.clone()]);
-        }
-
-        if let Some(dataset_id) = &self.bq_dataset_id {
-            args.extend(["--bq-dataset-id".to_owned(), dataset_id.clone()]);
-        }
-
-        if let Some(sa_key_file) = &self.bq_sa_key_file {
-            args.extend(["--bq-sa-key-file".to_owned(), sa_key_file.display().to_string()]);
-        }
+        Ok(())
     }
 
     fn psql_query(&self, database: &str, sql: &str) -> Result<String> {
@@ -718,6 +795,7 @@ impl Destination {
         match self {
             Self::Null => "null",
             Self::BigQuery => "bigquery",
+            Self::Snowflake => "snowflake",
         }
     }
 }
@@ -1072,6 +1150,9 @@ fn run_benchmark_binary(
     command.args(["run", "--quiet", "-p", "etl-benchmarks", "--release"]);
     if matches!(destination, Destination::BigQuery) {
         command.args(["--features", "bigquery"]);
+    }
+    if matches!(destination, Destination::Snowflake) {
+        command.args(["--features", "snowflake"]);
     }
     command.args(["--bin", binary_name, "--"]).args(binary_args);
 
