@@ -3,7 +3,7 @@ use std::{fmt, sync::Arc};
 use crate::types::PgLsn;
 
 /// Updates emitted by the background task driving the PostgreSQL connection.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) enum PostgresConnectionUpdate {
     /// The connection task is running.
     Running,
@@ -11,6 +11,16 @@ pub(crate) enum PostgresConnectionUpdate {
     Terminated,
     /// The connection task exited due to an error.
     Errored { error: Arc<str> },
+}
+
+impl fmt::Debug for PostgresConnectionUpdate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Running => f.write_str("Running"),
+            Self::Terminated => f.write_str("Terminated"),
+            Self::Errored { .. } => f.debug_struct("Errored").finish_non_exhaustive(),
+        }
+    }
 }
 
 impl PostgresConnectionUpdate {

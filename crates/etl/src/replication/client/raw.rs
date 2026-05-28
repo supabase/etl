@@ -1,4 +1,4 @@
-use std::{num::NonZeroI32, time::Duration};
+use std::{fmt, num::NonZeroI32, sync::Arc, time::Duration};
 
 use etl_postgres::{replication::extract_server_version, tokio::tls::MakeRustlsConnect};
 use pg_escape::{quote_identifier, quote_literal};
@@ -69,6 +69,61 @@ fn tls_client_config_from_root_certs(trusted_root_certs: &str) -> EtlResult<Clie
     Ok(ClientConfig::builder().with_root_certificates(root_store).with_no_client_auth())
 }
 
+/// Shared connection settings used to create parent and child replication
+/// connections.
+///
+/// The raw [`PgConnectionConfig`] can contain large PEM certificate strings, so
+/// this wrapper keeps it behind an [`Arc`] and caches the parsed rustls
+/// [`ClientConfig`] for TLS connections.
+#[derive(Clone)]
+pub(super) struct PgReplicationConnectionConfig {
+    /// Original PostgreSQL connection settings.
+    pg_connection_config: Arc<PgConnectionConfig>,
+    /// Parsed rustls client config, present when TLS is enabled.
+    tls_client_config: Option<Arc<ClientConfig>>,
+}
+
+impl PgReplicationConnectionConfig {
+    /// Creates shared connection settings from an owned PostgreSQL config.
+    fn new(pg_connection_config: PgConnectionConfig) -> EtlResult<Self> {
+        let tls_client_config = if pg_connection_config.tls.enabled {
+            Some(Arc::new(tls_client_config_from_root_certs(
+                &pg_connection_config.tls.trusted_root_certs,
+            )?))
+        } else {
+            None
+        };
+
+        Ok(Self { pg_connection_config: Arc::new(pg_connection_config), tls_client_config })
+    }
+
+    /// Returns the raw PostgreSQL connection settings.
+    fn pg_connection_config(&self) -> &PgConnectionConfig {
+        &self.pg_connection_config
+    }
+
+    /// Returns the shared rustls client config.
+    fn tls_client_config(&self) -> Option<Arc<ClientConfig>> {
+        self.tls_client_config.as_ref().map(Arc::clone)
+    }
+}
+
+impl fmt::Debug for PgReplicationConnectionConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let config = self.pg_connection_config();
+
+        f.debug_struct("PgReplicationConnectionConfig")
+            .field("host_configured", &!config.host.is_empty())
+            .field("hostaddr_configured", &config.hostaddr.is_some())
+            .field("port", &config.port)
+            .field("database_configured", &!config.name.is_empty())
+            .field("username_configured", &!config.username.is_empty())
+            .field("tls_enabled", &config.tls.enabled)
+            .field("tls_client_configured", &self.tls_client_config.is_some())
+            .finish()
+    }
+}
+
 /// Spawns a background task to monitor a Postgres connection until it
 /// terminates.
 fn spawn_postgres_connection<T>(
@@ -117,12 +172,21 @@ where
 /// cloneable. Methods that open a transaction borrow the client mutably, so no
 /// other command can be issued on the same connection while that transaction is
 /// alive.
-#[derive(Debug)]
 pub struct PgReplicationClient {
     client: Client,
-    pg_connection_config: PgConnectionConfig,
+    connection_config: PgReplicationConnectionConfig,
     server_version: Option<NonZeroI32>,
     connection_updates_rx: watch::Receiver<PostgresConnectionUpdate>,
+}
+
+impl fmt::Debug for PgReplicationClient {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PgReplicationClient")
+            .field("connection_config", &self.connection_config)
+            .field("server_version", &self.server_version)
+            .field("is_closed", &self.client.is_closed())
+            .finish()
+    }
 }
 
 impl PgReplicationClient {
@@ -131,28 +195,29 @@ impl PgReplicationClient {
     ///
     /// The connection is configured for logical replication mode.
     pub async fn connect(pg_connection_config: PgConnectionConfig) -> EtlResult<Self> {
-        PgReplicationClient::connect_with_kind(pg_connection_config, ConnectionKind::Replication)
-            .await
+        let connection_config = PgReplicationConnectionConfig::new(pg_connection_config)?;
+
+        PgReplicationClient::connect_with_kind(connection_config, ConnectionKind::Replication).await
     }
 
     /// Establishes a connection to Postgres using the supplied connection kind.
     async fn connect_with_kind(
-        pg_connection_config: PgConnectionConfig,
+        connection_config: PgReplicationConnectionConfig,
         kind: ConnectionKind,
     ) -> EtlResult<Self> {
-        match pg_connection_config.tls.enabled {
-            true => PgReplicationClient::connect_tls(pg_connection_config, kind).await,
-            false => PgReplicationClient::connect_no_tls(pg_connection_config, kind).await,
+        match connection_config.pg_connection_config().tls.enabled {
+            true => PgReplicationClient::connect_tls(connection_config, kind).await,
+            false => PgReplicationClient::connect_no_tls(connection_config, kind).await,
         }
     }
 
     /// Establishes a connection to Postgres without TLS encryption.
     async fn connect_no_tls(
-        pg_connection_config: PgConnectionConfig,
+        connection_config: PgReplicationConnectionConfig,
         kind: ConnectionKind,
     ) -> EtlResult<Self> {
         let mut config: Config =
-            pg_connection_config.clone().with_db(Some(&ETL_REPLICATION_OPTIONS));
+            connection_config.pg_connection_config().with_db(Some(&ETL_REPLICATION_OPTIONS));
         kind.configure(&mut config);
 
         let (client, connection) = config.connect(NoTls).await?;
@@ -164,26 +229,23 @@ impl PgReplicationClient {
 
         info!("connected to postgres without tls");
 
-        Ok(PgReplicationClient {
-            client,
-            pg_connection_config,
-            server_version,
-            connection_updates_rx,
-        })
+        Ok(PgReplicationClient { client, connection_config, server_version, connection_updates_rx })
     }
 
     /// Establishes a TLS-encrypted connection to Postgres.
     async fn connect_tls(
-        pg_connection_config: PgConnectionConfig,
+        connection_config: PgReplicationConnectionConfig,
         kind: ConnectionKind,
     ) -> EtlResult<Self> {
         let mut config: Config =
-            pg_connection_config.clone().with_db(Some(&ETL_REPLICATION_OPTIONS));
+            connection_config.pg_connection_config().with_db(Some(&ETL_REPLICATION_OPTIONS));
         kind.configure(&mut config);
 
-        let tls_config =
-            tls_client_config_from_root_certs(&pg_connection_config.tls.trusted_root_certs)?;
-        let (client, connection) = config.connect(MakeRustlsConnect::new(tls_config)).await?;
+        let tls_config = connection_config.tls_client_config().ok_or_else(|| {
+            etl_error!(ErrorKind::InvalidState, "TLS client config missing for TLS connection")
+        })?;
+        let (client, connection) =
+            config.connect(MakeRustlsConnect::from_shared_config(tls_config)).await?;
 
         let server_version =
             connection.parameter("server_version").and_then(extract_server_version);
@@ -192,19 +254,14 @@ impl PgReplicationClient {
 
         info!("connected to postgres with tls");
 
-        Ok(PgReplicationClient {
-            client,
-            pg_connection_config,
-            server_version,
-            connection_updates_rx,
-        })
+        Ok(PgReplicationClient { client, connection_config, server_version, connection_updates_rx })
     }
 
     /// Creates a non-replication child connection from connection settings.
     pub(super) async fn connect_child_from_config(
-        pg_connection_config: PgConnectionConfig,
+        connection_config: PgReplicationConnectionConfig,
     ) -> EtlResult<ChildPgReplicationClient> {
-        let client = Self::connect_with_kind(pg_connection_config, ConnectionKind::Child).await?;
+        let client = Self::connect_with_kind(connection_config, ConnectionKind::Child).await?;
 
         Ok(ChildPgReplicationClient::new(client))
     }
@@ -280,7 +337,7 @@ impl PgReplicationClient {
         &mut self,
         slot_name: &str,
     ) -> EtlResult<(PgReplicationTransaction<'_>, CreateSlotResult)> {
-        let pg_connection_config = self.pg_connection_config.clone();
+        let connection_config = self.connection_config.clone();
         let server_version = self.server_version;
         let connection_updates_rx = self.connection_updates_rx();
 
@@ -292,7 +349,7 @@ impl PgReplicationClient {
         Ok((
             PgReplicationTransaction::new(
                 transaction,
-                pg_connection_config,
+                connection_config,
                 server_version,
                 connection_updates_rx,
             ),

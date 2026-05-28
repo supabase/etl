@@ -9,13 +9,12 @@ use tracing::warn;
 use super::{
     child::ChildPgReplicationClient,
     query::PgReplicationQueryTarget,
-    raw::PgReplicationClient,
+    raw::{PgReplicationClient, PgReplicationConnectionConfig},
     types::{CtidPartition, PostgresConnectionUpdate},
     utils::get_row_value,
 };
 use crate::{
     bail,
-    config::PgConnectionConfig,
     conversions::{ColumnSchemaMessage, IdentityMessage, build_table_schema},
     error::{ErrorKind, EtlResult},
     etl_error,
@@ -592,26 +591,27 @@ impl fmt::Debug for PgReplicationTransactionCore<'_> {
 /// Child connections forked from this transaction rely on snapshots exported by
 /// it and must finish their snapshot-dependent work before this transaction is
 /// committed.
+#[derive(Debug)]
 pub struct PgReplicationTransaction<'a> {
     /// Common transaction state and query helpers.
     core: PgReplicationTransactionCore<'a>,
-    /// Settings used to fork child connections that import this transaction's
-    /// snapshot.
-    pg_connection_config: PgConnectionConfig,
+    /// Shared settings used to fork child connections that import this
+    /// transaction's snapshot.
+    connection_config: PgReplicationConnectionConfig,
 }
 
 impl<'a> PgReplicationTransaction<'a> {
     /// Wraps a transaction created from a replication client.
     pub(super) fn new(
         transaction: Transaction<'a>,
-        pg_connection_config: PgConnectionConfig,
+        connection_config: PgReplicationConnectionConfig,
         server_version: Option<NonZeroI32>,
         connection_updates_rx: watch::Receiver<PostgresConnectionUpdate>,
     ) -> Self {
         let core =
             PgReplicationTransactionCore::new(transaction, server_version, connection_updates_rx);
 
-        Self { core, pg_connection_config }
+        Self { core, connection_config }
     }
 
     /// Retrieves the schema information for the supplied table.
@@ -702,18 +702,12 @@ impl<'a> PgReplicationTransaction<'a> {
     /// keep this parent transaction open until every child transaction that
     /// imports its exported snapshot has finished.
     pub async fn fork_child(&self) -> EtlResult<ChildPgReplicationClient> {
-        PgReplicationClient::connect_child_from_config(self.pg_connection_config.clone()).await
+        PgReplicationClient::connect_child_from_config(self.connection_config.clone()).await
     }
 
     /// Commits the current transaction.
     pub async fn commit(self) -> EtlResult<()> {
         self.core.commit().await
-    }
-}
-
-impl fmt::Debug for PgReplicationTransaction<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PgReplicationTransaction").field("core", &self.core).finish_non_exhaustive()
     }
 }
 
@@ -724,6 +718,7 @@ impl fmt::Debug for PgReplicationTransaction<'_> {
 /// dropped. The exported parent snapshot it imports must remain valid for the
 /// duration of the child transaction; this dependency is maintained by callers
 /// rather than by this type's lifetime.
+#[derive(Debug)]
 pub struct PgChildReplicationTransaction<'a> {
     /// Common transaction state and query helpers.
     core: PgReplicationTransactionCore<'a>,
@@ -784,14 +779,6 @@ impl<'a> PgChildReplicationTransaction<'a> {
     /// Commits the current transaction.
     pub async fn commit(self) -> EtlResult<()> {
         self.core.commit().await
-    }
-}
-
-impl fmt::Debug for PgChildReplicationTransaction<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PgChildReplicationTransaction")
-            .field("core", &self.core)
-            .finish_non_exhaustive()
     }
 }
 
