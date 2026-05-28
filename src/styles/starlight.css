@@ -68,6 +68,18 @@ header.header {
   height: 1.45rem;
 }
 
+site-search button {
+  border-color: var(--sl-color-hairline);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--sl-color-bg) 86%, transparent);
+  box-shadow: 0 8px 28px color-mix(in srgb, var(--sl-color-black) 7%, transparent);
+}
+
+site-search button:hover {
+  border-color: color-mix(in srgb, var(--sl-color-accent) 42%, var(--sl-color-hairline));
+  background: color-mix(in srgb, var(--sl-color-accent-low) 18%, var(--sl-color-bg));
+}
+
 mobile-starlight-toc nav {
   border-top: 0;
 }
@@ -82,6 +94,35 @@ mobile-starlight-toc summary {
 
 .sidebar {
   border-inline-end: 1px solid var(--sl-color-hairline);
+}
+
+#starlight__sidebar a {
+  border-radius: 6px;
+  line-height: 1.35;
+}
+
+#starlight__sidebar a[aria-current='page'] {
+  background: color-mix(in srgb, var(--sl-color-accent) 18%, transparent);
+  color: var(--sl-color-accent-high);
+  font-weight: 650;
+}
+
+#starlight__sidebar summary {
+  border-radius: 6px;
+}
+
+.right-sidebar-panel {
+  font-size: 0.86rem;
+}
+
+.right-sidebar-panel a {
+  line-height: 1.35;
+  text-underline-offset: 0.18em;
+}
+
+.right-sidebar-panel a[aria-current='true'] {
+  color: var(--sl-color-accent-high);
+  font-weight: 650;
 }
 
 .content-panel {
@@ -104,6 +145,17 @@ mobile-starlight-toc summary {
   color: var(--sl-color-gray-3);
   font-size: 0.95rem;
   line-height: 1.72;
+}
+
+@media (min-width: 50.001rem) {
+  .sl-markdown-content {
+    font-size: 1rem;
+    line-height: 1.74;
+  }
+
+  .sl-markdown-content h2 {
+    margin-top: 2.5rem;
+  }
 }
 
 .sl-markdown-content > :first-child {
@@ -254,6 +306,51 @@ mobile-starlight-toc summary {
   text-underline-offset: 0.2em;
 }
 
+.doc-path-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+  margin-block: 1rem 1.75rem;
+}
+
+.doc-path-card {
+  display: flex;
+  min-height: 9.5rem;
+  flex-direction: column;
+  gap: 0.45rem;
+  padding: 0.85rem;
+  border: 1px solid var(--sl-color-hairline);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--sl-color-bg-sidebar) 54%, transparent);
+  color: var(--sl-color-gray-3);
+  text-decoration: none;
+}
+
+.doc-path-card:hover {
+  border-color: color-mix(in srgb, var(--sl-color-accent) 46%, var(--sl-color-hairline));
+  background: color-mix(in srgb, var(--sl-color-accent-low) 20%, var(--sl-color-bg));
+  text-decoration: none;
+}
+
+.doc-path-card strong {
+  color: var(--sl-color-gray-1);
+  font-size: 1.02rem;
+  line-height: 1.25;
+}
+
+.doc-path-card span:last-child {
+  line-height: 1.55;
+}
+
+.doc-path-kicker {
+  color: var(--sl-color-accent);
+  font-family: var(--sl-font-mono);
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
 .sl-markdown-content code:not(:where(pre code)) {
   border: 1px solid color-mix(in srgb, var(--sl-color-accent) 28%, transparent);
   border-radius: 5px;
@@ -265,6 +362,8 @@ mobile-starlight-toc summary {
 
 .expressive-code {
   --ec-brdRad: 8px;
+  --ec-codeFontSize: 0.84rem;
+  --ec-codeLineHt: 1.55;
   margin-block: 1.25rem;
   max-width: 100%;
   overflow-x: auto;
@@ -367,8 +466,199 @@ mobile-starlight-toc summary {
 }
 
 @media (max-width: 50rem) {
+  header.header {
+    z-index: 40;
+  }
+
+  starlight-menu-button button[aria-controls='starlight__sidebar'] {
+    position: fixed;
+    top: 0.65rem;
+    right: 0.75rem;
+    z-index: 45;
+    width: 2.25rem;
+    height: 2.25rem;
+    border: 1px solid var(--sl-color-hairline);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--sl-color-bg) 92%, transparent);
+    color: var(--sl-color-gray-2);
+    box-shadow: 0 8px 24px color-mix(in srgb, var(--sl-color-black) 8%, transparent);
+    backdrop-filter: blur(18px);
+  }
+
+  starlight-menu-button[aria-expanded='true'] button[aria-controls='starlight__sidebar'] {
+    border-color: color-mix(in srgb, var(--sl-color-accent) 56%, var(--sl-color-hairline));
+    background: color-mix(in srgb, var(--sl-color-accent-low) 72%, var(--sl-color-bg));
+    color: var(--sl-color-accent-high);
+  }
+
+  nav.sidebar:has(starlight-menu-button[aria-expanded='true'])::before {
+    position: fixed;
+    inset: 0;
+    z-index: 30;
+    background: color-mix(in srgb, var(--sl-color-black) 44%, transparent);
+    content: '';
+  }
+
+  #starlight__sidebar {
+    top: 3.5rem;
+    right: 0;
+    bottom: 0;
+    left: auto;
+    z-index: 35;
+    width: min(23rem, calc(100vw - 1rem));
+    border-top: 1px solid var(--sl-color-hairline-light);
+    border-left: 1px solid var(--sl-color-hairline);
+    border-radius: 8px 0 0 0;
+    background: var(--sl-color-bg);
+    box-shadow: -18px 0 48px color-mix(in srgb, var(--sl-color-black) 22%, transparent);
+    opacity: 0;
+    pointer-events: none;
+    transform: translateX(calc(100% + 1rem));
+    transition:
+      transform 180ms ease,
+      opacity 180ms ease,
+      visibility 180ms ease;
+    visibility: hidden;
+  }
+
+  starlight-menu-button[aria-expanded='true'] ~ #starlight__sidebar {
+    opacity: 1;
+    pointer-events: auto;
+    transform: translateX(0);
+    visibility: visible;
+  }
+
+  #starlight__sidebar .sidebar-content {
+    min-height: 100%;
+    padding: 1rem 0.8rem 5rem;
+    background: var(--sl-color-bg);
+  }
+
+  #starlight__sidebar .top-level {
+    gap: 0.25rem;
+  }
+
+  #starlight__sidebar .top-level a,
+  #starlight__sidebar .top-level summary {
+    min-height: 2.45rem;
+    border-radius: 8px;
+    white-space: normal;
+  }
+
+  #starlight__sidebar .top-level a span,
+  #starlight__sidebar .top-level summary span {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  #starlight__sidebar .top-level a {
+    padding: 0.55rem 0.65rem;
+  }
+
+  #starlight__sidebar .top-level a[aria-current='page'] {
+    background: color-mix(in srgb, var(--sl-color-accent) 22%, transparent);
+    color: var(--sl-color-accent-high);
+  }
+
+  #starlight__sidebar .top-level details {
+    margin-top: 0.35rem;
+    padding-top: 0.35rem;
+    border-top: 1px solid var(--sl-color-hairline-light);
+  }
+
+  #starlight__sidebar .top-level details > ul {
+    margin-top: 0.2rem;
+    border-left-color: var(--sl-color-hairline-light);
+  }
+
+  mobile-starlight-toc {
+    display: block;
+    width: 100%;
+  }
+
   .main-pane .sl-container {
     padding-inline: 1rem;
+  }
+
+  mobile-starlight-toc nav {
+    width: 100%;
+    padding: 0.55rem 1rem;
+    background: var(--sl-color-bg);
+    border-top: 1px solid var(--sl-color-hairline-light);
+    border-bottom: 1px solid var(--sl-color-hairline-light);
+  }
+
+  mobile-starlight-toc details {
+    position: relative;
+    width: 100%;
+  }
+
+  mobile-starlight-toc summary {
+    width: 100%;
+    min-height: 2.35rem;
+    padding: 0.45rem 0.65rem;
+    border: 1px solid var(--sl-color-hairline);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--sl-color-bg-sidebar) 72%, var(--sl-color-bg));
+    box-shadow: none;
+    gap: 0.65rem;
+  }
+
+  mobile-starlight-toc details[open] summary {
+    border-color: color-mix(in srgb, var(--sl-color-accent) 52%, var(--sl-color-hairline));
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--sl-color-accent) 14%, transparent);
+  }
+
+  mobile-starlight-toc summary .toggle {
+    flex: 0 0 auto;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--sl-color-gray-2);
+    font-weight: 600;
+    justify-content: flex-start;
+  }
+
+  mobile-starlight-toc summary .display-current {
+    flex: 1 1 auto;
+    min-width: 0;
+    max-width: 45%;
+    margin-left: auto;
+    overflow: hidden;
+    color: var(--sl-color-gray-3);
+    font-size: 0.84rem;
+    text-align: right;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  mobile-starlight-toc .dropdown {
+    position: absolute;
+    top: calc(100% + 0.45rem);
+    right: 0;
+    left: 0;
+    z-index: 60;
+    max-height: min(22rem, calc(100vh - 9rem));
+    overflow-y: auto;
+    border: 1px solid var(--sl-color-hairline);
+    border-radius: 8px;
+    background: var(--sl-color-bg);
+    box-shadow: 0 18px 46px color-mix(in srgb, var(--sl-color-black) 18%, transparent);
+  }
+
+  mobile-starlight-toc .dropdown ul {
+    padding: 0.35rem;
+  }
+
+  mobile-starlight-toc .dropdown a {
+    min-height: 2.25rem;
+    padding: 0.5rem 0.6rem;
+    border-radius: 6px;
+  }
+
+  mobile-starlight-toc .dropdown a[aria-current='true'] {
+    background: color-mix(in srgb, var(--sl-color-accent) 18%, transparent);
+    color: var(--sl-color-accent-high);
   }
 
   .content-panel:first-of-type {
@@ -387,5 +677,19 @@ mobile-starlight-toc summary {
     display: block;
     overflow-x: auto;
     font-size: 0.9rem;
+  }
+
+  .doc-path-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .doc-path-card {
+    min-height: 0;
+  }
+}
+
+@media (max-width: 24rem) {
+  mobile-starlight-toc summary .display-current {
+    display: none;
   }
 }
