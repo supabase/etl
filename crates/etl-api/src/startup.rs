@@ -20,7 +20,7 @@ use utoipa_swagger_ui::SwaggerUi;
 
 use crate::{
     authentication::auth_validator,
-    config::ApiConfig,
+    config::{ApiConfig, EncryptionKeyConfig},
     configs::encryption,
     data::publications::Publication,
     feature_flags::{FeatureFlagsClient, init_feature_flags},
@@ -214,7 +214,7 @@ pub fn build_encryption_keyring(
 
 /// Decodes one configured encryption key into runtime key material.
 fn decode_encryption_key(
-    key_config: &crate::config::EncryptionKey,
+    key_config: &EncryptionKeyConfig,
 ) -> Result<encryption::EncryptionKey, anyhow::Error> {
     let key_bytes = BASE64_STANDARD
         .decode(&key_config.key)

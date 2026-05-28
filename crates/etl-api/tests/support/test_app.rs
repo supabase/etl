@@ -9,7 +9,7 @@ use aws_lc_rs::{
 use base64::prelude::*;
 use etl_api::{
     config::{
-        ApiConfig, ApplicationSettings, EncryptionKey as ConfigEncryptionKey, K8sConfig,
+        ApiConfig, ApplicationSettings, EncryptionKeyConfig as ConfigEncryptionKey, K8sConfig,
         SourceConfig,
     },
     configs::encryption,
