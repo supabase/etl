@@ -17,8 +17,8 @@ mkdir -p "$pgdata"
 chown -R postgres:postgres "$(dirname "$pgdata")"
 
 if [ ! -s "$pgdata/PG_VERSION" ]; then
-  rm -rf "$pgdata"
   mkdir -p "$pgdata"
+  find "$pgdata" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
   chown -R postgres:postgres "$pgdata"
 
   export PGPASSWORD="$postgres_password"
