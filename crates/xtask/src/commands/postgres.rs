@@ -377,9 +377,8 @@ impl StartArgs {
             if started_at.elapsed() >= POSTGRES_READY_TIMEOUT {
                 self.dump_docker_compose_diagnostics(project_and_port);
                 bail!(
-                    "Postgres on localhost:{} did not become ready within {:?}",
-                    port,
-                    POSTGRES_READY_TIMEOUT
+                    "Postgres on localhost:{port} did not become ready within \
+                     {POSTGRES_READY_TIMEOUT:?}"
                 );
             }
 
