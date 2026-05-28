@@ -5,7 +5,7 @@ use thiserror::Error;
 
 use crate::{
     configs::{
-        encryption::EncryptionKey, serde::DbSerializationError, source::FullApiSourceConfig,
+        encryption::EncryptionKeyring, serde::DbSerializationError, source::FullApiSourceConfig,
     },
     data::{
         sources::{SourcesDbError, create_source},
@@ -34,7 +34,7 @@ pub async fn create_tenant_and_source(
     tenant_name: &str,
     source_name: &str,
     source_config: FullApiSourceConfig,
-    encryption_key: &EncryptionKey,
+    encryption_key: &EncryptionKeyring,
 ) -> Result<(String, i64), TenantSourceDbError> {
     let tenant_id = create_tenant(txn.deref_mut(), tenant_id, tenant_name).await?;
     let source_id =

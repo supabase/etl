@@ -6,7 +6,7 @@ use thiserror::Error;
 
 use crate::{
     configs::{
-        encryption::EncryptionKey,
+        encryption::EncryptionKeyring,
         pipeline::{FullApiPipelineConfig, StoredPipelineConfig},
         serde::{DbDeserializationError, DbSerializationError, deserialize_from_value, serialize},
     },
@@ -430,7 +430,7 @@ pub async fn read_pipeline_components(
     connection: &mut PgConnection,
     tenant_id: &str,
     pipeline_id: i64,
-    encryption_key: &EncryptionKey,
+    encryption_key: &EncryptionKeyring,
 ) -> Result<(Pipeline, Replicator, Image, Source, Destination), PipelineError> {
     let pipeline = read_pipeline(&mut *connection, tenant_id, pipeline_id)
         .await?

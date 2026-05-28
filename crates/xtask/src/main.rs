@@ -4,8 +4,8 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use commands::{
     BenchmarkArgs, BenchmarkCompareArgs, ChaosArgs, CheckArgs, DeployLocalArgs, ExampleArgs,
-    FixArgs, FmtArgs, InitArgs, MigrateArgs, MsrvArgs, NextestArgs, PostgresArgs, SeedArgs,
-    TestClickhouseArgs, VendorDuckdbArgs,
+    FixArgs, FmtArgs, InitArgs, MigrateArgs, MsrvArgs, NextestArgs, PostgresArgs,
+    RotateEncryptionKeyArgs, SeedArgs, TestClickhouseArgs, VendorDuckdbArgs,
 };
 
 #[derive(Parser)]
@@ -46,6 +46,10 @@ enum Command {
     Nextest(NextestArgs),
     /// Manage test Postgres clusters.
     Postgres(PostgresArgs),
+    /// Re-encrypt API source and destination configs with the latest configured
+    /// key.
+    #[command(name = "rotate-encryption-key")]
+    RotateEncryptionKey(RotateEncryptionKeyArgs),
     /// Seed a Postgres database with test tables and data for destination
     /// examples.
     Seed(SeedArgs),
@@ -74,6 +78,7 @@ async fn main() -> Result<()> {
         Command::Msrv(cmd) => cmd.run(),
         Command::Nextest(cmd) => cmd.run(),
         Command::Postgres(cmd) => cmd.run(),
+        Command::RotateEncryptionKey(cmd) => cmd.run().await,
         Command::Seed(cmd) => cmd.run(),
         Command::TestClickhouse(cmd) => cmd.run(),
         Command::VendorDuckdb(cmd) => cmd.run(),

@@ -18,7 +18,7 @@ use utoipa::ToSchema;
 
 use crate::{
     config::ApiConfig,
-    configs::{encryption::EncryptionKey, pipeline::FullApiPipelineConfig},
+    configs::{encryption::EncryptionKeyring, pipeline::FullApiPipelineConfig},
     data,
     data::{
         connect_to_source_database_from_api,
@@ -549,7 +549,7 @@ pub struct ValidatePipelineResponse {
 pub(crate) async fn create_pipeline(
     req: HttpRequest,
     pool: Data<PgPool>,
-    encryption_key: Data<EncryptionKey>,
+    encryption_key: Data<EncryptionKeyring>,
     pipeline: Json<CreatePipelineRequest>,
     feature_flags_client: Option<Data<FeatureFlagsClient>>,
 ) -> Result<impl Responder, PipelineError> {
@@ -670,7 +670,7 @@ pub(crate) async fn update_pipeline(
     k8s_client: Data<dyn K8sClient>,
     pipeline_id: Path<i64>,
     pipeline: Json<UpdatePipelineRequest>,
-    encryption_key: Data<EncryptionKey>,
+    encryption_key: Data<EncryptionKeyring>,
 ) -> Result<impl Responder, PipelineError> {
     let tenant_id = extract_tenant_id(&req)?;
     let pipeline_id = pipeline_id.into_inner();
@@ -749,7 +749,7 @@ pub(crate) async fn delete_pipeline(
     req: HttpRequest,
     pool: Data<PgPool>,
     api_config: Data<ApiConfig>,
-    encryption_key: Data<EncryptionKey>,
+    encryption_key: Data<EncryptionKeyring>,
     k8s_client: Data<dyn K8sClient>,
     trusted_root_certs_cache: Data<TrustedRootCertsCache>,
     pipeline_id: Path<i64>,
@@ -869,7 +869,7 @@ pub(crate) async fn read_all_pipelines(
 pub(crate) async fn start_pipeline(
     req: HttpRequest,
     pool: Data<PgPool>,
-    encryption_key: Data<EncryptionKey>,
+    encryption_key: Data<EncryptionKeyring>,
     k8s_client: Data<dyn K8sClient>,
     trusted_root_certs_cache: Data<TrustedRootCertsCache>,
     api_config: Data<ApiConfig>,
@@ -1082,7 +1082,7 @@ pub(crate) async fn get_pipeline_replication_status(
     req: HttpRequest,
     pool: Data<PgPool>,
     api_config: Data<ApiConfig>,
-    encryption_key: Data<EncryptionKey>,
+    encryption_key: Data<EncryptionKeyring>,
     trusted_root_certs_cache: Data<TrustedRootCertsCache>,
     pipeline_id: Path<i64>,
 ) -> Result<impl Responder, PipelineError> {
@@ -1177,7 +1177,7 @@ pub(crate) async fn rollback_tables(
     req: HttpRequest,
     pool: Data<PgPool>,
     api_config: Data<ApiConfig>,
-    encryption_key: Data<EncryptionKey>,
+    encryption_key: Data<EncryptionKeyring>,
     trusted_root_certs_cache: Data<TrustedRootCertsCache>,
     pipeline_id: Path<i64>,
     rollback_request: Json<RollbackTablesRequest>,
@@ -1324,7 +1324,7 @@ pub(crate) async fn rollback_tables(
 pub(crate) async fn update_pipeline_version(
     req: HttpRequest,
     pool: Data<PgPool>,
-    encryption_key: Data<EncryptionKey>,
+    encryption_key: Data<EncryptionKeyring>,
     k8s_client: Data<dyn K8sClient>,
     trusted_root_certs_cache: Data<TrustedRootCertsCache>,
     api_config: Data<ApiConfig>,
@@ -1429,7 +1429,7 @@ pub(crate) async fn validate_pipeline(
     api_config: Data<ApiConfig>,
     trusted_root_certs_cache: Data<TrustedRootCertsCache>,
     request: Json<ValidatePipelineRequest>,
-    encryption_key: Data<EncryptionKey>,
+    encryption_key: Data<EncryptionKeyring>,
 ) -> Result<impl Responder, PipelineError> {
     let tenant_id = extract_tenant_id(&req)?;
     let request = request.into_inner();

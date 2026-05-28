@@ -74,6 +74,61 @@ export APP_CONFIG_DIR=/etc/etl-api/config
 ./etl-api
 ```
 
+### Encryption Keys
+
+Sensitive source and destination config fields are encrypted before being stored
+in the API database. New encrypted values use the configured key with the
+highest `id`, while reads use the `id` stored with each encrypted value.
+
+The fallback `encryption_key` remains required during the migration to
+multi-key config:
+
+```yaml
+encryption_key:
+  id: 1
+  key: <base64-encoded 32-byte key>
+```
+
+Additional keys can be configured for rotation:
+
+```yaml
+encryption_keys:
+  - id: 2
+    key: <base64-encoded 32-byte key>
+```
+
+After adding a higher key id, existing rows can be re-encrypted with:
+
+```bash
+APP_CONFIG_DIR=/path/to/etl-api/configuration \
+APP_ENVIRONMENT=prod \
+cargo x rotate-encryption-key --dry-run
+
+APP_CONFIG_DIR=/path/to/etl-api/configuration \
+APP_ENVIRONMENT=prod \
+cargo x rotate-encryption-key
+```
+
+The command uses the keys and database connection from the API configuration.
+It decrypts rows using the stored key ids and writes updated configs with the
+highest configured key id.
+
+In Kubernetes, run the command from an image that contains the workspace binary
+and mount the same API configuration directory used by `etl-api`. For example,
+mount the `base.yaml` and environment YAML at `/app/configuration`, mount or
+inject the same secrets used for `database`, `encryption_key`, and
+`encryption_keys`, then run:
+
+```bash
+APP_CONFIG_DIR=/app/configuration \
+APP_ENVIRONMENT=prod \
+cargo x rotate-encryption-key --dry-run
+```
+
+After the dry run reports the expected rows, run the same command without
+`--dry-run`. The command has no separate database or key flags on purpose; the
+API config remains the source of truth for the target database and keyring.
+
 ## Development
 
 ### Database Migrations
