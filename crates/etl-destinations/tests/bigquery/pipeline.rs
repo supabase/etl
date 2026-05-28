@@ -4,7 +4,7 @@ use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use etl::{
     config::BatchConfig,
     destination::{DestinationMaterializationPolicy, TypeStrategy, ValueStrategy},
-    state::table::{TableReplicationPhase, TableReplicationPhaseType},
+    state::{TableState, TableStateType},
     store::state::StateStore,
     test_utils::{
         database::{spawn_source_database, test_table_name},
@@ -123,16 +123,10 @@ async fn table_copy_and_streaming_with_restart() {
 
     // Register notifications for table copy completion.
     let users_state_notify = store
-        .notify_on_table_state_type(
-            database_schema.users_schema().id,
-            TableReplicationPhaseType::Ready,
-        )
+        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
         .await;
     let orders_state_notify = store
-        .notify_on_table_state_type(
-            database_schema.orders_schema().id,
-            TableReplicationPhaseType::Ready,
-        )
+        .notify_on_table_state_type(database_schema.orders_schema().id, TableStateType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
@@ -262,7 +256,7 @@ async fn table_copy_reset_drops_destination_table_before_recopy() {
     );
 
     let users_ready =
-        store.notify_on_table_state_type(users_schema.id, TableReplicationPhaseType::Ready).await;
+        store.notify_on_table_state_type(users_schema.id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 
@@ -298,7 +292,7 @@ async fn table_copy_reset_drops_destination_table_before_recopy() {
     );
 
     let users_ready =
-        store.notify_on_table_state_type(users_schema.id, TableReplicationPhaseType::Ready).await;
+        store.notify_on_table_state_type(users_schema.id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 
@@ -344,10 +338,7 @@ async fn table_insert_update_delete() {
 
     // Register notifications for table copy completion.
     let users_state_notify = store
-        .notify_on_table_state_type(
-            database_schema.users_schema().id,
-            TableReplicationPhaseType::Ready,
-        )
+        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
@@ -451,10 +442,7 @@ async fn table_subsequent_updates() {
 
     // Register notifications for table copy completion.
     let users_state_notify = store
-        .notify_on_table_state_type(
-            database_schema.users_schema().id,
-            TableReplicationPhaseType::Ready,
-        )
+        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
@@ -546,10 +534,7 @@ async fn table_primary_key_update_rewrites_row() {
     );
 
     let users_state_notify = store
-        .notify_on_table_state_type(
-            database_schema.users_schema().id,
-            TableReplicationPhaseType::Ready,
-        )
+        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
@@ -664,7 +649,7 @@ async fn table_full_replica_identity_update_preserves_unchanged_toasted_columns(
     );
 
     let table_ready_notify =
-        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 
@@ -762,16 +747,10 @@ async fn table_truncate_with_batching() {
 
     // Register notifications for table copy completion.
     let users_state_notify = store
-        .notify_on_table_state_type(
-            database_schema.users_schema().id,
-            TableReplicationPhaseType::Ready,
-        )
+        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
         .await;
     let orders_state_notify = store
-        .notify_on_table_state_type(
-            database_schema.orders_schema().id,
-            TableReplicationPhaseType::Ready,
-        )
+        .notify_on_table_state_type(database_schema.orders_schema().id, TableStateType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
@@ -896,7 +875,7 @@ async fn table_nullable_scalar_columns() {
     );
 
     let table_sync_done_notification =
-        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 
@@ -1099,7 +1078,7 @@ async fn table_nullable_array_columns() {
     );
 
     let table_sync_done_notification =
-        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 
@@ -1322,7 +1301,7 @@ async fn table_non_nullable_scalar_columns() {
     );
 
     let table_sync_done_notification =
-        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 
@@ -1566,7 +1545,7 @@ async fn table_non_nullable_array_columns() {
     );
 
     let table_sync_done_notification =
-        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 
@@ -1820,7 +1799,7 @@ async fn table_array_with_null_values() {
     );
 
     let table_sync_done_notification =
-        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 
@@ -2048,32 +2027,24 @@ async fn table_validation_out_of_bounds_values() {
         destination.clone(),
     );
 
-    // Register notifications for errored replication phase
-    let huge_numeric_error_notify = store
-        .notify_on_table_state_type(huge_numeric_table_id, TableReplicationPhaseType::Errored)
-        .await;
+    // Register notifications for errored table state
+    let huge_numeric_error_notify =
+        store.notify_on_table_state_type(huge_numeric_table_id, TableStateType::Errored).await;
 
-    let infinite_numeric_error_notify = store
-        .notify_on_table_state_type(infinite_numeric_table_id, TableReplicationPhaseType::Errored)
-        .await;
+    let infinite_numeric_error_notify =
+        store.notify_on_table_state_type(infinite_numeric_table_id, TableStateType::Errored).await;
 
-    let old_date_error_notify = store
-        .notify_on_table_state_type(old_date_table_id, TableReplicationPhaseType::Errored)
-        .await;
+    let old_date_error_notify =
+        store.notify_on_table_state_type(old_date_table_id, TableStateType::Errored).await;
 
-    let nan_array_error_notify = store
-        .notify_on_table_state_type(nan_array_table_id, TableReplicationPhaseType::Errored)
-        .await;
+    let nan_array_error_notify =
+        store.notify_on_table_state_type(nan_array_table_id, TableStateType::Errored).await;
 
-    let wide_json_error_notify = store
-        .notify_on_table_state_type(wide_json_table_id, TableReplicationPhaseType::Errored)
-        .await;
+    let wide_json_error_notify =
+        store.notify_on_table_state_type(wide_json_table_id, TableStateType::Errored).await;
 
     let imprecise_json_integer_error_notify = store
-        .notify_on_table_state_type(
-            imprecise_json_integer_table_id,
-            TableReplicationPhaseType::Errored,
-        )
+        .notify_on_table_state_type(imprecise_json_integer_table_id, TableStateType::Errored)
         .await;
 
     pipeline.start().await.unwrap();
@@ -2096,8 +2067,8 @@ async fn table_validation_out_of_bounds_values() {
         wide_json_table_id,
         imprecise_json_integer_table_id,
     ] {
-        let table_state = store.get_table_replication_state(table_id).await.unwrap().unwrap();
-        assert!(matches!(table_state, TableReplicationPhase::Errored { .. }));
+        let table_state = store.get_table_state(table_id).await.unwrap().unwrap();
+        assert!(matches!(table_state, TableState::Errored { .. }));
     }
 }
 
@@ -2114,7 +2085,7 @@ async fn table_strategy_pairs_handle_same_risky_data() {
         (
             "native_only_reject",
             DestinationMaterializationPolicy::new(TypeStrategy::NativeOnly, ValueStrategy::Reject),
-            TableReplicationPhaseType::Errored,
+            TableStateType::Errored,
         ),
         (
             "native_or_string_reject",
@@ -2122,7 +2093,7 @@ async fn table_strategy_pairs_handle_same_risky_data() {
                 TypeStrategy::NativeOrString,
                 ValueStrategy::Reject,
             ),
-            TableReplicationPhaseType::Errored,
+            TableStateType::Errored,
         ),
         (
             "string_if_risky_preserve",
@@ -2130,7 +2101,7 @@ async fn table_strategy_pairs_handle_same_risky_data() {
                 TypeStrategy::StringIfRisky,
                 ValueStrategy::Preserve,
             ),
-            TableReplicationPhaseType::Ready,
+            TableStateType::Ready,
         ),
         (
             "native_or_string_normalize",
@@ -2138,7 +2109,7 @@ async fn table_strategy_pairs_handle_same_risky_data() {
                 TypeStrategy::NativeOrString,
                 ValueStrategy::Normalize,
             ),
-            TableReplicationPhaseType::Ready,
+            TableStateType::Ready,
         ),
     ] {
         let database = spawn_source_database().await;
@@ -2232,8 +2203,8 @@ async fn table_strategy_pairs_handle_same_risky_data() {
         );
 
         let unexpected_phase = match expected_phase {
-            TableReplicationPhaseType::Errored => TableReplicationPhaseType::Ready,
-            TableReplicationPhaseType::Ready => TableReplicationPhaseType::Errored,
+            TableStateType::Errored => TableStateType::Ready,
+            TableStateType::Ready => TableStateType::Errored,
             phase => unreachable!("unexpected materialization test phase: {phase:?}"),
         };
         let table_reached_outcome = store
@@ -2248,21 +2219,18 @@ async fn table_strategy_pairs_handle_same_risky_data() {
         tokio::select! {
             _ = table_reached_outcome.notified() => {}
             _ = sleep(Duration::from_secs(180)) => {
-                let table_state = store.get_table_replication_state(table_id).await.unwrap();
+                let table_state = store.get_table_state(table_id).await.unwrap();
                 pipeline.shutdown_and_wait().await.unwrap();
                 panic!("timed out waiting for {strategy_name} table outcome: {table_state:?}");
             }
         }
-        let table_state = store
-            .get_table_replication_state(table_id)
-            .await
-            .unwrap()
-            .expect("table replication state should exist");
+        let table_state =
+            store.get_table_state(table_id).await.unwrap().expect("table state should exist");
 
         pipeline.shutdown_and_wait().await.unwrap();
 
-        if expected_phase == TableReplicationPhaseType::Errored {
-            let TableReplicationPhase::Errored { reason, .. } = table_state else {
+        if expected_phase == TableStateType::Errored {
+            let TableState::Errored { reason, .. } = table_state else {
                 panic!("{strategy_name} table replication should have errored: {table_state:?}");
             };
 
@@ -2281,7 +2249,7 @@ async fn table_strategy_pairs_handle_same_risky_data() {
             continue;
         }
 
-        if table_state.as_type() != TableReplicationPhaseType::Ready {
+        if table_state.as_type() != TableStateType::Ready {
             panic!("{strategy_name} table replication should be ready: {table_state:?}");
         }
 
@@ -2391,7 +2359,7 @@ async fn table_schema_change() {
     );
 
     let table_sync_done =
-        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::SyncDone).await;
+        store.notify_on_table_state_type(table_id, TableStateType::SyncDone).await;
 
     pipeline.start().await.unwrap();
     table_sync_done.notified().await;

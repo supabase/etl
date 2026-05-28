@@ -180,7 +180,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         keepalive: TcpKeepaliveConfig::default(),
     };
 
-    // Create a persistent store for tracking table replication states and
+    // Create a persistent store for tracking table states and
     // schemas. This runs the Postgres store migrations; Pipeline::start()
     // runs the source migrations required by replication.
     let pipeline_id = 1;

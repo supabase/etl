@@ -7,8 +7,7 @@ mod external_maintenance;
 mod inline_size;
 mod metrics;
 mod schema;
-
-use pg_escape::quote_identifier;
+mod sql;
 
 /// The DuckDB catalog alias used in every `lake.<table>` qualified name.
 pub(super) const LAKE_CATALOG: &str = "lake";
@@ -22,11 +21,6 @@ pub(super) type DuckLakeTableName = String;
 /// writes inline into the DuckLake metadata first and can later be
 /// materialized to Parquet by an external maintenance job.
 const ATTACH_DATA_INLINING_ROW_LIMIT: u64 = 10_000;
-
-/// Returns a DuckLake-qualified table identifier.
-pub(super) fn qualified_table_identifier(table_name: &str) -> String {
-    format!("{LAKE_CATALOG}.{}", quote_identifier(table_name))
-}
 
 pub use core::{
     DuckLakeDestination, DuckLakeExternalMaintenanceConfig, DuckLakeExternalMaintenancePause,

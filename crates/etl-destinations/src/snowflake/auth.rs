@@ -126,17 +126,17 @@ pub struct AuthManager<E = HttpExchanger> {
 }
 
 impl AuthManager<HttpExchanger> {
-    /// Build an `AuthManager` from an RSA private key on disk.
+    /// Build an `AuthManager` from PEM-encoded RSA private key text.
     ///
     /// Creates its own internal `reqwest::Client` via `HttpExchanger`.
     pub fn new(
         config: &Config,
-        private_key_path: &str,
+        private_key_pem: &str,
         passphrase: Option<&secrecy::SecretString>,
     ) -> Result<Self> {
         Self::with_exchanger(
             config,
-            private_key_path,
+            private_key_pem,
             passphrase,
             HttpExchanger::new(
                 reqwest::Client::builder()
@@ -150,20 +150,17 @@ impl AuthManager<HttpExchanger> {
 }
 
 impl<E: TokenExchanger> AuthManager<E> {
-    /// Build an `AuthManager` with a custom token exchanger.
+    /// Build an `AuthManager` from PEM-encoded RSA private key text.
     ///
     /// The public-key fingerprint is derived and reused for every JWT.
     /// Accepts PKCS#8 (encrypted or plain) and PKCS#1 PEM formats.
     pub fn with_exchanger(
         config: &Config,
-        private_key_path: &str,
+        private_key_pem: &str,
         passphrase: Option<&secrecy::SecretString>,
         exchanger: E,
     ) -> Result<Self> {
-        let pem_text = std::fs::read_to_string(private_key_path)
-            .map_err(|e| Error::Config(format!("failed to read private key file: {e}")))?;
-
-        let (pkcs1_der, key_pair) = decode_and_load_rsa_key(&pem_text, passphrase)?;
+        let (pkcs1_der, key_pair) = decode_and_load_rsa_key(private_key_pem, passphrase)?;
 
         // Snowflake identifies keys by SHA-256(DER-encoded public key).
         let pub_der = key_pair
@@ -343,8 +340,9 @@ mod tests {
         username: &str,
     ) -> AuthManager<TestExchanger> {
         let config = Config::new(account_id, username, "TEST_DB", "PUBLIC");
+        let pem = std::fs::read_to_string(TEST_KEY_PATH).expect("test key");
 
-        AuthManager::with_exchanger(&config, TEST_KEY_PATH, None, TestExchanger)
+        AuthManager::with_exchanger(&config, &pem, None, TestExchanger)
             .expect("AuthManager::with_exchanger")
     }
 

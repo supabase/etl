@@ -6,6 +6,8 @@
 
 #[cfg(any(feature = "bigquery", feature = "ducklake", feature = "iceberg", feature = "snowflake"))]
 mod retry;
+#[cfg(any(feature = "clickhouse", feature = "ducklake", feature = "snowflake"))]
+mod sql;
 #[cfg(any(
     feature = "bigquery",
     feature = "clickhouse",

@@ -16,7 +16,7 @@ use etl::{
     },
     error::{ErrorKind, EtlResult},
     etl_error,
-    state::destination_metadata::DestinationTableMetadata,
+    state::destination_table_metadata::DestinationTableMetadata,
     store::DestinationStore,
     types::{
         Event, EventSequenceKey, OldTableRow, PartialTableRow, ReplicatedTableSchema, TableId,
@@ -25,7 +25,7 @@ use etl::{
 };
 use metrics::gauge;
 use parking_lot::Mutex;
-use pg_escape::quote_identifier;
+use pg_escape::quote_identifier as quote_postgres_identifier;
 use sqlx::{AssertSqlSafe, PgPool, postgres::PgPoolOptions};
 #[cfg(feature = "test-utils")]
 use tokio::sync::oneshot;
@@ -41,7 +41,7 @@ use url::Url;
 
 use crate::{
     ducklake::{
-        DuckLakeTableName, LAKE_CATALOG, S3Config,
+        DuckLakeTableName, S3Config,
         batches::{
             DuckLakeTableBatchKind, TableMutation, TrackedTableMutation, TrackedTruncateEvent,
             apply_table_batch_with_retry, apply_table_batches_with_retry,
@@ -67,8 +67,8 @@ use crate::{
             query_table_storage_metrics, register_metrics,
             resolve_ducklake_metadata_schema_blocking, spawn_ducklake_metrics_sampler,
         },
-        qualified_table_identifier,
         schema::build_create_table_sql_ducklake,
+        sql::qualified_lake_table_name,
     },
     table_name::try_stringify_table_name,
 };
@@ -282,7 +282,7 @@ fn validate_ducklake_replica_identity(
             _ => "DuckLake mutation requires a replica identity",
         };
         return Err(etl_error!(
-            ErrorKind::InvalidState,
+            ErrorKind::SourceReplicaIdentityError,
             description,
             format!(
                 "Table '{}' has no replicated replica-identity columns",
@@ -352,7 +352,7 @@ where
                 missing_indexes.next();
                 if is_identity {
                     return Err(etl_error!(
-                        ErrorKind::InvalidState,
+                        ErrorKind::SourceReplicaIdentityError,
                         "DuckLake partial update is missing replica-identity columns",
                         format!(
                             "Table '{}' emitted a partial update without key column '{}'",
@@ -710,8 +710,8 @@ where
             })?;
 
             let result = (|| -> EtlResult<()> {
-                let target = qualified_table_identifier(&table_name);
-                let truncate_table_sql = format!("TRUNCATE TABLE {target};");
+                let target_table = qualified_lake_table_name(&table_name);
+                let truncate_table_sql = format!("TRUNCATE TABLE {target_table};");
                 conn.execute_batch(&truncate_table_sql).map_err(|e| {
                     etl_error!(
                         ErrorKind::DestinationQueryFailed,
@@ -782,9 +782,8 @@ where
             })?;
 
             let result = (|| -> EtlResult<()> {
-                let quoted_table_name = quote_identifier(&table_name_for_drop).into_owned();
-                let drop_table_sql =
-                    format!("DROP TABLE IF EXISTS {LAKE_CATALOG}.{quoted_table_name};");
+                let table_name = qualified_lake_table_name(&table_name_for_drop);
+                let drop_table_sql = format!("DROP TABLE IF EXISTS {table_name};");
                 conn.execute_batch(&drop_table_sql).map_err(|e| {
                     etl_error!(
                         ErrorKind::DestinationQueryFailed,
@@ -1227,16 +1226,10 @@ where
         );
         self.store.store_destination_table_metadata(table_id, metadata.clone()).await?;
 
-        // `build_create_table_sql_ducklake` generates `CREATE TABLE IF NOT EXISTS
-        // "name" (...)`. Prefix the table name with the catalog alias so
-        // DuckLake knows which catalog to create the table in.
         let ddl = build_create_table_sql_ducklake(
             &table_name,
             &replicated_table_schema.inner().column_schemas,
         );
-        let quoted_table_name = quote_identifier(&table_name).into_owned();
-        let qualified_ddl =
-            ddl.replace(&quoted_table_name, &format!("{LAKE_CATALOG}.{quoted_table_name}"));
 
         let created_tables = Arc::clone(&self.created_tables);
         let table_name_clone = table_name.clone();
@@ -1250,7 +1243,7 @@ where
                     table = %table_name_clone,
                     "ducklake create table begin"
                 );
-                match conn.execute_batch(&qualified_ddl) {
+                match conn.execute_batch(&ddl) {
                     Ok(()) => {
                         created_tables.lock().insert(table_name_clone.clone());
                     }
@@ -1261,7 +1254,7 @@ where
                         return Err(etl_error!(
                             ErrorKind::DestinationQueryFailed,
                             "DuckLake CREATE TABLE failed",
-                            format_query_error_detail(&qualified_ddl),
+                            format_query_error_detail(&ddl),
                             source: e
                         ));
                     }
@@ -1479,8 +1472,8 @@ where
     async fn list_active_ducklake_tables(&self) -> EtlResult<Vec<String>> {
         let sql = format!(
             "SELECT table_name FROM {}.{} WHERE end_snapshot IS NULL ORDER BY table_name",
-            quote_identifier(self.metadata_schema.as_ref()),
-            quote_identifier("ducklake_table")
+            quote_postgres_identifier(self.metadata_schema.as_ref()),
+            quote_postgres_identifier("ducklake_table")
         );
         let rows: Vec<(String,)> = sqlx::query_as(AssertSqlSafe(sql))
             .fetch_all(&self.metadata_pg_pool)
@@ -1641,6 +1634,7 @@ mod tests {
 
     use super::*;
     use crate::ducklake::{
+        LAKE_CATALOG,
         config::catalog_conninfo_from_url,
         metrics::{query_catalog_maintenance_metrics, query_table_storage_metrics},
     };
@@ -1726,7 +1720,7 @@ mod tests {
         )
         .unwrap_err();
 
-        assert_eq!(error.kind(), ErrorKind::InvalidState);
+        assert_eq!(error.kind(), ErrorKind::SourceReplicaIdentityError);
         assert_eq!(error.description(), Some("DuckLake update requires a replica identity"));
     }
 

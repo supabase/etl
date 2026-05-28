@@ -22,9 +22,7 @@ use crate::{
         ApplyLoop, ApplyLoopResult, SharedTableCache, TableSyncResult, TableSyncWorkerContext,
         WorkerContext, WorkerType, client::PgReplicationClient, start_table_sync,
     },
-    state::table::{
-        RetryPolicy, TableReplicationError, TableReplicationPhase, TableReplicationPhaseType,
-    },
+    state::{TableError, TableRetryPolicy, TableState, TableStateType},
     store::{PipelineStore, state::StateStore},
     types::PipelineId,
     workers::{
@@ -34,9 +32,9 @@ use crate::{
     },
 };
 
-/// Formats phase types without using debug output.
-fn format_phase_types(phase_types: &[TableReplicationPhaseType]) -> String {
-    phase_types.iter().map(TableReplicationPhaseType::as_static_str).collect::<Vec<_>>().join(",")
+/// Formats state types without using debug output.
+fn format_state_types(state_types: &[TableStateType]) -> String {
+    state_types.iter().copied().map(Into::into).collect::<Vec<&'static str>>().join(",")
 }
 
 /// Result for a table sync worker task.
@@ -68,37 +66,37 @@ fn table_sync_worker_panic_error(payload: Box<dyn Any + Send>) -> EtlError {
 pub(crate) struct TableSyncWorkerStateInner {
     /// Unique identifier for the table whose state this structure tracks.
     table_id: TableId,
-    /// Current replication phase, this is the authoritative in-memory state.
-    table_replication_phase: TableReplicationPhase,
+    /// Current table state, this is the authoritative in-memory state.
+    table_state: TableState,
     /// Notification mechanism for notifying state changes to waiting workers.
-    phase_change: Arc<Notify>,
+    state_change: Arc<Notify>,
     /// Number of consecutive automatic retry attempts.
     retry_attempts: u32,
 }
 
 impl TableSyncWorkerStateInner {
-    /// Updates the table's replication phase and notifies all waiting workers.
+    /// Updates the table's table state and notifies all waiting workers.
     ///
     /// This method provides the core state transition mechanism for table
     /// synchronization. It atomically updates the in-memory state and
     /// broadcasts the change to any workers that may be waiting for state
     /// transitions.
-    pub(crate) fn set(&mut self, phase: TableReplicationPhase) {
+    pub(crate) fn set(&mut self, state: TableState) {
         info!(
             table_id = self.table_id.0,
-            from_phase = %self.table_replication_phase,
-            to_phase = %phase,
-            "table phase changing",
+            from_state = %self.table_state,
+            to_state = %state,
+            "table state changing",
         );
 
-        self.table_replication_phase = phase;
+        self.table_state = state;
 
         // Broadcast notification to all active waiters.
         //
         // Note that this notify will not wake up waiters that will be coming in the
         // future since no permit is stored, only active listeners will be
         // notified.
-        self.phase_change.notify_waiters();
+        self.state_change.notify_waiters();
     }
 
     /// Returns the number of consecutive automatic retry attempts.
@@ -117,39 +115,39 @@ impl TableSyncWorkerStateInner {
         self.retry_attempts = 0;
     }
 
-    /// Updates the table's replication phase with conditional persistence to
+    /// Updates the table's table state with conditional persistence to
     /// external storage.
     ///
     /// This method extends the basic [`TableSyncWorkerStateInner::set()`]
     /// method with durable persistence capabilities, ensuring that
     /// important state transitions survive process restarts and failures.
     ///
-    /// The persistence behavior is controlled by the phase type's storage
+    /// The persistence behavior is controlled by the state type's storage
     /// requirements.
     pub(crate) async fn set_and_store<S: StateStore>(
         &mut self,
-        phase: TableReplicationPhase,
+        state: TableState,
         state_store: &S,
     ) -> EtlResult<()> {
         // Apply in-memory state change first for immediate visibility
-        self.set(phase.clone());
+        self.set(state.clone());
 
-        // Conditionally persist based on phase type requirements
-        if phase.as_type().should_store() {
+        // Conditionally persist based on state type requirements
+        if state.as_type().should_store() {
             info!(
                 table_id = self.table_id.0,
-                %phase,
-                "storing phase change",
+                %state,
+                "storing state change",
             );
 
             // Persist to external storage - this may fail without affecting in-memory state
-            state_store.update_table_replication_state(self.table_id, phase).await?;
+            state_store.update_table_state(self.table_id, state).await?;
         }
 
         Ok(())
     }
 
-    /// Rolls back the table's replication state to the previous version.
+    /// Rolls back the table's table state to the previous version.
     ///
     /// This method coordinates rollback operations between persistent storage
     /// and in-memory state. It first queries the state store to retrieve
@@ -158,19 +156,19 @@ impl TableSyncWorkerStateInner {
     pub(crate) async fn rollback<S: StateStore>(&mut self, state_store: &S) -> EtlResult<()> {
         // We rollback the state in the store and then also set the rolled back state in
         // memory.
-        let previous_phase = state_store.rollback_table_replication_state(self.table_id).await?;
-        self.set(previous_phase);
+        let previous_state = state_store.rollback_table_state(self.table_id).await?;
+        self.set(previous_state);
 
         Ok(())
     }
 
-    /// Returns the current replication phase for this table.
+    /// Returns the current table state for this table.
     ///
     /// This method provides access to the authoritative in-memory state without
-    /// requiring coordination with external storage. The returned phase
+    /// requiring coordination with external storage. The returned state
     /// represents the most current state as seen by the local worker.
-    pub(crate) fn replication_phase(&self) -> TableReplicationPhase {
-        self.table_replication_phase.clone()
+    pub(crate) fn table_state(&self) -> TableState {
+        self.table_state.clone()
     }
 }
 
@@ -182,7 +180,7 @@ impl TableSyncWorkerStateInner {
 /// sync workers and apply workers.
 ///
 /// The state handle supports atomic updates, notifications, and blocking waits
-/// for specific phase transitions, making it suitable for complex multi-worker
+/// for specific state transitions, making it suitable for complex multi-worker
 /// scenarios.
 #[derive(Debug, Clone)]
 pub(crate) struct TableSyncWorkerState {
@@ -190,42 +188,42 @@ pub(crate) struct TableSyncWorkerState {
 }
 
 impl TableSyncWorkerState {
-    /// Creates a new table sync worker state with the given initial phase.
+    /// Creates a new table sync worker state with the given initial state.
     ///
     /// This constructor initializes the state management structure with the
-    /// specified table ID and replication phase. It sets up the notification
+    /// specified table ID and table state. It sets up the notification
     /// mechanism for coordinating state changes between workers.
-    fn new(table_id: TableId, table_replication_phase: TableReplicationPhase) -> Self {
+    fn new(table_id: TableId, table_state: TableState) -> Self {
         let inner = TableSyncWorkerStateInner {
             table_id,
-            table_replication_phase,
-            phase_change: Arc::new(Notify::new()),
+            table_state,
+            state_change: Arc::new(Notify::new()),
             retry_attempts: 0,
         };
 
         Self { inner: Arc::new(Mutex::new(inner)) }
     }
 
-    /// Waits for the table to reach a specific replication phase type.
+    /// Waits for the table to reach a specific table state type.
     ///
     /// This method blocks until either the table reaches one of the desired
-    /// phases or a shutdown signal is received. It uses an efficient
+    /// states or a shutdown signal is received. It uses an efficient
     /// notification system to avoid polling and provides immediate response
     /// to state changes.
-    pub(crate) async fn wait_for_phase_type(
+    pub(crate) async fn wait_for_state_type(
         &self,
-        target_phase_types: &[TableReplicationPhaseType],
+        target_state_types: &[TableStateType],
         mut shutdown_rx: ShutdownRx,
     ) -> ShutdownResult<MutexGuard<'_, TableSyncWorkerStateInner>, ()> {
         loop {
             let inner = self.inner.lock().await;
 
-            let current_phase = inner.table_replication_phase.as_type();
-            if target_phase_types.contains(&current_phase) {
+            let current_state = inner.table_state.as_type();
+            if target_state_types.contains(&current_state) {
                 info!(
                     table_id = inner.table_id.0,
-                    current_table_replication_phase_type = %current_phase,
-                    "table replication phase reached",
+                    current_table_state_type = %current_state,
+                    "table state reached",
                 );
 
                 return ShutdownResult::Ok(inner);
@@ -233,17 +231,17 @@ impl TableSyncWorkerState {
 
             info!(
                 table_id = inner.table_id.0,
-                current_table_replication_phase_type = %current_phase,
-                target_table_replication_phase_types = %format_phase_types(target_phase_types),
-                "waiting for table replication phase",
+                current_table_state_type = %current_state,
+                target_table_state_types = %format_state_types(target_state_types),
+                "waiting for table state",
             );
 
-            // We listen for the phase change while holding the lock to avoid the race
+            // We listen for the state change while holding the lock to avoid the race
             // condition which occurs when we release the lock, the value
             // changes, and then we wait for a value change, in that case, we
             // will miss the notification and the system will stall.
-            let phase_change = Arc::clone(&inner.phase_change);
-            let phase_change_notified = phase_change.notified();
+            let state_change = Arc::clone(&inner.state_change);
+            let state_change_notified = state_change.notified();
 
             // We must drop the lock here so that state changes can actually happen.
             drop(inner);
@@ -253,15 +251,15 @@ impl TableSyncWorkerState {
 
                 _ = shutdown_rx.changed() => {
                     info!(
-                        target_table_replication_phase_types = %format_phase_types(target_phase_types),
-                        "shutdown signal received, cancelling wait for phase",
+                        target_table_state_types = %format_state_types(target_state_types),
+                        "shutdown signal received, cancelling wait for state",
                     );
 
                     return ShutdownResult::Shutdown(());
                 }
 
-                _ = phase_change_notified => {
-                    // Phase changed, loop to check if it's the desired phase.
+                _ = state_change_notified => {
+                    // State changed, loop to check if it's the desired state.
                 }
             }
         }
@@ -406,14 +404,13 @@ where
         // worker use the same retry timing settings.
         let policy = build_error_handling_policy(&err);
         let mut retry_policy = match policy.retry_directive() {
-            RetryDirective::Timed => RetryPolicy::retry_in(ChronoDuration::milliseconds(
+            RetryDirective::Timed => TableRetryPolicy::retry_in(ChronoDuration::milliseconds(
                 config.table_error_retry_delay_ms as i64,
             )),
-            RetryDirective::Manual => RetryPolicy::ManualRetry,
-            RetryDirective::NoRetry => RetryPolicy::NoRetry,
+            RetryDirective::Manual => TableRetryPolicy::ManualRetry,
+            RetryDirective::NoRetry => TableRetryPolicy::NoRetry,
         };
-        let mut table_error =
-            TableReplicationError::from_error_policy(table_id, &err, &policy, retry_policy.clone());
+        let mut table_error = TableError::from_error_policy(&err, &policy, retry_policy.clone());
 
         let mut state_guard = state.lock().await;
 
@@ -429,14 +426,14 @@ where
                 "max automatic retry attempts reached, switching to manual retry"
             );
 
-            table_error = table_error.with_retry_policy(RetryPolicy::ManualRetry);
+            table_error = table_error.with_retry_policy(TableRetryPolicy::ManualRetry);
             retry_policy = table_error.retry_policy().clone();
         }
 
         let error_type = match retry_policy {
-            RetryPolicy::TimedRetry { .. } => "timed",
-            RetryPolicy::ManualRetry => "manual",
-            RetryPolicy::NoRetry => "no_retry",
+            TableRetryPolicy::TimedRetry { .. } => "timed",
+            TableRetryPolicy::ManualRetry => "manual",
+            TableRetryPolicy::NoRetry => "no_retry",
         };
         counter!(
             ETL_WORKER_ERRORS_TOTAL,
@@ -454,7 +451,7 @@ where
         state_guard.set_and_store(table_error.into(), store).await?;
 
         match retry_policy {
-            RetryPolicy::TimedRetry { next_retry } => {
+            TableRetryPolicy::TimedRetry { next_retry } => {
                 let now = Utc::now();
                 let mut should_shutdown = false;
 
@@ -520,7 +517,7 @@ where
 
                 Ok(None)
             }
-            RetryPolicy::NoRetry | RetryPolicy::ManualRetry => {
+            TableRetryPolicy::NoRetry | TableRetryPolicy::ManualRetry => {
                 state_guard.reset_retry_attempts();
 
                 info!(
@@ -535,29 +532,27 @@ where
 
     /// Spawns the table sync worker into the pool.
     ///
-    /// This method initializes the worker by loading its replication state from
+    /// This method initializes the worker by loading its table state from
     /// storage, creating the state management structure, and spawning the
     /// synchronization process into the pool.
     pub(crate) async fn spawn_into_pool(self, pool: &TableSyncWorkerPool) -> EtlResult<()> {
         info!(table_id = self.table_id.0, "starting table sync worker");
 
-        let Some(table_replication_phase) =
-            self.store.get_table_replication_state(self.table_id).await?
-        else {
+        let Some(table_state) = self.store.get_table_state(self.table_id).await? else {
             bail!(
                 ErrorKind::InvalidState,
-                "Table replication state not found",
-                format!("Replication state missing for table {}", self.table_id)
+                "Table state not found",
+                format!("Table state missing for table {}", self.table_id)
             );
         };
 
         info!(
             table_id = self.table_id.0,
-            %table_replication_phase,
+            %table_state,
             "loaded table sync worker state",
         );
 
-        let state = TableSyncWorkerState::new(self.table_id, table_replication_phase);
+        let state = TableSyncWorkerState::new(self.table_id, table_state);
         let table_id = self.table_id;
 
         let table_sync_worker_span = tracing::info_span!(
@@ -683,8 +678,8 @@ where
     /// This method orchestrates the complete table sync workflow: acquiring run
     /// permits, establishing replication connections, performing initial data
     /// sync, running catchup replication, and cleaning up resources. It
-    /// handles both the bulk data copy phase and the incremental
-    /// replication phase.
+    /// handles both the bulk data copy state and the incremental
+    /// table state.
     async fn run_table_sync_worker(
         mut self,
         state: TableSyncWorkerState,
@@ -732,13 +727,13 @@ where
         // Note that this connection must be tied to the lifetime of this worker,
         // otherwise there will be problems when cleaning up the replication
         // slot.
-        let replication_client =
+        let mut replication_client =
             PgReplicationClient::connect(self.config.pg_connection.clone()).await?;
 
         let table_sync_result = start_table_sync(
             self.pipeline_id,
             Arc::clone(&self.config),
-            replication_client.clone(),
+            &mut replication_client,
             self.table_id,
             state.clone(),
             self.store.clone(),
@@ -778,7 +773,7 @@ where
             self.pipeline_id,
             start_lsn,
             Arc::clone(&self.config),
-            replication_client.clone(),
+            &replication_client,
             self.store.clone(),
             self.destination.clone(),
             self.shared_table_cache.clone(),
@@ -799,7 +794,7 @@ where
                 // Catchup has completed, so cleanup failures should not turn a
                 // completed table sync into a replication failure.
                 if let Err(err) =
-                    self.cleanup_resources(replication_client, self.store.clone()).await
+                    self.cleanup_resources(&replication_client, self.store.clone()).await
                 {
                     warn!(
                         table_id = self.table_id.0,
@@ -829,7 +824,7 @@ where
     /// does not leave stale progress for a completed table sync worker.
     async fn cleanup_resources(
         &self,
-        replication_client: PgReplicationClient,
+        replication_client: &PgReplicationClient,
         store: S,
     ) -> EtlResult<()> {
         store

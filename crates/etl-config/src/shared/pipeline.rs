@@ -131,7 +131,7 @@ pub enum InvalidatedSlotBehavior {
     /// Automatically recreates the slot and restarts replication from scratch.
     ///
     /// When an invalidated slot is detected, the pipeline will:
-    /// 1. Reset all table replication states to `Init`
+    /// 1. Reset all table states to `Init`
     /// 2. Delete all existing replication slots for the pipeline
     /// 3. Create a new replication slot
     /// 4. Run table sync for all tables, respecting [`TableSyncCopyConfig`]

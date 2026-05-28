@@ -35,8 +35,8 @@ pub const ETL_MEMORY_BACKPRESSURE_ACTIVATION_DURATION_SECONDS: &str =
     "etl_memory_backpressure_activation_duration_seconds";
 pub const ETL_IDEAL_BATCH_SIZE_BYTES: &str = "etl_ideal_batch_size_bytes";
 
-/// Label key for replication phase (used by table state metrics).
-pub const PHASE_LABEL: &str = "phase";
+/// Label key for table state (used by table state metrics).
+pub const STATE_LABEL: &str = "state";
 /// Label key for the ETL worker type ("table_sync" or "apply").
 pub const WORKER_TYPE_LABEL: &str = "worker_type";
 /// Label key for the action performed by the worker ("table_copy" or
@@ -91,7 +91,7 @@ pub(crate) fn register_metrics() {
             ETL_TABLE_COPY_DURATION_SECONDS,
             Unit::Seconds,
             "Duration in seconds to complete initial table copy from DataSync to FinishedCopy \
-             phase"
+             state transition"
         );
 
         describe_histogram!(

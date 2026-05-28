@@ -2,9 +2,7 @@ use std::{collections::HashSet, time::Duration};
 
 use etl::{
     error::ErrorKind,
-    replication::client::{
-        CtidPartition, PgReplicationChildTransaction, PgReplicationClient, SlotState,
-    },
+    replication::client::{CtidPartition, PgReplicationClient, SlotState},
     test_utils::{
         database::{spawn_source_database, test_table_name},
         pipeline::test_slot_name,
@@ -642,7 +640,7 @@ async fn table_schema_copy_is_consistent() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
-    let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
 
     let age_schema = test_column("age", Type::INT4, 2, true, false);
 
@@ -668,8 +666,8 @@ async fn table_schema_copy_across_multiple_connections() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
-    let first_client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
-    let second_client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let mut first_client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let mut second_client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
 
     let age_schema = test_column("age", Type::INT4, 2, true, false);
     let year_schema = test_column("year", Type::INT4, 3, true, false);
@@ -742,7 +740,7 @@ async fn table_schema_preserves_primary_key_constraint_order() {
         .await
         .unwrap();
 
-    let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
 
     let (transaction, _) =
         client.create_slot_with_transaction(&test_slot_name("composite_pk_order")).await.unwrap();
@@ -838,7 +836,8 @@ async fn ddl_message_primary_key_order_matches_loaded_table_schema() {
     let tenant_id_column = columns.iter().find(|column| column["attname"] == "tenant_id").unwrap();
     assert_eq!(tenant_id_column["attnum"], 2);
 
-    let introspection_client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let mut introspection_client =
+        PgReplicationClient::connect(database.config.clone()).await.unwrap();
     let (transaction, _) = introspection_client
         .create_slot_with_transaction(&test_slot_name("ddl_composite_pk_order_read"))
         .await
@@ -855,7 +854,7 @@ async fn table_copy_stream_is_consistent() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
-    let parent_client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let mut parent_client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
 
     // We create a table and insert one row.
     let table_1_id = database
@@ -925,7 +924,7 @@ async fn table_copy_stream_respects_row_filter() {
         .await
         .unwrap();
 
-    let parent_client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let mut parent_client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
 
     // We apply a row filter (age >= 18), so we expect the number of rows
     // post-synchronization to be the numbers 18..=30 when inserting the range
@@ -1000,7 +999,7 @@ async fn get_replicated_column_names_respects_column_filter() {
         .await
         .unwrap();
 
-    let parent_client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let mut parent_client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
 
     // Insert test data with all columns.
     database
@@ -1091,7 +1090,7 @@ async fn get_replicated_column_names_for_all_tables_publication() {
         .await
         .unwrap();
 
-    let parent_client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let mut parent_client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
 
     let (transaction, _) =
         parent_client.create_slot_with_transaction(&test_slot_name("my_slot")).await.unwrap();
@@ -1153,7 +1152,7 @@ async fn get_replicated_column_names_for_tables_in_schema_publication() {
         .await
         .unwrap();
 
-    let parent_client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let mut parent_client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
 
     let (transaction, _) =
         parent_client.create_slot_with_transaction(&test_slot_name("my_slot")).await.unwrap();
@@ -1210,7 +1209,7 @@ async fn get_replicated_column_names_errors_when_table_not_in_publication() {
         .await
         .unwrap();
 
-    let parent_client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let mut parent_client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
 
     let (transaction, _) =
         parent_client.create_slot_with_transaction(&test_slot_name("my_slot")).await.unwrap();
@@ -1278,7 +1277,7 @@ async fn table_copy_stream_no_row_filter() {
         .await
         .unwrap();
 
-    let parent_client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let mut parent_client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
 
     let expected_rows_count = 30;
 
@@ -1940,7 +1939,7 @@ async fn plan_ctid_partitions_returns_correct_partitions() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
-    let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
 
     let table_id = database
         .create_table(test_table_name("table_1"), true, &[("age", "integer")])
@@ -2003,7 +2002,7 @@ async fn plan_ctid_partitions_returns_empty_for_empty_table() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
-    let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
 
     let table_id = database
         .create_table(test_table_name("table_1"), true, &[("age", "integer")])
@@ -2025,7 +2024,7 @@ async fn table_copy_stream_with_ctid_partition() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
-    let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
 
     let table_id = database
         .create_table(test_table_name("table_1"), true, &[("age", "integer")])
@@ -2053,8 +2052,8 @@ async fn table_copy_stream_with_ctid_partition() {
 
     let mut total_rows: u64 = 0;
     for partition in &partitions {
-        let child = transaction.get_cloned_client().fork_child().await.unwrap();
-        let child_tx = PgReplicationChildTransaction::new(child, &snapshot_id).await.unwrap();
+        let mut child = transaction.fork_child().await.unwrap();
+        let child_tx = child.begin_transaction(&snapshot_id).await.unwrap();
 
         let stream = child_tx
             .get_table_copy_stream_with_ctid_partition(table_id, column_schemas, None, partition)

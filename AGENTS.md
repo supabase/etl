@@ -43,6 +43,9 @@
 - Do not add dependencies unless they are justified by the task.
 - If you change workflow assumptions, build or test the smallest relevant target and report what actually ran.
 - Never create commits, push branches, open pull requests, or perform other git write actions unless the user explicitly instructs you to do so.
+- Never modify migration files unless the user explicitly asks for a migration
+  change. This includes changing comments or other non-executable text inside
+  migration files.
 - Keep the workspace on the stable toolchain from `rust-toolchain.toml` for build, lint, and test commands; use the pinned nightly formatter only through `cargo x fmt` and `cargo x fmt --check`.
 - Treat `Cargo.toml` workspace lints, `rustfmt.toml`, and compiler diagnostics as the source of truth for enforceable style and correctness rules. Prefer adding or tightening static checks over adding prose rules here.
 - Run Clippy, builds, and tests intentionally when they are relevant: for example
@@ -65,6 +68,10 @@
 - Keep top-level binaries focused on orchestration; move implementation detail into helpers or modules.
 - Prefer clear, boring code over clever abstractions.
 - Prefer existing workspace patterns over introducing new local conventions.
+- Keep item order local and readable: place supporting helpers and types before
+  their use when practical, and group type-centered code as `struct`, inherent
+  `impl`, then trait impls. Within inherent impls, put constructors first,
+  externally visible methods next, and private helpers last.
 - Do not add `#[must_use]` attributes unless the user explicitly asks for one.
 - Default to private visibility and only widen when a real caller requires it.
 - Prefer the narrowest working visibility in this order: private, `pub(super)`, `pub(crate)`, then `pub`.
@@ -146,9 +153,8 @@
 - Prefer `Display` formatting (`%`) or explicit structured fields over
   `Debug` formatting (`?`) for structs in logs, unless the type is known not to
   contain sensitive values.
-- For table replication phase logs, always use
-  `table_replication_phase_type` for one phase and
-  `table_replication_phase_types` for lists.
+- For table state logs, always use `table_state_type` for one state and
+  `table_state_types` for lists.
 - For Sentry, wrap sensitive API route groups with the sensitive Sentry scope
   marker and scrub request/response body capture from marked events. Do not
   duplicate route sensitivity with separate path matchers in the scrubber.

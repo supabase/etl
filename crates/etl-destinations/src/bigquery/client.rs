@@ -36,6 +36,7 @@ use crate::bigquery::{
     metrics::{
         ETL_BQ_APPEND_BATCHES_BATCH_ERRORS_TOTAL, ETL_BQ_APPEND_BATCHES_BATCH_ROW_ERRORS_TOTAL,
     },
+    sql::{quote_identifier, quote_information_schema_tables_path, quote_table_path},
     value::{
         BigQueryArrayType, BigQueryFloatEncoding, BigQueryIntEncoding, BigQueryTableRow,
         BigQueryType,
@@ -88,18 +89,23 @@ pub(super) enum BigQueryOperationType {
 }
 
 impl BigQueryOperationType {
+    /// Returns the BigQuery CDC operation string.
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Upsert => "UPSERT",
+            Self::Delete => "DELETE",
+        }
+    }
+
     /// Converts the operation type into a [`Cell`] for streaming.
     pub(super) fn into_cell(self) -> Cell {
-        Cell::String(self.to_string())
+        Cell::String(self.as_str().to_owned())
     }
 }
 
 impl fmt::Display for BigQueryOperationType {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            BigQueryOperationType::Upsert => write!(f, "UPSERT"),
-            BigQueryOperationType::Delete => write!(f, "DELETE"),
-        }
+        write!(f, "{}", self.as_str())
     }
 }
 
@@ -660,11 +666,7 @@ impl BigQueryClient {
         dataset_id: &BigQueryDatasetId,
         table_id: &BigQueryTableId,
     ) -> EtlResult<String> {
-        let project_id = Self::sanitize_identifier(&self.project_id, "BigQuery project id")?;
-        let dataset_id = Self::sanitize_identifier(dataset_id, "BigQuery dataset id")?;
-        let table_id = Self::sanitize_identifier(table_id, "BigQuery table id")?;
-
-        Ok(format!("`{project_id}.{dataset_id}.{table_id}`"))
+        quote_table_path(&self.project_id, dataset_id, table_id)
     }
 
     /// Creates a table in BigQuery if it doesn't already exist, otherwise
@@ -863,12 +865,11 @@ impl BigQueryClient {
     ) -> EtlResult<Vec<BigQueryTableId>> {
         info!(%dataset_id, %base_table_id, "listing sequenced tables from bigquery");
 
-        let project_id = Self::sanitize_identifier(&self.project_id, "BigQuery project id")?;
-        let dataset_id = Self::sanitize_identifier(dataset_id, "BigQuery dataset id")?;
+        let information_schema_tables =
+            quote_information_schema_tables_path(&self.project_id, dataset_id)?;
         let query = format!(
-            "select table_name from `{project_id}.{dataset_id}.INFORMATION_SCHEMA.TABLES` where \
-             table_type = 'BASE TABLE' and starts_with(table_name, @table_name_prefix) order by \
-             table_name"
+            "select table_name from {information_schema_tables} where table_type = 'BASE TABLE' \
+             and starts_with(table_name, @table_name_prefix) order by table_name"
         );
         let mut request = QueryRequest::new(query);
         request.parameter_mode = Some("NAMED".to_owned());
@@ -910,18 +911,15 @@ impl BigQueryClient {
         materializer: &BigQueryMaterializer,
     ) -> EtlResult<()> {
         let full_table_name = self.full_table_name(dataset_id, table_id)?;
-        let column_name = Self::sanitize_identifier(&column_schema.name, "BigQuery column name")?;
+        let column_name = quote_identifier(&column_schema.name, "BigQuery column name")?;
         let column_type = materializer.materialize_type(&column_schema.typ)?.to_sql();
 
-        info!(
-            "adding column `{column_name}` ({column_type}) to table {full_table_name} in BigQuery"
-        );
+        info!("adding column {column_name} ({column_type}) to table {full_table_name} in BigQuery");
 
         // BigQuery requires new columns to be nullable (no NOT NULL constraint
         // allowed). Also, we wouldn't be able to add it nonetheless since we
         // don't have a way to set a default value for past columns.
-        let query =
-            format!("alter table {full_table_name} add column `{column_name}` {column_type}");
+        let query = format!("alter table {full_table_name} add column {column_name} {column_type}");
 
         let _ = self.query(QueryRequest::new(query)).await?;
 
@@ -939,11 +937,11 @@ impl BigQueryClient {
         column_name: &str,
     ) -> EtlResult<()> {
         let full_table_name = self.full_table_name(dataset_id, table_id)?;
-        let column_name = Self::sanitize_identifier(column_name, "BigQuery column name")?;
+        let column_name = quote_identifier(column_name, "BigQuery column name")?;
 
-        info!("dropping column `{column_name}` from table {full_table_name} in BigQuery");
+        info!("dropping column {column_name} from table {full_table_name} in BigQuery");
 
-        let query = format!("alter table {full_table_name} drop column `{column_name}`");
+        let query = format!("alter table {full_table_name} drop column {column_name}");
 
         let _ = self.query(QueryRequest::new(query)).await?;
 
@@ -962,15 +960,12 @@ impl BigQueryClient {
         new_name: &str,
     ) -> EtlResult<()> {
         let full_table_name = self.full_table_name(dataset_id, table_id)?;
-        let old_name = Self::sanitize_identifier(old_name, "BigQuery column name")?;
-        let new_name = Self::sanitize_identifier(new_name, "BigQuery column name")?;
+        let old_name = quote_identifier(old_name, "BigQuery column name")?;
+        let new_name = quote_identifier(new_name, "BigQuery column name")?;
 
-        info!(
-            "renaming column `{old_name}` to `{new_name}` in table {full_table_name} in BigQuery"
-        );
+        info!("renaming column {old_name} to {new_name} in table {full_table_name} in BigQuery");
 
-        let query =
-            format!("alter table {full_table_name} rename column `{old_name}` to `{new_name}`");
+        let query = format!("alter table {full_table_name} rename column {old_name} to {new_name}");
 
         let _ = self.query(QueryRequest::new(query)).await?;
 
@@ -1242,56 +1237,16 @@ impl BigQueryClient {
         Ok(ResultSet::new_from_query_response(query_response))
     }
 
-    /// Sanitizes a BigQuery identifier for safe backtick quoting.
-    ///
-    /// Rejects empty identifiers and identifiers containing control characters.
-    /// Internal backticks are escaped by doubling them so the resulting
-    /// value can be wrapped in backticks without altering the identifier or
-    /// allowing statement breaks.
-    fn sanitize_identifier(identifier: &str, context: &str) -> EtlResult<String> {
-        if identifier.is_empty() {
-            return Err(etl_error!(
-                ErrorKind::DestinationTableNameInvalid,
-                "Invalid BigQuery identifier",
-                format!("{context} cannot be empty")
-            ));
-        }
-
-        if identifier.chars().any(char::is_control) {
-            return Err(etl_error!(
-                ErrorKind::DestinationTableNameInvalid,
-                "Invalid BigQuery identifier",
-                format!("{context} contains control characters")
-            ));
-        }
-
-        let mut escaped = String::with_capacity(identifier.len());
-
-        for ch in identifier.chars() {
-            match ch {
-                // Backticks delimit identifiers in BigQuery. Escape with a backslash
-                // per GoogleSQL lexical rules to keep the identifier intact.
-                '`' => escaped.push_str("\\`"),
-                // Backslash is the escape character; escape it to avoid altering
-                // the meaning of the identifier when parsed.
-                '\\' => escaped.push_str("\\\\"),
-                _ => escaped.push(ch),
-            }
-        }
-
-        Ok(escaped)
-    }
-
     /// Generates SQL column specification for CREATE TABLE statements.
     fn column_spec(
         column_schema: &ColumnSchema,
         materializer: &BigQueryMaterializer,
     ) -> EtlResult<String> {
-        let column_name = Self::sanitize_identifier(&column_schema.name, "BigQuery column name")?;
+        let column_name = quote_identifier(&column_schema.name, "BigQuery column name")?;
         let materialized_type = materializer.materialize_type(&column_schema.typ)?;
 
         let column_type = materialized_type.to_sql();
-        let mut column_spec = format!("`{column_name}` {column_type}");
+        let mut column_spec = format!("{column_name} {column_type}");
 
         // BigQuery array columns use REPEATED mode and don't support NOT NULL.
         // If an array source type materializes to a scalar string, preserve the
@@ -1326,10 +1281,7 @@ impl BigQueryClient {
 
         let primary_key_columns: Vec<String> = primary_key_columns
             .into_iter()
-            .map(|c| {
-                Self::sanitize_identifier(&c.name, "BigQuery primary key column")
-                    .map(|name| format!("`{name}`"))
-            })
+            .map(|c| quote_identifier(&c.name, "BigQuery primary key column"))
             .collect::<EtlResult<Vec<_>>>()?;
 
         let primary_key_clause =
@@ -1817,16 +1769,6 @@ mod tests {
         .expect("escaped column spec");
 
         assert_eq!(spec, "`pwn\\`name` string");
-    }
-
-    #[test]
-    fn sanitize_identifier_rejects_control_chars() {
-        let result = BigQueryClient::sanitize_identifier("bad\nname", "column");
-
-        assert!(matches!(
-            result,
-            Err(err) if err.kind() == ErrorKind::DestinationTableNameInvalid
-        ));
     }
 
     #[test]

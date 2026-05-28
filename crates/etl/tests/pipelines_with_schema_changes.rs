@@ -1,7 +1,7 @@
 #![cfg(feature = "test-utils")]
 
 use etl::{
-    state::table::TableReplicationPhaseType,
+    state::TableStateType,
     test_utils::{
         database::{spawn_source_database, test_table_name},
         event::group_events_by_type_and_table_id,
@@ -800,9 +800,8 @@ async fn partitioned_table_schema_change_updates_relation_message() {
         destination.clone(),
     );
 
-    let parent_ready = state_store
-        .notify_on_table_state_type(parent_table_id, TableReplicationPhaseType::Ready)
-        .await;
+    let parent_ready =
+        state_store.notify_on_table_state_type(parent_table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 

@@ -4,13 +4,13 @@ use etl::{
     error::{EtlError, EtlResult},
     replication::WorkerType,
     state::{
-        destination_metadata::{AppliedDestinationTableMetadata, DestinationTableMetadata},
-        table::TableReplicationPhase,
+        TableState,
+        destination_table_metadata::{AppliedDestinationTableMetadata, DestinationTableMetadata},
     },
     store::{
         lifecycle::TableLifecycleStore,
         schema::{SchemaStore, TableSchemaRetention},
-        state::{StateStore, TableReplicationStates},
+        state::{StateStore, TableStates},
     },
     types::{PgLsn, SnapshotId, TableId, TableSchema},
 };
@@ -20,8 +20,8 @@ use crate::{error_notification::ErrorNotificationClient, sentry};
 
 /// State store decorator that reports persisted table replication errors.
 ///
-/// After [`StateStore::update_table_replication_states`] succeeds, this wrapper
-/// reports each [`TableReplicationPhase::Errored`] update to Sentry and, when
+/// After [`StateStore::update_table_states`] succeeds, this wrapper
+/// reports each [`TableState::Errored`] update to Sentry and, when
 /// configured, to the Supabase error-notification endpoint.
 #[derive(Debug, Clone)]
 pub(crate) struct ErrorReportingStateStore<S> {
@@ -32,9 +32,9 @@ pub(crate) struct ErrorReportingStateStore<S> {
 /// Persisted table error waiting to be reported.
 #[derive(Debug)]
 struct ReportableTableError {
-    /// Table whose replication state was persisted as errored.
+    /// Table whose table state was persisted as errored.
     table_id: TableId,
-    /// Source ETL error captured in the persisted table phase.
+    /// Source ETL error captured in the persisted table state.
     source_err: EtlError,
 }
 
@@ -62,13 +62,11 @@ impl<S> ErrorReportingStateStore<S> {
 
     /// Extracts only the errored state updates that need post-persistence
     /// reporting.
-    fn collect_reportable_errors(
-        updates: &[(TableId, TableReplicationPhase)],
-    ) -> Vec<ReportableTableError> {
+    fn collect_reportable_errors(updates: &[(TableId, TableState)]) -> Vec<ReportableTableError> {
         updates
             .iter()
-            .filter_map(|(table_id, phase)| match phase {
-                TableReplicationPhase::Errored { source_err, .. } => Some(ReportableTableError {
+            .filter_map(|(table_id, state)| match state {
+                TableState::Errored { source_err, .. } => Some(ReportableTableError {
                     table_id: *table_id,
                     source_err: source_err.clone(),
                 }),
@@ -82,29 +80,23 @@ impl<S> StateStore for ErrorReportingStateStore<S>
 where
     S: StateStore + Send + Sync,
 {
-    async fn get_table_replication_state(
-        &self,
-        table_id: TableId,
-    ) -> EtlResult<Option<TableReplicationPhase>> {
-        self.inner.get_table_replication_state(table_id).await
+    async fn get_table_state(&self, table_id: TableId) -> EtlResult<Option<TableState>> {
+        self.inner.get_table_state(table_id).await
     }
 
-    async fn get_table_replication_states(&self) -> EtlResult<TableReplicationStates> {
-        self.inner.get_table_replication_states().await
+    async fn get_table_states(&self) -> EtlResult<TableStates> {
+        self.inner.get_table_states().await
     }
 
-    async fn load_table_replication_states(&self) -> EtlResult<usize> {
-        self.inner.load_table_replication_states().await
+    async fn load_table_states(&self) -> EtlResult<usize> {
+        self.inner.load_table_states().await
     }
 
-    async fn update_table_replication_states(
-        &self,
-        updates: Vec<(TableId, TableReplicationPhase)>,
-    ) -> EtlResult<()> {
+    async fn update_table_states(&self, updates: Vec<(TableId, TableState)>) -> EtlResult<()> {
         // We collect all errors in advance, to avoid cloning the whole set of updates.
         let reportable_errors = Self::collect_reportable_errors(&updates);
 
-        self.inner.update_table_replication_states(updates).await?;
+        self.inner.update_table_states(updates).await?;
 
         // This operation must be infallible or at least not propagate failures,
         // otherwise the error thrown here, will be caught and handled by the
@@ -115,11 +107,8 @@ where
         Ok(())
     }
 
-    async fn rollback_table_replication_state(
-        &self,
-        table_id: TableId,
-    ) -> EtlResult<TableReplicationPhase> {
-        self.inner.rollback_table_replication_state(table_id).await
+    async fn rollback_table_state(&self, table_id: TableId) -> EtlResult<TableState> {
+        self.inner.rollback_table_state(table_id).await
     }
 
     async fn get_replication_progress(&self, worker_type: WorkerType) -> EtlResult<Option<PgLsn>> {

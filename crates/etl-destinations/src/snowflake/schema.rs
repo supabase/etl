@@ -1,14 +1,9 @@
 use etl::types::{ColumnSchema, ReplicatedTableSchema, Type, is_array_type};
 
-use crate::snowflake::{Error, Result};
+use crate::snowflake::{Error, Result, sql::quote_identifier};
 
 pub(crate) const CDC_OPERATION_COLUMN: &str = "_cdc_operation";
 pub(crate) const CDC_SEQUENCE_COLUMN: &str = "_cdc_sequence_number";
-
-/// Double-quote a SQL identifier, escaping internal double-quotes.
-pub(crate) fn quote_identifier(name: &str) -> String {
-    format!("\"{}\"", name.replace('"', "\"\""))
-}
 
 /// Returns the Snowflake DDL type string for a given Postgres type.
 ///
@@ -223,15 +218,6 @@ mod tests {
         assert!(
             matches!(error, Error::Config(message) if message.contains("changed Snowflake type"))
         );
-    }
-
-    #[test]
-    fn quote_identifier_cases() {
-        let cases =
-            [("my_table", r#""my_table""#), (r#"my"table"#, r#""my""table""#), ("", r#""""#)];
-        for (input, expected) in cases {
-            assert_eq!(quote_identifier(input), expected, "input: {input:?}");
-        }
     }
 
     #[test]

@@ -5,6 +5,8 @@ use etl::{
 };
 use etl_config::shared::ClickHouseEngine;
 
+use crate::clickhouse::sql::quote_identifier;
+
 /// (For MergeTree engine) CDC operation column.
 pub(crate) const CDC_OPERATION_COLUMN_NAME: &str = "cdc_operation";
 /// (For MergeTree engine) CDC LSN column (commit_lsn).
@@ -73,11 +75,6 @@ fn postgres_array_element_clickhouse_sql(typ: &Type) -> &'static str {
         &Type::OID_ARRAY => "UInt32",
         _ => "String",
     }
-}
-
-/// Quotes a ClickHouse identifier, escaping embedded double quotes.
-pub(crate) fn quote_identifier(identifier: &str) -> String {
-    format!("\"{}\"", identifier.replace('"', "\"\""))
 }
 
 /// Returns the full ClickHouse type string for a column, with Nullable
@@ -250,12 +247,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn quote_identifier_escapes_embedded_quotes() {
-        assert_eq!(quote_identifier("plain"), "\"plain\"");
-        assert_eq!(quote_identifier("has\"quote"), "\"has\"\"quote\"");
-    }
-
-    #[test]
     fn create_merge_tree_sql_quotes_identifiers() {
         let schemas = vec![ColumnSchema {
             name: "id\"value".to_owned(),
@@ -270,11 +261,11 @@ mod tests {
         let sql = create_merge_tree_sql("sche\"ma_ta\"ble", &schemas);
 
         assert!(
-            sql.contains("CREATE TABLE IF NOT EXISTS \"sche\"\"ma_ta\"\"ble\""),
+            sql.contains("CREATE TABLE IF NOT EXISTS \"sche\\\"ma_ta\\\"ble\""),
             "schema-derived table name should be quoted and escaped: {sql}"
         );
         assert!(
-            sql.contains("\"id\"\"value\" Int32"),
+            sql.contains("\"id\\\"value\" Int32"),
             "column name should be quoted and escaped: {sql}"
         );
     }
@@ -521,7 +512,7 @@ mod tests {
     fn drop_current_view_sql_quotes_view_name() {
         let sql = drop_current_view_sql("public_us\"ers");
 
-        assert_eq!(sql, "DROP VIEW IF EXISTS \"public_us\"\"ers__current\"");
+        assert_eq!(sql, "DROP VIEW IF EXISTS \"public_us\\\"ers__current\"");
     }
 
     #[test]

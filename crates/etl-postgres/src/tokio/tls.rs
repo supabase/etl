@@ -36,7 +36,12 @@ pub struct MakeRustlsConnect {
 impl MakeRustlsConnect {
     /// Creates a new `MakeRustlsConnect` from the provided `ClientConfig`.
     pub fn new(config: ClientConfig) -> Self {
-        Self { config: Arc::new(config) }
+        Self::from_shared_config(Arc::new(config))
+    }
+
+    /// Creates a new `MakeRustlsConnect` from a shared `ClientConfig`.
+    pub fn from_shared_config(config: Arc<ClientConfig>) -> Self {
+        Self { config }
     }
 }
 

@@ -6,7 +6,7 @@ use etl::{
         START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP, START_TABLE_SYNC_DURING_DATA_SYNC_FP,
         STORE_REPLICATION_PROGRESS_FP,
     },
-    state::table::{RetryPolicy, TableReplicationPhase, TableReplicationPhaseType},
+    state::{TableRetryPolicy, TableState, TableStateType},
     store::state::StateStore,
     test_utils::{
         database::{spawn_source_database, test_table_name},
@@ -132,12 +132,9 @@ async fn table_sync_worker_panic_marks_table_errored() {
         destination.clone(),
     );
 
-    // Register notifications for table sync phases.
+    // Register notifications for table sync states.
     let users_state_notify = store
-        .notify_on_table_state_type(
-            database_schema.users_schema().id,
-            TableReplicationPhaseType::Errored,
-        )
+        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Errored)
         .await;
 
     pipeline.start().await.unwrap();
@@ -146,14 +143,11 @@ async fn table_sync_worker_panic_marks_table_errored() {
 
     pipeline.shutdown_and_wait().await.unwrap();
 
-    let table_state = store
-        .get_table_replication_state(database_schema.users_schema().id)
-        .await
-        .unwrap()
-        .unwrap();
+    let table_state =
+        store.get_table_state(database_schema.users_schema().id).await.unwrap().unwrap();
     assert!(matches!(
         table_state,
-        TableReplicationPhase::Errored { retry_policy: RetryPolicy::ManualRetry, .. }
+        TableState::Errored { retry_policy: TableRetryPolicy::ManualRetry, .. }
     ));
 
     // Verify no data is there.
@@ -192,12 +186,9 @@ async fn table_copy_fails_after_data_sync_threw_an_error_with_no_retry() {
         destination.clone(),
     );
 
-    // Register notifications for table sync phases.
+    // Register notifications for table sync states.
     let users_state_notify = store
-        .notify_on_table_state_type(
-            database_schema.users_schema().id,
-            TableReplicationPhaseType::Errored,
-        )
+        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Errored)
         .await;
 
     pipeline.start().await.unwrap();
@@ -206,14 +197,11 @@ async fn table_copy_fails_after_data_sync_threw_an_error_with_no_retry() {
 
     pipeline.shutdown_and_wait().await.unwrap();
 
-    let table_state = store
-        .get_table_replication_state(database_schema.users_schema().id)
-        .await
-        .unwrap()
-        .unwrap();
+    let table_state =
+        store.get_table_state(database_schema.users_schema().id).await.unwrap().unwrap();
     assert!(matches!(
         table_state,
-        TableReplicationPhase::Errored { retry_policy: RetryPolicy::NoRetry, .. }
+        TableState::Errored { retry_policy: TableRetryPolicy::NoRetry, .. }
     ));
 
     // Verify no data is there.
@@ -257,11 +245,8 @@ async fn table_copy_fails_after_timed_retry_exceeded_max_attempts() {
     // Register notifications for waiting on the manual retry which is expected to
     // be flipped by the max attempts handling.
     let users_state_notify = store
-        .notify_on_table_state(database_schema.users_schema().id, |phase| {
-            matches!(
-                phase,
-                TableReplicationPhase::Errored { retry_policy: RetryPolicy::ManualRetry, .. }
-            )
+        .notify_on_table_state(database_schema.users_schema().id, |state| {
+            matches!(state, TableState::Errored { retry_policy: TableRetryPolicy::ManualRetry, .. })
         })
         .await;
 
@@ -271,14 +256,11 @@ async fn table_copy_fails_after_timed_retry_exceeded_max_attempts() {
 
     pipeline.shutdown_and_wait().await.unwrap();
 
-    let table_state = store
-        .get_table_replication_state(database_schema.users_schema().id)
-        .await
-        .unwrap()
-        .unwrap();
+    let table_state =
+        store.get_table_state(database_schema.users_schema().id).await.unwrap().unwrap();
     assert!(matches!(
         table_state,
-        TableReplicationPhase::Errored { retry_policy: RetryPolicy::ManualRetry, .. }
+        TableState::Errored { retry_policy: TableRetryPolicy::ManualRetry, .. }
     ));
 
     // Verify no data is there.
@@ -319,10 +301,7 @@ async fn table_copy_is_consistent_after_data_sync_threw_an_error_with_timed_retr
 
     // We register the interest in waiting for both table syncs to have started.
     let users_state_notify = store
-        .notify_on_table_state_type(
-            database_schema.users_schema().id,
-            TableReplicationPhaseType::Ready,
-        )
+        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
@@ -375,10 +354,7 @@ async fn table_copy_is_consistent_during_data_sync_threw_an_error_with_timed_ret
 
     // We register the interest in waiting for both table syncs to have started.
     let users_state_notify = store
-        .notify_on_table_state_type(
-            database_schema.users_schema().id,
-            TableReplicationPhaseType::Ready,
-        )
+        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
@@ -1222,8 +1198,7 @@ async fn table_schema_replication_masks_are_consistent_after_restart() {
     );
 
     // Wait for the table to finish syncing.
-    let sync_done_notify =
-        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
+    let sync_done_notify = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 
@@ -1234,7 +1209,7 @@ async fn table_schema_replication_masks_are_consistent_after_restart() {
         .wait_for_events_count(vec![(EventType::Relation, 3), (EventType::Insert, 3)])
         .await;
 
-    // Phase 1: Insert with all 4 columns (id, name, age, email).
+    // State 1: Insert with all 4 columns (id, name, age, email).
     database
         .run_sql(&format!(
             "insert into {} (name, age, email) values ('Alice', 25, 'alice@example.com')",
@@ -1243,7 +1218,7 @@ async fn table_schema_replication_masks_are_consistent_after_restart() {
         .await
         .unwrap();
 
-    // Phase 2: Remove email column -> (id, name, age), then insert.
+    // State 2: Remove email column -> (id, name, age), then insert.
     database
         .run_sql(&format!(
             "alter publication {publication_name} set table {} (id, name, age)",
@@ -1260,7 +1235,7 @@ async fn table_schema_replication_masks_are_consistent_after_restart() {
         .await
         .unwrap();
 
-    // Phase 3: Remove age column -> (id, name), then insert.
+    // State 3: Remove age column -> (id, name), then insert.
     database
         .run_sql(&format!(
             "alter publication {publication_name} set table {} (id, name)",
@@ -1311,7 +1286,7 @@ async fn table_schema_replication_masks_are_consistent_after_restart() {
             "Expected relation column counts [4, 3, 2], got {relation_column_counts:?}"
         );
 
-        // Verify relation column names for each phase.
+        // Verify relation column names for each state.
         let relation_1_cols: Vec<&str> = relation_events[0]
             .replicated_table_schema
             .column_schemas()

@@ -7,7 +7,7 @@ use etl::{
     },
     error::{ErrorKind, EtlResult},
     etl_error,
-    state::destination_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus},
+    state::destination_table_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus},
     store::{schema::SchemaStore, state::StateStore},
     types::{
         Cell, ColumnSchema, Event, EventSequenceKey, IdentityType, OldTableRow, PgLsn,
@@ -970,7 +970,7 @@ where
                     Event::Update(update) => {
                         let UpdatedTableRow::Full(table_row) = update.updated_table_row else {
                             return Err(etl_error!(
-                                ErrorKind::InvalidState,
+                                ErrorKind::SourceReplicaIdentityError,
                                 "ClickHouse update requires a full new row image",
                                 format!(
                                     "Table '{}' emitted a partial update row: some column values \
@@ -1244,7 +1244,7 @@ fn validate_replica_identity_for_clickhouse(
     match replicated_table_schema.identity_type() {
         IdentityType::PrimaryKey | IdentityType::Full => Ok(()),
         identity_type => Err(etl_error!(
-            ErrorKind::SourceSchemaError,
+            ErrorKind::SourceReplicaIdentityError,
             "ClickHouse requires primary-key or full replica identity",
             format!(
                 "Table '{}' uses replica identity {:?}. ClickHouse needs the source row identity \
@@ -1480,7 +1480,7 @@ mod tests {
             ClickHouseEngine::MergeTree,
         )
         .unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::SourceSchemaError);
+        assert_eq!(err.kind(), ErrorKind::SourceReplicaIdentityError);
     }
 
     #[test]
@@ -1490,7 +1490,7 @@ mod tests {
             ClickHouseEngine::MergeTree,
         )
         .unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::SourceSchemaError);
+        assert_eq!(err.kind(), ErrorKind::SourceReplicaIdentityError);
     }
 
     #[test]

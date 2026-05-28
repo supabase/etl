@@ -1,5 +1,6 @@
 use etl::types::{ColumnSchema, Type, is_array_type};
-use pg_escape::quote_identifier;
+
+use crate::ducklake::sql::{qualified_lake_table_name, quote_identifier};
 
 /// Returns the DuckLake SQL type string for a given Postgres scalar type.
 fn postgres_scalar_type_to_ducklake_sql(typ: &Type) -> &'static str {
@@ -72,7 +73,7 @@ pub(super) fn build_create_table_sql_ducklake(
     table_name: &str,
     column_schemas: &[ColumnSchema],
 ) -> String {
-    let table_name = quote_identifier(table_name);
+    let table_name = qualified_lake_table_name(table_name);
     let col_defs: Vec<String> = column_schemas
         .iter()
         .map(|col| {
@@ -127,7 +128,7 @@ mod tests {
             &[ColumnSchema::new("select".to_owned(), Type::INT4, -1, 1, Some(1), false)],
         );
 
-        assert!(sql.starts_with("CREATE TABLE IF NOT EXISTS \"odd\"\"table\""));
+        assert!(sql.starts_with("CREATE TABLE IF NOT EXISTS \"lake\".\"odd\"\"table\""));
         assert!(sql.contains("  \"select\" INTEGER NOT NULL"));
     }
 }
