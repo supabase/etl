@@ -6,7 +6,7 @@ use std::{
 
 use etl_postgres::types::{
     ColumnSchema, IdentityMask, ReplicatedTableSchema, ReplicationMask, SnapshotId, TableId,
-    TableName, TableSchema, convert_type_oid_to_type,
+    TableName, TableSchema, convert_type_oid_to_type_or_text,
 };
 use metrics::{counter, histogram};
 use postgres_replication::protocol;
@@ -220,7 +220,9 @@ pub(crate) fn build_column_schemas(
     columns
         .into_iter()
         .map(|column| {
-            let typ = convert_type_oid_to_type(column.atttypid);
+            // Unknown OIDs fall back to TEXT so row parsing uses the source
+            // text representation consistently for table copy and streaming.
+            let typ = convert_type_oid_to_type_or_text(column.atttypid);
             ColumnSchema::new(
                 column.attname,
                 typ,

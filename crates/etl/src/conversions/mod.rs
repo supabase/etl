@@ -1,6 +1,7 @@
 mod bool;
 mod event;
 mod hex;
+pub mod materialization;
 mod numeric;
 mod table_row;
 mod text;

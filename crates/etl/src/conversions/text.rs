@@ -12,7 +12,10 @@ use crate::{
     bail,
     conversions::{bool::parse_bool, hex},
     error::{ErrorKind, EtlResult},
-    types::{ArrayCell, Cell},
+    types::{
+        ArrayCell, Cell, PgDate, PgTemporalBound, PgTemporalOutOfRange, PgTime, PgTimestamp,
+        PgTimestampTz,
+    },
 };
 
 /// Converts a Postgres text-format string to a typed [`Cell`] value.
@@ -78,66 +81,30 @@ pub(crate) fn parse_cell_from_postgres_text(typ: &Type, str: &str) -> EtlResult<
             |str| Ok(Some(hex::parse_bytea_hex_string(str)?)),
             ArrayCell::Bytes,
         ),
-        Type::DATE => {
-            let val = NaiveDate::parse_from_str(str, DATE_FORMAT)?;
-            Ok(Cell::Date(val))
-        }
+        Type::DATE => Ok(Cell::Date(parse_postgres_date(str)?)),
         Type::DATE_ARRAY => parse_cell_from_postgres_text_array(
             str,
-            |str| Ok(Some(NaiveDate::parse_from_str(str, DATE_FORMAT)?)),
+            |str| Ok(Some(parse_postgres_date(str)?)),
             ArrayCell::Date,
         ),
-        Type::TIME => {
-            let val = NaiveTime::parse_from_str(str, TIME_FORMAT)?;
-            Ok(Cell::Time(val))
-        }
+        Type::TIME => Ok(Cell::Time(parse_postgres_time(str)?)),
         Type::TIME_ARRAY => parse_cell_from_postgres_text_array(
             str,
-            |str| Ok(Some(NaiveTime::parse_from_str(str, TIME_FORMAT)?)),
+            |str| Ok(Some(parse_postgres_time(str)?)),
             ArrayCell::Time,
         ),
-        Type::TIMESTAMP => {
-            let val = NaiveDateTime::parse_from_str(str, TIMESTAMP_FORMAT)?;
-            Ok(Cell::Timestamp(val))
-        }
+        Type::TIMESTAMP => Ok(Cell::Timestamp(parse_postgres_timestamp(str)?)),
         Type::TIMESTAMP_ARRAY => parse_cell_from_postgres_text_array(
             str,
-            |str| Ok(Some(NaiveDateTime::parse_from_str(str, TIMESTAMP_FORMAT)?)),
+            |str| Ok(Some(parse_postgres_timestamp(str)?)),
             ArrayCell::Timestamp,
         ),
-        Type::TIMESTAMPTZ => {
-            // PostgreSQL can render UTC offsets either as `+00` or `+00:00`,
-            // so we accept both text formats here.
-            let val = match DateTime::<FixedOffset>::parse_from_str(str, TIMESTAMPTZ_FORMAT_HHMM) {
-                Ok(val) => val,
-                Err(_) => DateTime::<FixedOffset>::parse_from_str(str, TIMESTAMPTZ_FORMAT_HH_MM)?,
-            };
-            Ok(Cell::TimestampTz(val.into()))
-        }
-        Type::TIMESTAMPTZ_ARRAY => {
-            match parse_cell_from_postgres_text_array(
-                str,
-                |str| {
-                    Ok(Some(
-                        DateTime::<FixedOffset>::parse_from_str(str, TIMESTAMPTZ_FORMAT_HHMM)?
-                            .into(),
-                    ))
-                },
-                ArrayCell::TimestampTz,
-            ) {
-                Ok(val) => Ok(val),
-                Err(_) => parse_cell_from_postgres_text_array(
-                    str,
-                    |str| {
-                        Ok(Some(
-                            DateTime::<FixedOffset>::parse_from_str(str, TIMESTAMPTZ_FORMAT_HH_MM)?
-                                .into(),
-                        ))
-                    },
-                    ArrayCell::TimestampTz,
-                ),
-            }
-        }
+        Type::TIMESTAMPTZ => Ok(Cell::TimestampTz(parse_postgres_timestamptz(str)?)),
+        Type::TIMESTAMPTZ_ARRAY => parse_cell_from_postgres_text_array(
+            str,
+            |str| Ok(Some(parse_postgres_timestamptz(str)?)),
+            ArrayCell::TimestampTz,
+        ),
         Type::UUID => {
             let val = Uuid::parse_str(str)?;
             Ok(Cell::Uuid(val))
@@ -147,14 +114,11 @@ pub(crate) fn parse_cell_from_postgres_text(typ: &Type, str: &str) -> EtlResult<
             |str| Ok(Some(Uuid::parse_str(str)?)),
             ArrayCell::Uuid,
         ),
-        Type::JSON | Type::JSONB => {
-            let val = serde_json::from_str(str)?;
-            Ok(Cell::Json(val))
-        }
+        Type::JSON | Type::JSONB => Ok(Cell::String(str.to_owned())),
         Type::JSON_ARRAY | Type::JSONB_ARRAY => parse_cell_from_postgres_text_array(
             str,
-            |str| Ok(Some(serde_json::from_str(str)?)),
-            ArrayCell::Json,
+            |str| Ok(Some(str.to_owned())),
+            ArrayCell::String,
         ),
         Type::OID => {
             let val: u32 = str.parse()?;
@@ -172,15 +136,121 @@ pub(crate) fn parse_cell_from_postgres_text(typ: &Type, str: &str) -> EtlResult<
     }
 }
 
+/// Parses PostgreSQL date text into the internal date representation.
+fn parse_postgres_date(value: &str) -> EtlResult<PgDate> {
+    match value {
+        "infinity" => return Ok(PgDate::PosInfinity),
+        "-infinity" => return Ok(PgDate::NegInfinity),
+        _ => {}
+    }
+
+    match NaiveDate::parse_from_str(value, DATE_FORMAT) {
+        Ok(value) => Ok(PgDate::Finite(value)),
+        Err(_) if temporal_out_of_range_bound(value).is_some() => {
+            Ok(PgDate::OutOfRange(out_of_range_temporal(value)?))
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Parses PostgreSQL time text into the internal time representation.
+fn parse_postgres_time(value: &str) -> EtlResult<PgTime> {
+    if is_postgres_twenty_four_hour_time(value) {
+        return Ok(PgTime::TwentyFourHour);
+    }
+
+    Ok(PgTime::Finite(NaiveTime::parse_from_str(value, TIME_FORMAT)?))
+}
+
+/// Parses PostgreSQL timestamp text into the internal timestamp representation.
+fn parse_postgres_timestamp(value: &str) -> EtlResult<PgTimestamp> {
+    match value {
+        "infinity" => return Ok(PgTimestamp::PosInfinity),
+        "-infinity" => return Ok(PgTimestamp::NegInfinity),
+        _ => {}
+    }
+
+    match NaiveDateTime::parse_from_str(value, TIMESTAMP_FORMAT) {
+        Ok(value) => Ok(PgTimestamp::Finite(value)),
+        Err(_) if temporal_out_of_range_bound(value).is_some() => {
+            Ok(PgTimestamp::OutOfRange(out_of_range_temporal(value)?))
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Parses PostgreSQL timestamptz text into the internal timestamp
+/// representation.
+fn parse_postgres_timestamptz(value: &str) -> EtlResult<PgTimestampTz> {
+    match value {
+        "infinity" => return Ok(PgTimestampTz::PosInfinity),
+        "-infinity" => return Ok(PgTimestampTz::NegInfinity),
+        _ => {}
+    }
+
+    // PostgreSQL can render UTC offsets either as `+00` or `+00:00`, so both
+    // text formats are accepted.
+    DateTime::<FixedOffset>::parse_from_str(value, TIMESTAMPTZ_FORMAT_HHMM)
+        .or_else(|_| DateTime::<FixedOffset>::parse_from_str(value, TIMESTAMPTZ_FORMAT_HH_MM))
+        .map(|value| PgTimestampTz::Finite(value.into()))
+        .or_else(|error| {
+            if let Some(bound) = temporal_out_of_range_bound(value) {
+                Ok(PgTimestampTz::OutOfRange(PgTemporalOutOfRange::new(value, bound)))
+            } else {
+                Err(error)
+            }
+        })
+        .map_err(Into::into)
+}
+
+/// Returns whether PostgreSQL time text represents `24:00:00`.
+fn is_postgres_twenty_four_hour_time(value: &str) -> bool {
+    if value == "24:00:00" {
+        return true;
+    }
+
+    let Some(fraction) = value.strip_prefix("24:00:00.") else {
+        return false;
+    };
+
+    !fraction.is_empty() && fraction.len() <= 6 && fraction.bytes().all(|byte| byte == b'0')
+}
+
+/// Builds an out-of-range temporal wrapper from PostgreSQL text.
+fn out_of_range_temporal(value: &str) -> EtlResult<PgTemporalOutOfRange> {
+    temporal_out_of_range_bound(value)
+        .map(|bound| PgTemporalOutOfRange::new(value, bound))
+        .ok_or_else(|| {
+            crate::etl_error!(
+                ErrorKind::ConversionError,
+                "Temporal value is not recognized as out of range",
+                format!("{value} does not have a lower or upper temporal bound")
+            )
+        })
+}
+
+/// Infers whether temporal text is below or above chrono's finite domain.
+fn temporal_out_of_range_bound(value: &str) -> Option<PgTemporalBound> {
+    if value.ends_with(" BC") || value.starts_with('-') {
+        return Some(PgTemporalBound::Lower);
+    }
+
+    let (year, _) = value.split_once('-')?;
+    let year = year.parse::<i32>().ok()?;
+
+    if year > 262_142 { Some(PgTemporalBound::Upper) } else { None }
+}
+
 /// Parses Postgres array literal syntax into a typed [`ArrayCell`].
 ///
-/// This function handles Postgres's array format with curly braces, comma
-/// separation, and proper quoting. It supports null values (unquoted "null"),
-/// escaped characters within quoted strings, and delegates element parsing
-/// to the provided closure.
+/// This function handles Postgres's one-dimensional array format with curly
+/// braces, comma separation, and proper quoting. It supports null values
+/// (unquoted "null"), escaped characters within quoted strings, and delegates
+/// element parsing to the provided closure.
 ///
 /// The parser correctly handles quote escaping, comma separation within quotes,
-/// and distinguishes between null values and the string "null".
+/// and distinguishes between null values and the string "null". It rejects
+/// multidimensional arrays instead of flattening their nested structure.
 fn parse_cell_from_postgres_text_array<P, M, T>(str: &str, mut parse: P, m: M) -> EtlResult<Cell>
 where
     P: FnMut(&str) -> EtlResult<Option<T>>,
@@ -188,6 +258,10 @@ where
 {
     if str.len() < 2 {
         bail!(ErrorKind::ConversionError, "Array input too short");
+    }
+
+    if str.starts_with('[') {
+        bail!(ErrorKind::ConversionError, "Array inputs with explicit bounds are not supported");
     }
 
     if !str.starts_with('{') || !str.ends_with('}') {
@@ -221,6 +295,12 @@ where
                     ',' if !in_quotes => {
                         break;
                     }
+                    '{' | '}' if !in_quotes => {
+                        bail!(
+                            ErrorKind::ConversionError,
+                            "Multidimensional arrays are not supported"
+                        );
+                    }
                     c => {
                         val_str.push(c);
                     }
@@ -253,7 +333,7 @@ mod tests {
     use chrono::{Datelike, Timelike};
 
     use super::*;
-    use crate::types::PgNumeric;
+    use crate::types::{PgNumeric, PgTemporalBound};
 
     #[test]
     fn parse_text_array_quoted_null_as_string() {
@@ -538,6 +618,7 @@ mod tests {
     fn try_from_str_dates() {
         let cell = parse_cell_from_postgres_text(&Type::DATE, "2023-12-25").unwrap();
         if let Cell::Date(date) = cell {
+            let date = date.as_finite().expect("finite date");
             assert_eq!(date.year(), 2023);
             assert_eq!(date.month(), 12);
             assert_eq!(date.day(), 25);
@@ -546,12 +627,24 @@ mod tests {
         }
 
         assert!(parse_cell_from_postgres_text(&Type::DATE, "invalid-date").is_err());
+        assert_eq!(
+            parse_cell_from_postgres_text(&Type::DATE, "infinity").unwrap(),
+            Cell::Date(PgDate::PosInfinity)
+        );
+        assert_eq!(
+            parse_cell_from_postgres_text(&Type::DATE, "294277-01-01").unwrap(),
+            Cell::Date(PgDate::OutOfRange(PgTemporalOutOfRange::new(
+                "294277-01-01",
+                PgTemporalBound::Upper
+            )))
+        );
     }
 
     #[test]
     fn try_from_str_time() {
         let cell = parse_cell_from_postgres_text(&Type::TIME, "14:30:45.123").unwrap();
         if let Cell::Time(time) = cell {
+            let time = time.as_finite().expect("finite time");
             assert_eq!(time.hour(), 14);
             assert_eq!(time.minute(), 30);
             assert_eq!(time.second(), 45);
@@ -560,6 +653,16 @@ mod tests {
         }
 
         assert!(parse_cell_from_postgres_text(&Type::TIME, "invalid-time").is_err());
+        assert_eq!(
+            parse_cell_from_postgres_text(&Type::TIME, "24:00:00").unwrap(),
+            Cell::Time(PgTime::TwentyFourHour)
+        );
+        assert_eq!(
+            parse_cell_from_postgres_text(&Type::TIME, "24:00:00.000000").unwrap(),
+            Cell::Time(PgTime::TwentyFourHour)
+        );
+        assert!(parse_cell_from_postgres_text(&Type::TIME, "24:00:00.000001").is_err());
+        assert!(parse_cell_from_postgres_text(&Type::TIME, "24:00:00.0000000").is_err());
     }
 
     #[test]
@@ -567,11 +670,17 @@ mod tests {
         let cell =
             parse_cell_from_postgres_text(&Type::TIMESTAMP, "2023-12-25 14:30:45.123").unwrap();
         if let Cell::Timestamp(ts) = cell {
+            let ts = ts.as_finite().expect("finite timestamp");
             assert_eq!(ts.date().year(), 2023);
             assert_eq!(ts.time().hour(), 14);
         } else {
             panic!("Expected TimeStamp cell");
         }
+
+        assert_eq!(
+            parse_cell_from_postgres_text(&Type::TIMESTAMP, "infinity").unwrap(),
+            Cell::Timestamp(PgTimestamp::PosInfinity)
+        );
     }
 
     #[test]
@@ -580,6 +689,7 @@ mod tests {
             parse_cell_from_postgres_text(&Type::TIMESTAMPTZ, "2023-12-25 14:30:45.123+00:00")
                 .unwrap();
         if let Cell::TimestampTz(ts) = cell {
+            let ts = ts.as_finite().expect("finite timestamptz");
             assert_eq!(ts.year(), 2023);
         } else {
             panic!("Expected TimeStampTz cell");
@@ -589,6 +699,10 @@ mod tests {
         let cell = parse_cell_from_postgres_text(&Type::TIMESTAMPTZ, "2023-12-25 14:30:45.123+00")
             .unwrap();
         assert!(matches!(cell, Cell::TimestampTz(_)));
+        assert_eq!(
+            parse_cell_from_postgres_text(&Type::TIMESTAMPTZ, "-infinity").unwrap(),
+            Cell::TimestampTz(PgTimestampTz::NegInfinity)
+        );
     }
 
     #[test]
@@ -608,31 +722,33 @@ mod tests {
     fn try_from_str_json() {
         let json_str = r#"{"key": "value", "number": 42}"#;
         let cell = parse_cell_from_postgres_text(&Type::JSON, json_str).unwrap();
-        if let Cell::Json(json) = cell {
-            assert_eq!(json["key"], "value");
-            assert_eq!(json["number"], 42);
+        if let Cell::String(json) = cell {
+            assert_eq!(json, json_str);
         } else {
-            panic!("Expected Json cell");
+            panic!("Expected string cell");
         }
 
         let cell = parse_cell_from_postgres_text(&Type::JSONB, json_str).unwrap();
-        assert!(matches!(cell, Cell::Json(_)));
+        assert_eq!(cell, Cell::String(json_str.to_owned()));
 
-        assert!(parse_cell_from_postgres_text(&Type::JSON, "invalid json").is_err());
+        assert_eq!(
+            parse_cell_from_postgres_text(&Type::JSON, "invalid json").unwrap(),
+            Cell::String("invalid json".to_owned())
+        );
     }
 
     #[test]
     fn try_from_str_json_accepts_wide_number_literals() {
         let json_str = r#"{"value":1e309}"#;
         let cell = parse_cell_from_postgres_text(&Type::JSON, json_str).unwrap();
-        if let Cell::Json(json) = cell {
-            assert_eq!(json.to_string(), r#"{"value":1e+309}"#);
+        if let Cell::String(json) = cell {
+            assert_eq!(json, json_str);
         } else {
-            panic!("Expected Json cell");
+            panic!("Expected string cell");
         }
 
         let cell = parse_cell_from_postgres_text(&Type::JSONB, json_str).unwrap();
-        assert!(matches!(cell, Cell::Json(_)));
+        assert_eq!(cell, Cell::String(json_str.to_owned()));
     }
 
     #[test]
@@ -758,6 +874,15 @@ mod tests {
     }
 
     #[test]
+    fn parse_array_rejects_unsupported_shapes() {
+        assert!(parse_cell_from_postgres_text(&Type::TEXT_ARRAY, "{{a,b},{c,d}}").is_err());
+        assert!(parse_cell_from_postgres_text(&Type::INT4_ARRAY, "[2:3]={1,2}").is_err());
+
+        let cell = parse_cell_from_postgres_text(&Type::TEXT_ARRAY, r#"{"{literal}"}"#).unwrap();
+        assert_eq!(cell, Cell::Array(ArrayCell::String(vec![Some("{literal}".to_owned())])));
+    }
+
+    #[test]
     fn parse_array_escape_sequences() {
         // The array parser doesn't process escape sequences in the same way as the
         // table row parser It expects literal characters in the array string
@@ -779,7 +904,7 @@ mod tests {
 
     #[test]
     fn parse_timestamptz_array_fallback() {
-        // Test the fallback parsing for timestamptz arrays
+        // Test the alternate offset format for timestamptz arrays.
         let cell = parse_cell_from_postgres_text(
             &Type::TIMESTAMPTZ_ARRAY,
             "{\"2023-01-01 12:00:00.000+00\"}",
@@ -792,6 +917,26 @@ mod tests {
             }
             _ => panic!("Expected TIMESTAMPTZ array"),
         }
+    }
+
+    #[test]
+    fn temporal_arrays_preserve_postgres_edge_values() {
+        assert_eq!(
+            parse_cell_from_postgres_text(&Type::DATE_ARRAY, "{infinity}").unwrap(),
+            Cell::Array(ArrayCell::Date(vec![Some(PgDate::PosInfinity)]))
+        );
+        assert_eq!(
+            parse_cell_from_postgres_text(&Type::TIME_ARRAY, "{24:00:00}").unwrap(),
+            Cell::Array(ArrayCell::Time(vec![Some(PgTime::TwentyFourHour)]))
+        );
+        assert_eq!(
+            parse_cell_from_postgres_text(&Type::TIMESTAMP_ARRAY, "{infinity}").unwrap(),
+            Cell::Array(ArrayCell::Timestamp(vec![Some(PgTimestamp::PosInfinity)]))
+        );
+        assert_eq!(
+            parse_cell_from_postgres_text(&Type::TIMESTAMPTZ_ARRAY, "{-infinity}").unwrap(),
+            Cell::Array(ArrayCell::TimestampTz(vec![Some(PgTimestampTz::NegInfinity)]))
+        );
     }
 
     #[test]

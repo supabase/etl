@@ -6,6 +6,7 @@
 use std::{fmt, path::Path, str::FromStr, time::Duration};
 
 use etl::{
+    destination::DestinationMaterializationPolicy,
     store::DestinationStore,
     types::{PipelineId, TableName},
 };
@@ -21,7 +22,7 @@ use tokio::{runtime::Handle, time::sleep};
 use uuid::Uuid;
 
 use crate::{
-    bigquery::{BigQueryDestination, table_name_to_bigquery_table_id},
+    bigquery::{BigQueryDestination, BigQueryDestinationOptions, table_name_to_bigquery_table_id},
     retry::{RetryDecision, RetryPolicy, retry_with_backoff},
 };
 
@@ -347,13 +348,36 @@ impl BigQueryDatabase {
     where
         S: DestinationStore,
     {
+        self.build_destination_with_materialization_policy(
+            pipeline_id,
+            schema_store,
+            DestinationMaterializationPolicy::default(),
+        )
+        .await
+    }
+
+    /// Creates a [`BigQueryDestination`] with a custom materialization policy.
+    pub async fn build_destination_with_materialization_policy<S>(
+        &self,
+        pipeline_id: PipelineId,
+        schema_store: S,
+        policy: DestinationMaterializationPolicy,
+    ) -> BigQueryDestination<S>
+    where
+        S: DestinationStore,
+    {
+        let options = BigQueryDestinationOptions::new(
+            self.dataset_id.clone(),
+            Some(0), // Zero staleness for immediate consistency in tests.
+            policy,
+            pipeline_id,
+        );
+
         BigQueryDestination::new_with_key_path(
             self.project_id.clone(),
-            self.dataset_id.clone(),
             &self.sa_key_path,
-            Some(0), // Zero staleness for immediate consistency in tests
-            10,      // Allow concurrent streams for testing
-            pipeline_id,
+            10, // Allow concurrent streams for testing.
+            options,
             schema_store,
         )
         .await
@@ -475,6 +499,11 @@ impl BigQueryTableSchema {
     /// Returns the names of all columns in the schema.
     pub fn column_names(&self) -> Vec<&str> {
         self.0.iter().map(|c| c.column_name.as_str()).collect()
+    }
+
+    /// Returns all columns in the schema.
+    pub fn columns(&self) -> &[BigQueryColumnSchema] {
+        &self.0
     }
 }
 

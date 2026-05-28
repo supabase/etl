@@ -37,6 +37,11 @@ description: Stream Postgres changes anywhere, in real-time.
     <strong>Schema Changes</strong>
     <span>See how relation events, DDL messages, and destination diffs work.</span>
   </a>
+  <a class="doc-path-card" href="/etl/explanation/data-type-compatibility/">
+    <span class="doc-path-kicker">Choose</span>
+    <strong>Data Type Compatibility</strong>
+    <span>Compare destination type mappings and value strategy behavior.</span>
+  </a>
   <a class="doc-path-card" href="https://supabase.com/docs/guides/database/replication">
     <span class="doc-path-kicker">Supabase</span>
     <strong>Database Replication</strong>
@@ -182,6 +187,7 @@ replication begins. If you use `PostgresStore` as the runtime store,
 |---------|------------------|
 | [Your First Pipeline](/etl/guides/first-pipeline/) | Step-by-step instructions to get things done |
 | [Postgres Replication Concepts](/etl/explanation/concepts/) | Deep dives into concepts and architecture |
+| [Data Type Compatibility](/etl/explanation/data-type-compatibility/) | Destination type and value strategy mapping |
 | [Examples](https://github.com/supabase/etl/tree/main/crates/etl-examples) | Runnable `bigquery` and `ducklake` example binaries |
 
 ## Contributing

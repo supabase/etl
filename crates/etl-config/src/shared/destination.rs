@@ -4,6 +4,8 @@ use url::Url;
 #[cfg(feature = "utoipa")]
 use utoipa::ToSchema;
 
+use super::{TypeStrategy, ValueStrategy};
+
 const fn default_connection_pool_size() -> usize {
     DestinationConfig::DEFAULT_CONNECTION_POOL_SIZE
 }
@@ -99,6 +101,12 @@ pub enum DestinationConfig {
         /// consumes more resources.
         #[serde(default = "default_connection_pool_size")]
         connection_pool_size: usize,
+        /// Type strategy for BigQuery materialization.
+        #[serde(default)]
+        type_strategy: TypeStrategy,
+        /// Value strategy for BigQuery materialization.
+        #[serde(default)]
+        value_strategy: ValueStrategy,
     },
     #[serde(rename = "clickhouse")]
     ClickHouse {
@@ -319,6 +327,12 @@ pub enum DestinationConfigWithoutSecrets {
         /// consumes more resources.
         #[serde(default = "default_connection_pool_size")]
         connection_pool_size: usize,
+        /// Type strategy for BigQuery materialization.
+        #[serde(default)]
+        type_strategy: TypeStrategy,
+        /// Value strategy for BigQuery materialization.
+        #[serde(default)]
+        value_strategy: ValueStrategy,
     },
     #[serde(rename = "clickhouse")]
     ClickHouse {
@@ -390,11 +404,15 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
                 service_account_key: _,
                 max_staleness_mins,
                 connection_pool_size,
+                type_strategy,
+                value_strategy,
             } => DestinationConfigWithoutSecrets::BigQuery {
                 project_id,
                 dataset_id,
                 max_staleness_mins,
                 connection_pool_size,
+                type_strategy,
+                value_strategy,
             },
             DestinationConfig::ClickHouse { url, user, password: _, database, engine } => {
                 DestinationConfigWithoutSecrets::ClickHouse { url, user, database, engine }
@@ -447,5 +465,69 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
                 role,
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn big_query_strategies_default_to_native_or_string_reject() {
+        let json = r#"{
+            "big_query": {
+                "project_id": "project-id",
+                "dataset_id": "dataset-id",
+                "service_account_key": "service-account-key",
+                "max_staleness_mins": null
+            }
+        }"#;
+
+        let config: DestinationConfig = serde_json::from_str(json).unwrap();
+
+        let DestinationConfig::BigQuery { type_strategy, value_strategy, .. } = config else {
+            panic!("Expected BigQuery destination config");
+        };
+        assert_eq!(type_strategy, TypeStrategy::NativeOrString);
+        assert_eq!(value_strategy, ValueStrategy::Reject);
+    }
+
+    #[test]
+    fn big_query_strategies_deserialize() {
+        let json = r#"{
+            "big_query": {
+                "project_id": "project-id",
+                "dataset_id": "dataset-id",
+                "service_account_key": "service-account-key",
+                "max_staleness_mins": null,
+                "type_strategy": "string_if_risky",
+                "value_strategy": "preserve"
+            }
+        }"#;
+
+        let config: DestinationConfig = serde_json::from_str(json).unwrap();
+
+        let DestinationConfig::BigQuery { type_strategy, value_strategy, .. } = config else {
+            panic!("Expected BigQuery destination config");
+        };
+        assert_eq!(type_strategy, TypeStrategy::StringIfRisky);
+        assert_eq!(value_strategy, ValueStrategy::Preserve);
+    }
+
+    #[test]
+    fn big_query_without_secrets_serializes_strategies() {
+        let config = DestinationConfigWithoutSecrets::BigQuery {
+            project_id: "project-id".to_owned(),
+            dataset_id: "dataset-id".to_owned(),
+            max_staleness_mins: None,
+            connection_pool_size: DestinationConfig::DEFAULT_CONNECTION_POOL_SIZE,
+            type_strategy: TypeStrategy::NativeOrString,
+            value_strategy: ValueStrategy::Normalize,
+        };
+
+        let value = serde_json::to_value(config).unwrap();
+
+        assert_eq!(value["big_query"]["type_strategy"], "native_or_string");
+        assert_eq!(value["big_query"]["value_strategy"], "normalize");
     }
 }

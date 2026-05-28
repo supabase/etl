@@ -1,4 +1,4 @@
-use etl::types::{ColumnSchema, Type, is_array_type};
+use etl::types::{ColumnSchema, ReplicatedTableSchema, Type, is_array_type};
 
 use crate::snowflake::{Error, Result, sql::quote_identifier};
 
@@ -8,7 +8,8 @@ pub(crate) const CDC_SEQUENCE_COLUMN: &str = "_cdc_sequence_number";
 /// Returns the Snowflake DDL type string for a given Postgres type.
 ///
 /// Array types map to ARRAY (Snowflake's native array type, a subtype of
-/// VARIANT). Scalar types follow the closest Snowflake equivalent.
+/// VARIANT). Scalar types use lossless Snowflake equivalents, falling back to
+/// VARCHAR when Snowflake's native type cannot cover PostgreSQL's value range.
 pub(crate) fn type_name(typ: &Type) -> &'static str {
     if is_array_type(typ) {
         return "ARRAY";
@@ -48,6 +49,33 @@ pub(crate) fn validate_no_cdc_collisions(columns: &[ColumnSchema]) -> Result<()>
     Ok(())
 }
 
+/// Rejects same-source-column type changes that Snowflake cannot apply safely.
+pub(crate) fn validate_no_type_changes(
+    current_schema: &ReplicatedTableSchema,
+    new_schema: &ReplicatedTableSchema,
+) -> Result<()> {
+    for current_column in current_schema.column_schemas() {
+        let Some(new_column) = new_schema
+            .column_schemas()
+            .find(|column| column.ordinal_position == current_column.ordinal_position)
+        else {
+            continue;
+        };
+
+        let current_type_name = type_name(&current_column.typ);
+        let new_type_name = type_name(&new_column.typ);
+        if current_type_name != new_type_name {
+            return Err(Error::Config(format!(
+                "Source column '{}' changed Snowflake type from {} to {}, which Snowflake \
+                 destination schema changes do not support",
+                current_column.name, current_type_name, new_type_name
+            )));
+        }
+    }
+
+    Ok(())
+}
+
 /// Builds the column definitions string.
 ///
 /// Each source column is rendered as `"name" TYPE` + two CDC columns are
@@ -66,6 +94,10 @@ pub(crate) fn build_column_defs(columns: &[ColumnSchema]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use etl::types::{ReplicationMask, TableId, TableName, TableSchema};
+
     use super::*;
 
     fn col(name: &str) -> ColumnSchema {
@@ -127,6 +159,65 @@ mod tests {
                 "columns: {col_names:?}"
             );
         }
+    }
+
+    fn replicated_schema(columns: Vec<ColumnSchema>) -> ReplicatedTableSchema {
+        let schema = Arc::new(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_owned(), "users".to_owned()),
+            columns,
+        ));
+        let mask = ReplicationMask::all(&schema);
+
+        ReplicatedTableSchema::from_mask(schema, mask)
+    }
+
+    #[test]
+    fn type_change_validation_allows_same_types_and_renames() {
+        let current_schema = replicated_schema(vec![
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
+            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true),
+        ]);
+        let new_schema = replicated_schema(vec![
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
+            ColumnSchema::new("full_name".to_owned(), Type::TEXT, -1, 2, None, true),
+        ]);
+
+        validate_no_type_changes(&current_schema, &new_schema).unwrap();
+    }
+
+    #[test]
+    fn type_change_validation_allows_same_snowflake_type_changes() {
+        let current_schema = replicated_schema(vec![
+            ColumnSchema::new("name".to_owned(), Type::VARCHAR, -1, 1, None, true),
+            ColumnSchema::new("payload".to_owned(), Type::JSON, -1, 2, None, true),
+            ColumnSchema::new("items".to_owned(), Type::INT4_ARRAY, -1, 3, None, true),
+        ]);
+        let new_schema = replicated_schema(vec![
+            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 1, None, true),
+            ColumnSchema::new("payload".to_owned(), Type::JSONB, -1, 2, None, true),
+            ColumnSchema::new("items".to_owned(), Type::TEXT_ARRAY, -1, 3, None, true),
+        ]);
+
+        validate_no_type_changes(&current_schema, &new_schema).unwrap();
+    }
+
+    #[test]
+    fn type_change_validation_rejects_same_ordinal_type_changes() {
+        let current_schema = replicated_schema(vec![
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
+            ColumnSchema::new("score".to_owned(), Type::INT4, -1, 2, None, true),
+        ]);
+        let new_schema = replicated_schema(vec![
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
+            ColumnSchema::new("score".to_owned(), Type::TEXT, -1, 2, None, true),
+        ]);
+
+        let error = validate_no_type_changes(&current_schema, &new_schema).unwrap_err();
+
+        assert!(
+            matches!(error, Error::Config(message) if message.contains("changed Snowflake type"))
+        );
     }
 
     #[test]

@@ -31,9 +31,9 @@ use etl::{
     error::ErrorKind,
     store::{both::memory::MemoryStore, schema::SchemaStore},
     types::{
-        Cell, ColumnSchema, DeleteEvent, Event, IdentityMask, OldTableRow, PartialTableRow, PgLsn,
-        ReplicatedTableSchema, ReplicationMask, TableId, TableName, TableRow, TableSchema,
-        Type as PgType, UpdatedTableRow,
+        ArrayCell, Cell, ColumnSchema, DeleteEvent, Event, IdentityMask, OldTableRow,
+        PartialTableRow, PgLsn, ReplicatedTableSchema, ReplicationMask, TableId, TableName,
+        TableRow, TableSchema, Type as PgType, UpdatedTableRow,
     },
 };
 use etl_destinations::ducklake::{DuckLakeDestination, table_name_to_ducklake_table_name};
@@ -2128,6 +2128,151 @@ async fn concurrent_writes_with_single_slot_complete() {
     assert_eq!(count_rows(&conn, &table_name_b), 50);
 }
 
+/// Destination table names that require identifier escaping should work across
+/// copy, CDC update/delete/insert, and truncate paths.
+#[tokio::test(flavor = "multi_thread")]
+async fn table_names_with_quotes_survive_copy_cdc_and_truncate() {
+    use etl::types::{InsertEvent, TruncateEvent, UpdateEvent};
+
+    let lake = create_test_lake("table_names_with_quotes_survive_copy_cdc_and_truncate").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
+
+    let mut schema = make_schema(41, "public", "quo\"ted events");
+    schema.add_column_schema(ColumnSchema::new(
+        "tags".to_owned(),
+        PgType::INT4_ARRAY,
+        -1,
+        3,
+        None,
+        true,
+    ));
+    let replicated_table_schema = make_replicated_table_schema(&schema);
+    let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
+
+    let store = MemoryStore::new();
+    store.store_table_schema(schema).await.unwrap();
+
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .unwrap();
+
+    destination
+        .write_table_rows(
+            &replicated_table_schema,
+            vec![TableRow::new(vec![
+                Cell::I32(1),
+                Cell::String("seed".to_owned()),
+                Cell::Array(ArrayCell::I32(vec![Some(1), None, Some(3)])),
+            ])],
+        )
+        .await
+        .unwrap();
+
+    let lsn = PgLsn::from(900u64);
+    destination
+        .write_events(vec![Event::Update(UpdateEvent {
+            start_lsn: lsn,
+            commit_lsn: lsn,
+            tx_ordinal: 0,
+            replicated_table_schema: replicated_table_schema.clone(),
+            updated_table_row: UpdatedTableRow::Partial(PartialTableRow::new(
+                3,
+                TableRow::new(vec![Cell::String("grown".to_owned())]),
+                vec![0, 2],
+            )),
+            old_table_row: Some(OldTableRow::Key(TableRow::new(vec![Cell::I32(1)]))),
+        })])
+        .await
+        .unwrap();
+
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
+    let name: String = conn
+        .query_row(
+            &format!(
+                "SELECT name FROM {}.{} WHERE id = 1",
+                quote_identifier("lake"),
+                quote_identifier(&table_name)
+            ),
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(name, "grown");
+    drop(conn);
+
+    let lsn = PgLsn::from(901u64);
+    destination
+        .write_events(vec![
+            Event::Delete(DeleteEvent {
+                start_lsn: lsn,
+                commit_lsn: lsn,
+                tx_ordinal: 0,
+                replicated_table_schema: replicated_table_schema.clone(),
+                old_table_row: Some(OldTableRow::Key(TableRow::new(vec![Cell::I32(1)]))),
+            }),
+            Event::Insert(InsertEvent {
+                start_lsn: lsn,
+                commit_lsn: lsn,
+                tx_ordinal: 1,
+                replicated_table_schema: replicated_table_schema.clone(),
+                table_row: TableRow::new(vec![
+                    Cell::I32(2),
+                    Cell::String("tail".to_owned()),
+                    Cell::Array(ArrayCell::I32(vec![Some(5)])),
+                ]),
+            }),
+        ])
+        .await
+        .unwrap();
+
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
+    assert_eq!(count_rows(&conn, &table_name), 1);
+    drop(conn);
+
+    destination.truncate_table(&replicated_table_schema).await.unwrap();
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
+    assert_eq!(count_rows(&conn, &table_name), 0);
+    drop(conn);
+
+    destination
+        .write_table_rows(
+            &replicated_table_schema,
+            vec![TableRow::new(vec![
+                Cell::I32(3),
+                Cell::String("before truncate".to_owned()),
+                Cell::Array(ArrayCell::I32(vec![Some(8), Some(13)])),
+            ])],
+        )
+        .await
+        .unwrap();
+
+    let lsn = PgLsn::from(902u64);
+    destination
+        .write_events(vec![Event::Truncate(TruncateEvent {
+            start_lsn: lsn,
+            commit_lsn: lsn,
+            tx_ordinal: 0,
+            options: 0,
+            truncated_tables: vec![replicated_table_schema.clone()],
+        })])
+        .await
+        .unwrap();
+
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
+    assert_eq!(count_rows(&conn, &table_name), 0);
+}
+
 /// Verifies that common Postgres types survive the write → read cycle.
 #[tokio::test(flavor = "multi_thread")]
 async fn type_mapping_round_trip() {
@@ -2164,7 +2309,7 @@ async fn type_mapping_round_trip() {
                 Cell::String("hello".to_owned()),
                 Cell::F64(PI),
                 Cell::Bool(true),
-                Cell::Date(NaiveDate::from_ymd_opt(2024, 6, 15).unwrap()),
+                Cell::Date(NaiveDate::from_ymd_opt(2024, 6, 15).unwrap().into()),
             ])],
         )
         .await

@@ -79,6 +79,7 @@ export default defineConfig({
             { slug: 'explanation/architecture' },
             { slug: 'explanation/events' },
             { slug: 'explanation/schema-changes' },
+            { slug: 'explanation/data-type-compatibility' },
             { slug: 'explanation/traits' },
           ],
         },

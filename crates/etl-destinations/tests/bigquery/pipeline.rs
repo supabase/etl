@@ -3,7 +3,7 @@ use std::{str::FromStr, sync::Once, time::Duration};
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use etl::{
     config::BatchConfig,
-    error::ErrorKind,
+    destination::{DestinationMaterializationPolicy, TypeStrategy, ValueStrategy},
     state::{TableState, TableStateType},
     store::state::StateStore,
     test_utils::{
@@ -103,7 +103,13 @@ async fn table_copy_and_streaming_with_restart() {
 
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
+    let raw_destination = bigquery_database
+        .build_destination_with_materialization_policy(
+            pipeline_id,
+            store.clone(),
+            DestinationMaterializationPolicy::native_or_string_reject(),
+        )
+        .await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     // Start pipeline from scratch.
@@ -148,7 +154,13 @@ async fn table_copy_and_streaming_with_restart() {
 
     // Rebuild the destination for the restart so the test exercises state/schema
     // recovery instead of relying on a reused, previously shut-down wrapper.
-    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
+    let raw_destination = bigquery_database
+        .build_destination_with_materialization_policy(
+            pipeline_id,
+            store.clone(),
+            DestinationMaterializationPolicy::native_only_reject(),
+        )
+        .await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     // We restart the pipeline and check that we can process events since we have
@@ -410,7 +422,13 @@ async fn table_subsequent_updates() {
 
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
+    let raw_destination = bigquery_database
+        .build_destination_with_materialization_policy(
+            pipeline_id,
+            store.clone(),
+            DestinationMaterializationPolicy::native_or_string_reject(),
+        )
+        .await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     // Start pipeline from scratch.
@@ -833,7 +851,13 @@ async fn table_nullable_scalar_columns() {
 
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
+    let raw_destination = bigquery_database
+        .build_destination_with_materialization_policy(
+            pipeline_id,
+            store.clone(),
+            DestinationMaterializationPolicy::native_or_string_normalize(),
+        )
+        .await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     let publication_name = "test_pub".to_owned();
@@ -1030,7 +1054,13 @@ async fn table_nullable_array_columns() {
 
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
+    let raw_destination = bigquery_database
+        .build_destination_with_materialization_policy(
+            pipeline_id,
+            store.clone(),
+            DestinationMaterializationPolicy::string_if_risky_preserve(),
+        )
+        .await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     let publication_name = "test_pub_array".to_owned();
@@ -1092,9 +1122,9 @@ async fn table_nullable_array_columns() {
 
     let table_rows = bigquery_database.query_table(table_name.clone()).await.unwrap();
     let parsed_table_rows = parse_bigquery_table_rows::<NullableColsArray>(table_rows);
-    // null arrays are returned as empty arrays by big query: See this section:
-    // https://cloud.google.com/bigquery/docs/reference/standard-sql/data-types#array_nulls
-    assert_eq!(parsed_table_rows, vec![NullableColsArray::all_empty(1),]);
+    // Preserve materialization stores arrays as scalar strings so source
+    // NULL arrays remain NULL instead of becoming BigQuery empty arrays.
+    assert_eq!(parsed_table_rows, vec![NullableColsArray::all_null(1),]);
 
     // update with array values
     let event_notify = destination.wait_for_events_count(vec![(EventType::Update, 1)]).await;
@@ -1247,7 +1277,13 @@ async fn table_non_nullable_scalar_columns() {
 
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
+    let raw_destination = bigquery_database
+        .build_destination_with_materialization_policy(
+            pipeline_id,
+            store.clone(),
+            DestinationMaterializationPolicy::native_or_string_normalize(),
+        )
+        .await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     let publication_name = "test_pub_non_null".to_owned();
@@ -1485,7 +1521,13 @@ async fn table_non_nullable_array_columns() {
 
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
+    let raw_destination = bigquery_database
+        .build_destination_with_materialization_policy(
+            pipeline_id,
+            store.clone(),
+            DestinationMaterializationPolicy::native_or_string_normalize(),
+        )
+        .await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     let publication_name = "test_pub_non_null_array".to_owned();
@@ -1733,7 +1775,13 @@ async fn table_array_with_null_values() {
 
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
+    let raw_destination = bigquery_database
+        .build_destination_with_materialization_policy(
+            pipeline_id,
+            store.clone(),
+            DestinationMaterializationPolicy::string_if_risky_preserve(),
+        )
+        .await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     let publication_name = "test_pub_array_nulls".to_owned();
@@ -1757,76 +1805,26 @@ async fn table_array_with_null_values() {
 
     table_sync_done_notification.notified().await;
 
-    // Insert array with null value
-    database
-        .client
-        .as_ref()
-        .unwrap()
+    let event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 3)]).await;
+
+    // BigQuery cannot preserve NULL repeated fields or NULL repeated-field
+    // elements, so the preserve value strategy stores arrays as scalar strings.
+    let client = database.client.as_ref().unwrap();
+    let quoted_table_name = table_name.as_quoted_identifier();
+    client
+        .execute(&format!("insert into {quoted_table_name} (int_array) values (null)"), &[])
+        .await
+        .unwrap();
+    client
         .execute(
-            &format!(
-                "insert into {} (int_array) values (array[1, null])",
-                table_name.as_quoted_identifier()
-            ),
+            &format!("insert into {quoted_table_name} (int_array) values (array[]::int4[])"),
             &[],
         )
         .await
         .unwrap();
-
-    // We sleep to wait for the event to be processed. This is not ideal, but if we
-    // wanted to do this better, we would have to also implement error handling
-    // within the apply worker to write in the state store.
-    sleep(Duration::from_secs(5)).await;
-
-    // Wait for the pipeline expecting an error to be returned.
-    let err = pipeline.shutdown_and_wait().await.err().unwrap();
-    assert_eq!(err.kinds().len(), 1);
-    assert_eq!(err.kinds()[0], ErrorKind::NullValuesNotSupportedInArrayInDestination);
-
-    // Reset and try with valid array (no nulls)
-    database
-        .client
-        .as_ref()
-        .unwrap()
-        .execute(&format!("delete from {} where true", table_name.as_quoted_identifier()), &[])
-        .await
-        .unwrap();
-
-    // We have to reset the state of the table and copy it from scratch, otherwise
-    // the CDC will contain the inserts and deletes, failing again.
-    store.reset_table_state(table_id).await.unwrap();
-
-    // We also clear the events so that it's more idiomatic to wait for them, since
-    // we don't have the prior insert.
-    destination.clear_events().await;
-
-    // We recreate the pipeline and try again.
-    let mut pipeline = create_pipeline(
-        &database.config,
-        pipeline_id,
-        publication_name,
-        store.clone(),
-        destination.clone(),
-    );
-
-    let table_sync_done_notification =
-        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
-
-    pipeline.start().await.unwrap();
-
-    table_sync_done_notification.notified().await;
-
-    let event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
-
-    // Insert array without null values
-    database
-        .client
-        .as_ref()
-        .unwrap()
+    client
         .execute(
-            &format!(
-                "insert into {} (int_array) values (array[1, 2, 3])",
-                table_name.as_quoted_identifier()
-            ),
+            &format!("insert into {quoted_table_name} (int_array) values (array[1, null])"),
             &[],
         )
         .await
@@ -1836,19 +1834,29 @@ async fn table_array_with_null_values() {
 
     pipeline.shutdown_and_wait().await.unwrap();
 
-    // Verify the valid array was successfully replicated to BigQuery
+    let destination_schema =
+        bigquery_database.query_table_schema(table_name.clone()).await.unwrap();
+    let int_array_type = destination_schema
+        .columns()
+        .iter()
+        .find(|column| column.column_name == "int_array")
+        .map(|column| column.data_type.as_str());
+    assert_eq!(int_array_type, Some("STRING"));
+
     let table_rows = bigquery_database.query_table(table_name.clone()).await.unwrap();
+    assert_eq!(table_rows.len(), 3);
 
-    // Check that there is only the valid row in BigQuery
-    assert_eq!(table_rows.len(), 1);
+    let mut replicated_arrays = table_rows
+        .into_iter()
+        .map(|row| {
+            let columns = row.columns.expect("row should contain columns");
+            assert_eq!(columns.len(), 2);
+            columns[1].value.as_ref().and_then(|value| value.as_str().map(str::to_owned))
+        })
+        .collect::<Vec<_>>();
+    replicated_arrays.sort();
 
-    // Check that the int array contains 3 elements, meaning it must be the second
-    // insert with all NON-NULL values
-    let row = &table_rows[0];
-    if let Some(columns) = &row.columns {
-        assert_eq!(columns.len(), 2);
-        assert_eq!(columns[1].value.clone().unwrap().as_array().unwrap().len(), 3);
-    }
+    assert_eq!(replicated_arrays, vec![None, Some("{1,NULL}".to_owned()), Some("{}".to_owned())]);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1986,7 +1994,13 @@ async fn table_validation_out_of_bounds_values() {
 
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
+    let raw_destination = bigquery_database
+        .build_destination_with_materialization_policy(
+            pipeline_id,
+            store.clone(),
+            DestinationMaterializationPolicy::native_only_reject(),
+        )
+        .await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     let publication_name = "test_pub_validation".to_owned();
@@ -2055,6 +2069,253 @@ async fn table_validation_out_of_bounds_values() {
     ] {
         let table_state = store.get_table_state(table_id).await.unwrap().unwrap();
         assert!(matches!(table_state, TableState::Errored { .. }));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn table_strategy_pairs_handle_same_risky_data() {
+    if skip_if_missing_bigquery_env_vars() {
+        return;
+    }
+
+    init_test_tracing();
+    install_crypto_provider();
+
+    for (strategy_name, policy, expected_phase) in [
+        (
+            "native_only_reject",
+            DestinationMaterializationPolicy::new(TypeStrategy::NativeOnly, ValueStrategy::Reject),
+            TableStateType::Errored,
+        ),
+        (
+            "native_or_string_reject",
+            DestinationMaterializationPolicy::new(
+                TypeStrategy::NativeOrString,
+                ValueStrategy::Reject,
+            ),
+            TableStateType::Errored,
+        ),
+        (
+            "string_if_risky_preserve",
+            DestinationMaterializationPolicy::new(
+                TypeStrategy::StringIfRisky,
+                ValueStrategy::Preserve,
+            ),
+            TableStateType::Ready,
+        ),
+        (
+            "native_or_string_normalize",
+            DestinationMaterializationPolicy::new(
+                TypeStrategy::NativeOrString,
+                ValueStrategy::Normalize,
+            ),
+            TableStateType::Ready,
+        ),
+    ] {
+        let database = spawn_source_database().await;
+        let bigquery_database = setup_bigquery_database().await;
+
+        let table_name = test_table_name(&format!("{strategy_name}_types"));
+        let table_id = database
+            .create_table(
+                table_name.clone(),
+                true,
+                &[
+                    ("numeric_value", "numeric"),
+                    ("infinite_numeric", "numeric"),
+                    ("float8_value", "double precision"),
+                    ("old_date", "date"),
+                    ("time_value", "time"),
+                    ("timestamp_value", "timestamp"),
+                    ("timestamptz_value", "timestamptz"),
+                    ("uuid_value", "uuid"),
+                    ("json_value", "json"),
+                    ("json_duplicate", "json"),
+                    ("numeric_array", "numeric[]"),
+                    ("uuid_array", "uuid[]"),
+                    ("json_array", "json[]"),
+                ],
+            )
+            .await
+            .unwrap();
+
+        database
+            .client
+            .as_ref()
+            .unwrap()
+            .execute(
+                &format!(
+                    "insert into {} (
+                        numeric_value,
+                        infinite_numeric,
+                        float8_value,
+                        old_date,
+                        time_value,
+                        timestamp_value,
+                        timestamptz_value,
+                        uuid_value,
+                        json_value,
+                        json_duplicate,
+                        numeric_array,
+                        uuid_array,
+                        json_array
+                    ) values (
+                        '0.000000000000000000000000000000000000001'::numeric,
+                        'Infinity'::numeric,
+                        '-0'::double precision,
+                        '-infinity'::date,
+                        '24:00:00'::time,
+                        'infinity'::timestamp,
+                        'infinity'::timestamptz,
+                        '550e8400-e29b-41d4-a716-446655440000'::uuid,
+                        '{{\"value\":18446744073709551616}}'::json,
+                        '{{\"value\":1,\"value\":2}}'::json,
+                        array['0.000000000000000000000000000000000000001'::numeric],
+                        array['550e8400-e29b-41d4-a716-446655440000'::uuid],
+                        array['{{\"value\":18446744073709551616}}'::json]
+                    )",
+                    table_name.as_quoted_identifier()
+                ),
+                &[],
+            )
+            .await
+            .unwrap();
+
+        let store = NotifyingStore::new();
+        let pipeline_id: PipelineId = random();
+        let raw_destination = bigquery_database
+            .build_destination_with_materialization_policy(pipeline_id, store.clone(), policy)
+            .await;
+        let destination = TestDestinationWrapper::wrap(raw_destination);
+
+        let publication_name = format!("test_pub_{strategy_name}_types");
+        database
+            .create_publication(&publication_name, std::slice::from_ref(&table_name))
+            .await
+            .expect("Failed to create publication");
+
+        let mut pipeline = create_pipeline(
+            &database.config,
+            pipeline_id,
+            publication_name,
+            store.clone(),
+            destination,
+        );
+
+        let unexpected_phase = match expected_phase {
+            TableStateType::Errored => TableStateType::Ready,
+            TableStateType::Ready => TableStateType::Errored,
+            phase => unreachable!("unexpected materialization test phase: {phase:?}"),
+        };
+        let table_reached_outcome = store
+            .notify_on_table_state(table_id, move |state| {
+                let state_type = state.as_type();
+                state_type == expected_phase || state_type == unexpected_phase
+            })
+            .await;
+
+        pipeline.start().await.unwrap();
+
+        tokio::select! {
+            _ = table_reached_outcome.notified() => {}
+            _ = sleep(Duration::from_secs(180)) => {
+                let table_state = store.get_table_state(table_id).await.unwrap();
+                pipeline.shutdown_and_wait().await.unwrap();
+                panic!("timed out waiting for {strategy_name} table outcome: {table_state:?}");
+            }
+        }
+        let table_state =
+            store.get_table_state(table_id).await.unwrap().expect("table state should exist");
+
+        pipeline.shutdown_and_wait().await.unwrap();
+
+        if expected_phase == TableStateType::Errored {
+            let TableState::Errored { reason, .. } = table_state else {
+                panic!("{strategy_name} table replication should have errored: {table_state:?}");
+            };
+
+            assert!(
+                reason.contains("[UnsupportedValueInDestination]"),
+                "{strategy_name} should reject the risky payload locally: {reason}"
+            );
+            assert!(
+                reason.contains("would be rounded by BigQuery")
+                    || reason.contains("JSON integer would lose precision")
+                    || reason.contains("JSON integer is outside BigQuery")
+                    || reason.contains("has no native BigQuery representation"),
+                "{strategy_name} should reject a silent BigQuery conversion risk: {reason}"
+            );
+
+            continue;
+        }
+
+        if table_state.as_type() != TableStateType::Ready {
+            panic!("{strategy_name} table replication should be ready: {table_state:?}");
+        }
+
+        let destination_schema =
+            bigquery_database.query_table_schema(table_name.clone()).await.unwrap();
+        let column_type = |column_name: &str| {
+            destination_schema
+                .columns()
+                .iter()
+                .find(|column| column.column_name == column_name)
+                .map(|column| column.data_type.as_str())
+        };
+
+        if policy.is_string_if_risky_preserve() {
+            for column_name in [
+                "numeric_value",
+                "infinite_numeric",
+                "float8_value",
+                "old_date",
+                "time_value",
+                "timestamp_value",
+                "timestamptz_value",
+                "uuid_value",
+                "json_value",
+                "json_duplicate",
+            ] {
+                assert_eq!(column_type(column_name), Some("STRING"), "{column_name}");
+            }
+        } else {
+            assert_eq!(column_type("numeric_value"), Some("BIGNUMERIC"));
+            assert_eq!(column_type("infinite_numeric"), Some("BIGNUMERIC"));
+            assert_eq!(column_type("float8_value"), Some("FLOAT64"));
+            assert_eq!(column_type("old_date"), Some("DATE"));
+            assert_eq!(column_type("time_value"), Some("TIME"));
+            assert_eq!(column_type("timestamp_value"), Some("DATETIME"));
+            assert_eq!(column_type("timestamptz_value"), Some("TIMESTAMP"));
+            assert_eq!(column_type("uuid_value"), Some("STRING"));
+            assert_eq!(column_type("json_value"), Some("JSON"));
+            assert_eq!(column_type("json_duplicate"), Some("JSON"));
+        }
+
+        if policy.is_string_if_risky_preserve() {
+            for column_name in ["numeric_array", "uuid_array", "json_array"] {
+                assert_eq!(column_type(column_name), Some("STRING"), "{column_name}");
+            }
+        } else {
+            assert_eq!(column_type("numeric_array"), Some("ARRAY<BIGNUMERIC>"));
+            assert_eq!(column_type("uuid_array"), Some("ARRAY<STRING>"));
+            assert_eq!(column_type("json_array"), Some("ARRAY<JSON>"));
+        }
+
+        let destination_rows = bigquery_database.query_table(table_name).await.unwrap();
+        assert_eq!(destination_rows.len(), 1);
+
+        let table_schemas = store.get_table_schemas().await;
+        let source_table_schema = table_schemas
+            .get(&table_id)
+            .and_then(|schemas| schemas.first())
+            .map(|(_, table_schema)| table_schema)
+            .expect("source schema should be stored");
+        let numeric_column = source_table_schema
+            .column_schemas
+            .iter()
+            .find(|column| column.name == "numeric_value")
+            .expect("numeric column should exist");
+        assert_eq!(numeric_column.typ.name(), "numeric");
     }
 }
 

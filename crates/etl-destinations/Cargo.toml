@@ -34,6 +34,7 @@ ducklake = [
 ]
 bigquery = [
     "dep:gcp-bigquery-client",
+    "dep:serde",
     "dep:serde_json",
     "dep:prost",
     "dep:rand",
@@ -119,7 +120,7 @@ regex = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true, features = ["json", "rustls-tls"] }
 secrecy = { workspace = true, optional = true }
 serde = { workspace = true, optional = true, features = ["derive"] }
-serde_json = { workspace = true, optional = true, features = ["arbitrary_precision", "std"] }
+serde_json = { workspace = true, optional = true, features = ["arbitrary_precision", "raw_value", "std", "unbounded_depth"] }
 sha2 = { workspace = true, optional = true }
 sqlx = { workspace = true, optional = true, features = ["runtime-tokio", "tls-rustls", "postgres"] }
 thiserror = { workspace = true, optional = true }

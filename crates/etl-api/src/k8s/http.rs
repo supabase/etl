@@ -1514,7 +1514,7 @@ mod tests {
     use etl_config::shared::{
         BatchConfig, DestinationConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig,
         PgConnectionConfig, PipelineConfig, ReplicatorConfig, ReplicatorConfigWithoutSecrets,
-        TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
+        TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig, TypeStrategy, ValueStrategy,
     };
     use insta::{assert_json_snapshot, assert_snapshot};
 
@@ -1875,6 +1875,8 @@ mod tests {
                 service_account_key: "sa-key".into(),
                 max_staleness_mins: None,
                 connection_pool_size: 4,
+                type_strategy: TypeStrategy::NativeOrString,
+                value_strategy: ValueStrategy::Reject,
             },
             pipeline: PipelineConfig {
                 id: 42,

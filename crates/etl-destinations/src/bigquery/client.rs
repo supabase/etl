@@ -3,7 +3,7 @@ use std::fmt;
 use etl::{
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
-    types::{Cell, ColumnSchema, PipelineId, ReplicatedTableSchema, Type, is_array_type},
+    types::{Cell, ColumnSchema, PipelineId, ReplicatedTableSchema},
 };
 use gcp_bigquery_client::{
     Client,
@@ -32,11 +32,15 @@ use tonic::Code;
 use tracing::{debug, error, info, warn};
 
 use crate::bigquery::{
-    encoding::BigQueryTableRow,
+    materialization::BigQueryMaterializer,
     metrics::{
         ETL_BQ_APPEND_BATCHES_BATCH_ERRORS_TOTAL, ETL_BQ_APPEND_BATCHES_BATCH_ROW_ERRORS_TOTAL,
     },
     sql::{quote_identifier, quote_information_schema_tables_path, quote_table_path},
+    value::{
+        BigQueryArrayType, BigQueryFloatEncoding, BigQueryIntEncoding, BigQueryTableRow,
+        BigQueryType,
+    },
 };
 
 /// Multiplier for calculating max inflight requests from pool size.
@@ -674,18 +678,19 @@ impl BigQueryClient {
     ///
     /// Returns `true` if the table was created fresh, `false` if it already
     /// existed and was replaced.
-    pub async fn create_or_replace_table(
+    pub(super) async fn create_or_replace_table(
         &self,
         dataset_id: &BigQueryDatasetId,
         table_id: &BigQueryTableId,
         replicated_table_schema: &ReplicatedTableSchema,
         max_staleness_mins: Option<u16>,
+        materializer: &BigQueryMaterializer,
     ) -> EtlResult<bool> {
         let table_exists = self.table_exists(dataset_id, table_id).await?;
 
         let full_table_name = self.full_table_name(dataset_id, table_id)?;
 
-        let columns_spec = Self::create_columns_spec(replicated_table_schema)?;
+        let columns_spec = Self::create_columns_spec(replicated_table_schema, materializer)?;
         let max_staleness_option = if let Some(max_staleness_mins) = max_staleness_mins {
             Self::max_staleness_option(max_staleness_mins)
         } else {
@@ -711,19 +716,26 @@ impl BigQueryClient {
     /// Creates a table in BigQuery if it doesn't already exist.
     ///
     /// Returns `true` if the table was created, `false` if it already existed.
-    pub async fn create_table_if_missing(
+    pub(super) async fn create_table_if_missing(
         &self,
         dataset_id: &BigQueryDatasetId,
         table_id: &BigQueryTableId,
         replicated_table_schema: &ReplicatedTableSchema,
         max_staleness_mins: Option<u16>,
+        materializer: &BigQueryMaterializer,
     ) -> EtlResult<bool> {
         if self.table_exists(dataset_id, table_id).await? {
             return Ok(false);
         }
 
-        self.create_table(dataset_id, table_id, replicated_table_schema, max_staleness_mins)
-            .await?;
+        self.create_table(
+            dataset_id,
+            table_id,
+            replicated_table_schema,
+            max_staleness_mins,
+            materializer,
+        )
+        .await?;
 
         Ok(true)
     }
@@ -732,16 +744,17 @@ impl BigQueryClient {
     ///
     /// Builds and executes a CREATE TABLE statement with the provided column
     /// schemas and optional staleness configuration for CDC operations.
-    pub async fn create_table(
+    pub(super) async fn create_table(
         &self,
         dataset_id: &BigQueryDatasetId,
         table_id: &BigQueryTableId,
         replicated_table_schema: &ReplicatedTableSchema,
         max_staleness_mins: Option<u16>,
+        materializer: &BigQueryMaterializer,
     ) -> EtlResult<()> {
         let full_table_name = self.full_table_name(dataset_id, table_id)?;
 
-        let columns_spec = Self::create_columns_spec(replicated_table_schema)?;
+        let columns_spec = Self::create_columns_spec(replicated_table_schema, materializer)?;
         let max_staleness_option = if let Some(max_staleness_mins) = max_staleness_mins {
             Self::max_staleness_option(max_staleness_mins)
         } else {
@@ -890,15 +903,16 @@ impl BigQueryClient {
     ///
     /// Executes an ALTER TABLE ADD COLUMN statement to add a new column with
     /// the specified schema. New columns must be nullable in BigQuery.
-    pub async fn add_column(
+    pub(super) async fn add_column(
         &self,
         dataset_id: &BigQueryDatasetId,
         table_id: &BigQueryTableId,
         column_schema: &ColumnSchema,
+        materializer: &BigQueryMaterializer,
     ) -> EtlResult<()> {
         let full_table_name = self.full_table_name(dataset_id, table_id)?;
         let column_name = quote_identifier(&column_schema.name, "BigQuery column name")?;
-        let column_type = Self::postgres_to_bigquery_type(&column_schema.typ);
+        let column_type = materializer.materialize_type(&column_schema.typ)?.to_sql();
 
         info!("adding column {column_name} ({column_type}) to table {full_table_name} in BigQuery");
 
@@ -1190,8 +1204,8 @@ impl BigQueryClient {
 
     /// Creates a batch append request for a specific table with validated rows.
     ///
-    /// Converts TableRow instances to BigQueryTableRow and creates a properly
-    /// configured [`BatchAppendRequest`] for efficient append retries.
+    /// Rows are already converted to [`BigQueryTableRow`] before reaching this
+    /// boundary, so this only attaches the stream, descriptor, and trace id.
     pub(super) fn create_batch_append_request(
         &self,
         pipeline_id: PipelineId,
@@ -1224,13 +1238,20 @@ impl BigQueryClient {
     }
 
     /// Generates SQL column specification for CREATE TABLE statements.
-    fn column_spec(column_schema: &ColumnSchema) -> EtlResult<String> {
+    fn column_spec(
+        column_schema: &ColumnSchema,
+        materializer: &BigQueryMaterializer,
+    ) -> EtlResult<String> {
         let column_name = quote_identifier(&column_schema.name, "BigQuery column name")?;
+        let materialized_type = materializer.materialize_type(&column_schema.typ)?;
 
-        let mut column_spec =
-            format!("{} {}", column_name, Self::postgres_to_bigquery_type(&column_schema.typ));
+        let column_type = materialized_type.to_sql();
+        let mut column_spec = format!("{column_name} {column_type}");
 
-        if !column_schema.nullable && !is_array_type(&column_schema.typ) {
+        // BigQuery array columns use REPEATED mode and don't support NOT NULL.
+        // If an array source type materializes to a scalar string, preserve the
+        // source column nullability on that scalar destination column.
+        if !column_schema.nullable && !matches!(&materialized_type, BigQueryType::Array(_)) {
             column_spec.push_str(" not null");
         };
 
@@ -1270,10 +1291,13 @@ impl BigQueryClient {
     }
 
     /// Builds complete column specifications for CREATE TABLE statements.
-    fn create_columns_spec(replicated_table_schema: &ReplicatedTableSchema) -> EtlResult<String> {
+    fn create_columns_spec(
+        replicated_table_schema: &ReplicatedTableSchema,
+        materializer: &BigQueryMaterializer,
+    ) -> EtlResult<String> {
         let mut column_spec = replicated_table_schema
             .column_schemas()
-            .map(Self::column_spec)
+            .map(|column_schema| Self::column_spec(column_schema, materializer))
             .collect::<EtlResult<Vec<_>>>()?
             .join(",");
 
@@ -1289,112 +1313,25 @@ impl BigQueryClient {
         format!("options (max_staleness = interval {max_staleness_mins} minute)")
     }
 
-    /// Converts Postgres data types to BigQuery equivalent types.
-    fn postgres_to_bigquery_type(typ: &Type) -> String {
-        if is_array_type(typ) {
-            let element_type = match typ {
-                &Type::BOOL_ARRAY => "bool",
-                &Type::CHAR_ARRAY
-                | &Type::BPCHAR_ARRAY
-                | &Type::VARCHAR_ARRAY
-                | &Type::NAME_ARRAY
-                | &Type::TEXT_ARRAY => "string",
-                &Type::INT2_ARRAY | &Type::INT4_ARRAY | &Type::INT8_ARRAY => "int64",
-                &Type::FLOAT4_ARRAY | &Type::FLOAT8_ARRAY => "float64",
-                &Type::NUMERIC_ARRAY => "bignumeric",
-                &Type::MONEY_ARRAY => "string",
-                &Type::DATE_ARRAY => "date",
-                &Type::TIME_ARRAY => "time",
-                &Type::TIMESTAMP_ARRAY | &Type::TIMESTAMPTZ_ARRAY => "timestamp",
-                &Type::UUID_ARRAY => "string",
-                &Type::JSON_ARRAY | &Type::JSONB_ARRAY => "json",
-                &Type::OID_ARRAY => "int64",
-                &Type::BYTEA_ARRAY => "bytes",
-                _ => "string",
-            };
-
-            return format!("array<{element_type}>");
-        }
-
-        match typ {
-            &Type::BOOL => "bool",
-            &Type::CHAR | &Type::BPCHAR | &Type::VARCHAR | &Type::NAME | &Type::TEXT => "string",
-            &Type::INT2 | &Type::INT4 | &Type::INT8 => "int64",
-            &Type::FLOAT4 | &Type::FLOAT8 => "float64",
-            &Type::NUMERIC => "bignumeric",
-            &Type::MONEY => "string",
-            &Type::DATE => "date",
-            &Type::TIME => "time",
-            &Type::TIMESTAMP | &Type::TIMESTAMPTZ => "timestamp",
-            &Type::UUID => "string",
-            &Type::JSON | &Type::JSONB => "json",
-            &Type::OID => "int64",
-            &Type::BYTEA => "bytes",
-            _ => "string",
-        }
-        .to_owned()
-    }
-
     /// Converts Postgres column schemas to a BigQuery [`TableDescriptor`].
     ///
     /// Maps data types and nullability to BigQuery column specifications,
     /// setting appropriate column modes and automatically adding CDC
     /// special columns.
-    pub fn column_schemas_to_table_descriptor(
+    pub(super) fn column_schemas_to_table_descriptor(
         replicated_table_schema: &ReplicatedTableSchema,
         use_cdc_sequence_column: bool,
-    ) -> TableDescriptor {
+        materializer: &BigQueryMaterializer,
+    ) -> EtlResult<TableDescriptor> {
         let mut field_descriptors = vec![];
         let mut number = 1;
 
         for column_schema in replicated_table_schema.column_schemas() {
-            let typ = match column_schema.typ {
-                Type::BOOL => ColumnType::Bool,
-                Type::CHAR | Type::BPCHAR | Type::VARCHAR | Type::NAME | Type::TEXT => {
-                    ColumnType::String
-                }
-                Type::INT2 => ColumnType::Int32,
-                Type::INT4 => ColumnType::Int32,
-                Type::INT8 => ColumnType::Int64,
-                Type::FLOAT4 => ColumnType::Float,
-                Type::FLOAT8 => ColumnType::Double,
-                Type::NUMERIC => ColumnType::String,
-                Type::MONEY => ColumnType::String,
-                Type::DATE => ColumnType::String,
-                Type::TIME => ColumnType::String,
-                Type::TIMESTAMP => ColumnType::String,
-                Type::TIMESTAMPTZ => ColumnType::String,
-                Type::UUID => ColumnType::String,
-                Type::JSON => ColumnType::String,
-                Type::JSONB => ColumnType::String,
-                Type::OID => ColumnType::Int32,
-                Type::BYTEA => ColumnType::Bytes,
-                Type::BOOL_ARRAY => ColumnType::Bool,
-                Type::CHAR_ARRAY
-                | Type::BPCHAR_ARRAY
-                | Type::VARCHAR_ARRAY
-                | Type::NAME_ARRAY
-                | Type::TEXT_ARRAY => ColumnType::String,
-                Type::INT2_ARRAY => ColumnType::Int32,
-                Type::INT4_ARRAY => ColumnType::Int32,
-                Type::INT8_ARRAY => ColumnType::Int64,
-                Type::FLOAT4_ARRAY => ColumnType::Float,
-                Type::FLOAT8_ARRAY => ColumnType::Double,
-                Type::NUMERIC_ARRAY => ColumnType::String,
-                Type::MONEY_ARRAY => ColumnType::String,
-                Type::DATE_ARRAY => ColumnType::String,
-                Type::TIME_ARRAY => ColumnType::String,
-                Type::TIMESTAMP_ARRAY => ColumnType::String,
-                Type::TIMESTAMPTZ_ARRAY => ColumnType::String,
-                Type::UUID_ARRAY => ColumnType::String,
-                Type::JSON_ARRAY => ColumnType::String,
-                Type::JSONB_ARRAY => ColumnType::String,
-                Type::OID_ARRAY => ColumnType::Int32,
-                Type::BYTEA_ARRAY => ColumnType::Bytes,
-                _ => ColumnType::String,
-            };
+            let materialized_type = materializer.materialize_type(&column_schema.typ)?;
+            let materialized_as_array = matches!(&materialized_type, BigQueryType::Array(_));
+            let typ = Self::bigquery_storage_write_type(&materialized_type);
 
-            let mode = if is_array_type(&column_schema.typ) {
+            let mode = if materialized_as_array {
                 ColumnMode::Repeated
             } else if use_cdc_sequence_column {
                 // CDC delete rows can omit non-key columns, so the writer
@@ -1433,7 +1370,65 @@ impl BigQueryClient {
             });
         }
 
-        TableDescriptor { field_descriptors }
+        Ok(TableDescriptor { field_descriptors })
+    }
+
+    /// Converts a destination-materialized type to a Storage Write API type.
+    fn bigquery_storage_write_type(typ: &BigQueryType) -> ColumnType {
+        match typ {
+            BigQueryType::Bool => ColumnType::Bool,
+            // BigQuery `BIGNUMERIC` is carried as a decimal string for the
+            // Write API so we do not approximate exact numerics through a
+            // protobuf float or double before BigQuery validates the value.
+            BigQueryType::BigNumeric => ColumnType::String,
+            BigQueryType::String
+            | BigQueryType::Date
+            | BigQueryType::Time
+            | BigQueryType::DateTime
+            | BigQueryType::Timestamp
+            | BigQueryType::Json => ColumnType::String,
+            BigQueryType::Int64(encoding) => Self::bigquery_int_storage_write_type(encoding),
+            BigQueryType::Float64(encoding) => Self::bigquery_float_storage_write_type(encoding),
+            BigQueryType::Bytes => ColumnType::Bytes,
+            BigQueryType::Array(element_type) => {
+                Self::bigquery_array_storage_write_type(element_type)
+            }
+        }
+    }
+
+    /// Converts a BigQuery repeated type to a Storage Write API element type.
+    fn bigquery_array_storage_write_type(typ: &BigQueryArrayType) -> ColumnType {
+        match typ {
+            BigQueryArrayType::Bool => ColumnType::Bool,
+            BigQueryArrayType::String
+            | BigQueryArrayType::BigNumeric
+            | BigQueryArrayType::Date
+            | BigQueryArrayType::Time
+            | BigQueryArrayType::DateTime
+            | BigQueryArrayType::Timestamp
+            | BigQueryArrayType::Json => ColumnType::String,
+            BigQueryArrayType::Int64(encoding) => Self::bigquery_int_storage_write_type(encoding),
+            BigQueryArrayType::Float64(encoding) => {
+                Self::bigquery_float_storage_write_type(encoding)
+            }
+            BigQueryArrayType::Bytes => ColumnType::Bytes,
+        }
+    }
+
+    /// Converts a BigQuery integer encoding to a Storage Write API type.
+    fn bigquery_int_storage_write_type(encoding: &BigQueryIntEncoding) -> ColumnType {
+        match encoding {
+            BigQueryIntEncoding::Int32 => ColumnType::Int32,
+            BigQueryIntEncoding::Int64 => ColumnType::Int64,
+        }
+    }
+
+    /// Converts a BigQuery float encoding to a Storage Write API type.
+    fn bigquery_float_storage_write_type(encoding: &BigQueryFloatEncoding) -> ColumnType {
+        match encoding {
+            BigQueryFloatEncoding::Float => ColumnType::Float,
+            BigQueryFloatEncoding::Double => ColumnType::Double,
+        }
     }
 }
 
@@ -1448,12 +1443,21 @@ impl fmt::Debug for BigQueryClient {
 mod tests {
     use std::{collections::HashSet, sync::Arc};
 
-    use etl::types::{IdentityMask, ReplicationMask, TableId, TableName, TableSchema};
+    use etl::{
+        destination::DestinationMaterializationPolicy,
+        types::{IdentityMask, ReplicationMask, TableId, TableName, TableSchema, Type},
+    };
     use gcp_bigquery_client::google::cloud::bigquery::storage::v1::{
         AppendRowsResponse, append_rows_response,
     };
 
     use super::*;
+    use crate::bigquery::materialization::BigQueryMaterialization;
+
+    /// Returns a BigQuery materializer for tests.
+    fn materializer(policy: DestinationMaterializationPolicy) -> BigQueryMaterializer {
+        BigQueryMaterialization::materializer(policy)
+    }
 
     fn successful_append_response() -> AppendRowsResponse {
         AppendRowsResponse {
@@ -1512,80 +1516,257 @@ mod tests {
         ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask)
     }
 
-    #[test]
-    fn postgres_to_bigquery_type_basic_types() {
-        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::BOOL), "bool");
-        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::TEXT), "string");
-        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::INT2), "int64");
-        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::INT4), "int64");
-        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::INT8), "int64");
-        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::FLOAT4), "float64");
-        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::FLOAT8), "float64");
-        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::NUMERIC), "bignumeric");
-        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::MONEY), "string");
-        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::OID), "int64");
-        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::TIMESTAMP), "timestamp");
-        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::JSON), "json");
-        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::BYTEA), "bytes");
+    /// Converts a type with a materialization policy for test assertions.
+    fn bigquery_type(typ: &Type, policy: DestinationMaterializationPolicy) -> EtlResult<String> {
+        materializer(policy).materialize_type(typ).map(|typ| typ.to_sql())
     }
 
     #[test]
-    fn postgres_to_bigquery_type_array_types() {
-        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::BOOL_ARRAY), "array<bool>");
-        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::TEXT_ARRAY), "array<string>");
-        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::INT2_ARRAY), "array<int64>");
-        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::INT4_ARRAY), "array<int64>");
-        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::INT8_ARRAY), "array<int64>");
+    fn materialize_type_strategy_pairs_follow_documented_bigquery_schema_matrix() {
+        for (typ, native_only, native_or_string, string_if_risky, normalize) in [
+            (Type::BOOL, Some("bool"), Some("bool"), Some("bool"), Some("bool")),
+            (Type::TEXT, Some("string"), Some("string"), Some("string"), Some("string")),
+            (Type::INT4, Some("int64"), Some("int64"), Some("int64"), Some("int64")),
+            (Type::INT8, Some("int64"), Some("int64"), Some("int64"), Some("int64")),
+            (Type::OID, Some("int64"), Some("int64"), Some("int64"), Some("int64")),
+            (Type::FLOAT8, Some("float64"), Some("float64"), Some("string"), Some("float64")),
+            (
+                Type::NUMERIC,
+                Some("bignumeric"),
+                Some("bignumeric"),
+                Some("string"),
+                Some("bignumeric"),
+            ),
+            (Type::DATE, Some("date"), Some("date"), Some("string"), Some("date")),
+            (Type::TIME, Some("time"), Some("time"), Some("string"), Some("time")),
+            (Type::TIMESTAMP, Some("datetime"), Some("datetime"), Some("string"), Some("datetime")),
+            (
+                Type::TIMESTAMPTZ,
+                Some("timestamp"),
+                Some("timestamp"),
+                Some("string"),
+                Some("timestamp"),
+            ),
+            (Type::JSON, Some("json"), Some("json"), Some("string"), Some("json")),
+            (Type::BYTEA, Some("bytes"), Some("bytes"), Some("bytes"), Some("bytes")),
+            (Type::UUID, None, Some("string"), Some("string"), Some("string")),
+            (Type::MONEY, None, Some("string"), Some("string"), Some("string")),
+            (Type::INTERVAL, None, Some("string"), Some("string"), Some("string")),
+            (
+                Type::INT4_ARRAY,
+                Some("array<int64>"),
+                Some("array<int64>"),
+                Some("string"),
+                Some("array<int64>"),
+            ),
+            (
+                Type::NUMERIC_ARRAY,
+                Some("array<bignumeric>"),
+                Some("array<bignumeric>"),
+                Some("string"),
+                Some("array<bignumeric>"),
+            ),
+            (
+                Type::TIMESTAMP_ARRAY,
+                Some("array<datetime>"),
+                Some("array<datetime>"),
+                Some("string"),
+                Some("array<datetime>"),
+            ),
+            (
+                Type::TIMESTAMPTZ_ARRAY,
+                Some("array<timestamp>"),
+                Some("array<timestamp>"),
+                Some("string"),
+                Some("array<timestamp>"),
+            ),
+            (
+                Type::JSON_ARRAY,
+                Some("array<json>"),
+                Some("array<json>"),
+                Some("string"),
+                Some("array<json>"),
+            ),
+            (
+                Type::BYTEA_ARRAY,
+                Some("array<bytes>"),
+                Some("array<bytes>"),
+                Some("string"),
+                Some("array<bytes>"),
+            ),
+            (Type::UUID_ARRAY, None, Some("array<string>"), Some("string"), Some("array<string>")),
+            (Type::MONEY_ARRAY, None, Some("array<string>"), Some("string"), Some("array<string>")),
+            (
+                Type::INTERVAL_ARRAY,
+                None,
+                Some("array<string>"),
+                Some("string"),
+                Some("array<string>"),
+            ),
+            (
+                Type::INT4_RANGE_ARRAY,
+                None,
+                Some("array<string>"),
+                Some("string"),
+                Some("array<string>"),
+            ),
+        ] {
+            for (strategy_name, policy, expected) in [
+                (
+                    "native_only_reject",
+                    DestinationMaterializationPolicy::native_only_reject(),
+                    native_only,
+                ),
+                (
+                    "native_or_string_reject",
+                    DestinationMaterializationPolicy::native_or_string_reject(),
+                    native_or_string,
+                ),
+                (
+                    "string_if_risky_preserve",
+                    DestinationMaterializationPolicy::string_if_risky_preserve(),
+                    string_if_risky,
+                ),
+                (
+                    "native_or_string_normalize",
+                    DestinationMaterializationPolicy::native_or_string_normalize(),
+                    normalize,
+                ),
+            ] {
+                match expected {
+                    Some(expected) => assert_eq!(
+                        bigquery_type(&typ, policy).unwrap(),
+                        expected,
+                        "{strategy_name} mapping for {}",
+                        typ.name(),
+                    ),
+                    None => {
+                        let result = bigquery_type(&typ, policy);
+                        assert!(
+                            matches!(
+                                result,
+                                Err(ref err) if err.kind() == ErrorKind::UnsupportedValueInDestination
+                            ),
+                            "{strategy_name} should reject {}: {result:?}",
+                            typ.name(),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn default_strategy_pair_is_native_or_string_reject() {
         assert_eq!(
-            BigQueryClient::postgres_to_bigquery_type(&Type::FLOAT4_ARRAY),
-            "array<float64>"
-        );
-        assert_eq!(
-            BigQueryClient::postgres_to_bigquery_type(&Type::FLOAT8_ARRAY),
-            "array<float64>"
-        );
-        assert_eq!(
-            BigQueryClient::postgres_to_bigquery_type(&Type::NUMERIC_ARRAY),
-            "array<bignumeric>"
-        );
-        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::MONEY_ARRAY), "array<string>");
-        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::OID_ARRAY), "array<int64>");
-        assert_eq!(
-            BigQueryClient::postgres_to_bigquery_type(&Type::TIMESTAMP_ARRAY),
-            "array<timestamp>"
-        );
-        assert_eq!(
-            BigQueryClient::postgres_to_bigquery_type(&Type::INTERVAL_ARRAY),
-            "array<string>"
-        );
-        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::INET_ARRAY), "array<string>");
-        assert_eq!(
-            BigQueryClient::postgres_to_bigquery_type(&Type::INT4_RANGE_ARRAY),
-            "array<string>"
+            bigquery_type(&Type::TIMESTAMP, DestinationMaterializationPolicy::default()).unwrap(),
+            bigquery_type(
+                &Type::TIMESTAMP,
+                DestinationMaterializationPolicy::native_or_string_reject()
+            )
+            .unwrap()
         );
     }
 
     #[test]
     fn column_spec() {
         let column_schema = test_column("test_col", Type::TEXT, 1, true, None);
-        let spec = BigQueryClient::column_spec(&column_schema).expect("column spec generation");
+        let spec = BigQueryClient::column_spec(
+            &column_schema,
+            &materializer(DestinationMaterializationPolicy::native_only_reject()),
+        )
+        .expect("column spec generation");
         assert_eq!(spec, "`test_col` string");
 
         let not_null_column = test_column("id", Type::INT4, 1, false, Some(1));
-        let not_null_spec =
-            BigQueryClient::column_spec(&not_null_column).expect("not null column spec");
+        let not_null_spec = BigQueryClient::column_spec(
+            &not_null_column,
+            &materializer(DestinationMaterializationPolicy::native_only_reject()),
+        )
+        .expect("not null column spec");
         assert_eq!(not_null_spec, "`id` int64 not null");
 
         let array_column = test_column("tags", Type::TEXT_ARRAY, 1, false, None);
-        let array_spec = BigQueryClient::column_spec(&array_column).expect("array column spec");
+        let array_spec = BigQueryClient::column_spec(
+            &array_column,
+            &materializer(DestinationMaterializationPolicy::native_only_reject()),
+        )
+        .expect("array column spec");
         assert_eq!(array_spec, "`tags` array<string>");
+    }
+
+    #[test]
+    fn column_spec_preserve_uses_string_if_risky_types() {
+        let numeric_column = test_column("amount", Type::NUMERIC, 1, false, None);
+        let numeric_spec = BigQueryClient::column_spec(
+            &numeric_column,
+            &materializer(DestinationMaterializationPolicy::string_if_risky_preserve()),
+        )
+        .expect("numeric column spec");
+        assert_eq!(numeric_spec, "`amount` string not null");
+
+        let json_array_column = test_column("payloads", Type::JSONB_ARRAY, 2, true, None);
+        let json_array_spec = BigQueryClient::column_spec(
+            &json_array_column,
+            &materializer(DestinationMaterializationPolicy::string_if_risky_preserve()),
+        )
+        .expect("json array column spec");
+        assert_eq!(json_array_spec, "`payloads` string");
+
+        let non_null_array_column = test_column("tags", Type::TEXT_ARRAY, 4, false, None);
+        let non_null_array_spec = BigQueryClient::column_spec(
+            &non_null_array_column,
+            &materializer(DestinationMaterializationPolicy::string_if_risky_preserve()),
+        )
+        .expect("non-null array column spec");
+        assert_eq!(non_null_array_spec, "`tags` string not null");
+
+        let timestamp_column = test_column("created_at", Type::TIMESTAMPTZ, 3, true, None);
+        let timestamp_spec = BigQueryClient::column_spec(
+            &timestamp_column,
+            &materializer(DestinationMaterializationPolicy::string_if_risky_preserve()),
+        )
+        .expect("timestamp column spec");
+        assert_eq!(timestamp_spec, "`created_at` string");
+    }
+
+    #[test]
+    fn column_spec_native_only_rejects_non_native_types() {
+        let column_schema = test_column("tenant_uuid", Type::UUID, 1, true, None);
+
+        let result = BigQueryClient::column_spec(
+            &column_schema,
+            &materializer(DestinationMaterializationPolicy::native_only_reject()),
+        );
+
+        assert!(matches!(
+            result,
+            Err(err) if err.kind() == ErrorKind::UnsupportedValueInDestination
+        ));
+    }
+
+    #[test]
+    fn column_spec_normalize_uses_string_for_non_native_types() {
+        let column_schema = test_column("tenant_uuid", Type::UUID, 1, false, None);
+
+        let spec = BigQueryClient::column_spec(
+            &column_schema,
+            &materializer(DestinationMaterializationPolicy::native_or_string_normalize()),
+        )
+        .expect("uuid column spec");
+
+        assert_eq!(spec, "`tenant_uuid` string not null");
     }
 
     #[test]
     fn column_spec_escapes_backticks() {
         let column_schema = test_column("pwn`name", Type::TEXT, 1, true, None);
 
-        let spec = BigQueryClient::column_spec(&column_schema).expect("escaped column spec");
+        let spec = BigQueryClient::column_spec(
+            &column_schema,
+            &materializer(DestinationMaterializationPolicy::native_only_reject()),
+        )
+        .expect("escaped column spec");
 
         assert_eq!(spec, "`pwn\\`name` string");
     }
@@ -1660,7 +1841,12 @@ mod tests {
         ];
         let schema = test_replicated_schema(columns);
 
-        let descriptor = BigQueryClient::column_schemas_to_table_descriptor(&schema, true);
+        let descriptor = BigQueryClient::column_schemas_to_table_descriptor(
+            &schema,
+            true,
+            &materializer(DestinationMaterializationPolicy::native_only_reject()),
+        )
+        .expect("table descriptor");
 
         assert_eq!(descriptor.field_descriptors.len(), 6); // 4 columns + CDC columns
 
@@ -1696,6 +1882,33 @@ mod tests {
     }
 
     #[test]
+    fn column_schemas_to_table_descriptor_uses_bigquery_number_wire_encodings() {
+        let columns = vec![
+            test_column("small_value", Type::INT2, 1, true, None),
+            test_column("large_value", Type::INT8, 2, true, None),
+            test_column("oid_value", Type::OID, 3, true, None),
+            test_column("real_value", Type::FLOAT4, 4, true, None),
+            test_column("double_value", Type::FLOAT8, 5, true, None),
+            test_column("exact_value", Type::NUMERIC, 6, true, None),
+        ];
+        let schema = test_replicated_schema(columns);
+
+        let descriptor = BigQueryClient::column_schemas_to_table_descriptor(
+            &schema,
+            false,
+            &materializer(DestinationMaterializationPolicy::native_only_reject()),
+        )
+        .expect("table descriptor");
+
+        assert!(matches!(descriptor.field_descriptors[0].typ, ColumnType::Int32));
+        assert!(matches!(descriptor.field_descriptors[1].typ, ColumnType::Int64));
+        assert!(matches!(descriptor.field_descriptors[2].typ, ColumnType::Int64));
+        assert!(matches!(descriptor.field_descriptors[3].typ, ColumnType::Float));
+        assert!(matches!(descriptor.field_descriptors[4].typ, ColumnType::Double));
+        assert!(matches!(descriptor.field_descriptors[5].typ, ColumnType::String));
+    }
+
+    #[test]
     fn column_schemas_to_table_descriptor_preserves_required_mode_for_table_copy() {
         let columns = vec![
             test_column("id", Type::INT4, 1, false, Some(1)),
@@ -1703,11 +1916,56 @@ mod tests {
         ];
         let schema = test_replicated_schema(columns);
 
-        let descriptor = BigQueryClient::column_schemas_to_table_descriptor(&schema, false);
+        let descriptor = BigQueryClient::column_schemas_to_table_descriptor(
+            &schema,
+            false,
+            &materializer(DestinationMaterializationPolicy::native_only_reject()),
+        )
+        .expect("table copy descriptor");
 
         assert!(matches!(descriptor.field_descriptors[0].mode, ColumnMode::Required));
         assert!(matches!(descriptor.field_descriptors[1].mode, ColumnMode::Nullable));
         assert_eq!(descriptor.field_descriptors.len(), 3);
+    }
+
+    #[test]
+    fn column_schemas_to_table_descriptor_uses_materialized_array_mode() {
+        let columns = vec![test_column("values", Type::INT4_ARRAY, 1, true, None)];
+        let schema = test_replicated_schema(columns);
+
+        let descriptor = BigQueryClient::column_schemas_to_table_descriptor(
+            &schema,
+            true,
+            &materializer(DestinationMaterializationPolicy::string_if_risky_preserve()),
+        )
+        .expect("preserve table descriptor");
+
+        assert_eq!(descriptor.field_descriptors[0].name, "values");
+        assert!(matches!(descriptor.field_descriptors[0].typ, ColumnType::String));
+        assert!(matches!(descriptor.field_descriptors[0].mode, ColumnMode::Nullable));
+
+        let columns = vec![test_column("values", Type::INT4_ARRAY, 1, false, None)];
+        let schema = test_replicated_schema(columns);
+
+        let descriptor = BigQueryClient::column_schemas_to_table_descriptor(
+            &schema,
+            false,
+            &materializer(DestinationMaterializationPolicy::native_only_reject()),
+        )
+        .expect("native-only table descriptor");
+
+        assert!(matches!(descriptor.field_descriptors[0].typ, ColumnType::Int32));
+        assert!(matches!(descriptor.field_descriptors[0].mode, ColumnMode::Repeated));
+
+        let descriptor = BigQueryClient::column_schemas_to_table_descriptor(
+            &schema,
+            false,
+            &materializer(DestinationMaterializationPolicy::native_or_string_normalize()),
+        )
+        .expect("normalize table descriptor");
+
+        assert!(matches!(descriptor.field_descriptors[0].typ, ColumnType::Int32));
+        assert!(matches!(descriptor.field_descriptors[0].mode, ColumnMode::Repeated));
     }
 
     #[test]
@@ -1719,20 +1977,45 @@ mod tests {
             test_column("numeric_col", Type::NUMERIC, 4, true, None),
             test_column("date_col", Type::DATE, 5, true, None),
             test_column("time_col", Type::TIME, 6, true, None),
+            test_column("oid_col", Type::OID, 7, true, None),
         ];
         let schema = test_replicated_schema(columns);
 
-        let descriptor = BigQueryClient::column_schemas_to_table_descriptor(&schema, true);
+        let descriptor = BigQueryClient::column_schemas_to_table_descriptor(
+            &schema,
+            true,
+            &materializer(DestinationMaterializationPolicy::native_or_string_normalize()),
+        )
+        .expect("complex table descriptor");
 
-        assert_eq!(descriptor.field_descriptors.len(), 8); // 6 columns + CDC columns
+        assert_eq!(descriptor.field_descriptors.len(), 9); // 7 columns + CDC columns
 
-        // Check that UUID, JSON, DATE, TIME are all mapped to String in storage
+        // Check that string-backed Storage Write API fields are used where
+        // BigQuery expects textual input for the materialized type.
         assert!(matches!(descriptor.field_descriptors[0].typ, ColumnType::String)); // UUID
         assert!(matches!(descriptor.field_descriptors[1].typ, ColumnType::String)); // JSON
         assert!(matches!(descriptor.field_descriptors[2].typ, ColumnType::Bytes)); // BYTEA
         assert!(matches!(descriptor.field_descriptors[3].typ, ColumnType::String)); // NUMERIC
         assert!(matches!(descriptor.field_descriptors[4].typ, ColumnType::String)); // DATE
         assert!(matches!(descriptor.field_descriptors[5].typ, ColumnType::String)); // TIME
+        assert!(matches!(descriptor.field_descriptors[6].typ, ColumnType::Int64)); // OID
+    }
+
+    #[test]
+    fn column_schemas_to_table_descriptor_native_only_rejects_non_native_types() {
+        let columns = vec![test_column("uuid_col", Type::UUID, 1, true, None)];
+        let schema = test_replicated_schema(columns);
+
+        let result = BigQueryClient::column_schemas_to_table_descriptor(
+            &schema,
+            true,
+            &materializer(DestinationMaterializationPolicy::native_only_reject()),
+        );
+
+        assert!(matches!(
+            result,
+            Err(err) if err.kind() == ErrorKind::UnsupportedValueInDestination
+        ));
     }
 
     #[test]

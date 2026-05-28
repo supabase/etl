@@ -37,15 +37,14 @@ const PUBLICATION_NAME: &str = "test_pub_ch_large_rows";
 /// Byte count of the JSON object framing as ClickHouse receives it.
 ///
 /// Postgres `jsonb_out` emits a canonical form with spaces after `:` and `,`
-/// (e.g. `{"x": "", "y": ""}` = 18 bytes), but ETL parses jsonb through
-/// `serde_json` (see `crates/etl/src/conversions/text.rs`) and re-serialises
-/// in compact form (`{"x":"","y":""}` = 15 bytes). The destination only ever
-/// sees the compact representation, so byte-exact assertions key off 15.
-const PAYLOAD_OVERHEAD: usize = 15;
+/// (e.g. `{"x": "", "y": ""}` = 18 bytes). ETL preserves JSON/JSONB source
+/// text in the shared [`Cell`] model, so byte-exact assertions key off that
+/// canonical PostgreSQL representation.
+const PAYLOAD_OVERHEAD: usize = 18;
 
-/// First 16 bytes of the payload as ClickHouse sees it: 6 framing bytes
-/// (`{"x":"`) followed by 10 `'a'`s from the first field value.
-const EXPECTED_HEAD: &str = r#"{"x":"aaaaaaaaaa"#;
+/// First 16 bytes of the payload as ClickHouse sees it: 7 framing bytes
+/// (`{"x": "`) followed by 9 `'a'`s from the first field value.
+const EXPECTED_HEAD: &str = r#"{"x": "aaaaaaaaa"#;
 
 /// Last 16 bytes of the payload: 14 `'a'`s from the second field value
 /// followed by the 2-byte closer `"}`.

@@ -1,6 +1,6 @@
-use chrono::{NaiveDate, NaiveTime};
+use chrono::{Datelike, NaiveDate, NaiveTime, Timelike};
 use duckdb::types::{TimeUnit, Value};
-use etl::types::{ArrayCell, Cell, TableRow};
+use etl::types::{ArrayCell, Cell, PgDate, PgTime, PgTimestamp, PgTimestampTz, TableRow};
 use pg_escape::quote_literal;
 
 /// Prepared row payload reused across retry attempts.
@@ -32,30 +32,56 @@ pub(super) fn table_row_to_sql_literal_ref(row: &TableRow) -> String {
 
 /// Serializes a borrowed cell into a DuckDB SQL literal expression.
 pub(super) fn cell_to_sql_literal_ref(cell: &Cell) -> String {
-    cell_to_sql_literal(cell_to_owned(cell))
+    match cell {
+        Cell::Null => "NULL".to_owned(),
+        Cell::Bool(value) => bool_literal(*value),
+        Cell::String(value) => quote_literal(value),
+        Cell::I16(value) => value.to_string(),
+        Cell::I32(value) => value.to_string(),
+        Cell::U32(value) => value.to_string(),
+        Cell::I64(value) => value.to_string(),
+        Cell::F32(value) => float_literal(*value as f64, false),
+        Cell::F64(value) => float_literal(*value, true),
+        Cell::Numeric(value) => quote_literal(&value.to_string()),
+        Cell::Date(value) => format!("DATE '{value}'"),
+        Cell::Time(value) => format!("TIME '{value}'"),
+        Cell::Timestamp(value) => format!("TIMESTAMP '{value}'"),
+        Cell::TimestampTz(value) => format!("TIMESTAMPTZ '{value}'"),
+        Cell::Uuid(value) => format!("CAST({} AS UUID)", quote_literal(&value.to_string())),
+        Cell::Bytes(value) => format!("from_hex('{}')", encode_hex(value)),
+        Cell::Array(value) => array_cell_to_sql_literal_ref(value),
+    }
 }
 
 /// Returns whether a cell must bypass the DuckDB appender path.
 fn cell_requires_sql_literals(cell: &Cell) -> bool {
-    matches!(cell, Cell::Array(_))
+    matches!(cell, Cell::Array(_)) || cell_contains_non_finite_temporal(cell)
+}
+
+/// Returns whether a cell contains a PostgreSQL-only temporal value.
+fn cell_contains_non_finite_temporal(cell: &Cell) -> bool {
+    match cell {
+        Cell::Date(value) => !matches!(value, PgDate::Finite(_)),
+        Cell::Time(value) => !matches!(value, PgTime::Finite(_)),
+        Cell::Timestamp(value) => !matches!(value, PgTimestamp::Finite(_)),
+        Cell::TimestampTz(value) => !matches!(value, PgTimestampTz::Finite(_)),
+        _ => false,
+    }
 }
 
 /// Serializes a row into a SQL `VALUES (...)` tuple.
 fn table_row_to_sql_literal(row: TableRow) -> String {
-    table_row_to_sql_literal_ref(&row)
+    format!(
+        "({})",
+        row.into_values().into_iter().map(cell_to_sql_literal).collect::<Vec<_>>().join(", ")
+    )
 }
 
 /// Converts a [`Cell`] into a DuckDB SQL literal expression.
 fn cell_to_sql_literal(cell: Cell) -> String {
     match cell {
         Cell::Null => "NULL".to_owned(),
-        Cell::Bool(b) => {
-            if b {
-                "TRUE".to_owned()
-            } else {
-                "FALSE".to_owned()
-            }
-        }
+        Cell::Bool(b) => bool_literal(b),
         Cell::String(s) => quote_literal(&s),
         Cell::I16(i) => i.to_string(),
         Cell::I32(i) => i.to_string(),
@@ -64,65 +90,19 @@ fn cell_to_sql_literal(cell: Cell) -> String {
         Cell::F32(f) => float_literal(f as f64, false),
         Cell::F64(f) => float_literal(f, true),
         Cell::Numeric(n) => quote_literal(&n.to_string()),
-        Cell::Date(d) => format!("DATE '{}'", d.format("%Y-%m-%d")),
-        Cell::Time(t) => format!("TIME '{}'", t.format("%H:%M:%S%.6f")),
-        Cell::Timestamp(dt) => {
-            format!("TIMESTAMP '{}'", dt.format("%Y-%m-%d %H:%M:%S%.6f"))
-        }
-        Cell::TimestampTz(dt) => {
-            format!("TIMESTAMPTZ '{}'", dt.format("%Y-%m-%d %H:%M:%S%.6f%:z"))
-        }
+        Cell::Date(d) => format!("DATE '{d}'"),
+        Cell::Time(t) => format!("TIME '{t}'"),
+        Cell::Timestamp(dt) => format!("TIMESTAMP '{dt}'"),
+        Cell::TimestampTz(dt) => format!("TIMESTAMPTZ '{dt}'"),
         Cell::Uuid(u) => format!("CAST({} AS UUID)", quote_literal(&u.to_string())),
-        Cell::Json(j) => format!("CAST({} AS JSON)", quote_literal(&j.to_string())),
         Cell::Bytes(b) => format!("from_hex('{}')", encode_hex(&b)),
         Cell::Array(arr) => array_cell_to_sql_literal(arr),
     }
 }
 
-/// Clones a [`Cell`] from a borrowed row reference.
-fn cell_to_owned(cell: &Cell) -> Cell {
-    match cell {
-        Cell::Null => Cell::Null,
-        Cell::Bool(value) => Cell::Bool(*value),
-        Cell::String(value) => Cell::String(value.clone()),
-        Cell::I16(value) => Cell::I16(*value),
-        Cell::I32(value) => Cell::I32(*value),
-        Cell::U32(value) => Cell::U32(*value),
-        Cell::I64(value) => Cell::I64(*value),
-        Cell::F32(value) => Cell::F32(*value),
-        Cell::F64(value) => Cell::F64(*value),
-        Cell::Numeric(value) => Cell::Numeric(value.clone()),
-        Cell::Date(value) => Cell::Date(*value),
-        Cell::Time(value) => Cell::Time(*value),
-        Cell::Timestamp(value) => Cell::Timestamp(*value),
-        Cell::TimestampTz(value) => Cell::TimestampTz(*value),
-        Cell::Uuid(value) => Cell::Uuid(*value),
-        Cell::Json(value) => Cell::Json(value.clone()),
-        Cell::Bytes(value) => Cell::Bytes(value.clone()),
-        Cell::Array(value) => Cell::Array(array_cell_to_owned(value)),
-    }
-}
-
-/// Clones an [`ArrayCell`] from a borrowed row reference.
-fn array_cell_to_owned(cell: &ArrayCell) -> ArrayCell {
-    match cell {
-        ArrayCell::Bool(values) => ArrayCell::Bool(values.clone()),
-        ArrayCell::String(values) => ArrayCell::String(values.clone()),
-        ArrayCell::I16(values) => ArrayCell::I16(values.clone()),
-        ArrayCell::I32(values) => ArrayCell::I32(values.clone()),
-        ArrayCell::U32(values) => ArrayCell::U32(values.clone()),
-        ArrayCell::I64(values) => ArrayCell::I64(values.clone()),
-        ArrayCell::F32(values) => ArrayCell::F32(values.clone()),
-        ArrayCell::F64(values) => ArrayCell::F64(values.clone()),
-        ArrayCell::Numeric(values) => ArrayCell::Numeric(values.clone()),
-        ArrayCell::Date(values) => ArrayCell::Date(values.clone()),
-        ArrayCell::Time(values) => ArrayCell::Time(values.clone()),
-        ArrayCell::Timestamp(values) => ArrayCell::Timestamp(values.clone()),
-        ArrayCell::TimestampTz(values) => ArrayCell::TimestampTz(values.clone()),
-        ArrayCell::Uuid(values) => ArrayCell::Uuid(values.clone()),
-        ArrayCell::Json(values) => ArrayCell::Json(values.clone()),
-        ArrayCell::Bytes(values) => ArrayCell::Bytes(values.clone()),
-    }
+/// Returns a DuckDB SQL literal for a boolean value.
+fn bool_literal(value: bool) -> String {
+    if value { "TRUE".to_owned() } else { "FALSE".to_owned() }
 }
 
 /// Converts an [`ArrayCell`] into a DuckDB list literal expression.
@@ -173,39 +153,19 @@ fn array_cell_to_sql_literal(arr: ArrayCell) -> String {
             .collect(),
         ArrayCell::Date(v) => v
             .into_iter()
-            .map(|o| {
-                o.map_or_else(
-                    || "NULL".to_owned(),
-                    |value| format!("DATE '{}'", value.format("%Y-%m-%d")),
-                )
-            })
+            .map(|o| o.map_or_else(|| "NULL".to_owned(), |value| format!("DATE '{value}'")))
             .collect(),
         ArrayCell::Time(v) => v
             .into_iter()
-            .map(|o| {
-                o.map_or_else(
-                    || "NULL".to_owned(),
-                    |value| format!("TIME '{}'", value.format("%H:%M:%S%.6f")),
-                )
-            })
+            .map(|o| o.map_or_else(|| "NULL".to_owned(), |value| format!("TIME '{value}'")))
             .collect(),
         ArrayCell::Timestamp(v) => v
             .into_iter()
-            .map(|o| {
-                o.map_or_else(
-                    || "NULL".to_owned(),
-                    |value| format!("TIMESTAMP '{}'", value.format("%Y-%m-%d %H:%M:%S%.6f")),
-                )
-            })
+            .map(|o| o.map_or_else(|| "NULL".to_owned(), |value| format!("TIMESTAMP '{value}'")))
             .collect(),
         ArrayCell::TimestampTz(v) => v
             .into_iter()
-            .map(|o| {
-                o.map_or_else(
-                    || "NULL".to_owned(),
-                    |value| format!("TIMESTAMPTZ '{}'", value.format("%Y-%m-%d %H:%M:%S%.6f%:z")),
-                )
-            })
+            .map(|o| o.map_or_else(|| "NULL".to_owned(), |value| format!("TIMESTAMPTZ '{value}'")))
             .collect(),
         ArrayCell::Uuid(v) => v
             .into_iter()
@@ -216,21 +176,103 @@ fn array_cell_to_sql_literal(arr: ArrayCell) -> String {
                 )
             })
             .collect(),
-        ArrayCell::Json(v) => v
-            .into_iter()
-            .map(|o| {
-                o.map_or_else(
-                    || "NULL".to_owned(),
-                    |value| format!("CAST({} AS JSON)", quote_literal(&value.to_string())),
-                )
-            })
-            .collect(),
         ArrayCell::Bytes(v) => v
             .into_iter()
             .map(|o| {
                 o.map_or_else(
                     || "NULL".to_owned(),
                     |value| format!("from_hex('{}')", encode_hex(&value)),
+                )
+            })
+            .collect(),
+    };
+
+    format!("[{}]", values.join(", "))
+}
+
+/// Serializes a borrowed [`ArrayCell`] into a DuckDB list literal expression.
+fn array_cell_to_sql_literal_ref(arr: &ArrayCell) -> String {
+    let values: Vec<String> = match arr {
+        ArrayCell::Bool(v) => {
+            v.iter().map(|o| o.map_or_else(|| "NULL".to_owned(), bool_literal)).collect()
+        }
+        ArrayCell::String(v) => v
+            .iter()
+            .map(|o| o.as_ref().map_or_else(|| "NULL".to_owned(), |value| quote_literal(value)))
+            .collect(),
+        ArrayCell::I16(v) => v
+            .iter()
+            .map(|o| o.map_or_else(|| "NULL".to_owned(), |value| value.to_string()))
+            .collect(),
+        ArrayCell::I32(v) => v
+            .iter()
+            .map(|o| o.map_or_else(|| "NULL".to_owned(), |value| value.to_string()))
+            .collect(),
+        ArrayCell::U32(v) => v
+            .iter()
+            .map(|o| o.map_or_else(|| "NULL".to_owned(), |value| value.to_string()))
+            .collect(),
+        ArrayCell::I64(v) => v
+            .iter()
+            .map(|o| o.map_or_else(|| "NULL".to_owned(), |value| value.to_string()))
+            .collect(),
+        ArrayCell::F32(v) => v
+            .iter()
+            .map(|o| {
+                o.map_or_else(|| "NULL".to_owned(), |value| float_literal(value as f64, false))
+            })
+            .collect(),
+        ArrayCell::F64(v) => v
+            .iter()
+            .map(|o| o.map_or_else(|| "NULL".to_owned(), |value| float_literal(value, true)))
+            .collect(),
+        ArrayCell::Numeric(v) => v
+            .iter()
+            .map(|o| {
+                o.as_ref()
+                    .map_or_else(|| "NULL".to_owned(), |value| quote_literal(&value.to_string()))
+            })
+            .collect(),
+        ArrayCell::Date(v) => v
+            .iter()
+            .map(|o| {
+                o.as_ref().map_or_else(|| "NULL".to_owned(), |value| format!("DATE '{value}'"))
+            })
+            .collect(),
+        ArrayCell::Time(v) => v
+            .iter()
+            .map(|o| {
+                o.as_ref().map_or_else(|| "NULL".to_owned(), |value| format!("TIME '{value}'"))
+            })
+            .collect(),
+        ArrayCell::Timestamp(v) => v
+            .iter()
+            .map(|o| {
+                o.as_ref().map_or_else(|| "NULL".to_owned(), |value| format!("TIMESTAMP '{value}'"))
+            })
+            .collect(),
+        ArrayCell::TimestampTz(v) => v
+            .iter()
+            .map(|o| {
+                o.as_ref()
+                    .map_or_else(|| "NULL".to_owned(), |value| format!("TIMESTAMPTZ '{value}'"))
+            })
+            .collect(),
+        ArrayCell::Uuid(v) => v
+            .iter()
+            .map(|o| {
+                o.map_or_else(
+                    || "NULL".to_owned(),
+                    |value| format!("CAST({} AS UUID)", quote_literal(&value.to_string())),
+                )
+            })
+            .collect(),
+        ArrayCell::Bytes(v) => v
+            .iter()
+            .map(|o| {
+                o.as_ref().map_or_else(
+                    || "NULL".to_owned(),
+                    |value| format!("from_hex('{}')", encode_hex(value)),
                 )
             })
             .collect(),
@@ -271,12 +313,19 @@ fn encode_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02X}")).collect()
 }
 
+/// Converts a date to DuckDB `DATE` days since Unix epoch.
+fn date_to_days_since_epoch(value: NaiveDate) -> i32 {
+    value.num_days_from_ce() - 719_163
+}
+
+/// Converts a time to DuckDB `TIME` microseconds since midnight.
+fn time_to_micros_since_midnight(value: NaiveTime) -> i64 {
+    i64::from(value.num_seconds_from_midnight()) * 1_000_000 + i64::from(value.nanosecond() / 1_000)
+}
+
 /// Converts a [`Cell`] to a [`duckdb::types::Value`] for use with parameterized
 /// INSERT statements.
 fn cell_to_value(cell: Cell) -> Value {
-    let epoch_date = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
-    let epoch_time = NaiveTime::from_hms_opt(0, 0, 0).unwrap();
-
     match cell {
         Cell::Null => Value::Null,
         Cell::Bool(b) => Value::Boolean(b),
@@ -289,19 +338,36 @@ fn cell_to_value(cell: Cell) -> Value {
         Cell::F64(f) => Value::Double(f),
         // NUMERIC stored as VARCHAR to avoid precision loss.
         Cell::Numeric(n) => Value::Text(n.to_string()),
-        Cell::Date(d) => Value::Date32(d.signed_duration_since(epoch_date).num_days() as i32),
+        Cell::Date(d) => {
+            if let Some(d) = d.as_finite() {
+                Value::Date32(date_to_days_since_epoch(d))
+            } else {
+                Value::Text(d.to_string())
+            }
+        }
         Cell::Time(t) => {
-            let micros = t.signed_duration_since(epoch_time).num_microseconds().unwrap_or(0);
-            Value::Time64(TimeUnit::Microsecond, micros)
+            if let Some(t) = t.as_finite() {
+                Value::Time64(TimeUnit::Microsecond, time_to_micros_since_midnight(t))
+            } else {
+                Value::Text(t.to_string())
+            }
         }
         Cell::Timestamp(dt) => {
-            Value::Timestamp(TimeUnit::Microsecond, dt.and_utc().timestamp_micros())
+            if let Some(dt) = dt.as_finite() {
+                Value::Timestamp(TimeUnit::Microsecond, dt.and_utc().timestamp_micros())
+            } else {
+                Value::Text(dt.to_string())
+            }
         }
-        Cell::TimestampTz(dt) => Value::Timestamp(TimeUnit::Microsecond, dt.timestamp_micros()),
+        Cell::TimestampTz(dt) => {
+            if let Some(dt) = dt.as_finite() {
+                Value::Timestamp(TimeUnit::Microsecond, dt.timestamp_micros())
+            } else {
+                Value::Text(dt.to_string())
+            }
+        }
         // UUID stored as text; DuckDB casts VARCHAR → UUID automatically.
         Cell::Uuid(u) => Value::Text(u.to_string()),
-        // JSON serialised as text.
-        Cell::Json(j) => Value::Text(j.to_string()),
         Cell::Bytes(b) => Value::Blob(b),
         Cell::Array(arr) => array_cell_to_value(arr),
     }
@@ -325,49 +391,62 @@ fn array_cell_to_value(arr: ArrayCell) -> Value {
         ArrayCell::Numeric(v) => {
             v.into_iter().map(|o| o.map_or(Value::Null, |n| Value::Text(n.to_string()))).collect()
         }
-        ArrayCell::Date(v) => {
-            let epoch_date = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
-            v.into_iter()
-                .map(|o| {
-                    o.map_or(Value::Null, |d| {
-                        Value::Date32(d.signed_duration_since(epoch_date).num_days() as i32)
-                    })
+        ArrayCell::Date(v) => v
+            .into_iter()
+            .map(|o| {
+                o.map_or(Value::Null, |value| {
+                    value.as_finite().map_or_else(
+                        || Value::Text(value.to_string()),
+                        |value| Value::Date32(date_to_days_since_epoch(value)),
+                    )
                 })
-                .collect()
-        }
-        ArrayCell::Time(v) => {
-            let epoch_time = NaiveTime::from_hms_opt(0, 0, 0).unwrap();
-            v.into_iter()
-                .map(|o| {
-                    o.map_or(Value::Null, |t| {
-                        let micros =
-                            t.signed_duration_since(epoch_time).num_microseconds().unwrap_or(0);
-                        Value::Time64(TimeUnit::Microsecond, micros)
-                    })
+            })
+            .collect(),
+        ArrayCell::Time(v) => v
+            .into_iter()
+            .map(|o| {
+                o.map_or(Value::Null, |value| {
+                    value.as_finite().map_or_else(
+                        || Value::Text(value.to_string()),
+                        |value| {
+                            Value::Time64(
+                                TimeUnit::Microsecond,
+                                time_to_micros_since_midnight(value),
+                            )
+                        },
+                    )
                 })
-                .collect()
-        }
+            })
+            .collect(),
         ArrayCell::Timestamp(v) => v
             .into_iter()
             .map(|o| {
-                o.map_or(Value::Null, |dt| {
-                    Value::Timestamp(TimeUnit::Microsecond, dt.and_utc().timestamp_micros())
+                o.map_or(Value::Null, |value| {
+                    value.as_finite().map_or_else(
+                        || Value::Text(value.to_string()),
+                        |value| {
+                            Value::Timestamp(
+                                TimeUnit::Microsecond,
+                                value.and_utc().timestamp_micros(),
+                            )
+                        },
+                    )
                 })
             })
             .collect(),
         ArrayCell::TimestampTz(v) => v
             .into_iter()
             .map(|o| {
-                o.map_or(Value::Null, |dt| {
-                    Value::Timestamp(TimeUnit::Microsecond, dt.timestamp_micros())
+                o.map_or(Value::Null, |value| {
+                    value.as_finite().map_or_else(
+                        || Value::Text(value.to_string()),
+                        |value| Value::Timestamp(TimeUnit::Microsecond, value.timestamp_micros()),
+                    )
                 })
             })
             .collect(),
         ArrayCell::Uuid(v) => {
             v.into_iter().map(|o| o.map_or(Value::Null, |u| Value::Text(u.to_string()))).collect()
-        }
-        ArrayCell::Json(v) => {
-            v.into_iter().map(|o| o.map_or(Value::Null, |j| Value::Text(j.to_string()))).collect()
         }
         ArrayCell::Bytes(v) => v.into_iter().map(|o| o.map_or(Value::Null, Value::Blob)).collect(),
     };
@@ -376,6 +455,8 @@ fn array_cell_to_value(arr: ArrayCell) -> Value {
 
 #[cfg(test)]
 mod tests {
+    use chrono::{DateTime, Utc};
+
     use super::*;
 
     #[test]
@@ -392,17 +473,47 @@ mod tests {
     }
 
     #[test]
+    fn cell_to_value_date_uses_duckdb_epoch_days() {
+        let pre_epoch = NaiveDate::from_ymd_opt(1969, 12, 31).unwrap();
+        assert_eq!(cell_to_value(Cell::Date(pre_epoch.into())), Value::Date32(-1));
+
+        let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+        assert_eq!(cell_to_value(Cell::Date(epoch.into())), Value::Date32(0));
+    }
+
+    #[test]
+    fn cell_to_value_timestamptz_uses_unix_epoch_microseconds() {
+        let timestamp = DateTime::<Utc>::from_timestamp(1, 500_000_000).unwrap();
+
+        assert_eq!(
+            cell_to_value(Cell::TimestampTz(timestamp.into())),
+            Value::Timestamp(TimeUnit::Microsecond, 1_500_000)
+        );
+    }
+
+    #[test]
+    fn sql_literals_preserve_duckdb_temporal_special_values() {
+        assert_eq!(cell_to_sql_literal(Cell::Date(PgDate::PosInfinity)), "DATE 'infinity'");
+        assert_eq!(cell_to_sql_literal(Cell::Date(PgDate::NegInfinity)), "DATE '-infinity'");
+        assert_eq!(
+            cell_to_sql_literal(Cell::Timestamp(PgTimestamp::PosInfinity)),
+            "TIMESTAMP 'infinity'"
+        );
+        assert_eq!(
+            cell_to_sql_literal(Cell::TimestampTz(PgTimestampTz::NegInfinity)),
+            "TIMESTAMPTZ '-infinity'"
+        );
+    }
+
+    #[test]
     fn array_cell_to_sql_literal_preserves_nulls() {
         assert_eq!(
             array_cell_to_sql_literal(ArrayCell::I32(vec![Some(1), None, Some(3)])),
             "[1, NULL, 3]"
         );
         assert_eq!(
-            array_cell_to_sql_literal(ArrayCell::Json(vec![
-                Some(serde_json::json!({"a": 1})),
-                None,
-            ])),
-            "[CAST('{\"a\":1}' AS JSON), NULL]"
+            array_cell_to_sql_literal(ArrayCell::String(vec![Some(r#"{"a":1}"#.to_owned()), None])),
+            "['{\"a\":1}', NULL]"
         );
     }
 
