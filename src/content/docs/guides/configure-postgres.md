@@ -179,7 +179,7 @@ Publication, table, and ETL source-migration changes are ordinary WAL records. W
 SELECT pg_current_wal_flush_lsn();
 ```
 
-Then wait on the read replica until replay reaches that LSN:
+Then wait on the read replica until replay reaches that LSN. If you just created a new database on the primary, connect to an existing maintenance database such as `postgres` for this check; the new database might not exist on the replica until replay catches up.
 
 ```sql
 -- Run on the read replica before starting ETL.

@@ -43,6 +43,10 @@ const POSTGRES_TLS_CERT_PATH: &str = "/var/lib/postgresql/server.crt";
 const POSTGRES_TLS_KEY_PATH: &str = "/var/lib/postgresql/server.key";
 const POSTGRES_SSL_ARGS: &str = "-c ssl=on -c ssl_cert_file=/var/lib/postgresql/server.crt -c \
                                  ssl_key_file=/var/lib/postgresql/server.key";
+const SOURCE_POSTGRES_SERVICE: &str = "source-postgres";
+const SOURCE_POSTGRES_READ_REPLICA_SERVICE: &str = "source-postgres-read-replica";
+const SOURCE_POSTGRES_SERVICES: [&str; 2] =
+    [SOURCE_POSTGRES_SERVICE, SOURCE_POSTGRES_READ_REPLICA_SERVICE];
 
 #[derive(Args)]
 pub(crate) struct PostgresArgs {
@@ -126,12 +130,9 @@ impl StartArgs {
 
         // Start the full stack on the base port unless the caller only needs source
         // Postgres.
-        let first_shard_services = if self.source_only {
-            &["source-postgres", "source-postgres-read-replica"][..]
-        } else {
-            &[]
-        };
-        self.start_cluster(None, first_shard_services, tls_files.as_ref())?;
+        let first_shard_services =
+            if self.source_only { &SOURCE_POSTGRES_SERVICES[..] } else { &[] };
+        self.start_cluster(None, self.base_port, first_shard_services, tls_files.as_ref())?;
 
         // Start additional source-postgres containers on subsequent ports.
         for shard in 2..=self.shards {
@@ -139,7 +140,8 @@ impl StartArgs {
             let project = format!("etl-stack-pg-{}-shard-{shard}", self.pg_version);
             self.start_cluster(
                 Some((&project, port)),
-                &["source-postgres", "source-postgres-read-replica"],
+                port,
+                &SOURCE_POSTGRES_SERVICES,
                 tls_files.as_ref(),
             )?;
         }
@@ -153,7 +155,7 @@ impl StartArgs {
 
         if tls_files.is_some() {
             eprintln!(
-                "source Postgres supports TLS. Local tests use plaintext by default; set \
+                "source Postgres services support TLS. Local tests use plaintext by default; set \
                  TESTS_DATABASE_TLS_ENABLED=true to require verified TLS.",
             );
         }
@@ -166,14 +168,20 @@ impl StartArgs {
     fn start_cluster(
         &self,
         project_and_port: Option<(&str, u16)>,
+        port: u16,
         services: &[&str],
         tls_files: Option<&TlsFiles>,
     ) -> Result<()> {
         self.docker_compose_up(project_and_port, services, false, false)?;
 
         if let Some(tls_files) = tls_files {
-            self.install_tls_files(project_and_port, tls_files)?;
-            self.docker_compose_up(project_and_port, &["source-postgres"], true, true)?;
+            self.wait_for_pg(port)?;
+            self.wait_for_pg(port + READ_REPLICA_PORT_OFFSET)?;
+
+            for service in SOURCE_POSTGRES_SERVICES {
+                self.install_tls_files(project_and_port, tls_files, service)?;
+            }
+            self.docker_compose_up(project_and_port, &SOURCE_POSTGRES_SERVICES, true, true)?;
         }
 
         Ok(())
@@ -281,36 +289,48 @@ impl StartArgs {
         Ok(())
     }
 
-    /// Copies generated TLS files into a source Postgres container and fixes
+    /// Copies generated TLS files into a source Postgres service and fixes
     /// ownership and permissions for the Postgres server.
     fn install_tls_files(
         &self,
         project_and_port: Option<(&str, u16)>,
         tls_files: &TlsFiles,
+        service: &str,
     ) -> Result<()> {
-        self.docker_compose_cp(project_and_port, &tls_files.server_cert, POSTGRES_TLS_CERT_PATH)?;
-        self.docker_compose_cp(project_and_port, &tls_files.server_key, POSTGRES_TLS_KEY_PATH)?;
+        self.docker_compose_cp(
+            project_and_port,
+            service,
+            &tls_files.server_cert,
+            POSTGRES_TLS_CERT_PATH,
+        )?;
+        self.docker_compose_cp(
+            project_and_port,
+            service,
+            &tls_files.server_key,
+            POSTGRES_TLS_KEY_PATH,
+        )?;
 
         let permissions_command = format!(
             "chown postgres:postgres {POSTGRES_TLS_CERT_PATH} {POSTGRES_TLS_KEY_PATH} && chmod \
              0644 {POSTGRES_TLS_CERT_PATH} && chmod 0600 {POSTGRES_TLS_KEY_PATH}"
         );
         let mut cmd = self.docker_compose_base_command(project_and_port);
-        cmd.args(["exec", "-T", "-u", "root", "source-postgres", "sh", "-c", &permissions_command]);
+        cmd.args(["exec", "-T", "-u", "root", service, "sh", "-c", &permissions_command]);
         run_command(cmd, "failed to prepare Postgres TLS files")?;
 
         Ok(())
     }
 
-    /// Copies a file from the host into the source Postgres container.
+    /// Copies a file from the host into a source Postgres service container.
     fn docker_compose_cp(
         &self,
         project_and_port: Option<(&str, u16)>,
+        service: &str,
         source: &Path,
         destination: &str,
     ) -> Result<()> {
         let mut cmd = self.docker_compose_base_command(project_and_port);
-        cmd.args(["cp", path_str(source)?, &format!("source-postgres:{destination}")]);
+        cmd.args(["cp", path_str(source)?, &format!("{service}:{destination}")]);
         run_command(cmd, "failed to copy Postgres TLS file into container")
     }
 
@@ -322,10 +342,12 @@ impl StartArgs {
         cmd.args(["-f", COMPOSE_FILE]);
         cmd.env("POSTGRES_VERSION", &self.pg_version);
 
-        if let Some((project, port)) = project_and_port {
+        let port = project_and_port.map_or(self.base_port, |(_, port)| port);
+        cmd.env("POSTGRES_PORT", port.to_string());
+        cmd.env("POSTGRES_REPLICA_PORT", (port + READ_REPLICA_PORT_OFFSET).to_string());
+
+        if let Some((project, _)) = project_and_port {
             cmd.args(["-p", project]);
-            cmd.env("POSTGRES_PORT", port.to_string());
-            cmd.env("POSTGRES_REPLICA_PORT", (port + READ_REPLICA_PORT_OFFSET).to_string());
         }
 
         cmd

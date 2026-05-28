@@ -254,8 +254,11 @@ async fn assert_database_and_publication_visible_on_read_replica(
 }
 
 async fn wait_for_read_replica_replay(replica_config: &PgConnectionConfig, target_lsn: PgLsn) {
+    let mut monitor_config = replica_config.clone();
+    monitor_config.name = "postgres".to_owned();
+
     wait_until("read replica replay", || async {
-        let Ok((client, _)) = try_connect_to_pg_database(replica_config).await else {
+        let Ok((client, _)) = try_connect_to_pg_database(&monitor_config).await else {
             return Ok(false);
         };
 
