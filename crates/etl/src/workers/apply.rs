@@ -306,7 +306,7 @@ where
             self.pipeline_id,
             start_lsn,
             self.config,
-            replication_client,
+            &replication_client,
             self.store,
             self.destination,
             self.shared_table_cache,

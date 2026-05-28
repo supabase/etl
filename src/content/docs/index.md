@@ -11,14 +11,38 @@ description: Stream Postgres changes anywhere, in real-time.
 
 ## Start Here
 
-| Your background | Recommended path |
-|-----------------|------------------|
-| New to Postgres logical replication | [Postgres Replication Concepts](/etl/explanation/concepts/) |
-| Using ETL with Supabase | [Supabase Database Replication](https://supabase.com/docs/guides/database/replication) |
-| Ready to build | [Your First Pipeline](/etl/guides/first-pipeline/) (15 min) |
-| Need custom destinations | [Custom Stores and Destinations](/etl/guides/custom-implementations/) (30 min) |
-| Handling schema changes | [Schema Changes](/etl/explanation/schema-changes/) |
-| Setting up Postgres | [Configure Postgres](/etl/guides/configure-postgres/) |
+<div class="doc-path-grid">
+  <a class="doc-path-card" href="/etl/guides/first-pipeline/">
+    <span class="doc-path-kicker">Build</span>
+    <strong>Your First Pipeline</strong>
+    <span>Copy existing rows, stream changes, and implement a tiny destination.</span>
+  </a>
+  <a class="doc-path-card" href="/etl/guides/configure-postgres/">
+    <span class="doc-path-kicker">Prepare</span>
+    <strong>Configure Postgres</strong>
+    <span>Set WAL, publications, slots, and retention for reliable replication.</span>
+  </a>
+  <a class="doc-path-card" href="/etl/guides/custom-implementations/">
+    <span class="doc-path-kicker">Extend</span>
+    <strong>Custom Stores and Destinations</strong>
+    <span>Bring your own persistence and write replicated events anywhere.</span>
+  </a>
+  <a class="doc-path-card" href="/etl/explanation/concepts/">
+    <span class="doc-path-kicker">Learn</span>
+    <strong>Replication Concepts</strong>
+    <span>Understand WAL, publications, slots, pgoutput, and replica identity.</span>
+  </a>
+  <a class="doc-path-card" href="/etl/explanation/schema-changes/">
+    <span class="doc-path-kicker">Operate</span>
+    <strong>Schema Changes</strong>
+    <span>See how relation events, DDL messages, and destination diffs work.</span>
+  </a>
+  <a class="doc-path-card" href="https://supabase.com/docs/guides/database/replication">
+    <span class="doc-path-kicker">Supabase</span>
+    <strong>Database Replication</strong>
+    <span>Use this with the product docs for Supabase-hosted projects.</span>
+  </a>
+</div>
 
 ## Why ETL?
 
