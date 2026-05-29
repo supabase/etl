@@ -50,6 +50,8 @@ const DUCKDB_BLOCKING_OPERATION_KIND: &str = "foreground";
 /// interrupt() has been called. If the operation is still stuck after this,
 /// the process is no longer safe to keep running.
 const BLOCKING_ABORT_GRACE: Duration = Duration::from_secs(30);
+/// Description used when DuckLake rejects new blocking work during shutdown.
+const DUCKLAKE_SHUTDOWN_REQUESTED: &str = "DuckLake shutdown requested";
 
 trait DuckDbQueryInterrupt: Send + Sync + 'static {
     fn interrupt(&self);
@@ -384,6 +386,8 @@ pub(super) struct DuckLakeConnectionManager {
     pub(super) disable_extension_autoload: bool,
     /// Shared registry of interrupt handles for live connections.
     pub(super) interrupt_registry: Arc<DuckLakeInterruptRegistry>,
+    /// Set once process or destination shutdown should stop new DuckDB work.
+    pub(super) shutdown_requested: Arc<AtomicBool>,
     /// Counts successfully initialized DuckDB connections for tests.
     #[cfg(feature = "test-utils")]
     pub(super) open_count: Arc<AtomicUsize>,
@@ -392,6 +396,7 @@ pub(super) struct DuckLakeConnectionManager {
 /// DuckDB connection state tracked while a pooled connection is checked out.
 pub(super) struct ManagedDuckLakeConnection {
     conn: duckdb::Connection,
+    shutdown_requested: Arc<AtomicBool>,
     broken: bool,
 }
 
@@ -435,6 +440,12 @@ impl fmt::Display for DuckLakeConnectionError {
 impl error::Error for DuckLakeConnectionError {}
 
 impl DuckLakeConnectionManager {
+    /// Records DuckLake shutdown and interrupts all live managed connections.
+    pub(super) fn interrupt_all_connections_for_shutdown(&self) -> usize {
+        self.shutdown_requested.store(true, Ordering::Relaxed);
+        self.interrupt_all_connections()
+    }
+
     /// Interrupts all currently live managed DuckLake connections.
     pub(super) fn interrupt_all_connections(&self) -> usize {
         self.interrupt_registry.interrupt_all()
@@ -491,13 +502,21 @@ impl r2d2::ManageConnection for DuckLakeConnectionManager {
     type Error = DuckLakeConnectionError;
 
     fn connect(&self) -> Result<ManagedDuckLakeConnection, DuckLakeConnectionError> {
-        Ok(ManagedDuckLakeConnection { conn: self.open_duckdb_connection()?, broken: false })
+        Ok(ManagedDuckLakeConnection {
+            conn: self.open_duckdb_connection()?,
+            shutdown_requested: Arc::clone(&self.shutdown_requested),
+            broken: false,
+        })
     }
 
     fn is_valid(
         &self,
         conn: &mut ManagedDuckLakeConnection,
     ) -> Result<(), DuckLakeConnectionError> {
+        if conn.shutdown_requested.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+
         conn.conn.execute_batch("SELECT 1").map_err(DuckLakeConnectionError::validation)?;
         Ok(())
     }
@@ -591,6 +610,17 @@ pub(super) fn duckdb_blocking_timeout_error(timeout: Duration, stage: &'static s
             timeout.as_millis()
         )
     )
+}
+
+/// Builds the error returned when shutdown has stopped new DuckDB work.
+pub(super) fn ducklake_shutdown_requested_error() -> EtlError {
+    etl_error!(ErrorKind::DestinationConnectionFailed, DUCKLAKE_SHUTDOWN_REQUESTED)
+}
+
+/// Returns whether an error was produced by DuckLake shutdown admission checks.
+pub(super) fn is_ducklake_shutdown_requested_error(error: &EtlError) -> bool {
+    error.kind() == ErrorKind::DestinationConnectionFailed
+        && error.description() == Some(DUCKLAKE_SHUTDOWN_REQUESTED)
 }
 
 fn abort_stuck_duckdb_blocking_operation(
@@ -828,6 +858,17 @@ where
             wait_ms = checkout_started.elapsed().as_millis() as u64,
             "wait for ducklake pool checkout"
         );
+        if pooled_conn.shutdown_requested.load(Ordering::Relaxed) {
+            warn!(
+                operation_id,
+                operation_kind = operation_kind,
+                "ducklake blocking operation skipped because shutdown was requested: \
+                 operation_id={}, operation_kind={}",
+                operation_id,
+                operation_kind
+            );
+            return Err(ducklake_shutdown_requested_error());
+        }
         let operation_timeout =
             deadline.checked_duration_since(Instant::now()).unwrap_or(Duration::ZERO);
         if operation_timeout.is_zero() {
@@ -1066,6 +1107,7 @@ mod tests {
             setup_plan: Arc::new(DuckLakeSetupPlan::default()),
             disable_extension_autoload: cfg!(target_os = "linux"),
             interrupt_registry: Arc::new(DuckLakeInterruptRegistry::default()),
+            shutdown_requested: Arc::new(AtomicBool::new(false)),
             #[cfg(feature = "test-utils")]
             open_count: Arc::new(AtomicUsize::new(0)),
         }
@@ -1652,5 +1694,21 @@ mod tests {
 
         assert_eq!(error.kind(), ErrorKind::DestinationQueryFailed);
         assert_eq!(error.description(), Some("DuckLake interrupt test query failed"));
+    }
+
+    #[tokio::test]
+    async fn shutdown_requested_skips_new_blocking_operations() {
+        let manager = make_blocking_test_manager();
+        let pool = Arc::new(
+            build_warm_ducklake_pool(manager.clone(), 1, "shutdown-skip-test")
+                .await
+                .expect("failed to build blocking test pool"),
+        );
+        let blocking_slots = Arc::new(Semaphore::new(1));
+
+        manager.interrupt_all_connections_for_shutdown();
+
+        let error = run_duckdb_blocking(pool, blocking_slots, |_| Ok(())).await.unwrap_err();
+        assert!(is_ducklake_shutdown_requested_error(&error));
     }
 }
