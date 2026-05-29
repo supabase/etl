@@ -144,8 +144,17 @@ where
         );
 
         // Source migrations install schema helper functions and DDL event
-        // triggers used by all stores.
-        migrations::run_source_migrations(&self.config.pg_connection).await?;
+        // triggers used by all stores. Creating the `ddl_command_end` event
+        // trigger requires superuser, so this is gated: a de-elevated role can
+        // disable it and have an admin install the source objects out-of-band.
+        if self.config.run_source_migrations {
+            migrations::run_source_migrations(&self.config.pg_connection).await?;
+        } else {
+            warn!(
+                "skipping source migrations (run_source_migrations = false); the source schema \
+                 helpers and DDL event trigger must be installed out-of-band"
+            );
+        }
 
         // We always start memory monitoring for running workers to keep total memory
         // snapshots available.
