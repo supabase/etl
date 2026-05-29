@@ -67,7 +67,7 @@ fn create_snowflake_config(
             .map(|p| SerializableSecretString::from(p.to_owned())),
         database: database.to_owned(),
         schema: schema.to_owned(),
-        role: role.map(|r| r.to_owned()),
+        role: role.map(str::to_owned),
     }
 }
 

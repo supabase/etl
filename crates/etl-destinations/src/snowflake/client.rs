@@ -90,7 +90,7 @@ impl Client<AuthManager<HttpExchanger>> {
         // `SHOW DATABASES` runs on Cloud Services (no warehouse needed).
         let db_pattern = quote_string_literal(&config.database);
         let resp = sql.execute_statement(&format!("SHOW DATABASES LIKE {db_pattern}")).await?;
-        if !resp.data.is_some_and(|rows| !rows.is_empty()) {
+        if resp.data.is_none_or(|rows| rows.is_empty()) {
             return Err(Error::DatabaseNotFound(config.database.clone()));
         }
 
@@ -102,7 +102,7 @@ impl Client<AuthManager<HttpExchanger>> {
                 "SHOW SCHEMAS LIKE {schema_pattern} IN DATABASE {db_ident}"
             ))
             .await?;
-        if !resp.data.is_some_and(|rows| !rows.is_empty()) {
+        if resp.data.is_none_or(|rows| rows.is_empty()) {
             return Err(Error::SchemaNotFound {
                 database: config.database.clone(),
                 schema: config.schema.clone(),
