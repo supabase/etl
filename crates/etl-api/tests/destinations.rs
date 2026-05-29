@@ -18,8 +18,9 @@ use crate::support::{
         create_default_image,
         destinations::{
             create_destination, create_destination_with_config, new_bigquery_destination_config,
-            new_iceberg_supabase_destination_config, new_name, updated_destination_config,
-            updated_iceberg_supabase_destination_config, updated_name,
+            new_iceberg_supabase_destination_config, new_name, new_snowflake_destination_config,
+            updated_destination_config, updated_iceberg_supabase_destination_config, updated_name,
+            updated_snowflake_destination_config,
         },
         pipelines::new_pipeline_config,
         sources::create_source,
@@ -335,4 +336,88 @@ async fn destination_with_inactive_pipeline_cannot_be_deleted() {
     assert!(pipeline_response.status().is_success());
 
     drop_pg_database(&source_db_config).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn snowflake_destination_can_be_created() {
+    init_test_tracing();
+    // Arrange
+    let app = spawn_test_app().await;
+    let tenant_id = &create_tenant(&app).await;
+
+    // Act
+    let destination = CreateDestinationRequest {
+        name: "Snowflake Destination".to_owned(),
+        config: new_snowflake_destination_config(),
+    };
+    let response = app.create_destination(tenant_id, &destination).await;
+
+    // Assert
+    assert!(response.status().is_success());
+    let response: CreateDestinationResponse =
+        response.json().await.expect("failed to deserialize response");
+    assert_eq!(response.id, 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_existing_snowflake_destination_can_be_read() {
+    init_test_tracing();
+    // Arrange
+    let app = spawn_test_app().await;
+    let tenant_id = &create_tenant(&app).await;
+
+    let destination = CreateDestinationRequest {
+        name: "Snowflake Destination".to_owned(),
+        config: new_snowflake_destination_config(),
+    };
+    let response = app.create_destination(tenant_id, &destination).await;
+    let response: CreateDestinationResponse =
+        response.json().await.expect("failed to deserialize response");
+    let destination_id = response.id;
+
+    // Act
+    let response = app.read_destination(tenant_id, destination_id).await;
+
+    // Assert
+    assert!(response.status().is_success());
+    let response: ReadDestinationResponse =
+        response.json().await.expect("failed to deserialize response");
+    assert_eq!(response.id, destination_id);
+    assert_eq!(&response.tenant_id, tenant_id);
+    assert_eq!(response.name, destination.name);
+    insta::assert_debug_snapshot!(response.config);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_existing_snowflake_destination_can_be_updated() {
+    init_test_tracing();
+    // Arrange
+    let app = spawn_test_app().await;
+    let tenant_id = &create_tenant(&app).await;
+
+    let destination = CreateDestinationRequest {
+        name: "Snowflake Destination".to_owned(),
+        config: new_snowflake_destination_config(),
+    };
+    let response = app.create_destination(tenant_id, &destination).await;
+    let response: CreateDestinationResponse =
+        response.json().await.expect("failed to deserialize response");
+    let destination_id = response.id;
+
+    // Act
+    let updated_config = UpdateDestinationRequest {
+        name: "Snowflake Destination (Updated)".to_owned(),
+        config: updated_snowflake_destination_config(),
+    };
+    let response = app.update_destination(tenant_id, destination_id, &updated_config).await;
+
+    // Assert
+    assert!(response.status().is_success());
+    let response = app.read_destination(tenant_id, destination_id).await;
+    let response: ReadDestinationResponse =
+        response.json().await.expect("failed to deserialize response");
+    assert_eq!(response.id, destination_id);
+    assert_eq!(&response.tenant_id, tenant_id);
+    assert_eq!(response.name, updated_config.name);
+    insta::assert_debug_snapshot!(response.config);
 }

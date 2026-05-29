@@ -90,6 +90,8 @@ pub enum DestinationType {
     },
     /// DuckLake destination.
     Ducklake,
+    /// Snowflake destination.
+    Snowflake,
 }
 
 impl From<&StoredDestinationConfig> for DestinationType {
@@ -102,6 +104,7 @@ impl From<&StoredDestinationConfig> for DestinationType {
                 DestinationType::ClickHouse { password_secret_required: password.is_some() }
             }
             StoredDestinationConfig::Ducklake { .. } => DestinationType::Ducklake,
+            StoredDestinationConfig::Snowflake { .. } => DestinationType::Snowflake,
         }
     }
 }
@@ -240,6 +243,22 @@ pub trait K8sClient: Send + Sync {
     ///
     /// Does nothing if the secret does not exist.
     async fn delete_ducklake_secret(&self, prefix: &str) -> Result<(), K8sError>;
+
+    /// Creates or updates the Snowflake credentials secret for a replicator.
+    ///
+    /// The secret contains the RSA private key and optionally the private key
+    /// passphrase.
+    async fn create_or_update_snowflake_secret(
+        &self,
+        prefix: &str,
+        private_key: &str,
+        private_key_passphrase: Option<&str>,
+    ) -> Result<(), K8sError>;
+
+    /// Deletes the Snowflake credentials secret for a replicator.
+    ///
+    /// Does nothing if the secret does not exist.
+    async fn delete_snowflake_secret(&self, prefix: &str) -> Result<(), K8sError>;
 
     /// Retrieves a [`ConfigMap`] by name from the data-plane namespace.
     async fn get_config_map(&self, config_map_name: &str) -> Result<ConfigMap, K8sError>;

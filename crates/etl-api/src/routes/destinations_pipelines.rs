@@ -15,7 +15,7 @@ use super::{ErrorMessage, TenantIdError, extract_tenant_id, utils};
 use crate::{
     config::ApiConfig,
     configs::{
-        destination::FullApiDestinationConfig, encryption::EncryptionKey,
+        destination::FullApiDestinationConfig, encryption::EncryptionKeyring,
         pipeline::FullApiPipelineConfig,
     },
     data,
@@ -243,7 +243,7 @@ pub(crate) async fn create_destination_and_pipeline(
     req: HttpRequest,
     pool: Data<PgPool>,
     destination_and_pipeline: Json<CreateDestinationPipelineRequest>,
-    encryption_key: Data<EncryptionKey>,
+    encryption_key: Data<EncryptionKeyring>,
     feature_flags_client: Option<Data<FeatureFlagsClient>>,
 ) -> Result<impl Responder, DestinationPipelineError> {
     let tenant_id = extract_tenant_id(&req)?;
@@ -320,7 +320,7 @@ pub(crate) async fn update_destination_and_pipeline(
     pool: Data<PgPool>,
     destination_and_pipeline_ids: Path<(i64, i64)>,
     destination_and_pipeline: Json<UpdateDestinationPipelineRequest>,
-    encryption_key: Data<EncryptionKey>,
+    encryption_key: Data<EncryptionKeyring>,
 ) -> Result<impl Responder, DestinationPipelineError> {
     let tenant_id = extract_tenant_id(&req)?;
     let (destination_id, pipeline_id) = destination_and_pipeline_ids.into_inner();
@@ -401,7 +401,7 @@ pub(crate) async fn delete_destination_and_pipeline(
     req: HttpRequest,
     pool: Data<PgPool>,
     api_config: Data<ApiConfig>,
-    encryption_key: Data<EncryptionKey>,
+    encryption_key: Data<EncryptionKeyring>,
     k8s_client: Data<dyn K8sClient>,
     trusted_root_certs_cache: Data<TrustedRootCertsCache>,
     destination_and_pipeline_ids: Path<(i64, i64)>,

@@ -14,7 +14,7 @@ use utoipa::ToSchema;
 
 use crate::{
     config::ApiConfig,
-    configs::encryption::EncryptionKey,
+    configs::encryption::EncryptionKeyring,
     data,
     data::{
         connect_to_source_database_from_api,
@@ -297,7 +297,7 @@ pub(crate) async fn update_tenant(
 pub(crate) async fn delete_tenant(
     pool: Data<PgPool>,
     api_config: Data<ApiConfig>,
-    encryption_key: Data<EncryptionKey>,
+    encryption_key: Data<EncryptionKeyring>,
     k8s_client: Data<dyn K8sClient>,
     tenant_id: Path<String>,
     trusted_root_certs_cache: Data<TrustedRootCertsCache>,
