@@ -26,6 +26,7 @@ use crate::{
     configs::encryption,
     data::publications::Publication,
     feature_flags::{FeatureFlagsClient, init_feature_flags},
+    http_metrics::record_http_metrics,
     k8s::{K8sClient, K8sError, TrustedRootCertsCache, http::HttpK8sClient},
     routes::{
         destinations::{
@@ -80,7 +81,7 @@ use crate::{
             CreateTenantSourceRequest, CreateTenantSourceResponse, create_tenant_and_source,
         },
     },
-    sentry_scrubbing::mark_sensitive_sentry_scope,
+    sentry_scrubbing::{capture_server_errors, mark_sensitive_sentry_scope},
     span_builder,
 };
 
@@ -476,6 +477,8 @@ pub fn run(
         .layer(Extension(Arc::clone(&config)))
         .layer(Extension(connection_pool))
         .layer(Extension(Arc::clone(&encryption_keyring)))
+        .layer(middleware::from_fn(record_http_metrics))
+        .layer(middleware::from_fn(capture_server_errors))
         .layer(sentry_layer)
         .layer(trace_layer);
 

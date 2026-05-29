@@ -14,6 +14,7 @@ This API service provides a RESTful interface for managing Postgres replication 
 - RESTful API endpoints for pipeline management
 - Axum HTTP runtime with tower middleware
 - Multi-tenant support with isolated configurations
+- Prometheus request metrics and Sentry capture for server-error responses
 - Kubernetes deployment support
 - Secure configuration management
 - Database schema versioning with migrations
@@ -132,6 +133,13 @@ The service exposes the generated OpenAPI document at
 generated from the `utoipa` macros attached to the handlers, so changes to
 routes, parameters, request bodies, or responses should be reflected in those
 attributes as part of the same code change.
+
+### Observability
+
+The service exposes Prometheus metrics at `/metrics`. HTTP request middleware
+records `http_requests_total` and `http_requests_duration_seconds` with
+`endpoint`, `method`, and `status` labels. Server-error HTTP responses are
+captured as Sentry events while preserving sensitive-route payload scrubbing.
 
 ### Database Migrations
 

@@ -1989,6 +1989,7 @@ dependencies = [
  "insta",
  "k8s-openapi",
  "kube",
+ "metrics",
  "metrics-exporter-prometheus",
  "pg_escape",
  "rand 0.9.4",
