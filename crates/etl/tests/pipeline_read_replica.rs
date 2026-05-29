@@ -112,6 +112,19 @@ async fn wait_for_read_replica_replay(replica_config: &PgConnectionConfig, targe
     .await;
 }
 
+async fn wait_for_read_replica_to_catch_up(
+    primary: &PgDatabase<Client>,
+    replica_config: &PgConnectionConfig,
+) -> PgLsn {
+    // Emit a standby snapshot WAL record so the returned LSN is a concrete
+    // replay barrier and standby logical slot creation has fresh transaction
+    // snapshot metadata available.
+    let target_lsn = log_standby_snapshot(primary).await;
+    wait_for_read_replica_replay(replica_config, target_lsn).await;
+
+    target_lsn
+}
+
 async fn assert_replication_slot_absent(primary: &PgDatabase<Client>, slot_name: &str) {
     let row = primary
         .client
@@ -136,7 +149,8 @@ where
             () = &mut future => return,
             _ = snapshot_interval.tick() => {
                 // Logical slot creation on a standby may wait for a running-xacts
-                // snapshot from the primary when the primary is otherwise idle.
+                // snapshot from the primary when the primary is otherwise idle,
+                // so keep nudging the primary while the pipeline starts.
                 log_standby_snapshot(primary).await;
             }
         }
@@ -210,10 +224,10 @@ async fn read_replica_replays_multiple_test_databases() {
     let replica_a = local_pg_read_replica_connection_config(&primary_a.config);
     let replica_b = local_pg_read_replica_connection_config(&primary_b.config);
 
-    let setup_lsn_a = log_standby_snapshot(&primary_a).await;
-    let setup_lsn_b = log_standby_snapshot(&primary_b).await;
-    wait_for_read_replica_replay(&replica_a, setup_lsn_a).await;
-    wait_for_read_replica_replay(&replica_b, setup_lsn_b).await;
+    // Physical replication is cluster-wide, so wait for the standby to replay
+    // each database's setup before connecting to those databases on the replica.
+    wait_for_read_replica_to_catch_up(&primary_a, &replica_a).await;
+    wait_for_read_replica_to_catch_up(&primary_b, &replica_b).await;
 
     let publication_name_a = schema_a.publication_name();
     let publication_name_b = schema_b.publication_name();
@@ -247,8 +261,7 @@ async fn pipeline_replicates_table_copy_and_cdc_from_read_replica() {
     let replica_config = local_pg_read_replica_connection_config(&primary.config);
     // The publication and schema setup happen on the primary, so the pipeline
     // only starts after the standby has replayed that setup WAL.
-    let setup_lsn = log_standby_snapshot(&primary).await;
-    wait_for_read_replica_replay(&replica_config, setup_lsn).await;
+    wait_for_read_replica_to_catch_up(&primary, &replica_config).await;
     assert_read_replica(&replica_config).await;
 
     let store = NotifyingStore::new();
@@ -262,19 +275,19 @@ async fn pipeline_replicates_table_copy_and_cdc_from_read_replica() {
         destination.clone(),
     );
 
-    let users_ready = store
+    let users_ready_notify = store
         .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
-    wait_with_standby_snapshots(&primary, users_ready.notified()).await;
+
+    wait_with_standby_snapshots(&primary, users_ready_notify.notified()).await;
 
     let apply_slot_name: String =
         EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
+    // In read-replica mode ETL logical slots must be created on the replica,
+    // while the primary should only own the physical standby slot.
     assert_replication_slot_absent(&primary, &apply_slot_name).await;
-
-    let table_rows = destination.get_table_rows().await;
-    assert_eq!(table_rows.get(&database_schema.users_schema().id).map_or(0, Vec::len), 2);
 
     let users_inserted = destination
         .wait_for_all_events(vec![EventCondition::Table(
@@ -285,11 +298,14 @@ async fn pipeline_replicates_table_copy_and_cdc_from_read_replica() {
         .await;
 
     insert_users_data(&mut primary, &database_schema.users_schema().name, 3..=3).await;
-    let change_lsn = current_wal_flush_lsn(&primary).await;
-    wait_for_read_replica_replay(&replica_config, change_lsn).await;
+    wait_for_read_replica_to_catch_up(&primary, &replica_config).await;
+
     users_inserted.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
+
+    let table_rows = destination.get_table_rows().await;
+    assert_eq!(table_rows.get(&database_schema.users_schema().id).map_or(0, Vec::len), 2);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -312,8 +328,7 @@ async fn pipeline_advances_read_replica_slot_on_idle_keepalive() {
     let replica_config = local_pg_read_replica_connection_config(&primary.config);
     // The publication and schema setup happen on the primary, so the pipeline
     // only starts after the standby has replayed that setup WAL.
-    let setup_lsn = log_standby_snapshot(&primary).await;
-    wait_for_read_replica_replay(&replica_config, setup_lsn).await;
+    wait_for_read_replica_to_catch_up(&primary, &replica_config).await;
     assert_read_replica(&replica_config).await;
 
     let store = NotifyingStore::new();
@@ -327,26 +342,35 @@ async fn pipeline_advances_read_replica_slot_on_idle_keepalive() {
         destination.clone(),
     );
 
-    let users_ready = store
+    let users_ready_notify = store
         .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
-    wait_with_standby_snapshots(&primary, users_ready.notified()).await;
+
+    wait_with_standby_snapshots(&primary, users_ready_notify.notified()).await;
 
     let apply_slot_name: String =
         EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
+    // In read-replica mode ETL logical slots must be created on the replica,
+    // while the primary should only own the physical standby slot.
     assert_replication_slot_absent(&primary, &apply_slot_name).await;
 
     primary.insert_values(unpublished_table, &["value"], &[&1_i32]).await.unwrap();
+    // Capture the LSN of the unpublished-table write without emitting an extra
+    // standby snapshot record, so slot progress is tied to this unrelated WAL.
     let unrelated_change_lsn = current_wal_flush_lsn(&primary).await;
+    // The slot progress assertion below is meaningful only after the standby
+    // has replayed the WAL generated by the unpublished table change.
     wait_for_read_replica_replay(&replica_config, unrelated_change_lsn).await;
 
+    // Even though the change is not in the publication and emits no data event,
+    // idle keepalive feedback should still advance the replica-side slot.
     wait_for_slot_confirmed_flush_lsn(&replica_config, &apply_slot_name, unrelated_change_lsn)
         .await;
 
+    pipeline.shutdown_and_wait().await.unwrap();
+
     let events = destination.get_events().await;
     assert!(events.iter().all(|event| EventType::from(event) != EventType::Insert));
-
-    pipeline.shutdown_and_wait().await.unwrap();
 }
