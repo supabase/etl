@@ -180,7 +180,10 @@ impl PostgresStore {
     /// Runs the Postgres store migrations, then creates a lazily-connected pool
     /// with automatic idle timeout. Connections are established on first use
     /// and automatically closed after `IDLE_TIMEOUT` of inactivity.
-    pub async fn new(pipeline_id: PipelineId, connection_config: PgConnectionConfig) -> EtlResult<Self> {
+    pub async fn new(
+        pipeline_id: PipelineId,
+        connection_config: PgConnectionConfig,
+    ) -> EtlResult<Self> {
         migrations::run_postgres_store_migrations(&connection_config).await?;
 
         let pool = create_database_pool(&connection_config);
