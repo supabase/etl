@@ -6,7 +6,7 @@ use thiserror::Error;
 use crate::{
     configs::{
         destination::FullApiDestinationConfig,
-        encryption::EncryptionKey,
+        encryption::EncryptionKeyring,
         pipeline::FullApiPipelineConfig,
         serde::{DbDeserializationError, DbSerializationError},
     },
@@ -49,7 +49,7 @@ pub async fn create_destination_and_pipeline(
     destination_config: FullApiDestinationConfig,
     image_id: i64,
     pipeline_config: FullApiPipelineConfig,
-    encryption_key: &EncryptionKey,
+    encryption_key: &EncryptionKeyring,
 ) -> Result<(i64, i64), DestinationPipelinesDbError> {
     let destination_id = create_destination(
         txn.deref_mut(),
@@ -77,7 +77,7 @@ pub async fn update_destination_and_pipeline(
     destination_name: &str,
     destination_config: FullApiDestinationConfig,
     pipeline_config: FullApiPipelineConfig,
-    encryption_key: &EncryptionKey,
+    encryption_key: &EncryptionKeyring,
 ) -> Result<(), DestinationPipelinesDbError> {
     let destination_id_res = update_destination(
         txn.deref_mut(),

@@ -11,7 +11,7 @@ use thiserror::Error;
 use utoipa::ToSchema;
 
 use crate::{
-    configs::{destination::FullApiDestinationConfig, encryption::EncryptionKey},
+    configs::{destination::FullApiDestinationConfig, encryption::EncryptionKeyring},
     data,
     data::{
         destinations::{DestinationsDbError, destination_exists},
@@ -182,7 +182,7 @@ pub struct ValidateDestinationResponse {
 pub(crate) async fn create_destination(
     req: HttpRequest,
     pool: Data<PgPool>,
-    encryption_key: Data<EncryptionKey>,
+    encryption_key: Data<EncryptionKeyring>,
     destination: Json<CreateDestinationRequest>,
 ) -> Result<impl Responder, DestinationError> {
     let tenant_id = extract_tenant_id(&req)?;
@@ -220,7 +220,7 @@ pub(crate) async fn create_destination(
 pub(crate) async fn read_destination(
     req: HttpRequest,
     pool: Data<PgPool>,
-    encryption_key: Data<EncryptionKey>,
+    encryption_key: Data<EncryptionKeyring>,
     destination_id: Path<i64>,
 ) -> Result<impl Responder, DestinationError> {
     let tenant_id = extract_tenant_id(&req)?;
@@ -260,7 +260,7 @@ pub(crate) async fn update_destination(
     req: HttpRequest,
     pool: Data<PgPool>,
     destination_id: Path<i64>,
-    encryption_key: Data<EncryptionKey>,
+    encryption_key: Data<EncryptionKeyring>,
     destination: Json<UpdateDestinationRequest>,
 ) -> Result<impl Responder, DestinationError> {
     let tenant_id = extract_tenant_id(&req)?;
@@ -350,7 +350,7 @@ pub(crate) async fn delete_destination(
 pub(crate) async fn read_all_destinations(
     req: HttpRequest,
     pool: Data<PgPool>,
-    encryption_key: Data<EncryptionKey>,
+    encryption_key: Data<EncryptionKeyring>,
 ) -> Result<impl Responder, DestinationError> {
     let tenant_id = extract_tenant_id(&req)?;
 

@@ -10,7 +10,7 @@ use utoipa::ToSchema;
 
 use crate::{
     config::ApiConfig,
-    configs::encryption::EncryptionKey,
+    configs::encryption::EncryptionKeyring,
     data::{
         self, connect_to_source_database_from_api,
         sources::SourcesDbError,
@@ -97,7 +97,7 @@ pub(crate) async fn read_table_names(
     req: HttpRequest,
     pool: Data<PgPool>,
     api_config: Data<ApiConfig>,
-    encryption_key: Data<EncryptionKey>,
+    encryption_key: Data<EncryptionKeyring>,
     trusted_root_certs_cache: Data<TrustedRootCertsCache>,
     source_id: Path<i64>,
 ) -> Result<impl Responder, TableError> {

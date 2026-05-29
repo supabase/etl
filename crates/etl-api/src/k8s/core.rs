@@ -90,6 +90,15 @@ pub enum Secrets {
         /// S3-compatible secret access key.
         s3_secret_access_key: Option<String>,
     },
+    /// Credentials for Snowflake destinations.
+    Snowflake {
+        /// PostgreSQL source database password.
+        postgres_password: String,
+        /// RSA private key PEM contents.
+        private_key: String,
+        /// Optional passphrase for encrypted private key.
+        private_key_passphrase: Option<String>,
+    },
 }
 
 /// Creates or updates all Kubernetes resources required for a pipeline.
@@ -317,6 +326,15 @@ fn build_secrets_from_configs(
                     .map(|value| value.expose_secret().to_owned()),
             }
         }
+        StoredDestinationConfig::Snowflake { private_key, private_key_passphrase, .. } => {
+            Secrets::Snowflake {
+                postgres_password,
+                private_key: private_key.expose_secret().to_owned(),
+                private_key_passphrase: private_key_passphrase
+                    .as_ref()
+                    .map(|p| p.expose_secret().to_owned()),
+            }
+        }
     }
 }
 
@@ -409,6 +427,16 @@ async fn create_or_update_dynamic_replicator_secrets(
             } else {
                 k8s_client.delete_ducklake_secret(prefix).await?;
             }
+        }
+        Secrets::Snowflake { postgres_password, private_key, private_key_passphrase } => {
+            k8s_client.create_or_update_postgres_secret(prefix, &postgres_password).await?;
+            k8s_client
+                .create_or_update_snowflake_secret(
+                    prefix,
+                    &private_key,
+                    private_key_passphrase.as_deref(),
+                )
+                .await?;
         }
     }
 
@@ -509,6 +537,7 @@ async fn delete_dynamic_replicator_secrets(
     k8s_client.delete_clickhouse_secret(prefix).await?;
     k8s_client.delete_iceberg_secret(prefix).await?;
     k8s_client.delete_ducklake_secret(prefix).await?;
+    k8s_client.delete_snowflake_secret(prefix).await?;
 
     Ok(())
 }
@@ -667,6 +696,21 @@ mod tests {
 
         async fn delete_ducklake_secret(&self, prefix: &str) -> Result<(), K8sError> {
             self.calls.lock().unwrap().push(format!("delete-ducklake:{prefix}"));
+            Ok(())
+        }
+
+        async fn create_or_update_snowflake_secret(
+            &self,
+            prefix: &str,
+            _private_key: &str,
+            _private_key_passphrase: Option<&str>,
+        ) -> Result<(), K8sError> {
+            self.calls.lock().unwrap().push(format!("snowflake:{prefix}"));
+            Ok(())
+        }
+
+        async fn delete_snowflake_secret(&self, prefix: &str) -> Result<(), K8sError> {
+            self.calls.lock().unwrap().push(format!("delete-snowflake:{prefix}"));
             Ok(())
         }
 

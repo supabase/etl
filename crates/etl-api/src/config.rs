@@ -30,8 +30,8 @@ pub struct ApiConfig {
     /// Source database configuration and validation settings.
     #[serde(default)]
     pub source: SourceConfig,
-    /// Encryption key configuration.
-    pub encryption_key: EncryptionKey,
+    /// Encryption key configurations.
+    pub encryption_keys: Vec<EncryptionKeyConfig>,
     /// List of base64-encoded API keys.
     ///
     /// All keys in this list are considered valid for authentication.
@@ -127,7 +127,7 @@ impl fmt::Display for ApplicationSettings {
 
 /// Encryption key configuration with identifier and key material.
 #[derive(Debug, Clone, Deserialize)]
-pub struct EncryptionKey {
+pub struct EncryptionKeyConfig {
     /// Unique identifier for the key.
     pub id: u32,
     /// Base64-encoded key material.

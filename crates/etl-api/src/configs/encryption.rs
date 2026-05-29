@@ -1,4 +1,4 @@
-use std::string;
+use std::{collections::BTreeMap, string};
 
 use aws_lc_rs::{
     aead::{AES_256_GCM, Aad, Nonce, RandomizedNonceKey},
@@ -31,21 +31,33 @@ pub enum DecryptionError {
     #[error("An error occurred while converting bytes to UTF-8 for decryption: {0}")]
     FromUtf8(#[from] string::FromUtf8Error),
 
-    /// The key ID in the encrypted data did not match the expected key ID.
-    #[error("There was a mismatch in the key id while decrypting data (got: {0}, expected: {1})")]
-    MismatchedKeyId(u32, u32),
+    /// No configured encryption key matched the encrypted value's key ID.
+    #[error("Unknown encryption key id while decrypting data: {0}")]
+    UnknownKeyId(u32),
+}
+
+/// Errors that occur while building an encryption keyring.
+#[derive(Debug, Error)]
+pub enum EncryptionKeyringError {
+    /// The keyring did not contain any keys.
+    #[error("At least one encryption key must be configured")]
+    Empty,
+
+    /// Multiple keys used the same identifier.
+    #[error("Duplicate encryption key id in configuration: {0}")]
+    DuplicateKeyId(u32),
 }
 
 /// Trait for types that can be encrypted.
 pub trait Encrypt<T> {
-    /// Encrypts this value using the provided encryption key.
-    fn encrypt(self, encryption_key: &EncryptionKey) -> Result<T, EncryptionError>;
+    /// Encrypts this value using the provided encryption keyring.
+    fn encrypt(self, encryption_keyring: &EncryptionKeyring) -> Result<T, EncryptionError>;
 }
 
 /// Trait for types that can be decrypted.
 pub trait Decrypt<T> {
-    /// Decrypts this value using the provided encryption key.
-    fn decrypt(self, encryption_key: &EncryptionKey) -> Result<T, DecryptionError>;
+    /// Decrypts this value using the provided encryption keyring.
+    fn decrypt(self, encryption_keyring: &EncryptionKeyring) -> Result<T, DecryptionError>;
 }
 
 /// Encryption key with identifier for key management.
@@ -54,6 +66,57 @@ pub struct EncryptionKey {
     pub id: u32,
     /// The key material used for encryption and decryption.
     pub key: RandomizedNonceKey,
+}
+
+/// Collection of encryption keys used for reads and writes.
+pub struct EncryptionKeyring {
+    /// Keys indexed by their stored key identifier.
+    keys: BTreeMap<u32, RandomizedNonceKey>,
+}
+
+impl EncryptionKeyring {
+    /// Creates a keyring from one or more encryption keys.
+    pub fn new(keys: Vec<EncryptionKey>) -> Result<Self, EncryptionKeyringError> {
+        if keys.is_empty() {
+            return Err(EncryptionKeyringError::Empty);
+        }
+
+        let mut keyring_keys = BTreeMap::new();
+        for key in keys {
+            if keyring_keys.insert(key.id, key.key).is_some() {
+                return Err(EncryptionKeyringError::DuplicateKeyId(key.id));
+            }
+        }
+
+        Ok(Self { keys: keyring_keys })
+    }
+
+    /// Returns the key id that will be used for new encrypted values.
+    pub fn latest_key_id(&self) -> u32 {
+        self.keys
+            .last_key_value()
+            .map(|(id, _)| *id)
+            .expect("encryption keyring should contain at least one key")
+    }
+
+    /// Returns the key used for new encrypted values.
+    fn latest_key(&self) -> (u32, &RandomizedNonceKey) {
+        self.keys
+            .last_key_value()
+            .map(|(id, key)| (*id, key))
+            .expect("encryption keyring should contain at least one key")
+    }
+
+    /// Returns the key matching a stored encrypted value.
+    fn key_for_decryption(&self, key_id: u32) -> Result<&RandomizedNonceKey, DecryptionError> {
+        self.keys.get(&key_id).ok_or(DecryptionError::UnknownKeyId(key_id))
+    }
+}
+
+impl From<EncryptionKey> for EncryptionKeyring {
+    fn from(key: EncryptionKey) -> Self {
+        Self::new(vec![key]).expect("one-key encryption keyring should be valid")
+    }
 }
 
 /// Encrypted value with metadata for decryption.
@@ -73,35 +136,29 @@ pub struct EncryptedValue {
 /// data, all base64-encoded for safe storage and transmission.
 pub fn encrypt_text(
     value: String,
-    encryption_key: &EncryptionKey,
+    encryption_keyring: &EncryptionKeyring,
 ) -> Result<EncryptedValue, EncryptionError> {
-    let (encrypted_password, nonce) = encrypt(value.as_bytes(), &encryption_key.key)?;
+    let (key_id, key) = encryption_keyring.latest_key();
+    let (encrypted_password, nonce) = encrypt(value.as_bytes(), key)?;
     let encoded_encrypted_password = BASE64_STANDARD.encode(encrypted_password);
     let encoded_nonce = BASE64_STANDARD.encode(nonce.as_ref());
 
-    Ok(EncryptedValue {
-        id: encryption_key.id,
-        nonce: encoded_nonce,
-        value: encoded_encrypted_password,
-    })
+    Ok(EncryptedValue { id: key_id, nonce: encoded_nonce, value: encoded_encrypted_password })
 }
 
 /// Decrypts an [`EncryptedValue`] back to the original string.
 ///
-/// Validates the key ID matches before attempting decryption. Returns the
-/// original plaintext string if decryption succeeds.
+/// Selects the configured key matching the stored key ID before decryption.
+/// Returns the original plaintext string if decryption succeeds.
 pub fn decrypt_text(
     encrypted_value: EncryptedValue,
-    encryption_key: &EncryptionKey,
+    encryption_keyring: &EncryptionKeyring,
 ) -> Result<String, DecryptionError> {
-    if encrypted_value.id != encryption_key.id {
-        return Err(DecryptionError::MismatchedKeyId(encrypted_value.id, encryption_key.id));
-    }
-
     let encrypted_value_bytes = BASE64_STANDARD.decode(encrypted_value.value)?;
     let nonce = Nonce::try_assume_unique_for_key(&BASE64_STANDARD.decode(encrypted_value.nonce)?)?;
+    let key = encryption_keyring.key_for_decryption(encrypted_value.id)?;
 
-    let decrypted_value_bytes = decrypt(encrypted_value_bytes, nonce, &encryption_key.key)?;
+    let decrypted_value_bytes = decrypt(encrypted_value_bytes, nonce, key)?;
 
     let decrypted_value = String::from_utf8(decrypted_value_bytes)?;
 
@@ -149,4 +206,59 @@ pub fn generate_random_key<const T: usize>()
     let key = RandomizedNonceKey::new(&AES_256_GCM, &key_bytes)?;
 
     Ok(key)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_key(id: u32, byte: u8) -> EncryptionKey {
+        let key_bytes = [byte; 32];
+        let key = RandomizedNonceKey::new(&AES_256_GCM, &key_bytes).unwrap();
+
+        EncryptionKey { id, key }
+    }
+
+    #[test]
+    fn encrypt_text_uses_highest_configured_key_id() {
+        let keyring =
+            EncryptionKeyring::new(vec![test_key(1, 1), test_key(3, 3), test_key(2, 2)]).unwrap();
+
+        let encrypted = encrypt_text("secret".to_owned(), &keyring).unwrap();
+        let decrypted = decrypt_text(encrypted.clone(), &keyring).unwrap();
+
+        assert_eq!(encrypted.id, 3);
+        assert_eq!(decrypted, "secret");
+    }
+
+    #[test]
+    fn decrypt_text_uses_stored_key_id() {
+        let old_keyring = EncryptionKeyring::from(test_key(1, 1));
+        let encrypted = encrypt_text("secret".to_owned(), &old_keyring).unwrap();
+        let new_keyring = EncryptionKeyring::new(vec![test_key(1, 1), test_key(2, 2)]).unwrap();
+
+        let decrypted = decrypt_text(encrypted, &new_keyring).unwrap();
+
+        assert_eq!(decrypted, "secret");
+    }
+
+    #[test]
+    fn decrypt_text_rejects_unknown_key_id() {
+        let old_keyring = EncryptionKeyring::from(test_key(1, 1));
+        let encrypted = encrypt_text("secret".to_owned(), &old_keyring).unwrap();
+        let new_keyring = EncryptionKeyring::from(test_key(2, 2));
+
+        let error = decrypt_text(encrypted, &new_keyring).unwrap_err();
+
+        assert!(matches!(error, DecryptionError::UnknownKeyId(1)));
+    }
+
+    #[test]
+    fn keyring_rejects_duplicate_key_ids() {
+        let Err(error) = EncryptionKeyring::new(vec![test_key(1, 1), test_key(1, 2)]) else {
+            panic!("duplicate key id should fail");
+        };
+
+        assert!(matches!(error, EncryptionKeyringError::DuplicateKeyId(1)));
+    }
 }

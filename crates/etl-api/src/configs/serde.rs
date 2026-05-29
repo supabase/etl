@@ -2,7 +2,7 @@ use serde::Serialize;
 use thiserror::Error;
 
 use crate::configs::{
-    encryption::{Decrypt, DecryptionError, Encrypt, EncryptionError, EncryptionKey},
+    encryption::{Decrypt, DecryptionError, Encrypt, EncryptionError, EncryptionKeyring},
     store::Store,
 };
 
@@ -47,11 +47,11 @@ where
 /// Encrypts a value and serializes it to a [`serde_json::Value`] for database
 /// storage.
 ///
-/// The value is first encrypted using the provided [`EncryptionKey`], then
+/// The value is first encrypted using the provided [`EncryptionKeyring`], then
 /// serialized. Returns an error if encryption or serialization fails.
 pub fn encrypt_and_serialize<T, S>(
     value: T,
-    encryption_key: &EncryptionKey,
+    encryption_key: &EncryptionKeyring,
 ) -> Result<serde_json::Value, DbSerializationError>
 where
     T: Encrypt<S>,
@@ -78,12 +78,12 @@ where
 /// Deserializes and decrypts a [`serde_json::Value`] into a value of type `S`.
 ///
 /// The value is first deserialized into a type implementing [`Decrypt`], then
-/// decrypted using the provided [`EncryptionKey`].
+/// decrypted using the provided [`EncryptionKeyring`].
 ///
 /// Returns an error if deserialization or decryption fails.
 pub fn decrypt_and_deserialize_from_value<T, S>(
     value: serde_json::Value,
-    encryption_key: &EncryptionKey,
+    encryption_key: &EncryptionKeyring,
 ) -> Result<S, DbDeserializationError>
 where
     T: Decrypt<S>,
