@@ -30,9 +30,12 @@ pub(crate) fn maybe_with_sccache(cmd: Cmd<'_>, flag: bool) -> Cmd<'_> {
         return cmd;
     }
 
+    let cc = std::env::var("CC").unwrap_or_else(|_| "cc".into());
+    let cxx = std::env::var("CXX").unwrap_or_else(|_| "c++".into());
+
     cmd.env("RUSTC_WRAPPER", "sccache")
-        .env("CC", "sccache cc")
-        .env("CXX", "sccache c++")
+        .env("CC", format!("sccache {cc}"))
+        .env("CXX", format!("sccache {cxx}"))
         .env("CARGO_INCREMENTAL", "0")
         .env("SCCACHE_CACHE_SIZE", "20G")
 }
