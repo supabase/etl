@@ -1,8 +1,6 @@
 use etl_api::{
     configs::destination::FullApiDestinationConfig,
-    validation::{
-        FailureType, ValidationContext, validate_destination, validate_pipeline,
-    },
+    validation::{FailureType, ValidationContext, validate_destination, validate_pipeline},
 };
 use etl_config::{Environment, SerializableSecretString};
 use etl_destinations::bigquery::test_utils::{
@@ -11,7 +9,9 @@ use etl_destinations::bigquery::test_utils::{
 };
 use etl_postgres::sqlx::test_utils::drop_pg_database;
 
-use super::{create_pipeline_config, create_validation_context, create_validation_context_with_source};
+use super::{
+    create_pipeline_config, create_validation_context, create_validation_context_with_source,
+};
 
 fn create_bigquery_config(
     project_id: &str,

@@ -1,13 +1,10 @@
-use etl_api::validation::{
-    FailureType, ValidationContext, validate_pipeline, validate_source,
-};
+use etl_api::validation::{FailureType, ValidationContext, validate_pipeline, validate_source};
 use etl_config::Environment;
 use etl_postgres::sqlx::test_utils::drop_pg_database;
 use sqlx::Executor;
 
-use crate::support::database::get_test_db_config;
-
 use super::{create_pipeline_config, create_validation_context_with_source};
+use crate::support::database::get_test_db_config;
 
 #[tokio::test]
 async fn validate_pipeline_wal_level_success() {
