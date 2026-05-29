@@ -2,10 +2,15 @@ use anyhow::Result;
 use clap::Args;
 use xshell::{Shell, cmd};
 
-use super::shared::NIGHTLY_TOOLCHAIN;
+use super::shared::{NIGHTLY_TOOLCHAIN, maybe_with_sccache};
 
 #[derive(Args)]
-pub(crate) struct CheckArgs {}
+pub(crate) struct CheckArgs {
+    /// Enable `sccache`.
+    /// Also enabled via `ETL_SCCACHE=1`.
+    #[arg(long)]
+    sccache: bool,
+}
 
 impl CheckArgs {
     pub(crate) fn run(self) -> Result<()> {
@@ -21,7 +26,11 @@ impl CheckArgs {
         cmd!(sh, "cargo sort --workspace --grouped --check").run()?;
 
         println!("[clippy]");
-        cmd!(sh, "cargo clippy --all-targets --all-features --no-deps").run()?;
+        maybe_with_sccache(
+            cmd!(sh, "cargo clippy --all-targets --all-features --no-deps"),
+            self.sccache,
+        )
+        .run()?;
 
         Ok(())
     }

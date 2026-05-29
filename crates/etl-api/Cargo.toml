@@ -31,12 +31,23 @@ configcat = { workspace = true }
 constant_time_eq = { workspace = true }
 etl = { workspace = true }
 etl-config = { workspace = true, features = ["utoipa", "supabase"] }
-etl-destinations = { workspace = true, features = ["bigquery", "clickhouse", "ducklake", "iceberg"] }
+etl-destinations = { workspace = true, features = [
+  "bigquery",
+  "clickhouse",
+  "ducklake",
+  "iceberg",
+  "snowflake",
+] }
 etl-maintenance = { workspace = true }
 etl-postgres = { workspace = true, features = ["replication"] }
 etl-telemetry = { workspace = true }
 k8s-openapi = { workspace = true, features = ["latest"] }
-kube = { workspace = true, features = ["runtime", "derive", "client", "rustls-tls"] }
+kube = { workspace = true, features = [
+  "runtime",
+  "derive",
+  "client",
+  "rustls-tls",
+] }
 metrics-exporter-prometheus = { workspace = true, features = ["http-listener"] }
 pg_escape = { workspace = true }
 rand = { workspace = true, features = ["std"] }
@@ -45,7 +56,14 @@ secrecy = { workspace = true }
 sentry = { workspace = true, features = ["actix"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true, features = ["std"] }
-sqlx = { workspace = true, features = ["runtime-tokio", "tls-rustls", "macros", "postgres", "json", "migrate"] }
+sqlx = { workspace = true, features = [
+  "runtime-tokio",
+  "tls-rustls",
+  "macros",
+  "postgres",
+  "json",
+  "migrate",
+] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tracing = { workspace = true, default-features = false }
@@ -55,7 +73,14 @@ utoipa = { workspace = true, features = ["actix_extras"] }
 utoipa-swagger-ui = { workspace = true, features = ["actix-web"] }
 
 [dev-dependencies]
-etl-destinations = { workspace = true, features = ["test-utils", "bigquery", "clickhouse", "ducklake", "iceberg"] }
+etl-destinations = { workspace = true, features = [
+  "test-utils",
+  "bigquery",
+  "clickhouse",
+  "ducklake",
+  "iceberg",
+  "snowflake",
+] }
 etl-postgres = { workspace = true, features = ["test-utils", "sqlx"] }
 
 insta = { workspace = true, features = ["json", "redactions"] }
