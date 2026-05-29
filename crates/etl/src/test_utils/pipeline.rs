@@ -198,6 +198,7 @@ where
             max_copy_connections_per_table: self.max_copy_connections_per_table,
             memory_refresh_interval_ms: self.memory_refresh_interval_ms,
             memory_backpressure: Some(self.memory_backpressure),
+            run_source_migrations: true,
         };
 
         Pipeline::new(config, self.store, self.destination)

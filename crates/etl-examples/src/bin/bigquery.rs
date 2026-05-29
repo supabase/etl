@@ -189,6 +189,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
     let pipeline_config = PipelineConfig {
         id: pipeline_id, // Using a simple ID for the example
         publication_name: args.publication,
+        run_source_migrations: true,
         pg_connection: pg_connection_config,
         batch: BatchConfig {
             max_fill_ms: args.bq_args.max_batch_fill_duration_ms,

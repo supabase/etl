@@ -1927,6 +1927,7 @@ mod tests {
                 table_sync_copy: TableSyncCopyConfig::IncludeAllTables,
                 invalidated_slot_behavior: InvalidatedSlotBehavior::Error,
                 max_copy_connections_per_table: 2,
+                run_source_migrations: true,
             },
             sentry: None,
             supabase: None,

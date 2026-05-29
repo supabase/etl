@@ -788,6 +788,7 @@ pub fn pipeline_config(
         table_sync_copy,
         invalidated_slot_behavior: InvalidatedSlotBehavior::Error,
         max_copy_connections_per_table: tuning.max_copy_connections_per_table,
+        run_source_migrations: true,
     }
 }
 
