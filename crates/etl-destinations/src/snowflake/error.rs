@@ -26,6 +26,12 @@ pub enum Error {
 
     #[error("Configuration error: {0}")]
     Config(String),
+
+    #[error("database '{0}' not found")]
+    DatabaseNotFound(String),
+
+    #[error("schema '{schema}' not found in database '{database}'")]
+    SchemaNotFound { database: String, schema: String },
 }
 
 impl From<Error> for EtlError {
@@ -44,6 +50,8 @@ impl From<Error> for EtlError {
             Error::Channel(_) => (ErrorKind::DestinationError, "Snowflake channel error"),
             Error::Encoding(_) => (ErrorKind::InvalidData, "Snowflake encoding error"),
             Error::Config(_) => (ErrorKind::ConfigError, "Snowflake configuration error"),
+            Error::DatabaseNotFound(_) => (ErrorKind::ConfigError, "Snowflake database not found"),
+            Error::SchemaNotFound { .. } => (ErrorKind::ConfigError, "Snowflake schema not found"),
         };
         etl::etl_error!(kind, description, err.to_string())
     }
