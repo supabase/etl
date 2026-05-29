@@ -3,6 +3,7 @@ mod clickhouse;
 mod ducklake;
 mod iceberg;
 mod pipeline;
+mod snowflake;
 mod source;
 
 use async_trait::async_trait;
@@ -10,6 +11,7 @@ use bigquery::BigQueryValidator;
 use clickhouse::ClickHouseValidator;
 use ducklake::DucklakeValidator;
 use iceberg::IcebergValidator;
+use snowflake::SnowflakeValidator;
 use pipeline::{
     GeneratedColumnsValidator, PrimaryKeysValidator, PublicationExistsValidator,
     PublicationHasTablesValidator, ReplicationPermissionsValidator, ReplicationSlotsValidator,
@@ -144,9 +146,25 @@ impl Validator for DestinationValidator {
                 );
                 validator.validate(ctx).await
             }
-            FullApiDestinationConfig::Snowflake { .. } => {
-                // Snowflake validator added in ETL-639
-                Ok(vec![])
+            FullApiDestinationConfig::Snowflake {
+                account_id,
+                user,
+                private_key,
+                private_key_passphrase,
+                database,
+                schema,
+                role,
+            } => {
+                let validator = SnowflakeValidator::new(
+                    account_id.clone(),
+                    user.clone(),
+                    private_key.clone(),
+                    private_key_passphrase.clone(),
+                    database.clone(),
+                    schema.clone(),
+                    role.clone(),
+                );
+                validator.validate(ctx).await
             }
         }
     }

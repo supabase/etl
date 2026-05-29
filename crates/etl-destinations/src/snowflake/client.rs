@@ -9,6 +9,7 @@ use crate::snowflake::{
     auth::{AuthManager, HttpExchanger, TokenProvider},
     config::{HTTP_CONNECT_TIMEOUT, HTTP_REQUEST_TIMEOUT},
     schema,
+    sql::{quote_identifier, quote_string_literal},
     sql_client::SqlClient,
     streaming::{ChannelHandle, OffsetToken, RestStreamClient, RowBatch, StreamClient},
 };
@@ -62,6 +63,53 @@ impl Client<AuthManager<HttpExchanger>> {
         ));
         let sql_client = SqlClient::new(config, auth, http);
         Self::with_clients(sql_client, stream_client, database, schema, pipeline_id)
+    }
+
+    /// Verify Snowflake connectivity.
+    ///
+    /// Check that credentials are valid and the target database and schema
+    /// exist.
+    pub async fn validate_connectivity(
+        config: &Config,
+        private_key_pem: &str,
+        passphrase: Option<&secrecy::SecretString>,
+    ) -> Result<()> {
+        let auth = Arc::new(
+            AuthManager::new(config, private_key_pem, passphrase)
+                .map_err(|e| Error::Auth(e.to_string()))?,
+        );
+
+        let http = reqwest::Client::builder()
+            .connect_timeout(HTTP_CONNECT_TIMEOUT)
+            .timeout(HTTP_REQUEST_TIMEOUT)
+            .build()
+            .map_err(Error::HttpTransport)?;
+
+        let sql = SqlClient::new(config.clone(), auth, http);
+
+        // `SHOW DATABASES` runs on Cloud Services (no warehouse needed).
+        let db_pattern = quote_string_literal(&config.database);
+        let resp = sql.execute_statement(&format!("SHOW DATABASES LIKE {db_pattern}")).await?;
+        if !resp.data.is_some_and(|rows| !rows.is_empty()) {
+            return Err(Error::DatabaseNotFound(config.database.clone()));
+        }
+
+        // `SHOW SCHEMAS` also runs on Cloud Services.
+        let db_ident = quote_identifier(&config.database);
+        let schema_pattern = quote_string_literal(&config.schema);
+        let resp = sql
+            .execute_statement(&format!(
+                "SHOW SCHEMAS LIKE {schema_pattern} IN DATABASE {db_ident}"
+            ))
+            .await?;
+        if !resp.data.is_some_and(|rows| !rows.is_empty()) {
+            return Err(Error::SchemaNotFound {
+                database: config.database.clone(),
+                schema: config.schema.clone(),
+            });
+        }
+
+        Ok(())
     }
 }
 
