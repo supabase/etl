@@ -94,6 +94,13 @@ pub trait Destination {
     /// boundaries. ETL may call this method multiple times with different
     /// streaming batches.
     ///
+    /// Streaming batches are built from size and time limits, not schema
+    /// change boundaries. A single call may contain zero, one, or many
+    /// [`Event::Relation`] events, including multiple schema changes for the
+    /// same table. Implementations that apply destination DDL should process
+    /// events in order and update their active table schema each time a
+    /// relation event appears.
+    ///
     /// The main ordering guarantee is per table: ETL preserves the required
     /// order for streaming operations on the same table.
     ///
