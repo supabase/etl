@@ -13,8 +13,7 @@ use etl::{
     types::{Cell, EventType, PipelineId, TableRow},
 };
 use etl_destinations::iceberg::{
-    DestinationNamespace, IcebergClient, IcebergDestination, IcebergOperationType,
-    table_name_to_iceberg_table_name,
+    DestinationNamespace, IcebergClient, IcebergDestination, table_name_to_iceberg_table_name,
     test_utils::{LAKEKEEPER_URL, LakekeeperClient, create_minio_props, get_catalog_url},
 };
 use etl_telemetry::tracing::init_test_tracing;
@@ -33,22 +32,6 @@ async fn run_table_copy_test(destination_namespace: DestinationNamespace) {
 
     let mut database = spawn_source_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
-
-    // Iceberg now fails fast unless source tables use replica identity full.
-    database
-        .run_sql(&format!(
-            "alter table {} replica identity full",
-            database_schema.users_schema().name.as_quoted_identifier()
-        ))
-        .await
-        .unwrap();
-    database
-        .run_sql(&format!(
-            "alter table {} replica identity full",
-            database_schema.orders_schema().name.as_quoted_identifier()
-        ))
-        .await
-        .unwrap();
 
     // Insert initial test data.
     insert_mock_data(
@@ -84,8 +67,6 @@ async fn run_table_copy_test(destination_namespace: DestinationNamespace) {
     let single_destination_namespace = destination_namespace.is_single();
     let raw_destination =
         IcebergDestination::new(client.clone(), destination_namespace, store.clone());
-    // let raw_destination =
-    // bigquery_database.build_destination(store.clone()).await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     // Start pipeline from scratch.
@@ -126,20 +107,8 @@ async fn run_table_copy_test(destination_namespace: DestinationNamespace) {
     let mut actual_users = read_all_rows(&client, namespace.clone(), users_table.clone()).await;
 
     let expected_users = vec![
-        TableRow::new(vec![
-            Cell::I64(1),
-            Cell::String("user_1".to_owned()),
-            Cell::I32(1),
-            IcebergOperationType::Insert.into(),
-            Cell::String("0000000000000000/0000000000000000".to_owned()),
-        ]),
-        TableRow::new(vec![
-            Cell::I64(2),
-            Cell::String("user_2".to_owned()),
-            Cell::I32(2),
-            IcebergOperationType::Insert.into(),
-            Cell::String("0000000000000000/0000000000000000".to_owned()),
-        ]),
+        TableRow::new(vec![Cell::I64(1), Cell::String("user_1".to_owned()), Cell::I32(1)]),
+        TableRow::new(vec![Cell::I64(2), Cell::String("user_2".to_owned()), Cell::I32(2)]),
     ];
 
     // Sort deterministically by the debug representation as a simple stable key for
@@ -151,18 +120,8 @@ async fn run_table_copy_test(destination_namespace: DestinationNamespace) {
     let mut actual_orders = read_all_rows(&client, namespace.clone(), orders_table.clone()).await;
 
     let expected_orders = vec![
-        TableRow::new(vec![
-            Cell::I64(1),
-            Cell::String("description_1".to_owned()),
-            IcebergOperationType::Insert.into(),
-            Cell::String("0000000000000000/0000000000000000".to_owned()),
-        ]),
-        TableRow::new(vec![
-            Cell::I64(2),
-            Cell::String("description_2".to_owned()),
-            IcebergOperationType::Insert.into(),
-            Cell::String("0000000000000000/0000000000000000".to_owned()),
-        ]),
+        TableRow::new(vec![Cell::I64(1), Cell::String("description_1".to_owned())]),
+        TableRow::new(vec![Cell::I64(2), Cell::String("description_2".to_owned())]),
     ];
 
     // Sort deterministically by the debug representation as a simple stable key for
@@ -172,9 +131,9 @@ async fn run_table_copy_test(destination_namespace: DestinationNamespace) {
     assert_table_rows_equal_ignoring_size(&actual_orders, &expected_orders);
 
     // Manual cleanup for now because lakekeeper doesn't allow cascade delete at the
-    // warehouse level This feature is planned for future releases. We'll start
+    // warehouse level. This feature is planned for future releases. We'll start
     // to use it when it becomes available. The cleanup is not in a Drop impl
-    // because each test has different number of object specitic to that test.
+    // because each test has a different number of objects to clean up.
     client.drop_table_if_exists(&namespace, users_table).await.unwrap();
     client.drop_table_if_exists(&namespace, orders_table).await.unwrap();
     client.drop_namespace(&namespace).await.unwrap();
@@ -192,24 +151,6 @@ async fn run_cdc_streaming_test(destination_namespace: DestinationNamespace) {
 
     let mut database = spawn_source_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
-
-    // We make the table with replica identity full since this is required by
-    // Iceberg to work after we made the changes to properly handle deletions
-    // with non-full idenntities.
-    database
-        .run_sql(&format!(
-            "alter table {} replica identity full",
-            database_schema.users_schema().name.as_quoted_identifier()
-        ))
-        .await
-        .unwrap();
-    database
-        .run_sql(&format!(
-            "alter table {} replica identity full",
-            database_schema.orders_schema().name.as_quoted_identifier()
-        ))
-        .await
-        .unwrap();
 
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
@@ -316,7 +257,7 @@ async fn run_cdc_streaming_test(destination_namespace: DestinationNamespace) {
         .await
         .unwrap();
 
-    // Delete order with id 2
+    // Delete order with id 2.
     database
         .delete_values(database_schema.orders_schema().name.clone(), &["id"], &["2"], "")
         .await
@@ -325,7 +266,7 @@ async fn run_cdc_streaming_test(destination_namespace: DestinationNamespace) {
     // Wait for all CDC delete events to be written to Iceberg.
     event_notify.notified().await;
 
-    // base table names
+    // Build base table names.
     let users_table = table_name_to_iceberg_table_name(
         &database_schema.users_schema().name,
         single_destination_namespace,
@@ -337,117 +278,32 @@ async fn run_cdc_streaming_test(destination_namespace: DestinationNamespace) {
     )
     .unwrap();
 
+    // Stop the pipeline to finalize writes.
+    pipeline.shutdown_and_wait().await.unwrap();
+
     let mut actual_users = read_all_rows(&client, namespace.clone(), users_table.clone()).await;
+    actual_users
+        .sort_by(|a, b| format!("{:?}", a.values()[0]).cmp(&format!("{:?}", b.values()[0])));
 
-    // Sort deterministically by the sequence key for stable assertions
-    actual_users.sort_by(|a, b| {
-        let a_key = format!("{:?}", a.values()[4]);
-        let b_key = format!("{:?}", b.values()[4]);
-        a_key.cmp(&b_key)
-    });
-
-    // Drop the last column (non-deterministic sequence key) before comparison.
-    for row in &mut actual_users {
-        let _ = row.values_mut().pop();
-    }
-
-    // Expected CDC rows: 2 inserts (UPSERT), 2 updates (UPSERT), 1 delete (DELETE)
-    // Note: order here is messed up due to limitations in how read_all_rows can't
-    // sort, so we sort manually by id and cdc operation columns
-    let expected_users = vec![
-        // Initial insert of user 1
-        TableRow::new(vec![
-            Cell::I64(1),
-            Cell::String("user_1".to_owned()),
-            Cell::I32(1),
-            IcebergOperationType::Insert.into(),
-        ]),
-        // Initial insert of user 2
-        TableRow::new(vec![
-            Cell::I64(2),
-            Cell::String("user_2".to_owned()),
-            Cell::I32(2),
-            IcebergOperationType::Insert.into(),
-        ]),
-        // Update of user 1
-        TableRow::new(vec![
-            Cell::I64(1),
-            Cell::String("updated_name".to_owned()),
-            Cell::I32(42),
-            IcebergOperationType::Update.into(),
-        ]),
-        // Update of user 2
-        TableRow::new(vec![
-            Cell::I64(2),
-            Cell::String("updated_name".to_owned()),
-            Cell::I32(42),
-            IcebergOperationType::Update.into(),
-        ]),
-        // Delete of user with id 1 preserves the full old row image.
-        TableRow::new(vec![
-            Cell::I64(1),
-            Cell::String("updated_name".to_owned()),
-            Cell::I32(42),
-            IcebergOperationType::Delete.into(),
-        ]),
-    ];
+    let expected_users = vec![TableRow::new(vec![
+        Cell::I64(2),
+        Cell::String("updated_name".to_owned()),
+        Cell::I32(42),
+    ])];
 
     assert_table_rows_equal_ignoring_size(&actual_users, &expected_users);
 
     let mut actual_orders = read_all_rows(&client, namespace.clone(), orders_table.clone()).await;
 
-    // Sort deterministically by the primary key (id) and sequence key for stable
-    // assertions
-    actual_orders.sort_by(|a, b| {
-        let a_key = format!("{:?}", a.values()[3]);
-        let b_key = format!("{:?}", b.values()[3]);
-        a_key.cmp(&b_key)
-    });
+    actual_orders
+        .sort_by(|a, b| format!("{:?}", a.values()[0]).cmp(&format!("{:?}", b.values()[0])));
 
-    // Drop the last column (non-deterministic sequence key) before comparison.
-    for row in &mut actual_orders {
-        let _ = row.values_mut().pop();
-    }
-
-    let expected_orders = vec![
-        // Initial insert of order 1
-        TableRow::new(vec![
-            Cell::I64(1),
-            Cell::String("description_1".to_owned()),
-            IcebergOperationType::Insert.into(),
-        ]),
-        // Initial insert of order 2
-        TableRow::new(vec![
-            Cell::I64(2),
-            Cell::String("description_2".to_owned()),
-            IcebergOperationType::Insert.into(),
-        ]),
-        // Update of order 1
-        TableRow::new(vec![
-            Cell::I64(1),
-            Cell::String("updated_description".to_owned()),
-            IcebergOperationType::Update.into(),
-        ]),
-        // Update of order 2
-        TableRow::new(vec![
-            Cell::I64(2),
-            Cell::String("updated_description".to_owned()),
-            IcebergOperationType::Update.into(),
-        ]),
-        // Delete of order 2 preserves the full old row image.
-        TableRow::new(vec![
-            Cell::I64(2),
-            Cell::String("updated_description".to_owned()),
-            IcebergOperationType::Delete.into(),
-        ]),
-    ];
+    let expected_orders =
+        vec![TableRow::new(vec![Cell::I64(1), Cell::String("updated_description".to_owned())])];
 
     assert_table_rows_equal_ignoring_size(&actual_orders, &expected_orders);
 
-    // Stop the pipeline to finalize writes.
-    pipeline.shutdown_and_wait().await.unwrap();
-
-    // Cleanup: drop CDC tables, namespace, and warehouse.
+    // Cleanup: drop tables, namespace, and warehouse.
     client.drop_table_if_exists(&namespace, users_table).await.unwrap();
     client.drop_table_if_exists(&namespace, orders_table).await.unwrap();
     client.drop_namespace(&namespace).await.unwrap();
@@ -466,22 +322,6 @@ async fn run_cdc_streaming_with_truncate_test(destination_namespace: Destination
 
     let mut database = spawn_source_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
-
-    // Iceberg now fails fast unless source tables use replica identity full.
-    database
-        .run_sql(&format!(
-            "alter table {} replica identity full",
-            database_schema.users_schema().name.as_quoted_identifier()
-        ))
-        .await
-        .unwrap();
-    database
-        .run_sql(&format!(
-            "alter table {} replica identity full",
-            database_schema.orders_schema().name.as_quoted_identifier()
-        ))
-        .await
-        .unwrap();
 
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
@@ -535,7 +375,7 @@ async fn run_cdc_streaming_with_truncate_test(destination_namespace: Destination
     // We'll expect 2 inserts per table -> 4 insert events total.
     let event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 4)]).await;
 
-    // Insert 2 rows per each table (captured as CDC UPSERT events).
+    // Insert 2 rows per each table.
     insert_mock_data(
         &mut database,
         &database_schema.users_schema().name,
@@ -551,8 +391,8 @@ async fn run_cdc_streaming_with_truncate_test(destination_namespace: Destination
 
     let event_notify = destination.wait_for_events_count(vec![(EventType::Truncate, 2)]).await;
 
-    // Truncate both tables in the source; destination should drop and recreate base
-    // + CDC tables.
+    // Truncate both tables in the source; destination should drop and recreate
+    // the Iceberg tables.
     database.truncate_table(database_schema.users_schema().name.clone()).await.unwrap();
     database.truncate_table(database_schema.orders_schema().name.clone()).await.unwrap();
 
@@ -560,7 +400,7 @@ async fn run_cdc_streaming_with_truncate_test(destination_namespace: Destination
     event_notify.notified().await;
     destination.clear_events().await;
 
-    // base table names
+    // Build base table names.
     let users_table = table_name_to_iceberg_table_name(
         &database_schema.users_schema().name,
         single_destination_namespace,
@@ -573,7 +413,7 @@ async fn run_cdc_streaming_with_truncate_test(destination_namespace: Destination
     .unwrap();
 
     let actual_users = read_all_rows(&client, namespace.clone(), users_table.clone()).await;
-    let actual_orders = read_all_rows(&client, namespace.clone(), users_table.clone()).await;
+    let actual_orders = read_all_rows(&client, namespace.clone(), orders_table.clone()).await;
 
     assert!(actual_users.is_empty());
     assert!(actual_orders.is_empty());
@@ -595,56 +435,32 @@ async fn run_cdc_streaming_with_truncate_test(destination_namespace: Destination
     event_notify.notified().await;
     destination.clear_events().await;
 
-    // After truncate, pre-truncate CDC rows should be gone (tables were dropped).
-    // Only post-truncate rows remain.
+    // After truncate, pre-truncate rows should be gone. Only post-truncate rows
+    // remain.
     let mut actual_users = read_all_rows(&client, namespace.clone(), users_table.clone()).await;
-    for row in &mut actual_users {
-        let _ = row.values_mut().pop(); // drop sequence_key
-    }
     actual_users
         .sort_by(|a, b| format!("{:?}", a.values()[0]).cmp(&format!("{:?}", b.values()[0])));
 
     let expected_users = vec![
-        TableRow::new(vec![
-            Cell::I64(3),
-            Cell::String("user_3".to_owned()),
-            Cell::I32(3),
-            IcebergOperationType::Insert.into(),
-        ]),
-        TableRow::new(vec![
-            Cell::I64(4),
-            Cell::String("user_4".to_owned()),
-            Cell::I32(4),
-            IcebergOperationType::Insert.into(),
-        ]),
+        TableRow::new(vec![Cell::I64(3), Cell::String("user_3".to_owned()), Cell::I32(3)]),
+        TableRow::new(vec![Cell::I64(4), Cell::String("user_4".to_owned()), Cell::I32(4)]),
     ];
     assert_table_rows_equal_ignoring_size(&actual_users, &expected_users);
 
     let mut actual_orders = read_all_rows(&client, namespace.clone(), orders_table.clone()).await;
-    for row in &mut actual_orders {
-        let _ = row.values_mut().pop(); // drop sequence_key
-    }
     actual_orders
         .sort_by(|a, b| format!("{:?}", a.values()[0]).cmp(&format!("{:?}", b.values()[0])));
 
     let expected_orders = vec![
-        TableRow::new(vec![
-            Cell::I64(3),
-            Cell::String("description_3".to_owned()),
-            IcebergOperationType::Insert.into(),
-        ]),
-        TableRow::new(vec![
-            Cell::I64(4),
-            Cell::String("description_4".to_owned()),
-            IcebergOperationType::Insert.into(),
-        ]),
+        TableRow::new(vec![Cell::I64(3), Cell::String("description_3".to_owned())]),
+        TableRow::new(vec![Cell::I64(4), Cell::String("description_4".to_owned())]),
     ];
     assert_table_rows_equal_ignoring_size(&actual_orders, &expected_orders);
 
     // Stop the pipeline to finalize writes.
     pipeline.shutdown_and_wait().await.unwrap();
 
-    // Cleanup: drop CDC tables, namespace, and warehouse.
+    // Cleanup: drop tables, namespace, and warehouse.
     client.drop_table_if_exists(&namespace, users_table).await.unwrap();
     client.drop_table_if_exists(&namespace, orders_table).await.unwrap();
     client.drop_namespace(&namespace).await.unwrap();

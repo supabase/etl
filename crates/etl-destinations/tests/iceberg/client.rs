@@ -265,6 +265,84 @@ async fn drop_table_if_exists_is_idempotent() {
 }
 
 #[tokio::test]
+async fn apply_row_delta_replays_upserts_and_deletes() {
+    init_test_tracing();
+
+    let lakekeeper_client = LakekeeperClient::new(LAKEKEEPER_URL);
+    let (warehouse_name, warehouse_id) = lakekeeper_client.create_warehouse().await.unwrap();
+    let client = IcebergClient::new_with_rest_catalog(
+        get_catalog_url(),
+        warehouse_name,
+        create_minio_props(),
+    )
+    .await
+    .unwrap();
+
+    let namespace = "test_namespace";
+    client.create_namespace_if_missing(namespace).await.unwrap();
+
+    let table_name = "test_delta_table".to_owned();
+    let column_schemas = vec![
+        test_column("id", Type::INT4, 1, false, Some(1)),
+        test_column("name", Type::TEXT, 2, false, None),
+        test_column("age", Type::INT4, 3, false, None),
+    ];
+    client.create_table_if_missing(namespace, table_name.clone(), &column_schemas).await.unwrap();
+
+    let initial_rows = vec![
+        TableRow::new(vec![Cell::I32(1), Cell::String("alice".to_owned()), Cell::I32(10)]),
+        TableRow::new(vec![Cell::I32(2), Cell::String("bob".to_owned()), Cell::I32(20)]),
+    ];
+    client.insert_rows(namespace.to_owned(), table_name.clone(), initial_rows).await.unwrap();
+
+    let upsert_rows = vec![
+        TableRow::new(vec![Cell::I32(1), Cell::String("alice_updated".to_owned()), Cell::I32(11)]),
+        TableRow::new(vec![Cell::I32(3), Cell::String("carol".to_owned()), Cell::I32(30)]),
+    ];
+    let upsert_delete_rows = vec![
+        TableRow::new(vec![Cell::I32(1), Cell::String("alice".to_owned()), Cell::I32(10)]),
+        TableRow::new(vec![Cell::I32(3), Cell::String(String::new()), Cell::I32(0)]),
+    ];
+
+    client
+        .apply_row_delta(
+            namespace.to_owned(),
+            table_name.clone(),
+            upsert_rows.clone(),
+            upsert_delete_rows.clone(),
+        )
+        .await
+        .unwrap();
+    client
+        .apply_row_delta(namespace.to_owned(), table_name.clone(), upsert_rows, upsert_delete_rows)
+        .await
+        .unwrap();
+
+    client
+        .apply_row_delta(
+            namespace.to_owned(),
+            table_name.clone(),
+            Vec::new(),
+            vec![TableRow::new(vec![Cell::I32(2), Cell::String("bob".to_owned()), Cell::I32(20)])],
+        )
+        .await
+        .unwrap();
+
+    let mut read_rows = read_all_rows(&client, namespace.to_owned(), table_name.clone()).await;
+    read_rows.sort_by(|a, b| format!("{:?}", a.values()[0]).cmp(&format!("{:?}", b.values()[0])));
+
+    let expected_rows = vec![
+        TableRow::new(vec![Cell::I32(1), Cell::String("alice_updated".to_owned()), Cell::I32(11)]),
+        TableRow::new(vec![Cell::I32(3), Cell::String("carol".to_owned()), Cell::I32(30)]),
+    ];
+    assert_table_rows_equal_ignoring_size(&read_rows, &expected_rows);
+
+    client.drop_table_if_exists(namespace, table_name).await.unwrap();
+    client.drop_namespace(namespace).await.unwrap();
+    lakekeeper_client.drop_warehouse(warehouse_id).await.unwrap();
+}
+
+#[tokio::test]
 async fn insert_nullable_scalars() {
     init_test_tracing();
 

@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use arrow::array::RecordBatch;
 use etl::{
@@ -6,14 +6,22 @@ use etl::{
     types::{ColumnSchema, TableRow},
 };
 use iceberg::{
-    Catalog, CatalogBuilder, NamespaceIdent, TableCreation, TableIdent,
+    Catalog, CatalogBuilder, Error, ErrorKind, NamespaceIdent, TableCreation, TableIdent,
+    TableRequirement, TableUpdate,
     io::{S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_REGION, S3_SECRET_ACCESS_KEY},
-    spec::{DataFile, TableProperties},
+    spec::{
+        DataFile, DataFileFormat, FormatVersion, MAIN_BRANCH, ManifestContentType, ManifestFile,
+        ManifestListWriter, ManifestWriter, ManifestWriterBuilder, Operation, SchemaRef, Snapshot,
+        SnapshotReference, SnapshotRetention, Summary, TableProperties,
+    },
     table::Table,
     transaction::{ApplyTransactionAction, Transaction},
     writer::{
         IcebergWriter, IcebergWriterBuilder,
-        base_writer::data_file_writer::DataFileWriterBuilder,
+        base_writer::{
+            data_file_writer::DataFileWriterBuilder,
+            equality_delete_writer::{EqualityDeleteFileWriterBuilder, EqualityDeleteWriterConfig},
+        },
         file_writer::{
             ParquetWriterBuilder,
             location_generator::{DefaultFileNameGenerator, DefaultLocationGenerator},
@@ -22,20 +30,36 @@ use iceberg::{
     },
 };
 use iceberg_catalog_rest::{
-    REST_CATALOG_PROP_URI, REST_CATALOG_PROP_WAREHOUSE, RestCatalogBuilder,
+    CommitTableRequest, REST_CATALOG_PROP_URI, REST_CATALOG_PROP_WAREHOUSE, RestCatalogBuilder,
 };
 use parquet::{basic::Compression, file::properties::WriterProperties};
-use tracing::debug;
+use reqwest::{
+    Client, Method, StatusCode,
+    header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, USER_AGENT},
+};
+use serde::Deserialize;
+use tracing::{debug, warn};
 
-use crate::iceberg::{
-    catalog::{SupabaseCatalog, SupabaseClient},
-    encoding::rows_to_record_batch,
-    error::{arrow_error_to_etl_error, iceberg_error_to_etl_error},
-    schema::postgres_to_iceberg_schema,
+use crate::{
+    iceberg::{
+        catalog::{SupabaseCatalog, SupabaseClient},
+        encoding::rows_to_record_batch,
+        error::{arrow_error_to_etl_error, iceberg_error_to_etl_error},
+        schema::postgres_to_iceberg_schema,
+    },
+    retry::{RetryDecision, RetryPolicy, retry_with_backoff},
 };
 
 /// Authentication token key for catalog configuration.
 const CATALOG_TOKEN: &str = "token";
+/// Iceberg REST spec version sent in client headers.
+const ICEBERG_REST_SPEC_VERSION: &str = "0.14.1";
+/// Iceberg REST API path root.
+const REST_API_ROOT: &str = "v1";
+/// Metadata directory under an Iceberg table location.
+const METADATA_DIRECTORY: &str = "metadata";
+/// Default number of row-delta commit retries.
+const ROW_DELTA_COMMIT_RETRIES: u32 = 10;
 
 /// Client for managing Apache Iceberg data lake operations.
 ///
@@ -51,6 +75,9 @@ const CATALOG_TOKEN: &str = "token";
 pub struct IcebergClient {
     /// The underlying Iceberg catalog implementation.
     catalog: Arc<dyn Catalog>,
+    /// REST commit helper used for row-delta commits not exposed by
+    /// iceberg-rust's public transaction API yet.
+    rest_commit: RestCommitClient,
 }
 
 impl IcebergClient {
@@ -68,9 +95,10 @@ impl IcebergClient {
         props.insert(REST_CATALOG_PROP_WAREHOUSE.to_owned(), warehouse_name);
 
         let builder = RestCatalogBuilder::default();
-        let catalog = builder.load("RestCatalog", props).await?;
+        let catalog = builder.load("RestCatalog", props.clone()).await?;
+        let rest_commit = RestCommitClient::from_props(props);
 
-        Ok(IcebergClient { catalog: Arc::new(catalog) })
+        Ok(IcebergClient { catalog: Arc::new(catalog), rest_commit })
     }
 
     /// Creates a new [`IcebergClient`] configured for Supabase storage
@@ -108,11 +136,12 @@ impl IcebergClient {
         props.insert(REST_CATALOG_PROP_WAREHOUSE.to_owned(), warehouse_name.clone());
 
         let builder = RestCatalogBuilder::default();
-        let inner = builder.load("SupabaseCatalog", props).await?;
+        let inner = builder.load("SupabaseCatalog", props.clone()).await?;
         let client = SupabaseClient::new(catalog_uri, warehouse_name, catalog_token);
         let catalog = SupabaseCatalog::new(inner, client);
+        let rest_commit = RestCommitClient::from_props(props);
 
-        Ok(IcebergClient { catalog: Arc::new(catalog) })
+        Ok(IcebergClient { catalog: Arc::new(catalog), rest_commit })
     }
 
     /// Creates a namespace if it does not already exist.
@@ -212,6 +241,7 @@ impl IcebergClient {
             TableProperties::PROPERTY_COMMIT_TOTAL_RETRY_TIME_MS.to_owned(),
             "1800000".to_owned(),
         );
+        props.insert(TableProperties::PROPERTY_FORMAT_VERSION.to_owned(), "2".to_owned());
         props
     }
 
@@ -295,6 +325,10 @@ impl IcebergClient {
         table_name: String,
         table_rows: Vec<TableRow>,
     ) -> EtlResult<u64> {
+        if table_rows.is_empty() {
+            return Ok(0);
+        }
+
         let namespace_ident = NamespaceIdent::new(namespace);
         let table_ident = TableIdent::new(namespace_ident, table_name);
 
@@ -304,14 +338,89 @@ impl IcebergClient {
         let iceberg_schema = table_metadata.current_schema();
 
         // Convert the actual Iceberg schema to Arrow schema using iceberg-rust's
-        // built-in converter This preserves field IDs properly for
-        // transaction-based writes
+        // built-in converter. This preserves field IDs properly for
+        // transaction-based writes.
         let arrow_schema = iceberg::arrow::schema_to_arrow_schema(iceberg_schema)
             .map_err(iceberg_error_to_etl_error)?;
         let record_batch =
             rows_to_record_batch(&table_rows, arrow_schema).map_err(arrow_error_to_etl_error)?;
 
         self.write_record_batch(&table, record_batch).await.map_err(iceberg_error_to_etl_error)
+    }
+
+    /// Applies a CDC row-delta batch to an Iceberg table.
+    ///
+    /// Data rows are appended as Parquet data files. Delete rows are written as
+    /// Iceberg v2 equality-delete files using the table identifier fields.
+    /// When delete files are present, the method commits data and deletes in
+    /// one snapshot through the REST catalog commit endpoint.
+    pub async fn apply_row_delta(
+        &self,
+        namespace: String,
+        table_name: String,
+        data_rows: Vec<TableRow>,
+        delete_rows: Vec<TableRow>,
+    ) -> EtlResult<u64> {
+        if data_rows.is_empty() && delete_rows.is_empty() {
+            return Ok(0);
+        }
+
+        let namespace_ident = NamespaceIdent::new(namespace);
+        let table_ident = TableIdent::new(namespace_ident, table_name);
+        let table =
+            self.catalog.load_table(&table_ident).await.map_err(iceberg_error_to_etl_error)?;
+
+        let mut bytes_sent = 0;
+        let data_files = if data_rows.is_empty() {
+            Vec::new()
+        } else {
+            let record_batch = self.rows_to_table_record_batch(&table, &data_rows)?;
+            let data_files =
+                self.write_data_files(&table, record_batch).await.map_err(|error| {
+                    tracing::error!(error = %error, "failed to write iceberg data files");
+                    iceberg_error_to_etl_error(error)
+                })?;
+            bytes_sent += total_file_size(&data_files);
+            data_files
+        };
+
+        if delete_rows.is_empty() {
+            self.commit_append(&table, data_files).await.map_err(iceberg_error_to_etl_error)?;
+            return Ok(bytes_sent);
+        }
+
+        let record_batch = self.rows_to_table_record_batch(&table, &delete_rows)?;
+        let delete_files =
+            self.write_equality_delete_files(&table, record_batch).await.map_err(|error| {
+                tracing::error!(error = %error, "failed to write iceberg equality-delete files");
+                iceberg_error_to_etl_error(error)
+            })?;
+        bytes_sent += total_file_size(&delete_files);
+
+        self.commit_row_delta(table_ident, data_files, delete_files).await.map_err(|error| {
+            tracing::error!(error = %error, "failed to commit iceberg row delta");
+            iceberg_error_to_etl_error(error)
+        })?;
+
+        Ok(bytes_sent)
+    }
+
+    /// Converts rows to a [`RecordBatch`] using the current Iceberg table
+    /// schema.
+    fn rows_to_table_record_batch(
+        &self,
+        table: &Table,
+        table_rows: &[TableRow],
+    ) -> EtlResult<RecordBatch> {
+        let table_metadata = table.metadata();
+        let iceberg_schema = table_metadata.current_schema();
+
+        let arrow_schema = iceberg::arrow::schema_to_arrow_schema(iceberg_schema)
+            .map_err(iceberg_error_to_etl_error)?;
+        let record_batch =
+            rows_to_record_batch(table_rows, arrow_schema).map_err(arrow_error_to_etl_error)?;
+
+        Ok(record_batch)
     }
 
     /// Writes a RecordBatch to an Iceberg table using Parquet format.
@@ -326,54 +435,663 @@ impl IcebergClient {
         table: &Table,
         record_batch: RecordBatch,
     ) -> Result<u64, iceberg::Error> {
-        // Create Parquet writer properties
-        let writer_props = WriterProperties::builder().set_compression(Compression::SNAPPY).build();
+        let data_files = self.write_data_files(table, record_batch).await?;
+        let bytes_sent = total_file_size(&data_files);
 
-        // Create location and file name generators
-        let location_gen = DefaultLocationGenerator::new(table.metadata().clone())?;
-        let file_name_gen = DefaultFileNameGenerator::new(
-            "data".to_owned(),
-            Some(uuid::Uuid::new_v4().to_string()), // Add unique UUID for each file
-            iceberg::spec::DataFileFormat::Parquet,
-        );
-
-        // Create Parquet writer builder (now only takes props and schema)
-        let parquet_writer_builder =
-            ParquetWriterBuilder::new(writer_props, Arc::clone(table.metadata().current_schema()));
-
-        // Create rolling file writer builder (handles file I/O and location generation)
-        let rolling_writer_builder = RollingFileWriterBuilder::new_with_default_file_size(
-            parquet_writer_builder,
-            table.file_io().clone(),
-            location_gen,
-            file_name_gen,
-        );
-
-        // Create data file writer builder
-        let data_file_writer_builder = DataFileWriterBuilder::new(rolling_writer_builder);
-
-        // Build the writer (pass None for partition key on unpartitioned tables)
-        let mut data_file_writer = data_file_writer_builder.build(None).await?;
-
-        // Write the record batch using Iceberg writer
-        data_file_writer.write(record_batch.clone()).await?;
-
-        // Close writer and get data files
-        let data_files = data_file_writer.close().await?;
-
-        let bytes_sent: u64 = data_files.iter().map(DataFile::file_size_in_bytes).sum();
-
-        // Create transaction and fast append action
-        let transaction = Transaction::new(table);
-        let append_action =
-            transaction.fast_append().with_check_duplicate(false).add_data_files(data_files); // Don't check duplicates for performance
-
-        // Apply the append action to create updated transaction
-        let updated_transaction = append_action.apply(transaction)?;
-
-        // Commit the transaction to the catalog
-        let _updated_table = updated_transaction.commit(&*self.catalog).await?;
+        self.commit_append(table, data_files).await?;
 
         Ok(bytes_sent)
     }
+
+    /// Writes a [`RecordBatch`] to data files without committing them.
+    async fn write_data_files(
+        &self,
+        table: &Table,
+        record_batch: RecordBatch,
+    ) -> Result<Vec<DataFile>, iceberg::Error> {
+        let writer_props = WriterProperties::builder().set_compression(Compression::SNAPPY).build();
+
+        let rolling_writer_builder = parquet_rolling_writer_builder(
+            table,
+            writer_props,
+            "data",
+            Arc::clone(table.metadata().current_schema()),
+        )?;
+
+        let data_file_writer_builder = DataFileWriterBuilder::new(rolling_writer_builder);
+
+        let mut data_file_writer = data_file_writer_builder.build(None).await?;
+
+        data_file_writer.write(record_batch).await?;
+
+        data_file_writer.close().await
+    }
+
+    /// Writes equality-delete files for the table identifier fields.
+    async fn write_equality_delete_files(
+        &self,
+        table: &Table,
+        record_batch: RecordBatch,
+    ) -> Result<Vec<DataFile>, iceberg::Error> {
+        let equality_ids: Vec<_> =
+            table.metadata().current_schema().identifier_field_ids().collect();
+
+        if equality_ids.is_empty() {
+            return Err(Error::new(
+                ErrorKind::PreconditionFailed,
+                "Iceberg equality deletes require identifier fields",
+            ));
+        }
+
+        let config = EqualityDeleteWriterConfig::new(
+            equality_ids,
+            Arc::clone(table.metadata().current_schema()),
+        )?;
+        let delete_schema =
+            Arc::new(iceberg::arrow::arrow_schema_to_schema(config.projected_arrow_schema_ref())?);
+        let writer_props = WriterProperties::builder().set_compression(Compression::SNAPPY).build();
+        let rolling_writer_builder =
+            parquet_rolling_writer_builder(table, writer_props, "delete", delete_schema)?;
+        let equality_delete_writer_builder =
+            EqualityDeleteFileWriterBuilder::new(rolling_writer_builder, config);
+
+        let mut delete_writer = equality_delete_writer_builder.build(None).await?;
+        delete_writer.write(record_batch).await?;
+        delete_writer.close().await
+    }
+
+    /// Commits data files as a fast append transaction.
+    ///
+    /// Duplicate file checks are disabled because this destination writes new
+    /// unique file names for every batch and avoids the extra metadata scan.
+    async fn commit_append(
+        &self,
+        table: &Table,
+        data_files: Vec<DataFile>,
+    ) -> Result<(), iceberg::Error> {
+        if data_files.is_empty() {
+            return Ok(());
+        }
+
+        let transaction = Transaction::new(table);
+        let append_action =
+            transaction.fast_append().with_check_duplicate(false).add_data_files(data_files);
+
+        let updated_transaction = append_action.apply(transaction)?;
+
+        let _updated_table = updated_transaction.commit(&*self.catalog).await?;
+
+        Ok(())
+    }
+
+    /// Commits data and equality-delete files in a single row-delta snapshot.
+    async fn commit_row_delta(
+        &self,
+        table_ident: TableIdent,
+        data_files: Vec<DataFile>,
+        delete_files: Vec<DataFile>,
+    ) -> Result<(), iceberg::Error> {
+        retry_with_backoff(
+            RetryPolicy {
+                max_retries: ROW_DELTA_COMMIT_RETRIES,
+                initial_delay: Duration::from_millis(100),
+                max_delay: Duration::from_secs(1),
+            },
+            |error: &Error| {
+                if error.retryable() { RetryDecision::Retry } else { RetryDecision::Stop }
+            },
+            |delay| delay,
+            |attempt| {
+                warn!(
+                    retry = attempt.retry_index,
+                    max = attempt.max_retries,
+                    delay_ms = attempt.sleep_delay.as_millis(),
+                    error = %attempt.error,
+                    "retrying iceberg row-delta commit"
+                );
+            },
+            || {
+                let catalog = Arc::clone(&self.catalog);
+                let rest_commit = self.rest_commit.clone();
+                let table_ident = table_ident.clone();
+                let data_files = data_files.clone();
+                let delete_files = delete_files.clone();
+
+                async move {
+                    let table = catalog.load_table(&table_ident).await?;
+                    let commit = build_row_delta_commit(&table, data_files, delete_files).await?;
+                    rest_commit.commit_table(&table_ident, commit).await
+                }
+            },
+        )
+        .await
+        .map_err(|failure| failure.last_error)
+    }
+}
+
+/// Request body needed for a REST table commit.
+struct RowDeltaCommit {
+    /// Requirements that must still hold at commit time.
+    requirements: Vec<TableRequirement>,
+    /// Table metadata updates to apply.
+    updates: Vec<TableUpdate>,
+}
+
+/// REST commit helper for table updates that iceberg-rust can represent
+/// in metadata but does not yet expose as public transaction actions.
+#[derive(Debug, Clone)]
+struct RestCommitClient {
+    /// REST catalog base URI.
+    catalog_uri: String,
+    /// Optional warehouse query value.
+    warehouse: Option<String>,
+    /// Catalog properties used for auth headers and runtime config.
+    props: HashMap<String, String>,
+    /// HTTP client.
+    client: Client,
+}
+
+/// Runtime catalog config returned by the REST catalog.
+#[derive(Debug, Deserialize)]
+struct CatalogConfigResponse {
+    /// Server-side property overrides.
+    overrides: HashMap<String, String>,
+    /// Server-side property defaults.
+    defaults: HashMap<String, String>,
+}
+
+/// Resolved REST catalog config.
+#[derive(Debug)]
+struct ResolvedRestConfig {
+    /// Effective catalog URI.
+    catalog_uri: String,
+    /// Effective REST catalog properties.
+    props: HashMap<String, String>,
+}
+
+impl ResolvedRestConfig {
+    /// Builds the REST table endpoint for a table.
+    fn table_endpoint(&self, table: &TableIdent) -> String {
+        let namespace = table.namespace.to_url_string();
+        let mut parts = vec![self.catalog_uri.trim_end_matches('/'), REST_API_ROOT];
+
+        if let Some(prefix) = self.props.get("prefix") {
+            parts.push(prefix);
+        }
+
+        parts.extend(["namespaces", &namespace, "tables", &table.name]);
+
+        parts.join("/")
+    }
+}
+
+/// OAuth token response from REST catalogs.
+#[derive(Debug, Deserialize)]
+struct TokenResponse {
+    /// Access token.
+    access_token: String,
+}
+
+impl RestCommitClient {
+    /// Creates a new [`RestCommitClient`] from REST catalog properties.
+    fn from_props(mut props: HashMap<String, String>) -> Self {
+        let catalog_uri = props.remove(REST_CATALOG_PROP_URI).unwrap_or_default();
+        let warehouse = props.remove(REST_CATALOG_PROP_WAREHOUSE);
+
+        RestCommitClient { catalog_uri, warehouse, props, client: Client::new() }
+    }
+
+    /// Commits table updates through the Iceberg REST API.
+    async fn commit_table(
+        &self,
+        table_ident: &TableIdent,
+        commit: RowDeltaCommit,
+    ) -> Result<(), Error> {
+        let config = self.load_config().await?;
+        let url = config.table_endpoint(table_ident);
+        let body = CommitTableRequest {
+            identifier: Some(table_ident.clone()),
+            requirements: commit.requirements,
+            updates: commit.updates,
+        };
+
+        let response = self
+            .request_with_props(Method::POST, url, &config.props)
+            .await?
+            .json(&body)
+            .send()
+            .await
+            .map_err(|error| {
+                Error::new(ErrorKind::Unexpected, "Iceberg REST commit failed").with_source(error)
+            })?;
+
+        match response.status() {
+            StatusCode::OK => Ok(()),
+            StatusCode::CONFLICT => Err(Error::new(
+                ErrorKind::CatalogCommitConflicts,
+                "Catalog commit conflict while applying Iceberg row delta",
+            )
+            .with_retryable(true)),
+            StatusCode::NOT_FOUND => Err(Error::new(
+                ErrorKind::TableNotFound,
+                "Tried to update an Iceberg table that does not exist",
+            )),
+            status => Err(Error::new(
+                ErrorKind::Unexpected,
+                "Received unexpected response from Iceberg REST commit",
+            )
+            .with_context("status", status.to_string())),
+        }
+    }
+
+    /// Loads runtime REST catalog config and merges it with user config.
+    async fn load_config(&self) -> Result<ResolvedRestConfig, Error> {
+        let mut request =
+            self.request_with_props(Method::GET, self.config_endpoint(), &self.props).await?;
+        if let Some(warehouse) = &self.warehouse {
+            request = request.query(&[("warehouse", warehouse)]);
+        }
+
+        let response = request.send().await.map_err(|error| {
+            Error::new(ErrorKind::Unexpected, "Iceberg REST config request failed")
+                .with_source(error)
+        })?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            return Err(Error::new(
+                ErrorKind::Unexpected,
+                "Received unexpected response from Iceberg REST config",
+            )
+            .with_context("status", status.to_string()));
+        }
+
+        let config = response.json::<CatalogConfigResponse>().await.map_err(|error| {
+            Error::new(ErrorKind::Unexpected, "Failed to parse Iceberg REST config")
+                .with_source(error)
+        })?;
+
+        let mut props = config.defaults;
+        props.extend(self.props.clone());
+        props.extend(config.overrides);
+
+        let catalog_uri =
+            props.get(REST_CATALOG_PROP_URI).cloned().unwrap_or_else(|| self.catalog_uri.clone());
+
+        Ok(ResolvedRestConfig { catalog_uri, props })
+    }
+
+    /// Creates an authenticated request builder from catalog properties.
+    async fn request_with_props(
+        &self,
+        method: Method,
+        url: String,
+        props: &HashMap<String, String>,
+    ) -> Result<reqwest::RequestBuilder, Error> {
+        let mut headers = self.headers(props)?;
+
+        if props.get("rest.sigv4-enabled").is_some_and(|value| value == "true") {
+            return Err(Error::new(
+                ErrorKind::FeatureUnsupported,
+                "Iceberg REST SigV4 authentication is not yet implemented by this destination",
+            ));
+        }
+
+        if let Some(token) = self.bearer_token(props).await? {
+            headers.insert(
+                reqwest::header::AUTHORIZATION,
+                HeaderValue::from_str(&format!("Bearer {token}")).map_err(|error| {
+                    Error::new(ErrorKind::DataInvalid, "Invalid Iceberg REST bearer token")
+                        .with_source(error)
+                })?,
+            );
+        }
+
+        Ok(self.client.request(method, url).headers(headers))
+    }
+
+    /// Returns the REST config endpoint.
+    fn config_endpoint(&self) -> String {
+        [self.catalog_uri.trim_end_matches('/'), REST_API_ROOT, "config"].join("/")
+    }
+
+    /// Builds default and user-provided REST headers.
+    fn headers(&self, props: &HashMap<String, String>) -> Result<HeaderMap, Error> {
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        headers.insert(
+            HeaderName::from_static("x-client-version"),
+            HeaderValue::from_static(ICEBERG_REST_SPEC_VERSION),
+        );
+        headers.insert(USER_AGENT, HeaderValue::from_static("etl-iceberg-writer"));
+
+        for (key, value) in props
+            .iter()
+            .filter_map(|(key, value)| key.strip_prefix("header.").map(|key| (key, value)))
+        {
+            headers.insert(
+                HeaderName::from_bytes(key.as_bytes()).map_err(|error| {
+                    Error::new(ErrorKind::DataInvalid, "Invalid Iceberg REST header name")
+                        .with_source(error)
+                })?,
+                HeaderValue::from_str(value).map_err(|error| {
+                    Error::new(ErrorKind::DataInvalid, "Invalid Iceberg REST header value")
+                        .with_source(error)
+                })?,
+            );
+        }
+
+        Ok(headers)
+    }
+
+    /// Returns a bearer token, exchanging OAuth credentials when necessary.
+    async fn bearer_token(&self, props: &HashMap<String, String>) -> Result<Option<String>, Error> {
+        if let Some(token) = props.get(CATALOG_TOKEN) {
+            return Ok(Some(token.clone()));
+        }
+
+        let Some(credential) = props.get("credential") else {
+            return Ok(None);
+        };
+
+        let (client_id, client_secret) = match credential.split_once(':') {
+            Some((client_id, client_secret)) => (Some(client_id), client_secret),
+            None => (None, credential.as_str()),
+        };
+
+        let mut params = HashMap::new();
+        params.insert("grant_type", "client_credentials");
+        params.insert("client_secret", client_secret);
+        if let Some(client_id) = client_id {
+            params.insert("client_id", client_id);
+        }
+
+        let token_endpoint = props.get("oauth2-server-uri").cloned().unwrap_or_else(|| {
+            [self.catalog_uri.trim_end_matches('/'), REST_API_ROOT, "oauth", "tokens"].join("/")
+        });
+
+        let response = self
+            .client
+            .post(token_endpoint)
+            .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .form(&params)
+            .send()
+            .await
+            .map_err(|error| {
+                Error::new(ErrorKind::Unexpected, "Iceberg REST OAuth request failed")
+                    .with_source(error)
+            })?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            return Err(Error::new(
+                ErrorKind::Unexpected,
+                "Received unexpected response from Iceberg REST OAuth endpoint",
+            )
+            .with_context("status", status.to_string()));
+        }
+
+        let token = response.json::<TokenResponse>().await.map_err(|error| {
+            Error::new(ErrorKind::Unexpected, "Failed to parse Iceberg REST OAuth response")
+                .with_source(error)
+        })?;
+
+        Ok(Some(token.access_token))
+    }
+}
+
+/// Builds and writes a row-delta Iceberg metadata commit.
+async fn build_row_delta_commit(
+    table: &Table,
+    data_files: Vec<DataFile>,
+    delete_files: Vec<DataFile>,
+) -> Result<RowDeltaCommit, Error> {
+    if data_files.is_empty() && delete_files.is_empty() {
+        return Err(Error::new(
+            ErrorKind::PreconditionFailed,
+            "Cannot commit an empty Iceberg row delta",
+        ));
+    }
+
+    let operation = if data_files.is_empty() { Operation::Delete } else { Operation::Overwrite };
+    let snapshot_id = generate_snapshot_id(table);
+    let commit_uuid = uuid::Uuid::new_v4();
+    let mut manifest_counter = 0_u64;
+    let mut manifests = existing_manifests(table).await?;
+
+    if !data_files.is_empty() {
+        let manifest = write_manifest(
+            table,
+            snapshot_id,
+            commit_uuid,
+            &mut manifest_counter,
+            ManifestContentType::Data,
+            data_files,
+        )
+        .await?;
+        manifests.push(manifest);
+    }
+
+    if !delete_files.is_empty() {
+        let manifest = write_manifest(
+            table,
+            snapshot_id,
+            commit_uuid,
+            &mut manifest_counter,
+            ManifestContentType::Deletes,
+            delete_files,
+        )
+        .await?;
+        manifests.push(manifest);
+    }
+
+    let manifest_list_path =
+        write_manifest_list(table, snapshot_id, commit_uuid, manifests).await?;
+    let snapshot = build_snapshot(table, snapshot_id, manifest_list_path, operation);
+
+    let updates = vec![
+        TableUpdate::AddSnapshot { snapshot },
+        TableUpdate::SetSnapshotRef {
+            ref_name: MAIN_BRANCH.to_owned(),
+            reference: SnapshotReference::new(
+                snapshot_id,
+                SnapshotRetention::branch(None, None, None),
+            ),
+        },
+    ];
+    let requirements = vec![
+        TableRequirement::UuidMatch { uuid: table.metadata().uuid() },
+        TableRequirement::RefSnapshotIdMatch {
+            r#ref: MAIN_BRANCH.to_owned(),
+            snapshot_id: table.metadata().current_snapshot_id(),
+        },
+    ];
+
+    Ok(RowDeltaCommit { requirements, updates })
+}
+
+/// Returns the currently live manifests for the table.
+async fn existing_manifests(table: &Table) -> Result<Vec<ManifestFile>, Error> {
+    let Some(snapshot) = table.metadata().current_snapshot() else {
+        return Ok(Vec::new());
+    };
+
+    let manifest_list = snapshot.load_manifest_list(table.file_io(), table.metadata()).await?;
+    let manifests = manifest_list
+        .entries()
+        .iter()
+        .filter(|manifest| manifest.has_added_files() || manifest.has_existing_files())
+        .cloned()
+        .collect();
+
+    Ok(manifests)
+}
+
+/// Writes a manifest file containing added data or delete files.
+async fn write_manifest(
+    table: &Table,
+    snapshot_id: i64,
+    commit_uuid: uuid::Uuid,
+    manifest_counter: &mut u64,
+    content: ManifestContentType,
+    files: Vec<DataFile>,
+) -> Result<ManifestFile, Error> {
+    let mut writer =
+        new_manifest_writer(table, snapshot_id, commit_uuid, manifest_counter, content)?;
+    for file in files {
+        writer.add_file(file, -1)?;
+    }
+    writer.write_manifest_file().await
+}
+
+/// Creates a manifest writer for the table format version.
+fn new_manifest_writer(
+    table: &Table,
+    snapshot_id: i64,
+    commit_uuid: uuid::Uuid,
+    manifest_counter: &mut u64,
+    content: ManifestContentType,
+) -> Result<ManifestWriter, Error> {
+    let manifest_path = format!(
+        "{}/{}/{}-m{}.{}",
+        table.metadata().location(),
+        METADATA_DIRECTORY,
+        commit_uuid,
+        *manifest_counter,
+        DataFileFormat::Avro,
+    );
+    *manifest_counter += 1;
+
+    let output_file = table.file_io().new_output(manifest_path)?;
+    let builder = ManifestWriterBuilder::new(
+        output_file,
+        Some(snapshot_id),
+        None,
+        Arc::clone(table.metadata().current_schema()),
+        table.metadata().default_partition_spec().as_ref().clone(),
+    );
+
+    match (table.metadata().format_version(), content) {
+        (FormatVersion::V1, _) => Err(Error::new(
+            ErrorKind::FeatureUnsupported,
+            "Iceberg row-level deletes require table format version 2 or newer",
+        )),
+        (FormatVersion::V2, ManifestContentType::Data) => Ok(builder.build_v2_data()),
+        (FormatVersion::V2, ManifestContentType::Deletes) => Ok(builder.build_v2_deletes()),
+        (FormatVersion::V3, ManifestContentType::Data) => Ok(builder.build_v3_data()),
+        (FormatVersion::V3, ManifestContentType::Deletes) => Ok(builder.build_v3_deletes()),
+    }
+}
+
+/// Writes the manifest list for a new snapshot.
+async fn write_manifest_list(
+    table: &Table,
+    snapshot_id: i64,
+    commit_uuid: uuid::Uuid,
+    manifests: Vec<ManifestFile>,
+) -> Result<String, Error> {
+    let manifest_list_path = format!(
+        "{}/{}/snap-{}-0-{}.{}",
+        table.metadata().location(),
+        METADATA_DIRECTORY,
+        snapshot_id,
+        commit_uuid,
+        DataFileFormat::Avro,
+    );
+
+    let next_sequence_number = table.metadata().next_sequence_number();
+    let mut writer = match table.metadata().format_version() {
+        FormatVersion::V1 => {
+            return Err(Error::new(
+                ErrorKind::FeatureUnsupported,
+                "Iceberg row-level deletes require table format version 2 or newer",
+            ));
+        }
+        FormatVersion::V2 => ManifestListWriter::v2(
+            table.file_io().new_output(manifest_list_path.clone())?,
+            snapshot_id,
+            table.metadata().current_snapshot_id(),
+            next_sequence_number,
+        ),
+        FormatVersion::V3 => ManifestListWriter::v3(
+            table.file_io().new_output(manifest_list_path.clone())?,
+            snapshot_id,
+            table.metadata().current_snapshot_id(),
+            next_sequence_number,
+            Some(table.metadata().next_row_id()),
+        ),
+    };
+
+    writer.add_manifests(manifests.into_iter())?;
+    writer.close().await?;
+
+    Ok(manifest_list_path)
+}
+
+/// Builds the snapshot metadata for a row-delta commit.
+fn build_snapshot(
+    table: &Table,
+    snapshot_id: i64,
+    manifest_list_path: String,
+    operation: Operation,
+) -> Snapshot {
+    let summary = Summary { operation, additional_properties: HashMap::new() };
+
+    Snapshot::builder()
+        .with_manifest_list(manifest_list_path)
+        .with_snapshot_id(snapshot_id)
+        .with_parent_snapshot_id(table.metadata().current_snapshot_id())
+        .with_sequence_number(table.metadata().next_sequence_number())
+        .with_summary(summary)
+        .with_schema_id(table.metadata().current_schema_id())
+        .with_timestamp_ms(chrono::Utc::now().timestamp_millis())
+        .build()
+}
+
+/// Generates a snapshot ID that is not already used by the table.
+fn generate_snapshot_id(table: &Table) -> i64 {
+    loop {
+        let (lhs, rhs) = uuid::Uuid::new_v4().as_u64_pair();
+        let snapshot_id = (lhs ^ rhs) as i64;
+        let snapshot_id = if snapshot_id < 0 { -snapshot_id } else { snapshot_id };
+
+        if table.metadata().snapshot_by_id(snapshot_id).is_none() {
+            return snapshot_id;
+        }
+    }
+}
+
+/// Creates a rolling Parquet writer builder for data or delete files.
+fn parquet_rolling_writer_builder(
+    table: &Table,
+    writer_props: WriterProperties,
+    prefix: &str,
+    schema: SchemaRef,
+) -> Result<
+    RollingFileWriterBuilder<
+        ParquetWriterBuilder,
+        DefaultLocationGenerator,
+        DefaultFileNameGenerator,
+    >,
+    Error,
+> {
+    let location_gen = DefaultLocationGenerator::new(table.metadata().clone())?;
+    let file_name_gen = DefaultFileNameGenerator::new(
+        prefix.to_owned(),
+        Some(uuid::Uuid::new_v4().to_string()),
+        DataFileFormat::Parquet,
+    );
+    let parquet_writer_builder = ParquetWriterBuilder::new(writer_props, schema);
+
+    Ok(RollingFileWriterBuilder::new_with_default_file_size(
+        parquet_writer_builder,
+        table.file_io().clone(),
+        location_gen,
+        file_name_gen,
+    ))
+}
+
+/// Returns the total file size for a list of Iceberg data files.
+fn total_file_size(files: &[DataFile]) -> u64 {
+    files.iter().map(DataFile::file_size_in_bytes).sum()
 }

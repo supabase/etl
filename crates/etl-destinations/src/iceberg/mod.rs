@@ -9,7 +9,7 @@ pub mod test_utils;
 
 #[cfg(feature = "test-utils")]
 pub use core::table_name_to_iceberg_table_name;
-pub use core::{DestinationNamespace, IcebergDestination, IcebergOperationType};
+pub use core::{DestinationNamespace, IcebergDestination};
 
 pub use client::IcebergClient;
 pub use encoding::UNIX_EPOCH;
