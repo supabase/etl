@@ -83,24 +83,16 @@ Sensitive source and destination config fields are encrypted before being stored
 in the API database. New encrypted values use the configured key with the
 highest `id`, while reads use the `id` stored with each encrypted value.
 
-The fallback `encryption_key` remains required during the migration to
-multi-key config:
-
-```yaml
-encryption_key:
-  id: 1
-  key: <base64-encoded 32-byte key>
-```
-
-Additional keys can be configured for rotation:
+Encryption keys are configured as a non-empty list:
 
 ```yaml
 encryption_keys:
-  - id: 2
+  - id: 1
     key: <base64-encoded 32-byte key>
 ```
 
-After adding a higher key id, existing rows can be re-encrypted with:
+To rotate, add a new entry with a higher `id`. Existing rows can then be
+re-encrypted with:
 
 ```bash
 APP_CONFIG_DIR=/path/to/etl-api/configuration \
@@ -119,8 +111,7 @@ highest configured key id.
 In Kubernetes, run the command from an image that contains the workspace binary
 and mount the same API configuration directory used by `etl-api`. For example,
 mount the `base.yaml` and environment YAML at `/app/configuration`, mount or
-inject the same secrets used for `database`, `encryption_key`, and
-`encryption_keys`, then run:
+inject the same secrets used for `database` and `encryption_keys`, then run:
 
 ```bash
 APP_CONFIG_DIR=/app/configuration \

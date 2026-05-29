@@ -22,7 +22,7 @@ use utoipa_swagger_ui::SwaggerUi;
 
 use crate::{
     authentication::auth_validator,
-    config::{ApiConfig, EncryptionKey as ConfigEncryptionKey},
+    config::{ApiConfig, EncryptionKeyConfig},
     configs::encryption,
     data::publications::Publication,
     feature_flags::{FeatureFlagsClient, init_feature_flags},
@@ -207,49 +207,19 @@ async fn test_orbstack_connection(client: &kube::Client) -> Result<(), K8sError>
     Ok(())
 }
 
-/// Builds the encryption keyring from legacy and multi-key configuration.
+/// Builds the encryption keyring from configured encryption keys.
 pub fn build_encryption_keyring(
     config: &ApiConfig,
 ) -> Result<encryption::EncryptionKeyring, anyhow::Error> {
-    let mut key_configs = Vec::new();
-
-    push_encryption_key_config(&mut key_configs, &config.encryption_key)?;
-
-    for key in &config.encryption_keys {
-        push_encryption_key_config(&mut key_configs, key)?;
-    }
-
-    let keys = key_configs
-        .iter()
-        .map(|key_config| decode_encryption_key(key_config))
-        .collect::<Result<Vec<_>, _>>()?;
+    let keys =
+        config.encryption_keys.iter().map(decode_encryption_key).collect::<Result<Vec<_>, _>>()?;
 
     encryption::EncryptionKeyring::new(keys).map_err(Into::into)
 }
 
-/// Adds a configured encryption key while allowing exact legacy duplicates.
-fn push_encryption_key_config<'a>(
-    key_configs: &mut Vec<&'a ConfigEncryptionKey>,
-    key_config: &'a ConfigEncryptionKey,
-) -> Result<(), anyhow::Error> {
-    if let Some(existing_key_config) =
-        key_configs.iter().find(|existing_key_config| existing_key_config.id == key_config.id)
-    {
-        if existing_key_config.key != key_config.key {
-            anyhow::bail!("Duplicate encryption key id in configuration: {}", key_config.id);
-        }
-
-        return Ok(());
-    }
-
-    key_configs.push(key_config);
-
-    Ok(())
-}
-
 /// Decodes one configured encryption key into runtime key material.
 fn decode_encryption_key(
-    key_config: &ConfigEncryptionKey,
+    key_config: &EncryptionKeyConfig,
 ) -> Result<encryption::EncryptionKey, anyhow::Error> {
     let key_bytes = BASE64_STANDARD
         .decode(&key_config.key)

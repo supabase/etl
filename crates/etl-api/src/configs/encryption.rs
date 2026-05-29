@@ -115,7 +115,7 @@ impl EncryptionKeyring {
 
 impl From<EncryptionKey> for EncryptionKeyring {
     fn from(key: EncryptionKey) -> Self {
-        Self::new(vec![key]).expect("single-key encryption keyring should be valid")
+        Self::new(vec![key]).expect("one-key encryption keyring should be valid")
     }
 }
 
