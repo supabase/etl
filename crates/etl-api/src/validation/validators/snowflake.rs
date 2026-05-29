@@ -87,15 +87,13 @@ impl Validator for SnowflakeValidator {
                      key is encrypted)\n(3) The key is registered for this user\n\nError: {msg}"
                 ),
             )]),
-            Err(snowflake::Error::DatabaseNotFound(db)) => {
-                Ok(vec![ValidationFailure::critical(
-                    "Snowflake Database Not Found",
-                    format!(
-                        "Database '{db}' does not exist.\n\nPlease verify:\n(1) The database name \
-                         is correct\n(2) The user has USAGE privilege on the database"
-                    ),
-                )])
-            }
+            Err(snowflake::Error::DatabaseNotFound(db)) => Ok(vec![ValidationFailure::critical(
+                "Snowflake Database Not Found",
+                format!(
+                    "Database '{db}' does not exist.\n\nPlease verify:\n(1) The database name is \
+                     correct\n(2) The user has USAGE privilege on the database"
+                ),
+            )]),
             Err(snowflake::Error::SchemaNotFound { database, schema }) => {
                 Ok(vec![ValidationFailure::critical(
                     "Snowflake Schema Not Found",
@@ -109,9 +107,8 @@ impl Validator for SnowflakeValidator {
             Err(err) => Ok(vec![ValidationFailure::critical(
                 "Snowflake Connection Failed",
                 format!(
-                    "Cannot connect to Snowflake.\n\nPlease verify:\n(1) The account \
-                     identifier is correct\n(2) Network connectivity to Snowflake\n\nError: \
-                     {err}"
+                    "Cannot connect to Snowflake.\n\nPlease verify:\n(1) The account identifier \
+                     is correct\n(2) Network connectivity to Snowflake\n\nError: {err}"
                 ),
             )]),
         }

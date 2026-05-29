@@ -11,13 +11,13 @@ use bigquery::BigQueryValidator;
 use clickhouse::ClickHouseValidator;
 use ducklake::DucklakeValidator;
 use iceberg::IcebergValidator;
-use snowflake::SnowflakeValidator;
 use pipeline::{
     GeneratedColumnsValidator, PrimaryKeysValidator, PublicationExistsValidator,
     PublicationHasTablesValidator, ReplicationPermissionsValidator, ReplicationSlotsValidator,
     WalLevelValidator,
 };
 use secrecy::ExposeSecret;
+use snowflake::SnowflakeValidator;
 pub(super) use source::SourceValidator;
 
 use super::{ValidationContext, ValidationError, ValidationFailure, Validator};
