@@ -361,6 +361,8 @@ when detecting replays.
 ## Event Batching
 
 ETL batches events before calling `write_events()`. A batch may contain events from **multiple tables, multiple transactions, and mixed event types**.
+Schema changes do not end a batch: because batching is driven by size and time,
+one batch may contain multiple `Relation` events and multiple schema changes.
 
 **Ordering requirement:** Events affecting the same row (by primary key) must be processed in order. Events for different rows can be processed concurrently.
 
