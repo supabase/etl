@@ -1,7 +1,7 @@
+use std::{thread, time::Duration};
+
 use anyhow::{Result, bail};
 use clap::Args;
-use std::thread;
-use std::time::Duration;
 use xshell::{Shell, cmd};
 
 #[derive(Args)]
@@ -61,9 +61,11 @@ impl TestClickhouseArgs {
 
             println!("⏳ Waiting for Postgres to be ready...");
             let pg_user = &self.postgres_user;
+            let pg_check =
+                ["exec", "-T", pg_service.as_str(), "pg_isready", "-U", pg_user.as_str()];
             let mut pg_ready = false;
             for _ in 0..60 {
-                if cmd!(sh, "{docker_compose} -f {compose_file} exec -T {pg_service} pg_isready -U {pg_user}")
+                if cmd!(sh, "{docker_compose} -f {compose_file} {pg_check...}")
                     .quiet()
                     .run()
                     .is_ok()
@@ -80,15 +82,24 @@ impl TestClickhouseArgs {
             println!("⏳ Waiting for ClickHouse to be ready...");
             let ch_user = &self.clickhouse_user;
             let ch_pass = &self.clickhouse_password;
+            let ch_check = [
+                "exec",
+                "-T",
+                ch_service.as_str(),
+                "clickhouse-client",
+                "--user",
+                ch_user.as_str(),
+                "--password",
+                ch_pass.as_str(),
+                "--query",
+                "SELECT 1",
+            ];
             let mut ch_ready = false;
             for _ in 0..60 {
-                if cmd!(
-                    sh,
-                    "{docker_compose} -f {compose_file} exec -T {ch_service} clickhouse-client --user {ch_user} --password {ch_pass} --query 'SELECT 1'"
-                )
-                .quiet()
-                .run()
-                .is_ok()
+                if cmd!(sh, "{docker_compose} -f {compose_file} {ch_check...}")
+                    .quiet()
+                    .run()
+                    .is_ok()
                 {
                     ch_ready = true;
                     break;
@@ -114,7 +125,10 @@ impl TestClickhouseArgs {
             sh.set_var("TESTS_DATABASE_PASSWORD", &self.postgres_password);
         }
         if sh.var("TESTS_CLICKHOUSE_URL").is_err() {
-            sh.set_var("TESTS_CLICKHOUSE_URL", format!("http://localhost:{}", self.clickhouse_http_port));
+            sh.set_var(
+                "TESTS_CLICKHOUSE_URL",
+                format!("http://localhost:{}", self.clickhouse_http_port),
+            );
         }
         if sh.var("TESTS_CLICKHOUSE_USER").is_err() {
             sh.set_var("TESTS_CLICKHOUSE_USER", &self.clickhouse_user);
@@ -125,15 +139,23 @@ impl TestClickhouseArgs {
 
         println!("🧪 Running ClickHouse destination tests...");
         let filter = &self.filter;
-        
-        let mut cargo_args = vec!["test", "-p", "etl-destinations", "--features", "clickhouse,test-utils", "--test", "main"];
+
+        let mut cargo_args = vec![
+            "test",
+            "-p",
+            "etl-destinations",
+            "--features",
+            "clickhouse,test-utils",
+            "--test",
+            "main",
+        ];
         if !filter.is_empty() {
             cargo_args.push(filter);
         }
         cargo_args.extend(["--", "--nocapture"]);
 
         if let Some(tc) = &self.toolchain {
-            let tc_arg = format!("+{}", tc);
+            let tc_arg = format!("+{tc}");
             cmd!(sh, "cargo {tc_arg} {cargo_args...}").run()?;
         } else {
             cmd!(sh, "cargo {cargo_args...}").run()?;
