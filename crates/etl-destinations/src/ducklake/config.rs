@@ -125,6 +125,12 @@ impl DuckLakeSetupPlan {
         &self.steps
     }
 
+    /// Builds a setup plan from explicit setup steps.
+    #[cfg(test)]
+    pub(super) fn from_steps(steps: Vec<DuckLakeSetupStep>) -> Self {
+        Self { steps }
+    }
+
     /// Returns all setup SQL concatenated into one batch.
     #[cfg(test)]
     pub(super) fn combined_sql(&self) -> String {

@@ -230,7 +230,7 @@ async fn interrupt_duckdb_connections_on_process_shutdown(manager: Arc<DuckLakeC
         _ = sigint.recv() => "sigint",
     };
 
-    let interrupted_connections = manager.interrupt_all_connections_for_shutdown();
+    let interrupted_connections = manager.interrupt_all_connections_for_process_shutdown();
     info!(
         interrupted_connections,
         signal = signal_name,
@@ -246,7 +246,7 @@ async fn interrupt_duckdb_connections_on_process_shutdown(manager: Arc<DuckLakeC
         return;
     }
 
-    let interrupted_connections = manager.interrupt_all_connections_for_shutdown();
+    let interrupted_connections = manager.interrupt_all_connections_for_process_shutdown();
     info!(
         interrupted_connections,
         signal = "ctrl_c",
