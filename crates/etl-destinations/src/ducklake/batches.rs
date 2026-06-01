@@ -1946,7 +1946,6 @@ fn apply_delete_mutation(
             etl_error!(
                 ErrorKind::DestinationQueryFailed,
                 "DuckLake DELETE failed",
-                format_query_error_detail(&sql_query),
                 source: error
             )
         })?;
@@ -1974,7 +1973,6 @@ fn apply_update_mutation(
         etl_error!(
             ErrorKind::DestinationQueryFailed,
             "DuckLake UPDATE failed",
-            format_query_error_detail(&sql_query),
             source: err
         )
     })?;
@@ -2154,6 +2152,8 @@ fn maybe_fail_after_copy_batch_commit_for_tests(table_name: &str) -> EtlResult<(
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error as _;
+
     use etl::types::{
         ColumnSchema, IdentityMask, OldTableRow, PartialTableRow, ReplicatedTableSchema,
         ReplicationMask, TableId, TableName, TableSchema, Type as PgType, UpdatedTableRow,
@@ -2174,6 +2174,73 @@ mod tests {
 
     fn make_replicated_schema() -> ReplicatedTableSchema {
         ReplicatedTableSchema::all(Arc::new(make_schema()))
+    }
+
+    fn make_prepared_batch(table_name: &str) -> PreparedDuckLakeTableBatch {
+        PreparedDuckLakeTableBatch {
+            table_name: table_name.to_owned(),
+            batch_id: "test-batch".to_owned(),
+            batch_kind: DuckLakeTableBatchKind::Mutation,
+            first_start_lsn: None,
+            last_commit_lsn: None,
+            first_sequence_key: None,
+            last_sequence_key: None,
+            insert_column_names: vec![],
+            action: PreparedDuckLakeTableBatchAction::Mutation(vec![]),
+        }
+    }
+
+    fn assert_query_failure_omits_sensitive_value(
+        error: &etl::error::EtlError,
+        description: &'static str,
+        sensitive_value: &str,
+    ) {
+        assert_eq!(error.kind(), ErrorKind::DestinationQueryFailed);
+        assert_eq!(error.description(), Some(description));
+        assert_eq!(error.detail(), None);
+        assert!(error.source().is_some());
+        assert!(!error.to_string().contains(sensitive_value));
+    }
+
+    #[test]
+    fn apply_delete_mutation_failure_omits_row_values_from_detail() {
+        let conn = duckdb::Connection::open_in_memory().unwrap();
+        let batch = make_prepared_batch("users");
+        let operation_context = DuckLakeBlockingOperationContext::for_tests();
+        let sensitive_value = "alice@example.com";
+        let predicates = vec![format!("\"email\" = '{sensitive_value}'")];
+
+        let error = apply_delete_mutation(
+            &conn,
+            &batch,
+            predicates.as_slice(),
+            "delete",
+            &operation_context,
+        )
+        .unwrap_err();
+
+        assert_query_failure_omits_sensitive_value(
+            &error,
+            "DuckLake DELETE failed",
+            sensitive_value,
+        );
+    }
+
+    #[test]
+    fn apply_update_mutation_failure_omits_row_values_from_detail() {
+        let conn = duckdb::Connection::open_in_memory().unwrap();
+        let sensitive_value = "secret-token";
+        let assignments = vec![format!("\"token\" = '{sensitive_value}'")];
+        let predicate = format!("\"token\" = '{sensitive_value}'");
+
+        let error =
+            apply_update_mutation(&conn, "users", assignments.as_slice(), &predicate).unwrap_err();
+
+        assert_query_failure_omits_sensitive_value(
+            &error,
+            "DuckLake UPDATE failed",
+            sensitive_value,
+        );
     }
 
     #[test]

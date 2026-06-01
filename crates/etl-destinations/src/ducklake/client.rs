@@ -153,6 +153,18 @@ impl DuckLakeBlockingOperationContext {
     pub(super) fn interrupt_reason_label(&self) -> &'static str {
         self.interrupt_state.reason().as_str()
     }
+
+    /// Creates a minimal context for unit tests that call batch helpers
+    /// directly.
+    #[cfg(test)]
+    pub(super) fn for_tests() -> Self {
+        Self::new(
+            0,
+            DUCKDB_BLOCKING_OPERATION_KIND,
+            Duration::ZERO,
+            Arc::new(DuckLakeInterruptState::default()),
+        )
+    }
 }
 
 trait DuckDbQueryInterrupt: Send + Sync + 'static {
