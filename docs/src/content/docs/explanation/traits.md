@@ -38,6 +38,7 @@ pub trait Destination {
 - `write_table_rows()` and `write_events()` must tolerate **duplicate delivery** because ETL may retry or replay after failure.
 - Handle **concurrent calls** safely, especially from parallel table sync workers.
 - Preserve **per-table event order**. During initial copy and catch-up, transaction markers are not a reliable all-tables transaction boundary.
+- Treat `Event::Relation` as an ordered schema transition, not a `write_events()` batch boundary. ETL batches streaming events by size and time, so one call can contain multiple schema changes, including multiple relation events for the same table.
 - Always complete the supplied async result handle. Dropping it reports a destination error to ETL.
 - All three write-like methods use async results, but ETL waits differently. `drop_table_for_copy()` waits immediately before copy-scoped store cleanup. `write_table_rows()` also waits immediately, requesting the next batch only after the current one finishes for that copy partition. `write_events()` is the method where ETL can keep processing other work while the destination finishes the current batch; ETL still waits for that batch's async result before handing the destination the next streaming batch.
 

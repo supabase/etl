@@ -116,19 +116,28 @@ POSTGRES_DATA_VOLUME=/path/to/data cargo x init
 | `POSTGRES_PASSWORD` | `postgres` | Database password |
 | `POSTGRES_DB` | `postgres` | Database name |
 | `POSTGRES_PORT` | `5430` | Database port |
+| `POSTGRES_REPLICA_PORT` | `6430` | Read replica database port |
 | `POSTGRES_HOST` | `localhost` | Database host |
+| `POSTGRES_MAX_WAL_SENDERS` | `100` | Local Postgres WAL sender capacity for replication tests |
+| `POSTGRES_MAX_REPLICATION_SLOTS` | `100` | Local Postgres slot capacity for physical and logical replication tests |
+| `POSTGRES_WAL_SENDER_TIMEOUT` | `10s` | Local Postgres WAL sender timeout used by replication tests |
+| `POSTGRES_REPLICA_WAL_RECEIVER_STATUS_INTERVAL` | `1s` | Read replica WAL receiver feedback interval |
+| `POSTGRES_REPLICA_MAX_STANDBY_STREAMING_DELAY` | `-1` | Read replica conflict delay used to avoid canceling long test copies |
 | `CLICKHOUSE_HTTP_PORT` | `8123` | ClickHouse HTTP port |
 | `CLICKHOUSE_NATIVE_PORT` | `9000` | ClickHouse native TCP port |
 | `CLICKHOUSE_USER` | `etl` | ClickHouse user for the local Docker Compose setup |
 | `CLICKHOUSE_PASSWORD` | `etl` | ClickHouse password for the local Docker Compose setup |
 | `SKIP_DOCKER` | (empty) | Skip Docker Compose if set |
 | `POSTGRES_DATA_VOLUME` | (empty) | Path for PostgreSQL persistent storage |
+| `POSTGRES_REPLICA_DATA_VOLUME` | (empty) | Path for PostgreSQL read replica persistent storage |
 | `CLICKHOUSE_DATA_VOLUME` | (empty) | Path for ClickHouse persistent storage |
 | `REPLICATOR_IMAGE` | `ramsup/etl-replicator:latest` | Default replicator image |
 
 PostgreSQL 18+ containers store data under `/var/lib/postgresql/<major>/data`, so the Docker Compose setup mounts the parent `/var/lib/postgresql` directory to keep upgrades compatible.
 
 The source PostgreSQL container started by `cargo x init` or `cargo xtask postgres start` supports TLS by default. The task runner generates a local test CA and server certificate under `target/postgres-tls/`, then copies the server certificate and key into the container. Local clients may still connect without TLS; set `TESTS_DATABASE_TLS_ENABLED=true` when running tests to require verified TLS using the generated root certificate.
+
+The same local PostgreSQL setup also starts a physical read replica for logical decoding tests. By default, the primary listens on `localhost:5430` and the replica listens on `localhost:6430`. Additional sharded test clusters use the same `+1000` port offset for their replicas. The replica is created with `pg_basebackup`, streams from the primary through a physical replication slot, and enables `hot_standby_feedback`. ETL logical slots are created on the read replica during these tests; the primary only owns the physical slot that feeds the replica.
 
 The same Docker Compose stack also starts ClickHouse on `http://localhost:8123` by default, which is enough for local destination development and ClickHouse integration tests.
 
@@ -407,6 +416,8 @@ All tests that interact with PostgreSQL require the following environment variab
 |----------|----------|-------------|
 | `TESTS_DATABASE_HOST` | **Yes** | PostgreSQL server hostname (e.g., `localhost`) |
 | `TESTS_DATABASE_PORT` | **Yes** | PostgreSQL server port (e.g., `5430`) |
+| `TESTS_DATABASE_REPLICA_HOST` | No | Read replica hostname for tests that require standby logical decoding; defaults to `TESTS_DATABASE_HOST` |
+| `TESTS_DATABASE_REPLICA_PORT` | No | Read replica port for tests that require standby logical decoding; defaults to `TESTS_DATABASE_PORT + 1000` |
 | `TESTS_DATABASE_USERNAME` | **Yes** | Database user (e.g., `postgres`) |
 | `TESTS_DATABASE_PASSWORD` | No | Database password (optional) |
 | `TESTS_DATABASE_TLS_ENABLED` | No | Require verified TLS for Postgres test clients when set to `true` |
@@ -479,6 +490,8 @@ Export variables in your current shell session, then run tests:
 # PostgreSQL test configuration
 export TESTS_DATABASE_HOST=localhost
 export TESTS_DATABASE_PORT=5430
+export TESTS_DATABASE_REPLICA_HOST=localhost
+export TESTS_DATABASE_REPLICA_PORT=6430
 export TESTS_DATABASE_USERNAME=postgres
 export TESTS_DATABASE_PASSWORD=postgres
 # Optional when using the local Docker Compose Postgres from cargo x init.

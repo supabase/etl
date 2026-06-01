@@ -58,6 +58,11 @@ The important public boundary is:
 
 Destinations should treat `Event::Relation` as the point where the **active schema changes** for following row events.
 
+`Relation` is an ordered event, not a batch boundary. ETL batches calls to
+`write_events()` based on size and time, so a single destination batch may
+contain zero, one, or many schema changes, including multiple relation events
+for the same table.
+
 ## Destination-Specific DDL Behavior
 
 ETL has one shared schema-change signal, but **DDL behavior is implemented per destination**. A destination may choose to apply DDL automatically, reject a schema change, or require operator handling.
@@ -93,16 +98,18 @@ watching for `Event::Relation`.
 
 A practical flow is:
 
-1. Flush any buffered rows/events for the old schema before processing the
+1. Iterate through the batch in order, treating each relation event as a
+   possible schema transition for that table.
+2. Flush any buffered rows/events for the old schema before processing the
    relation event.
-2. Compare the old destination schema with the relation event's new
+3. Compare the old destination schema with the relation event's new
    `ReplicatedTableSchema`.
-3. Mark destination metadata as `Applying` if the destination needs recovery
+4. Mark destination metadata as `Applying` if the destination needs recovery
    bookkeeping for the DDL transition.
-4. Apply supported destination DDL for adds, drops, and renames.
-5. Mark destination metadata as `Applied` only after the destination schema is
+5. Apply supported destination DDL for adds, drops, and renames.
+6. Mark destination metadata as `Applied` only after the destination schema is
    actually ready for following row events.
-6. Process following row events with the new schema.
+7. Process following row events with the new schema.
 
 The built-in BigQuery, ClickHouse, Iceberg, and Snowflake destinations follow
 this shape: they mark destination schema metadata as `Applying`, apply the

@@ -64,8 +64,8 @@ enum TableStateCleanupScope {
 /// This is ideal for the store connection since we might want a connection to
 /// be open for a while and then closed when it's unnecessary since after the
 /// first table copy state, we don't update the state so often.
-fn create_database_pool(config: &PgConnectionConfig) -> PgPool {
-    let options = config.with_db(Some(&ETL_STATE_MANAGEMENT_OPTIONS));
+fn create_database_pool(connection_config: &PgConnectionConfig) -> PgPool {
+    let options = connection_config.with_db(Some(&ETL_STATE_MANAGEMENT_OPTIONS));
 
     PgPoolOptions::new()
         .min_connections(0)
@@ -182,11 +182,11 @@ impl PostgresStore {
     /// and automatically closed after `IDLE_TIMEOUT` of inactivity.
     pub async fn new(
         pipeline_id: PipelineId,
-        source_config: PgConnectionConfig,
+        connection_config: PgConnectionConfig,
     ) -> EtlResult<Self> {
-        migrations::run_postgres_store_migrations(&source_config).await?;
+        migrations::run_postgres_store_migrations(&connection_config).await?;
 
-        let pool = create_database_pool(&source_config);
+        let pool = create_database_pool(&connection_config);
         let inner = Inner {
             state_counts: HashMap::new(),
             table_states: Arc::new(BTreeMap::new()),

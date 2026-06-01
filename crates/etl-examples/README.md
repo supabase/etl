@@ -77,7 +77,7 @@ ALTER USER my_user REPLICATION;
 The fastest way to get a seeded database with a publication is via the xtask:
 
 ```bash
-# Start the dev Postgres (port 5430, wal_level=logical)
+# Start the dev Postgres primary (port 5430) and read replica (port 6430)
 cargo x init
 
 # Create and seed a database with 3 tables (users, orders, events) and a publication

@@ -153,6 +153,29 @@ impl Display for SequencedBigQueryTableId {
     }
 }
 
+/// Returns the sequenced table id stored in destination metadata.
+fn metadata_sequenced_table_id_for_base(
+    metadata: &DestinationTableMetadata,
+    base_bigquery_table_id: &BigQueryTableId,
+) -> EtlResult<SequencedBigQueryTableId> {
+    let sequenced_bigquery_table_id =
+        metadata.destination_table_id.parse::<SequencedBigQueryTableId>()?;
+
+    if !sequenced_bigquery_table_id.belongs_to_base(base_bigquery_table_id) {
+        bail!(
+            ErrorKind::InvalidState,
+            "Destination table metadata points to a different BigQuery table",
+            format!(
+                "Destination table metadata points to '{}', but reset copy cleanup expected a \
+                 sequenced table for '{}'",
+                metadata.destination_table_id, base_bigquery_table_id
+            )
+        );
+    }
+
+    Ok(sequenced_bigquery_table_id)
+}
+
 /// Internal state for [`BigQueryDestination`] wrapped in `Arc<Mutex<>>`.
 ///
 /// Contains caches and state that require synchronization across concurrent
@@ -1159,6 +1182,14 @@ where
         let table_id = replicated_table_schema.id();
         let mut table_ids = HashSet::new();
 
+        // Always include the durable metadata target. BigQuery INFORMATION_SCHEMA
+        // can lag behind recently-created tables, but destination metadata is the
+        // source of truth for the table this pipeline last wrote to.
+        if let Some(metadata) = self.state_store.get_destination_table_metadata(table_id).await? {
+            table_ids
+                .insert(metadata_sequenced_table_id_for_base(&metadata, &base_bigquery_table_id)?);
+        }
+
         // Discover physical table versions from BigQuery instead of the local cache.
         // Older processes may have created versions this process never cached.
         let listed_table_ids =
@@ -1899,6 +1930,36 @@ mod tests {
             None
         );
         assert_eq!(SequencedBigQueryTableId::parse_for_base("users_table", &base_table_id), None);
+    }
+
+    #[test]
+    fn metadata_sequenced_table_id_for_base_uses_metadata_target() {
+        let replicated_table_schema = replicated_schema(IdentityType::PrimaryKey);
+        let metadata = DestinationTableMetadata::new_applied(
+            "users_table_3".to_owned(),
+            replicated_table_schema.inner().snapshot_id,
+            replicated_table_schema.replication_mask().clone(),
+        );
+
+        let sequenced_table_id =
+            metadata_sequenced_table_id_for_base(&metadata, &"users_table".to_owned()).unwrap();
+
+        assert_eq!(sequenced_table_id, SequencedBigQueryTableId("users_table".to_owned(), 3));
+    }
+
+    #[test]
+    fn metadata_sequenced_table_id_for_base_rejects_unrelated_metadata_target() {
+        let replicated_table_schema = replicated_schema(IdentityType::PrimaryKey);
+        let metadata = DestinationTableMetadata::new_applied(
+            "orders_table_0".to_owned(),
+            replicated_table_schema.inner().snapshot_id,
+            replicated_table_schema.replication_mask().clone(),
+        );
+
+        let err = metadata_sequenced_table_id_for_base(&metadata, &"users_table".to_owned())
+            .expect_err("metadata target should belong to the reset table");
+
+        assert_eq!(err.kind(), ErrorKind::InvalidState);
     }
 
     #[test]
