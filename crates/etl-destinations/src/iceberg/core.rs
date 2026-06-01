@@ -1135,21 +1135,14 @@ fn validate_iceberg_table_identity(
     ))
 }
 
-/// Converts a Postgres schema name to a valid S3 Tables namespace.
+/// Converts a Postgres schema name to a portable Iceberg namespace.
 fn schema_to_namespace(schema: &str) -> String {
     // Convert to lowercase and replace invalid characters with underscores.
-    // S3 Tables namespaces can only contain lowercase letters, numbers, and
-    // underscores.
     let mut namespace: String = schema
         .to_lowercase()
         .chars()
         .map(|c| if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' { c } else { '_' })
         .collect();
-
-    // S3 Tables namespaces must not start with 'aws'.
-    if namespace.starts_with("aws") {
-        namespace = format!("s_{namespace}");
-    }
 
     // Ensure namespace starts with a letter or number.
     if let Some(first_char) = namespace.chars().next()
@@ -1426,7 +1419,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_to_namespace_starts_with_underscore() {
+    fn schema_to_namespace_prefixes_reserved_leading_underscore() {
         // Names starting with underscore should be prefixed with 's'.
         assert_eq!(schema_to_namespace("_private"), "s_private");
         assert_eq!(schema_to_namespace("_temp"), "s_temp");
@@ -1451,21 +1444,20 @@ mod tests {
     }
 
     #[test]
-    fn schema_to_namespace_starts_with_aws() {
-        // Names starting with 'aws' should be prefixed with 's_'.
-        assert_eq!(schema_to_namespace("aws_internal"), "s_aws_internal");
-        assert_eq!(schema_to_namespace("aws"), "s_aws");
-        assert_eq!(schema_to_namespace("awsschema"), "s_awsschema");
-        assert_eq!(schema_to_namespace("AWS"), "s_aws");
+    fn schema_to_namespace_preserves_catalog_prefix() {
+        // Catalog-specific reserved prefixes are handled outside ETL.
+        assert_eq!(schema_to_namespace("reserved_internal"), "reserved_internal");
+        assert_eq!(schema_to_namespace("reserved"), "reserved");
+        assert_eq!(schema_to_namespace("reservedschema"), "reservedschema");
+        assert_eq!(schema_to_namespace("RESERVED"), "reserved");
     }
 
     #[test]
-    fn schema_to_namespace_starts_with_underscore_and_aws() {
-        // Names starting with underscore followed by 'aws'.
-        assert_eq!(schema_to_namespace("_aws_internal"), "s_aws_internal");
-        assert_eq!(schema_to_namespace("_aws"), "s_aws");
-        // After removing leading underscore, it becomes 'aws', so needs 's_' prefix.
-        assert_eq!(schema_to_namespace("__aws"), "s__aws");
+    fn schema_to_namespace_starts_with_underscore() {
+        // Names starting with underscore are prefixed with a safe leading letter.
+        assert_eq!(schema_to_namespace("_reserved_internal"), "s_reserved_internal");
+        assert_eq!(schema_to_namespace("_reserved"), "s_reserved");
+        assert_eq!(schema_to_namespace("__reserved"), "s__reserved");
     }
 
     #[test]

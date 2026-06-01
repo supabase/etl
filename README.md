@@ -207,9 +207,8 @@ the new row, deletes write equality-delete files, and truncates drop and
 recreate the table. It does not run Iceberg maintenance. High-frequency CDC can
 fragment data files, delete files, manifests, snapshots, and metadata, so a
 separate Iceberg maintenance service is required for healthy and performant
-tables. If you store the experimental tables in AWS S3 Tables, manage and
-monitor S3 Tables maintenance outside ETL. BigQuery and DuckLake are the
-supported destination paths.
+tables. Storage/catalog backends are outside this destination's support
+contract. BigQuery and DuckLake are the supported destination paths.
 
 Enable one or more destination modules with crate features:
 

@@ -16,9 +16,8 @@
 //! snapshots, and metadata files over time. This module does not run
 //! compaction, snapshot expiration, manifest rewrites, or orphan-file cleanup.
 //! Operators must provide those Iceberg maintenance jobs externally before
-//! relying on these tables for healthy or performant reads. When using AWS S3
-//! Tables, this means verifying and tuning table maintenance in AWS; ETL does
-//! not configure or validate that backend maintenance.
+//! relying on these tables for healthy or performant reads. ETL does not
+//! configure or validate backend catalog or storage maintenance.
 
 mod catalog;
 mod client;

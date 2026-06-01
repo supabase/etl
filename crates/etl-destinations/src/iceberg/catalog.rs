@@ -354,21 +354,15 @@ impl SupabaseClient {
 
     /// Removes a table from the catalog with data purging.
     ///
-    /// Sends a DELETE request with `purgeRequested=true` parameter as S3 tables
-    /// in Supabase require purging during deletion. Returns an error if the
+    /// Sends a DELETE request with `purgeRequested=true` so storage-backed
+    /// catalogs remove table data during deletion. Returns an error if the
     /// table does not exist.
     async fn drop_table(&self, table: &TableIdent) -> Result<()> {
         let namespace_path = table.namespace().as_ref().join(".");
         let url = self.table_url(&namespace_path, table.name());
 
         let http_response = self
-            .send_request(
-                reqwest::Method::DELETE,
-                &url,
-                None,
-                Some(&[("purgeRequested", "true")]), /* S3 tables doesn't support dropping
-                                                      * tables without purging */
-            )
+            .send_request(reqwest::Method::DELETE, &url, None, Some(&[("purgeRequested", "true")]))
             .await?;
 
         match http_response.status() {
