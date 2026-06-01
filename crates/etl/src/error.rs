@@ -357,6 +357,16 @@ fn write_error_tree(
             {
                 write!(f, ": {}", detail.lines().collect::<Vec<_>>().join(" "))?;
             }
+
+            if let Some(source) = &payload.source {
+                let source_prefix = if is_root {
+                    String::new()
+                } else {
+                    format!("{prefix}{}", if is_last { "   " } else { "│  " })
+                };
+                write_source_chain(source.as_ref(), f, &source_prefix)?;
+            }
+
             Ok(())
         }
         ErrorRepr::Many { errors, .. } => {
@@ -381,6 +391,32 @@ fn write_error_tree(
             Ok(())
         }
     }
+}
+
+/// Writes the source chain below an error in a compact, readable form.
+fn write_source_chain(
+    source: &(dyn error::Error + 'static),
+    f: &mut fmt::Formatter<'_>,
+    prefix: &str,
+) -> fmt::Result {
+    writeln!(f)?;
+    write!(f, "{prefix}caused by:")?;
+
+    let mut current = Some(source);
+    let mut index = 1;
+
+    while let Some(error) = current {
+        writeln!(f)?;
+        write!(
+            f,
+            "{prefix}  {index}. {}",
+            error.to_string().lines().collect::<Vec<_>>().join(" ")
+        )?;
+        current = error.source();
+        index += 1;
+    }
+
+    Ok(())
 }
 
 impl error::Error for EtlError {
@@ -1084,6 +1120,42 @@ mod tests {
         let err = EtlError::from(io_err);
         let source = err.source().expect("missing source");
         assert_eq!(source.to_string(), "Boom");
+    }
+
+    #[test]
+    fn display_includes_source_chain() {
+        let err = etl_error!(
+            ErrorKind::DestinationError,
+            "BigQuery invalid argument",
+            source: std::io::Error::other(
+                "Data decompression failed with decompression status: RESOURCE_EXHAUSTED"
+            )
+        );
+
+        assert_eq!(
+            err.to_string(),
+            "[DestinationError] BigQuery invalid argument\ncaused by:\n  1. Data decompression \
+             failed with decompression status: RESOURCE_EXHAUSTED"
+        );
+    }
+
+    #[test]
+    fn display_indents_source_chain_for_aggregated_errors() {
+        let err = etl_error!(
+            ErrorKind::DestinationError,
+            "BigQuery invalid argument",
+            source: std::io::Error::other("Maximum length exceeded: 10485760")
+        );
+        let multi_err = EtlError::from(vec![
+            err,
+            EtlError::from((ErrorKind::ValidationError, "Invalid schema")),
+        ]);
+
+        assert_eq!(
+            multi_err.to_string(),
+            "2 errors occurred\n├─ [DestinationError] BigQuery invalid argument\n│  caused \
+             by:\n│    1. Maximum length exceeded: 10485760\n└─ [ValidationError] Invalid schema"
+        );
     }
 
     #[test]
