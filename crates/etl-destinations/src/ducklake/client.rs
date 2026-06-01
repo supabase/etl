@@ -1623,9 +1623,8 @@ mod tests {
             ..make_blocking_test_manager()
         };
 
-        let error = match manager.open_duckdb_connection() {
-            Ok(_) => panic!("setup should fail"),
-            Err(error) => error,
+        let Err(error) = manager.open_duckdb_connection() else {
+            panic!("setup should fail");
         };
 
         assert!(error.to_string().contains("failing_setup"), "unexpected setup error: {error}");
