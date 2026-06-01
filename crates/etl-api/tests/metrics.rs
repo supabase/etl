@@ -1,4 +1,5 @@
 use etl_telemetry::tracing::init_test_tracing;
+use reqwest::Url;
 
 use crate::support::test_app::spawn_test_app;
 
@@ -12,7 +13,7 @@ async fn metrics_endpoint_returns_200() {
 
     // Act
     let response = client
-        .get(format!("{}/metrics", app.address))
+        .get(local_test_url(&app.address, "/metrics"))
         .send()
         .await
         .expect("Failed to execute request.");
@@ -31,12 +32,12 @@ async fn metrics_endpoint_includes_http_request_metrics() {
 
     // Act
     let health_response = client
-        .get(format!("{}/health_check", app.address))
+        .get(local_test_url(&app.address, "/health_check"))
         .send()
         .await
         .expect("Failed to execute request.");
     let metrics = client
-        .get(format!("{}/metrics", app.address))
+        .get(local_test_url(&app.address, "/metrics"))
         .send()
         .await
         .expect("Failed to execute request.")
@@ -57,4 +58,19 @@ fn has_health_request_metric(metrics: &str, prefix: &str) -> bool {
             && line.contains(r#"method="GET""#)
             && line.contains(r#"status="200""#)
     })
+}
+
+fn local_test_url(address: &str, path: &str) -> Url {
+    let address = Url::parse(address).expect("test app address should be a URL");
+
+    assert_eq!(address.scheme(), "http");
+    assert_eq!(address.host_str(), Some("127.0.0.1"));
+    assert!(address.username().is_empty());
+    assert!(address.password().is_none());
+    assert_eq!(address.query(), None);
+
+    let port = address.port().expect("test app address should include a port");
+
+    Url::parse(&format!("http://127.0.0.1:{port}{path}"))
+        .expect("test app endpoint URL should be valid")
 }
