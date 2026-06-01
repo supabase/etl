@@ -771,6 +771,7 @@ pub fn pipeline_config(
             tls: TlsConfig { trusted_root_certs: pg.tls_certs.clone(), enabled: pg.tls_enabled },
             keepalive: TcpKeepaliveConfig::default(),
         },
+        store_pg_connection: None,
         batch: BatchConfig {
             max_fill_ms: tuning.batch_max_fill_ms,
             memory_budget_ratio: tuning.memory_budget_ratio,

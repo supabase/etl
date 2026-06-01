@@ -2,6 +2,7 @@ use xshell::Cmd;
 
 pub(crate) const DEFAULT_PG_SHARD_COUNT: u16 = 3;
 pub(crate) const DEFAULT_BASE_PORT: u16 = 5430;
+pub(crate) const READ_REPLICA_PORT_OFFSET: u16 = 1000;
 pub(crate) const NIGHTLY_TOOLCHAIN: &str = "nightly-2026-04-15";
 
 /// Returns whether sccache should be enabled for the spawned build.
