@@ -198,17 +198,14 @@ one of the modules shipped in `etl-destinations`.
 | --- | --- | --- | --- |
 | `bigquery` | Google BigQuery | Stable | Full CRUD-capable replication for analytics workloads. |
 | `ducklake` | DuckLake | In progress | Open data lake replication with local or S3-compatible storage. |
-| `iceberg` | Apache Iceberg | Experimental / unsupported | Unmaintained experimental writer code. It writes materialized Iceberg format v2 tables, not changelog tables, and is not intended for production use. |
+| `iceberg` | Apache Iceberg | Experimental / unsupported | Unmaintained experimental writer code. Not intended for production use. |
 
-The Iceberg destination is available for experimentation at your own risk. It
-materializes rows into Iceberg tables with equality-delete based CDC handling:
-inserts are written as replay-safe upserts, updates delete the old key and write
-the new row, deletes write equality-delete files, and truncates drop and
-recreate the table. It does not run Iceberg maintenance. High-frequency CDC can
-fragment data files, delete files, manifests, snapshots, and metadata, so a
-separate Iceberg maintenance service is required for healthy and performant
-tables. Storage/catalog backends are outside this destination's support
-contract. BigQuery and DuckLake are the supported destination paths.
+The Iceberg destination is unmaintained experimental code. It writes
+materialized Iceberg format v2 tables with equality-delete CDC, but has not been
+widely tested and does not run Iceberg maintenance such as compaction, snapshot
+expiration, manifest rewrites, or orphan-file cleanup. CDC requires a replicated
+source primary key and primary-key or full replica identity. Use it at your own
+risk; BigQuery and DuckLake are the supported destination paths.
 
 Enable one or more destination modules with crate features:
 

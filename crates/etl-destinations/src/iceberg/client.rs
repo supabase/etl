@@ -10,8 +10,8 @@ use etl::{
     types::{ColumnSchema, SchemaDiff, TableRow},
 };
 use iceberg::{
-    Catalog, CatalogBuilder, Error, ErrorKind, NamespaceIdent, TableCreation, TableIdent,
-    TableRequirement, TableUpdate,
+    Catalog, CatalogBuilder, NamespaceIdent, TableCreation, TableIdent, TableRequirement,
+    TableUpdate,
     io::{S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_REGION, S3_SECRET_ACCESS_KEY},
     spec::{
         DataFile, DataFileFormat, FormatVersion, MAIN_BRANCH, ManifestContentType, ManifestFile,
@@ -261,7 +261,7 @@ impl IcebergClient {
                 initial_delay: Duration::from_millis(100),
                 max_delay: Duration::from_secs(1),
             },
-            |error: &Error| {
+            |error: &iceberg::Error| {
                 if error.retryable() { RetryDecision::Retry } else { RetryDecision::Stop }
             },
             |delay| delay,
@@ -557,8 +557,8 @@ impl IcebergClient {
             table.metadata().current_schema().identifier_field_ids().collect();
 
         if equality_ids.is_empty() {
-            return Err(Error::new(
-                ErrorKind::PreconditionFailed,
+            return Err(iceberg::Error::new(
+                iceberg::ErrorKind::PreconditionFailed,
                 "Iceberg equality deletes require identifier fields",
             ));
         }
@@ -623,7 +623,7 @@ impl IcebergClient {
                 initial_delay: Duration::from_millis(100),
                 max_delay: Duration::from_secs(1),
             },
-            |error: &Error| {
+            |error: &iceberg::Error| {
                 if error.retryable() { RetryDecision::Retry } else { RetryDecision::Stop }
             },
             |delay| delay,
@@ -732,7 +732,7 @@ impl RestCommitClient {
         &self,
         table_ident: &TableIdent,
         commit: RestTableCommit,
-    ) -> Result<(), Error> {
+    ) -> Result<(), iceberg::Error> {
         let config = self.load_config().await?;
         let url = config.table_endpoint(table_ident);
         let body = CommitTableRequest {
@@ -748,22 +748,23 @@ impl RestCommitClient {
             .send()
             .await
             .map_err(|error| {
-                Error::new(ErrorKind::Unexpected, "Iceberg REST commit failed").with_source(error)
+                iceberg::Error::new(iceberg::ErrorKind::Unexpected, "Iceberg REST commit failed")
+                    .with_source(error)
             })?;
 
         match response.status() {
             StatusCode::OK => Ok(()),
-            StatusCode::CONFLICT => Err(Error::new(
-                ErrorKind::CatalogCommitConflicts,
+            StatusCode::CONFLICT => Err(iceberg::Error::new(
+                iceberg::ErrorKind::CatalogCommitConflicts,
                 "Catalog commit conflict while applying Iceberg table update",
             )
             .with_retryable(true)),
-            StatusCode::NOT_FOUND => Err(Error::new(
-                ErrorKind::TableNotFound,
+            StatusCode::NOT_FOUND => Err(iceberg::Error::new(
+                iceberg::ErrorKind::TableNotFound,
                 "Tried to update an Iceberg table that does not exist",
             )),
-            status => Err(Error::new(
-                ErrorKind::Unexpected,
+            status => Err(iceberg::Error::new(
+                iceberg::ErrorKind::Unexpected,
                 "Received unexpected response from Iceberg REST commit",
             )
             .with_context("status", status.to_string())),
@@ -771,7 +772,7 @@ impl RestCommitClient {
     }
 
     /// Loads runtime REST catalog config and merges it with user config.
-    async fn load_config(&self) -> Result<ResolvedRestConfig, Error> {
+    async fn load_config(&self) -> Result<ResolvedRestConfig, iceberg::Error> {
         let mut request =
             self.request_with_props(Method::GET, self.config_endpoint(), &self.props).await?;
         if let Some(warehouse) = &self.warehouse {
@@ -779,22 +780,28 @@ impl RestCommitClient {
         }
 
         let response = request.send().await.map_err(|error| {
-            Error::new(ErrorKind::Unexpected, "Iceberg REST config request failed")
-                .with_source(error)
+            iceberg::Error::new(
+                iceberg::ErrorKind::Unexpected,
+                "Iceberg REST config request failed",
+            )
+            .with_source(error)
         })?;
 
         if !response.status().is_success() {
             let status = response.status();
-            return Err(Error::new(
-                ErrorKind::Unexpected,
+            return Err(iceberg::Error::new(
+                iceberg::ErrorKind::Unexpected,
                 "Received unexpected response from Iceberg REST config",
             )
             .with_context("status", status.to_string()));
         }
 
         let config = response.json::<CatalogConfigResponse>().await.map_err(|error| {
-            Error::new(ErrorKind::Unexpected, "Failed to parse Iceberg REST config")
-                .with_source(error)
+            iceberg::Error::new(
+                iceberg::ErrorKind::Unexpected,
+                "Failed to parse Iceberg REST config",
+            )
+            .with_source(error)
         })?;
 
         let mut props = config.defaults;
@@ -813,12 +820,12 @@ impl RestCommitClient {
         method: Method,
         url: String,
         props: &HashMap<String, String>,
-    ) -> Result<reqwest::RequestBuilder, Error> {
+    ) -> Result<reqwest::RequestBuilder, iceberg::Error> {
         let mut headers = self.headers(props)?;
 
         if props.get("rest.sigv4-enabled").is_some_and(|value| value == "true") {
-            return Err(Error::new(
-                ErrorKind::FeatureUnsupported,
+            return Err(iceberg::Error::new(
+                iceberg::ErrorKind::FeatureUnsupported,
                 "Iceberg REST SigV4 authentication is not yet implemented by this destination",
             ));
         }
@@ -827,8 +834,11 @@ impl RestCommitClient {
             headers.insert(
                 reqwest::header::AUTHORIZATION,
                 HeaderValue::from_str(&format!("Bearer {token}")).map_err(|error| {
-                    Error::new(ErrorKind::DataInvalid, "Invalid Iceberg REST bearer token")
-                        .with_source(error)
+                    iceberg::Error::new(
+                        iceberg::ErrorKind::DataInvalid,
+                        "Invalid Iceberg REST bearer token",
+                    )
+                    .with_source(error)
                 })?,
             );
         }
@@ -842,7 +852,7 @@ impl RestCommitClient {
     }
 
     /// Builds default and user-provided REST headers.
-    fn headers(&self, props: &HashMap<String, String>) -> Result<HeaderMap, Error> {
+    fn headers(&self, props: &HashMap<String, String>) -> Result<HeaderMap, iceberg::Error> {
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         headers.insert(
@@ -857,12 +867,18 @@ impl RestCommitClient {
         {
             headers.insert(
                 HeaderName::from_bytes(key.as_bytes()).map_err(|error| {
-                    Error::new(ErrorKind::DataInvalid, "Invalid Iceberg REST header name")
-                        .with_source(error)
+                    iceberg::Error::new(
+                        iceberg::ErrorKind::DataInvalid,
+                        "Invalid Iceberg REST header name",
+                    )
+                    .with_source(error)
                 })?,
                 HeaderValue::from_str(value).map_err(|error| {
-                    Error::new(ErrorKind::DataInvalid, "Invalid Iceberg REST header value")
-                        .with_source(error)
+                    iceberg::Error::new(
+                        iceberg::ErrorKind::DataInvalid,
+                        "Invalid Iceberg REST header value",
+                    )
+                    .with_source(error)
                 })?,
             );
         }
@@ -871,7 +887,10 @@ impl RestCommitClient {
     }
 
     /// Returns a bearer token, exchanging OAuth credentials when necessary.
-    async fn bearer_token(&self, props: &HashMap<String, String>) -> Result<Option<String>, Error> {
+    async fn bearer_token(
+        &self,
+        props: &HashMap<String, String>,
+    ) -> Result<Option<String>, iceberg::Error> {
         if let Some(token) = props.get(CATALOG_TOKEN) {
             return Ok(Some(token.clone()));
         }
@@ -905,22 +924,28 @@ impl RestCommitClient {
             .send()
             .await
             .map_err(|error| {
-                Error::new(ErrorKind::Unexpected, "Iceberg REST OAuth request failed")
-                    .with_source(error)
+                iceberg::Error::new(
+                    iceberg::ErrorKind::Unexpected,
+                    "Iceberg REST OAuth request failed",
+                )
+                .with_source(error)
             })?;
 
         if !response.status().is_success() {
             let status = response.status();
-            return Err(Error::new(
-                ErrorKind::Unexpected,
+            return Err(iceberg::Error::new(
+                iceberg::ErrorKind::Unexpected,
                 "Received unexpected response from Iceberg REST OAuth endpoint",
             )
             .with_context("status", status.to_string()));
         }
 
         let token = response.json::<TokenResponse>().await.map_err(|error| {
-            Error::new(ErrorKind::Unexpected, "Failed to parse Iceberg REST OAuth response")
-                .with_source(error)
+            iceberg::Error::new(
+                iceberg::ErrorKind::Unexpected,
+                "Failed to parse Iceberg REST OAuth response",
+            )
+            .with_source(error)
         })?;
 
         Ok(Some(token.access_token))
@@ -932,20 +957,20 @@ fn build_schema_update_commit(
     table: &Table,
     expected_current_schema: &IcebergSchema,
     desired_schema: IcebergSchema,
-) -> Result<Option<RestTableCommit>, Error> {
+) -> Result<Option<RestTableCommit>, iceberg::Error> {
     let actual_current_schema = table.metadata().current_schema().as_ref();
 
+    if schema_matches(actual_current_schema, &desired_schema) {
+        return Ok(None);
+    }
+
     if !schema_matches(actual_current_schema, expected_current_schema) {
-        return Err(Error::new(
-            ErrorKind::DataInvalid,
+        return Err(iceberg::Error::new(
+            iceberg::ErrorKind::DataInvalid,
             "Iceberg table schema does not match applied ETL metadata",
         )
         .with_context("table", table.identifier().to_string())
         .with_context("schema_id", table.metadata().current_schema_id().to_string()));
-    }
-
-    if schema_matches(actual_current_schema, &desired_schema) {
-        return Ok(None);
     }
 
     let updates = vec![
@@ -970,11 +995,11 @@ fn validate_postgres_schema_evolution(
     current_schema: &IcebergSchema,
     desired_schema: &IcebergSchema,
     diff: &SchemaDiff,
-) -> Result<(), Error> {
+) -> Result<(), iceberg::Error> {
     for column in &diff.columns_to_add {
         if !column.nullable {
-            return Err(Error::new(
-                ErrorKind::FeatureUnsupported,
+            return Err(iceberg::Error::new(
+                iceberg::ErrorKind::FeatureUnsupported,
                 "Iceberg schema evolution cannot add a required field without defaults",
             )
             .with_context("field", column.name.clone()));
@@ -994,12 +1019,12 @@ fn schema_matches(current_schema: &IcebergSchema, desired_schema: &IcebergSchema
 fn validate_schema_evolution(
     current_schema: &IcebergSchema,
     desired_schema: &IcebergSchema,
-) -> Result<(), Error> {
+) -> Result<(), iceberg::Error> {
     let current_identifier_ids = identifier_field_ids(current_schema);
     let desired_identifier_ids = identifier_field_ids(desired_schema);
     if current_identifier_ids != desired_identifier_ids {
-        return Err(Error::new(
-            ErrorKind::FeatureUnsupported,
+        return Err(iceberg::Error::new(
+            iceberg::ErrorKind::FeatureUnsupported,
             "Iceberg schema evolution cannot change identifier fields",
         ));
     }
@@ -1007,8 +1032,8 @@ fn validate_schema_evolution(
     for desired_field in desired_schema.as_struct().fields() {
         let Some(current_field) = current_schema.field_by_id(desired_field.id) else {
             if desired_field.required {
-                return Err(Error::new(
-                    ErrorKind::FeatureUnsupported,
+                return Err(iceberg::Error::new(
+                    iceberg::ErrorKind::FeatureUnsupported,
                     "Iceberg schema evolution cannot add a required field without defaults",
                 )
                 .with_context("field", desired_field.name.clone()));
@@ -1032,18 +1057,18 @@ fn identifier_field_ids(schema: &IcebergSchema) -> HashSet<i32> {
 fn validate_field_evolution(
     current_field: &NestedFieldRef,
     desired_field: &NestedFieldRef,
-) -> Result<(), Error> {
+) -> Result<(), iceberg::Error> {
     if !current_field.required && desired_field.required {
-        return Err(Error::new(
-            ErrorKind::FeatureUnsupported,
+        return Err(iceberg::Error::new(
+            iceberg::ErrorKind::FeatureUnsupported,
             "Iceberg schema evolution cannot make an optional field required",
         )
         .with_context("field", desired_field.name.clone()));
     }
 
     if !is_supported_type_evolution(&current_field.field_type, &desired_field.field_type) {
-        return Err(Error::new(
-            ErrorKind::FeatureUnsupported,
+        return Err(iceberg::Error::new(
+            iceberg::ErrorKind::FeatureUnsupported,
             "Iceberg schema evolution does not support this type change",
         )
         .with_context("field", desired_field.name.clone())
@@ -1085,10 +1110,10 @@ async fn build_row_delta_commit(
     table: &Table,
     data_files: Vec<DataFile>,
     delete_files: Vec<DataFile>,
-) -> Result<RestTableCommit, Error> {
+) -> Result<RestTableCommit, iceberg::Error> {
     if data_files.is_empty() && delete_files.is_empty() {
-        return Err(Error::new(
-            ErrorKind::PreconditionFailed,
+        return Err(iceberg::Error::new(
+            iceberg::ErrorKind::PreconditionFailed,
             "Cannot commit an empty Iceberg row delta",
         ));
     }
@@ -1152,7 +1177,7 @@ async fn build_row_delta_commit(
 }
 
 /// Returns the currently live manifests for the table.
-async fn existing_manifests(table: &Table) -> Result<Vec<ManifestFile>, Error> {
+async fn existing_manifests(table: &Table) -> Result<Vec<ManifestFile>, iceberg::Error> {
     let Some(snapshot) = table.metadata().current_snapshot() else {
         return Ok(Vec::new());
     };
@@ -1176,7 +1201,7 @@ async fn write_manifest(
     manifest_counter: &mut u64,
     content: ManifestContentType,
     files: Vec<DataFile>,
-) -> Result<ManifestFile, Error> {
+) -> Result<ManifestFile, iceberg::Error> {
     let mut writer =
         new_manifest_writer(table, snapshot_id, commit_uuid, manifest_counter, content)?;
     for file in files {
@@ -1192,7 +1217,7 @@ fn new_manifest_writer(
     commit_uuid: uuid::Uuid,
     manifest_counter: &mut u64,
     content: ManifestContentType,
-) -> Result<ManifestWriter, Error> {
+) -> Result<ManifestWriter, iceberg::Error> {
     let manifest_path = format!(
         "{}/{}/{}-m{}.{}",
         table.metadata().location(),
@@ -1213,8 +1238,8 @@ fn new_manifest_writer(
     );
 
     match (table.metadata().format_version(), content) {
-        (FormatVersion::V1, _) => Err(Error::new(
-            ErrorKind::FeatureUnsupported,
+        (FormatVersion::V1, _) => Err(iceberg::Error::new(
+            iceberg::ErrorKind::FeatureUnsupported,
             "Iceberg row-level deletes require table format version 2 or newer",
         )),
         (FormatVersion::V2, ManifestContentType::Data) => Ok(builder.build_v2_data()),
@@ -1230,7 +1255,7 @@ async fn write_manifest_list(
     snapshot_id: i64,
     commit_uuid: uuid::Uuid,
     manifests: Vec<ManifestFile>,
-) -> Result<String, Error> {
+) -> Result<String, iceberg::Error> {
     let manifest_list_path = format!(
         "{}/{}/snap-{}-0-{}.{}",
         table.metadata().location(),
@@ -1243,8 +1268,8 @@ async fn write_manifest_list(
     let next_sequence_number = table.metadata().next_sequence_number();
     let mut writer = match table.metadata().format_version() {
         FormatVersion::V1 => {
-            return Err(Error::new(
-                ErrorKind::FeatureUnsupported,
+            return Err(iceberg::Error::new(
+                iceberg::ErrorKind::FeatureUnsupported,
                 "Iceberg row-level deletes require table format version 2 or newer",
             ));
         }
@@ -1331,7 +1356,7 @@ fn parquet_rolling_writer_builder(
         DefaultLocationGenerator,
         DefaultFileNameGenerator,
     >,
-    Error,
+    iceberg::Error,
 > {
     let location_gen = DefaultLocationGenerator::new(table.metadata().clone())?;
     let file_name_gen = DefaultFileNameGenerator::new(
@@ -1351,16 +1376,19 @@ fn parquet_rolling_writer_builder(
 }
 
 /// Returns the target equality-delete file size for a table.
-fn table_delete_target_file_size(table: &Table) -> Result<usize, Error> {
+fn table_delete_target_file_size(table: &Table) -> Result<usize, iceberg::Error> {
     let Some(value) = table.metadata().properties().get(WRITE_DELETE_TARGET_FILE_SIZE_BYTES) else {
         return Ok(WRITE_DELETE_TARGET_FILE_SIZE_BYTES_DEFAULT);
     };
 
     value.parse().map_err(|error| {
-        Error::new(ErrorKind::DataInvalid, "Invalid Iceberg delete target file size table property")
-            .with_context("property", WRITE_DELETE_TARGET_FILE_SIZE_BYTES)
-            .with_context("value", value.clone())
-            .with_source(error)
+        iceberg::Error::new(
+            iceberg::ErrorKind::DataInvalid,
+            "Invalid Iceberg delete target file size table property",
+        )
+        .with_context("property", WRITE_DELETE_TARGET_FILE_SIZE_BYTES)
+        .with_context("value", value.clone())
+        .with_source(error)
     })
 }
 

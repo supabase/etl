@@ -10,21 +10,13 @@ Enable the destination modules you need with crate features:
 | `ducklake` | DuckLake | In progress |
 | `iceberg` | Apache Iceberg | Experimental / unsupported |
 
-The Iceberg module is unmaintained experimental code and is not production
-supported. It now writes materialized Iceberg format v2 tables rather than
-append-only changelog tables: table-copy rows are appended, inserts are
-replay-safe upserts, updates delete the old key and write the new row, deletes
-write equality-delete files, and truncates drop and recreate the table. Simple
-add, drop, and rename column changes are supported; primary-key/identifier
-changes, positional deletes, delete vectors, and full DDL support are not.
-
-Iceberg CDC writes create data files, equality-delete files, manifests,
-snapshots, and table metadata over time. This destination does not compact,
-rewrite, expire, or clean up those files. Run catalog/table maintenance outside
-ETL before considering the tables healthy or performant. Use the module at your
-own risk; BigQuery and DuckLake are the maintained destination paths. If the
-tables are stored in AWS S3 Tables, keep AWS table maintenance enabled and tune
-it there; ETL does not enable, disable, or validate S3 Tables maintenance.
+The Iceberg module is unmaintained experimental code. It is not production
+supported, has not been widely tested, and should only be used at your own
+risk. It writes materialized Iceberg format v2 tables with equality-delete CDC,
+but does not run compaction, snapshot expiration, manifest rewrites, or
+orphan-file cleanup. CDC requires a replicated source primary key and
+primary-key or full replica identity. BigQuery and DuckLake are the maintained
+destination paths.
 
 DuckLake external maintenance is configured at runtime with
 `maintenance_mode`: `disabled`, `kubernetes`, or `postgres`. The default is

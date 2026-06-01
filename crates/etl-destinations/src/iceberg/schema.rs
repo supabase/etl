@@ -5,8 +5,13 @@ use iceberg::spec::{
     ListType, NestedField, PrimitiveType, Schema as IcebergSchema, Type as IcebergType,
 };
 
-/// Offset used to derive stable Iceberg list element field IDs from Postgres
-/// column attnums.
+/// Reserved offset for deriving stable list element field IDs.
+///
+/// Postgres user-column `attnum` values are small positive integers, while
+/// Iceberg requires every nested field ID in a schema to be unique. Reserving a
+/// high deterministic range for list elements keeps element IDs stable across
+/// source renames, drops, and additions without colliding with top-level source
+/// column IDs.
 const LIST_ELEMENT_FIELD_ID_OFFSET: i32 = 1_000_000;
 
 /// Converts a Postgres array type to equivalent Iceberg type
@@ -99,7 +104,7 @@ pub(super) fn postgres_to_iceberg_schema(
     for column_schema in column_schemas {
         let field_id = iceberg_field_id_for_column(column_schema);
         let field_type = if is_array_type(&column_schema.typ) {
-            let element_id = iceberg_list_element_id_for_column(column_schema);
+            let element_id = iceberg_list_element_id_for_column(column_schema)?;
             postgres_array_type_to_iceberg_type(&column_schema.typ, element_id)
         } else {
             postgres_scalar_type_to_iceberg_type(&column_schema.typ)
@@ -134,8 +139,17 @@ fn iceberg_field_id_for_column(column_schema: &ColumnSchema) -> i32 {
 }
 
 /// Returns the Iceberg field ID for a source array column's list element.
-fn iceberg_list_element_id_for_column(column_schema: &ColumnSchema) -> i32 {
-    LIST_ELEMENT_FIELD_ID_OFFSET + iceberg_field_id_for_column(column_schema)
+fn iceberg_list_element_id_for_column(column_schema: &ColumnSchema) -> Result<i32, iceberg::Error> {
+    iceberg_field_id_for_column(column_schema).checked_add(LIST_ELEMENT_FIELD_ID_OFFSET).ok_or_else(
+        || {
+            iceberg::Error::new(
+                iceberg::ErrorKind::DataInvalid,
+                "Iceberg list element field ID overflow",
+            )
+            .with_context("column", column_schema.name.clone())
+            .with_context("field_id", iceberg_field_id_for_column(column_schema).to_string())
+        },
+    )
 }
 
 #[cfg(test)]
@@ -485,5 +499,14 @@ mod tests {
         assert_eq!(schema.field_by_name("email").expect("email field").id, 5);
         assert!(schema.field_by_id(3).is_none());
         assert!(schema.field_by_id(4).is_none());
+    }
+
+    #[test]
+    fn list_element_field_id_overflow_is_rejected() {
+        let columns = vec![test_column("tags", Type::TEXT_ARRAY, i32::MAX, true, None)];
+
+        let error = postgres_to_iceberg_schema(&columns).expect_err("field id overflow");
+
+        assert_eq!(error.kind(), iceberg::ErrorKind::DataInvalid);
     }
 }

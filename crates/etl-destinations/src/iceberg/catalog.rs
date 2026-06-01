@@ -2,8 +2,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 use iceberg::{
-    Catalog, Error, ErrorKind, Namespace, NamespaceIdent, Result, TableCommit, TableCreation,
-    TableIdent,
+    Catalog, Namespace, NamespaceIdent, Result, TableCommit, TableCreation, TableIdent,
     io::{FileIO, FileIOBuilder, StorageFactory},
     spec::{Schema, SortOrder, TableMetadata, UnboundPartitionSpec},
     table::Table,
@@ -38,7 +37,10 @@ fn load_file_io_for_location(
     props: HashMap<String, String>,
 ) -> Result<FileIO> {
     let metadata_location = metadata_location.ok_or_else(|| {
-        Error::new(ErrorKind::Unexpected, "Unable to load file io, metadata location is not set!")
+        iceberg::Error::new(
+            iceberg::ErrorKind::Unexpected,
+            "Unable to load file io, metadata location is not set!",
+        )
     })?;
     let storage_factory = storage_factory_for_location(Some(metadata_location))?;
 
@@ -51,8 +53,8 @@ fn storage_factory_for_location(location: Option<&str>) -> Result<Arc<dyn Storag
         Some(FILE_SCHEME) => Ok(Arc::new(OpenDalStorageFactory::Fs)),
         Some(MEMORY_SCHEME) => Ok(Arc::new(OpenDalStorageFactory::Memory)),
         Some(scheme @ (S3_SCHEME | S3A_SCHEME)) => Ok(s3_storage_factory(scheme)),
-        Some(scheme) => Err(Error::new(
-            ErrorKind::FeatureUnsupported,
+        Some(scheme) => Err(iceberg::Error::new(
+            iceberg::ErrorKind::FeatureUnsupported,
             format!("Unsupported iceberg storage scheme: {scheme}"),
         )),
         None if location.is_some_and(|location| location.starts_with('/')) => {
@@ -309,7 +311,10 @@ impl SupabaseClient {
         let url = self.tables_url(&namespace_path);
 
         let body = serde_json::to_value(supabase_request).map_err(|e| {
-            Error::new(ErrorKind::DataInvalid, format!("JSON serialization failed: {e}"))
+            iceberg::Error::new(
+                iceberg::ErrorKind::DataInvalid,
+                format!("JSON serialization failed: {e}"),
+            )
         })?;
 
         let http_response =
@@ -320,19 +325,22 @@ impl SupabaseClient {
                 deserialize_catalog_response::<LoadTableResponse>(http_response).await?
             }
             StatusCode::NOT_FOUND => {
-                return Err(Error::new(
-                    ErrorKind::Unexpected,
+                return Err(iceberg::Error::new(
+                    iceberg::ErrorKind::Unexpected,
                     "Tried to create a table under a namespace that does not exist",
                 ));
             }
             StatusCode::CONFLICT => {
-                return Err(Error::new(ErrorKind::Unexpected, "The table already exists"));
+                return Err(iceberg::Error::new(
+                    iceberg::ErrorKind::Unexpected,
+                    "The table already exists",
+                ));
             }
             _ => return Err(deserialize_unexpected_catalog_error(http_response).await),
         };
 
-        let metadata_location = response.metadata_location.as_ref().ok_or(Error::new(
-            ErrorKind::DataInvalid,
+        let metadata_location = response.metadata_location.as_ref().ok_or(iceberg::Error::new(
+            iceberg::ErrorKind::DataInvalid,
             "Metadata location missing in `create_table` response!",
         ))?;
 
@@ -367,9 +375,10 @@ impl SupabaseClient {
 
         match http_response.status() {
             StatusCode::NO_CONTENT | StatusCode::OK => Ok(()),
-            StatusCode::NOT_FOUND => {
-                Err(Error::new(ErrorKind::Unexpected, "Tried to drop a table that does not exist"))
-            }
+            StatusCode::NOT_FOUND => Err(iceberg::Error::new(
+                iceberg::ErrorKind::Unexpected,
+                "Tried to drop a table that does not exist",
+            )),
             _ => Err(deserialize_unexpected_catalog_error(http_response).await),
         }
     }
@@ -418,16 +427,15 @@ impl SupabaseClient {
             request = request.query(query);
         }
 
-        let response = request
-            .send()
-            .await
-            .map_err(|e| Error::new(ErrorKind::Unexpected, format!("HTTP request failed: {e}")))?;
+        let response = request.send().await.map_err(|e| {
+            iceberg::Error::new(iceberg::ErrorKind::Unexpected, format!("HTTP request failed: {e}"))
+        })?;
 
         if !response.status().is_success() {
             let status = response.status();
             let error_text = response.text().await.unwrap_or_default();
-            return Err(Error::new(
-                ErrorKind::Unexpected,
+            return Err(iceberg::Error::new(
+                iceberg::ErrorKind::Unexpected,
                 format!("HTTP {status} error: {error_text}"),
             ));
         }
@@ -447,9 +455,12 @@ pub(crate) async fn deserialize_catalog_response<R: DeserializeOwned>(
     let bytes = response.bytes().await?;
 
     serde_json::from_slice::<R>(&bytes).map_err(|e| {
-        Error::new(ErrorKind::Unexpected, "Failed to parse response from rest catalog server")
-            .with_context("json", String::from_utf8_lossy(&bytes))
-            .with_source(e)
+        iceberg::Error::new(
+            iceberg::ErrorKind::Unexpected,
+            "Failed to parse response from rest catalog server",
+        )
+        .with_context("json", String::from_utf8_lossy(&bytes))
+        .with_source(e)
     })
 }
 
@@ -458,10 +469,13 @@ pub(crate) async fn deserialize_catalog_response<R: DeserializeOwned>(
 /// Extracts status code, headers, and response body to create a comprehensive
 /// error message for debugging failed catalog operations. Handles empty
 /// response bodies gracefully.
-pub(crate) async fn deserialize_unexpected_catalog_error(response: Response) -> Error {
-    let err = Error::new(ErrorKind::Unexpected, "Received response with unexpected status code")
-        .with_context("status", response.status().to_string())
-        .with_context("headers", format!("{:?}", response.headers()));
+pub(crate) async fn deserialize_unexpected_catalog_error(response: Response) -> iceberg::Error {
+    let err = iceberg::Error::new(
+        iceberg::ErrorKind::Unexpected,
+        "Received response with unexpected status code",
+    )
+    .with_context("status", response.status().to_string())
+    .with_context("headers", format!("{:?}", response.headers()));
 
     let bytes = match response.bytes().await {
         Ok(bytes) => bytes,

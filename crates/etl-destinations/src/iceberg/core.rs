@@ -12,10 +12,11 @@ use etl::{
     error::{ErrorKind, EtlResult},
     etl_error,
     state::destination_table_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus},
-    store::{SchemaStore, SharedStateStore},
+    store::DestinationStore,
     types::{
         ArrayCell, Cell, ColumnSchema, Event, IdentityType, OldTableRow, ReplicatedTableSchema,
-        TableId, TableName, TableRow, Type, UpdatedTableRow,
+        ReplicationMask, SnapshotId, TableId, TableName, TableRow, TableSchema, Type,
+        UpdatedTableRow,
     },
 };
 use tokio::{sync::Mutex, task::JoinSet};
@@ -120,7 +121,7 @@ pub struct IcebergDestination<S> {
 
 impl<S> IcebergDestination<S>
 where
-    S: SharedStateStore + SchemaStore,
+    S: DestinationStore,
 {
     /// Creates a new Iceberg destination instance.
     ///
@@ -142,6 +143,22 @@ where
             })),
             tasks: TaskSet::new(),
         }
+    }
+
+    /// Writes table-copy rows synchronously for integration tests.
+    #[cfg(feature = "test-utils")]
+    pub async fn write_table_rows_for_tests(
+        &self,
+        replicated_table_schema: &ReplicatedTableSchema,
+        table_rows: Vec<TableRow>,
+    ) -> EtlResult<()> {
+        self.write_table_rows(replicated_table_schema, table_rows).await
+    }
+
+    /// Writes CDC events synchronously for integration tests.
+    #[cfg(feature = "test-utils")]
+    pub async fn write_events_for_tests(&self, events: Vec<Event>) -> EtlResult<()> {
+        self.write_events(events).await
     }
 
     /// Truncates an Iceberg table by dropping and recreating it.
@@ -268,17 +285,28 @@ where
             new_replicated_table_schema.column_schemas().cloned().collect();
 
         let mut inner = self.inner.lock().await;
-        let Some(metadata) = self.store.get_applied_destination_table_metadata(table_id).await?
-        else {
-            return Err(etl_error!(
-                ErrorKind::CorruptedTableSchema,
-                "Missing destination table metadata",
-                format!(
-                    "No destination table metadata found for table {} when processing Iceberg \
-                     schema change.",
-                    table_id
+        let metadata =
+            self.store.get_destination_table_metadata(table_id).await?.ok_or_else(|| {
+                etl_error!(
+                    ErrorKind::CorruptedTableSchema,
+                    "Missing destination table metadata",
+                    format!(
+                        "No destination table metadata found for table {} when processing Iceberg \
+                         schema change.",
+                        table_id
+                    )
                 )
-            ));
+            })?;
+        let metadata = if metadata.is_applying() {
+            self.recover_applying_metadata(
+                &mut inner,
+                table_id,
+                metadata,
+                Some(new_replicated_table_schema),
+            )
+            .await?
+        } else {
+            metadata
         };
 
         let current_snapshot_id = metadata.snapshot_id;
@@ -500,8 +528,13 @@ where
                 let mut bytes_sent = 0;
                 #[cfg_attr(not(feature = "egress"), allow(unused_assignments))]
                 while let Some(insert_result) = join_set.join_next().await {
-                    bytes_sent += insert_result
-                        .map_err(|_| etl_error!(ErrorKind::Unknown, "Failed to join future"))??;
+                    bytes_sent += insert_result.map_err(|error| {
+                        etl_error!(
+                            ErrorKind::DestinationError,
+                            "Iceberg row-delta task failed",
+                            source: error
+                        )
+                    })??;
                 }
 
                 #[cfg(feature = "egress")]
@@ -565,20 +598,30 @@ where
         let replication_mask = replicated_table_schema.replication_mask().clone();
         let column_schemas: Vec<_> = replicated_table_schema.column_schemas().cloned().collect();
 
-        let iceberg_table_name =
-            table_name_to_iceberg_table_name(table_name, inner.namespace.is_single())?;
-        let iceberg_table_name = if let Some(metadata) =
-            self.store.get_applied_destination_table_metadata(table_id).await?
-        {
-            metadata.destination_table_id
-        } else {
-            iceberg_table_name
-        };
+        let metadata = self.store.get_destination_table_metadata(table_id).await?;
+        let iceberg_table_name = metadata.as_ref().map_or_else(
+            || table_name_to_iceberg_table_name(table_name, inner.namespace.is_single()),
+            |metadata| Ok(metadata.destination_table_id.clone()),
+        )?;
 
         // We prepare the namespace.
         let namespace = schema_to_namespace(&table_name.schema);
         let namespace = inner.namespace.get_or(&namespace).to_owned();
         let namespace = self.create_namespace_if_missing(inner, namespace).await?;
+
+        if let Some(metadata) = metadata.as_ref()
+            && metadata.is_applying()
+        {
+            self.recover_applying_metadata(
+                inner,
+                table_id,
+                metadata.clone(),
+                Some(replicated_table_schema),
+            )
+            .await?;
+
+            return Ok((namespace, iceberg_table_name));
+        }
 
         // If the table is already in the cache, we skip the creation. This works
         // assuming that etl is the only system managing the underlying tables.
@@ -591,21 +634,28 @@ where
             return Ok((namespace, iceberg_table_name));
         }
 
-        // Create metadata with applying status before creating the table.
-        let metadata = DestinationTableMetadata::new_applying(
-            iceberg_table_name.clone(),
-            snapshot_id,
-            replication_mask,
-        );
-        self.store.store_destination_table_metadata(table_id, metadata.clone()).await?;
+        let metadata = if metadata.is_none() {
+            // Create metadata with applying status before creating the table.
+            let metadata = DestinationTableMetadata::new_applying(
+                iceberg_table_name.clone(),
+                snapshot_id,
+                replication_mask,
+            );
+            self.store.store_destination_table_metadata(table_id, metadata.clone()).await?;
+            Some(metadata)
+        } else {
+            None
+        };
 
         self.client
             .create_table_if_missing(&namespace, iceberg_table_name.clone(), &column_schemas)
             .await
             .map_err(iceberg_error_to_etl_error)?;
 
-        // Mark as applied after successful table creation.
-        self.store.store_destination_table_metadata(table_id, metadata.to_applied()).await?;
+        if let Some(metadata) = metadata {
+            // Mark as applied after successful table creation.
+            self.store.store_destination_table_metadata(table_id, metadata.to_applied()).await?;
+        }
 
         // We add the table to the cache.
         inner.created_tables.insert(table_id);
@@ -613,6 +663,139 @@ where
         debug!("iceberg table {iceberg_table_name} added to creation cache");
 
         Ok((namespace, iceberg_table_name))
+    }
+
+    /// Loads the exact ETL table schema for a destination metadata snapshot.
+    async fn load_exact_table_schema(
+        &self,
+        table_id: TableId,
+        snapshot_id: SnapshotId,
+        missing_schema_description: &'static str,
+    ) -> EtlResult<Arc<TableSchema>> {
+        let table_schema =
+            self.store.get_table_schema(&table_id, snapshot_id).await?.ok_or_else(|| {
+                etl_error!(
+                    ErrorKind::InvalidState,
+                    missing_schema_description,
+                    format!(
+                        "Could not find schema for table {} at snapshot_id {}",
+                        table_id, snapshot_id
+                    )
+                )
+            })?;
+
+        if table_schema.snapshot_id != snapshot_id {
+            return Err(etl_error!(
+                ErrorKind::InvalidState,
+                missing_schema_description,
+                format!(
+                    "Could not find exact schema for table {} at snapshot_id {}; found nearest \
+                     schema at snapshot_id {}",
+                    table_id, snapshot_id, table_schema.snapshot_id
+                )
+            ));
+        }
+
+        Ok(table_schema)
+    }
+
+    /// Resolves the target replicated schema for interrupted Iceberg DDL.
+    async fn target_schema_for_recovery(
+        &self,
+        table_id: TableId,
+        metadata: &DestinationTableMetadata,
+        provided_target_schema: Option<&ReplicatedTableSchema>,
+    ) -> EtlResult<ReplicatedTableSchema> {
+        if let Some(schema) = provided_target_schema
+            && schema.inner().snapshot_id == metadata.snapshot_id
+            && schema.replication_mask() == &metadata.replication_mask
+        {
+            return Ok(schema.clone());
+        }
+
+        let target_table_schema = self
+            .load_exact_table_schema(
+                table_id,
+                metadata.snapshot_id,
+                "Iceberg schema recovery target schema not found",
+            )
+            .await?;
+
+        Ok(ReplicatedTableSchema::from_mask(target_table_schema, metadata.replication_mask.clone()))
+    }
+
+    /// Replays interrupted Iceberg DDL and transitions metadata to `Applied`.
+    async fn recover_applying_metadata(
+        &self,
+        inner: &mut Inner,
+        table_id: TableId,
+        metadata: DestinationTableMetadata,
+        target_schema: Option<&ReplicatedTableSchema>,
+    ) -> EtlResult<DestinationTableMetadata> {
+        warn!(
+            table_id = %table_id,
+            table = %metadata.destination_table_id,
+            "iceberg table has Applying metadata, recovering interrupted operation"
+        );
+
+        let target_schema =
+            self.target_schema_for_recovery(table_id, &metadata, target_schema).await?;
+        let table_name = target_schema.name();
+        let namespace = schema_to_namespace(&table_name.schema);
+        let namespace = inner.namespace.get_or(&namespace).to_owned();
+        let namespace = self.create_namespace_if_missing(inner, namespace).await?;
+        let target_column_schemas: Vec<_> = target_schema.column_schemas().cloned().collect();
+
+        match metadata.previous_snapshot_id {
+            Some(previous_snapshot_id) => {
+                let previous_table_schema = self
+                    .load_exact_table_schema(
+                        table_id,
+                        previous_snapshot_id,
+                        "Iceberg schema recovery previous schema not found",
+                    )
+                    .await?;
+                let previous_replication_mask = previous_replication_mask_for_recovery(
+                    &previous_table_schema,
+                    target_schema.inner(),
+                    &metadata.replication_mask,
+                );
+                let previous_schema = ReplicatedTableSchema::from_mask(
+                    previous_table_schema,
+                    previous_replication_mask,
+                );
+                let previous_column_schemas: Vec<_> =
+                    previous_schema.column_schemas().cloned().collect();
+                let diff = previous_schema.diff(&target_schema);
+
+                self.client
+                    .evolve_table_schema(
+                        &namespace,
+                        metadata.destination_table_id.clone(),
+                        &previous_column_schemas,
+                        &target_column_schemas,
+                        &diff,
+                    )
+                    .await
+                    .map_err(iceberg_error_to_etl_error)?;
+            }
+            None => {
+                self.client
+                    .create_table_if_missing(
+                        &namespace,
+                        metadata.destination_table_id.clone(),
+                        &target_column_schemas,
+                    )
+                    .await
+                    .map_err(iceberg_error_to_etl_error)?;
+            }
+        }
+
+        let metadata = metadata.to_applied();
+        self.store.store_destination_table_metadata(table_id, metadata.clone()).await?;
+        inner.created_tables.insert(table_id);
+
+        Ok(metadata)
     }
 
     /// Creates a namespace if it is missing in the destination.
@@ -640,7 +823,7 @@ where
 
 impl<S> Destination for IcebergDestination<S>
 where
-    S: SharedStateStore + SchemaStore,
+    S: DestinationStore,
 {
     /// Returns the identifier name for this destination type.
     fn name() -> &'static str {
@@ -660,6 +843,8 @@ where
         replicated_table_schema: &ReplicatedTableSchema,
         async_result: DropTableForCopyResult<()>,
     ) -> EtlResult<()> {
+        self.tasks.try_reap().await?;
+
         let result = self.drop_table_for_copy_inner(replicated_table_schema).await;
         async_result.send(result);
 
@@ -675,6 +860,8 @@ where
         table_rows: Vec<TableRow>,
         async_result: WriteTableRowsResult<()>,
     ) -> EtlResult<()> {
+        self.tasks.try_reap().await?;
+
         let result =
             IcebergDestination::write_table_rows(self, replicated_table_schema, table_rows).await;
         async_result.send(result);
@@ -985,6 +1172,36 @@ fn row_key(table_row: &TableRow, key_indices: &[usize]) -> RowKey {
     RowKey { values }
 }
 
+/// Builds the best previous-schema replication mask available during recovery.
+///
+/// [`DestinationTableMetadata`] stores the target mask, not the previous mask.
+/// For a source-schema change, target bits are projected back by source
+/// ordinal position. Columns that no longer exist in the target schema are
+/// treated as previously replicated so idempotent Iceberg DDL can drop them if
+/// they still exist.
+fn previous_replication_mask_for_recovery(
+    previous_schema: &TableSchema,
+    target_schema: &TableSchema,
+    target_replication_mask: &ReplicationMask,
+) -> ReplicationMask {
+    let mask = previous_schema
+        .column_schemas
+        .iter()
+        .map(|previous_column| {
+            target_schema
+                .column_schemas
+                .iter()
+                .position(|target_column| {
+                    target_column.ordinal_position == previous_column.ordinal_position
+                })
+                .and_then(|index| target_replication_mask.as_slice().get(index).copied())
+                .unwrap_or(1)
+        })
+        .collect();
+
+    ReplicationMask::from_bytes(mask)
+}
+
 /// Value inside an in-memory row key.
 #[derive(Clone, Eq, Hash, PartialEq)]
 enum RowKeyValue {
@@ -1082,18 +1299,17 @@ fn debug_key(value: &impl std::fmt::Debug) -> String {
 /// Validates that a replicated table schema can be applied in Iceberg.
 ///
 /// Iceberg CDC replay uses v2 equality-delete files over the source primary
-/// key. Source tables therefore need a replicated primary key and either a
-/// primary-key-equivalent replica identity or full old-row images.
+/// key. Source tables therefore need all primary-key columns replicated and
+/// either primary-key-equivalent replica identity or full old-row images.
 fn validate_iceberg_table_identity(
     replicated_table_schema: &ReplicatedTableSchema,
 ) -> EtlResult<()> {
-    if replicated_table_schema.primary_key_column_schemas().len() == 0 {
+    if replicated_table_schema.primary_key_column_schemas().next().is_none() {
         return Err(etl_error!(
-            ErrorKind::SourceReplicaIdentityError,
+            ErrorKind::SourceSchemaError,
             "Iceberg requires a source primary key",
             format!(
-                "Table '{}' does not have replicated primary-key columns, but Iceberg equality \
-                 deletes require stable identifier fields.",
+                "Table '{}' does not expose any replicated primary-key columns.",
                 replicated_table_schema.name()
             )
         ));
@@ -1107,10 +1323,10 @@ fn validate_iceberg_table_identity(
             .join(", ");
 
         return Err(etl_error!(
-            ErrorKind::SourceReplicaIdentityError,
+            ErrorKind::SourceSchemaError,
             "Iceberg requires all primary-key columns to be replicated",
             format!(
-                "Table '{}' does not replicate primary-key column(s) '{}'.",
+                "Table '{}' omits source primary-key column(s) from replication: {}.",
                 replicated_table_schema.name(),
                 missing_columns
             )
@@ -1125,10 +1341,11 @@ fn validate_iceberg_table_identity(
 
     Err(etl_error!(
         ErrorKind::SourceReplicaIdentityError,
-        "Iceberg requires primary-key row identity",
+        "Iceberg requires primary-key or full replica identity",
         format!(
             "Table '{}' uses replica identity {:?}, but Iceberg equality deletes require FULL or \
-             primary-key-equivalent replica identity.",
+             primary-key-equivalent replica identity so old-row keys map to Iceberg identifier \
+             fields.",
             replicated_table_schema.name(),
             replicated_table_schema.identity_type()
         )
@@ -1214,6 +1431,35 @@ mod tests {
         let identity_mask = IdentityMask::from_bytes(vec![1, 1, 0]);
 
         ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask)
+    }
+
+    fn replicated_schema_with_partial_primary_key() -> ReplicatedTableSchema {
+        let table_schema = Arc::new(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_owned(), "users".to_owned()),
+            vec![
+                ColumnSchema::new("tenant_id".to_owned(), Type::TEXT, -1, 1, Some(1), false),
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 2, Some(2), false),
+                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 3, None, true),
+            ],
+        ));
+        let replication_mask = ReplicationMask::from_bytes(vec![0, 1, 1]);
+        let identity_mask = IdentityMask::from_bytes(vec![0, 1, 0]);
+
+        ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask)
+    }
+
+    fn replicated_pkless_schema() -> ReplicatedTableSchema {
+        let table_schema = Arc::new(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_owned(), "events".to_owned()),
+            vec![
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, None, false),
+                ColumnSchema::new("payload".to_owned(), Type::TEXT, -1, 2, None, true),
+            ],
+        ));
+
+        ReplicatedTableSchema::all(table_schema)
     }
 
     fn test_row(id: i32, name: &str) -> TableRow {
@@ -1549,5 +1795,22 @@ mod tests {
 
         let error = validate_iceberg_table_identity(&replicated_table_schema).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::SourceReplicaIdentityError);
+    }
+
+    #[test]
+    fn validate_iceberg_table_identity_rejects_partial_primary_key() {
+        let replicated_table_schema = replicated_schema_with_partial_primary_key();
+
+        let error = validate_iceberg_table_identity(&replicated_table_schema).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::SourceSchemaError);
+        assert!(error.to_string().contains("tenant_id"));
+    }
+
+    #[test]
+    fn validate_iceberg_table_identity_rejects_pkless_schema() {
+        let replicated_table_schema = replicated_pkless_schema();
+
+        let error = validate_iceberg_table_identity(&replicated_table_schema).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::SourceSchemaError);
     }
 }
