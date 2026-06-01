@@ -2,7 +2,7 @@
 <p align="center">
   <a href="https://supabase.com">
     <picture>
-      <img alt="ETL by Supabase" width="100%" src="public/assets/etl-logo-extended.png">
+      <img alt="ETL by Supabase" width="100%" src="docs/public/assets/etl-logo-extended.png">
     </picture>
   </a>
 
