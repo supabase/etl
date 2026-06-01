@@ -26,6 +26,7 @@ DB_USER="${POSTGRES_USER:=postgres}"
 DB_PASSWORD="${POSTGRES_PASSWORD:=postgres}"
 DB_NAME="${POSTGRES_DB:=postgres}"
 DB_PORT="${POSTGRES_PORT:=5430}"
+DB_REPLICA_PORT="${POSTGRES_REPLICA_PORT:=6430}"
 DB_HOST="${POSTGRES_HOST:=localhost}"
 CLICKHOUSE_HTTP_PORT="${CLICKHOUSE_HTTP_PORT:=8123}"
 CLICKHOUSE_NATIVE_PORT="${CLICKHOUSE_NATIVE_PORT:=9000}"
@@ -44,6 +45,7 @@ then
   export POSTGRES_PASSWORD="${DB_PASSWORD}"
   export POSTGRES_DB="${DB_NAME}"
   export POSTGRES_PORT="${DB_PORT}"
+  export POSTGRES_REPLICA_PORT="${DB_REPLICA_PORT}"
   export CLICKHOUSE_HTTP_PORT="${CLICKHOUSE_HTTP_PORT}"
   export CLICKHOUSE_NATIVE_PORT="${CLICKHOUSE_NATIVE_PORT}"
   export CLICKHOUSE_USER="${CLICKHOUSE_USER}"
@@ -56,6 +58,14 @@ then
     export POSTGRES_DATA_VOLUME="${POSTGRES_DATA_VOLUME}"
   else
     echo "📁 No Postgres storage path specified, using default Docker volume"
+  fi
+
+  if [[ -n "${POSTGRES_REPLICA_DATA_VOLUME}" ]]; then
+    echo "📁 Setting up Postgres read replica persistent storage at ${POSTGRES_REPLICA_DATA_VOLUME}"
+    mkdir -p "${POSTGRES_REPLICA_DATA_VOLUME}"
+    export POSTGRES_REPLICA_DATA_VOLUME="${POSTGRES_REPLICA_DATA_VOLUME}"
+  else
+    echo "📁 No Postgres read replica storage path specified, using default Docker volume"
   fi
 
   if [[ -n "${CLICKHOUSE_DATA_VOLUME}" ]]; then
@@ -88,6 +98,14 @@ if [[ "${USING_DOCKER_COMPOSE}" == "1" ]]; then
 
   echo "✅ Postgres is up and running on port ${DB_PORT}"
 
+  echo "⏳ Waiting for Postgres read replica to be ready..."
+  until docker-compose -f ./scripts/docker-compose.yaml exec -T source-postgres-read-replica pg_isready -U postgres > /dev/null 2>&1; do
+    echo "Waiting for Postgres read replica..."
+    sleep 1
+  done
+
+  echo "✅ Postgres read replica is up and running on port ${DB_REPLICA_PORT}"
+
   echo "⏳ Waiting for ClickHouse to be ready..."
   until docker-compose -f ./scripts/docker-compose.yaml exec -T clickhouse clickhouse-client --user "$CLICKHOUSE_USER" --password "$CLICKHOUSE_PASSWORD" --query "SELECT 1" > /dev/null 2>&1; do
     echo "Waiting for ClickHouse..."
@@ -109,6 +127,9 @@ else
 fi
 
 echo "🔗 Database URL: ${DATABASE_URL}"
+if [[ "${USING_DOCKER_COMPOSE}" == "1" ]]; then
+  echo "🧪 Postgres test env: TESTS_DATABASE_HOST=${DB_HOST} TESTS_DATABASE_PORT=${DB_PORT} TESTS_DATABASE_REPLICA_HOST=${DB_HOST} TESTS_DATABASE_REPLICA_PORT=${DB_REPLICA_PORT} TESTS_DATABASE_USERNAME=${DB_USER} TESTS_DATABASE_PASSWORD=${DB_PASSWORD}"
+fi
 
 # Run database migrations
 echo "🔄 Running database migrations..."

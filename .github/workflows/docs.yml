@@ -27,8 +27,12 @@ jobs:
           cache: npm
       - name: Install Docs Dependencies
         run: npm ci
+      - name: Install Docs Smoke Browser
+        run: npx playwright install --with-deps chromium
       - name: Build Docs
         run: npm run build
+      - name: Smoke Test Docs
+        run: npm run smoke:docs
       - name: Upload Pages Artifact
         if: github.event_name != 'pull_request'
         uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4

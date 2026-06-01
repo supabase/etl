@@ -48,14 +48,10 @@ pub(crate) async fn start_replicator_with_config(
 ) -> ReplicatorResult<()> {
     let pipeline_id = replicator_config.pipeline.id;
 
-    // We initialize the store, which for the replicator is not
-    // configurable.
-    let store = init_store(
-        pipeline_id,
-        replicator_config.pipeline.pg_connection.clone(),
-        notification_client,
-    )
-    .await?;
+    // We initialize the store, using the optional store connection when the
+    // replication connection points at a read replica.
+    let store_pg_connection_config = replicator_config.pipeline.store_pg_connection().clone();
+    let store = init_store(pipeline_id, store_pg_connection_config, notification_client).await?;
 
     // For each destination, we start the pipeline. This is more verbose due to
     // static dispatch, but we prefer more performance at the cost of
@@ -269,16 +265,16 @@ fn create_props(
 /// Initializes the store.
 ///
 /// Creates a [`PostgresStore`] instance for the given pipeline and connection
-/// configuration. The pipeline itself owns store migration startup.
+/// configuration. The pipeline itself owns source migration startup.
 async fn init_store(
     pipeline_id: PipelineId,
-    pg_connection_config: PgConnectionConfig,
+    store_pg_connection_config: PgConnectionConfig,
     notification_client: Option<ErrorNotificationClient>,
 ) -> ReplicatorResult<impl PipelineStore> {
     info!("initializing postgres store");
 
     Ok(ErrorReportingStateStore::new(
-        PostgresStore::new(pipeline_id, pg_connection_config).await?,
+        PostgresStore::new(pipeline_id, store_pg_connection_config).await?,
         notification_client,
     ))
 }

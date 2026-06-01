@@ -189,6 +189,7 @@ where
             id: self.pipeline_id,
             publication_name: self.publication_name,
             pg_connection: self.pg_connection_config,
+            store_pg_connection: None,
             batch: self.batch,
             table_error_retry_delay_ms: self.table_error_retry_delay_ms,
             table_error_retry_max_attempts: self.table_error_retry_max_attempts,

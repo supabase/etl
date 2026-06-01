@@ -30,6 +30,8 @@ function bundledMermaid() {
 export default defineConfig({
   site: 'https://supabase.github.io',
   base: docsBase,
+  srcDir: './docs/src',
+  publicDir: './docs/public',
   markdown: {
     smartypants: false,
   },
@@ -46,7 +48,7 @@ export default defineConfig({
         'Stream your Postgres data anywhere in real-time with Rust building blocks for CDC pipelines.',
       favicon: '/favicon.ico',
       logo: {
-        src: './src/assets/etl-logo.png',
+        src: './docs/src/assets/etl-logo.png',
         alt: 'ETL',
       },
       editLink: {
@@ -116,7 +118,7 @@ export default defineConfig({
           ],
         }),
       ],
-      customCss: ['./src/styles/starlight.css'],
+      customCss: ['./docs/src/styles/starlight.css'],
       head: [
         {
           tag: 'script',

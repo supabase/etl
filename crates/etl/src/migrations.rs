@@ -32,6 +32,16 @@ async fn create_migration_connection(
     Ok(conn)
 }
 
+/// Returns whether the source database is currently a physical standby.
+async fn source_database_in_recovery(
+    connection_config: &PgConnectionConfig,
+) -> Result<bool, sqlx::Error> {
+    let options: PgConnectOptions = connection_config.with_db(Some(&ETL_MIGRATION_OPTIONS));
+    let mut conn = PgConnection::connect_with(&options).await?;
+
+    sqlx::query_scalar("select pg_is_in_recovery()").fetch_one(&mut conn).await
+}
+
 /// Returns the migrator for source-side replication helpers.
 fn source_migrator() -> Migrator {
     let mut migrator = sqlx::migrate!("./migrations/source");
@@ -69,11 +79,29 @@ async fn run_migration_set(
 ///
 /// These migrations install the `etl` schema, schema snapshot helper
 /// functions, and the DDL event trigger used by replication.
+/// When the configured source is a physical standby, this function skips
+/// migration execution because standby connections are read-only. In that
+/// setup, source-side migrations must be applied on the primary and then
+/// replayed to the standby before the pipeline starts.
 ///
 /// [`crate::pipeline::Pipeline::start`] runs these migrations automatically.
 /// This function is public for applications that want to preflight or
 /// pre-apply the source-side setup.
 pub async fn run_source_migrations(source_config: &PgConnectionConfig) -> EtlResult<()> {
+    let in_recovery = source_database_in_recovery(source_config).await.map_err(|err| {
+        etl_error!(
+            ErrorKind::SourceConnectionFailed,
+            "Failed to inspect source database recovery state",
+            source: err
+        )
+    })?;
+
+    if in_recovery {
+        debug!("skipping etl source migrations on standby source database");
+
+        return Ok(());
+    }
+
     run_migration_set(source_config, source_migrator(), "source")
         .await
         .map_err(|err| {
