@@ -17,7 +17,7 @@ use tokio_postgres::{
 use url::Url;
 use uuid::Uuid;
 
-const DUCKDB_EXTENSION_VERSION: &str = "1.5.2";
+const DUCKDB_EXTENSION_VERSION: &str = "1.5.3";
 const DUCKLAKE_EXTENSION_FILE: &str = "ducklake.duckdb_extension";
 const POSTGRES_SCANNER_EXTENSION_FILE: &str = "postgres_scanner.duckdb_extension";
 pub struct DuckLakeTestEnv {
