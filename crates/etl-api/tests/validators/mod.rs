@@ -1,6 +1,7 @@
 mod bigquery;
 mod iceberg;
 mod pipeline;
+mod snowflake;
 
 use etl_api::{configs::pipeline::FullApiPipelineConfig, validation::ValidationContext};
 use etl_config::{Environment, shared::BatchConfig};

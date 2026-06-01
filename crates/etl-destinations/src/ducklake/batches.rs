@@ -39,7 +39,10 @@ use tracing::{debug, trace, warn};
 use crate::{
     ducklake::{
         DuckLakeTableName, LAKE_CATALOG,
-        client::{DuckLakeConnectionManager, format_query_error_detail, run_duckdb_blocking},
+        client::{
+            DuckLakeConnectionManager, format_query_error_detail,
+            is_ducklake_shutdown_requested_error, run_duckdb_blocking,
+        },
         core::is_create_table_conflict,
         encoding::{
             PreparedRows, cell_to_sql_literal_ref, prepare_rows, table_row_to_sql_literal_ref,
@@ -96,6 +99,15 @@ const INITIAL_RETRY_DELAY_MS: u64 = 50;
 const MAX_RETRY_DELAY_MS: u64 = 2_000;
 /// Minimum retry delay for transient delete-file visibility failures.
 const TRANSIENT_DELETE_FILE_RETRY_DELAY_MS: u64 = 5_000;
+
+/// Decides whether DuckLake-owned retry loops should retry one failure.
+fn ducklake_retry_decision(error: &etl::error::EtlError) -> RetryDecision {
+    if is_ducklake_shutdown_requested_error(error) {
+        RetryDecision::Stop
+    } else {
+        RetryDecision::Retry
+    }
+}
 
 /// Event-level table mutations that must be applied in order.
 pub(super) enum TableMutation {
@@ -246,6 +258,11 @@ struct DuckLakeBatchIdentity {
     last_commit_lsn: Option<PgLsn>,
 }
 
+/// Returns destination-visible column names in replicated write order.
+fn replicated_column_names(replicated_table_schema: &ReplicatedTableSchema) -> Vec<String> {
+    replicated_table_schema.column_schemas().map(|column| column.name.clone()).collect()
+}
+
 /// Prepared per-table work executed atomically in one DuckLake transaction.
 enum PreparedDuckLakeTableBatchAction {
     Mutation(Vec<PreparedTableMutation>),
@@ -261,6 +278,7 @@ pub(super) struct PreparedDuckLakeTableBatch {
     last_commit_lsn: Option<PgLsn>,
     first_sequence_key: Option<EventSequenceKey>,
     last_sequence_key: Option<EventSequenceKey>,
+    insert_column_names: Vec<String>,
     action: PreparedDuckLakeTableBatchAction,
 }
 
@@ -436,7 +454,7 @@ pub(super) async fn apply_table_batches_with_retry(
             initial_delay: Duration::from_millis(INITIAL_RETRY_DELAY_MS),
             max_delay: Duration::from_millis(MAX_RETRY_DELAY_MS),
         },
-        |_| RetryDecision::Retry,
+        ducklake_retry_decision,
         jitter_ducklake_retry_delay,
         |attempt: RetryAttempt<'_, etl::error::EtlError>| {
             counter!(
@@ -469,6 +487,10 @@ pub(super) async fn apply_table_batches_with_retry(
     )
     .await
     .map_err(|failure| {
+        if is_ducklake_shutdown_requested_error(&failure.last_error) {
+            return failure.last_error;
+        }
+
         counter!(
             ETL_DUCKLAKE_FAILED_BATCHES_TOTAL,
             BATCH_KIND_LABEL => DuckLakeTableBatchKind::Mutation.as_str(),
@@ -503,7 +525,7 @@ pub(super) async fn apply_table_batch_with_retry(
                 MAX_RETRY_DELAY_MS.max(TRANSIENT_DELETE_FILE_RETRY_DELAY_MS),
             ),
         },
-        |_| RetryDecision::Retry,
+        ducklake_retry_decision,
         jitter_ducklake_retry_delay,
         |attempt: RetryAttempt<'_, etl::error::EtlError>| {
             counter!(
@@ -546,6 +568,10 @@ pub(super) async fn apply_table_batch_with_retry(
     )
     .await
     .map_err(|failure| {
+        if is_ducklake_shutdown_requested_error(&failure.last_error) {
+            return failure.last_error;
+        }
+
         counter!(
             ETL_DUCKLAKE_FAILED_BATCHES_TOTAL,
             BATCH_KIND_LABEL => batch_kind.as_str(),
@@ -614,6 +640,7 @@ pub(super) fn prepare_copy_table_batch(
         last_commit_lsn: identity.last_commit_lsn,
         first_sequence_key: None,
         last_sequence_key: None,
+        insert_column_names: replicated_column_names(replicated_table_schema),
         action: PreparedDuckLakeTableBatchAction::Mutation(vec![PreparedTableMutation::Upsert(
             prepare_rows(table_rows),
         )]),
@@ -634,6 +661,7 @@ pub(super) fn prepare_truncate_table_batch(
         last_commit_lsn: identity.last_commit_lsn,
         first_sequence_key: tracked_truncates.first().map(TrackedTruncateEvent::sequence_key),
         last_sequence_key: tracked_truncates.last().map(TrackedTruncateEvent::sequence_key),
+        insert_column_names: Vec::new(),
         action: PreparedDuckLakeTableBatchAction::Truncate,
     }
 }
@@ -963,6 +991,7 @@ fn push_prepared_mutation_batch(
         last_commit_lsn: identity.last_commit_lsn,
         first_sequence_key,
         last_sequence_key,
+        insert_column_names: replicated_column_names(replicated_table_schema),
         action: PreparedDuckLakeTableBatchAction::Mutation(prepare_table_mutations(
             replicated_table_schema,
             mutations,
@@ -1530,20 +1559,31 @@ fn update_table_streaming_progress(
     Ok(())
 }
 
+/// Joins quoted column identifiers for insert/select lists.
+fn quoted_column_list(column_names: &[String]) -> String {
+    column_names
+        .iter()
+        .map(|column_name| quote_identifier(column_name))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Reusable per-batch temp staging table for DuckLake upserts.
 struct ReusableStagingTable {
     table_name: DuckLakeTableName,
     staging_name: String,
     created: bool,
+    insert_column_names: Vec<String>,
 }
 
 impl ReusableStagingTable {
     /// Creates a fresh staging-table manager for one destination table.
-    fn new(table_name: &str) -> Self {
+    fn new(table_name: &str, insert_column_names: Vec<String>) -> Self {
         Self {
             table_name: table_name.to_owned(),
             staging_name: format!("__staging_{table_name}"),
             created: false,
+            insert_column_names,
         }
     }
 
@@ -1557,9 +1597,12 @@ impl ReusableStagingTable {
         self.prepare(conn)?;
         self.load_rows(conn, prepared_rows)?;
 
+        let column_list = quoted_column_list(&self.insert_column_names);
         let target_table = qualified_lake_table_name(&self.table_name);
         let staging_table = quote_identifier(&self.staging_name);
-        let sql = format!("INSERT INTO {target_table} SELECT * FROM {staging_table};");
+        let sql = format!(
+            "insert into {target_table} ({column_list}) select {column_list} from {staging_table};"
+        );
         conn.execute_batch(&sql).map_err(|err| {
             tracing::error!(error = %err, "error INSERT INTO");
             etl_error!(
@@ -1579,7 +1622,7 @@ impl ReusableStagingTable {
         }
 
         let staging_table = quote_identifier(&self.staging_name);
-        if let Err(error) = conn.execute_batch(&format!("DROP TABLE IF EXISTS {staging_table}")) {
+        if let Err(error) = conn.execute_batch(&format!("drop table if exists {staging_table}")) {
             tracing::error!(error = %error, "error drop table staging");
         }
     }
@@ -1588,7 +1631,7 @@ impl ReusableStagingTable {
     fn prepare(&mut self, conn: &duckdb::Connection) -> EtlResult<()> {
         let staging_table = quote_identifier(&self.staging_name);
         if self.created {
-            let sql = format!("TRUNCATE TABLE {staging_table};");
+            let sql = format!("truncate table {staging_table};");
             conn.execute_batch(&sql).map_err(|error| {
                 tracing::error!(error = %error, "error clear staging");
                 etl_error!(
@@ -1606,10 +1649,11 @@ impl ReusableStagingTable {
             *counts.entry(self.table_name.clone()).or_default() += 1;
         }
 
+        let column_list = quoted_column_list(&self.insert_column_names);
         let target_table = qualified_lake_table_name(&self.table_name);
         conn.execute_batch(&format!(
-            "CREATE OR REPLACE TEMP TABLE {staging_table} AS
-             SELECT * FROM {target_table} LIMIT 0;"
+            "create or replace temp table {staging_table} as
+             select {column_list} from {target_table} limit 0;"
         ))
         .map_err(|error| {
             tracing::error!(error = %error, "error CREATE TEMP TABLE");
@@ -1685,7 +1729,8 @@ fn apply_table_batch(
         )
     })?;
 
-    let mut reusable_staging_table = ReusableStagingTable::new(&batch.table_name);
+    let mut reusable_staging_table =
+        ReusableStagingTable::new(&batch.table_name, batch.insert_column_names.clone());
     let result = (|| -> EtlResult<()> {
         match &batch.action {
             PreparedDuckLakeTableBatchAction::Mutation(prepared_mutations) => {

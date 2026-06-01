@@ -769,6 +769,17 @@ pub async fn connect_to_pg_database(config: &PgConnectionConfig) -> (Client, Opt
     connect_with_config(database_config, config).await
 }
 
+/// Tries to connect to an existing Postgres database.
+///
+/// Establishes a client connection to the database specified in the
+/// configuration. Assumes the database already exists.
+pub async fn try_connect_to_pg_database(
+    config: &PgConnectionConfig,
+) -> Result<(Client, Option<NonZeroI32>), String> {
+    let database_config: tokio_postgres::Config = config.with_db(None);
+    try_connect_with_config(database_config, config).await
+}
+
 /// Drops a Postgres database and cleans up all resources.
 ///
 /// Terminates all active connections, drops replication slots, and removes

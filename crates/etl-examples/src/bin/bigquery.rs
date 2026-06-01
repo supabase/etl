@@ -190,6 +190,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         id: pipeline_id, // Using a simple ID for the example
         publication_name: args.publication,
         pg_connection: pg_connection_config,
+        store_pg_connection: None,
         batch: BatchConfig {
             max_fill_ms: args.bq_args.max_batch_fill_duration_ms,
             memory_budget_ratio: 0.2,
