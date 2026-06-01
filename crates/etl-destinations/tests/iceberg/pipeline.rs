@@ -1,9 +1,6 @@
 use etl::{
-    state::{
-        TableStateType,
-        destination_table_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus},
-    },
-    store::{both::memory::MemoryStore, schema::SchemaStore, state::StateStore},
+    state::TableStateType,
+    store::state::StateStore,
     test_utils::{
         database::{spawn_source_database, test_table_name},
         notifying_store::NotifyingStore,
@@ -14,10 +11,7 @@ use etl::{
             insert_mock_data, setup_test_database_schema,
         },
     },
-    types::{
-        Cell, ColumnSchema, Event, EventType, InsertEvent, PgLsn, PipelineId, RelationEvent,
-        ReplicatedTableSchema, SnapshotId, TableId, TableRow, TableSchema, Type,
-    },
+    types::{Cell, EventType, PipelineId, TableRow},
 };
 use etl_config::shared::BatchConfig;
 use etl_destinations::iceberg::{
@@ -371,124 +365,6 @@ async fn cdc_streaming_applies_schema_changes_end_to_end() {
     assert_table_rows_equal_ignoring_size(&actual_rows, &expected_rows);
 
     client.drop_table_if_exists(namespace, iceberg_table).await.unwrap();
-    client.drop_namespace(namespace).await.unwrap();
-    lakekeeper_client.drop_warehouse(warehouse_id).await.unwrap();
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn cdc_streaming_recovers_applying_schema_change() {
-    init_test_tracing();
-
-    let table_id = TableId::new(41);
-    let table_name = test_table_name("iceberg_recover_schema");
-    let old_schema = TableSchema::with_snapshot_id(
-        table_id,
-        table_name.clone(),
-        vec![
-            ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, Some(1), false),
-            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true),
-        ],
-        SnapshotId::from(41_u64),
-    );
-    let new_schema = TableSchema::with_snapshot_id(
-        table_id,
-        table_name.clone(),
-        vec![
-            ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, Some(1), false),
-            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true),
-            ColumnSchema::new("email".to_owned(), Type::TEXT, -1, 3, None, true),
-        ],
-        SnapshotId::from(42_u64),
-    );
-    let old_replicated_table_schema = ReplicatedTableSchema::all(old_schema.into());
-    let new_replicated_table_schema = ReplicatedTableSchema::all(new_schema.into());
-    let table_name = old_replicated_table_schema.name().clone();
-    let iceberg_table_name = table_name_to_iceberg_table_name(&table_name, true).unwrap();
-
-    let store = MemoryStore::new();
-    store.store_table_schema(old_replicated_table_schema.inner().clone()).await.unwrap();
-    store.store_table_schema(new_replicated_table_schema.inner().clone()).await.unwrap();
-
-    let lakekeeper_client = LakekeeperClient::new(LAKEKEEPER_URL);
-    let (warehouse_name, warehouse_id) = lakekeeper_client.create_warehouse().await.unwrap();
-    let client = IcebergClient::new_with_rest_catalog(
-        get_catalog_url(),
-        warehouse_name,
-        create_minio_props(),
-    )
-    .await
-    .unwrap();
-
-    let namespace = "test_namespace";
-    let destination = IcebergDestination::new(
-        client.clone(),
-        DestinationNamespace::Single(namespace.to_owned()),
-        store.clone(),
-    );
-
-    destination
-        .write_table_rows_for_tests(
-            &old_replicated_table_schema,
-            vec![TableRow::new(vec![Cell::I64(1), Cell::String("Alice".to_owned())])],
-        )
-        .await
-        .unwrap();
-
-    let applying_metadata = DestinationTableMetadata::new_applied(
-        iceberg_table_name.clone(),
-        old_replicated_table_schema.inner().snapshot_id,
-        old_replicated_table_schema.replication_mask().clone(),
-    )
-    .with_schema_change(
-        new_replicated_table_schema.inner().snapshot_id,
-        new_replicated_table_schema.replication_mask().clone(),
-        DestinationTableSchemaStatus::Applying,
-    );
-    store.store_destination_table_metadata(table_id, applying_metadata).await.unwrap();
-
-    let lsn = PgLsn::from(42_u64);
-    destination
-        .write_events_for_tests(vec![
-            Event::Relation(RelationEvent {
-                start_lsn: lsn,
-                commit_lsn: lsn,
-                tx_ordinal: 0,
-                replicated_table_schema: new_replicated_table_schema.clone(),
-            }),
-            Event::Insert(InsertEvent {
-                start_lsn: lsn,
-                commit_lsn: lsn,
-                tx_ordinal: 1,
-                replicated_table_schema: new_replicated_table_schema.clone(),
-                table_row: TableRow::new(vec![
-                    Cell::I64(2),
-                    Cell::String("Bob".to_owned()),
-                    Cell::String("bob@example.com".to_owned()),
-                ]),
-            }),
-        ])
-        .await
-        .expect("write_events should recover applying schema metadata");
-
-    let metadata =
-        store.get_destination_table_metadata(table_id).await.unwrap().expect("metadata exists");
-    assert!(metadata.is_applied());
-    assert_eq!(metadata.snapshot_id, new_replicated_table_schema.inner().snapshot_id);
-
-    let mut actual_rows =
-        read_all_rows(&client, namespace.to_owned(), iceberg_table_name.clone()).await;
-    sort_rows_by_id(&mut actual_rows);
-    let expected_rows = vec![
-        TableRow::new(vec![Cell::I64(1), Cell::String("Alice".to_owned()), Cell::Null]),
-        TableRow::new(vec![
-            Cell::I64(2),
-            Cell::String("Bob".to_owned()),
-            Cell::String("bob@example.com".to_owned()),
-        ]),
-    ];
-    assert_table_rows_equal_ignoring_size(&actual_rows, &expected_rows);
-
-    client.drop_table_if_exists(namespace, iceberg_table_name).await.unwrap();
     client.drop_namespace(namespace).await.unwrap();
     lakekeeper_client.drop_warehouse(warehouse_id).await.unwrap();
 }

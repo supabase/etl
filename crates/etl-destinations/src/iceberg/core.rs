@@ -755,10 +755,14 @@ where
                         "Iceberg schema recovery previous schema not found",
                     )
                     .await?;
+                let current_field_ids = self
+                    .client
+                    .current_schema_field_ids(&namespace, metadata.destination_table_id.clone())
+                    .await
+                    .map_err(iceberg_error_to_etl_error)?;
                 let previous_replication_mask = previous_replication_mask_for_recovery(
                     &previous_table_schema,
-                    target_schema.inner(),
-                    &metadata.replication_mask,
+                    &current_field_ids,
                 );
                 let previous_schema = ReplicatedTableSchema::from_mask(
                     previous_table_schema,
@@ -1172,30 +1176,21 @@ fn row_key(table_row: &TableRow, key_indices: &[usize]) -> RowKey {
     RowKey { values }
 }
 
-/// Builds the best previous-schema replication mask available during recovery.
+/// Builds the previous-schema replication mask from the actual Iceberg schema.
 ///
-/// [`DestinationTableMetadata`] stores the target mask, not the previous mask.
-/// For a source-schema change, target bits are projected back by source
-/// ordinal position. Columns that no longer exist in the target schema are
-/// treated as previously replicated so idempotent Iceberg DDL can drop them if
-/// they still exist.
+/// [`DestinationTableMetadata`] stores the target mask, not the previous mask,
+/// during `Applying`. Iceberg field IDs are derived from Postgres attnums, so
+/// the actual Iceberg table schema is the most reliable source of which
+/// previous columns had already been materialized.
 fn previous_replication_mask_for_recovery(
     previous_schema: &TableSchema,
-    target_schema: &TableSchema,
-    target_replication_mask: &ReplicationMask,
+    current_iceberg_field_ids: &HashSet<i32>,
 ) -> ReplicationMask {
     let mask = previous_schema
         .column_schemas
         .iter()
         .map(|previous_column| {
-            target_schema
-                .column_schemas
-                .iter()
-                .position(|target_column| {
-                    target_column.ordinal_position == previous_column.ordinal_position
-                })
-                .and_then(|index| target_replication_mask.as_slice().get(index).copied())
-                .unwrap_or(1)
+            u8::from(current_iceberg_field_ids.contains(&previous_column.ordinal_position))
         })
         .collect();
 
@@ -1382,7 +1377,7 @@ fn schema_to_namespace(schema: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{collections::HashSet, sync::Arc};
 
     use etl::{
         error::ErrorKind,
@@ -1393,8 +1388,8 @@ mod tests {
     };
 
     use crate::iceberg::core::{
-        TableDelta, equality_delete_row_from_full_row, schema_to_namespace,
-        validate_iceberg_table_identity,
+        TableDelta, equality_delete_row_from_full_row, previous_replication_mask_for_recovery,
+        schema_to_namespace, validate_iceberg_table_identity,
     };
 
     fn replicated_schema(identity_type: IdentityType) -> ReplicatedTableSchema {
@@ -1462,6 +1457,18 @@ mod tests {
         ReplicatedTableSchema::all(table_schema)
     }
 
+    fn schema_with_unreplicated_middle_column() -> TableSchema {
+        TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_owned(), "users".to_owned()),
+            vec![
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
+                ColumnSchema::new("internal_note".to_owned(), Type::TEXT, -1, 2, None, true),
+                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 3, None, true),
+            ],
+        )
+    }
+
     fn test_row(id: i32, name: &str) -> TableRow {
         TableRow::new(vec![Cell::I32(id), Cell::String(name.to_owned())])
     }
@@ -1480,6 +1487,17 @@ mod tests {
         key_indices: &[usize],
     ) -> TableRow {
         equality_delete_row_from_full_row(table_row, replicated_table_schema, key_indices)
+    }
+
+    #[test]
+    fn previous_replication_mask_for_recovery_uses_iceberg_field_ids() {
+        let previous_schema = schema_with_unreplicated_middle_column();
+        let current_field_ids = HashSet::from([1, 3]);
+
+        let replication_mask =
+            previous_replication_mask_for_recovery(&previous_schema, &current_field_ids);
+
+        assert_eq!(replication_mask.as_slice(), &[1, 0, 1]);
     }
 
     #[test]

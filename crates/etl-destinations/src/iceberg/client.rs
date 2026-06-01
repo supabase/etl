@@ -297,6 +297,26 @@ impl IcebergClient {
         .map_err(|failure| failure.last_error)
     }
 
+    /// Returns the field IDs in the table's current top-level Iceberg schema.
+    pub(super) async fn current_schema_field_ids(
+        &self,
+        namespace: &str,
+        table_name: String,
+    ) -> Result<HashSet<i32>, iceberg::Error> {
+        let namespace_ident = NamespaceIdent::from_strs(namespace.split('.'))?;
+        let table_ident = TableIdent::new(namespace_ident, table_name);
+        let table = self.catalog.load_table(&table_ident).await?;
+
+        Ok(table
+            .metadata()
+            .current_schema()
+            .as_struct()
+            .fields()
+            .iter()
+            .map(|field| field.id)
+            .collect())
+    }
+
     /// Generates default table properties for commit behavior and retry
     /// configuration.
     ///
