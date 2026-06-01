@@ -5,7 +5,7 @@ use std::{
     error, fmt, process,
     sync::{
         Arc, LazyLock, Mutex, Weak,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -53,6 +53,108 @@ const BLOCKING_ABORT_GRACE: Duration = Duration::from_secs(30);
 /// Description used when DuckLake rejects new blocking work during shutdown.
 const DUCKLAKE_SHUTDOWN_REQUESTED: &str = "DuckLake shutdown requested";
 
+/// Reason recorded for the first interrupt sent to a DuckLake connection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DuckLakeInterruptReason {
+    None = 0,
+    QueryTimeout = 1,
+    DestinationShutdown = 2,
+    ProcessShutdown = 3,
+    ExternalInterrupt = 4,
+}
+
+impl DuckLakeInterruptReason {
+    /// Returns the stable label used in logs and error details.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::QueryTimeout => "query_timeout",
+            Self::DestinationShutdown => "destination_shutdown",
+            Self::ProcessShutdown => "process_shutdown",
+            Self::ExternalInterrupt => "external_interrupt",
+        }
+    }
+
+    /// Converts one stored atomic value back into an interrupt reason.
+    fn from_u8(value: u8) -> Self {
+        match value {
+            1 => Self::QueryTimeout,
+            2 => Self::DestinationShutdown,
+            3 => Self::ProcessShutdown,
+            4 => Self::ExternalInterrupt,
+            _ => Self::None,
+        }
+    }
+}
+
+/// Shared interrupt state for one managed DuckDB connection.
+#[derive(Default)]
+struct DuckLakeInterruptState {
+    reason: AtomicU8,
+}
+
+impl DuckLakeInterruptState {
+    /// Clears the previously recorded interrupt reason before a new query.
+    fn clear(&self) {
+        self.reason.store(DuckLakeInterruptReason::None as u8, Ordering::Relaxed);
+    }
+
+    /// Records the first reason that interrupted the current query.
+    fn record(&self, reason: DuckLakeInterruptReason) {
+        let _ = self.reason.compare_exchange(
+            DuckLakeInterruptReason::None as u8,
+            reason as u8,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        );
+    }
+
+    /// Returns the currently recorded interrupt reason.
+    fn reason(&self) -> DuckLakeInterruptReason {
+        DuckLakeInterruptReason::from_u8(self.reason.load(Ordering::Relaxed))
+    }
+}
+
+/// Context for one DuckDB blocking operation.
+pub(super) struct DuckLakeBlockingOperationContext {
+    operation_id: u64,
+    operation_kind: &'static str,
+    timeout: Duration,
+    interrupt_state: Arc<DuckLakeInterruptState>,
+}
+
+impl DuckLakeBlockingOperationContext {
+    /// Creates context for one blocking DuckDB operation.
+    fn new(
+        operation_id: u64,
+        operation_kind: &'static str,
+        timeout: Duration,
+        interrupt_state: Arc<DuckLakeInterruptState>,
+    ) -> Self {
+        Self { operation_id, operation_kind, timeout, interrupt_state }
+    }
+
+    /// Returns the operation id assigned to the blocking DuckDB operation.
+    pub(super) fn operation_id(&self) -> u64 {
+        self.operation_id
+    }
+
+    /// Returns the stable operation-kind label.
+    pub(super) fn operation_kind(&self) -> &'static str {
+        self.operation_kind
+    }
+
+    /// Returns the operation timeout in milliseconds.
+    pub(super) fn timeout_ms(&self) -> u64 {
+        self.timeout.as_millis() as u64
+    }
+
+    /// Returns the currently recorded interrupt reason label.
+    pub(super) fn interrupt_reason_label(&self) -> &'static str {
+        self.interrupt_state.reason().as_str()
+    }
+}
+
 trait DuckDbQueryInterrupt: Send + Sync + 'static {
     fn interrupt(&self);
 }
@@ -64,6 +166,46 @@ impl DuckDbQueryInterrupt for duckdb::InterruptHandle {
 }
 
 type DuckDbQueryInterruptHandle = Arc<dyn DuckDbQueryInterrupt>;
+
+/// Interrupt handle registered for one managed DuckLake connection.
+struct RegisteredDuckLakeInterrupt {
+    handle: Arc<duckdb::InterruptHandle>,
+    state: Arc<DuckLakeInterruptState>,
+}
+
+impl RegisteredDuckLakeInterrupt {
+    /// Creates a registered interrupt handle for one DuckDB connection.
+    fn new(handle: Arc<duckdb::InterruptHandle>) -> Self {
+        Self { handle, state: Arc::new(DuckLakeInterruptState::default()) }
+    }
+
+    /// Clears the previously recorded interrupt reason before a new query.
+    fn clear_reason(&self) {
+        self.state.clear();
+    }
+
+    /// Returns the shared interrupt state for context passed to callers.
+    fn interrupt_state(&self) -> Arc<DuckLakeInterruptState> {
+        Arc::clone(&self.state)
+    }
+
+    /// Returns the currently recorded interrupt reason.
+    fn interrupt_reason(&self) -> DuckLakeInterruptReason {
+        self.state.reason()
+    }
+
+    /// Interrupts the connection and records why the interrupt was sent.
+    fn interrupt_with_reason(&self, reason: DuckLakeInterruptReason) {
+        self.state.record(reason);
+        self.handle.interrupt();
+    }
+}
+
+impl DuckDbQueryInterrupt for RegisteredDuckLakeInterrupt {
+    fn interrupt(&self) {
+        self.interrupt_with_reason(DuckLakeInterruptReason::QueryTimeout);
+    }
+}
 
 fn remaining_ms_until(deadline: Instant) -> u64 {
     deadline.checked_duration_since(Instant::now()).unwrap_or(Duration::ZERO).as_millis() as u64
@@ -269,7 +411,7 @@ impl DuckDbQueryWatchdog {
         }
     }
 
-    fn publish_interrupt_handle(&mut self, handle: Arc<duckdb::InterruptHandle>) {
+    fn publish_interrupt_handle(&mut self, handle: DuckDbQueryInterruptHandle) {
         self.publish_query_interrupt_handle(handle);
     }
 
@@ -342,12 +484,12 @@ impl DuckDbQueryWatchdog {
 /// Shared registry of interrupt handles for live DuckLake connections.
 #[derive(Default)]
 pub(super) struct DuckLakeInterruptRegistry {
-    handles: Mutex<Vec<Weak<duckdb::InterruptHandle>>>,
+    handles: Mutex<Vec<Weak<RegisteredDuckLakeInterrupt>>>,
 }
 
 impl DuckLakeInterruptRegistry {
     /// Registers one live DuckLake connection interrupt handle.
-    fn register(&self, handle: &Arc<duckdb::InterruptHandle>) {
+    fn register(&self, handle: &Arc<RegisteredDuckLakeInterrupt>) {
         self.handles
             .lock()
             .expect("ducklake interrupt registry mutex should not be poisoned")
@@ -355,7 +497,13 @@ impl DuckLakeInterruptRegistry {
     }
 
     /// Interrupts all currently live registered DuckLake connections.
+    #[cfg(test)]
     pub(super) fn interrupt_all(&self) -> usize {
+        self.interrupt_all_with_reason(DuckLakeInterruptReason::ExternalInterrupt)
+    }
+
+    /// Interrupts all live connections and records one shared reason.
+    fn interrupt_all_with_reason(&self, reason: DuckLakeInterruptReason) -> usize {
         let mut interrupted = 0;
         let mut handles =
             self.handles.lock().expect("ducklake interrupt registry mutex should not be poisoned");
@@ -363,7 +511,7 @@ impl DuckLakeInterruptRegistry {
             let Some(handle) = handle.upgrade() else {
                 return false;
             };
-            handle.interrupt();
+            handle.interrupt_with_reason(reason);
             interrupted += 1;
             true
         });
@@ -396,8 +544,15 @@ pub(super) struct DuckLakeConnectionManager {
 /// DuckDB connection state tracked while a pooled connection is checked out.
 pub(super) struct ManagedDuckLakeConnection {
     conn: duckdb::Connection,
+    interrupt_handle: Arc<RegisteredDuckLakeInterrupt>,
     shutdown_requested: Arc<AtomicBool>,
     broken: bool,
+}
+
+/// DuckDB connection and registered interrupt handle opened by the manager.
+struct OpenDuckLakeConnection {
+    conn: duckdb::Connection,
+    interrupt_handle: Arc<RegisteredDuckLakeInterrupt>,
 }
 
 /// Error returned while opening or validating one DuckLake pooled connection.
@@ -443,19 +598,25 @@ impl DuckLakeConnectionManager {
     /// Records DuckLake shutdown and interrupts all live managed connections.
     pub(super) fn interrupt_all_connections_for_shutdown(&self) -> usize {
         self.shutdown_requested.store(true, Ordering::Relaxed);
-        self.interrupt_all_connections()
+        self.interrupt_registry
+            .interrupt_all_with_reason(DuckLakeInterruptReason::DestinationShutdown)
+    }
+
+    /// Records process shutdown and interrupts all live managed connections.
+    pub(super) fn interrupt_all_connections_for_process_shutdown(&self) -> usize {
+        self.shutdown_requested.store(true, Ordering::Relaxed);
+        self.interrupt_registry.interrupt_all_with_reason(DuckLakeInterruptReason::ProcessShutdown)
     }
 
     /// Interrupts all currently live managed DuckLake connections.
+    #[cfg(test)]
     pub(super) fn interrupt_all_connections(&self) -> usize {
         self.interrupt_registry.interrupt_all()
     }
 
     /// Opens one fully initialized DuckDB connection and attaches the lake
     /// catalog.
-    pub(super) fn open_duckdb_connection(
-        &self,
-    ) -> Result<duckdb::Connection, DuckLakeConnectionError> {
+    fn open_duckdb_connection(&self) -> Result<OpenDuckLakeConnection, DuckLakeConnectionError> {
         let connection_init_id = NEXT_CONNECTION_INIT_ID.fetch_add(1, Ordering::Relaxed);
         let conn = if self.disable_extension_autoload {
             duckdb::Connection::open_in_memory_with_flags(
@@ -467,7 +628,9 @@ impl DuckLakeConnectionManager {
         } else {
             duckdb::Connection::open_in_memory().map_err(DuckLakeConnectionError::validation)?
         };
-        self.interrupt_registry.register(&conn.interrupt_handle());
+        let interrupt_handle = Arc::new(RegisteredDuckLakeInterrupt::new(conn.interrupt_handle()));
+        self.interrupt_registry.register(&interrupt_handle);
+
         for step in self.setup_plan.steps() {
             let phase_started = Instant::now();
             info!(
@@ -487,7 +650,7 @@ impl DuckLakeConnectionManager {
         }
         #[cfg(feature = "test-utils")]
         self.open_count.fetch_add(1, Ordering::Relaxed);
-        Ok(conn)
+        Ok(OpenDuckLakeConnection { conn, interrupt_handle })
     }
 
     /// Returns the number of successfully initialized DuckDB connections.
@@ -502,8 +665,11 @@ impl r2d2::ManageConnection for DuckLakeConnectionManager {
     type Error = DuckLakeConnectionError;
 
     fn connect(&self) -> Result<ManagedDuckLakeConnection, DuckLakeConnectionError> {
+        let OpenDuckLakeConnection { conn, interrupt_handle } = self.open_duckdb_connection()?;
+
         Ok(ManagedDuckLakeConnection {
-            conn: self.open_duckdb_connection()?,
+            conn,
+            interrupt_handle,
             shutdown_requested: Arc::clone(&self.shutdown_requested),
             broken: false,
         })
@@ -659,6 +825,27 @@ where
         .await
 }
 
+/// Runs one DuckDB operation with context for operation-local diagnostics.
+pub(super) async fn run_duckdb_blocking_with_context<R, F>(
+    pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
+    blocking_slots: Arc<Semaphore>,
+    operation: F,
+) -> EtlResult<R>
+where
+    R: Send + 'static,
+    F: FnOnce(&duckdb::Connection, &DuckLakeBlockingOperationContext) -> EtlResult<R>
+        + Send
+        + 'static,
+{
+    run_duckdb_blocking_with_timeout_and_context(
+        pool,
+        blocking_slots,
+        FOREGROUND_QUERY_TIMEOUT,
+        operation,
+    )
+    .await
+}
+
 /// Runs one DuckDB operation with an explicit timeout budget.
 pub(super) async fn run_duckdb_blocking_with_timeout<R, F>(
     pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
@@ -669,6 +856,25 @@ pub(super) async fn run_duckdb_blocking_with_timeout<R, F>(
 where
     R: Send + 'static,
     F: FnOnce(&duckdb::Connection) -> EtlResult<R> + Send + 'static,
+{
+    run_duckdb_blocking_with_timeout_and_context(pool, blocking_slots, timeout, move |conn, _| {
+        operation(conn)
+    })
+    .await
+}
+
+/// Runs one DuckDB operation with an explicit timeout and diagnostic context.
+async fn run_duckdb_blocking_with_timeout_and_context<R, F>(
+    pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
+    blocking_slots: Arc<Semaphore>,
+    timeout: Duration,
+    operation: F,
+) -> EtlResult<R>
+where
+    R: Send + 'static,
+    F: FnOnce(&duckdb::Connection, &DuckLakeBlockingOperationContext) -> EtlResult<R>
+        + Send
+        + 'static,
 {
     let operation_kind = DUCKDB_BLOCKING_OPERATION_KIND;
     let operation_id = NEXT_DUCKDB_BLOCKING_OPERATION_ID.fetch_add(1, Ordering::Relaxed);
@@ -882,7 +1088,16 @@ where
             );
             return Err(duckdb_blocking_timeout_error(timeout, "query_execution"));
         }
-        let interrupt_handle = pooled_conn.conn.interrupt_handle();
+        pooled_conn.interrupt_handle.clear_reason();
+        let operation_context = DuckLakeBlockingOperationContext::new(
+            operation_id,
+            operation_kind,
+            timeout,
+            pooled_conn.interrupt_handle.interrupt_state(),
+        );
+        let interrupt_handle: Arc<RegisteredDuckLakeInterrupt> =
+            Arc::clone(&pooled_conn.interrupt_handle);
+        let interrupt_handle: DuckDbQueryInterruptHandle = interrupt_handle;
         info!(
             operation_id,
             operation_kind = operation_kind,
@@ -894,14 +1109,17 @@ where
             operation_timeout.as_millis()
         );
         watchdog.publish_interrupt_handle(interrupt_handle);
+        let interrupt_reason = pooled_conn.interrupt_handle.interrupt_reason();
         if watchdog.timed_out() {
             warn!(
                 operation_id,
                 operation_kind = operation_kind,
+                interrupt_reason = interrupt_reason.as_str(),
                 "ducklake blocking operation timed out before query started; marking pooled \
-                 connection broken: operation_id={}, operation_kind={}",
+                 connection broken: operation_id={}, operation_kind={}, interrupt_reason={}",
                 operation_id,
-                operation_kind
+                operation_kind,
+                interrupt_reason.as_str()
             );
             pooled_conn.broken = true;
             return Err(duckdb_blocking_timeout_error(timeout, "query_execution"));
@@ -917,20 +1135,24 @@ where
             operation_kind,
             remaining_ms_until(deadline)
         );
-        let res = operation(&pooled_conn.conn);
+        let res = operation(&pooled_conn.conn, &operation_context);
         let operation_duration_ms = operation_started.elapsed().as_millis() as u64;
+        let interrupt_reason = pooled_conn.interrupt_handle.interrupt_reason();
         info!(
             operation_id,
             operation_kind = operation_kind,
             duration_ms = operation_duration_ms,
             timed_out = watchdog.timed_out(),
+            interrupt_reason = interrupt_reason.as_str(),
             result_is_error = res.is_err(),
             "ducklake blocking operation DuckDB closure returned: operation_id={}, \
-             operation_kind={}, duration_ms={}, timed_out={}, result_is_error={}",
+             operation_kind={}, duration_ms={}, timed_out={}, interrupt_reason={}, \
+             result_is_error={}",
             operation_id,
             operation_kind,
             operation_duration_ms,
             watchdog.timed_out(),
+            interrupt_reason.as_str(),
             res.is_err()
         );
         watchdog.finish();
@@ -945,11 +1167,13 @@ where
                 operation_id,
                 operation_kind = operation_kind,
                 duration_ms = operation_duration_ms,
+                interrupt_reason = interrupt_reason.as_str(),
                 "ducklake blocking operation returned after timeout; marking pooled connection \
-                 broken: operation_id={}, operation_kind={}, duration_ms={}",
+                 broken: operation_id={}, operation_kind={}, duration_ms={}, interrupt_reason={}",
                 operation_id,
                 operation_kind,
-                operation_duration_ms
+                operation_duration_ms,
+                interrupt_reason.as_str()
             );
             pooled_conn.broken = true;
             return Err(duckdb_blocking_timeout_error(timeout, "query_execution"));
@@ -959,11 +1183,13 @@ where
                 operation_id,
                 operation_kind = operation_kind,
                 duration_ms = operation_duration_ms,
+                interrupt_reason = interrupt_reason.as_str(),
                 "ducklake blocking operation returned error; marking pooled connection broken: \
-                 operation_id={}, operation_kind={}, duration_ms={}",
+                 operation_id={}, operation_kind={}, duration_ms={}, interrupt_reason={}",
                 operation_id,
                 operation_kind,
-                operation_duration_ms
+                operation_duration_ms,
+                interrupt_reason.as_str()
             );
             pooled_conn.broken = true;
         } else {
@@ -1310,6 +1536,42 @@ mod tests {
     }
 
     #[test]
+    fn ducklake_interrupt_state_records_first_reason() {
+        let state = DuckLakeInterruptState::default();
+
+        assert_eq!(state.reason(), DuckLakeInterruptReason::None);
+
+        state.record(DuckLakeInterruptReason::DestinationShutdown);
+        state.record(DuckLakeInterruptReason::QueryTimeout);
+
+        assert_eq!(state.reason(), DuckLakeInterruptReason::DestinationShutdown);
+
+        state.clear();
+
+        assert_eq!(state.reason(), DuckLakeInterruptReason::None);
+    }
+
+    #[test]
+    fn ducklake_blocking_operation_context_reports_interrupt_reason() {
+        let state = Arc::new(DuckLakeInterruptState::default());
+        let context = DuckLakeBlockingOperationContext::new(
+            42,
+            DUCKDB_BLOCKING_OPERATION_KIND,
+            Duration::from_millis(250),
+            Arc::clone(&state),
+        );
+
+        assert_eq!(context.operation_id(), 42);
+        assert_eq!(context.operation_kind(), DUCKDB_BLOCKING_OPERATION_KIND);
+        assert_eq!(context.timeout_ms(), 250);
+        assert_eq!(context.interrupt_reason_label(), "none");
+
+        state.record(DuckLakeInterruptReason::ProcessShutdown);
+
+        assert_eq!(context.interrupt_reason_label(), "process_shutdown");
+    }
+
+    #[test]
     fn redact_ducklake_connection_error_message_masks_quoted_password() {
         let message = "timed out waiting for connection: attach failed: postgres:host='localhost' \
                        user='ducklake' password='pa\\'ss\\\\word' dbname='catalog'";
@@ -1348,6 +1610,33 @@ mod tests {
             DuckLakeConnectionError::setup_phase(&step, error).to_string(),
             "ducklake duckdb connection setup phase `attach_catalog` failed: attach failed: \
              postgres:host='localhost' user='ducklake' password='[redacted]'"
+        );
+    }
+
+    #[test]
+    fn open_duckdb_connection_registers_interrupt_before_setup_sql() {
+        let manager = DuckLakeConnectionManager {
+            setup_plan: Arc::new(DuckLakeSetupPlan::from_steps(vec![DuckLakeSetupStep {
+                label: "failing_setup",
+                sql: "SELECT * FROM missing_setup_table;".to_owned(),
+            }])),
+            ..make_blocking_test_manager()
+        };
+
+        let Err(error) = manager.open_duckdb_connection() else {
+            panic!("setup should fail");
+        };
+
+        assert!(error.to_string().contains("failing_setup"), "unexpected setup error: {error}");
+        assert_eq!(
+            manager
+                .interrupt_registry
+                .handles
+                .lock()
+                .expect("ducklake interrupt registry mutex should not be poisoned")
+                .len(),
+            1,
+            "interrupt handle should be registered before setup SQL runs"
         );
     }
 
@@ -1621,14 +1910,14 @@ mod tests {
 
     #[tokio::test]
     async fn query_watchdog_marks_timeout_when_handle_arrives_after_deadline() {
-        let conn = make_blocking_test_manager()
+        let opened = make_blocking_test_manager()
             .open_duckdb_connection()
             .expect("failed to open blocking test connection");
         let mut watchdog = DuckDbQueryWatchdog::spawn(Instant::now() + Duration::from_millis(10));
         let watchdog_task = watchdog.async_task_handle().expect("failed to extract watchdog task");
 
         tokio::time::sleep(Duration::from_millis(20)).await;
-        watchdog.publish_interrupt_handle(conn.interrupt_handle());
+        watchdog.publish_interrupt_handle(opened.conn.interrupt_handle());
 
         watchdog_task.await.expect("watchdog task should not panic");
 
