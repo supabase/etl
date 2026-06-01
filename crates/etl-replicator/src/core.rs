@@ -185,7 +185,7 @@ pub(crate) async fn start_replicator_with_config(
                 DuckLakeExternalMaintenanceConfig { mode: maintenance_mode, pipeline_id };
 
             let destination = DuckLakeDestination::new_with_external_maintenance(
-                parse_ducklake_url(catalog_url).map_err(ReplicatorError::config)?,
+                parse_ducklake_url(catalog_url.expose_secret()).map_err(ReplicatorError::config)?,
                 parse_ducklake_url(data_path).map_err(ReplicatorError::config)?,
                 *pool_size,
                 s3_config,

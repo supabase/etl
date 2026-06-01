@@ -64,15 +64,24 @@ impl Validator for DucklakeValidator {
         &self,
         _ctx: &ValidationContext,
     ) -> Result<Vec<ValidationFailure>, ValidationError> {
-        match (&self.s3_access_key_id, &self.s3_secret_access_key) {
-            (Some(_), None) | (None, Some(_)) => {
-                return Ok(vec![ValidationFailure::critical(
-                    "Ducklake S3 Configuration Invalid",
-                    "DuckLake S3 credentials must include both access key ID and secret access \
-                     key.",
-                )]);
-            }
-            _ => {}
+        let (s3_access_key_id, s3_secret_access_key) =
+            match (&self.s3_access_key_id, &self.s3_secret_access_key) {
+                (Some(s3_access_key_id), Some(s3_secret_access_key)) => {
+                    (s3_access_key_id.clone(), s3_secret_access_key.clone())
+                }
+                _ => {
+                    return Ok(vec![ValidationFailure::critical(
+                        "Ducklake S3 Configuration Invalid",
+                        "DuckLake S3 credentials are required.",
+                    )]);
+                }
+            };
+
+        if s3_access_key_id.is_empty() || s3_secret_access_key.is_empty() {
+            return Ok(vec![ValidationFailure::critical(
+                "Ducklake S3 Configuration Invalid",
+                "DuckLake S3 credentials are required.",
+            )]);
         }
 
         let catalog_url = match parse_ducklake_url(&self.catalog_url) {
@@ -95,12 +104,9 @@ impl Validator for DucklakeValidator {
             }
         };
 
-        let s3_config = self.s3_access_key_id.clone().map(|access_key_id| DucklakeS3Config {
-            access_key_id,
-            secret_access_key: self
-                .s3_secret_access_key
-                .clone()
-                .expect("ducklake s3 secret access key should be present"),
+        let s3_config = Some(DucklakeS3Config {
+            access_key_id: s3_access_key_id,
+            secret_access_key: s3_secret_access_key,
             region: self.s3_region.clone().unwrap_or_else(|| "us-east-1".to_owned()),
             endpoint: self.s3_endpoint.clone(),
             url_style: self.s3_url_style.clone().unwrap_or_else(|| "path".to_owned()),

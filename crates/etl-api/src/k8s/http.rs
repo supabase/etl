@@ -50,9 +50,10 @@ const ICEBERG_CATALOG_TOKEN_KEY_NAME: &str = "catalog-token";
 const ICEBERG_S3_ACCESS_KEY_ID_KEY_NAME: &str = "s3-access-key-id";
 /// Name of s3 acess key id in the iceberg secret and its reference.
 const ICEBERG_S3_SECRET_ACCESS_KEY_KEY_NAME: &str = "s3-secret-access-key";
-/// Secret name suffix for ducklake secrets (includes s3 access key id and s3
-/// secret access key).
+/// Secret name suffix for DuckLake secrets.
 const DUCKLAKE_SECRET_NAME_SUFFIX: &str = "ducklake";
+/// Name of catalog URL in the DuckLake secret and its reference.
+const DUCKLAKE_CATALOG_URL_KEY_NAME: &str = "catalog-url";
 /// Name of s3 access key id in the ducklake secret and its reference.
 const DUCKLAKE_S3_ACCESS_KEY_ID_KEY_NAME: &str = "s3-access-key-id";
 /// Name of s3 secret access key in the ducklake secret and its reference.
@@ -440,11 +441,13 @@ impl K8sClient for HttpK8sClient {
     async fn create_or_update_ducklake_secret(
         &self,
         prefix: &str,
+        catalog_url: &str,
         s3_access_key_id: &str,
         s3_secret_access_key: &str,
     ) -> Result<(), K8sError> {
         debug!("patching ducklake secret");
 
+        let encoded_catalog_url = BASE64_STANDARD.encode(catalog_url);
         let encoded_s3_access_key_id = BASE64_STANDARD.encode(s3_access_key_id);
         let encoded_s3_secret_access_key = BASE64_STANDARD.encode(s3_secret_access_key);
 
@@ -453,6 +456,7 @@ impl K8sClient for HttpK8sClient {
         let ducklake_secret_json = create_ducklake_secret_json(
             &ducklake_secret_name,
             &replicator_app_name,
+            &encoded_catalog_url,
             &encoded_s3_access_key_id,
             &encoded_s3_secret_access_key,
         );
@@ -932,6 +936,7 @@ fn create_iceberg_secret_json(
 fn create_ducklake_secret_json(
     secret_name: &str,
     replicator_app_name: &str,
+    encoded_catalog_url: &str,
     encoded_s3_access_key_id: &str,
     encoded_s3_secret_access_key: &str,
 ) -> serde_json::Value {
@@ -948,6 +953,7 @@ fn create_ducklake_secret_json(
       },
       "type": "Opaque",
       "data": {
+        DUCKLAKE_CATALOG_URL_KEY_NAME: encoded_catalog_url,
         DUCKLAKE_S3_ACCESS_KEY_ID_KEY_NAME: encoded_s3_access_key_id,
         DUCKLAKE_S3_SECRET_ACCESS_KEY_KEY_NAME: encoded_s3_secret_access_key
       }
@@ -1171,6 +1177,10 @@ fn create_container_environment_json(
             container_environment.push(postgres_secret_env_var_json);
 
             let ducklake_secret_name = create_ducklake_secret_name(prefix);
+
+            let ducklake_catalog_url_env_var_json =
+                create_ducklake_catalog_url_env_var_json(&ducklake_secret_name);
+            container_environment.push(ducklake_catalog_url_env_var_json);
 
             let ducklake_s3_access_key_id_env_var_json =
                 create_ducklake_s3_access_key_id_env_var_json(&ducklake_secret_name);
@@ -1401,14 +1411,25 @@ fn create_iceberg_s3_secret_access_key_env_var_json(
     })
 }
 
+fn create_ducklake_catalog_url_env_var_json(ducklake_secret_name: &str) -> serde_json::Value {
+    json!({
+      "name": "APP_DESTINATION__DUCKLAKE__CATALOG_URL",
+      "valueFrom": {
+        "secretKeyRef": {
+          "name": ducklake_secret_name,
+          "key": DUCKLAKE_CATALOG_URL_KEY_NAME
+        }
+      }
+    })
+}
+
 fn create_ducklake_s3_access_key_id_env_var_json(ducklake_secret_name: &str) -> serde_json::Value {
     json!({
       "name": "APP_DESTINATION__DUCKLAKE__S3_ACCESS_KEY_ID",
       "valueFrom": {
         "secretKeyRef": {
           "name": ducklake_secret_name,
-          "key": DUCKLAKE_S3_ACCESS_KEY_ID_KEY_NAME,
-          "optional": true
+          "key": DUCKLAKE_S3_ACCESS_KEY_ID_KEY_NAME
         }
       }
     })
@@ -1422,8 +1443,7 @@ fn create_ducklake_s3_secret_access_key_env_var_json(
       "valueFrom": {
         "secretKeyRef": {
           "name": ducklake_secret_name,
-          "key": DUCKLAKE_S3_SECRET_ACCESS_KEY_KEY_NAME,
-          "optional": true
+          "key": DUCKLAKE_S3_SECRET_ACCESS_KEY_KEY_NAME
         }
       }
     })
@@ -1727,6 +1747,7 @@ mod tests {
                 create_ducklake_secret_json(
                     &ducklake_secret_name,
                     &replicator_app_name,
+                    "secret",
                     "secret",
                     "secret",
                 ),

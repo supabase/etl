@@ -79,7 +79,7 @@ async fn run(config: ReplicatorConfig) -> MaintenanceResult<()> {
     };
 
     let maintenance_config = DuckLakeMaintenanceConfig {
-        catalog_url: parse_ducklake_url(&catalog_url)?,
+        catalog_url: parse_ducklake_url(catalog_url.expose_secret())?,
         data_path: parse_ducklake_url(&data_path)?,
         pool_size,
         s3,

@@ -33,6 +33,8 @@ fn validate_table_name_component_for_underscore_encoding(
     value: &str,
     component_name: &str,
 ) -> EtlResult<()> {
+    const UNSUPPORTED_SQL_IDENTIFIER_CHARS: [char; 2] = ['"', ';'];
+
     if value.starts_with('_') || value.ends_with('_') {
         bail!(
             ErrorKind::ValidationError,
@@ -53,6 +55,16 @@ fn validate_table_name_component_for_underscore_encoding(
                  table name"
             )
         ));
+    }
+
+    if let Some(character) =
+        value.chars().find(|character| UNSUPPORTED_SQL_IDENTIFIER_CHARS.contains(character))
+    {
+        bail!(
+            ErrorKind::ValidationError,
+            "Destination table name contains an unsupported SQL identifier character",
+            format!("{component_name} '{value}' contains unsupported character '{character}'")
+        );
     }
 
     Ok(())
@@ -112,5 +124,30 @@ mod tests {
         let table_name = TableName::new("a__b".to_owned(), "c__d".to_owned());
 
         assert_eq!(try_stringify_table_name(&table_name).unwrap(), "a____b_c____d");
+    }
+
+    #[test]
+    fn rejects_double_quote() {
+        let table_name =
+            TableName::new("public".to_owned(), "users\"; drop table x; --".to_owned());
+        let err = try_stringify_table_name(&table_name).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::ValidationError);
+        assert_eq!(
+            err.description(),
+            Some("Destination table name contains an unsupported SQL identifier character")
+        );
+    }
+
+    #[test]
+    fn rejects_semicolon() {
+        let table_name = TableName::new("public".to_owned(), "users;drop".to_owned());
+        let err = try_stringify_table_name(&table_name).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::ValidationError);
+        assert_eq!(
+            err.description(),
+            Some("Destination table name contains an unsupported SQL identifier character")
+        );
     }
 }
