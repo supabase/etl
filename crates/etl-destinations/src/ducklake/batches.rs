@@ -40,8 +40,9 @@ use crate::{
     ducklake::{
         DuckLakeTableName, LAKE_CATALOG,
         client::{
-            DuckLakeConnectionManager, format_query_error_detail,
+            DuckLakeBlockingOperationContext, DuckLakeConnectionManager, format_query_error_detail,
             is_ducklake_shutdown_requested_error, run_duckdb_blocking,
+            run_duckdb_blocking_with_context,
         },
         core::is_create_table_conflict,
         encoding::{
@@ -83,6 +84,16 @@ const APPLIED_BATCHES_TABLE_DATA_INLINING_ROW_LIMIT: usize = 256;
 /// Formats an optional LSN without using debug output.
 fn format_optional_lsn(lsn: Option<PgLsn>) -> String {
     lsn.map_or_else(|| "none".to_owned(), |lsn| lsn.to_string())
+}
+
+/// Formats an optional sequence key without using debug output.
+fn format_optional_sequence_key(sequence_key: Option<EventSequenceKey>) -> String {
+    sequence_key.map_or_else(|| "none".to_owned(), |sequence_key| sequence_key.to_string())
+}
+
+/// Returns whether one DuckDB error is the standard interrupted query error.
+fn is_duckdb_interrupt_error(error: &duckdb::Error) -> bool {
+    error.to_string().contains("INTERRUPT Error: Interrupted")
 }
 
 /// ETL-managed per-table streaming replay progress for steady-state CDC
@@ -477,8 +488,8 @@ pub(super) async fn apply_table_batches_with_retry(
             let pool = Arc::clone(&pool);
             let blocking_slots = Arc::clone(&blocking_slots);
             async move {
-                run_duckdb_blocking(pool, blocking_slots, move |conn| {
-                    apply_table_batches(conn, attempt_batches.as_ref())?;
+                run_duckdb_blocking_with_context(pool, blocking_slots, move |conn, context| {
+                    apply_table_batches(conn, attempt_batches.as_ref(), context)?;
                     Ok(())
                 })
                 .await
@@ -548,18 +559,22 @@ pub(super) async fn apply_table_batch_with_retry(
             let pool = Arc::clone(&pool);
             let blocking_slots = Arc::clone(&blocking_slots);
             async move {
-                run_duckdb_blocking(pool, blocking_slots, move |conn| {
+                run_duckdb_blocking_with_context(pool, blocking_slots, move |conn, context| {
                     if batch_kind == DuckLakeTableBatchKind::Copy {
                         if applied_batch_marker_exists(conn, attempt_batch.as_ref())? {
                             record_replayed_batch_skip(attempt_batch.as_ref());
                             return Ok(());
                         }
 
-                        apply_table_batch(conn, attempt_batch.as_ref())?;
+                        apply_table_batch(conn, attempt_batch.as_ref(), context)?;
                         return Ok(());
                     }
 
-                    apply_table_batches(conn, std::slice::from_ref(attempt_batch.as_ref()))?;
+                    apply_table_batches(
+                        conn,
+                        std::slice::from_ref(attempt_batch.as_ref()),
+                        context,
+                    )?;
                     Ok(())
                 })
                 .await
@@ -898,6 +913,7 @@ fn compare_sequence_keys(left: EventSequenceKey, right: EventSequenceKey) -> std
 fn apply_table_batches(
     conn: &duckdb::Connection,
     batches: &[PreparedDuckLakeTableBatch],
+    operation_context: &DuckLakeBlockingOperationContext,
 ) -> EtlResult<()> {
     if batches.is_empty() {
         return Ok(());
@@ -918,7 +934,7 @@ fn apply_table_batches(
                 continue;
             }
 
-            apply_table_batch(conn, batch).map_err(|error| {
+            apply_table_batch(conn, batch, operation_context).map_err(|error| {
                 etl_error!(
                     ErrorKind::DestinationQueryFailed,
                     "DuckLake atomic table batch failed",
@@ -944,7 +960,7 @@ fn apply_table_batches(
             }
         }
 
-        apply_table_batch(conn, batch).map_err(|error| {
+        apply_table_batch(conn, batch, operation_context).map_err(|error| {
             etl_error!(
                 ErrorKind::DestinationQueryFailed,
                 "DuckLake atomic table batch failed",
@@ -1717,6 +1733,7 @@ impl ReusableStagingTable {
 fn apply_table_batch(
     conn: &duckdb::Connection,
     batch: &PreparedDuckLakeTableBatch,
+    operation_context: &DuckLakeBlockingOperationContext,
 ) -> EtlResult<()> {
     let batch_started = Instant::now();
 
@@ -1737,9 +1754,10 @@ fn apply_table_batch(
                 for prepared_mutation in prepared_mutations {
                     apply_table_mutation(
                         conn,
-                        batch.batch_kind,
+                        batch,
                         prepared_mutation,
                         &mut reusable_staging_table,
+                        operation_context,
                     )?;
                 }
             }
@@ -1832,15 +1850,16 @@ fn optional_lsn_to_sql_literal(lsn: Option<PgLsn>) -> String {
 /// Applies one prepared table mutation inside an open transaction.
 fn apply_table_mutation(
     conn: &duckdb::Connection,
-    batch_kind: DuckLakeTableBatchKind,
+    batch: &PreparedDuckLakeTableBatch,
     prepared_mutation: &PreparedTableMutation,
     reusable_staging_table: &mut ReusableStagingTable,
+    operation_context: &DuckLakeBlockingOperationContext,
 ) -> EtlResult<()> {
     match prepared_mutation {
         PreparedTableMutation::Upsert(prepared_rows) => {
             histogram!(
                 ETL_DUCKLAKE_UPSERT_ROWS,
-                BATCH_KIND_LABEL => batch_kind.as_str(),
+                BATCH_KIND_LABEL => batch.batch_kind.as_str(),
                 PREPARED_ROWS_KIND_LABEL => prepared_rows_kind(prepared_rows),
             )
             .record(prepared_rows_count(prepared_rows) as f64);
@@ -1849,11 +1868,11 @@ fn apply_table_mutation(
         PreparedTableMutation::Delete { predicates, origin } => {
             histogram!(
                 ETL_DUCKLAKE_DELETE_PREDICATES,
-                BATCH_KIND_LABEL => batch_kind.as_str(),
+                BATCH_KIND_LABEL => batch.batch_kind.as_str(),
                 DELETE_ORIGIN_LABEL => *origin,
             )
             .record(predicates.len() as f64);
-            apply_delete_mutation(conn, &reusable_staging_table.table_name, predicates.as_slice())
+            apply_delete_mutation(conn, batch, predicates.as_slice(), origin, operation_context)
         }
         PreparedTableMutation::Update { assignments, predicate } => apply_update_mutation(
             conn,
@@ -1885,21 +1904,45 @@ fn apply_upsert_mutation(
 /// Applies one delete batch inside an open DuckLake transaction.
 fn apply_delete_mutation(
     conn: &duckdb::Connection,
-    table_name: &str,
+    batch: &PreparedDuckLakeTableBatch,
     predicates: &[String],
+    origin: &'static str,
+    operation_context: &DuckLakeBlockingOperationContext,
 ) -> EtlResult<()> {
     if predicates.is_empty() {
         return Ok(());
     }
 
-    let target_table = qualified_lake_table_name(table_name);
-    for chunk in predicates.chunks(SQL_DELETE_BATCH_SIZE) {
+    let target_table = qualified_lake_table_name(&batch.table_name);
+    let chunk_count = predicates.len().div_ceil(SQL_DELETE_BATCH_SIZE);
+    for (chunk_index, chunk) in predicates.chunks(SQL_DELETE_BATCH_SIZE).enumerate() {
         let where_clause =
             chunk.iter().map(|predicate| format!("({predicate})")).collect::<Vec<_>>().join(" OR ");
 
         let sql_query = format!("DELETE FROM {target_table} WHERE {where_clause};");
         conn.execute_batch(&sql_query).map_err(|error| {
-            tracing::error!(error = %error, "error DELETE FROM");
+            let duckdb_interrupted = is_duckdb_interrupt_error(&error);
+            tracing::error!(
+                error = %error,
+                table = %batch.table_name,
+                batch_id = %batch.batch_id,
+                batch_kind = batch.batch_kind.as_str(),
+                first_start_lsn = %format_optional_lsn(batch.first_start_lsn),
+                last_commit_lsn = %format_optional_lsn(batch.last_commit_lsn),
+                first_sequence_key = %format_optional_sequence_key(batch.first_sequence_key),
+                last_sequence_key = %format_optional_sequence_key(batch.last_sequence_key),
+                delete_origin = origin,
+                delete_predicate_count = predicates.len(),
+                delete_chunk_index = chunk_index,
+                delete_chunk_count = chunk_count,
+                delete_chunk_predicate_count = chunk.len(),
+                duckdb_interrupted,
+                ducklake_interrupt_reason = operation_context.interrupt_reason_label(),
+                ducklake_operation_id = operation_context.operation_id(),
+                ducklake_operation_kind = operation_context.operation_kind(),
+                ducklake_operation_timeout_ms = operation_context.timeout_ms(),
+                "error DELETE FROM"
+            );
             etl_error!(
                 ErrorKind::DestinationQueryFailed,
                 "DuckLake DELETE failed",
