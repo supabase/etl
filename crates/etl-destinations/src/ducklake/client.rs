@@ -549,6 +549,12 @@ pub(super) struct ManagedDuckLakeConnection {
     broken: bool,
 }
 
+/// DuckDB connection and registered interrupt handle opened by the manager.
+struct OpenDuckLakeConnection {
+    conn: duckdb::Connection,
+    interrupt_handle: Arc<RegisteredDuckLakeInterrupt>,
+}
+
 /// Error returned while opening or validating one DuckLake pooled connection.
 #[derive(Debug)]
 pub(super) struct DuckLakeConnectionError {
@@ -610,9 +616,7 @@ impl DuckLakeConnectionManager {
 
     /// Opens one fully initialized DuckDB connection and attaches the lake
     /// catalog.
-    pub(super) fn open_duckdb_connection(
-        &self,
-    ) -> Result<duckdb::Connection, DuckLakeConnectionError> {
+    fn open_duckdb_connection(&self) -> Result<OpenDuckLakeConnection, DuckLakeConnectionError> {
         let connection_init_id = NEXT_CONNECTION_INIT_ID.fetch_add(1, Ordering::Relaxed);
         let conn = if self.disable_extension_autoload {
             duckdb::Connection::open_in_memory_with_flags(
@@ -624,6 +628,9 @@ impl DuckLakeConnectionManager {
         } else {
             duckdb::Connection::open_in_memory().map_err(DuckLakeConnectionError::validation)?
         };
+        let interrupt_handle = Arc::new(RegisteredDuckLakeInterrupt::new(conn.interrupt_handle()));
+        self.interrupt_registry.register(&interrupt_handle);
+
         for step in self.setup_plan.steps() {
             let phase_started = Instant::now();
             info!(
@@ -643,7 +650,7 @@ impl DuckLakeConnectionManager {
         }
         #[cfg(feature = "test-utils")]
         self.open_count.fetch_add(1, Ordering::Relaxed);
-        Ok(conn)
+        Ok(OpenDuckLakeConnection { conn, interrupt_handle })
     }
 
     /// Returns the number of successfully initialized DuckDB connections.
@@ -658,9 +665,7 @@ impl r2d2::ManageConnection for DuckLakeConnectionManager {
     type Error = DuckLakeConnectionError;
 
     fn connect(&self) -> Result<ManagedDuckLakeConnection, DuckLakeConnectionError> {
-        let conn = self.open_duckdb_connection()?;
-        let interrupt_handle = Arc::new(RegisteredDuckLakeInterrupt::new(conn.interrupt_handle()));
-        self.interrupt_registry.register(&interrupt_handle);
+        let OpenDuckLakeConnection { conn, interrupt_handle } = self.open_duckdb_connection()?;
 
         Ok(ManagedDuckLakeConnection {
             conn,
@@ -1608,6 +1613,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn open_duckdb_connection_registers_interrupt_before_setup_sql() {
+        let manager = DuckLakeConnectionManager {
+            setup_plan: Arc::new(DuckLakeSetupPlan::from_steps(vec![DuckLakeSetupStep {
+                label: "failing_setup",
+                sql: "SELECT * FROM missing_setup_table;".to_owned(),
+            }])),
+            ..make_blocking_test_manager()
+        };
+
+        let error = match manager.open_duckdb_connection() {
+            Ok(_) => panic!("setup should fail"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("failing_setup"), "unexpected setup error: {error}");
+        assert_eq!(
+            manager
+                .interrupt_registry
+                .handles
+                .lock()
+                .expect("ducklake interrupt registry mutex should not be poisoned")
+                .len(),
+            1,
+            "interrupt handle should be registered before setup SQL runs"
+        );
+    }
+
     #[tokio::test]
     async fn query_watchdog_signal_order_matrix_does_not_deadlock() {
         use WatchdogSignal::{DropDoneSender, DropInterruptSender, Finish, PublishInterrupt};
@@ -1878,14 +1911,14 @@ mod tests {
 
     #[tokio::test]
     async fn query_watchdog_marks_timeout_when_handle_arrives_after_deadline() {
-        let conn = make_blocking_test_manager()
+        let opened = make_blocking_test_manager()
             .open_duckdb_connection()
             .expect("failed to open blocking test connection");
         let mut watchdog = DuckDbQueryWatchdog::spawn(Instant::now() + Duration::from_millis(10));
         let watchdog_task = watchdog.async_task_handle().expect("failed to extract watchdog task");
 
         tokio::time::sleep(Duration::from_millis(20)).await;
-        watchdog.publish_interrupt_handle(conn.interrupt_handle());
+        watchdog.publish_interrupt_handle(opened.conn.interrupt_handle());
 
         watchdog_task.await.expect("watchdog task should not panic");
 
