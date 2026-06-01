@@ -1,9 +1,13 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::Duration,
+};
 
 use arrow::array::RecordBatch;
 use etl::{
     error::EtlResult,
-    types::{ColumnSchema, TableRow},
+    types::{ColumnSchema, SchemaDiff, TableRow},
 };
 use iceberg::{
     Catalog, CatalogBuilder, Error, ErrorKind, NamespaceIdent, TableCreation, TableIdent,
@@ -11,8 +15,9 @@ use iceberg::{
     io::{S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_REGION, S3_SECRET_ACCESS_KEY},
     spec::{
         DataFile, DataFileFormat, FormatVersion, MAIN_BRANCH, ManifestContentType, ManifestFile,
-        ManifestListWriter, ManifestWriter, ManifestWriterBuilder, Operation, SchemaRef, Snapshot,
-        SnapshotReference, SnapshotRetention, Summary, TableProperties,
+        ManifestListWriter, ManifestWriter, ManifestWriterBuilder, NestedFieldRef, Operation,
+        PrimitiveType, Schema as IcebergSchema, SchemaRef, Snapshot, SnapshotReference,
+        SnapshotRetention, SnapshotSummaryCollector, Summary, TableProperties, Type as IcebergType,
     },
     table::Table,
     transaction::{ApplyTransactionAction, Transaction},
@@ -42,7 +47,7 @@ use tracing::{debug, warn};
 
 use crate::{
     iceberg::{
-        catalog::{SupabaseCatalog, SupabaseClient},
+        catalog::{SupabaseCatalog, SupabaseClient, storage_factory_for_catalog_props},
         encoding::rows_to_record_batch,
         error::{arrow_error_to_etl_error, iceberg_error_to_etl_error},
         schema::postgres_to_iceberg_schema,
@@ -52,14 +57,20 @@ use crate::{
 
 /// Authentication token key for catalog configuration.
 const CATALOG_TOKEN: &str = "token";
-/// Iceberg REST spec version sent in client headers.
-const ICEBERG_REST_SPEC_VERSION: &str = "0.14.1";
-/// Iceberg REST API path root.
+/// Iceberg REST client version header value mirrored from iceberg-catalog-rest.
+const ICEBERG_REST_CLIENT_VERSION: &str = "0.14.1";
+/// Iceberg REST catalog API path version.
 const REST_API_ROOT: &str = "v1";
 /// Metadata directory under an Iceberg table location.
 const METADATA_DIRECTORY: &str = "metadata";
 /// Default number of row-delta commit retries.
 const ROW_DELTA_COMMIT_RETRIES: u32 = 10;
+/// Default number of schema commit retries.
+const SCHEMA_COMMIT_RETRIES: u32 = 10;
+/// Table property controlling equality-delete target file size.
+const WRITE_DELETE_TARGET_FILE_SIZE_BYTES: &str = "write.delete.target-file-size-bytes";
+/// Iceberg's default equality-delete target file size.
+const WRITE_DELETE_TARGET_FILE_SIZE_BYTES_DEFAULT: usize = 64 * 1024 * 1024;
 
 /// Client for managing Apache Iceberg data lake operations.
 ///
@@ -75,7 +86,7 @@ const ROW_DELTA_COMMIT_RETRIES: u32 = 10;
 pub struct IcebergClient {
     /// The underlying Iceberg catalog implementation.
     catalog: Arc<dyn Catalog>,
-    /// REST commit helper used for row-delta commits not exposed by
+    /// REST commit helper used for table commits not exposed by
     /// iceberg-rust's public transaction API yet.
     rest_commit: RestCommitClient,
 }
@@ -94,7 +105,8 @@ impl IcebergClient {
         props.insert(REST_CATALOG_PROP_URI.to_owned(), catalog_uri);
         props.insert(REST_CATALOG_PROP_WAREHOUSE.to_owned(), warehouse_name);
 
-        let builder = RestCatalogBuilder::default();
+        let builder = RestCatalogBuilder::default()
+            .with_storage_factory(storage_factory_for_catalog_props(&props)?);
         let catalog = builder.load("RestCatalog", props.clone()).await?;
         let rest_commit = RestCommitClient::from_props(props);
 
@@ -135,7 +147,8 @@ impl IcebergClient {
         props.insert(REST_CATALOG_PROP_URI.to_owned(), catalog_uri.clone());
         props.insert(REST_CATALOG_PROP_WAREHOUSE.to_owned(), warehouse_name.clone());
 
-        let builder = RestCatalogBuilder::default();
+        let builder = RestCatalogBuilder::default()
+            .with_storage_factory(storage_factory_for_catalog_props(&props)?);
         let inner = builder.load("SupabaseCatalog", props.clone()).await?;
         let client = SupabaseClient::new(catalog_uri, warehouse_name, catalog_token);
         let catalog = SupabaseCatalog::new(inner, client);
@@ -211,12 +224,77 @@ impl IcebergClient {
             let creation = TableCreation::builder()
                 .name(table_name)
                 .schema(iceberg_schema)
+                .format_version(FormatVersion::V2)
                 .properties(Self::get_table_properties())
                 .build();
             self.catalog.create_table(&namespace_ident, creation).await?;
         }
 
         Ok(())
+    }
+
+    /// Evolves an existing table to match the provided source columns.
+    ///
+    /// The desired schema is converted with stable source-derived field IDs.
+    /// If the current Iceberg schema already matches, no catalog commit is
+    /// issued. Otherwise the method commits a new schema and sets it as current
+    /// using the REST catalog update path.
+    pub async fn evolve_table_schema(
+        &self,
+        namespace: &str,
+        table_name: String,
+        current_column_schemas: &[ColumnSchema],
+        desired_column_schemas: &[ColumnSchema],
+        diff: &SchemaDiff,
+    ) -> Result<(), iceberg::Error> {
+        debug!(%table_name, %namespace, "evolving iceberg table schema");
+
+        let namespace_ident = NamespaceIdent::from_strs(namespace.split('.'))?;
+        let table_ident = TableIdent::new(namespace_ident, table_name);
+        let current_schema = postgres_to_iceberg_schema(current_column_schemas)?;
+        let desired_schema = postgres_to_iceberg_schema(desired_column_schemas)?;
+        validate_postgres_schema_evolution(&current_schema, &desired_schema, diff)?;
+
+        retry_with_backoff(
+            RetryPolicy {
+                max_retries: SCHEMA_COMMIT_RETRIES,
+                initial_delay: Duration::from_millis(100),
+                max_delay: Duration::from_secs(1),
+            },
+            |error: &Error| {
+                if error.retryable() { RetryDecision::Retry } else { RetryDecision::Stop }
+            },
+            |delay| delay,
+            |attempt| {
+                warn!(
+                    retry = attempt.retry_index,
+                    max = attempt.max_retries,
+                    delay_ms = attempt.sleep_delay.as_millis(),
+                    error = %attempt.error,
+                    "retrying iceberg schema commit"
+                );
+            },
+            || {
+                let catalog = Arc::clone(&self.catalog);
+                let rest_commit = self.rest_commit.clone();
+                let table_ident = table_ident.clone();
+                let current_schema = current_schema.clone();
+                let desired_schema = desired_schema.clone();
+
+                async move {
+                    let table = catalog.load_table(&table_ident).await?;
+                    let Some(commit) =
+                        build_schema_update_commit(&table, &current_schema, desired_schema)?
+                    else {
+                        return Ok(());
+                    };
+
+                    rest_commit.commit_table(&table_ident, commit).await
+                }
+            },
+        )
+        .await
+        .map_err(|failure| failure.last_error)
     }
 
     /// Generates default table properties for commit behavior and retry
@@ -450,10 +528,12 @@ impl IcebergClient {
         record_batch: RecordBatch,
     ) -> Result<Vec<DataFile>, iceberg::Error> {
         let writer_props = WriterProperties::builder().set_compression(Compression::SNAPPY).build();
+        let target_file_size = table.metadata().table_properties()?.write_target_file_size_bytes;
 
         let rolling_writer_builder = parquet_rolling_writer_builder(
             table,
             writer_props,
+            target_file_size,
             "data",
             Arc::clone(table.metadata().current_schema()),
         )?;
@@ -490,8 +570,14 @@ impl IcebergClient {
         let delete_schema =
             Arc::new(iceberg::arrow::arrow_schema_to_schema(config.projected_arrow_schema_ref())?);
         let writer_props = WriterProperties::builder().set_compression(Compression::SNAPPY).build();
-        let rolling_writer_builder =
-            parquet_rolling_writer_builder(table, writer_props, "delete", delete_schema)?;
+        let target_file_size = table_delete_target_file_size(table)?;
+        let rolling_writer_builder = parquet_rolling_writer_builder(
+            table,
+            writer_props,
+            target_file_size,
+            "delete",
+            delete_schema,
+        )?;
         let equality_delete_writer_builder =
             EqualityDeleteFileWriterBuilder::new(rolling_writer_builder, config);
 
@@ -569,8 +655,8 @@ impl IcebergClient {
     }
 }
 
-/// Request body needed for a REST table commit.
-struct RowDeltaCommit {
+/// Request body needed for a REST table metadata commit.
+struct RestTableCommit {
     /// Requirements that must still hold at commit time.
     requirements: Vec<TableRequirement>,
     /// Table metadata updates to apply.
@@ -645,7 +731,7 @@ impl RestCommitClient {
     async fn commit_table(
         &self,
         table_ident: &TableIdent,
-        commit: RowDeltaCommit,
+        commit: RestTableCommit,
     ) -> Result<(), Error> {
         let config = self.load_config().await?;
         let url = config.table_endpoint(table_ident);
@@ -669,7 +755,7 @@ impl RestCommitClient {
             StatusCode::OK => Ok(()),
             StatusCode::CONFLICT => Err(Error::new(
                 ErrorKind::CatalogCommitConflicts,
-                "Catalog commit conflict while applying Iceberg row delta",
+                "Catalog commit conflict while applying Iceberg table update",
             )
             .with_retryable(true)),
             StatusCode::NOT_FOUND => Err(Error::new(
@@ -761,7 +847,7 @@ impl RestCommitClient {
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         headers.insert(
             HeaderName::from_static("x-client-version"),
-            HeaderValue::from_static(ICEBERG_REST_SPEC_VERSION),
+            HeaderValue::from_static(ICEBERG_REST_CLIENT_VERSION),
         );
         headers.insert(USER_AGENT, HeaderValue::from_static("etl-iceberg-writer"));
 
@@ -840,12 +926,165 @@ impl RestCommitClient {
     }
 }
 
+/// Builds an Iceberg schema update commit when the desired schema differs.
+fn build_schema_update_commit(
+    table: &Table,
+    expected_current_schema: &IcebergSchema,
+    desired_schema: IcebergSchema,
+) -> Result<Option<RestTableCommit>, Error> {
+    let actual_current_schema = table.metadata().current_schema().as_ref();
+
+    if !schema_matches(actual_current_schema, expected_current_schema) {
+        return Err(Error::new(
+            ErrorKind::DataInvalid,
+            "Iceberg table schema does not match applied ETL metadata",
+        )
+        .with_context("table", table.identifier().to_string())
+        .with_context("schema_id", table.metadata().current_schema_id().to_string()));
+    }
+
+    if schema_matches(actual_current_schema, &desired_schema) {
+        return Ok(None);
+    }
+
+    let updates = vec![
+        TableUpdate::AddSchema { schema: desired_schema },
+        TableUpdate::SetCurrentSchema { schema_id: -1 },
+    ];
+    let requirements = vec![
+        TableRequirement::UuidMatch { uuid: table.metadata().uuid() },
+        TableRequirement::CurrentSchemaIdMatch {
+            current_schema_id: table.metadata().current_schema_id(),
+        },
+        TableRequirement::LastAssignedFieldIdMatch {
+            last_assigned_field_id: table.metadata().last_column_id(),
+        },
+    ];
+
+    Ok(Some(RestTableCommit { requirements, updates }))
+}
+
+/// Validates that an ETL schema diff is safe for Iceberg.
+fn validate_postgres_schema_evolution(
+    current_schema: &IcebergSchema,
+    desired_schema: &IcebergSchema,
+    diff: &SchemaDiff,
+) -> Result<(), Error> {
+    for column in &diff.columns_to_add {
+        if !column.nullable {
+            return Err(Error::new(
+                ErrorKind::FeatureUnsupported,
+                "Iceberg schema evolution cannot add a required field without defaults",
+            )
+            .with_context("field", column.name.clone()));
+        }
+    }
+
+    validate_schema_evolution(current_schema, desired_schema)
+}
+
+/// Returns whether two schemas are equivalent for writer purposes.
+fn schema_matches(current_schema: &IcebergSchema, desired_schema: &IcebergSchema) -> bool {
+    current_schema.as_struct() == desired_schema.as_struct()
+        && identifier_field_ids(current_schema) == identifier_field_ids(desired_schema)
+}
+
+/// Validates that an Iceberg schema change is safe for the destination.
+fn validate_schema_evolution(
+    current_schema: &IcebergSchema,
+    desired_schema: &IcebergSchema,
+) -> Result<(), Error> {
+    let current_identifier_ids = identifier_field_ids(current_schema);
+    let desired_identifier_ids = identifier_field_ids(desired_schema);
+    if current_identifier_ids != desired_identifier_ids {
+        return Err(Error::new(
+            ErrorKind::FeatureUnsupported,
+            "Iceberg schema evolution cannot change identifier fields",
+        ));
+    }
+
+    for desired_field in desired_schema.as_struct().fields() {
+        let Some(current_field) = current_schema.field_by_id(desired_field.id) else {
+            if desired_field.required {
+                return Err(Error::new(
+                    ErrorKind::FeatureUnsupported,
+                    "Iceberg schema evolution cannot add a required field without defaults",
+                )
+                .with_context("field", desired_field.name.clone()));
+            }
+
+            continue;
+        };
+
+        validate_field_evolution(current_field, desired_field)?;
+    }
+
+    Ok(())
+}
+
+/// Returns a schema's identifier field IDs.
+fn identifier_field_ids(schema: &IcebergSchema) -> HashSet<i32> {
+    schema.identifier_field_ids().collect()
+}
+
+/// Validates evolution for a field that exists in both schemas.
+fn validate_field_evolution(
+    current_field: &NestedFieldRef,
+    desired_field: &NestedFieldRef,
+) -> Result<(), Error> {
+    if !current_field.required && desired_field.required {
+        return Err(Error::new(
+            ErrorKind::FeatureUnsupported,
+            "Iceberg schema evolution cannot make an optional field required",
+        )
+        .with_context("field", desired_field.name.clone()));
+    }
+
+    if !is_supported_type_evolution(&current_field.field_type, &desired_field.field_type) {
+        return Err(Error::new(
+            ErrorKind::FeatureUnsupported,
+            "Iceberg schema evolution does not support this type change",
+        )
+        .with_context("field", desired_field.name.clone())
+        .with_context("field_id", desired_field.id.to_string()));
+    }
+
+    Ok(())
+}
+
+/// Returns whether an Iceberg type change is spec-compatible for this writer.
+fn is_supported_type_evolution(current_type: &IcebergType, desired_type: &IcebergType) -> bool {
+    if current_type == desired_type {
+        return true;
+    }
+
+    match (current_type, desired_type) {
+        (
+            IcebergType::Primitive(PrimitiveType::Int),
+            IcebergType::Primitive(PrimitiveType::Long),
+        )
+        | (
+            IcebergType::Primitive(PrimitiveType::Float),
+            IcebergType::Primitive(PrimitiveType::Double),
+        ) => true,
+        (IcebergType::List(current_list), IcebergType::List(desired_list)) => {
+            current_list.element_field.id == desired_list.element_field.id
+                && (current_list.element_field.required || !desired_list.element_field.required)
+                && is_supported_type_evolution(
+                    &current_list.element_field.field_type,
+                    &desired_list.element_field.field_type,
+                )
+        }
+        _ => false,
+    }
+}
+
 /// Builds and writes a row-delta Iceberg metadata commit.
 async fn build_row_delta_commit(
     table: &Table,
     data_files: Vec<DataFile>,
     delete_files: Vec<DataFile>,
-) -> Result<RowDeltaCommit, Error> {
+) -> Result<RestTableCommit, Error> {
     if data_files.is_empty() && delete_files.is_empty() {
         return Err(Error::new(
             ErrorKind::PreconditionFailed,
@@ -854,6 +1093,7 @@ async fn build_row_delta_commit(
     }
 
     let operation = if data_files.is_empty() { Operation::Delete } else { Operation::Overwrite };
+    let summary = build_snapshot_summary(table, operation, &data_files, &delete_files);
     let snapshot_id = generate_snapshot_id(table);
     let commit_uuid = uuid::Uuid::new_v4();
     let mut manifest_counter = 0_u64;
@@ -887,7 +1127,7 @@ async fn build_row_delta_commit(
 
     let manifest_list_path =
         write_manifest_list(table, snapshot_id, commit_uuid, manifests).await?;
-    let snapshot = build_snapshot(table, snapshot_id, manifest_list_path, operation);
+    let snapshot = build_snapshot(table, snapshot_id, manifest_list_path, summary);
 
     let updates = vec![
         TableUpdate::AddSnapshot { snapshot },
@@ -907,7 +1147,7 @@ async fn build_row_delta_commit(
         },
     ];
 
-    Ok(RowDeltaCommit { requirements, updates })
+    Ok(RestTableCommit { requirements, updates })
 }
 
 /// Returns the currently live manifests for the table.
@@ -1028,15 +1268,31 @@ async fn write_manifest_list(
     Ok(manifest_list_path)
 }
 
+/// Builds a snapshot summary for a row-delta commit.
+fn build_snapshot_summary(
+    table: &Table,
+    operation: Operation,
+    data_files: &[DataFile],
+    delete_files: &[DataFile],
+) -> Summary {
+    let mut collector = SnapshotSummaryCollector::default();
+    let schema = Arc::clone(table.metadata().current_schema());
+    let partition_spec = Arc::clone(table.metadata().default_partition_spec());
+
+    for file in data_files.iter().chain(delete_files) {
+        collector.add_file(file, Arc::clone(&schema), Arc::clone(&partition_spec));
+    }
+
+    Summary { operation, additional_properties: collector.build() }
+}
+
 /// Builds the snapshot metadata for a row-delta commit.
 fn build_snapshot(
     table: &Table,
     snapshot_id: i64,
     manifest_list_path: String,
-    operation: Operation,
+    summary: Summary,
 ) -> Snapshot {
-    let summary = Summary { operation, additional_properties: HashMap::new() };
-
     Snapshot::builder()
         .with_manifest_list(manifest_list_path)
         .with_snapshot_id(snapshot_id)
@@ -1065,6 +1321,7 @@ fn generate_snapshot_id(table: &Table) -> i64 {
 fn parquet_rolling_writer_builder(
     table: &Table,
     writer_props: WriterProperties,
+    target_file_size: usize,
     prefix: &str,
     schema: SchemaRef,
 ) -> Result<
@@ -1083,12 +1340,27 @@ fn parquet_rolling_writer_builder(
     );
     let parquet_writer_builder = ParquetWriterBuilder::new(writer_props, schema);
 
-    Ok(RollingFileWriterBuilder::new_with_default_file_size(
+    Ok(RollingFileWriterBuilder::new(
         parquet_writer_builder,
+        target_file_size,
         table.file_io().clone(),
         location_gen,
         file_name_gen,
     ))
+}
+
+/// Returns the target equality-delete file size for a table.
+fn table_delete_target_file_size(table: &Table) -> Result<usize, Error> {
+    let Some(value) = table.metadata().properties().get(WRITE_DELETE_TARGET_FILE_SIZE_BYTES) else {
+        return Ok(WRITE_DELETE_TARGET_FILE_SIZE_BYTES_DEFAULT);
+    };
+
+    value.parse().map_err(|error| {
+        Error::new(ErrorKind::DataInvalid, "Invalid Iceberg delete target file size table property")
+            .with_context("property", WRITE_DELETE_TARGET_FILE_SIZE_BYTES)
+            .with_context("value", value.clone())
+            .with_source(error)
+    })
 }
 
 /// Returns the total file size for a list of Iceberg data files.

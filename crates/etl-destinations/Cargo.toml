@@ -45,6 +45,7 @@ bigquery = [
 iceberg = [
     "dep:iceberg",
     "dep:iceberg-catalog-rest",
+    "dep:iceberg-storage-opendal",
     "dep:arrow",
     "dep:tracing",
     "dep:parquet",
@@ -106,6 +107,7 @@ gcp-bigquery-client = { workspace = true, optional = true, features = ["rust-tls
 humantime = { workspace = true, optional = true }
 iceberg = { workspace = true, optional = true }
 iceberg-catalog-rest = { workspace = true, optional = true }
+iceberg-storage-opendal = { workspace = true, optional = true, features = ["opendal-fs", "opendal-memory", "opendal-s3"] }
 jsonwebtoken = { workspace = true, optional = true }
 metrics = { workspace = true, optional = true }
 parking_lot = { workspace = true, optional = true }

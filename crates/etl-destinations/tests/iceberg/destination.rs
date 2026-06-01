@@ -1,9 +1,10 @@
 use etl::{
     state::TableStateType,
+    store::state::StateStore,
     test_utils::{
-        database::spawn_source_database,
+        database::{spawn_source_database, test_table_name},
         notifying_store::NotifyingStore,
-        pipeline::create_pipeline,
+        pipeline::{create_pipeline, create_pipeline_with_batch_config},
         test_destination_wrapper::TestDestinationWrapper,
         test_schema::{
             TableSelection, TestDatabaseSchema, assert_table_rows_equal_ignoring_size,
@@ -12,10 +13,12 @@ use etl::{
     },
     types::{Cell, EventType, PipelineId, TableRow},
 };
+use etl_config::shared::BatchConfig;
 use etl_destinations::iceberg::{
     DestinationNamespace, IcebergClient, IcebergDestination, table_name_to_iceberg_table_name,
     test_utils::{LAKEKEEPER_URL, LakekeeperClient, create_minio_props, get_catalog_url},
 };
+use etl_postgres::tokio::test_utils::TableModification;
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
 
@@ -137,6 +140,231 @@ async fn run_table_copy_test(destination_namespace: DestinationNamespace) {
     client.drop_table_if_exists(&namespace, users_table).await.unwrap();
     client.drop_table_if_exists(&namespace, orders_table).await.unwrap();
     client.drop_namespace(&namespace).await.unwrap();
+    lakekeeper_client.drop_warehouse(warehouse_id).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cdc_streaming_coalesces_insert_then_delete_in_one_batch() {
+    init_test_tracing();
+
+    let database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+
+    let store = NotifyingStore::new();
+    let pipeline_id: PipelineId = random();
+
+    let lakekeeper_client = LakekeeperClient::new(LAKEKEEPER_URL);
+    let (warehouse_name, warehouse_id) = lakekeeper_client.create_warehouse().await.unwrap();
+    let client = IcebergClient::new_with_rest_catalog(
+        get_catalog_url(),
+        warehouse_name,
+        create_minio_props(),
+    )
+    .await
+    .unwrap();
+
+    let namespace = "test_namespace";
+    client.create_namespace_if_missing(namespace).await.unwrap();
+
+    let raw_destination = IcebergDestination::new(
+        client.clone(),
+        DestinationNamespace::Single(namespace.to_owned()),
+        store.clone(),
+    );
+    let destination = TestDestinationWrapper::wrap(raw_destination);
+
+    let mut pipeline = create_pipeline_with_batch_config(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+        BatchConfig { max_fill_ms: 2_000, memory_budget_ratio: 0.2, max_bytes: 8 * 1024 * 1024 },
+    );
+
+    let users_state_notify = store
+        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
+        .await;
+
+    pipeline.start().await.unwrap();
+    users_state_notify.notified().await;
+
+    let event_notify = destination
+        .wait_for_events_count(vec![(EventType::Insert, 1), (EventType::Delete, 1)])
+        .await;
+    let users_table_name = database_schema.users_schema().name;
+
+    database
+        .insert_values(
+            users_table_name.clone(),
+            &["id", "name", "age"],
+            &[&10_i64, &"transient", &10_i32],
+        )
+        .await
+        .unwrap();
+    database.delete_values(users_table_name.clone(), &["id"], &["10"], "").await.unwrap();
+
+    event_notify.notified().await;
+
+    let users_table =
+        table_name_to_iceberg_table_name(&users_table_name, true).expect("valid table name");
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let actual_users = read_all_rows(&client, namespace.to_owned(), users_table.clone()).await;
+    assert!(actual_users.is_empty());
+
+    client.drop_table_if_exists(namespace, users_table).await.unwrap();
+    client.drop_namespace(namespace).await.unwrap();
+    lakekeeper_client.drop_warehouse(warehouse_id).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cdc_streaming_applies_schema_changes_end_to_end() {
+    init_test_tracing();
+
+    let database = spawn_source_database().await;
+    let table_name = test_table_name("iceberg_schema_multi_ops");
+    let table_id = database
+        .create_table(
+            table_name.clone(),
+            true,
+            &[("name", "text not null"), ("age", "integer not null"), ("status", "text")],
+        )
+        .await
+        .unwrap();
+    let publication_name = format!("test_pub_schema_change_{}", random::<u64>());
+    database
+        .create_publication(&publication_name, std::slice::from_ref(&table_name))
+        .await
+        .unwrap();
+
+    let store = NotifyingStore::new();
+    let pipeline_id: PipelineId = random();
+
+    let lakekeeper_client = LakekeeperClient::new(LAKEKEEPER_URL);
+    let (warehouse_name, warehouse_id) = lakekeeper_client.create_warehouse().await.unwrap();
+    let client = IcebergClient::new_with_rest_catalog(
+        get_catalog_url(),
+        warehouse_name,
+        create_minio_props(),
+    )
+    .await
+    .unwrap();
+
+    let namespace = "test_namespace";
+    client.create_namespace_if_missing(namespace).await.unwrap();
+
+    let raw_destination = IcebergDestination::new(
+        client.clone(),
+        DestinationNamespace::Single(namespace.to_owned()),
+        store.clone(),
+    );
+    let destination = TestDestinationWrapper::wrap(raw_destination);
+
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name,
+        store.clone(),
+        destination.clone(),
+    );
+
+    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+
+    pipeline.start().await.unwrap();
+    table_ready.notified().await;
+
+    let initial_state = store
+        .get_applied_destination_table_metadata(table_id)
+        .await
+        .unwrap()
+        .expect("destination table metadata should exist");
+    let initial_snapshot_id = initial_state.snapshot_id;
+
+    let event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
+    database
+        .insert_values(
+            table_name.clone(),
+            &["name", "age", "status"],
+            &[&"Alice", &25_i32, &"active"],
+        )
+        .await
+        .unwrap();
+    event_notify.notified().await;
+    destination.clear_events().await;
+
+    let event_notify = destination
+        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+        .await;
+
+    database
+        .alter_table(
+            table_name.clone(),
+            &[TableModification::RenameColumn { old_name: "name", new_name: "full_name" }],
+        )
+        .await
+        .unwrap();
+    database
+        .alter_table(table_name.clone(), &[TableModification::DropColumn { name: "status" }])
+        .await
+        .unwrap();
+    database
+        .alter_table(
+            table_name.clone(),
+            &[TableModification::AddColumn { name: "email", data_type: "text" }],
+        )
+        .await
+        .unwrap();
+    database
+        .insert_values(
+            table_name.clone(),
+            &["full_name", "age", "email"],
+            &[&"Bob", &30_i32, &"bob@example.com"],
+        )
+        .await
+        .unwrap();
+
+    event_notify.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let final_state = store
+        .get_applied_destination_table_metadata(table_id)
+        .await
+        .unwrap()
+        .expect("destination table metadata should exist");
+    assert!(final_state.snapshot_id > initial_snapshot_id);
+
+    let iceberg_table = table_name_to_iceberg_table_name(&table_name, true).unwrap();
+    let table = client.load_table(namespace.to_owned(), iceberg_table.clone()).await.unwrap();
+    let schema = table.metadata().current_schema();
+    let field_names: Vec<_> =
+        schema.as_struct().fields().iter().map(|field| field.name.as_str()).collect();
+    assert_eq!(field_names, vec!["id", "full_name", "age", "email"]);
+    assert!(schema.field_by_name("name").is_none());
+    assert!(schema.field_by_name("status").is_none());
+
+    let mut actual_rows = read_all_rows(&client, namespace.to_owned(), iceberg_table.clone()).await;
+    actual_rows.sort_by(|a, b| format!("{:?}", a.values()[0]).cmp(&format!("{:?}", b.values()[0])));
+    let expected_rows = vec![
+        TableRow::new(vec![
+            Cell::I64(1),
+            Cell::String("Alice".to_owned()),
+            Cell::I32(25),
+            Cell::Null,
+        ]),
+        TableRow::new(vec![
+            Cell::I64(2),
+            Cell::String("Bob".to_owned()),
+            Cell::I32(30),
+            Cell::String("bob@example.com".to_owned()),
+        ]),
+    ];
+    assert_table_rows_equal_ignoring_size(&actual_rows, &expected_rows);
+
+    client.drop_table_if_exists(namespace, iceberg_table).await.unwrap();
+    client.drop_namespace(namespace).await.unwrap();
     lakekeeper_client.drop_warehouse(warehouse_id).await.unwrap();
 }
 

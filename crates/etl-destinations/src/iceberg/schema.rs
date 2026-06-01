@@ -5,6 +5,10 @@ use iceberg::spec::{
     ListType, NestedField, PrimitiveType, Schema as IcebergSchema, Type as IcebergType,
 };
 
+/// Offset used to derive stable Iceberg list element field IDs from Postgres
+/// column attnums.
+const LIST_ELEMENT_FIELD_ID_OFFSET: i32 = 1_000_000;
+
 /// Converts a Postgres array type to equivalent Iceberg type
 fn postgres_array_type_to_iceberg_type(typ: &Type, field_id: i32) -> IcebergType {
     match typ {
@@ -81,35 +85,21 @@ fn create_iceberg_list_type(element_type: PrimitiveType, field_id: i32) -> Icebe
 /// Iceberg to understand which columns uniquely identify rows in the table.
 /// Iceberg identifier fields are unordered (stored as a set).
 ///
-/// Field IDs are assigned following iceberg-rust's convention: all outer field
-/// IDs are assigned first, then nested field IDs (e.g., list element fields).
-/// This ensures consistency with how the Iceberg library handles schema
-/// evolution.
+/// Top-level field IDs are the source Postgres `pg_attribute.attnum` values
+/// carried in [`ColumnSchema::ordinal_position`]. Those IDs remain stable for
+/// renames, drops, and additions, matching Iceberg's ID-based schema evolution.
+/// List element field IDs are derived from the parent column ID with a fixed
+/// offset so they also remain stable across later top-level column additions.
 pub(super) fn postgres_to_iceberg_schema(
     column_schemas: &[ColumnSchema],
 ) -> Result<IcebergSchema, iceberg::Error> {
     let mut identifier_field_ids = Vec::new();
-
-    // First pass: assign IDs to all outer fields (1, 2, 3, ...).
-    let mut outer_field_id = 1;
-    let outer_fields: Vec<_> = column_schemas
-        .iter()
-        .map(|col| {
-            let id = outer_field_id;
-            outer_field_id += 1;
-            (col, id)
-        })
-        .collect();
-
-    // Second pass: assign IDs to nested fields (list elements) and build the
-    // schema. Nested field IDs start after all outer field IDs.
-    let mut nested_field_id = outer_field_id;
     let mut fields = Vec::with_capacity(column_schemas.len());
 
-    for (column_schema, field_id) in outer_fields {
+    for column_schema in column_schemas {
+        let field_id = iceberg_field_id_for_column(column_schema);
         let field_type = if is_array_type(&column_schema.typ) {
-            let element_id = nested_field_id;
-            nested_field_id += 1;
+            let element_id = iceberg_list_element_id_for_column(column_schema);
             postgres_array_type_to_iceberg_type(&column_schema.typ, element_id)
         } else {
             postgres_scalar_type_to_iceberg_type(&column_schema.typ)
@@ -136,6 +126,16 @@ pub(super) fn postgres_to_iceberg_schema(
     let schema = builder.build()?;
 
     Ok(schema)
+}
+
+/// Returns the Iceberg field ID for a top-level source column.
+fn iceberg_field_id_for_column(column_schema: &ColumnSchema) -> i32 {
+    column_schema.ordinal_position
+}
+
+/// Returns the Iceberg field ID for a source array column's list element.
+fn iceberg_list_element_id_for_column(column_schema: &ColumnSchema) -> i32 {
+    LIST_ELEMENT_FIELD_ID_OFFSET + iceberg_field_id_for_column(column_schema)
 }
 
 #[cfg(test)]
@@ -448,5 +448,42 @@ mod tests {
 
         let ids: Vec<i32> = schema.identifier_field_ids().collect();
         assert!(ids.is_empty());
+    }
+
+    #[test]
+    fn field_ids_use_source_attnums() {
+        let columns = vec![
+            test_column("id", Type::INT8, 1, false, Some(1)),
+            test_column("tags", Type::TEXT_ARRAY, 4, true, None),
+            test_column("email", Type::TEXT, 7, true, None),
+        ];
+
+        let schema = postgres_to_iceberg_schema(&columns).expect("schema creation");
+
+        assert_eq!(schema.field_by_name("id").expect("id field").id, 1);
+        assert_eq!(schema.field_by_name("tags").expect("tags field").id, 4);
+        assert_eq!(schema.field_by_name("email").expect("email field").id, 7);
+
+        let tags = schema.field_by_name("tags").expect("tags field");
+        let IcebergType::List(list) = tags.field_type.as_ref() else {
+            panic!("tags should be a list");
+        };
+        assert_eq!(list.element_field.id, LIST_ELEMENT_FIELD_ID_OFFSET + 4);
+    }
+
+    #[test]
+    fn renamed_and_added_columns_keep_stable_field_ids() {
+        let columns = vec![
+            test_column("id", Type::INT8, 1, false, Some(1)),
+            test_column("full_name", Type::TEXT, 2, false, None),
+            test_column("email", Type::TEXT, 5, true, None),
+        ];
+
+        let schema = postgres_to_iceberg_schema(&columns).expect("schema creation");
+
+        assert_eq!(schema.field_by_name("full_name").expect("full_name field").id, 2);
+        assert_eq!(schema.field_by_name("email").expect("email field").id, 5);
+        assert!(schema.field_by_id(3).is_none());
+        assert!(schema.field_by_id(4).is_none());
     }
 }

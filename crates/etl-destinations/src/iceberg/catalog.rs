@@ -1,16 +1,79 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 use iceberg::{
     Catalog, Error, ErrorKind, Namespace, NamespaceIdent, Result, TableCommit, TableCreation,
     TableIdent,
-    io::FileIO,
+    io::{FileIO, FileIOBuilder, StorageFactory},
     spec::{Schema, SortOrder, TableMetadata, UnboundPartitionSpec},
     table::Table,
 };
-use iceberg_catalog_rest::RestCatalog;
+use iceberg_catalog_rest::{REST_CATALOG_PROP_WAREHOUSE, RestCatalog};
+use iceberg_storage_opendal::OpenDalStorageFactory;
 use reqwest::{Client, Response, StatusCode};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+
+/// Default scheme to use for S3-compatible Iceberg table locations.
+const DEFAULT_S3_SCHEME: &str = "s3";
+/// Scheme used for S3-compatible object storage locations.
+const S3_SCHEME: &str = "s3";
+/// Alternative scheme used by some S3-compatible Iceberg catalogs.
+const S3A_SCHEME: &str = "s3a";
+/// Scheme used for local filesystem table locations.
+const FILE_SCHEME: &str = "file";
+/// Scheme used for in-memory table locations.
+const MEMORY_SCHEME: &str = "memory";
+
+/// Creates a storage factory for a REST catalog from known catalog properties.
+pub(super) fn storage_factory_for_catalog_props(
+    props: &HashMap<String, String>,
+) -> Result<Arc<dyn StorageFactory>> {
+    let location = props.get(REST_CATALOG_PROP_WAREHOUSE).map(String::as_str);
+    storage_factory_for_location(location)
+}
+
+/// Creates a file I/O handle for a loaded table location.
+fn load_file_io_for_location(
+    metadata_location: Option<&str>,
+    props: HashMap<String, String>,
+) -> Result<FileIO> {
+    let metadata_location = metadata_location.ok_or_else(|| {
+        Error::new(ErrorKind::Unexpected, "Unable to load file io, metadata location is not set!")
+    })?;
+    let storage_factory = storage_factory_for_location(Some(metadata_location))?;
+
+    Ok(FileIOBuilder::new(storage_factory).with_props(props).build())
+}
+
+/// Creates a storage factory for the table location.
+fn storage_factory_for_location(location: Option<&str>) -> Result<Arc<dyn StorageFactory>> {
+    match location.and_then(location_scheme) {
+        Some(FILE_SCHEME) => Ok(Arc::new(OpenDalStorageFactory::Fs)),
+        Some(MEMORY_SCHEME) => Ok(Arc::new(OpenDalStorageFactory::Memory)),
+        Some(scheme @ (S3_SCHEME | S3A_SCHEME)) => Ok(s3_storage_factory(scheme)),
+        Some(scheme) => Err(Error::new(
+            ErrorKind::FeatureUnsupported,
+            format!("Unsupported iceberg storage scheme: {scheme}"),
+        )),
+        None if location.is_some_and(|location| location.starts_with('/')) => {
+            Ok(Arc::new(OpenDalStorageFactory::Fs))
+        }
+        None => Ok(s3_storage_factory(DEFAULT_S3_SCHEME)),
+    }
+}
+
+/// Returns the URI scheme for a table location.
+fn location_scheme(location: &str) -> Option<&str> {
+    location.split_once("://").map(|(scheme, _)| scheme)
+}
+
+/// Creates an S3-compatible storage factory for the configured scheme.
+fn s3_storage_factory(configured_scheme: &str) -> Arc<dyn StorageFactory> {
+    Arc::new(OpenDalStorageFactory::S3 {
+        configured_scheme: configured_scheme.to_owned(),
+        customized_credential_load: None,
+    })
+}
 
 /// A REST catalog implementation that handles Supabase-specific API
 /// incompatibilities.
@@ -332,17 +395,7 @@ impl SupabaseClient {
             props.extend(config);
         }
 
-        let file_io = match metadata_location {
-            Some(url) => FileIO::from_path(url)?.with_props(props).build()?,
-            None => {
-                return Err(Error::new(
-                    ErrorKind::Unexpected,
-                    "Unable to load file io, metadata location is not set!",
-                ))?;
-            }
-        };
-
-        Ok(file_io)
+        load_file_io_for_location(metadata_location, props)
     }
 
     /// Sends an authenticated HTTP request to the Supabase catalog API.

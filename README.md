@@ -194,7 +194,18 @@ one of the modules shipped in `etl-destinations`.
 | --- | --- | --- | --- |
 | `bigquery` | Google BigQuery | Stable | Full CRUD-capable replication for analytics workloads. |
 | `ducklake` | DuckLake | In progress | Open data lake replication with local or S3-compatible storage. |
-| `iceberg` | Apache Iceberg | Deprecated for now | The module remains available, but new deployments should prefer BigQuery or DuckLake. |
+| `iceberg` | Apache Iceberg | Experimental / unsupported | Unmaintained experimental writer code. It writes materialized Iceberg format v2 tables, not changelog tables, and is not intended for production use. |
+
+The Iceberg destination is available for experimentation at your own risk. It
+materializes rows into Iceberg tables with equality-delete based CDC handling:
+inserts are written as replay-safe upserts, updates delete the old key and write
+the new row, deletes write equality-delete files, and truncates drop and
+recreate the table. It does not run Iceberg maintenance. High-frequency CDC can
+fragment data files, delete files, manifests, snapshots, and metadata, so a
+separate Iceberg maintenance service is required for healthy and performant
+tables. If you store the experimental tables in AWS S3 Tables, manage and
+monitor S3 Tables maintenance outside ETL. BigQuery and DuckLake are the
+supported destination paths.
 
 Enable one or more destination modules with crate features:
 

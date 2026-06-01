@@ -8,10 +8,12 @@ description: How ETL handles DDL and evolving table schemas.
 ETL supports schema changes, and this area is actively being improved. The
 current implementation is intentionally conservative: the source-side event
 trigger captures a rich PostgreSQL-shaped snapshot, while ETL currently models
-only simple, well-understood column changes: **adds, drops, and renames**. Built-in
-destination support varies: **BigQuery, ClickHouse, and Snowflake** apply these
-simple changes today; **DuckLake does not apply automatic schema-change DDL yet**;
-and Iceberg is deprecated for new deployments.
+only simple, well-understood column changes: **adds, drops, and renames**.
+Built-in destination support varies: **BigQuery, ClickHouse, and Snowflake**
+apply these simple changes today; **DuckLake does not apply automatic
+schema-change DDL yet**. The Iceberg module also has experimental simple-column
+handling, but it is unmaintained, unsupported, and not intended for production
+use.
 
 ## Short Version
 
@@ -66,7 +68,7 @@ ETL has one shared schema-change signal, but **DDL behavior is implemented per d
 | ClickHouse | Supports simple add, drop, and rename column changes. `ReplacingMergeTree` rejects primary-key drops or renames because the ordering expression cannot be rewritten safely. |
 | Snowflake | Supports simple add, drop, and rename column changes. |
 | DuckLake | Does not apply automatic schema-change DDL yet. Do not rely on `Relation` events to alter DuckLake tables. |
-| Iceberg | Deprecated for now. Schema-change DDL is not a supported path for new deployments. |
+| Iceberg | Experimental and unsupported. Supports simple add, drop, and rename column changes on format v2 tables by committing a new Iceberg schema. Primary-key/identifier changes and adding required fields without defaults are rejected. |
 | Custom destinations | Destination authors decide which `Event::Relation` changes to apply, reject, or handle manually. |
 
 ## Diff Semantics
@@ -102,15 +104,20 @@ A practical flow is:
    actually ready for following row events.
 6. Process following row events with the new schema.
 
-The built-in BigQuery, ClickHouse, and Snowflake destinations follow this
-shape: they mark destination schema metadata as `Applying`, apply the supported
-add/rename/drop operations, then mark the schema as `Applied`. Because
-destination DDL is not always transactional, a crash while metadata is
-`Applying` may require manual intervention.
+The built-in BigQuery, ClickHouse, Iceberg, and Snowflake destinations follow
+this shape: they mark destination schema metadata as `Applying`, apply the
+supported add/rename/drop operations, then mark the schema as `Applied`.
+Because destination DDL is not always transactional, a crash while metadata is
+`Applying` may require manual intervention. Iceberg schema changes are committed
+atomically through the catalog, but ETL still treats `Applying` metadata as an
+interrupted schema transition rather than as proof that a destination schema is
+safe to use.
 
 Other destination modules may support a narrower schema-change surface. Treat
 `Event::Relation` as the stable ETL contract, then check the destination's
-status and implementation before relying on automatic destination DDL.
+status and implementation before relying on automatic destination DDL. In
+particular, do not treat Iceberg's experimental schema-change handling as a
+production support commitment.
 
 ## Supported Scope
 

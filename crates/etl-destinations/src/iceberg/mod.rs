@@ -1,3 +1,25 @@
+//! Experimental Apache Iceberg destination.
+//!
+//! This module is unmaintained experimental code and is not a supported
+//! production destination. Prefer the maintained destination modules for
+//! production pipelines.
+//!
+//! The destination writes materialized Iceberg format v2 tables rather than
+//! append-only changelog tables. Table-copy rows are appended to data files.
+//! Streaming inserts are written as replay-safe upserts, updates delete the old
+//! primary-key identity and write the new row, deletes write equality-delete
+//! files, and truncates drop and recreate the table. Simple add, drop, and
+//! rename column changes are supported; full DDL, positional deletes, and
+//! delete vectors are not.
+//!
+//! Iceberg row-level CDC produces data files, equality-delete files, manifests,
+//! snapshots, and metadata files over time. This module does not run
+//! compaction, snapshot expiration, manifest rewrites, or orphan-file cleanup.
+//! Operators must provide those Iceberg maintenance jobs externally before
+//! relying on these tables for healthy or performant reads. When using AWS S3
+//! Tables, this means verifying and tuning table maintenance in AWS; ETL does
+//! not configure or validate that backend maintenance.
+
 mod catalog;
 mod client;
 mod core;
