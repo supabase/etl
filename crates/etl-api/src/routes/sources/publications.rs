@@ -1,8 +1,10 @@
-use actix_web::{
-    HttpRequest, HttpResponse, Responder, ResponseError, delete, get,
-    http::{StatusCode, header::ContentType},
-    post, put,
-    web::{Data, Json, Path},
+use std::sync::Arc;
+
+use axum::{
+    Extension, Json,
+    extract::Path,
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -19,11 +21,11 @@ use crate::{
         tables::Table,
     },
     k8s::{TrustedRootCertsCache, TrustedRootCertsError},
-    routes::{ErrorMessage, TenantIdError, extract_tenant_id},
+    routes::{ErrorMessage, IntoInner, TenantIdError, error_response, extract_tenant_id},
 };
 
 #[derive(Debug, Error)]
-enum PublicationError {
+pub(crate) enum PublicationError {
     #[error("The source with id {0} was not found")]
     SourceNotFound(i64),
 
@@ -59,9 +61,9 @@ impl PublicationError {
     }
 }
 
-impl ResponseError for PublicationError {
-    fn status_code(&self) -> StatusCode {
-        match self {
+impl IntoResponse for PublicationError {
+    fn into_response(self) -> Response {
+        let status_code = match &self {
             PublicationError::SourcesDb(_)
             | PublicationError::PublicationsDb(_)
             | PublicationError::Database(_)
@@ -70,14 +72,9 @@ impl ResponseError for PublicationError {
                 StatusCode::NOT_FOUND
             }
             PublicationError::TenantId(_) => StatusCode::BAD_REQUEST,
-        }
-    }
+        };
 
-    fn error_response(&self) -> HttpResponse {
-        let error_message = ErrorMessage { message: self.to_message() };
-        let body =
-            serde_json::to_string(&error_message).expect("failed to serialize error message");
-        HttpResponse::build(self.status_code()).insert_header(ContentType::json()).body(body)
+        error_response(status_code, self.to_message())
     }
 }
 
@@ -102,6 +99,8 @@ pub struct ReadPublicationsResponse {
 }
 
 #[utoipa::path(
+    post,
+    path = "/sources/{source_id}/publications",
     summary = "Create a publication",
     description = "Creates a publication on the given source with the specified tables.",
     tag = "Publications",
@@ -114,20 +113,19 @@ pub struct ReadPublicationsResponse {
         (status = 500, description = "Internal server error", body = ErrorMessage)
     )
 )]
-#[post("/sources/{source_id}/publications")]
 pub(crate) async fn create_publication(
-    req: HttpRequest,
-    pool: Data<PgPool>,
-    api_config: Data<ApiConfig>,
-    encryption_key: Data<EncryptionKeyring>,
-    trusted_root_certs_cache: Data<TrustedRootCertsCache>,
+    headers: HeaderMap,
+    Extension(pool): Extension<PgPool>,
+    Extension(api_config): Extension<Arc<ApiConfig>>,
+    Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
+    Extension(trusted_root_certs_cache): Extension<Arc<TrustedRootCertsCache>>,
     source_id: Path<i64>,
     publication: Json<CreatePublicationRequest>,
-) -> Result<impl Responder, PublicationError> {
-    let tenant_id = extract_tenant_id(&req)?;
+) -> Result<impl IntoResponse, PublicationError> {
+    let tenant_id = extract_tenant_id(&headers)?;
     let source_id = source_id.into_inner();
 
-    let source_config = data::sources::read_source(&**pool, tenant_id, source_id, &encryption_key)
+    let source_config = data::sources::read_source(&pool, tenant_id, source_id, &encryption_key)
         .await?
         .map(|s| s.config)
         .ok_or(PublicationError::SourceNotFound(source_id))?;
@@ -140,10 +138,12 @@ pub(crate) async fn create_publication(
     let publication = Publication { name: publication.name, tables: publication.tables };
     data::publications::create_publication(&publication, &source_pool).await?;
 
-    Ok(HttpResponse::Ok().finish())
+    Ok(StatusCode::OK)
 }
 
 #[utoipa::path(
+    get,
+    path = "/sources/{source_id}/publications/{publication_name}",
     summary = "Retrieve a publication",
     description = "Returns a publication identified by name within the given source.",
     tag = "Publications",
@@ -157,19 +157,18 @@ pub(crate) async fn create_publication(
         (status = 500, description = "Internal server error", body = ErrorMessage)
     )
 )]
-#[get("/sources/{source_id}/publications/{publication_name}")]
 pub(crate) async fn read_publication(
-    req: HttpRequest,
-    pool: Data<PgPool>,
-    api_config: Data<ApiConfig>,
-    encryption_key: Data<EncryptionKeyring>,
-    trusted_root_certs_cache: Data<TrustedRootCertsCache>,
+    headers: HeaderMap,
+    Extension(pool): Extension<PgPool>,
+    Extension(api_config): Extension<Arc<ApiConfig>>,
+    Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
+    Extension(trusted_root_certs_cache): Extension<Arc<TrustedRootCertsCache>>,
     source_id_and_pub_name: Path<(i64, String)>,
-) -> Result<impl Responder, PublicationError> {
-    let tenant_id = extract_tenant_id(&req)?;
+) -> Result<impl IntoResponse, PublicationError> {
+    let tenant_id = extract_tenant_id(&headers)?;
     let (source_id, publication_name) = source_id_and_pub_name.into_inner();
 
-    let source_config = data::sources::read_source(&**pool, tenant_id, source_id, &encryption_key)
+    let source_config = data::sources::read_source(&pool, tenant_id, source_id, &encryption_key)
         .await?
         .map(|s| s.config)
         .ok_or(PublicationError::SourceNotFound(source_id))?;
@@ -186,6 +185,8 @@ pub(crate) async fn read_publication(
 }
 
 #[utoipa::path(
+    post,
+    path = "/sources/{source_id}/publications/{publication_name}",
     summary = "Update a publication",
     description = "Replaces the publication's table list on the given source.",
     tag = "Publications",
@@ -200,20 +201,19 @@ pub(crate) async fn read_publication(
         (status = 500, description = "Internal server error", body = ErrorMessage)
     )
 )]
-#[post("/sources/{source_id}/publications/{publication_name}")]
 pub(crate) async fn update_publication(
-    req: HttpRequest,
-    pool: Data<PgPool>,
-    api_config: Data<ApiConfig>,
-    encryption_key: Data<EncryptionKeyring>,
-    trusted_root_certs_cache: Data<TrustedRootCertsCache>,
+    headers: HeaderMap,
+    Extension(pool): Extension<PgPool>,
+    Extension(api_config): Extension<Arc<ApiConfig>>,
+    Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
+    Extension(trusted_root_certs_cache): Extension<Arc<TrustedRootCertsCache>>,
     source_id_and_pub_name: Path<(i64, String)>,
     publication: Json<UpdatePublicationRequest>,
-) -> Result<impl Responder, PublicationError> {
-    let tenant_id = extract_tenant_id(&req)?;
+) -> Result<impl IntoResponse, PublicationError> {
+    let tenant_id = extract_tenant_id(&headers)?;
     let (source_id, publication_name) = source_id_and_pub_name.into_inner();
 
-    let source_config = data::sources::read_source(&**pool, tenant_id, source_id, &encryption_key)
+    let source_config = data::sources::read_source(&pool, tenant_id, source_id, &encryption_key)
         .await?
         .map(|s| s.config)
         .ok_or(PublicationError::SourceNotFound(source_id))?;
@@ -231,10 +231,12 @@ pub(crate) async fn update_publication(
     let publication = Publication { name: publication_name, tables: publication.tables };
     data::publications::update_publication(&publication, &source_pool).await?;
 
-    Ok(HttpResponse::Ok().finish())
+    Ok(StatusCode::OK)
 }
 
 #[utoipa::path(
+    delete,
+    path = "/sources/{source_id}/publications/{publication_name}",
     summary = "Delete a publication",
     description = "Deletes a publication by name on the given source.",
     tag = "Publications",
@@ -248,19 +250,18 @@ pub(crate) async fn update_publication(
         (status = 500, description = "Internal server error", body = ErrorMessage)
     )
 )]
-#[delete("/sources/{source_id}/publications/{publication_name}")]
 pub(crate) async fn delete_publication(
-    req: HttpRequest,
-    pool: Data<PgPool>,
-    api_config: Data<ApiConfig>,
-    encryption_key: Data<EncryptionKeyring>,
-    trusted_root_certs_cache: Data<TrustedRootCertsCache>,
+    headers: HeaderMap,
+    Extension(pool): Extension<PgPool>,
+    Extension(api_config): Extension<Arc<ApiConfig>>,
+    Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
+    Extension(trusted_root_certs_cache): Extension<Arc<TrustedRootCertsCache>>,
     source_id_and_pub_name: Path<(i64, String)>,
-) -> Result<impl Responder, PublicationError> {
-    let tenant_id = extract_tenant_id(&req)?;
+) -> Result<impl IntoResponse, PublicationError> {
+    let tenant_id = extract_tenant_id(&headers)?;
     let (source_id, publication_name) = source_id_and_pub_name.into_inner();
 
-    let source_config = data::sources::read_source(&**pool, tenant_id, source_id, &encryption_key)
+    let source_config = data::sources::read_source(&pool, tenant_id, source_id, &encryption_key)
         .await?
         .map(|s| s.config)
         .ok_or(PublicationError::SourceNotFound(source_id))?;
@@ -271,10 +272,12 @@ pub(crate) async fn delete_publication(
             .await?;
     data::publications::drop_publication(&publication_name, &source_pool).await?;
 
-    Ok(HttpResponse::Ok().finish())
+    Ok(StatusCode::OK)
 }
 
 #[utoipa::path(
+    get,
+    path = "/sources/{source_id}/publications",
     summary = "List publications",
     description = "Returns all publications defined on the given source.",
     tag = "Publications",
@@ -286,19 +289,18 @@ pub(crate) async fn delete_publication(
         (status = 500, description = "Internal server error", body = ErrorMessage)
     )
 )]
-#[get("/sources/{source_id}/publications")]
 pub(crate) async fn read_all_publications(
-    req: HttpRequest,
-    pool: Data<PgPool>,
-    api_config: Data<ApiConfig>,
-    encryption_key: Data<EncryptionKeyring>,
-    trusted_root_certs_cache: Data<TrustedRootCertsCache>,
+    headers: HeaderMap,
+    Extension(pool): Extension<PgPool>,
+    Extension(api_config): Extension<Arc<ApiConfig>>,
+    Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
+    Extension(trusted_root_certs_cache): Extension<Arc<TrustedRootCertsCache>>,
     source_id: Path<i64>,
-) -> Result<impl Responder, PublicationError> {
-    let tenant_id = extract_tenant_id(&req)?;
+) -> Result<impl IntoResponse, PublicationError> {
+    let tenant_id = extract_tenant_id(&headers)?;
     let source_id = source_id.into_inner();
 
-    let source_config = data::sources::read_source(&**pool, tenant_id, source_id, &encryption_key)
+    let source_config = data::sources::read_source(&pool, tenant_id, source_id, &encryption_key)
         .await?
         .map(|s| s.config)
         .ok_or(PublicationError::SourceNotFound(source_id))?;
@@ -314,6 +316,8 @@ pub(crate) async fn read_all_publications(
 }
 
 #[utoipa::path(
+    post,
+    path = "/sources/{source_id}/publications/{publication_name}/tables",
     summary = "Add tables to a publication",
     description = "Adds the specified tables to an existing publication.",
     tag = "Publications",
@@ -328,19 +332,18 @@ pub(crate) async fn read_all_publications(
         (status = 500, description = "Internal server error", body = ErrorMessage)
     )
 )]
-#[post("/sources/{source_id}/publications/{publication_name}/tables")]
 pub(crate) async fn add_tables_to_publication(
-    req: HttpRequest,
-    pool: Data<PgPool>,
-    api_config: Data<ApiConfig>,
-    encryption_key: Data<EncryptionKeyring>,
-    trusted_root_certs_cache: Data<TrustedRootCertsCache>,
+    headers: HeaderMap,
+    Extension(pool): Extension<PgPool>,
+    Extension(api_config): Extension<Arc<ApiConfig>>,
+    Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
+    Extension(trusted_root_certs_cache): Extension<Arc<TrustedRootCertsCache>>,
     source_id_and_pub_name: Path<(i64, String)>,
     publication: Json<UpdatePublicationRequest>,
-) -> Result<impl Responder, PublicationError> {
-    let tenant_id = extract_tenant_id(&req)?;
+) -> Result<impl IntoResponse, PublicationError> {
+    let tenant_id = extract_tenant_id(&headers)?;
     let (source_id, publication_name) = source_id_and_pub_name.into_inner();
-    let source_config = data::sources::read_source(&**pool, tenant_id, source_id, &encryption_key)
+    let source_config = data::sources::read_source(&pool, tenant_id, source_id, &encryption_key)
         .await?
         .map(|s| s.config)
         .ok_or(PublicationError::SourceNotFound(source_id))?;
@@ -357,10 +360,12 @@ pub(crate) async fn add_tables_to_publication(
     let publication = Publication { name: publication_name, tables: publication.tables };
     data::publications::add_tables_to_publication(&publication, &source_pool).await?;
 
-    Ok(HttpResponse::Ok().finish())
+    Ok(StatusCode::OK)
 }
 
 #[utoipa::path(
+    delete,
+    path = "/sources/{source_id}/publications/{publication_name}/tables",
     summary = "Remove tables from a publication",
     description = "Removes the specified tables from an existing publication.",
     tag = "Publications",
@@ -375,19 +380,18 @@ pub(crate) async fn add_tables_to_publication(
         (status = 500, description = "Internal server error", body = ErrorMessage)
     )
 )]
-#[delete("/sources/{source_id}/publications/{publication_name}/tables")]
 pub(crate) async fn drop_tables_from_publication(
-    req: HttpRequest,
-    pool: Data<PgPool>,
-    api_config: Data<ApiConfig>,
-    encryption_key: Data<EncryptionKeyring>,
-    trusted_root_certs_cache: Data<TrustedRootCertsCache>,
+    headers: HeaderMap,
+    Extension(pool): Extension<PgPool>,
+    Extension(api_config): Extension<Arc<ApiConfig>>,
+    Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
+    Extension(trusted_root_certs_cache): Extension<Arc<TrustedRootCertsCache>>,
     source_id_and_pub_name: Path<(i64, String)>,
     publication: Json<UpdatePublicationRequest>,
-) -> Result<impl Responder, PublicationError> {
-    let tenant_id = extract_tenant_id(&req)?;
+) -> Result<impl IntoResponse, PublicationError> {
+    let tenant_id = extract_tenant_id(&headers)?;
     let (source_id, publication_name) = source_id_and_pub_name.into_inner();
-    let source_config = data::sources::read_source(&**pool, tenant_id, source_id, &encryption_key)
+    let source_config = data::sources::read_source(&pool, tenant_id, source_id, &encryption_key)
         .await?
         .map(|s| s.config)
         .ok_or(PublicationError::SourceNotFound(source_id))?;
@@ -404,10 +408,12 @@ pub(crate) async fn drop_tables_from_publication(
     let publication = Publication { name: publication_name, tables: publication.tables };
     data::publications::drop_tables_from_publication(&publication, &source_pool).await?;
 
-    Ok(HttpResponse::Ok().finish())
+    Ok(StatusCode::OK)
 }
 
 #[utoipa::path(
+    put,
+    path = "/sources/{source_id}/publications/{publication_name}/tables",
     summary = "Replace tables of a publication",
     description = "Replaces the table list of an existing publication with the specified tables.",
     tag = "Publications",
@@ -422,19 +428,18 @@ pub(crate) async fn drop_tables_from_publication(
         (status = 500, description = "Internal server error", body = ErrorMessage)
     )
 )]
-#[put("/sources/{source_id}/publications/{publication_name}/tables")]
 pub(crate) async fn set_publication_tables(
-    req: HttpRequest,
-    pool: Data<PgPool>,
-    api_config: Data<ApiConfig>,
-    encryption_key: Data<EncryptionKeyring>,
-    trusted_root_certs_cache: Data<TrustedRootCertsCache>,
+    headers: HeaderMap,
+    Extension(pool): Extension<PgPool>,
+    Extension(api_config): Extension<Arc<ApiConfig>>,
+    Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
+    Extension(trusted_root_certs_cache): Extension<Arc<TrustedRootCertsCache>>,
     source_id_and_pub_name: Path<(i64, String)>,
     publication: Json<UpdatePublicationRequest>,
-) -> Result<impl Responder, PublicationError> {
-    let tenant_id = extract_tenant_id(&req)?;
+) -> Result<impl IntoResponse, PublicationError> {
+    let tenant_id = extract_tenant_id(&headers)?;
     let (source_id, publication_name) = source_id_and_pub_name.into_inner();
-    let source_config = data::sources::read_source(&**pool, tenant_id, source_id, &encryption_key)
+    let source_config = data::sources::read_source(&pool, tenant_id, source_id, &encryption_key)
         .await?
         .map(|s| s.config)
         .ok_or(PublicationError::SourceNotFound(source_id))?;
@@ -451,5 +456,5 @@ pub(crate) async fn set_publication_tables(
     let publication = Publication { name: publication_name, tables: publication.tables };
     data::publications::update_publication(&publication, &source_pool).await?;
 
-    Ok(HttpResponse::Ok().finish())
+    Ok(StatusCode::OK)
 }

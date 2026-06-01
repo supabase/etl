@@ -27,7 +27,7 @@ fn install_crypto_provider() {
 
 /// Entry point for the ETL API service.
 ///
-/// Initializes tracing, Sentry, and starts the Actix web server with
+/// Initializes tracing, Sentry, and starts the axum web server with
 /// command-line argument handling for both server mode and database migration.
 fn main() -> anyhow::Result<()> {
     // Install rustls crypto provider before any TLS operations.
@@ -43,7 +43,7 @@ fn main() -> anyhow::Result<()> {
     let _sentry_guard = sentry::init()?;
 
     // We start the runtime.
-    actix_web::rt::System::new().block_on(async_main())?;
+    tokio::runtime::Runtime::new()?.block_on(async_main())?;
 
     Ok(())
 }
