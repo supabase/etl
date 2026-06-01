@@ -73,7 +73,7 @@ pub enum FullApiDestinationConfig {
         #[schema(value_type = String, example = "postgres://localhost:5432/ducklake_catalog")]
         #[serde(deserialize_with = "crate::utils::trim_secret_string")]
         catalog_url: SerializableSecretString,
-        #[schema(example = "file:///absolute/path/to/lake_data")]
+        #[schema(example = "s3://bucket/path")]
         #[serde(deserialize_with = "crate::utils::trim_string")]
         data_path: String,
         #[schema(example = 4)]
@@ -1810,7 +1810,7 @@ mod tests {
             catalog_url: SerializableSecretString::from(
                 "postgres://user:pass@localhost:5432/ducklake_catalog".to_owned(),
             ),
-            data_path: "file:///absolute/path/to/lake_data".to_owned(),
+            data_path: "s3://bucket/path".to_owned(),
             pool_size: None,
             s3_access_key_id: None,
             s3_secret_access_key: None,
