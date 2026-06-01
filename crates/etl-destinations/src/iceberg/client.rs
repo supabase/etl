@@ -888,6 +888,7 @@ impl RestCommitClient {
         let mut params = HashMap::new();
         params.insert("grant_type", "client_credentials");
         params.insert("client_secret", client_secret);
+        params.insert("scope", props.get("scope").map_or("catalog", String::as_str));
         if let Some(client_id) = client_id {
             params.insert("client_id", client_id);
         }

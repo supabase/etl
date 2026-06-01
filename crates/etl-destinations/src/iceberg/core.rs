@@ -435,6 +435,7 @@ where
                         batch.table_delta.update(
                             delete_table_row,
                             updated_table_row,
+                            &batch.replicated_table_schema,
                             &batch.key_indices,
                         );
                     }
@@ -750,15 +751,27 @@ impl TableDelta {
         self.merge_at_key(key, change);
     }
 
-    /// Records an updated row as delete-old-key plus write-new-row.
-    fn update(&mut self, delete_row: TableRow, data_row: TableRow, key_indices: &[usize]) {
+    /// Records an updated row as delete-old-key plus upsert-new-row.
+    fn update(
+        &mut self,
+        delete_row: TableRow,
+        data_row: TableRow,
+        replicated_table_schema: &ReplicatedTableSchema,
+        key_indices: &[usize],
+    ) {
         let old_key = row_key(&delete_row, key_indices);
         let new_key = row_key(&data_row, key_indices);
+        let new_key_delete_row = (old_key != new_key).then(|| {
+            equality_delete_row_from_full_row(&data_row, replicated_table_schema, key_indices)
+        });
         let mut change = self
             .changes
             .remove(&old_key)
             .unwrap_or_else(|| PendingChange::with_delete(old_key, delete_row));
 
+        if let Some(delete_row) = new_key_delete_row {
+            change.delete_rows.push(PendingDelete::new(new_key.clone(), delete_row));
+        }
         change.data_row = Some(data_row);
 
         self.merge_at_key(new_key, change);
@@ -1288,7 +1301,12 @@ mod tests {
         let delete_row = delete_row(&old_row, &replicated_table_schema, &key_indices);
         let mut table_delta = TableDelta::default();
 
-        table_delta.update(delete_row.clone(), new_row.clone(), &key_indices);
+        table_delta.update(
+            delete_row.clone(),
+            new_row.clone(),
+            &replicated_table_schema,
+            &key_indices,
+        );
 
         let (data_rows, delete_rows) = table_delta.into_parts();
         assert_eq!(data_rows, vec![new_row]);
@@ -1296,37 +1314,27 @@ mod tests {
     }
 
     #[test]
-    fn table_delta_update_then_delete_writes_only_original_delete() {
+    fn table_delta_update_then_delete_writes_old_and_new_key_deletes() {
         let replicated_table_schema = replicated_schema(IdentityType::PrimaryKey);
         let key_indices = [0];
         let old_row = test_row(1, "alice");
         let updated_row = test_row(2, "alice");
         let old_delete_row = delete_row(&old_row, &replicated_table_schema, &key_indices);
         let updated_delete_row = delete_row(&updated_row, &replicated_table_schema, &key_indices);
+        let expected_updated_delete_row = updated_delete_row.clone();
         let mut table_delta = TableDelta::default();
 
-        table_delta.update(old_delete_row.clone(), updated_row, &key_indices);
+        table_delta.update(
+            old_delete_row.clone(),
+            updated_row,
+            &replicated_table_schema,
+            &key_indices,
+        );
         table_delta.delete(updated_delete_row, &key_indices);
 
         let (data_rows, delete_rows) = table_delta.into_parts();
         assert!(data_rows.is_empty());
-        assert_eq!(delete_rows, vec![old_delete_row]);
-    }
-
-    #[test]
-    fn table_delta_repeated_delete_writes_one_delete() {
-        let replicated_table_schema = replicated_schema(IdentityType::PrimaryKey);
-        let key_indices = [0];
-        let row = test_row(1, "alice");
-        let delete_row = delete_row(&row, &replicated_table_schema, &key_indices);
-        let mut table_delta = TableDelta::default();
-
-        table_delta.delete(delete_row.clone(), &key_indices);
-        table_delta.delete(delete_row.clone(), &key_indices);
-
-        let (data_rows, delete_rows) = table_delta.into_parts();
-        assert!(data_rows.is_empty());
-        assert_eq!(delete_rows, vec![delete_row]);
+        assert_eq!(delete_rows, vec![old_delete_row, expected_updated_delete_row]);
     }
 
     #[test]
@@ -1360,12 +1368,19 @@ mod tests {
         let delete_row_2 = delete_row(&row_2, &replicated_table_schema, &key_indices);
         let mut table_delta = TableDelta::default();
 
-        table_delta.update(delete_row_1.clone(), row_2, &key_indices);
-        table_delta.update(delete_row_2, row_3.clone(), &key_indices);
+        table_delta.update(delete_row_1.clone(), row_2, &replicated_table_schema, &key_indices);
+        table_delta.update(delete_row_2, row_3.clone(), &replicated_table_schema, &key_indices);
 
         let (data_rows, delete_rows) = table_delta.into_parts();
         assert_eq!(data_rows, vec![row_3]);
-        assert_eq!(delete_rows, vec![delete_row_1]);
+        assert_eq!(
+            delete_rows,
+            vec![
+                delete_row_1,
+                delete_row(&test_row(2, "alice"), &replicated_table_schema, &key_indices),
+                delete_row(&test_row(3, "alice"), &replicated_table_schema, &key_indices),
+            ]
+        );
     }
 
     #[test]
