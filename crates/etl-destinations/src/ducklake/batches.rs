@@ -11,6 +11,7 @@ use std::collections::HashMap;
 #[cfg(feature = "test-utils")]
 use std::sync::LazyLock;
 use std::{
+    error, fmt,
     hash::{Hash, Hasher},
     sync::{
         Arc,
@@ -94,6 +95,45 @@ fn format_optional_sequence_key(sequence_key: Option<EventSequenceKey>) -> Strin
 /// Returns whether one DuckDB error is the standard interrupted query error.
 fn is_duckdb_interrupt_error(error: &duckdb::Error) -> bool {
     error.to_string().contains("INTERRUPT Error: Interrupted")
+}
+
+/// Sanitized DuckDB query failure for statements that may contain row values.
+#[derive(Debug)]
+struct DuckDbSensitiveQueryError;
+
+impl fmt::Display for DuckDbSensitiveQueryError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "DuckDB query failed; error message omitted because it may contain row values")
+    }
+}
+
+impl error::Error for DuckDbSensitiveQueryError {}
+
+/// Formats query context for a delete mutation without row values.
+fn format_delete_mutation_error_detail(
+    target_table: &str,
+    predicate_count: usize,
+    chunk_index: usize,
+    chunk_count: usize,
+    chunk_predicate_count: usize,
+) -> String {
+    format!(
+        "sql: DELETE FROM {target_table} WHERE [redacted predicates]; predicate_count: \
+         {predicate_count}; chunk_index: {chunk_index}; chunk_count: {chunk_count}; \
+         chunk_predicate_count: {chunk_predicate_count}"
+    )
+}
+
+/// Formats query context for an update mutation without row values.
+fn format_update_mutation_error_detail(
+    target_table: &str,
+    assignment_count: usize,
+    has_predicate: bool,
+) -> String {
+    format!(
+        "sql: UPDATE {target_table} SET [redacted assignments] WHERE [redacted predicate]; \
+         assignment_count: {assignment_count}; has_predicate: {has_predicate}"
+    )
 }
 
 /// ETL-managed per-table streaming replay progress for steady-state CDC
@@ -1923,7 +1963,7 @@ fn apply_delete_mutation(
         conn.execute_batch(&sql_query).map_err(|error| {
             let duckdb_interrupted = is_duckdb_interrupt_error(&error);
             tracing::error!(
-                error = %error,
+                error = %DuckDbSensitiveQueryError,
                 table = %batch.table_name,
                 batch_id = %batch.batch_id,
                 batch_kind = batch.batch_kind.as_str(),
@@ -1946,8 +1986,14 @@ fn apply_delete_mutation(
             etl_error!(
                 ErrorKind::DestinationQueryFailed,
                 "DuckLake DELETE failed",
-                format_query_error_detail(&sql_query),
-                source: error
+                format_delete_mutation_error_detail(
+                    &target_table,
+                    predicates.len(),
+                    chunk_index,
+                    chunk_count,
+                    chunk.len(),
+                ),
+                source: DuckDbSensitiveQueryError
             )
         })?;
     }
@@ -1969,13 +2015,13 @@ fn apply_update_mutation(
     let set_clause = assignments.join(", ");
     let target_table = qualified_lake_table_name(table_name);
     let sql_query = format!("UPDATE {target_table} SET {set_clause} WHERE {predicate};");
-    conn.execute_batch(&sql_query).map_err(|err| {
-        tracing::error!(error = %err, "error UPDATE");
+    conn.execute_batch(&sql_query).map_err(|_err| {
+        tracing::error!(error = %DuckDbSensitiveQueryError, "error UPDATE");
         etl_error!(
             ErrorKind::DestinationQueryFailed,
             "DuckLake UPDATE failed",
-            format_query_error_detail(&sql_query),
-            source: err
+            format_update_mutation_error_detail(&target_table, assignments.len(), !predicate.is_empty()),
+            source: DuckDbSensitiveQueryError
         )
     })?;
 
@@ -2154,6 +2200,8 @@ fn maybe_fail_after_copy_batch_commit_for_tests(table_name: &str) -> EtlResult<(
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error as _;
+
     use etl::types::{
         ColumnSchema, IdentityMask, OldTableRow, PartialTableRow, ReplicatedTableSchema,
         ReplicationMask, TableId, TableName, TableSchema, Type as PgType, UpdatedTableRow,
@@ -2174,6 +2222,43 @@ mod tests {
 
     fn make_replicated_schema() -> ReplicatedTableSchema {
         ReplicatedTableSchema::all(Arc::new(make_schema()))
+    }
+
+    fn assert_query_failure_omits_sensitive_value(
+        error: &etl::error::EtlError,
+        sensitive_value: &str,
+    ) {
+        assert!(!error.to_string().contains(sensitive_value));
+        assert!(!error.detail().is_some_and(|detail| detail.contains(sensitive_value)));
+        let source = error.source().expect("expected sanitized source");
+        assert!(!source.to_string().contains(sensitive_value));
+        assert!(source.to_string().contains("omitted because it may contain row values"));
+    }
+
+    #[test]
+    fn apply_delete_mutation_failure_omits_row_values_from_detail() {
+        let sensitive_value = "secret-delete-value";
+        let error = etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            "DuckLake DELETE failed",
+            format_delete_mutation_error_detail("lake.\"users\"", 1, 0, 1, 1),
+            source: DuckDbSensitiveQueryError
+        );
+
+        assert_query_failure_omits_sensitive_value(&error, sensitive_value);
+    }
+
+    #[test]
+    fn apply_update_mutation_failure_omits_row_values_from_detail() {
+        let sensitive_value = "secret-update-value";
+        let error = etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            "DuckLake UPDATE failed",
+            format_update_mutation_error_detail("lake.\"users\"", 1, true),
+            source: DuckDbSensitiveQueryError
+        );
+
+        assert_query_failure_omits_sensitive_value(&error, sensitive_value);
     }
 
     #[test]
