@@ -90,8 +90,9 @@ futures = { version = "0.3.31", default-features = false }
 gcp-bigquery-client = { git = "https://github.com/iambriccardo/gcp-bigquery-client", rev = "c4fc59e338ca181d29b0dd53cac786fbe8513633", default-features = false }
 hex = { version = "0.4", default-features = false }
 humantime = { version = "2.3.0", default-features = false }
-iceberg = { version = "0.8.0", default-features = false }
-iceberg-catalog-rest = { version = "0.8.0", default-features = false }
+iceberg = { version = "0.9.1", default-features = false }
+iceberg-catalog-rest = { version = "0.9.1", default-features = false }
+iceberg-storage-opendal = { version = "0.9.1", default-features = false }
 insta = { version = "1.43.1", default-features = false }
 # aws_lc_rs backend avoids the `rsa` crate (RUSTSEC-2023-0071, unpatched timing
 # side-channel). We only sign JWTs, but cargo-deny flags the advisory regardless.

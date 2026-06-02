@@ -5,7 +5,7 @@ description: Stream Postgres changes anywhere, in real-time.
 
 **Stream Postgres changes anywhere, in real-time**
 
-**ETL** is a Rust framework for building **change data capture (CDC)** pipelines on **Postgres**. Stream inserts, updates, deletes, truncates, and schema events to feature-gated destination modules or your own custom destination. **BigQuery** is the recommended stable first production destination; DuckLake, ClickHouse, and Snowflake modules are available in `etl-destinations`, and the Iceberg module is deprecated for new deployments.
+**ETL** is a Rust framework for building **change data capture (CDC)** pipelines on **Postgres**. Stream inserts, updates, deletes, truncates, and schema events to feature-gated destination modules or your own custom destination. **BigQuery** is the recommended stable first production destination; DuckLake, ClickHouse, and Snowflake modules are available in `etl-destinations`. The Iceberg module is unmaintained experimental code, is not production supported, and should only be used at your own risk.
 
 *Using ETL with Supabase?* The Supabase product documentation for [database replication](https://supabase.com/docs/guides/database/replication) explains how replication works inside Supabase itself, including dashboard-level concepts that complement this library-focused guide.
 
@@ -170,8 +170,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 This snippet intentionally shows **ETL used as a library** with your own `Destination` implementation.
 Feature-gated destination modules live in `etl-destinations`: BigQuery,
-DuckLake, ClickHouse, Snowflake, and the deprecated Iceberg module. The shared
-pipeline, config, store, and event types should come from `etl`.
+DuckLake, ClickHouse, Snowflake, and the experimental, unsupported Iceberg
+module. The shared pipeline, config, store, and event types should come from
+`etl`.
 
 `Pipeline::start()` installs ETL's **source-side schema helpers** before
 replication begins. If you use `PostgresStore` as the runtime store,

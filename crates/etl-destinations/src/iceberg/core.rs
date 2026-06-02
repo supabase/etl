@@ -1,6 +1,5 @@
 use std::{
     collections::{HashMap, HashSet},
-    fmt,
     sync::Arc,
 };
 
@@ -12,15 +11,15 @@ use etl::{
     },
     error::{ErrorKind, EtlResult},
     etl_error,
-    state::destination_table_metadata::DestinationTableMetadata,
-    store::SharedStateStore,
+    state::destination_table_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus},
+    store::DestinationStore,
     types::{
-        Cell, ColumnSchema, Event, IdentityType, OldTableRow, ReplicatedTableSchema, TableId,
-        TableName, TableRow, Type, generate_sequence_number,
+        Cell, Event, IdentityType, OldTableRow, ReplicatedTableSchema, ReplicationMask, SnapshotId,
+        TableId, TableName, TableRow, TableSchema, UpdatedTableRow,
     },
 };
 use tokio::{sync::Mutex, task::JoinSet};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 #[cfg(feature = "egress")]
 use crate::egress::{PROCESSING_TYPE_STREAMING, PROCESSING_TYPE_TABLE_COPY, log_processed_bytes};
@@ -31,91 +30,34 @@ use crate::{
 
 /// Type alias for Iceberg table names.
 type IcebergTableName = String;
-/// Suffix for changelog tables
-const ICEBERG_CHANGELOG_TABLE_SUFFIX: &str = "changelog";
 
-/// CDC operation column name
-const CDC_OPERATION_COLUMN_NAME: &str = "cdc_operation";
-/// CDC operation column name
-const SEQUENCE_NUMBER_COLUMN_NAME: &str = "sequence_number";
-
-/// Converts a source table name to an Iceberg changelog table name.
+/// Converts a source table name to an Iceberg table name.
 ///
-/// Creates a standardized naming convention for Iceberg tables by combining
-/// the schema and table name with a `_changelog` suffix to distinguish
-/// CDC tables from regular data tables.
+/// Creates a standardized naming convention for Iceberg tables. When all
+/// source schemas share one Iceberg namespace, the source schema is encoded
+/// into the table name to avoid collisions.
 pub fn table_name_to_iceberg_table_name(
     table_name: &TableName,
     single_destination_namespace: bool,
 ) -> EtlResult<IcebergTableName> {
     if single_destination_namespace {
-        return Ok(format!(
-            "{}_{ICEBERG_CHANGELOG_TABLE_SUFFIX}",
-            try_stringify_table_name(table_name)?
-        ));
+        return try_stringify_table_name(table_name);
     }
 
-    Ok(format!("{}_{ICEBERG_CHANGELOG_TABLE_SUFFIX}", table_name.name))
+    Ok(table_name.name.clone())
 }
 
-/// CDC operation types for Iceberg changelog tables.
-///
-/// Represents the type of change operation that occurred in the source
-/// database. These values are stored in the `cdc_operation` column of changelog
-/// tables to distinguish between data modifications and deletions.
-#[derive(Debug, Clone, Copy)]
-pub enum IcebergOperationType {
-    /// Represents insert operations from the source database.
-    Insert,
-    /// Represents update operations from the source database.
-    Update,
-    /// Represents delete operations from the source database.
-    Delete,
-}
-
-impl From<IcebergOperationType> for Cell {
-    fn from(value: IcebergOperationType) -> Self {
-        Cell::String(value.to_string())
-    }
-}
-
-impl fmt::Display for IcebergOperationType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            IcebergOperationType::Insert => write!(f, "INSERT"),
-            IcebergOperationType::Update => write!(f, "UPDATE"),
-            IcebergOperationType::Delete => write!(f, "DELETE"),
-        }
-    }
-}
-
-/// An iceberg destination that implements the ETL [`Destination`] trait.
-///
-/// Provides Postgres-to-Iceberg data pipeline functionality including streaming
-/// inserts and CDC operation handling.
-///
-/// Designed for high concurrency with minimal locking:
-/// - Client is accessible without locks
-/// - Only caches require synchronization
-/// - Multiple write operations can execute concurrently
-#[derive(Debug, Clone)]
-pub struct IcebergDestination<S> {
-    client: IcebergClient,
-    store: S,
-    inner: Arc<Mutex<Inner>>,
-    tasks: TaskSet,
-}
-
-/// Namespace in the destination where the tables will be copied
+/// Namespace in the destination where the tables will be copied.
 #[derive(Debug)]
 pub enum DestinationNamespace {
-    /// A single namespace for all tables in the source
+    /// A single namespace for all tables in the source.
     Single(String),
-    /// One namespace for each schema in the source
+    /// One namespace for each schema in the source.
     OnePerSchema,
 }
 
 impl DestinationNamespace {
+    /// Returns the configured namespace or falls back to the table namespace.
     fn get_or<'a>(&'a self, table_namespace: &'a str) -> &'a str {
         match self {
             DestinationNamespace::Single(ns) => ns,
@@ -123,6 +65,7 @@ impl DestinationNamespace {
         }
     }
 
+    /// Returns whether all tables are written into one namespace.
     pub fn is_single(&self) -> bool {
         match self {
             DestinationNamespace::Single(_) => true,
@@ -141,16 +84,10 @@ struct Inner {
     /// Cache of source tables we already created/verified in the destination.
     ///
     /// Prevents redundant table existence checks and creation attempts.
-    /// Tables are added to this cache after successful creation or
-    /// verification.
-    ///
-    /// This cache is intentionally keyed by source [`TableId`] instead of the
-    /// rendered Iceberg table name. In a single destination namespace,
-    /// distinct source tables from different schemas can still render to
-    /// the same destination table name. That collision should surface
-    /// as a destination error from Iceberg.
-    created_tables: HashSet<IcebergTableName>,
-    /// Cache of namespaces we already created/verified in the destination
+    /// Tables are keyed by source [`TableId`] so same-named tables in different
+    /// destination namespaces are checked independently.
+    created_tables: HashSet<TableId>,
+    /// Cache of namespaces we already created/verified in the destination.
     ///
     /// Prevents redundant namespace existence checks and creation attempts.
     /// Namespaces are added to this cache after successful creation or
@@ -162,9 +99,28 @@ struct Inner {
     namespace: DestinationNamespace,
 }
 
+/// An Iceberg destination that implements the ETL [`Destination`] trait.
+///
+/// Provides experimental Postgres-to-Iceberg materialized table functionality
+/// including table copy, streaming inserts, updates, deletes, and truncates.
+/// This destination is not production supported and does not run Iceberg
+/// compaction, snapshot expiration, manifest rewrites, or orphan-file cleanup.
+///
+/// Designed for high concurrency with minimal locking:
+/// - Client is accessible without locks.
+/// - Only caches require synchronization.
+/// - Multiple write operations can execute concurrently.
+#[derive(Debug, Clone)]
+pub struct IcebergDestination<S> {
+    client: IcebergClient,
+    store: S,
+    inner: Arc<Mutex<Inner>>,
+    tasks: TaskSet,
+}
+
 impl<S> IcebergDestination<S>
 where
-    S: SharedStateStore,
+    S: DestinationStore,
 {
     /// Creates a new Iceberg destination instance.
     ///
@@ -186,6 +142,22 @@ where
             })),
             tasks: TaskSet::new(),
         }
+    }
+
+    /// Writes table-copy rows synchronously for integration tests.
+    #[cfg(feature = "test-utils")]
+    pub async fn write_table_rows_for_tests(
+        &self,
+        replicated_table_schema: &ReplicatedTableSchema,
+        table_rows: Vec<TableRow>,
+    ) -> EtlResult<()> {
+        self.write_table_rows(replicated_table_schema, table_rows).await
+    }
+
+    /// Writes CDC events synchronously for integration tests.
+    #[cfg(feature = "test-utils")]
+    pub async fn write_events_for_tests(&self, events: Vec<Event>) -> EtlResult<()> {
+        self.write_events(events).await
     }
 
     /// Truncates an Iceberg table by dropping and recreating it.
@@ -215,14 +187,14 @@ where
         };
         let iceberg_table_name = metadata.destination_table_id;
 
-        let namespace = schema_to_namespace(&replicated_table_schema.name().schema);
-        let namespace = inner.namespace.get_or(&namespace);
+        let table_namespace = schema_to_namespace(&replicated_table_schema.name().schema);
+        let namespace = inner.namespace.get_or(&table_namespace).to_owned();
 
         self.client
-            .drop_table_if_exists(namespace, iceberg_table_name.clone())
+            .drop_table_if_exists(&namespace, iceberg_table_name.clone())
             .await
             .map_err(iceberg_error_to_etl_error)?;
-        inner.created_tables.remove(&iceberg_table_name);
+        inner.created_tables.remove(&table_id);
 
         // We recreate the table with the same schema.
         self.prepare_table_for_streaming(&mut inner, replicated_table_schema).await?;
@@ -259,21 +231,19 @@ where
             .map_err(iceberg_error_to_etl_error)?;
 
         let mut inner = self.inner.lock().await;
-        inner.created_tables.remove(&iceberg_table_name);
+        inner.created_tables.remove(&table_id);
 
         Ok(())
     }
 
-    /// Writes table-copy rows to the Iceberg destination as insert entries.
+    /// Writes table-copy rows to the Iceberg destination.
     ///
-    /// Prepares the target table for streaming, augments each row with CDC
-    /// metadata (operation type and sequence number), and inserts the rows
-    /// into the Iceberg table. Table-copy rows are emitted as `Insert`
-    /// changelog entries in this context.
+    /// Prepares the target table for streaming and appends rows to the Iceberg
+    /// table without CDC metadata columns.
     async fn write_table_rows(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
-        mut table_rows: Vec<TableRow>,
+        table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
         let (namespace, iceberg_table_name) = {
             // We hold the lock for the entire preparation to avoid race conditions since
@@ -281,12 +251,6 @@ where
             let mut inner = self.inner.lock().await;
             self.prepare_table_for_streaming(&mut inner, replicated_table_schema).await?
         };
-
-        for table_row in &mut table_rows {
-            let sequence_number = generate_sequence_number(0.into(), 0.into());
-            table_row.values_mut().push(IcebergOperationType::Insert.into());
-            table_row.values_mut().push(Cell::String(sequence_number));
-        }
 
         if !table_rows.is_empty() {
             #[allow(unused_variables)]
@@ -300,25 +264,148 @@ where
         Ok(())
     }
 
+    /// Handles a relation event by applying an Iceberg schema update.
+    ///
+    /// Incoming relation events are processed only after pending row events
+    /// have been flushed. The state store is moved to `Applying` before the
+    /// Iceberg catalog commit and to `Applied` only after the commit succeeds.
+    /// The diff is computed from the ETL schema snapshot recorded in applied
+    /// destination metadata, not from the destination table's current schema.
+    async fn handle_relation_event(
+        &self,
+        new_replicated_table_schema: &ReplicatedTableSchema,
+    ) -> EtlResult<()> {
+        validate_iceberg_table_identity(new_replicated_table_schema)?;
+
+        let table_id = new_replicated_table_schema.id();
+        let new_snapshot_id = new_replicated_table_schema.inner().snapshot_id;
+        let new_replication_mask = new_replicated_table_schema.replication_mask().clone();
+        let new_column_schemas: Vec<_> =
+            new_replicated_table_schema.column_schemas().cloned().collect();
+
+        let mut inner = self.inner.lock().await;
+        let metadata =
+            self.store.get_destination_table_metadata(table_id).await?.ok_or_else(|| {
+                etl_error!(
+                    ErrorKind::CorruptedTableSchema,
+                    "Missing destination table metadata",
+                    format!(
+                        "No destination table metadata found for table {} when processing Iceberg \
+                         schema change.",
+                        table_id
+                    )
+                )
+            })?;
+        let metadata = if metadata.is_applying() {
+            self.recover_applying_metadata(
+                &mut inner,
+                table_id,
+                metadata,
+                Some(new_replicated_table_schema),
+            )
+            .await?
+        } else {
+            metadata
+        };
+
+        let current_snapshot_id = metadata.snapshot_id;
+        let current_replication_mask = metadata.replication_mask.clone();
+
+        if current_snapshot_id == new_snapshot_id
+            && current_replication_mask == new_replication_mask
+        {
+            debug!(%table_id, snapshot_id = %new_snapshot_id, "iceberg schema unchanged");
+            return Ok(());
+        }
+
+        let current_table_schema =
+            self.store.get_table_schema(&table_id, current_snapshot_id).await?.ok_or_else(
+                || {
+                    etl_error!(
+                        ErrorKind::InvalidState,
+                        "Old schema not found",
+                        format!(
+                            "Could not find schema for table {} at snapshot_id {}",
+                            table_id, current_snapshot_id
+                        )
+                    )
+                },
+            )?;
+        let current_schema = ReplicatedTableSchema::from_mask(
+            current_table_schema,
+            current_replication_mask.clone(),
+        );
+        let current_column_schemas: Vec<_> = current_schema.column_schemas().cloned().collect();
+        let diff = current_schema.diff(new_replicated_table_schema);
+
+        let updated_metadata = DestinationTableMetadata::new_applied(
+            metadata.destination_table_id.clone(),
+            current_snapshot_id,
+            current_replication_mask,
+        )
+        .with_schema_change(
+            new_snapshot_id,
+            new_replication_mask.clone(),
+            DestinationTableSchemaStatus::Applying,
+        );
+        self.store.store_destination_table_metadata(table_id, updated_metadata.clone()).await?;
+
+        let table_name = new_replicated_table_schema.name();
+        let table_namespace = schema_to_namespace(&table_name.schema);
+        let namespace = inner.namespace.get_or(&table_namespace).to_owned();
+        let namespace = self.create_namespace_if_missing(&mut inner, namespace).await?;
+        let iceberg_table_name = updated_metadata.destination_table_id.clone();
+
+        info!(
+            %table_id,
+            snapshot_id = %new_snapshot_id,
+            "applying iceberg schema change"
+        );
+
+        self.client
+            .evolve_table_schema(
+                &namespace,
+                iceberg_table_name,
+                &current_column_schemas,
+                &new_column_schemas,
+                &diff,
+            )
+            .await
+            .map_err(iceberg_error_to_etl_error)?;
+
+        self.store
+            .store_destination_table_metadata(table_id, updated_metadata.to_applied())
+            .await?;
+        inner.created_tables.insert(table_id);
+
+        info!(
+            %table_id,
+            snapshot_id = %new_snapshot_id,
+            "iceberg schema change applied"
+        );
+
+        Ok(())
+    }
+
     /// Processes and writes CDC events to Iceberg tables.
     ///
     /// Handles a stream of CDC events by batching non-truncate events by table
     /// ID and processing them concurrently. Truncate events are processed
-    /// separately and deduplicated for efficiency. Each event is augmented
-    /// with CDC metadata including operation type and sequence number based
-    /// on LSN information.
+    /// separately and deduplicated for efficiency. Inserts and updates append
+    /// data files, while updates and deletes add equality-delete files over the
+    /// source primary key.
     async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
         let mut events_iter = events.into_iter().peekable();
 
         while events_iter.peek().is_some() {
-            // Maps table ID to (schema, rows); schema is the first one seen for that table.
-            // Once schema change support is implemented, we will re-implement this.
-            let mut table_id_to_data: HashMap<TableId, (ReplicatedTableSchema, Vec<TableRow>)> =
-                HashMap::new();
+            // Maps table ID to pending changes for that table.
+            let mut table_id_to_data: HashMap<TableId, TableEventBatch> = HashMap::new();
 
-            // Process events until we hit a truncate event or run out of events
+            // Process events until we hit a truncate or relation event, or run
+            // out of events. Truncate and relation events require flushing all
+            // batched data first to preserve source ordering.
             while let Some(event) = events_iter.peek() {
-                if matches!(event, Event::Truncate(_)) {
+                if matches!(event, Event::Truncate(_) | Event::Relation(_)) {
                     break;
                 }
 
@@ -326,23 +413,19 @@ where
                     break;
                 };
                 match event {
-                    Event::Insert(mut insert) => {
-                        let sequence_key = insert.event_sequence_key().to_string();
-                        insert.table_row.values_mut().push(IcebergOperationType::Insert.into());
-                        insert.table_row.values_mut().push(Cell::String(sequence_key));
-
+                    Event::Insert(insert) => {
+                        validate_iceberg_table_identity(&insert.replicated_table_schema)?;
                         let table_id = insert.replicated_table_schema.id();
-                        let entry = table_id_to_data.entry(table_id).or_insert_with(|| {
-                            (insert.replicated_table_schema.clone(), Vec::new())
+                        let batch = table_id_to_data.entry(table_id).or_insert_with(|| {
+                            TableEventBatch::new(insert.replicated_table_schema.clone())
                         });
-                        entry.1.push(insert.table_row);
+                        batch.table_delta.insert(insert.table_row, &batch.key_indices);
                     }
                     Event::Update(update) => {
-                        validate_iceberg_replica_identity(&update.replicated_table_schema)?;
-                        let sequence_key = update.event_sequence_key().to_string();
-                        let mut table_row = match update.updated_table_row {
-                            etl::types::UpdatedTableRow::Full(row) => row,
-                            etl::types::UpdatedTableRow::Partial(_) => {
+                        validate_iceberg_table_identity(&update.replicated_table_schema)?;
+                        let updated_table_row = match update.updated_table_row {
+                            UpdatedTableRow::Full(row) => row,
+                            UpdatedTableRow::Partial(_) => {
                                 return Err(etl_error!(
                                     ErrorKind::InvalidState,
                                     "Iceberg update requires a full new row image",
@@ -355,74 +438,52 @@ where
                                 ));
                             }
                         };
-                        table_row.values_mut().push(IcebergOperationType::Update.into());
-                        table_row.values_mut().push(Cell::String(sequence_key));
-
                         let table_id = update.replicated_table_schema.id();
-                        let entry = table_id_to_data.entry(table_id).or_insert_with(|| {
-                            (update.replicated_table_schema.clone(), Vec::new())
+                        let batch = table_id_to_data.entry(table_id).or_insert_with(|| {
+                            TableEventBatch::new(update.replicated_table_schema.clone())
                         });
-                        entry.1.push(table_row);
+                        let delete_table_row = match update.old_table_row {
+                            Some(old_table_row) => old_table_row_to_delete_row(
+                                old_table_row,
+                                &batch.replicated_table_schema,
+                                &batch.key_indices,
+                            )?,
+                            None => equality_delete_row_from_full_row(
+                                &updated_table_row,
+                                &batch.key_indices,
+                            ),
+                        };
+
+                        batch.table_delta.update(
+                            delete_table_row,
+                            updated_table_row,
+                            &batch.key_indices,
+                        );
                     }
                     Event::Delete(delete) => {
-                        validate_iceberg_replica_identity(&delete.replicated_table_schema)?;
-                        let sequence_key = delete.event_sequence_key().to_string();
+                        validate_iceberg_table_identity(&delete.replicated_table_schema)?;
                         let Some(old_table_row) = delete.old_table_row else {
                             return Err(etl_error!(
                                 ErrorKind::InvalidState,
                                 "Iceberg delete requires an old row image",
                                 format!(
                                     "Table '{}' emitted a delete without an old row image even \
-                                     though Iceberg requires FULL replica identity.",
+                                     though Iceberg requires primary-key row identity.",
                                     delete.replicated_table_schema.name()
                                 )
                             ));
                         };
-                        let OldTableRow::Full(mut old_table_row) = old_table_row else {
-                            return Err(etl_error!(
-                                ErrorKind::InvalidState,
-                                "Iceberg delete requires a full old row image",
-                                format!(
-                                    "Table '{}' emitted a key-only delete image. Configure \
-                                     REPLICA IDENTITY FULL for Iceberg delete support.",
-                                    delete.replicated_table_schema.name()
-                                )
-                            ));
-                        };
-                        old_table_row.values_mut().push(IcebergOperationType::Delete.into());
-                        old_table_row.values_mut().push(Cell::String(sequence_key));
-
                         let table_id = delete.replicated_table_schema.id();
-                        let entry = table_id_to_data.entry(table_id).or_insert_with(|| {
-                            (delete.replicated_table_schema.clone(), Vec::new())
+                        let batch = table_id_to_data.entry(table_id).or_insert_with(|| {
+                            TableEventBatch::new(delete.replicated_table_schema.clone())
                         });
-                        entry.1.push(old_table_row);
-                    }
-                    Event::Relation(relation) => {
-                        validate_iceberg_replica_identity(&relation.replicated_table_schema)?;
+                        let delete_table_row = old_table_row_to_delete_row(
+                            old_table_row,
+                            &batch.replicated_table_schema,
+                            &batch.key_indices,
+                        )?;
 
-                        // Check if schema has changed - if so, error since Iceberg doesn't
-                        // support schema changes yet.
-                        let table_id = relation.replicated_table_schema.id();
-                        let new_snapshot_id = relation.replicated_table_schema.inner().snapshot_id;
-                        let new_replication_mask =
-                            relation.replicated_table_schema.replication_mask();
-
-                        if let Some(metadata) =
-                            self.store.get_applied_destination_table_metadata(table_id).await?
-                            && (metadata.snapshot_id != new_snapshot_id
-                                || &metadata.replication_mask != new_replication_mask)
-                        {
-                            return Err(etl_error!(
-                                ErrorKind::CorruptedTableSchema,
-                                "Schema changes not supported",
-                                format!(
-                                    "Iceberg destination does not support schema changes. Table \
-                                     {} schema changed from snapshot_id {} to {}.",
-                                    table_id, metadata.snapshot_id, new_snapshot_id
-                                )
-                            ));
-                        }
+                        batch.table_delta.delete(delete_table_row);
                     }
                     event => {
                         // Every other event type is currently not supported.
@@ -435,7 +496,8 @@ where
             if !table_id_to_data.is_empty() {
                 let mut join_set = JoinSet::new();
 
-                for (_, (replicated_table_schema, table_rows)) in table_id_to_data {
+                for (_, batch) in table_id_to_data {
+                    let TableEventBatch { replicated_table_schema, table_delta, .. } = batch;
                     let (namespace, iceberg_table_name) = {
                         // We hold the lock for the entire preparation to avoid race conditions
                         // since the consistency of this code path is
@@ -447,8 +509,11 @@ where
 
                     let client = self.client.clone();
 
+                    let (data_rows, delete_rows) = table_delta.into_parts();
                     join_set.spawn(async move {
-                        client.insert_rows(namespace, iceberg_table_name, table_rows).await
+                        client
+                            .apply_row_delta(namespace, iceberg_table_name, data_rows, delete_rows)
+                            .await
                     });
                 }
 
@@ -456,12 +521,25 @@ where
                 let mut bytes_sent = 0;
                 #[cfg_attr(not(feature = "egress"), allow(unused_assignments))]
                 while let Some(insert_result) = join_set.join_next().await {
-                    bytes_sent += insert_result
-                        .map_err(|_| etl_error!(ErrorKind::Unknown, "Failed to join future"))??;
+                    bytes_sent += insert_result.map_err(|error| {
+                        etl_error!(
+                            ErrorKind::DestinationError,
+                            "Iceberg row-delta task failed",
+                            source: error
+                        )
+                    })??;
                 }
 
                 #[cfg(feature = "egress")]
                 log_processed_bytes(Self::name(), PROCESSING_TYPE_STREAMING, bytes_sent, 0);
+            }
+
+            // Process any relation events that caused the batch to flush.
+            // Multiple consecutive relation events are processed sequentially.
+            while let Some(Event::Relation(_)) = events_iter.peek() {
+                if let Some(Event::Relation(relation)) = events_iter.next() {
+                    self.handle_relation_event(&relation.replicated_table_schema).await?;
+                }
             }
 
             // Collect and deduplicate schemas from all truncate events.
@@ -490,12 +568,11 @@ where
 
     /// Prepares a table for Iceberg writes with schema-aware table creation.
     ///
-    /// Augments the provided schema with CDC columns and ensures the
-    /// corresponding Iceberg table exists in the namespace. Also validates
-    /// that the source table uses `REPLICA IDENTITY FULL`, which Iceberg needs
-    /// for delete replay. Uses caching to avoid redundant table creation
-    /// checks and holds a lock during the entire preparation to prevent race
-    /// conditions.
+    /// Ensures the corresponding Iceberg table exists in the namespace. Also
+    /// validates that the source table exposes primary-key row identity, which
+    /// is required for equality-delete based CDC replay. Uses caching to avoid
+    /// redundant table creation checks and holds a lock during the entire
+    /// preparation to prevent race conditions.
     ///
     /// Follows the applying -> applied pattern for crash recovery:
     /// 1. Store metadata with `Applying` status before creating the table
@@ -506,32 +583,42 @@ where
         inner: &mut Inner,
         replicated_table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<(String, IcebergTableName)> {
-        validate_iceberg_replica_identity(replicated_table_schema)?;
+        validate_iceberg_table_identity(replicated_table_schema)?;
 
         let table_id = replicated_table_schema.id();
         let table_name = replicated_table_schema.name();
         let snapshot_id = replicated_table_schema.inner().snapshot_id;
         let replication_mask = replicated_table_schema.replication_mask().clone();
-        let column_schemas = Self::build_cdc_column_schemas(replicated_table_schema);
+        let column_schemas: Vec<_> = replicated_table_schema.column_schemas().cloned().collect();
 
-        let iceberg_table_name =
-            table_name_to_iceberg_table_name(table_name, inner.namespace.is_single())?;
-        let iceberg_table_name = if let Some(metadata) =
-            self.store.get_applied_destination_table_metadata(table_id).await?
-        {
-            metadata.destination_table_id
-        } else {
-            iceberg_table_name
-        };
+        let metadata = self.store.get_destination_table_metadata(table_id).await?;
+        let iceberg_table_name = metadata.as_ref().map_or_else(
+            || table_name_to_iceberg_table_name(table_name, inner.namespace.is_single()),
+            |metadata| Ok(metadata.destination_table_id.clone()),
+        )?;
 
         // We prepare the namespace.
         let namespace = schema_to_namespace(&table_name.schema);
         let namespace = inner.namespace.get_or(&namespace).to_owned();
         let namespace = self.create_namespace_if_missing(inner, namespace).await?;
 
+        if let Some(metadata) = metadata.as_ref()
+            && metadata.is_applying()
+        {
+            self.recover_applying_metadata(
+                inner,
+                table_id,
+                metadata.clone(),
+                Some(replicated_table_schema),
+            )
+            .await?;
+
+            return Ok((namespace, iceberg_table_name));
+        }
+
         // If the table is already in the cache, we skip the creation. This works
         // assuming that etl is the only system managing the underlying tables.
-        if inner.created_tables.contains(&iceberg_table_name) {
+        if inner.created_tables.contains(&table_id) {
             debug!(
                 "iceberg table {iceberg_table_name} found in creation cache, skipping existence \
                  check"
@@ -540,33 +627,177 @@ where
             return Ok((namespace, iceberg_table_name));
         }
 
-        // Create metadata with applying status before creating the table.
-        let metadata = DestinationTableMetadata::new_applying(
-            iceberg_table_name.clone(),
-            snapshot_id,
-            replication_mask,
-        );
-        self.store.store_destination_table_metadata(table_id, metadata.clone()).await?;
+        let metadata = if metadata.is_none() {
+            // Create metadata with applying status before creating the table.
+            let metadata = DestinationTableMetadata::new_applying(
+                iceberg_table_name.clone(),
+                snapshot_id,
+                replication_mask,
+            );
+            self.store.store_destination_table_metadata(table_id, metadata.clone()).await?;
+            Some(metadata)
+        } else {
+            None
+        };
 
         self.client
             .create_table_if_missing(&namespace, iceberg_table_name.clone(), &column_schemas)
             .await
             .map_err(iceberg_error_to_etl_error)?;
 
-        // Mark as applied after successful table creation.
-        self.store.store_destination_table_metadata(table_id, metadata.to_applied()).await?;
+        if let Some(metadata) = metadata {
+            // Mark as applied after successful table creation.
+            self.store.store_destination_table_metadata(table_id, metadata.to_applied()).await?;
+        }
 
         // We add the table to the cache.
-        inner.created_tables.insert(iceberg_table_name.clone());
+        inner.created_tables.insert(table_id);
 
         debug!("iceberg table {iceberg_table_name} added to creation cache");
 
         Ok((namespace, iceberg_table_name))
     }
 
+    /// Loads the exact ETL table schema for a destination metadata snapshot.
+    async fn load_exact_table_schema(
+        &self,
+        table_id: TableId,
+        snapshot_id: SnapshotId,
+        missing_schema_description: &'static str,
+    ) -> EtlResult<Arc<TableSchema>> {
+        let table_schema =
+            self.store.get_table_schema(&table_id, snapshot_id).await?.ok_or_else(|| {
+                etl_error!(
+                    ErrorKind::InvalidState,
+                    missing_schema_description,
+                    format!(
+                        "Could not find schema for table {} at snapshot_id {}",
+                        table_id, snapshot_id
+                    )
+                )
+            })?;
+
+        if table_schema.snapshot_id != snapshot_id {
+            return Err(etl_error!(
+                ErrorKind::InvalidState,
+                missing_schema_description,
+                format!(
+                    "Could not find exact schema for table {} at snapshot_id {}; found nearest \
+                     schema at snapshot_id {}",
+                    table_id, snapshot_id, table_schema.snapshot_id
+                )
+            ));
+        }
+
+        Ok(table_schema)
+    }
+
+    /// Resolves the target replicated schema for interrupted Iceberg DDL.
+    async fn target_schema_for_recovery(
+        &self,
+        table_id: TableId,
+        metadata: &DestinationTableMetadata,
+        provided_target_schema: Option<&ReplicatedTableSchema>,
+    ) -> EtlResult<ReplicatedTableSchema> {
+        if let Some(schema) = provided_target_schema
+            && schema.inner().snapshot_id == metadata.snapshot_id
+            && schema.replication_mask() == &metadata.replication_mask
+        {
+            return Ok(schema.clone());
+        }
+
+        let target_table_schema = self
+            .load_exact_table_schema(
+                table_id,
+                metadata.snapshot_id,
+                "Iceberg schema recovery target schema not found",
+            )
+            .await?;
+
+        Ok(ReplicatedTableSchema::from_mask(target_table_schema, metadata.replication_mask.clone()))
+    }
+
+    /// Replays interrupted Iceberg DDL and transitions metadata to `Applied`.
+    async fn recover_applying_metadata(
+        &self,
+        inner: &mut Inner,
+        table_id: TableId,
+        metadata: DestinationTableMetadata,
+        target_schema: Option<&ReplicatedTableSchema>,
+    ) -> EtlResult<DestinationTableMetadata> {
+        warn!(
+            table_id = %table_id,
+            table = %metadata.destination_table_id,
+            "iceberg table has Applying metadata, recovering interrupted operation"
+        );
+
+        let target_schema =
+            self.target_schema_for_recovery(table_id, &metadata, target_schema).await?;
+        let table_name = target_schema.name();
+        let namespace = schema_to_namespace(&table_name.schema);
+        let namespace = inner.namespace.get_or(&namespace).to_owned();
+        let namespace = self.create_namespace_if_missing(inner, namespace).await?;
+        let target_column_schemas: Vec<_> = target_schema.column_schemas().cloned().collect();
+
+        match metadata.previous_snapshot_id {
+            Some(previous_snapshot_id) => {
+                let previous_table_schema = self
+                    .load_exact_table_schema(
+                        table_id,
+                        previous_snapshot_id,
+                        "Iceberg schema recovery previous schema not found",
+                    )
+                    .await?;
+                let current_field_ids = self
+                    .client
+                    .current_schema_field_ids(&namespace, metadata.destination_table_id.clone())
+                    .await
+                    .map_err(iceberg_error_to_etl_error)?;
+                let previous_replication_mask = previous_replication_mask_for_recovery(
+                    &previous_table_schema,
+                    &current_field_ids,
+                );
+                let previous_schema = ReplicatedTableSchema::from_mask(
+                    previous_table_schema,
+                    previous_replication_mask,
+                );
+                let previous_column_schemas: Vec<_> =
+                    previous_schema.column_schemas().cloned().collect();
+                let diff = previous_schema.diff(&target_schema);
+
+                self.client
+                    .evolve_table_schema(
+                        &namespace,
+                        metadata.destination_table_id.clone(),
+                        &previous_column_schemas,
+                        &target_column_schemas,
+                        &diff,
+                    )
+                    .await
+                    .map_err(iceberg_error_to_etl_error)?;
+            }
+            None => {
+                self.client
+                    .create_table_if_missing(
+                        &namespace,
+                        metadata.destination_table_id.clone(),
+                        &target_column_schemas,
+                    )
+                    .await
+                    .map_err(iceberg_error_to_etl_error)?;
+            }
+        }
+
+        let metadata = metadata.to_applied();
+        self.store.store_destination_table_metadata(table_id, metadata.clone()).await?;
+        inner.created_tables.insert(table_id);
+
+        Ok(metadata)
+    }
+
     /// Creates a namespace if it is missing in the destination.
-    /// Once created adds it to the created_namespaces HashSet to
-    /// avoid creating it again.
+    ///
+    /// Once created, adds it to the created namespace cache.
     async fn create_namespace_if_missing(
         &self,
         inner: &mut Inner,
@@ -585,38 +816,11 @@ where
 
         Ok(namespace)
     }
-
-    /// Builds column schemas with CDC-specific columns added.
-    ///
-    /// Takes the replicated columns from the schema and adds two additional
-    /// columns for CDC operations:
-    /// - `cdc_operation`: Tracks whether the row represents an insert, update,
-    ///   or delete
-    /// - `sequence_number`: Provides ordering information based on WAL LSN
-    ///
-    /// These columns enable CDC consumers to understand the chronological order
-    /// of changes and distinguish between different types of operations.
-    fn build_cdc_column_schemas(
-        replicated_table_schema: &ReplicatedTableSchema,
-    ) -> Vec<ColumnSchema> {
-        let mut column_schemas: Vec<ColumnSchema> =
-            replicated_table_schema.column_schemas().cloned().collect();
-
-        // Add cdc specific columns.
-        let cdc_operation_col = find_unique_column_name(&column_schemas, CDC_OPERATION_COLUMN_NAME);
-        let sequence_number_col =
-            find_unique_column_name(&column_schemas, SEQUENCE_NUMBER_COLUMN_NAME);
-
-        column_schemas.push(ColumnSchema::new(cdc_operation_col, Type::TEXT, -1, 0, None, false));
-        column_schemas.push(ColumnSchema::new(sequence_number_col, Type::TEXT, -1, 0, None, false));
-
-        column_schemas
-    }
 }
 
 impl<S> Destination for IcebergDestination<S>
 where
-    S: SharedStateStore,
+    S: DestinationStore,
 {
     /// Returns the identifier name for this destination type.
     fn name() -> &'static str {
@@ -636,23 +840,25 @@ where
         replicated_table_schema: &ReplicatedTableSchema,
         async_result: DropTableForCopyResult<()>,
     ) -> EtlResult<()> {
+        self.tasks.try_reap().await?;
+
         let result = self.drop_table_for_copy_inner(replicated_table_schema).await;
         async_result.send(result);
 
         Ok(())
     }
 
-    /// Writes table rows to the destination as upsert operations.
+    /// Writes table-copy rows to the destination.
     ///
-    /// Augments each row with CDC metadata and inserts them into the
-    /// corresponding Iceberg changelog table. All rows are treated
-    /// as upsert operations with generated sequence numbers.
+    /// Rows are appended directly to the corresponding Iceberg table.
     async fn write_table_rows(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
         table_rows: Vec<TableRow>,
         async_result: WriteTableRowsResult<()>,
     ) -> EtlResult<()> {
+        self.tasks.try_reap().await?;
+
         let result =
             IcebergDestination::write_table_rows(self, replicated_table_schema, table_rows).await;
         async_result.send(result);
@@ -684,70 +890,396 @@ where
     }
 }
 
-/// Validates that a replicated table schema can be applied in Iceberg.
-///
-/// Iceberg changelog replay requires full old-row images so deletes can be
-/// represented correctly. That means source tables must use
-/// `REPLICA IDENTITY FULL`.
-fn validate_iceberg_replica_identity(
-    replicated_table_schema: &ReplicatedTableSchema,
-) -> EtlResult<()> {
-    match replicated_table_schema.identity_type() {
-        IdentityType::Full => Ok(()),
-        identity_type => Err(etl_error!(
-            ErrorKind::SourceReplicaIdentityError,
-            "Iceberg requires full replica identity",
-            format!(
-                "Table '{}' uses replica identity {:?}, but Iceberg only supports source tables \
-                 with FULL replica identity.",
-                replicated_table_schema.name(),
-                identity_type
-            )
-        )),
+/// Pending CDC event batch for one Iceberg table.
+struct TableEventBatch {
+    /// Source table schema used for this batch.
+    replicated_table_schema: ReplicatedTableSchema,
+    /// Replicated-column indexes for the source primary key.
+    key_indices: Vec<usize>,
+    /// Pending row-level changes for the table.
+    table_delta: TableDelta,
+}
+
+impl TableEventBatch {
+    /// Creates an empty table event batch.
+    fn new(replicated_table_schema: ReplicatedTableSchema) -> Self {
+        let key_indices = primary_key_indices(&replicated_table_schema);
+
+        Self { replicated_table_schema, key_indices, table_delta: TableDelta::default() }
     }
 }
 
-/// Creates a unique columns name with prefix `new_column_name` to avoid
-/// collissions with existing columns in `column_schemas` by adding a numeric
-/// suffix.
-fn find_unique_column_name(column_schemas: &[ColumnSchema], new_column_name: &str) -> String {
-    let mut suffix = None;
+/// Pending CDC changes for one Iceberg table.
+#[derive(Default)]
+struct TableDelta {
+    /// Pending changes keyed by the current primary-key value.
+    changes: HashMap<RowKey, PendingChange>,
+}
 
-    loop {
-        let final_name = match suffix {
-            Some(s) => format!("{new_column_name}_{s}"),
-            None => new_column_name.to_owned(),
-        };
+impl TableDelta {
+    /// Records an inserted row as an upsert.
+    fn insert(&mut self, table_row: TableRow, key_indices: &[usize]) {
+        let key = row_key(&table_row, key_indices);
+        let delete_row = equality_delete_row_from_full_row(&table_row, key_indices);
+        let mut change = self.changes.remove(&key).unwrap_or_default();
 
-        let found = column_schemas.iter().any(|cs| cs.name == final_name);
-        if found {
-            if let Some(s) = &mut suffix {
-                *s += 1;
-            } else {
-                suffix = Some(1);
-            }
+        change.delete_rows.push(PendingDelete::new(key.clone(), delete_row));
+        change.data_row = Some(table_row);
+
+        self.merge_at_key(key, change);
+    }
+
+    /// Records an updated row as delete-old-key plus upsert-new-row.
+    fn update(&mut self, delete_row: TableRow, data_row: TableRow, key_indices: &[usize]) {
+        let old_key = row_key_from_key_row(&delete_row);
+        let new_key = row_key(&data_row, key_indices);
+        let new_key_delete_row =
+            (old_key != new_key).then(|| equality_delete_row_from_full_row(&data_row, key_indices));
+        let mut change = self
+            .changes
+            .remove(&old_key)
+            .unwrap_or_else(|| PendingChange::with_delete(old_key, delete_row));
+
+        if let Some(delete_row) = new_key_delete_row {
+            change.delete_rows.push(PendingDelete::new(new_key.clone(), delete_row));
+        }
+        change.data_row = Some(data_row);
+
+        self.merge_at_key(new_key, change);
+    }
+
+    /// Records a deleted row.
+    fn delete(&mut self, delete_row: TableRow) {
+        let key = row_key_from_key_row(&delete_row);
+        let mut change = self
+            .changes
+            .remove(&key)
+            .unwrap_or_else(|| PendingChange::with_delete(key.clone(), delete_row));
+
+        change.data_row = None;
+        self.merge_at_key(key, change);
+    }
+
+    /// Merges a pending change into the entry for `key`.
+    fn merge_at_key(&mut self, key: RowKey, change: PendingChange) {
+        if let Some(existing) = self.changes.get_mut(&key) {
+            existing.delete_rows.extend(change.delete_rows);
+            existing.data_row = change.data_row;
         } else {
-            return final_name;
+            self.changes.insert(key, change);
+        }
+    }
+
+    /// Splits pending changes into rows to write and rows to equality-delete.
+    fn into_parts(self) -> (Vec<TableRow>, Vec<TableRow>) {
+        let data_row_count =
+            self.changes.values().filter(|change| change.data_row.is_some()).count();
+        let delete_row_count = self.changes.values().map(|change| change.delete_rows.len()).sum();
+        let mut data_rows = Vec::with_capacity(data_row_count);
+        let mut delete_rows = Vec::with_capacity(delete_row_count);
+        let mut seen_delete_keys = HashSet::with_capacity(delete_row_count);
+
+        for change in self.changes.into_values() {
+            if let Some(data_row) = change.data_row {
+                data_rows.push(data_row);
+            }
+
+            for delete_row in change.delete_rows {
+                if seen_delete_keys.insert(delete_row.key) {
+                    delete_rows.push(delete_row.row);
+                }
+            }
+        }
+
+        (data_rows, delete_rows)
+    }
+}
+
+/// Pending change for one logical source row.
+#[derive(Default)]
+struct PendingChange {
+    /// Equality-delete rows for prior snapshots.
+    delete_rows: Vec<PendingDelete>,
+    /// Final row value when the row remains present after the batch.
+    data_row: Option<TableRow>,
+}
+
+impl PendingChange {
+    /// Creates a pending change that deletes an existing key.
+    fn with_delete(key: RowKey, delete_row: TableRow) -> Self {
+        Self { delete_rows: vec![PendingDelete::new(key, delete_row)], data_row: None }
+    }
+}
+
+/// Pending equality delete for a primary-key value.
+struct PendingDelete {
+    /// Primary key targeted by the equality delete.
+    key: RowKey,
+    /// Dense key row passed to the Iceberg equality-delete writer adapter.
+    row: TableRow,
+}
+
+impl PendingDelete {
+    /// Creates a pending equality delete.
+    fn new(key: RowKey, row: TableRow) -> Self {
+        Self { key, row }
+    }
+}
+
+/// Converts an old-row image into a dense equality-delete key row.
+fn old_table_row_to_delete_row(
+    old_table_row: OldTableRow,
+    replicated_table_schema: &ReplicatedTableSchema,
+    key_indices: &[usize],
+) -> EtlResult<TableRow> {
+    match old_table_row {
+        OldTableRow::Full(table_row) => {
+            Ok(equality_delete_row_from_full_row(&table_row, key_indices))
+        }
+        OldTableRow::Key(table_row) => {
+            validate_key_row_width(replicated_table_schema, table_row, key_indices)
         }
     }
 }
 
-/// Converts a Postgres schema name to a S3 tables namespace
-/// such that the naming rules of the namespace are followed.
+/// Builds a dense equality-delete key row from a full row.
+fn equality_delete_row_from_full_row(table_row: &TableRow, key_indices: &[usize]) -> TableRow {
+    TableRow::new(key_indices.iter().map(|&index| table_row.values()[index].clone()).collect())
+}
+
+/// Validates a dense primary-key row emitted by the replication stream.
+fn validate_key_row_width(
+    replicated_table_schema: &ReplicatedTableSchema,
+    key_row: TableRow,
+    key_indices: &[usize],
+) -> EtlResult<TableRow> {
+    if key_row.values().len() != key_indices.len() {
+        return Err(etl_error!(
+            ErrorKind::InvalidState,
+            "Iceberg key row width does not match the source primary key",
+            format!(
+                "Table '{}' emitted {} key values for {} primary-key columns.",
+                replicated_table_schema.name(),
+                key_row.values().len(),
+                key_indices.len()
+            )
+        ));
+    }
+
+    Ok(key_row)
+}
+
+/// Returns replicated-column indexes for the source primary key.
+fn primary_key_indices(replicated_table_schema: &ReplicatedTableSchema) -> Vec<usize> {
+    replicated_table_schema
+        .column_schemas()
+        .enumerate()
+        .filter_map(|(index, column_schema)| column_schema.primary_key().then_some(index))
+        .collect()
+}
+
+/// Primary-key values used for in-memory CDC coalescing.
+#[derive(Clone, Eq, Hash, PartialEq)]
+struct RowKey {
+    /// Values that make up the source primary key.
+    values: Vec<RowKeyValue>,
+}
+
+/// Returns a typed primary-key value for `table_row`.
+fn row_key(table_row: &TableRow, key_indices: &[usize]) -> RowKey {
+    let mut values = Vec::with_capacity(key_indices.len());
+    let row_values = table_row.values();
+    for &index in key_indices {
+        values.push(RowKeyValue::from_cell(&row_values[index]));
+    }
+
+    RowKey { values }
+}
+
+/// Returns the in-memory key for a dense equality-delete key row.
+fn row_key_from_key_row(key_row: &TableRow) -> RowKey {
+    RowKey { values: key_row.values().iter().map(RowKeyValue::from_cell).collect() }
+}
+
+/// Builds the previous-schema replication mask from the actual Iceberg schema.
+///
+/// [`DestinationTableMetadata`] stores the target mask, not the previous mask,
+/// during `Applying`. Iceberg field IDs are derived from Postgres attnums, so
+/// the actual Iceberg table schema is the most reliable source of which
+/// previous columns had already been materialized.
+fn previous_replication_mask_for_recovery(
+    previous_schema: &TableSchema,
+    current_iceberg_field_ids: &HashSet<i32>,
+) -> ReplicationMask {
+    let mask = previous_schema
+        .column_schemas
+        .iter()
+        .map(|previous_column| {
+            u8::from(current_iceberg_field_ids.contains(&previous_column.ordinal_position))
+        })
+        .collect();
+
+    ReplicationMask::from_bytes(mask)
+}
+
+/// Value inside an in-memory row key.
+#[derive(Clone, Eq, Hash, PartialEq)]
+enum RowKeyValue {
+    /// Null key value.
+    Null,
+    /// Boolean key value.
+    Bool(bool),
+    /// Text key value.
+    String(String),
+    /// 16-bit integer key value.
+    I16(i16),
+    /// 32-bit integer key value.
+    I32(i32),
+    /// 32-bit unsigned integer key value.
+    U32(u32),
+    /// 64-bit integer key value.
+    I64(i64),
+    /// Normalized `f32` bits.
+    F32(u32),
+    /// Normalized `f64` bits.
+    F64(u64),
+    /// Debug-encoded numeric key value.
+    Numeric(String),
+    /// Date key value.
+    Date(chrono::NaiveDate),
+    /// Time key value.
+    Time(chrono::NaiveTime),
+    /// Timestamp key value.
+    Timestamp(chrono::NaiveDateTime),
+    /// Timestamp with timezone key value.
+    TimestampTz(chrono::DateTime<chrono::Utc>),
+    /// UUID key value.
+    Uuid(uuid::Uuid),
+    /// Debug-encoded JSON key value.
+    Json(String),
+    /// Binary key value.
+    Bytes(Vec<u8>),
+    /// Debug-encoded array key value.
+    Array(String),
+}
+
+impl RowKeyValue {
+    /// Converts a source cell into a hashable row-key value.
+    fn from_cell(cell: &Cell) -> Self {
+        match cell {
+            Cell::Null => RowKeyValue::Null,
+            Cell::Bool(value) => RowKeyValue::Bool(*value),
+            Cell::String(value) => RowKeyValue::String(value.clone()),
+            Cell::I16(value) => RowKeyValue::I16(*value),
+            Cell::I32(value) => RowKeyValue::I32(*value),
+            Cell::U32(value) => RowKeyValue::U32(*value),
+            Cell::I64(value) => RowKeyValue::I64(*value),
+            Cell::F32(value) => RowKeyValue::F32(float32_key_bits(*value)),
+            Cell::F64(value) => RowKeyValue::F64(float64_key_bits(*value)),
+            Cell::Numeric(value) => RowKeyValue::Numeric(debug_key(value)),
+            Cell::Date(value) => RowKeyValue::Date(*value),
+            Cell::Time(value) => RowKeyValue::Time(*value),
+            Cell::Timestamp(value) => RowKeyValue::Timestamp(*value),
+            Cell::TimestampTz(value) => RowKeyValue::TimestampTz(*value),
+            Cell::Uuid(value) => RowKeyValue::Uuid(*value),
+            Cell::Json(value) => RowKeyValue::Json(debug_key(value)),
+            Cell::Bytes(value) => RowKeyValue::Bytes(value.clone()),
+            Cell::Array(value) => RowKeyValue::Array(debug_key(value)),
+        }
+    }
+}
+
+/// Returns normalized `f32` bits for key equality and hashing.
+fn float32_key_bits(value: f32) -> u32 {
+    if value == 0.0 {
+        0.0_f32.to_bits()
+    } else if value.is_nan() {
+        f32::NAN.to_bits()
+    } else {
+        value.to_bits()
+    }
+}
+
+/// Returns normalized `f64` bits for key equality and hashing.
+fn float64_key_bits(value: f64) -> u64 {
+    if value == 0.0 {
+        0.0_f64.to_bits()
+    } else if value.is_nan() {
+        f64::NAN.to_bits()
+    } else {
+        value.to_bits()
+    }
+}
+
+/// Encodes uncommon key values through their debug representation.
+fn debug_key(value: &impl std::fmt::Debug) -> String {
+    format!("{value:?}")
+}
+
+/// Validates that a replicated table schema can be applied in Iceberg.
+///
+/// Iceberg CDC replay uses v2 equality-delete files over the source primary
+/// key. Source tables therefore need all primary-key columns replicated and
+/// either primary-key-equivalent replica identity or full old-row images.
+fn validate_iceberg_table_identity(
+    replicated_table_schema: &ReplicatedTableSchema,
+) -> EtlResult<()> {
+    if replicated_table_schema.primary_key_column_schemas().next().is_none() {
+        return Err(etl_error!(
+            ErrorKind::SourceSchemaError,
+            "Iceberg requires a source primary key",
+            format!(
+                "Table '{}' does not expose any replicated primary-key columns.",
+                replicated_table_schema.name()
+            )
+        ));
+    }
+
+    if !replicated_table_schema.all_primary_key_columns_replicated() {
+        let missing_columns = replicated_table_schema
+            .unreplicated_primary_key_column_schemas()
+            .map(|column_schema| column_schema.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        return Err(etl_error!(
+            ErrorKind::SourceSchemaError,
+            "Iceberg requires all primary-key columns to be replicated",
+            format!(
+                "Table '{}' omits source primary-key column(s) from replication: {}.",
+                replicated_table_schema.name(),
+                missing_columns
+            )
+        ));
+    }
+
+    if replicated_table_schema.identity_type() == IdentityType::Full
+        || replicated_table_schema.identity_matches_primary_key()
+    {
+        return Ok(());
+    }
+
+    Err(etl_error!(
+        ErrorKind::SourceReplicaIdentityError,
+        "Iceberg requires primary-key or full replica identity",
+        format!(
+            "Table '{}' uses replica identity {:?}, but Iceberg equality deletes require FULL or \
+             primary-key-equivalent replica identity so old-row keys map to Iceberg identifier \
+             fields.",
+            replicated_table_schema.name(),
+            replicated_table_schema.identity_type()
+        )
+    ))
+}
+
+/// Converts a Postgres schema name to a portable Iceberg namespace.
 fn schema_to_namespace(schema: &str) -> String {
     // Convert to lowercase and replace invalid characters with underscores.
-    // S3 Tables namespaces can only contain lowercase letters, numbers, and
-    // underscores.
     let mut namespace: String = schema
         .to_lowercase()
         .chars()
         .map(|c| if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' { c } else { '_' })
         .collect();
-
-    // S3 Tables namespaces must not start with 'aws'.
-    if namespace.starts_with("aws") {
-        namespace = format!("s_{namespace}");
-    }
 
     // Ensure namespace starts with a letter or number.
     if let Some(first_char) = namespace.chars().next()
@@ -770,19 +1302,19 @@ fn schema_to_namespace(schema: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{collections::HashSet, sync::Arc};
 
     use etl::{
         error::ErrorKind,
         types::{
-            ColumnSchema, IdentityMask, IdentityType, ReplicatedTableSchema, ReplicationMask,
-            TableId, TableName, TableSchema, Type,
+            Cell, ColumnSchema, IdentityMask, IdentityType, ReplicatedTableSchema, ReplicationMask,
+            TableId, TableName, TableRow, TableSchema, Type,
         },
     };
 
     use crate::iceberg::core::{
-        CDC_OPERATION_COLUMN_NAME, find_unique_column_name, schema_to_namespace,
-        validate_iceberg_replica_identity,
+        TableDelta, equality_delete_row_from_full_row, previous_replication_mask_for_recovery,
+        schema_to_namespace, validate_iceberg_table_identity,
     };
 
     fn replicated_schema(identity_type: IdentityType) -> ReplicatedTableSchema {
@@ -805,45 +1337,214 @@ mod tests {
         ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask)
     }
 
-    /// Creates a test column schema with common defaults.
-    ///
-    /// This helper simplifies column schema creation in tests by providing
-    /// sensible defaults for fields that are typically not relevant to the
-    /// test logic.
-    fn test_column(
-        name: &str,
-        typ: Type,
-        ordinal_position: i32,
-        nullable: bool,
-        primary_key_ordinal: Option<i32>,
-    ) -> ColumnSchema {
-        ColumnSchema::new(name.to_owned(), typ, -1, ordinal_position, primary_key_ordinal, nullable)
+    fn replicated_schema_with_partial_primary_key() -> ReplicatedTableSchema {
+        let table_schema = Arc::new(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_owned(), "users".to_owned()),
+            vec![
+                ColumnSchema::new("tenant_id".to_owned(), Type::TEXT, -1, 1, Some(1), false),
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 2, Some(2), false),
+                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 3, None, true),
+            ],
+        ));
+        let replication_mask = ReplicationMask::from_bytes(vec![0, 1, 1]);
+        let identity_mask = IdentityMask::from_bytes(vec![0, 1, 0]);
+
+        ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask)
+    }
+
+    fn replicated_pkless_schema() -> ReplicatedTableSchema {
+        let table_schema = Arc::new(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_owned(), "events".to_owned()),
+            vec![
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, None, false),
+                ColumnSchema::new("payload".to_owned(), Type::TEXT, -1, 2, None, true),
+            ],
+        ));
+
+        ReplicatedTableSchema::all(table_schema)
+    }
+
+    fn schema_with_unreplicated_middle_column() -> TableSchema {
+        TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_owned(), "users".to_owned()),
+            vec![
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
+                ColumnSchema::new("internal_note".to_owned(), Type::TEXT, -1, 2, None, true),
+                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 3, None, true),
+            ],
+        )
+    }
+
+    fn test_row(id: i32, name: &str) -> TableRow {
+        TableRow::new(vec![Cell::I32(id), Cell::String(name.to_owned())])
+    }
+
+    fn composite_key_row(tenant: &str, id: i32, name: &str) -> TableRow {
+        TableRow::new(vec![
+            Cell::String(tenant.to_owned()),
+            Cell::I32(id),
+            Cell::String(name.to_owned()),
+        ])
+    }
+
+    fn delete_row(table_row: &TableRow, key_indices: &[usize]) -> TableRow {
+        equality_delete_row_from_full_row(table_row, key_indices)
     }
 
     #[test]
-    fn can_find_unique_column_name() {
-        let column_schemas = vec![];
-        let col_name = find_unique_column_name(&column_schemas, CDC_OPERATION_COLUMN_NAME);
-        assert_eq!(col_name, CDC_OPERATION_COLUMN_NAME.to_owned());
+    fn previous_replication_mask_for_recovery_uses_iceberg_field_ids() {
+        let previous_schema = schema_with_unreplicated_middle_column();
+        let current_field_ids = HashSet::from([1, 3]);
 
-        let column_schemas = vec![test_column("id", Type::BOOL, 1, false, Some(1))];
-        let col_name = find_unique_column_name(&column_schemas, CDC_OPERATION_COLUMN_NAME);
-        assert_eq!(col_name, CDC_OPERATION_COLUMN_NAME.to_owned());
+        let replication_mask =
+            previous_replication_mask_for_recovery(&previous_schema, &current_field_ids);
 
-        let column_schemas = vec![
-            test_column("id", Type::BOOL, 1, false, Some(1)),
-            test_column(CDC_OPERATION_COLUMN_NAME, Type::BOOL, 2, false, Some(2)),
-        ];
-        let col_name = find_unique_column_name(&column_schemas, CDC_OPERATION_COLUMN_NAME);
-        assert_eq!(col_name, format!("{CDC_OPERATION_COLUMN_NAME}_1"));
+        assert_eq!(replication_mask.as_slice(), &[1, 0, 1]);
+    }
 
-        let column_schemas = vec![
-            test_column("id", Type::BOOL, 1, false, Some(1)),
-            test_column(CDC_OPERATION_COLUMN_NAME, Type::BOOL, 2, false, Some(2)),
-            test_column(&format!("{CDC_OPERATION_COLUMN_NAME}_1"), Type::BOOL, 3, false, Some(3)),
-        ];
-        let col_name = find_unique_column_name(&column_schemas, CDC_OPERATION_COLUMN_NAME);
-        assert_eq!(col_name, format!("{CDC_OPERATION_COLUMN_NAME}_2"));
+    #[test]
+    fn table_delta_repeated_insert_keeps_latest_row() {
+        let key_indices = [0];
+        let first_row = test_row(1, "alice");
+        let second_row = test_row(1, "alice-updated");
+        let mut table_delta = TableDelta::default();
+
+        table_delta.insert(first_row, &key_indices);
+        table_delta.insert(second_row.clone(), &key_indices);
+
+        let (data_rows, delete_rows) = table_delta.into_parts();
+        assert_eq!(data_rows, vec![second_row]);
+        assert_eq!(delete_rows.len(), 1);
+    }
+
+    #[test]
+    fn table_delta_insert_then_delete_writes_only_delete() {
+        let key_indices = [0];
+        let row = test_row(1, "alice");
+        let delete_row = delete_row(&row, &key_indices);
+        let mut table_delta = TableDelta::default();
+
+        table_delta.insert(row, &key_indices);
+        table_delta.delete(delete_row.clone());
+
+        let (data_rows, delete_rows) = table_delta.into_parts();
+        assert!(data_rows.is_empty());
+        assert_eq!(delete_rows, vec![delete_row]);
+    }
+
+    #[test]
+    fn table_delta_delete_then_insert_writes_delete_and_final_row() {
+        let key_indices = [0];
+        let old_row = test_row(1, "alice");
+        let new_row = test_row(1, "alice-updated");
+        let delete_row = delete_row(&old_row, &key_indices);
+        let mut table_delta = TableDelta::default();
+
+        table_delta.delete(delete_row.clone());
+        table_delta.insert(new_row.clone(), &key_indices);
+
+        let (data_rows, delete_rows) = table_delta.into_parts();
+        assert_eq!(data_rows, vec![new_row]);
+        assert_eq!(delete_rows, vec![delete_row]);
+    }
+
+    #[test]
+    fn table_delta_non_key_update_keeps_updated_row() {
+        let key_indices = [0];
+        let old_row = test_row(1, "alice");
+        let new_row = test_row(1, "alice-updated");
+        let delete_row = delete_row(&old_row, &key_indices);
+        let mut table_delta = TableDelta::default();
+
+        table_delta.update(delete_row.clone(), new_row.clone(), &key_indices);
+
+        let (data_rows, delete_rows) = table_delta.into_parts();
+        assert_eq!(data_rows, vec![new_row]);
+        assert_eq!(delete_rows, vec![delete_row]);
+    }
+
+    #[test]
+    fn table_delta_update_then_delete_writes_old_and_new_key_deletes() {
+        let key_indices = [0];
+        let old_row = test_row(1, "alice");
+        let updated_row = test_row(2, "alice");
+        let old_delete_row = delete_row(&old_row, &key_indices);
+        let updated_delete_row = delete_row(&updated_row, &key_indices);
+        let expected_updated_delete_row = updated_delete_row.clone();
+        let mut table_delta = TableDelta::default();
+
+        table_delta.update(old_delete_row.clone(), updated_row, &key_indices);
+        table_delta.delete(updated_delete_row);
+
+        let (data_rows, delete_rows) = table_delta.into_parts();
+        assert!(data_rows.is_empty());
+        assert_eq!(delete_rows, vec![old_delete_row, expected_updated_delete_row]);
+    }
+
+    #[test]
+    fn table_delta_composite_primary_key_keeps_distinct_rows() {
+        let key_indices = [0, 1];
+        let first_row = composite_key_row("tenant_1", 1, "alice");
+        let second_row = composite_key_row("tenant_2", 1, "alice");
+        let mut table_delta = TableDelta::default();
+
+        table_delta.insert(first_row.clone(), &key_indices);
+        table_delta.insert(second_row.clone(), &key_indices);
+
+        let (mut data_rows, delete_rows) = table_delta.into_parts();
+        data_rows.sort_by(|left, right| {
+            format!("{:?}", left.values()).cmp(&format!("{:?}", right.values()))
+        });
+
+        assert_eq!(data_rows, vec![first_row, second_row]);
+        assert_eq!(delete_rows.len(), 2);
+    }
+
+    #[test]
+    fn table_delta_primary_key_update_chain_keeps_final_row() {
+        let key_indices = [0];
+        let row_1 = test_row(1, "alice");
+        let row_2 = test_row(2, "alice");
+        let row_3 = test_row(3, "alice");
+        let delete_row_1 = delete_row(&row_1, &key_indices);
+        let delete_row_2 = delete_row(&row_2, &key_indices);
+        let mut table_delta = TableDelta::default();
+
+        table_delta.update(delete_row_1.clone(), row_2, &key_indices);
+        table_delta.update(delete_row_2, row_3.clone(), &key_indices);
+
+        let (data_rows, delete_rows) = table_delta.into_parts();
+        assert_eq!(data_rows, vec![row_3]);
+        assert_eq!(
+            delete_rows,
+            vec![
+                delete_row_1,
+                delete_row(&test_row(2, "alice"), &key_indices),
+                delete_row(&test_row(3, "alice"), &key_indices),
+            ]
+        );
+    }
+
+    #[test]
+    fn table_delta_delete_row_uses_dense_key_values() {
+        let key_indices = [1];
+        let old_row = TableRow::new(vec![
+            Cell::String("tenant_1".to_owned()),
+            Cell::I32(7),
+            Cell::String("alice".to_owned()),
+        ]);
+        let delete_row = delete_row(&old_row, &key_indices);
+        let mut table_delta = TableDelta::default();
+
+        table_delta.delete(delete_row.clone());
+
+        let (data_rows, delete_rows) = table_delta.into_parts();
+        assert!(data_rows.is_empty());
+        assert_eq!(delete_row.values(), &[Cell::I32(7)]);
+        assert_eq!(delete_rows, vec![delete_row]);
     }
 
     #[test]
@@ -889,7 +1590,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_to_namespace_starts_with_underscore() {
+    fn schema_to_namespace_prefixes_reserved_leading_underscore() {
         // Names starting with underscore should be prefixed with 's'.
         assert_eq!(schema_to_namespace("_private"), "s_private");
         assert_eq!(schema_to_namespace("_temp"), "s_temp");
@@ -914,21 +1615,20 @@ mod tests {
     }
 
     #[test]
-    fn schema_to_namespace_starts_with_aws() {
-        // Names starting with 'aws' should be prefixed with 's_'.
-        assert_eq!(schema_to_namespace("aws_internal"), "s_aws_internal");
-        assert_eq!(schema_to_namespace("aws"), "s_aws");
-        assert_eq!(schema_to_namespace("awsschema"), "s_awsschema");
-        assert_eq!(schema_to_namespace("AWS"), "s_aws");
+    fn schema_to_namespace_preserves_catalog_prefix() {
+        // Catalog-specific reserved prefixes are handled outside ETL.
+        assert_eq!(schema_to_namespace("reserved_internal"), "reserved_internal");
+        assert_eq!(schema_to_namespace("reserved"), "reserved");
+        assert_eq!(schema_to_namespace("reservedschema"), "reservedschema");
+        assert_eq!(schema_to_namespace("RESERVED"), "reserved");
     }
 
     #[test]
-    fn schema_to_namespace_starts_with_underscore_and_aws() {
-        // Names starting with underscore followed by 'aws'.
-        assert_eq!(schema_to_namespace("_aws_internal"), "s_aws_internal");
-        assert_eq!(schema_to_namespace("_aws"), "s_aws");
-        // After removing leading underscore, it becomes 'aws', so needs 's_' prefix.
-        assert_eq!(schema_to_namespace("__aws"), "s__aws");
+    fn schema_to_namespace_starts_with_underscore() {
+        // Names starting with underscore are prefixed with a safe leading letter.
+        assert_eq!(schema_to_namespace("_reserved_internal"), "s_reserved_internal");
+        assert_eq!(schema_to_namespace("_reserved"), "s_reserved");
+        assert_eq!(schema_to_namespace("__reserved"), "s__reserved");
     }
 
     #[test]
@@ -993,33 +1693,49 @@ mod tests {
     }
 
     #[test]
-    fn validate_iceberg_replica_identity_accepts_full() {
+    fn validate_iceberg_table_identity_accepts_full() {
         let replicated_table_schema = replicated_schema(IdentityType::Full);
 
-        validate_iceberg_replica_identity(&replicated_table_schema).unwrap();
+        validate_iceberg_table_identity(&replicated_table_schema).unwrap();
     }
 
     #[test]
-    fn validate_iceberg_replica_identity_rejects_primary_key() {
+    fn validate_iceberg_table_identity_accepts_primary_key() {
         let replicated_table_schema = replicated_schema(IdentityType::PrimaryKey);
 
-        let error = validate_iceberg_replica_identity(&replicated_table_schema).unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::SourceReplicaIdentityError);
+        validate_iceberg_table_identity(&replicated_table_schema).unwrap();
     }
 
     #[test]
-    fn validate_iceberg_replica_identity_rejects_alternative_key() {
+    fn validate_iceberg_table_identity_rejects_alternative_key() {
         let replicated_table_schema = replicated_schema(IdentityType::AlternativeKey);
 
-        let error = validate_iceberg_replica_identity(&replicated_table_schema).unwrap_err();
+        let error = validate_iceberg_table_identity(&replicated_table_schema).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::SourceReplicaIdentityError);
     }
 
     #[test]
-    fn validate_iceberg_replica_identity_rejects_missing() {
+    fn validate_iceberg_table_identity_rejects_missing() {
         let replicated_table_schema = replicated_schema(IdentityType::Missing);
 
-        let error = validate_iceberg_replica_identity(&replicated_table_schema).unwrap_err();
+        let error = validate_iceberg_table_identity(&replicated_table_schema).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::SourceReplicaIdentityError);
+    }
+
+    #[test]
+    fn validate_iceberg_table_identity_rejects_partial_primary_key() {
+        let replicated_table_schema = replicated_schema_with_partial_primary_key();
+
+        let error = validate_iceberg_table_identity(&replicated_table_schema).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::SourceSchemaError);
+        assert!(error.to_string().contains("tenant_id"));
+    }
+
+    #[test]
+    fn validate_iceberg_table_identity_rejects_pkless_schema() {
+        let replicated_table_schema = replicated_pkless_schema();
+
+        let error = validate_iceberg_table_identity(&replicated_table_schema).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::SourceSchemaError);
     }
 }

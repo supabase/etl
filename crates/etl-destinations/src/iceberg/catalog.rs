@@ -1,16 +1,79 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 use iceberg::{
-    Catalog, Error, ErrorKind, Namespace, NamespaceIdent, Result, TableCommit, TableCreation,
-    TableIdent,
-    io::FileIO,
-    spec::{Schema, SortOrder, TableMetadata, UnboundPartitionSpec},
-    table::Table,
+    Result,
+    io::{FileIO, FileIOBuilder, StorageFactory},
 };
-use iceberg_catalog_rest::RestCatalog;
+use iceberg_catalog_rest::{REST_CATALOG_PROP_WAREHOUSE, RestCatalog};
+use iceberg_storage_opendal::OpenDalStorageFactory;
 use reqwest::{Client, Response, StatusCode};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+
+/// Default scheme to use for S3-compatible Iceberg table locations.
+const DEFAULT_S3_SCHEME: &str = "s3";
+/// Scheme used for S3-compatible object storage locations.
+const S3_SCHEME: &str = "s3";
+/// Alternative scheme used by some S3-compatible Iceberg catalogs.
+const S3A_SCHEME: &str = "s3a";
+/// Scheme used for local filesystem table locations.
+const FILE_SCHEME: &str = "file";
+/// Scheme used for in-memory table locations.
+const MEMORY_SCHEME: &str = "memory";
+
+/// Creates a storage factory for a REST catalog from known catalog properties.
+pub(super) fn storage_factory_for_catalog_props(
+    props: &HashMap<String, String>,
+) -> Result<Arc<dyn StorageFactory>> {
+    let location = props.get(REST_CATALOG_PROP_WAREHOUSE).map(String::as_str);
+    storage_factory_for_location(location)
+}
+
+/// Creates a file I/O handle for a loaded table location.
+fn load_file_io_for_location(
+    metadata_location: Option<&str>,
+    props: HashMap<String, String>,
+) -> Result<FileIO> {
+    let metadata_location = metadata_location.ok_or_else(|| {
+        iceberg::Error::new(
+            iceberg::ErrorKind::Unexpected,
+            "Unable to load file io, metadata location is not set!",
+        )
+    })?;
+    let storage_factory = storage_factory_for_location(Some(metadata_location))?;
+
+    Ok(FileIOBuilder::new(storage_factory).with_props(props).build())
+}
+
+/// Creates a storage factory for the table location.
+fn storage_factory_for_location(location: Option<&str>) -> Result<Arc<dyn StorageFactory>> {
+    match location.and_then(location_scheme) {
+        Some(FILE_SCHEME) => Ok(Arc::new(OpenDalStorageFactory::Fs)),
+        Some(MEMORY_SCHEME) => Ok(Arc::new(OpenDalStorageFactory::Memory)),
+        Some(scheme @ (S3_SCHEME | S3A_SCHEME)) => Ok(s3_storage_factory(scheme)),
+        Some(scheme) => Err(iceberg::Error::new(
+            iceberg::ErrorKind::FeatureUnsupported,
+            format!("Unsupported iceberg storage scheme: {scheme}"),
+        )),
+        None if location.is_some_and(|location| location.starts_with('/')) => {
+            Ok(Arc::new(OpenDalStorageFactory::Fs))
+        }
+        None => Ok(s3_storage_factory(DEFAULT_S3_SCHEME)),
+    }
+}
+
+/// Returns the URI scheme for a table location.
+fn location_scheme(location: &str) -> Option<&str> {
+    location.split_once("://").map(|(scheme, _)| scheme)
+}
+
+/// Creates an S3-compatible storage factory for the configured scheme.
+fn s3_storage_factory(configured_scheme: &str) -> Arc<dyn StorageFactory> {
+    Arc::new(OpenDalStorageFactory::S3 {
+        configured_scheme: configured_scheme.to_owned(),
+        customized_credential_load: None,
+    })
+}
 
 /// A REST catalog implementation that handles Supabase-specific API
 /// incompatibilities.
@@ -42,21 +105,21 @@ impl SupabaseCatalog {
     }
 }
 
-/// Implementation of the [`Catalog`] trait for Supabase.
+/// Implementation of the [`iceberg::Catalog`] trait for Supabase.
 ///
 /// Routes operations to either the standard REST catalog or the
 /// Supabase-specific client based on endpoint compatibility. Table creation and
 /// deletion use the custom client, while other operations delegate to the
 /// standard implementation.
 #[async_trait]
-impl Catalog for SupabaseCatalog {
+impl iceberg::Catalog for SupabaseCatalog {
     /// Lists all namespaces under the specified parent namespace.
     ///
     /// Delegates to the standard REST catalog as this endpoint is compatible.
     async fn list_namespaces(
         &self,
-        parent: Option<&NamespaceIdent>,
-    ) -> Result<Vec<NamespaceIdent>> {
+        parent: Option<&iceberg::NamespaceIdent>,
+    ) -> Result<Vec<iceberg::NamespaceIdent>> {
         self.inner.list_namespaces(parent).await
     }
 
@@ -65,23 +128,26 @@ impl Catalog for SupabaseCatalog {
     /// Delegates to the standard REST catalog as this endpoint is compatible.
     async fn create_namespace(
         &self,
-        namespace: &NamespaceIdent,
+        namespace: &iceberg::NamespaceIdent,
         properties: HashMap<String, String>,
-    ) -> Result<Namespace> {
+    ) -> Result<iceberg::Namespace> {
         self.inner.create_namespace(namespace, properties).await
     }
 
     /// Retrieves metadata for the specified namespace.
     ///
     /// Delegates to the standard REST catalog as this endpoint is compatible.
-    async fn get_namespace(&self, namespace: &NamespaceIdent) -> Result<Namespace> {
+    async fn get_namespace(
+        &self,
+        namespace: &iceberg::NamespaceIdent,
+    ) -> Result<iceberg::Namespace> {
         self.inner.get_namespace(namespace).await
     }
 
     /// Checks whether the specified namespace exists in the catalog.
     ///
     /// Delegates to the standard REST catalog as this endpoint is compatible.
-    async fn namespace_exists(&self, namespace: &NamespaceIdent) -> Result<bool> {
+    async fn namespace_exists(&self, namespace: &iceberg::NamespaceIdent) -> Result<bool> {
         self.inner.namespace_exists(namespace).await
     }
 
@@ -90,7 +156,7 @@ impl Catalog for SupabaseCatalog {
     /// Delegates to the standard REST catalog as this endpoint is compatible.
     async fn update_namespace(
         &self,
-        namespace: &NamespaceIdent,
+        namespace: &iceberg::NamespaceIdent,
         properties: HashMap<String, String>,
     ) -> Result<()> {
         self.inner.update_namespace(namespace, properties).await
@@ -99,28 +165,31 @@ impl Catalog for SupabaseCatalog {
     /// Removes the specified namespace from the catalog.
     ///
     /// Delegates to the standard REST catalog as this endpoint is compatible.
-    async fn drop_namespace(&self, namespace: &NamespaceIdent) -> Result<()> {
+    async fn drop_namespace(&self, namespace: &iceberg::NamespaceIdent) -> Result<()> {
         self.inner.drop_namespace(namespace).await
     }
 
     /// Lists all tables within the specified namespace.
     ///
     /// Delegates to the standard REST catalog as this endpoint is compatible.
-    async fn list_tables(&self, namespace: &NamespaceIdent) -> Result<Vec<TableIdent>> {
+    async fn list_tables(
+        &self,
+        namespace: &iceberg::NamespaceIdent,
+    ) -> Result<Vec<iceberg::TableIdent>> {
         self.inner.list_tables(namespace).await
     }
 
     /// Checks whether the specified table exists in the catalog.
     ///
     /// Delegates to the standard REST catalog as this endpoint is compatible.
-    async fn table_exists(&self, identifier: &TableIdent) -> Result<bool> {
+    async fn table_exists(&self, identifier: &iceberg::TableIdent) -> Result<bool> {
         self.inner.table_exists(identifier).await
     }
 
     /// Removes the specified table from the catalog.
     ///
     /// Uses the Supabase-specific client due to non-standard endpoint behavior.
-    async fn drop_table(&self, identifier: &TableIdent) -> Result<()> {
+    async fn drop_table(&self, identifier: &iceberg::TableIdent) -> Result<()> {
         self.client.drop_table(identifier).await
     }
 
@@ -128,14 +197,18 @@ impl Catalog for SupabaseCatalog {
     /// identifier.
     ///
     /// Delegates to the standard REST catalog as this endpoint is compatible.
-    async fn rename_table(&self, src: &TableIdent, dest: &TableIdent) -> Result<()> {
+    async fn rename_table(
+        &self,
+        src: &iceberg::TableIdent,
+        dest: &iceberg::TableIdent,
+    ) -> Result<()> {
         self.inner.rename_table(src, dest).await
     }
 
     /// Loads an existing table by its identifier.
     ///
     /// Delegates to the standard REST catalog as this endpoint is compatible.
-    async fn load_table(&self, identifier: &TableIdent) -> Result<Table> {
+    async fn load_table(&self, identifier: &iceberg::TableIdent) -> Result<iceberg::table::Table> {
         self.inner.load_table(identifier).await
     }
 
@@ -145,16 +218,16 @@ impl Catalog for SupabaseCatalog {
     /// requirements.
     async fn create_table(
         &self,
-        namespace: &NamespaceIdent,
-        creation: TableCreation,
-    ) -> Result<Table> {
+        namespace: &iceberg::NamespaceIdent,
+        creation: iceberg::TableCreation,
+    ) -> Result<iceberg::table::Table> {
         self.client.create_table(namespace, creation).await
     }
 
     /// Updates an existing table with the specified commit operations.
     ///
     /// Delegates to the standard REST catalog as this endpoint is compatible.
-    async fn update_table(&self, commit: TableCommit) -> Result<Table> {
+    async fn update_table(&self, commit: iceberg::TableCommit) -> Result<iceberg::table::Table> {
         self.inner.update_table(commit).await
     }
 
@@ -164,9 +237,9 @@ impl Catalog for SupabaseCatalog {
     /// Delegates to the standard REST catalog as this endpoint is compatible.
     async fn register_table(
         &self,
-        identifier: &TableIdent,
+        identifier: &iceberg::TableIdent,
         metadata_location: String,
-    ) -> Result<Table> {
+    ) -> Result<iceberg::table::Table> {
         self.inner.register_table(identifier, metadata_location).await
     }
 }
@@ -219,15 +292,15 @@ impl SupabaseClient {
 
     /// Creates a new table using Supabase-specific API format.
     ///
-    /// Converts the standard [`TableCreation`] request to Supabase's expected
-    /// format and handles the non-standard response structure. Returns a
-    /// fully configured [`Table`] instance with metadata and file I/O
-    /// capabilities.
+    /// Converts the standard [`iceberg::TableCreation`] request to Supabase's
+    /// expected format and handles the non-standard response structure.
+    /// Returns a fully configured [`iceberg::table::Table`] instance with
+    /// metadata and file I/O capabilities.
     async fn create_table(
         &self,
-        namespace: &NamespaceIdent,
-        creation: TableCreation,
-    ) -> Result<Table> {
+        namespace: &iceberg::NamespaceIdent,
+        creation: iceberg::TableCreation,
+    ) -> Result<iceberg::table::Table> {
         let supabase_request = CreateTableRequest {
             name: creation.name.clone(),
             location: creation.location.clone(),
@@ -246,7 +319,10 @@ impl SupabaseClient {
         let url = self.tables_url(&namespace_path);
 
         let body = serde_json::to_value(supabase_request).map_err(|e| {
-            Error::new(ErrorKind::DataInvalid, format!("JSON serialization failed: {e}"))
+            iceberg::Error::new(
+                iceberg::ErrorKind::DataInvalid,
+                format!("JSON serialization failed: {e}"),
+            )
         })?;
 
         let http_response =
@@ -257,19 +333,22 @@ impl SupabaseClient {
                 deserialize_catalog_response::<LoadTableResponse>(http_response).await?
             }
             StatusCode::NOT_FOUND => {
-                return Err(Error::new(
-                    ErrorKind::Unexpected,
+                return Err(iceberg::Error::new(
+                    iceberg::ErrorKind::Unexpected,
                     "Tried to create a table under a namespace that does not exist",
                 ));
             }
             StatusCode::CONFLICT => {
-                return Err(Error::new(ErrorKind::Unexpected, "The table already exists"));
+                return Err(iceberg::Error::new(
+                    iceberg::ErrorKind::Unexpected,
+                    "The table already exists",
+                ));
             }
             _ => return Err(deserialize_unexpected_catalog_error(http_response).await),
         };
 
-        let metadata_location = response.metadata_location.as_ref().ok_or(Error::new(
-            ErrorKind::DataInvalid,
+        let metadata_location = response.metadata_location.as_ref().ok_or(iceberg::Error::new(
+            iceberg::ErrorKind::DataInvalid,
             "Metadata location missing in `create_table` response!",
         ))?;
 
@@ -277,10 +356,12 @@ impl SupabaseClient {
 
         let file_io = self.load_file_io(Some(metadata_location), Some(config))?;
 
-        let table_ident = TableIdent::new(namespace.clone(), creation.name.clone());
+        let table_ident = iceberg::TableIdent::new(namespace.clone(), creation.name.clone());
 
-        let table_builder =
-            Table::builder().identifier(table_ident).file_io(file_io).metadata(response.metadata);
+        let table_builder = iceberg::table::Table::builder()
+            .identifier(table_ident)
+            .file_io(file_io)
+            .metadata(response.metadata);
 
         if let Some(metadata_location) = response.metadata_location {
             table_builder.metadata_location(metadata_location).build()
@@ -291,28 +372,23 @@ impl SupabaseClient {
 
     /// Removes a table from the catalog with data purging.
     ///
-    /// Sends a DELETE request with `purgeRequested=true` parameter as S3 tables
-    /// in Supabase require purging during deletion. Returns an error if the
+    /// Sends a DELETE request with `purgeRequested=true` so storage-backed
+    /// catalogs remove table data during deletion. Returns an error if the
     /// table does not exist.
-    async fn drop_table(&self, table: &TableIdent) -> Result<()> {
+    async fn drop_table(&self, table: &iceberg::TableIdent) -> Result<()> {
         let namespace_path = table.namespace().as_ref().join(".");
         let url = self.table_url(&namespace_path, table.name());
 
         let http_response = self
-            .send_request(
-                reqwest::Method::DELETE,
-                &url,
-                None,
-                Some(&[("purgeRequested", "true")]), /* S3 tables doesn't support dropping
-                                                      * tables without purging */
-            )
+            .send_request(reqwest::Method::DELETE, &url, None, Some(&[("purgeRequested", "true")]))
             .await?;
 
         match http_response.status() {
             StatusCode::NO_CONTENT | StatusCode::OK => Ok(()),
-            StatusCode::NOT_FOUND => {
-                Err(Error::new(ErrorKind::Unexpected, "Tried to drop a table that does not exist"))
-            }
+            StatusCode::NOT_FOUND => Err(iceberg::Error::new(
+                iceberg::ErrorKind::Unexpected,
+                "Tried to drop a table that does not exist",
+            )),
             _ => Err(deserialize_unexpected_catalog_error(http_response).await),
         }
     }
@@ -332,17 +408,7 @@ impl SupabaseClient {
             props.extend(config);
         }
 
-        let file_io = match metadata_location {
-            Some(url) => FileIO::from_path(url)?.with_props(props).build()?,
-            None => {
-                return Err(Error::new(
-                    ErrorKind::Unexpected,
-                    "Unable to load file io, metadata location is not set!",
-                ))?;
-            }
-        };
-
-        Ok(file_io)
+        load_file_io_for_location(metadata_location, props)
     }
 
     /// Sends an authenticated HTTP request to the Supabase catalog API.
@@ -371,16 +437,15 @@ impl SupabaseClient {
             request = request.query(query);
         }
 
-        let response = request
-            .send()
-            .await
-            .map_err(|e| Error::new(ErrorKind::Unexpected, format!("HTTP request failed: {e}")))?;
+        let response = request.send().await.map_err(|e| {
+            iceberg::Error::new(iceberg::ErrorKind::Unexpected, format!("HTTP request failed: {e}"))
+        })?;
 
         if !response.status().is_success() {
             let status = response.status();
             let error_text = response.text().await.unwrap_or_default();
-            return Err(Error::new(
-                ErrorKind::Unexpected,
+            return Err(iceberg::Error::new(
+                iceberg::ErrorKind::Unexpected,
                 format!("HTTP {status} error: {error_text}"),
             ));
         }
@@ -400,9 +465,12 @@ pub(crate) async fn deserialize_catalog_response<R: DeserializeOwned>(
     let bytes = response.bytes().await?;
 
     serde_json::from_slice::<R>(&bytes).map_err(|e| {
-        Error::new(ErrorKind::Unexpected, "Failed to parse response from rest catalog server")
-            .with_context("json", String::from_utf8_lossy(&bytes))
-            .with_source(e)
+        iceberg::Error::new(
+            iceberg::ErrorKind::Unexpected,
+            "Failed to parse response from rest catalog server",
+        )
+        .with_context("json", String::from_utf8_lossy(&bytes))
+        .with_source(e)
     })
 }
 
@@ -411,10 +479,13 @@ pub(crate) async fn deserialize_catalog_response<R: DeserializeOwned>(
 /// Extracts status code, headers, and response body to create a comprehensive
 /// error message for debugging failed catalog operations. Handles empty
 /// response bodies gracefully.
-pub(crate) async fn deserialize_unexpected_catalog_error(response: Response) -> Error {
-    let err = Error::new(ErrorKind::Unexpected, "Received response with unexpected status code")
-        .with_context("status", response.status().to_string())
-        .with_context("headers", format!("{:?}", response.headers()));
+pub(crate) async fn deserialize_unexpected_catalog_error(response: Response) -> iceberg::Error {
+    let err = iceberg::Error::new(
+        iceberg::ErrorKind::Unexpected,
+        "Received response with unexpected status code",
+    )
+    .with_context("status", response.status().to_string())
+    .with_context("headers", format!("{:?}", response.headers()));
 
     let bytes = match response.bytes().await {
         Ok(bytes) => bytes,
@@ -445,18 +516,18 @@ struct CreateTableRequest {
     location: Option<String>,
 
     /// Table schema definition.
-    schema: Schema,
+    schema: iceberg::spec::Schema,
 
     /// Partition specification for the table.
     ///
     /// Named `spec` instead of the standard `partition-spec` to match
     /// Supabase's API expectations.
     #[serde(skip_serializing_if = "Option::is_none")]
-    spec: Option<UnboundPartitionSpec>,
+    spec: Option<iceberg::spec::UnboundPartitionSpec>,
 
     /// Sort order specification for the table.
     #[serde(skip_serializing_if = "Option::is_none")]
-    sort_order: Option<SortOrder>,
+    sort_order: Option<iceberg::spec::SortOrder>,
 
     /// Whether to stage the table creation operation.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -477,7 +548,7 @@ struct LoadTableResponse {
     /// Location of the table's metadata file.
     metadata_location: Option<String>,
     /// Complete table metadata specification.
-    metadata: TableMetadata,
+    metadata: iceberg::spec::TableMetadata,
     /// Additional configuration properties for the table.
     config: Option<HashMap<String, String>>,
 }
