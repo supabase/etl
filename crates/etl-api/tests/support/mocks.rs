@@ -72,7 +72,9 @@ pub(crate) mod destinations {
     /// Returns a default DuckLake destination config.
     pub(crate) fn new_ducklake_destination_config() -> FullApiDestinationConfig {
         FullApiDestinationConfig::Ducklake {
-            catalog_url: "postgres://postgres:postgres@localhost:5432/postgres".to_owned(),
+            catalog_url: SerializableSecretString::from(
+                "postgres://postgres:postgres@localhost:5432/postgres".to_owned(),
+            ),
             data_path: "s3://ducklake/".to_owned(),
             pool_size: Some(1),
             s3_access_key_id: Some(SerializableSecretString::from("access-key-id".to_owned())),
