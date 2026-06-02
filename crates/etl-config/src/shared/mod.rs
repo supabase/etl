@@ -5,6 +5,7 @@ mod pipeline;
 mod replicator;
 mod sentry;
 mod supabase;
+mod validators;
 
 pub use base::ValidationError;
 pub use connection::{
@@ -23,3 +24,4 @@ pub use pipeline::{
 pub use replicator::{ReplicatorConfig, ReplicatorConfigWithoutSecrets};
 pub use sentry::SentryConfig;
 pub use supabase::{SupabaseConfig, SupabaseConfigWithoutSecrets};
+pub use validators::{validate_snowflake_account_id, validate_supabase_project_ref};

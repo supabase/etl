@@ -550,7 +550,8 @@ impl BenchDestination {
                     .filter(|s| !s.trim().is_empty())
                     .context("Snowflake schema is required for Snowflake benchmarks")?;
 
-                let mut config = SnowflakeConfig::new(&account, &user, &database, &schema);
+                let mut config = SnowflakeConfig::new(&account, &user, &database, &schema)
+                    .context("invalid Snowflake account identifier")?;
                 if let Some(role) = &destination_args.sf_role
                     && !role.trim().is_empty()
                 {
