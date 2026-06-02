@@ -184,5 +184,6 @@ mod utils;
 pub mod workers;
 
 pub use crate::conversions::arrow::{
-    record_batch_to_table_rows, table_rows_to_arrow_batch, table_schema_to_arrow_schema,
+    record_batch_to_table_rows, record_batch_to_table_rows_with_schema, table_rows_to_arrow_batch,
+    table_schema_to_arrow_schema,
 };

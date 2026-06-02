@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::collections::HashMap;
 
 use tracing::info;
 
@@ -12,7 +12,7 @@ use crate::{
     error::EtlResult,
     state::DestinationTableMetadata,
     store::SharedStateStore,
-    types::{ReplicatedTableSchema, ReplicationMask, StreamBatch},
+    types::{ReplicatedTableSchema, StreamBatch},
 };
 
 /// In-memory destination for tests that only logs incoming data.
@@ -59,8 +59,8 @@ where
         let table_id = batch.table_id;
         let metadata = DestinationTableMetadata::new_applied(
             format!("memory_destination_table_{}", table_id.0),
-            batch.table_schema.snapshot_id,
-            ReplicationMask::all(&batch.table_schema),
+            batch.replicated_table_schema.inner().snapshot_id,
+            batch.replicated_table_schema.replication_mask().clone(),
         );
         let result = self.state_store.store_destination_table_metadata(table_id, metadata).await;
 
@@ -92,8 +92,10 @@ where
                         // The destination metadata should reflect the latest
                         // schema applied by the batch.
                         if let Some(group) = change_set.groups.last() {
-                            table_schemas
-                                .insert(change_set.table_id, Arc::clone(&group.rows.table_schema));
+                            table_schemas.insert(
+                                change_set.table_id,
+                                group.rows.replicated_table_schema.clone(),
+                            );
                         }
                     }
                     StreamBatch::Truncate(truncate) => {
@@ -102,11 +104,11 @@ where
                 }
             }
 
-            for (table_id, table_schema) in table_schemas {
+            for (table_id, replicated_table_schema) in table_schemas {
                 let metadata = DestinationTableMetadata::new_applied(
                     format!("memory_destination_table_{}", table_id.0),
-                    table_schema.snapshot_id,
-                    ReplicationMask::all(&table_schema),
+                    replicated_table_schema.inner().snapshot_id,
+                    replicated_table_schema.replication_mask().clone(),
                 );
                 self.state_store.store_destination_table_metadata(table_id, metadata).await?;
             }

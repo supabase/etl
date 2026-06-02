@@ -290,6 +290,7 @@ where
                     &transaction,
                     table_id,
                     Arc::clone(&arrow_table_schema),
+                    replicated_table_schema.clone(),
                     Some(&config.publication_name),
                     config.max_copy_connections_per_table,
                     config.batch.clone(),
@@ -327,7 +328,8 @@ where
             // to kickstart table creation.
             if total_table_copy_rows == 0 {
                 let snapshot_batch =
-                    table_rows_to_arrow_batch(Arc::clone(&arrow_table_schema), &[])?;
+                    table_rows_to_arrow_batch(Arc::clone(&arrow_table_schema), &[])?
+                        .with_replicated_table_schema(replicated_table_schema.clone());
                 let (flush_result, pending_flush_result) = WriteSnapshotBatchResult::new(());
                 destination.write_snapshot_batch(snapshot_batch, flush_result).await?;
                 pending_flush_result.await.into_result()?;

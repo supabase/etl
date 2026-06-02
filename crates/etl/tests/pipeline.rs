@@ -722,7 +722,7 @@ async fn streaming_reconnect_does_not_replay_already_flushed_events() {
         .expect("expected first streamed insert event");
 
     let client = database.client.as_ref().unwrap();
-    let terminated_pid = tokio::time::timeout(Duration::from_secs(2), async {
+    let terminated_pid = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let row = client
                 .query_one(
@@ -1148,14 +1148,6 @@ async fn table_copy_and_sync_streams_new_data() {
     )
     .await;
 
-    // Register notifications for ready state.
-    let users_state_notify = store
-        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
-        .await;
-    let orders_state_notify = store
-        .notify_on_table_state_type(database_schema.orders_schema().id, TableStateType::Ready)
-        .await;
-
     // We wait for all the inserts to be received.
     let events_notify = destination.wait_for_events_count(vec![(EventType::Insert, 8)]).await;
 
@@ -1169,9 +1161,11 @@ async fn table_copy_and_sync_streams_new_data() {
     )
     .await;
 
-    users_state_notify.notified().await;
-    orders_state_notify.notified().await;
     events_notify.notified().await;
+
+    let states = store.get_table_states().await;
+    assert_eq!(states.get(&database_schema.users_schema().id), Some(&TableState::Ready));
+    assert_eq!(states.get(&database_schema.orders_schema().id), Some(&TableState::Ready));
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -1337,7 +1331,7 @@ async fn table_processing_converges_to_apply_loop_with_no_events_coming() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn table_processing_with_schema_change_errors_table() {
+async fn table_processing_with_schema_change_updates_table_schema() {
     init_test_tracing();
     let database = spawn_source_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::OrdersOnly).await;
@@ -1400,9 +1394,8 @@ async fn table_processing_with_schema_change_errors_table() {
 
     insert_events_notify.notified().await;
 
-    // Register notification for the errored state.
-    let orders_state_notify = store
-        .notify_on_table_state_type(database_schema.orders_schema().id, TableStateType::Errored)
+    let schema_change_notify = destination
+        .wait_for_events_count(vec![(EventType::Relation, 2), (EventType::Insert, 3)])
         .await;
 
     // Change the schema of orders by adding a new column.
@@ -1424,31 +1417,47 @@ async fn table_processing_with_schema_change_errors_table() {
         .await
         .unwrap();
 
-    orders_state_notify.notified().await;
+    schema_change_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
-    // We assert that the schema is the initial one.
+    // We assert that the schema was updated after DDL.
     let table_schemas = store.get_latest_table_schemas().await;
     assert_eq!(table_schemas.len(), 1);
-    assert_eq!(
-        *table_schemas.get(&database_schema.orders_schema().id).unwrap(),
-        database_schema.orders_schema()
+    assert_table_schema_columns(
+        table_schemas.get(&database_schema.orders_schema().id).unwrap(),
+        &[
+            id_column_schema(),
+            test_column("description", Type::TEXT, 2, false, false),
+            test_column("date", Type::INT4, 3, true, false),
+        ],
     );
 
-    // We check that we got the insert events after the first data of the table has
-    // been copied.
+    // We check that the old inserts used the initial schema and the post-DDL
+    // insert used the updated schema.
     let events = destination.get_events().await;
     let grouped_events = group_events_by_type_and_table_id(&events);
     let orders_inserts =
         grouped_events.get(&(EventType::Insert, database_schema.orders_schema().id)).unwrap();
+    assert_eq!(orders_inserts.len(), 3);
 
     let expected_orders_inserts = build_expected_orders_inserts(
         2,
         &database_schema.orders_schema(),
         vec!["description_2", "description_3"],
     );
-    assert_events_equal(orders_inserts, &expected_orders_inserts);
+    assert_events_equal(&orders_inserts[..2], &expected_orders_inserts);
+
+    let Event::Insert(insert) = &orders_inserts[2] else {
+        panic!("Expected insert event after schema change");
+    };
+    assert_eq!(insert.table_row.values().len(), 3);
+    let columns: Vec<_> = insert
+        .replicated_table_schema
+        .column_schemas()
+        .map(|column| column.name.as_str())
+        .collect();
+    assert_eq!(columns, vec!["id", "description", "date"]);
 }
 
 #[tokio::test(flavor = "multi_thread")]

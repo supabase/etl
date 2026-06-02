@@ -357,12 +357,13 @@ impl PendingPgOutputChange {
         change: ChangeKind,
         row_image: RowImage,
         table_schema: &TableSchema,
+        replicated_table_schema: &ReplicatedTableSchema,
     ) -> bool {
         let [group] = self.groups.as_slice() else {
             return false;
         };
 
-        group.can_append(table_id, change, row_image, table_schema)
+        group.can_append(table_id, change, row_image, table_schema, replicated_table_schema)
     }
 
     /// Appends one tuple to this change's single row group.
@@ -392,6 +393,7 @@ struct PendingPgOutputRowsTarget {
     change: ChangeKind,
     row_image: RowImage,
     table_schema: Arc<TableSchema>,
+    replicated_table_schema: ReplicatedTableSchema,
 }
 
 impl PendingPgOutputRowsTarget {
@@ -401,8 +403,9 @@ impl PendingPgOutputRowsTarget {
         change: ChangeKind,
         row_image: RowImage,
         table_schema: Arc<TableSchema>,
+        replicated_table_schema: ReplicatedTableSchema,
     ) -> Self {
-        Self { table_id, change, row_image, table_schema }
+        Self { table_id, change, row_image, table_schema, replicated_table_schema }
     }
 }
 
@@ -427,6 +430,7 @@ struct PendingPgOutputRows {
     change: ChangeKind,
     row_image: RowImage,
     table_schema: Arc<TableSchema>,
+    replicated_table_schema: ReplicatedTableSchema,
     rows_builder: TableArrowBatchBuilder,
     commit_lsns: Vec<u64>,
     tx_ordinals: Vec<u64>,
@@ -449,6 +453,7 @@ impl PendingPgOutputRows {
             change: target.change,
             row_image: target.row_image,
             table_schema: target.table_schema,
+            replicated_table_schema: target.replicated_table_schema,
             rows_builder,
             commit_lsns: Vec::new(),
             tx_ordinals: Vec::new(),
@@ -475,6 +480,7 @@ impl PendingPgOutputRows {
             change: target.change,
             row_image: target.row_image,
             table_schema: target.table_schema,
+            replicated_table_schema: target.replicated_table_schema,
             rows_builder,
             commit_lsns: Vec::new(),
             tx_ordinals: Vec::new(),
@@ -493,12 +499,17 @@ impl PendingPgOutputRows {
         change: ChangeKind,
         row_image: RowImage,
         table_schema: &TableSchema,
+        replicated_table_schema: &ReplicatedTableSchema,
     ) -> bool {
         self.table_id == table_id
             && self.change == change
             && self.row_image == row_image
             && self.table_schema.snapshot_id == table_schema.snapshot_id
             && self.table_schema.column_schemas.iter().eq(table_schema.column_schemas.iter())
+            && replicated_table_schemas_are_compatible(
+                &self.replicated_table_schema,
+                replicated_table_schema,
+            )
     }
 
     /// Appends another borrowed pgoutput tuple directly into the Arrow builder.
@@ -712,6 +723,7 @@ impl ApplyLoopState {
                 target.change,
                 target.row_image,
                 &target.table_schema,
+                &target.replicated_table_schema,
             )
         {
             direct_change.append_single_tuple(tuple_data, meta)?;
@@ -970,6 +982,8 @@ struct PendingChangeRows {
     change: ChangeKind,
     row_image: RowImage,
     table_schema: Arc<TableSchema>,
+    replicated_table_schema: ReplicatedTableSchema,
+    partial_update_missing_column_indexes: Option<Arc<[usize]>>,
     storage: PendingChangeRowsStorage,
     commit_lsns: Vec<u64>,
     tx_ordinals: Vec<u64>,
@@ -977,7 +991,13 @@ struct PendingChangeRows {
 
 impl PendingChangeRows {
     /// Creates an empty pending change group.
-    fn new(change: ChangeKind, row_image: RowImage, table_schema: Arc<TableSchema>) -> Self {
+    fn new(
+        change: ChangeKind,
+        row_image: RowImage,
+        table_schema: Arc<TableSchema>,
+        replicated_table_schema: ReplicatedTableSchema,
+        partial_update_missing_column_indexes: Option<Arc<[usize]>>,
+    ) -> Self {
         let storage = TableArrowBatchBuilder::try_new(Arc::clone(&table_schema), 0).map_or_else(
             || PendingChangeRowsStorage::Rows(Vec::new()),
             PendingChangeRowsStorage::Arrow,
@@ -987,6 +1007,8 @@ impl PendingChangeRows {
             change,
             row_image,
             table_schema,
+            replicated_table_schema,
+            partial_update_missing_column_indexes,
             storage,
             commit_lsns: Vec::new(),
             tx_ordinals: Vec::new(),
@@ -999,10 +1021,18 @@ impl PendingChangeRows {
         change: ChangeKind,
         row_image: RowImage,
         table_schema: &TableSchema,
+        replicated_table_schema: &ReplicatedTableSchema,
+        partial_update_missing_column_indexes: Option<&Arc<[usize]>>,
     ) -> bool {
         self.change == change
             && self.row_image == row_image
             && table_schemas_are_compatible(&self.table_schema, table_schema)
+            && replicated_table_schemas_are_compatible(
+                &self.replicated_table_schema,
+                replicated_table_schema,
+            )
+            && self.partial_update_missing_column_indexes.as_ref()
+                == partial_update_missing_column_indexes
     }
 
     /// Creates pending rows from prebuilt direct pgoutput Arrow rows.
@@ -1011,6 +1041,8 @@ impl PendingChangeRows {
             change: rows.change,
             row_image: rows.row_image,
             table_schema: rows.table_schema,
+            replicated_table_schema: rows.replicated_table_schema,
+            partial_update_missing_column_indexes: None,
             storage: PendingChangeRowsStorage::Arrow(rows.rows_builder),
             commit_lsns: rows.commit_lsns,
             tx_ordinals: rows.tx_ordinals,
@@ -1042,12 +1074,14 @@ impl PendingChangeRows {
                 table_rows_to_arrow_batch(self.table_schema, table_rows.as_slice())?
             }
             PendingChangeRowsStorage::Arrow(builder) => builder.finish()?,
-        };
+        }
+        .with_replicated_table_schema(self.replicated_table_schema);
 
         Ok(ChangeArrowBatch {
             rows,
             change: self.change,
             row_image: self.row_image,
+            partial_update_missing_column_indexes: self.partial_update_missing_column_indexes,
             commit_lsns: UInt64Array::from(self.commit_lsns),
             tx_ordinals: UInt64Array::from(self.tx_ordinals),
         })
@@ -1085,10 +1119,40 @@ fn identity_arrow_table_schema(
     ))
 }
 
+/// Builds a batch schema containing present columns for a partial update row.
+fn partial_arrow_table_schema(
+    replicated_table_schema: &ReplicatedTableSchema,
+    missing_column_indexes: &[usize],
+) -> Arc<TableSchema> {
+    Arc::new(TableSchema::with_snapshot_id(
+        replicated_table_schema.id(),
+        replicated_table_schema.name().clone(),
+        replicated_table_schema
+            .column_schemas()
+            .enumerate()
+            .filter(|(index, _)| !missing_column_indexes.contains(index))
+            .map(|(_, column_schema)| column_schema.clone())
+            .collect(),
+        replicated_table_schema.inner().snapshot_id,
+    ))
+}
+
 /// Returns whether two table schemas describe the same Arrow batch shape.
 fn table_schemas_are_compatible(left: &TableSchema, right: &TableSchema) -> bool {
     left.snapshot_id == right.snapshot_id
         && left.column_schemas.iter().eq(right.column_schemas.iter())
+}
+
+/// Returns whether two replicated schemas describe the same source shape and
+/// masks.
+fn replicated_table_schemas_are_compatible(
+    left: &ReplicatedTableSchema,
+    right: &ReplicatedTableSchema,
+) -> bool {
+    left.inner().snapshot_id == right.inner().snapshot_id
+        && left.inner().column_schemas.iter().eq(right.inner().column_schemas.iter())
+        && left.replication_mask().as_slice() == right.replication_mask().as_slice()
+        && left.identity_mask().as_slice() == right.identity_mask().as_slice()
 }
 
 /// Returns whether an Arrow table schema matches replicated table columns.
@@ -1101,17 +1165,31 @@ fn table_schema_matches_replicated(
 }
 
 /// Destination group targeted by a decoded change row.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct PendingChangeTarget {
     table_id: TableId,
     change: ChangeKind,
     row_image: RowImage,
+    replicated_table_schema: ReplicatedTableSchema,
+    partial_update_missing_column_indexes: Option<Arc<[usize]>>,
 }
 
 impl PendingChangeTarget {
     /// Creates a decoded change row target.
-    fn new(table_id: TableId, change: ChangeKind, row_image: RowImage) -> Self {
-        Self { table_id, change, row_image }
+    fn new(
+        table_id: TableId,
+        change: ChangeKind,
+        row_image: RowImage,
+        replicated_table_schema: ReplicatedTableSchema,
+        partial_update_missing_column_indexes: Option<Arc<[usize]>>,
+    ) -> Self {
+        Self {
+            table_id,
+            change,
+            row_image,
+            replicated_table_schema,
+            partial_update_missing_column_indexes,
+        }
     }
 }
 
@@ -1144,9 +1222,25 @@ fn push_pending_change(
     });
 
     let group = match entry.groups.last_mut() {
-        Some(group) if group.can_append(target.change, target.row_image, &table_schema) => group,
+        Some(group)
+            if group.can_append(
+                target.change,
+                target.row_image,
+                &table_schema,
+                &target.replicated_table_schema,
+                target.partial_update_missing_column_indexes.as_ref(),
+            ) =>
+        {
+            group
+        }
         _ => {
-            let group = PendingChangeRows::new(target.change, target.row_image, table_schema);
+            let group = PendingChangeRows::new(
+                target.change,
+                target.row_image,
+                table_schema,
+                target.replicated_table_schema,
+                target.partial_update_missing_column_indexes,
+            );
             entry.groups.push(group);
             entry.groups.last_mut().expect("pushed group must exist")
         }
@@ -1211,6 +1305,7 @@ fn pending_pgoutput_full_row_group(
         change,
         row_image,
         replicated_arrow_table_schema(replicated_table_schema),
+        replicated_table_schema.clone(),
     );
     PendingPgOutputRows::try_new(target, tuple_data, meta)
 }
@@ -1229,6 +1324,7 @@ fn pending_pgoutput_key_row_group(
         change,
         row_image,
         table_schema,
+        replicated_table_schema.clone(),
     );
 
     match pgoutput_key_tuple_projection(replicated_table_schema, tuple_data)? {
@@ -1292,6 +1388,7 @@ struct HomogeneousFullNewBatchPlan {
     table_id: TableId,
     change: ChangeKind,
     table_schema: Arc<TableSchema>,
+    replicated_table_schema: ReplicatedTableSchema,
     row_count: usize,
 }
 
@@ -1299,20 +1396,36 @@ fn update_homogeneous_full_new_batch_plan(
     plan_table_id: &mut Option<TableId>,
     plan_change: &mut Option<ChangeKind>,
     plan_table_schema: &mut Option<Arc<TableSchema>>,
+    plan_replicated_table_schema: &mut Option<ReplicatedTableSchema>,
     table_id: TableId,
     change: ChangeKind,
     replicated_table_schema: &ReplicatedTableSchema,
 ) -> bool {
-    match (*plan_table_id, *plan_change, plan_table_schema.as_deref()) {
-        (Some(existing_table_id), Some(existing_change), Some(existing_table_schema)) => {
+    match (
+        *plan_table_id,
+        *plan_change,
+        plan_table_schema.as_deref(),
+        plan_replicated_table_schema.as_ref(),
+    ) {
+        (
+            Some(existing_table_id),
+            Some(existing_change),
+            Some(existing_table_schema),
+            Some(existing_replicated_table_schema),
+        ) => {
             existing_table_id == table_id
                 && existing_change == change
                 && table_schema_matches_replicated(existing_table_schema, replicated_table_schema)
+                && replicated_table_schemas_are_compatible(
+                    existing_replicated_table_schema,
+                    replicated_table_schema,
+                )
         }
-        (None, None, None) => {
+        (None, None, None, None) => {
             *plan_table_id = Some(table_id);
             *plan_change = Some(change);
             *plan_table_schema = Some(replicated_arrow_table_schema(replicated_table_schema));
+            *plan_replicated_table_schema = Some(replicated_table_schema.clone());
             true
         }
         _ => false,
@@ -1325,6 +1438,7 @@ fn homogeneous_full_new_batch_plan(
     let mut table_id = None;
     let mut change = None;
     let mut table_schema = None;
+    let mut replicated_table_schema = None;
     let mut first_data_event_index = None;
     let mut row_count = 0;
 
@@ -1335,6 +1449,7 @@ fn homogeneous_full_new_batch_plan(
                     &mut table_id,
                     &mut change,
                     &mut table_schema,
+                    &mut replicated_table_schema,
                     insert.replicated_table_schema.id(),
                     ChangeKind::Insert,
                     &insert.replicated_table_schema,
@@ -1355,6 +1470,7 @@ fn homogeneous_full_new_batch_plan(
                     &mut table_id,
                     &mut change,
                     &mut table_schema,
+                    &mut replicated_table_schema,
                     update.replicated_table_schema.id(),
                     ChangeKind::Update,
                     &update.replicated_table_schema,
@@ -1380,6 +1496,8 @@ fn homogeneous_full_new_batch_plan(
         table_id: table_id.expect("data event must set table id"),
         change: change.expect("data event must set change kind"),
         table_schema: table_schema.expect("data event must set table schema"),
+        replicated_table_schema: replicated_table_schema
+            .expect("data event must set replicated table schema"),
         row_count,
     }))
 }
@@ -1432,12 +1550,14 @@ fn normalize_homogeneous_full_new_batch(
     }
 
     let rows = table_rows_to_arrow_batch(plan.table_schema, table_rows.as_slice())?;
+    let rows = rows.with_replicated_table_schema(plan.replicated_table_schema);
     Ok(vec![StreamBatch::Changes(TableChangeSet {
         table_id: plan.table_id,
         groups: vec![ChangeArrowBatch {
             rows,
             change: plan.change,
             row_image: RowImage::New,
+            partial_update_missing_column_indexes: None,
             commit_lsns: UInt64Array::from(commit_lsns),
             tx_ordinals: UInt64Array::from(tx_ordinals),
         }],
@@ -1482,12 +1602,14 @@ fn normalize_homogeneous_full_new_batch_with_builder(
     }
 
     let rows = rows_builder.finish()?;
+    let rows = rows.with_replicated_table_schema(plan.replicated_table_schema);
     Ok(vec![StreamBatch::Changes(TableChangeSet {
         table_id: plan.table_id,
         groups: vec![ChangeArrowBatch {
             rows,
             change: plan.change,
             row_image: RowImage::New,
+            partial_update_missing_column_indexes: None,
             commit_lsns: UInt64Array::from(commit_lsns),
             tx_ordinals: UInt64Array::from(tx_ordinals),
         }],
@@ -1521,7 +1643,13 @@ fn normalize_pending_batch_items(
                     push_pending_change(
                         &mut table_changes,
                         &mut table_order,
-                        PendingChangeTarget::new(table_id, ChangeKind::Insert, RowImage::New),
+                        PendingChangeTarget::new(
+                            table_id,
+                            ChangeKind::Insert,
+                            RowImage::New,
+                            insert.replicated_table_schema.clone(),
+                            None,
+                        ),
                         insert.table_row,
                         PendingChangeMeta::new(insert.commit_lsn, insert.tx_ordinal),
                         || replicated_arrow_table_schema(&insert.replicated_table_schema),
@@ -1547,6 +1675,8 @@ fn normalize_pending_batch_items(
                                 table_id,
                                 ChangeKind::Update,
                                 RowImage::Old { key_only },
+                                update.replicated_table_schema.clone(),
+                                None,
                             ),
                             table_row,
                             PendingChangeMeta::new(update.commit_lsn, update.tx_ordinal),
@@ -1558,28 +1688,39 @@ fn normalize_pending_batch_items(
                         )?;
                     }
 
-                    let table_row = match update.updated_table_row {
-                        UpdatedTableRow::Full(row) => row,
-                        UpdatedTableRow::Partial(_) => {
-                            bail!(
-                                ErrorKind::ConversionError,
-                                "Partial update rows cannot be normalized to Arrow batches yet",
-                                format!(
-                                    "Table {} emitted an update with unchanged TOAST values that \
-                                     could not be reconstructed",
-                                    update.replicated_table_schema.name()
-                                )
-                            );
-                        }
-                    };
+                    let (table_row, table_schema, partial_update_missing_column_indexes) =
+                        match update.updated_table_row {
+                            UpdatedTableRow::Full(row) => (
+                                row,
+                                replicated_arrow_table_schema(&update.replicated_table_schema),
+                                None,
+                            ),
+                            UpdatedTableRow::Partial(partial_row) => {
+                                let (row, missing_column_indexes) = partial_row.into_parts();
+                                let missing_column_indexes: Arc<[usize]> =
+                                    missing_column_indexes.into();
+                                let table_schema = partial_arrow_table_schema(
+                                    &update.replicated_table_schema,
+                                    &missing_column_indexes,
+                                );
+
+                                (row, table_schema, Some(missing_column_indexes))
+                            }
+                        };
 
                     push_pending_change(
                         &mut table_changes,
                         &mut table_order,
-                        PendingChangeTarget::new(table_id, ChangeKind::Update, RowImage::New),
+                        PendingChangeTarget::new(
+                            table_id,
+                            ChangeKind::Update,
+                            RowImage::New,
+                            update.replicated_table_schema.clone(),
+                            partial_update_missing_column_indexes,
+                        ),
                         table_row,
                         PendingChangeMeta::new(update.commit_lsn, update.tx_ordinal),
-                        || replicated_arrow_table_schema(&update.replicated_table_schema),
+                        || table_schema,
                     )?;
                 }
                 PendingBatchItem::Event(Event::Delete(delete)) => {
@@ -1614,6 +1755,8 @@ fn normalize_pending_batch_items(
                             table_id,
                             ChangeKind::Delete,
                             RowImage::Old { key_only },
+                            delete.replicated_table_schema.clone(),
+                            None,
                         ),
                         table_row,
                         PendingChangeMeta::new(delete.commit_lsn, delete.tx_ordinal),
@@ -3132,6 +3275,7 @@ where
                 ChangeKind::Insert,
                 RowImage::New,
                 replicated_arrow_table_schema(&replicated_table_schema),
+                replicated_table_schema.clone(),
             );
             let meta = PendingPgOutputRowMeta::new(
                 remote_final_lsn,
@@ -3189,6 +3333,7 @@ where
                         ChangeKind::Update,
                         RowImage::New,
                         replicated_arrow_table_schema(&replicated_table_schema),
+                        replicated_table_schema.clone(),
                     );
                     let meta = PendingPgOutputRowMeta::new(
                         remote_final_lsn,

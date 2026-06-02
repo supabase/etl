@@ -7,7 +7,7 @@ use etl::{
         DropTableForCopyResult, WriteSnapshotBatchResult, WriteStreamBatchesResult,
     },
     error::{ErrorKind, EtlError, EtlResult},
-    etl_error, record_batch_to_table_rows,
+    etl_error, record_batch_to_table_rows_with_schema,
     state::destination_table_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus},
     store::DestinationStore,
     types::{
@@ -166,7 +166,10 @@ where
 
                 for group in change_set.groups {
                     let columns = group.rows.table_schema.column_schemas.clone();
-                    let rows = record_batch_to_table_rows(&group.rows.batch);
+                    let rows = record_batch_to_table_rows_with_schema(
+                        &group.rows.batch,
+                        &group.rows.table_schema,
+                    )?;
 
                     for (row_idx, table_row) in rows.into_iter().enumerate() {
                         let offset = OffsetToken::new(
@@ -585,9 +588,12 @@ where
         batch: TableArrowBatch,
         async_result: WriteSnapshotBatchResult<()>,
     ) -> EtlResult<()> {
-        let table_schema = ReplicatedTableSchema::all(Arc::clone(&batch.table_schema));
-        let table_rows = record_batch_to_table_rows(&batch.batch);
-        let result = self.write_table_rows(&table_schema, table_rows).await;
+        let table_schema = batch.replicated_table_schema;
+        let result = match record_batch_to_table_rows_with_schema(&batch.batch, &batch.table_schema)
+        {
+            Ok(table_rows) => self.write_table_rows(&table_schema, table_rows).await,
+            Err(error) => Err(error),
+        };
         async_result.send(result);
         Ok(())
     }

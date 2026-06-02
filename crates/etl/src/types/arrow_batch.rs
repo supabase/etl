@@ -1,4 +1,7 @@
-use std::{mem::size_of, sync::Arc};
+use std::{
+    mem::{size_of, size_of_val},
+    sync::Arc,
+};
 
 use arrow::{
     array::{Array, UInt64Array},
@@ -6,15 +9,17 @@ use arrow::{
 };
 use tokio_postgres::types::PgLsn;
 
-use crate::types::{SizeHint, TableId, TableSchema};
+use crate::types::{ReplicatedTableSchema, SizeHint, TableId, TableSchema};
 
 /// Arrow batch for one source table.
 #[derive(Debug)]
 pub struct TableArrowBatch {
     /// Source table identifier.
     pub table_id: TableId,
-    /// Source schema retained for destination-specific policies.
+    /// Arrow row schema retained for destination-specific policies.
     pub table_schema: Arc<TableSchema>,
+    /// Source schema and masks represented by this batch.
+    pub replicated_table_schema: ReplicatedTableSchema,
     /// User columns only.
     pub batch: RecordBatch,
     /// Approximate in-memory size of the batch payload.
@@ -24,9 +29,42 @@ pub struct TableArrowBatch {
 impl TableArrowBatch {
     /// Creates a new table Arrow batch.
     pub fn new(table_id: TableId, table_schema: Arc<TableSchema>, batch: RecordBatch) -> Self {
+        let replicated_table_schema = ReplicatedTableSchema::all(Arc::clone(&table_schema));
+        Self::new_with_replicated_table_schema(
+            table_id,
+            table_schema,
+            replicated_table_schema,
+            batch,
+        )
+    }
+
+    /// Creates a new table Arrow batch with explicit replicated schema
+    /// metadata.
+    pub fn new_with_replicated_table_schema(
+        table_id: TableId,
+        table_schema: Arc<TableSchema>,
+        replicated_table_schema: ReplicatedTableSchema,
+        batch: RecordBatch,
+    ) -> Self {
+        debug_assert_eq!(table_id, table_schema.id);
+        debug_assert_eq!(table_id, replicated_table_schema.id());
+
         let approx_bytes = batch.get_array_memory_size();
 
-        Self { table_id, table_schema, batch, approx_bytes }
+        Self { table_id, table_schema, replicated_table_schema, batch, approx_bytes }
+    }
+
+    /// Returns this batch with replaced replicated schema metadata.
+    pub fn with_replicated_table_schema(
+        self,
+        replicated_table_schema: ReplicatedTableSchema,
+    ) -> Self {
+        Self::new_with_replicated_table_schema(
+            self.table_id,
+            self.table_schema,
+            replicated_table_schema,
+            self.batch,
+        )
     }
 
     /// Returns the number of rows in the batch.
@@ -73,6 +111,8 @@ pub struct ChangeArrowBatch {
     pub change: ChangeKind,
     /// Row image carried by the batch.
     pub row_image: RowImage,
+    /// Missing replicated-column indexes for partial update new-row images.
+    pub partial_update_missing_column_indexes: Option<Arc<[usize]>>,
     /// Commit LSNs aligned to batch rows.
     pub commit_lsns: UInt64Array,
     /// Transaction ordinals aligned to batch rows.
@@ -83,6 +123,10 @@ impl SizeHint for ChangeArrowBatch {
     fn size_hint(&self) -> usize {
         size_of::<Self>()
             + self.rows.size_hint()
+            + self
+                .partial_update_missing_column_indexes
+                .as_ref()
+                .map_or(0, |indexes| size_of_val(indexes.as_ref()))
             + self.commit_lsns.get_array_memory_size()
             + self.tx_ordinals.get_array_memory_size()
     }

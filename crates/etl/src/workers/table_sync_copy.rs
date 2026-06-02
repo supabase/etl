@@ -1,7 +1,7 @@
 use std::{pin::Pin, sync::Arc, time::Instant};
 
 use etl_config::shared::BatchConfig;
-use etl_postgres::types::{TableId, TableSchema};
+use etl_postgres::types::{ReplicatedTableSchema, TableId, TableSchema};
 use futures::{Stream, StreamExt};
 use metrics::{counter, histogram};
 use tokio::{
@@ -82,6 +82,7 @@ async fn copy_table_rows_from_stream<D, S>(
     mut shutdown_rx: ShutdownRx,
     mut connection_updates_rx: watch::Receiver<PostgresConnectionUpdate>,
     table_schema: Arc<TableSchema>,
+    replicated_table_schema: ReplicatedTableSchema,
     partitioning: &'static str,
     destination: D,
 ) -> EtlResult<ShutdownResult<u64, u64>>
@@ -143,7 +144,8 @@ where
 
                 let before_sending = Instant::now();
                 let snapshot_batch =
-                    postgres_copy_rows_to_arrow_batch(Arc::clone(&table_schema), &copy_rows)?;
+                    postgres_copy_rows_to_arrow_batch(Arc::clone(&table_schema), &copy_rows)?
+                        .with_replicated_table_schema(replicated_table_schema.clone());
                 let (flush_result, pending_flush_result) = WriteSnapshotBatchResult::new(());
 
                 destination
@@ -200,6 +202,7 @@ pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
     transaction: &PgReplicationTransaction<'_>,
     table_id: TableId,
     table_schema: Arc<TableSchema>,
+    replicated_table_schema: ReplicatedTableSchema,
     publication_name: Option<&str>,
     max_copy_connections: u16,
     batch_config: BatchConfig,
@@ -213,6 +216,7 @@ pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
             transaction,
             table_id,
             table_schema,
+            replicated_table_schema,
             publication_name,
             max_copy_connections,
             batch_config,
@@ -227,6 +231,7 @@ pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
             transaction,
             table_id,
             table_schema,
+            replicated_table_schema,
             publication_name,
             batch_config,
             shutdown_rx,
@@ -245,6 +250,7 @@ async fn serial_table_copy<D: Destination + Clone + Send + 'static>(
     transaction: &PgReplicationTransaction<'_>,
     table_id: TableId,
     table_schema: Arc<TableSchema>,
+    replicated_table_schema: ReplicatedTableSchema,
     publication_name: Option<&str>,
     batch_config: BatchConfig,
     shutdown_rx: ShutdownRx,
@@ -277,6 +283,7 @@ async fn serial_table_copy<D: Destination + Clone + Send + 'static>(
         shutdown_rx,
         connection_updates_rx,
         Arc::clone(&table_schema),
+        replicated_table_schema,
         "false",
         destination,
     )
@@ -314,6 +321,7 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
     transaction: &PgReplicationTransaction<'_>,
     table_id: TableId,
     table_schema: Arc<TableSchema>,
+    replicated_table_schema: ReplicatedTableSchema,
     publication_name: Option<&str>,
     max_copy_connections: u16,
     batch_config: BatchConfig,
@@ -387,6 +395,7 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
         let child_replication_client = transaction.fork_child().await?;
         let snapshot_id = snapshot_id.clone();
         let table_schema = Arc::clone(&table_schema);
+        let replicated_table_schema = replicated_table_schema.clone();
         let publication_name = publication_name.clone();
         let batch_config = batch_config.clone();
         let shutdown_rx = shutdown_rx.clone();
@@ -403,6 +412,7 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
                 child_transaction,
                 table_id,
                 table_schema,
+                replicated_table_schema,
                 publication_name,
                 partition,
                 batch_config,
@@ -497,6 +507,7 @@ async fn copy_partition<D>(
     child_transaction: PgChildReplicationTransaction<'_>,
     table_id: TableId,
     table_schema: Arc<TableSchema>,
+    replicated_table_schema: ReplicatedTableSchema,
     publication_name: Option<Arc<str>>,
     partition: CopyPartition,
     batch_config: BatchConfig,
@@ -584,6 +595,7 @@ where
         shutdown_rx,
         connection_updates_rx,
         Arc::clone(&table_schema),
+        replicated_table_schema,
         "true",
         destination,
     )

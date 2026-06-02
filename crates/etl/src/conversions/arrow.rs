@@ -364,6 +364,38 @@ pub fn record_batch_to_table_rows(batch: &RecordBatch) -> Vec<TableRow> {
     rows
 }
 
+/// Converts an Arrow record batch back to ETL table rows using source types.
+pub fn record_batch_to_table_rows_with_schema(
+    batch: &RecordBatch,
+    table_schema: &TableSchema,
+) -> EtlResult<Vec<TableRow>> {
+    if batch.num_columns() != table_schema.column_schemas.len() {
+        return Err(etl_error!(
+            ErrorKind::ConversionError,
+            "Arrow batch schema does not match table schema",
+            format!(
+                "Arrow batch has {} columns, but table schema has {} columns",
+                batch.num_columns(),
+                table_schema.column_schemas.len()
+            )
+        ));
+    }
+
+    let mut rows = Vec::with_capacity(batch.num_rows());
+
+    for row_idx in 0..batch.num_rows() {
+        let mut cells = Vec::with_capacity(batch.num_columns());
+
+        for (column, column_schema) in batch.columns().iter().zip(&table_schema.column_schemas) {
+            cells.push(arrow_value_to_cell_for_type(column, row_idx, &column_schema.typ)?);
+        }
+
+        rows.push(TableRow::new(cells));
+    }
+
+    Ok(rows)
+}
+
 fn arrow_error_to_etl_error(error: ArrowError) -> crate::error::EtlError {
     etl_error!(
         ErrorKind::ConversionError,
@@ -2521,6 +2553,104 @@ fn arrow_value_to_cell(array: &ArrayRef, row_idx: usize) -> Cell {
     }
 }
 
+fn arrow_value_to_cell_for_type(array: &ArrayRef, row_idx: usize, typ: &Type) -> EtlResult<Cell> {
+    if array.is_null(row_idx) {
+        return Ok(Cell::Null);
+    }
+
+    if is_array_type(typ) {
+        return arrow_list_value_to_cell_for_type(array, row_idx, typ);
+    }
+
+    Ok(match *typ {
+        Type::BOOL => {
+            let array = array.as_any().downcast_ref::<BooleanArray>().unwrap();
+            Cell::Bool(array.value(row_idx))
+        }
+        Type::INT2 => {
+            let array = array.as_any().downcast_ref::<Int32Array>().unwrap();
+            Cell::I16(i16::try_from(array.value(row_idx)).map_err(|err| {
+                etl_error!(
+                    ErrorKind::ConversionError,
+                    "Arrow int32 value does not fit Postgres smallint",
+                    source: err
+                )
+            })?)
+        }
+        Type::INT4 => {
+            let array = array.as_any().downcast_ref::<Int32Array>().unwrap();
+            Cell::I32(array.value(row_idx))
+        }
+        Type::INT8 => {
+            let array = array.as_any().downcast_ref::<Int64Array>().unwrap();
+            Cell::I64(array.value(row_idx))
+        }
+        Type::OID => {
+            let array = array.as_any().downcast_ref::<Int64Array>().unwrap();
+            Cell::U32(u32::try_from(array.value(row_idx)).map_err(|err| {
+                etl_error!(
+                    ErrorKind::ConversionError,
+                    "Arrow int64 value does not fit Postgres oid",
+                    source: err
+                )
+            })?)
+        }
+        Type::FLOAT4 => {
+            let array = array.as_any().downcast_ref::<Float32Array>().unwrap();
+            Cell::F32(array.value(row_idx))
+        }
+        Type::FLOAT8 => {
+            let array = array.as_any().downcast_ref::<Float64Array>().unwrap();
+            Cell::F64(array.value(row_idx))
+        }
+        Type::NUMERIC => {
+            let array = array.as_any().downcast_ref::<StringArray>().unwrap();
+            Cell::Numeric(array.value(row_idx).parse()?)
+        }
+        Type::JSON | Type::JSONB => {
+            let array = array.as_any().downcast_ref::<StringArray>().unwrap();
+            Cell::Json(serde_json::from_str(array.value(row_idx))?)
+        }
+        Type::BYTEA => {
+            let array = array.as_any().downcast_ref::<LargeBinaryArray>().unwrap();
+            Cell::Bytes(array.value(row_idx).to_vec())
+        }
+        Type::DATE => {
+            let array = array.as_any().downcast_ref::<Date32Array>().unwrap();
+            Cell::Date(days_from_epoch_to_date(array.value(row_idx)))
+        }
+        Type::TIME => {
+            let array = array.as_any().downcast_ref::<Time64MicrosecondArray>().unwrap();
+            Cell::Time(micros_to_time(array.value(row_idx)))
+        }
+        Type::TIMESTAMP => {
+            let array = array.as_any().downcast_ref::<TimestampMicrosecondArray>().unwrap();
+            Cell::Timestamp(
+                chrono::DateTime::from_timestamp_micros(array.value(row_idx))
+                    .expect("valid timestamp")
+                    .naive_utc(),
+            )
+        }
+        Type::TIMESTAMPTZ => {
+            let array = array.as_any().downcast_ref::<TimestampMicrosecondArray>().unwrap();
+            Cell::TimestampTz(
+                chrono::DateTime::from_timestamp_micros(array.value(row_idx))
+                    .expect("valid timestamp"),
+            )
+        }
+        Type::UUID => {
+            let array = array.as_any().downcast_ref::<FixedSizeBinaryArray>().unwrap();
+            let bytes: [u8; 16] = array.value(row_idx).try_into().expect("uuid bytes");
+            Cell::Uuid(uuid::Uuid::from_bytes(bytes))
+        }
+        Type::CHAR | Type::BPCHAR | Type::VARCHAR | Type::NAME | Type::TEXT | Type::MONEY => {
+            let array = array.as_any().downcast_ref::<StringArray>().unwrap();
+            Cell::String(array.value(row_idx).to_owned())
+        }
+        _ => arrow_value_to_cell(array, row_idx),
+    })
+}
+
 fn arrow_list_value_to_cell(array: &ArrayRef, row_idx: usize, field: &FieldRef) -> Cell {
     let list_array = array.as_any().downcast_ref::<ListArray>().unwrap();
     let list_value = list_array.value(row_idx);
@@ -2617,6 +2747,131 @@ fn arrow_list_value_to_cell(array: &ArrayRef, row_idx: usize, field: &FieldRef) 
     }
 }
 
+fn arrow_list_value_to_cell_for_type(
+    array: &ArrayRef,
+    row_idx: usize,
+    typ: &Type,
+) -> EtlResult<Cell> {
+    let list_array = array.as_any().downcast_ref::<ListArray>().unwrap();
+    let list_value = list_array.value(row_idx);
+
+    Ok(match *typ {
+        Type::BOOL_ARRAY => Cell::Array(ArrayCell::Bool(option_values::<BooleanArray, _, _>(
+            &list_value,
+            BooleanArray::value,
+        ))),
+        Type::INT2_ARRAY => Cell::Array(ArrayCell::I16(option_values_try::<Int32Array, _, _>(
+            &list_value,
+            |array, index| {
+                i16::try_from(array.value(index)).map_err(|err| {
+                    etl_error!(
+                        ErrorKind::ConversionError,
+                        "Arrow int32 value does not fit Postgres smallint",
+                        source: err
+                    )
+                })
+            },
+        )?)),
+        Type::INT4_ARRAY => Cell::Array(ArrayCell::I32(option_values::<Int32Array, _, _>(
+            &list_value,
+            Int32Array::value,
+        ))),
+        Type::INT8_ARRAY => Cell::Array(ArrayCell::I64(option_values::<Int64Array, _, _>(
+            &list_value,
+            Int64Array::value,
+        ))),
+        Type::OID_ARRAY => Cell::Array(ArrayCell::U32(option_values_try::<Int64Array, _, _>(
+            &list_value,
+            |array, index| {
+                u32::try_from(array.value(index)).map_err(|err| {
+                    etl_error!(
+                        ErrorKind::ConversionError,
+                        "Arrow int64 value does not fit Postgres oid",
+                        source: err
+                    )
+                })
+            },
+        )?)),
+        Type::FLOAT4_ARRAY => Cell::Array(ArrayCell::F32(option_values::<Float32Array, _, _>(
+            &list_value,
+            Float32Array::value,
+        ))),
+        Type::FLOAT8_ARRAY => Cell::Array(ArrayCell::F64(option_values::<Float64Array, _, _>(
+            &list_value,
+            Float64Array::value,
+        ))),
+        Type::NUMERIC_ARRAY => {
+            Cell::Array(ArrayCell::Numeric(option_values_try::<StringArray, _, _>(
+                &list_value,
+                |array, index| Ok(array.value(index).parse()?),
+            )?))
+        }
+        Type::JSON_ARRAY | Type::JSONB_ARRAY => {
+            Cell::Array(ArrayCell::Json(option_values_try::<StringArray, _, _>(
+                &list_value,
+                |array, index| Ok(serde_json::from_str(array.value(index))?),
+            )?))
+        }
+        Type::BYTEA_ARRAY => Cell::Array(ArrayCell::Bytes(
+            option_values::<LargeBinaryArray, _, _>(&list_value, |array, index| {
+                array.value(index).to_vec()
+            }),
+        )),
+        Type::DATE_ARRAY => Cell::Array(ArrayCell::Date(option_values::<Date32Array, _, _>(
+            &list_value,
+            |array, index| days_from_epoch_to_date(array.value(index)),
+        ))),
+        Type::TIME_ARRAY => {
+            Cell::Array(ArrayCell::Time(option_values::<Time64MicrosecondArray, _, _>(
+                &list_value,
+                |array, index| micros_to_time(array.value(index)),
+            )))
+        }
+        Type::TIMESTAMP_ARRAY => {
+            Cell::Array(ArrayCell::Timestamp(option_values::<TimestampMicrosecondArray, _, _>(
+                &list_value,
+                |array, index| {
+                    chrono::DateTime::from_timestamp_micros(array.value(index))
+                        .expect("valid timestamp")
+                        .naive_utc()
+                },
+            )))
+        }
+        Type::TIMESTAMPTZ_ARRAY => {
+            Cell::Array(ArrayCell::TimestampTz(option_values::<TimestampMicrosecondArray, _, _>(
+                &list_value,
+                |array, index| {
+                    chrono::DateTime::from_timestamp_micros(array.value(index))
+                        .expect("valid timestamp")
+                },
+            )))
+        }
+        Type::UUID_ARRAY => Cell::Array(ArrayCell::Uuid(
+            option_values::<FixedSizeBinaryArray, _, _>(&list_value, |array, index| {
+                let bytes: [u8; 16] = array.value(index).try_into().expect("uuid bytes");
+                uuid::Uuid::from_bytes(bytes)
+            }),
+        )),
+        Type::CHAR_ARRAY
+        | Type::BPCHAR_ARRAY
+        | Type::VARCHAR_ARRAY
+        | Type::NAME_ARRAY
+        | Type::TEXT_ARRAY
+        | Type::MONEY_ARRAY => Cell::Array(ArrayCell::String(option_values::<StringArray, _, _>(
+            &list_value,
+            |array, index| array.value(index).to_owned(),
+        ))),
+        _ => arrow_list_value_to_cell(
+            array,
+            row_idx,
+            match array.data_type() {
+                DataType::List(field) => field,
+                _ => unreachable!("array type must be a list"),
+            },
+        ),
+    })
+}
+
 fn option_values<A, T, F>(array: &ArrayRef, get: F) -> Vec<Option<T>>
 where
     A: 'static + arrow::array::Array,
@@ -2634,6 +2889,25 @@ where
     }
 
     values
+}
+
+fn option_values_try<A, T, F>(array: &ArrayRef, mut get: F) -> EtlResult<Vec<Option<T>>>
+where
+    A: 'static + arrow::array::Array,
+    F: FnMut(&A, usize) -> EtlResult<T>,
+{
+    let array = array.as_any().downcast_ref::<A>().unwrap();
+    let mut values = Vec::with_capacity(array.len());
+
+    for index in 0..array.len() {
+        if array.is_null(index) {
+            values.push(None);
+        } else {
+            values.push(Some(get(array, index)?));
+        }
+    }
+
+    Ok(values)
 }
 
 fn days_from_epoch_to_date(days: i32) -> NaiveDate {
@@ -2761,6 +3035,48 @@ mod tests {
 
         assert_eq!(amount.value(0), "0012.300");
         assert_eq!(payload.value(0), r#"{"i": 1}"#);
+    }
+
+    #[test]
+    fn record_batch_to_table_rows_with_schema_restores_source_cell_types() {
+        let table_schema = Arc::new(TableSchema::new(
+            TableId::new(789),
+            TableName::new("public".to_owned(), "typed_arrow".to_owned()),
+            vec![
+                column("small", Type::INT2, 1, false, false),
+                column("oid_col", Type::OID, 2, false, false),
+                column("amount", Type::NUMERIC, 3, false, false),
+                column("payload", Type::JSONB, 4, false, false),
+                column("small_values", Type::INT2_ARRAY, 5, true, false),
+                column("oid_values", Type::OID_ARRAY, 6, true, false),
+                column("amount_values", Type::NUMERIC_ARRAY, 7, true, false),
+                column("payload_values", Type::JSONB_ARRAY, 8, true, false),
+            ],
+        ));
+        let table_rows = vec![TableRow::new(vec![
+            Cell::I16(7),
+            Cell::U32(42),
+            Cell::Numeric("0012.300".parse().unwrap()),
+            Cell::Json(serde_json::json!({ "i": 1 })),
+            Cell::Array(ArrayCell::I16(vec![Some(1), None, Some(2)])),
+            Cell::Array(ArrayCell::U32(vec![Some(10), None, Some(20)])),
+            Cell::Array(ArrayCell::Numeric(vec![
+                Some("1.25".parse().unwrap()),
+                None,
+                Some("-2.50".parse().unwrap()),
+            ])),
+            Cell::Array(ArrayCell::Json(vec![
+                Some(serde_json::json!({ "a": 1 })),
+                None,
+                Some(serde_json::json!([1, 2])),
+            ])),
+        ])];
+
+        let batch = table_rows_to_arrow_batch(Arc::clone(&table_schema), &table_rows).unwrap();
+        let typed_rows =
+            record_batch_to_table_rows_with_schema(&batch.batch, &table_schema).unwrap();
+
+        assert_eq!(typed_rows, table_rows);
     }
 
     #[test]

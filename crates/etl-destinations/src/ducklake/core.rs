@@ -17,14 +17,14 @@ use etl::{
         },
     },
     error::{ErrorKind, EtlResult},
-    etl_error, record_batch_to_table_rows,
+    etl_error, record_batch_to_table_rows_with_schema,
     state::destination_table_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus},
     store::DestinationStore,
     types::{
-        ChangeKind, ColumnSchema, DeleteEvent, Event, EventSequenceKey, InsertEvent, OldTableRow,
-        PartialTableRow, ReplicatedTableSchema, ReplicationMask, RowImage, SchemaDiff, SnapshotId,
-        StreamBatch, TableArrowBatch, TableChangeSet, TableId, TableName, TableRow, TableSchema,
-        TruncateEvent, UpdateEvent, UpdatedTableRow,
+        ChangeArrowBatch, ChangeKind, ColumnSchema, DeleteEvent, Event, EventSequenceKey,
+        InsertEvent, OldTableRow, PartialTableRow, ReplicatedTableSchema, ReplicationMask,
+        RowImage, SchemaDiff, SnapshotId, StreamBatch, TableArrowBatch, TableChangeSet, TableId,
+        TableName, TableRow, TableSchema, TruncateEvent, UpdateEvent, UpdatedTableRow,
     },
 };
 use metrics::gauge;
@@ -297,9 +297,12 @@ where
         batch: TableArrowBatch,
         async_result: WriteSnapshotBatchResult<()>,
     ) -> EtlResult<()> {
-        let replicated_table_schema = ReplicatedTableSchema::all(Arc::clone(&batch.table_schema));
-        let table_rows = record_batch_to_table_rows(&batch.batch);
-        let result = self.write_table_rows(&replicated_table_schema, table_rows).await;
+        let replicated_table_schema = batch.replicated_table_schema;
+        let result = match record_batch_to_table_rows_with_schema(&batch.batch, &batch.table_schema)
+        {
+            Ok(table_rows) => self.write_table_rows(&replicated_table_schema, table_rows).await,
+            Err(error) => Err(error),
+        };
         async_result.send(result);
 
         Ok(())
@@ -722,6 +725,21 @@ impl<S> DuckLakeDestination<S>
 where
     S: DestinationStore,
 {
+    /// Builds an update row image from an Arrow group.
+    fn updated_table_row_from_arrow_group(
+        group: &ChangeArrowBatch,
+        row: TableRow,
+    ) -> UpdatedTableRow {
+        match group.partial_update_missing_column_indexes.as_ref() {
+            Some(missing_column_indexes) => UpdatedTableRow::Partial(PartialTableRow::new(
+                group.rows.replicated_table_schema.column_schemas().len(),
+                row,
+                missing_column_indexes.to_vec(),
+            )),
+            None => UpdatedTableRow::Full(row),
+        }
+    }
+
     /// Builds a key-only row from a partial update row when PostgreSQL omits
     /// the old key image because the replica identity did not change.
     fn key_row_from_updated_partial_row(
@@ -867,7 +885,7 @@ where
         for batch in batches {
             match batch {
                 StreamBatch::Changes(change_set) => {
-                    self.append_change_set_events(change_set, &mut events).await?;
+                    self.append_change_set_events(change_set, &mut events)?;
                 }
                 StreamBatch::Truncate(truncate) => {
                     let mut truncated_tables = Vec::with_capacity(truncate.rel_ids.len());
@@ -891,17 +909,18 @@ where
     }
 
     /// Appends row events for one table-local Arrow change set.
-    async fn append_change_set_events(
+    fn append_change_set_events(
         &self,
         change_set: TableChangeSet,
         events: &mut Vec<Event>,
     ) -> EtlResult<()> {
-        let replicated_table_schema =
-            self.replicated_table_schema_for_stream_table(change_set.table_id).await?;
-
         let mut groups = change_set.groups.into_iter().peekable();
         while let Some(group) = groups.next() {
-            let rows = record_batch_to_table_rows(&group.rows.batch);
+            let replicated_table_schema = group.rows.replicated_table_schema.clone();
+            let rows = record_batch_to_table_rows_with_schema(
+                &group.rows.batch,
+                &group.rows.table_schema,
+            )?;
             if rows.len() != group.commit_lsns.values().len()
                 || rows.len() != group.tx_ordinals.values().len()
             {
@@ -938,7 +957,10 @@ where
                             && next_group.row_image == RowImage::New
                     }) {
                         let new_group = groups.next().expect("peeked update new group exists");
-                        let new_rows = record_batch_to_table_rows(&new_group.rows.batch);
+                        let new_rows = record_batch_to_table_rows_with_schema(
+                            &new_group.rows.batch,
+                            &new_group.rows.table_schema,
+                        )?;
                         if rows.len() != new_rows.len()
                             || rows.len() != new_group.commit_lsns.values().len()
                             || rows.len() != new_group.tx_ordinals.values().len()
@@ -958,6 +980,8 @@ where
                             ));
                         }
 
+                        let replicated_table_schema =
+                            new_group.rows.replicated_table_schema.clone();
                         for (row_idx, (old_row, new_row)) in
                             rows.into_iter().zip(new_rows).enumerate()
                         {
@@ -973,7 +997,9 @@ where
                                 commit_lsn,
                                 tx_ordinal,
                                 replicated_table_schema: replicated_table_schema.clone(),
-                                updated_table_row: UpdatedTableRow::Full(new_row),
+                                updated_table_row: Self::updated_table_row_from_arrow_group(
+                                    &new_group, new_row,
+                                ),
                                 old_table_row: Some(old_table_row),
                             }));
                         }
@@ -1005,7 +1031,9 @@ where
                             commit_lsn,
                             tx_ordinal,
                             replicated_table_schema: replicated_table_schema.clone(),
-                            updated_table_row: UpdatedTableRow::Full(table_row),
+                            updated_table_row: Self::updated_table_row_from_arrow_group(
+                                &group, table_row,
+                            ),
                             old_table_row: None,
                         }));
                     }

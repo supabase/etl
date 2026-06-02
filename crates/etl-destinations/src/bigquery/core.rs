@@ -18,7 +18,7 @@ use etl::{
         task_set::DestinationTaskSet,
     },
     error::{ErrorKind, EtlError, EtlResult},
-    etl_error, record_batch_to_table_rows,
+    etl_error, record_batch_to_table_rows_with_schema,
     state::DestinationTableMetadata,
     store::DestinationStore,
     types::{
@@ -612,7 +612,10 @@ where
                 .iter()
                 .zip(group.tx_ordinals.values().iter())
                 .map(|(commit_lsn, tx_ordinal)| format!("{commit_lsn:016x}/{tx_ordinal:016x}"));
-            let table_rows = record_batch_to_table_rows(&group.rows.batch);
+            let table_rows = record_batch_to_table_rows_with_schema(
+                &group.rows.batch,
+                &group.rows.table_schema,
+            )?;
 
             match (group.change, group.row_image) {
                 (ChangeKind::Insert | ChangeKind::Update, RowImage::New) => {
@@ -785,7 +788,7 @@ where
             }
         }
 
-        let table_rows = record_batch_to_table_rows(&batch.batch);
+        let table_rows = record_batch_to_table_rows_with_schema(&batch.batch, &batch.table_schema)?;
         self.write_table_rows(batch.table_id, table_rows).await
     }
 

@@ -14,7 +14,7 @@ use tokio_postgres::types::PgLsn;
 
 use crate::{
     concurrency::TaskSet,
-    conversions::arrow::record_batch_to_table_rows,
+    conversions::arrow::record_batch_to_table_rows_with_schema,
     destination::{
         Destination, PipelineDestination,
         async_result::{
@@ -28,9 +28,9 @@ use crate::{
         notify::TimedNotify,
     },
     types::{
-        ChangeKind, DeleteEvent, Event, EventType, InsertEvent, OldTableRow, RelationEvent,
-        RowImage, StreamBatch, TableArrowBatch, TableChangeSet, TableName, TableRow, TableSchema,
-        TruncateBatch, UpdateEvent, UpdatedTableRow,
+        ChangeArrowBatch, ChangeKind, DeleteEvent, Event, EventType, InsertEvent, OldTableRow,
+        PartialTableRow, RelationEvent, RowImage, StreamBatch, TableArrowBatch, TableChangeSet,
+        TableName, TableRow, TableSchema, TruncateBatch, UpdateEvent, UpdatedTableRow,
     },
 };
 
@@ -39,45 +39,56 @@ type TableRowCondition = Box<dyn Fn(&HashMap<TableId, Vec<TableRow>>) -> bool + 
 type CombinedCondition =
     Box<dyn Fn(&[Event], &HashMap<TableId, Vec<TableRow>>) -> bool + Send + Sync>;
 
-fn snapshot_batch_to_table_rows(batch: &TableArrowBatch) -> Vec<TableRow> {
-    record_batch_to_table_rows(&batch.batch)
+fn snapshot_batch_to_table_rows(batch: &TableArrowBatch) -> EtlResult<Vec<TableRow>> {
+    record_batch_to_table_rows_with_schema(&batch.batch, &batch.table_schema)
+}
+
+fn replicated_table_schemas_match(
+    left: &ReplicatedTableSchema,
+    right: &ReplicatedTableSchema,
+) -> bool {
+    left.inner().snapshot_id == right.inner().snapshot_id
+        && left.inner().column_schemas == right.inner().column_schemas
+        && left.replication_mask().as_slice() == right.replication_mask().as_slice()
+        && left.identity_mask().as_slice() == right.identity_mask().as_slice()
 }
 
 fn maybe_push_relation_event(
     events: &mut Vec<Event>,
-    relation_table_schemas: &mut HashMap<TableId, Arc<TableSchema>>,
-    table_schema: &Arc<TableSchema>,
+    relation_table_schemas: &mut HashMap<TableId, ReplicatedTableSchema>,
+    replicated_table_schema: &ReplicatedTableSchema,
     commit_lsn: PgLsn,
     tx_ordinal: u64,
 ) {
-    let table_id = table_schema.id;
-    let schema_changed = relation_table_schemas
-        .get(&table_id)
-        .is_none_or(|known_schema| known_schema.as_ref() != table_schema.as_ref());
+    let table_id = replicated_table_schema.id();
+    let schema_changed = relation_table_schemas.get(&table_id).is_none_or(|known_schema| {
+        !replicated_table_schemas_match(known_schema, replicated_table_schema)
+    });
 
     if !schema_changed {
         return;
     }
 
-    relation_table_schemas.insert(table_id, Arc::clone(table_schema));
+    relation_table_schemas.insert(table_id, replicated_table_schema.clone());
     events.push(Event::Relation(RelationEvent {
         start_lsn: commit_lsn,
         commit_lsn,
         tx_ordinal,
-        replicated_table_schema: ReplicatedTableSchema::all(Arc::clone(table_schema)),
+        replicated_table_schema: replicated_table_schema.clone(),
     }));
 }
 
 fn table_change_set_to_events(
     change_set: &TableChangeSet,
-    relation_table_schemas: &mut HashMap<TableId, Arc<TableSchema>>,
-) -> Vec<Event> {
+    relation_table_schemas: &mut HashMap<TableId, ReplicatedTableSchema>,
+) -> EtlResult<Vec<Event>> {
     let mut events = Vec::new();
     let mut index = 0;
 
     while index < change_set.groups.len() {
         let group = &change_set.groups[index];
-        let rows = record_batch_to_table_rows(&group.rows.batch);
+        let rows =
+            record_batch_to_table_rows_with_schema(&group.rows.batch, &group.rows.table_schema)?;
 
         match (group.change, group.row_image) {
             (ChangeKind::Insert, RowImage::New) => {
@@ -85,14 +96,13 @@ fn table_change_set_to_events(
                     maybe_push_relation_event(
                         &mut events,
                         relation_table_schemas,
-                        &group.rows.table_schema,
+                        &group.rows.replicated_table_schema,
                         PgLsn::from(group.commit_lsns.values()[0]),
                         group.tx_ordinals.values()[0],
                     );
                 }
 
-                let replicated_table_schema =
-                    ReplicatedTableSchema::all(Arc::clone(&group.rows.table_schema));
+                let replicated_table_schema = group.rows.replicated_table_schema.clone();
                 for (row_index, row) in rows.into_iter().enumerate() {
                     let commit_lsn = PgLsn::from(group.commit_lsns.values()[row_index]);
                     let tx_ordinal = group.tx_ordinals.values()[row_index];
@@ -115,20 +125,22 @@ fn table_change_set_to_events(
                         maybe_push_relation_event(
                             &mut events,
                             relation_table_schemas,
-                            &next_group.rows.table_schema,
+                            &next_group.rows.replicated_table_schema,
                             PgLsn::from(next_group.commit_lsns.values()[0]),
                             next_group.tx_ordinals.values()[0],
                         );
                     }
 
-                    let new_rows = record_batch_to_table_rows(&next_group.rows.batch);
+                    let new_rows = record_batch_to_table_rows_with_schema(
+                        &next_group.rows.batch,
+                        &next_group.rows.table_schema,
+                    )?;
                     assert_eq!(
                         rows.len(),
                         new_rows.len(),
                         "old and new update row image batches must have matching lengths"
                     );
-                    let replicated_table_schema =
-                        ReplicatedTableSchema::all(Arc::clone(&next_group.rows.table_schema));
+                    let replicated_table_schema = next_group.rows.replicated_table_schema.clone();
                     for (row_index, (old_row, new_row)) in
                         rows.into_iter().zip(new_rows).enumerate()
                     {
@@ -144,14 +156,13 @@ fn table_change_set_to_events(
                             commit_lsn,
                             tx_ordinal,
                             replicated_table_schema: replicated_table_schema.clone(),
-                            updated_table_row: UpdatedTableRow::Full(new_row),
+                            updated_table_row: updated_table_row_from_group(next_group, new_row),
                             old_table_row: Some(old_table_row),
                         }));
                     }
                     index += 2;
                 } else {
-                    let replicated_table_schema =
-                        ReplicatedTableSchema::all(Arc::clone(&group.rows.table_schema));
+                    let replicated_table_schema = group.rows.replicated_table_schema.clone();
                     for (row_index, row) in rows.into_iter().enumerate() {
                         let commit_lsn = PgLsn::from(group.commit_lsns.values()[row_index]);
                         let tx_ordinal = group.tx_ordinals.values()[row_index];
@@ -173,14 +184,13 @@ fn table_change_set_to_events(
                     maybe_push_relation_event(
                         &mut events,
                         relation_table_schemas,
-                        &group.rows.table_schema,
+                        &group.rows.replicated_table_schema,
                         PgLsn::from(group.commit_lsns.values()[0]),
                         group.tx_ordinals.values()[0],
                     );
                 }
 
-                let replicated_table_schema =
-                    ReplicatedTableSchema::all(Arc::clone(&group.rows.table_schema));
+                let replicated_table_schema = group.rows.replicated_table_schema.clone();
                 for (row_index, row) in rows.into_iter().enumerate() {
                     let commit_lsn = PgLsn::from(group.commit_lsns.values()[row_index]);
                     let tx_ordinal = group.tx_ordinals.values()[row_index];
@@ -189,7 +199,7 @@ fn table_change_set_to_events(
                         commit_lsn,
                         tx_ordinal,
                         replicated_table_schema: replicated_table_schema.clone(),
-                        updated_table_row: UpdatedTableRow::Full(row),
+                        updated_table_row: updated_table_row_from_group(group, row),
                         old_table_row: None,
                     }));
                 }
@@ -200,14 +210,13 @@ fn table_change_set_to_events(
                     maybe_push_relation_event(
                         &mut events,
                         relation_table_schemas,
-                        &group.rows.table_schema,
+                        &group.rows.replicated_table_schema,
                         PgLsn::from(group.commit_lsns.values()[0]),
                         group.tx_ordinals.values()[0],
                     );
                 }
 
-                let replicated_table_schema =
-                    ReplicatedTableSchema::all(Arc::clone(&group.rows.table_schema));
+                let replicated_table_schema = group.rows.replicated_table_schema.clone();
                 for (row_index, row) in rows.into_iter().enumerate() {
                     let commit_lsn = PgLsn::from(group.commit_lsns.values()[row_index]);
                     let tx_ordinal = group.tx_ordinals.values()[row_index];
@@ -229,7 +238,7 @@ fn table_change_set_to_events(
         }
     }
 
-    events
+    Ok(events)
 }
 
 fn table_id_to_replicated_table_schema(table_id: TableId) -> ReplicatedTableSchema {
@@ -239,16 +248,27 @@ fn table_id_to_replicated_table_schema(table_id: TableId) -> ReplicatedTableSche
     ReplicatedTableSchema::all(Arc::new(table_schema))
 }
 
+fn updated_table_row_from_group(group: &ChangeArrowBatch, row: TableRow) -> UpdatedTableRow {
+    match group.partial_update_missing_column_indexes.as_ref() {
+        Some(missing_column_indexes) => UpdatedTableRow::Partial(PartialTableRow::new(
+            group.rows.replicated_table_schema.column_schemas().len(),
+            row,
+            missing_column_indexes.to_vec(),
+        )),
+        None => UpdatedTableRow::Full(row),
+    }
+}
+
 fn stream_batches_to_events(
     batches: &[StreamBatch],
-    relation_table_schemas: &mut HashMap<TableId, Arc<TableSchema>>,
-) -> Vec<Event> {
+    relation_table_schemas: &mut HashMap<TableId, ReplicatedTableSchema>,
+) -> EtlResult<Vec<Event>> {
     let mut events = Vec::new();
 
     for batch in batches {
         match batch {
             StreamBatch::Changes(change_set) => {
-                events.extend(table_change_set_to_events(change_set, relation_table_schemas));
+                events.extend(table_change_set_to_events(change_set, relation_table_schemas)?);
             }
             StreamBatch::Truncate(TruncateBatch { rel_ids, commit_lsn, tx_ordinal, options }) => {
                 events.push(Event::Truncate(crate::types::TruncateEvent {
@@ -266,13 +286,13 @@ fn stream_batches_to_events(
         }
     }
 
-    events
+    Ok(events)
 }
 
 struct Inner<D> {
     wrapped_destination: D,
     events: Vec<Event>,
-    relation_table_schemas: HashMap<TableId, Arc<TableSchema>>,
+    relation_table_schemas: HashMap<TableId, ReplicatedTableSchema>,
     table_rows: HashMap<TableId, Vec<TableRow>>,
     tables_dropped_for_copy: HashSet<TableId>,
     event_conditions: Vec<(EventPredicate, Arc<Notify>)>,
@@ -468,6 +488,7 @@ impl<D> TestDestinationWrapper<D> {
     pub async fn clear_events(&self) {
         let mut inner = self.inner.write().await;
         inner.events.clear();
+        inner.relation_table_schemas.clear();
     }
 
     /// Returns whether the table was dropped for a fresh copy through the
@@ -554,7 +575,13 @@ where
             inner.wrapped_destination.clone()
         };
         let table_id = batch.table_id;
-        let table_rows = snapshot_batch_to_table_rows(&batch);
+        let table_rows = match snapshot_batch_to_table_rows(&batch) {
+            Ok(table_rows) => table_rows,
+            Err(error) => {
+                async_result.send(Err(error));
+                return Ok(());
+            }
+        };
 
         let (wrapped_flush_result, pending_result) = WriteSnapshotBatchResult::new(());
         destination.write_snapshot_batch(batch, wrapped_flush_result).await?;
@@ -589,7 +616,13 @@ where
         let (events, relation_table_schemas) = {
             let inner = self.inner.read().await;
             let mut relation_table_schemas = inner.relation_table_schemas.clone();
-            let events = stream_batches_to_events(&batches, &mut relation_table_schemas);
+            let events = match stream_batches_to_events(&batches, &mut relation_table_schemas) {
+                Ok(events) => events,
+                Err(error) => {
+                    async_result.send(Err(error));
+                    return Ok(());
+                }
+            };
 
             (events, relation_table_schemas)
         };

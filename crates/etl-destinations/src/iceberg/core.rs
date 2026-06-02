@@ -13,13 +13,13 @@ use etl::{
         },
     },
     error::{ErrorKind, EtlResult},
-    etl_error, record_batch_to_table_rows,
+    etl_error, record_batch_to_table_rows_with_schema,
     state::destination_table_metadata::DestinationTableMetadata,
     store::DestinationStore,
     types::{
         Cell, ChangeKind, ColumnSchema, EventSequenceKey, IdentityMask, IdentityType,
-        ReplicatedTableSchema, ReplicationMask, RowImage, StreamBatch, TableArrowBatch, TableId,
-        TableName, TableRow, TableSchema, Type, generate_sequence_number,
+        ReplicatedTableSchema, RowImage, StreamBatch, TableArrowBatch, TableId, TableName,
+        TableRow, Type, generate_sequence_number,
     },
 };
 use tokio::{sync::Mutex, task::JoinSet};
@@ -358,9 +358,11 @@ where
                 };
 
                 for group in change_set.groups {
-                    let replicated_table_schema =
-                        Self::replicated_schema_for_arrow_batch(&group.rows.table_schema);
-                    let rows = record_batch_to_table_rows(&group.rows.batch);
+                    let replicated_table_schema = group.rows.replicated_table_schema.clone();
+                    let rows = record_batch_to_table_rows_with_schema(
+                        &group.rows.batch,
+                        &group.rows.table_schema,
+                    )?;
 
                     for (row_idx, mut table_row) in rows.into_iter().enumerate() {
                         let sequence_key = EventSequenceKey::new(
@@ -555,14 +557,6 @@ where
         Ok(namespace)
     }
 
-    /// Builds a replicated schema for Arrow batches that already contain only
-    /// destination-visible columns.
-    fn replicated_schema_for_arrow_batch(table_schema: &Arc<TableSchema>) -> ReplicatedTableSchema {
-        let replication_mask = ReplicationMask::all(table_schema);
-        let identity_mask = IdentityMask::from_bytes(replication_mask.as_slice().to_vec());
-        ReplicatedTableSchema::from_masks(Arc::clone(table_schema), replication_mask, identity_mask)
-    }
-
     /// Builds column schemas with CDC-specific columns added.
     ///
     /// Takes the replicated columns from the schema and adds two additional
@@ -620,10 +614,15 @@ where
         batch: TableArrowBatch,
         async_result: WriteSnapshotBatchResult<()>,
     ) -> EtlResult<()> {
-        let replicated_table_schema = Self::replicated_schema_for_arrow_batch(&batch.table_schema);
-        let table_rows = record_batch_to_table_rows(&batch.batch);
-        let result =
-            IcebergDestination::write_table_rows(self, &replicated_table_schema, table_rows).await;
+        let replicated_table_schema = batch.replicated_table_schema;
+        let result = match record_batch_to_table_rows_with_schema(&batch.batch, &batch.table_schema)
+        {
+            Ok(table_rows) => {
+                IcebergDestination::write_table_rows(self, &replicated_table_schema, table_rows)
+                    .await
+            }
+            Err(error) => Err(error),
+        };
         async_result.send(result);
 
         Ok(())

@@ -8,13 +8,12 @@ use etl::{
         },
     },
     error::{ErrorKind, EtlResult},
-    etl_error, record_batch_to_table_rows,
-    state::destination_table_metadata::DestinationTableMetadata,
+    etl_error, record_batch_to_table_rows_with_schema,
+    state::destination_table_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus},
     store::{schema::SchemaStore, state::StateStore},
     types::{
-        Cell, ChangeKind, EventSequenceKey, IdentityType, PgLsn, ReplicatedTableSchema,
-        ReplicationMask, RowImage, SchemaDiff, SnapshotId, StreamBatch, TableArrowBatch, TableId,
-        TableRow, Type, is_array_type,
+        Cell, ChangeKind, EventSequenceKey, IdentityType, PgLsn, ReplicatedTableSchema, RowImage,
+        SchemaDiff, StreamBatch, TableArrowBatch, TableId, TableRow, Type, is_array_type,
     },
 };
 use etl_config::shared::ClickHouseEngine;
@@ -492,8 +491,12 @@ where
     ) -> EtlResult<(String, Arc<[bool]>)> {
         validate_replica_identity_for_clickhouse(schema, self.inserter_config.engine)?;
         let clickhouse_table_name = try_stringify_table_name(schema.name())?;
+        let table_id = schema.id();
+        let metadata = self.store.get_destination_table_metadata(table_id).await?;
 
-        if let Some(flags) = self.table_cache.read().get(&clickhouse_table_name).cloned() {
+        if metadata.as_ref().is_some_and(|metadata| metadata_matches_schema(metadata, schema))
+            && let Some(flags) = self.table_cache.read().get(&clickhouse_table_name).cloned()
+        {
             return Ok((clickhouse_table_name, flags));
         }
 
@@ -503,8 +506,7 @@ where
         // would then mis-align RowBinary on insert.
         self.ensure_engine_matches(&clickhouse_table_name).await?;
 
-        let table_id = schema.id();
-        match self.store.get_destination_table_metadata(table_id).await? {
+        match metadata {
             None => {
                 self.create_table_with_metadata(
                     table_id,
@@ -524,11 +526,15 @@ where
                         metadata,
                     )
                     .await?;
+                } else if !metadata_matches_schema(&metadata, schema) {
+                    self.apply_schema_change_with_metadata(
+                        table_id,
+                        &clickhouse_table_name,
+                        schema,
+                        metadata,
+                    )
+                    .await?;
                 }
-                // Otherwise the metadata is already `Applied`: this branch
-                // runs after `handle_relation_event` invalidated the cache,
-                // so no DDL is needed and we just fall through to recompute
-                // nullable flags below.
             }
         }
 
@@ -557,6 +563,46 @@ where
         };
 
         Ok((clickhouse_table_name, flags))
+    }
+
+    async fn apply_schema_change_with_metadata(
+        &self,
+        table_id: TableId,
+        clickhouse_table_name: &str,
+        schema: &ReplicatedTableSchema,
+        metadata: DestinationTableMetadata,
+    ) -> EtlResult<()> {
+        let old_table_schema =
+            self.store.get_table_schema(&table_id, metadata.snapshot_id).await?.ok_or_else(
+                || {
+                    etl_error!(
+                        ErrorKind::InvalidState,
+                        "Old schema not found for schema change",
+                        format!(
+                            "Cannot find schema for table {} at snapshot_id {}",
+                            table_id, metadata.snapshot_id
+                        )
+                    )
+                },
+            )?;
+        let old_schema =
+            ReplicatedTableSchema::from_mask(old_table_schema, metadata.replication_mask.clone());
+        let applying_metadata = metadata.with_schema_change(
+            schema.inner().snapshot_id,
+            schema.replication_mask().clone(),
+            DestinationTableSchemaStatus::Applying,
+        );
+        self.store.store_destination_table_metadata(table_id, applying_metadata.clone()).await?;
+
+        let diff = old_schema.diff(schema);
+        self.apply_schema_diff(clickhouse_table_name, &diff, &old_schema, schema).await?;
+
+        self.store
+            .store_destination_table_metadata(table_id, applying_metadata.to_applied())
+            .await?;
+        self.table_cache.write().remove(clickhouse_table_name);
+
+        Ok(())
     }
 
     /// Re-runs an interrupted DDL idempotently and transitions metadata to
@@ -752,8 +798,7 @@ where
         let mut batch_iter = batches.into_iter().peekable();
 
         while batch_iter.peek().is_some() {
-            let mut pending: HashMap<TableId, (ReplicatedTableSchema, Vec<PendingRow>)> =
-                HashMap::new();
+            let mut pending: Vec<(ReplicatedTableSchema, Vec<PendingRow>)> = Vec::new();
 
             while let Some(batch) = batch_iter.peek() {
                 if matches!(batch, StreamBatch::Truncate(_)) {
@@ -765,11 +810,13 @@ where
                 else {
                     unreachable!("truncate batches are handled separately");
                 };
-                let table_schema =
-                    self.replicated_table_schema_for_stream_batch(change_set.table_id).await?;
 
                 for group in change_set.groups {
-                    let rows = record_batch_to_table_rows(&group.rows.batch);
+                    let table_schema = group.rows.replicated_table_schema.clone();
+                    let rows = record_batch_to_table_rows_with_schema(
+                        &group.rows.batch,
+                        &group.rows.table_schema,
+                    )?;
 
                     for (row_idx, table_row) in rows.into_iter().enumerate() {
                         let commit_lsn = PgLsn::from(group.commit_lsns.value(row_idx));
@@ -784,15 +831,14 @@ where
                                 } else {
                                     table_row
                                 };
-                                let entry = pending
-                                    .entry(change_set.table_id)
-                                    .or_insert_with(|| (table_schema.clone(), Vec::new()));
-                                entry.1.push(PendingRow {
-                                    operation: CdcOperation::Delete,
-                                    commit_lsn,
-                                    tx_ordinal,
-                                    cells: old_row.into_values(),
-                                });
+                                pending_rows_for_schema(&mut pending, &table_schema).push(
+                                    PendingRow {
+                                        operation: CdcOperation::Delete,
+                                        commit_lsn,
+                                        tx_ordinal,
+                                        cells: old_row.into_values(),
+                                    },
+                                );
                                 continue;
                             }
                             (ChangeKind::Delete, RowImage::New)
@@ -805,10 +851,7 @@ where
                             }
                         };
 
-                        let entry = pending
-                            .entry(change_set.table_id)
-                            .or_insert_with(|| (table_schema.clone(), Vec::new()));
-                        entry.1.push(PendingRow {
+                        pending_rows_for_schema(&mut pending, &table_schema).push(PendingRow {
                             operation,
                             commit_lsn,
                             tx_ordinal,
@@ -838,55 +881,16 @@ where
         Ok(())
     }
 
-    async fn replicated_table_schema_for_stream_batch(
-        &self,
-        table_id: TableId,
-    ) -> EtlResult<ReplicatedTableSchema> {
-        if let Some(metadata) = self.store.get_applied_destination_table_metadata(table_id).await? {
-            let table_schema =
-                self.store.get_table_schema(&table_id, metadata.snapshot_id).await?.ok_or_else(
-                    || {
-                        etl_error!(
-                            ErrorKind::MissingTableSchema,
-                            "Table not found in the schema store",
-                            format!(
-                                "The table schema for table {table_id} at snapshot {} was not \
-                                 found in the schema store",
-                                metadata.snapshot_id
-                            )
-                        )
-                    },
-                )?;
-
-            return Ok(ReplicatedTableSchema::from_mask(table_schema, metadata.replication_mask));
-        }
-
-        let table_schema =
-            self.store.get_table_schema(&table_id, SnapshotId::max()).await?.ok_or_else(|| {
-                etl_error!(
-                    ErrorKind::MissingTableSchema,
-                    "Table not found in the schema store",
-                    format!(
-                        "The table schema for table {table_id} was not found in the schema store"
-                    )
-                )
-            })?;
-
-        Ok(ReplicatedTableSchema::from_mask(
-            Arc::clone(&table_schema),
-            ReplicationMask::all(&table_schema),
-        ))
-    }
-
     /// Encodes the accumulated `PendingRow` batches and inserts them into
-    /// ClickHouse, one `JoinSet` task per table. No-op if `pending` is empty.
+    /// ClickHouse, one `JoinSet` task per table schema. No-op if `pending` is
+    /// empty.
     ///
     /// All `ensure_table_exists` calls run sequentially before any insert is
     /// spawned, so a schema-resolution failure aborts the whole pass without
     /// any partial-write side effects.
     async fn flush_pending_rows(
         &self,
-        pending: HashMap<TableId, (ReplicatedTableSchema, Vec<PendingRow>)>,
+        pending: Vec<(ReplicatedTableSchema, Vec<PendingRow>)>,
     ) -> EtlResult<()> {
         if pending.is_empty() {
             return Ok(());
@@ -894,7 +898,7 @@ where
 
         let mut prepared: Vec<(String, Arc<[bool]>, Vec<PendingRow>)> =
             Vec::with_capacity(pending.len());
-        for (_, (schema, rows)) in pending {
+        for (schema, rows) in pending {
             let (clickhouse_table_name, nullable_flags) = self.ensure_table_exists(&schema).await?;
             prepared.push((clickhouse_table_name, nullable_flags, rows));
         }
@@ -938,6 +942,42 @@ where
 
         Ok(())
     }
+}
+
+fn pending_rows_for_schema<'a>(
+    pending: &'a mut Vec<(ReplicatedTableSchema, Vec<PendingRow>)>,
+    schema: &ReplicatedTableSchema,
+) -> &'a mut Vec<PendingRow> {
+    if let Some(index) = pending
+        .iter()
+        .position(|(existing_schema, _)| replicated_table_schemas_match(existing_schema, schema))
+    {
+        return &mut pending[index].1;
+    }
+
+    pending.push((schema.clone(), Vec::new()));
+    &mut pending.last_mut().expect("pending entry was just pushed").1
+}
+
+fn replicated_table_schemas_match(
+    left: &ReplicatedTableSchema,
+    right: &ReplicatedTableSchema,
+) -> bool {
+    left.id() == right.id()
+        && left.name() == right.name()
+        && left.inner().snapshot_id == right.inner().snapshot_id
+        && left.inner().column_schemas == right.inner().column_schemas
+        && left.replication_mask().as_slice() == right.replication_mask().as_slice()
+        && left.identity_mask().as_slice() == right.identity_mask().as_slice()
+}
+
+fn metadata_matches_schema(
+    metadata: &DestinationTableMetadata,
+    schema: &ReplicatedTableSchema,
+) -> bool {
+    metadata.is_applied()
+        && metadata.snapshot_id == schema.inner().snapshot_id
+        && metadata.replication_mask.as_slice() == schema.replication_mask().as_slice()
 }
 
 /// Rejects schema diffs that would drop or rename a primary-key column on
@@ -1203,9 +1243,12 @@ where
         batch: TableArrowBatch,
         async_result: WriteSnapshotBatchResult<()>,
     ) -> EtlResult<()> {
-        let table_schema = ReplicatedTableSchema::all(Arc::clone(&batch.table_schema));
-        let table_rows = record_batch_to_table_rows(&batch.batch);
-        let result = self.write_table_rows_inner(&table_schema, table_rows).await;
+        let table_schema = batch.replicated_table_schema;
+        let result = match record_batch_to_table_rows_with_schema(&batch.batch, &batch.table_schema)
+        {
+            Ok(table_rows) => self.write_table_rows_inner(&table_schema, table_rows).await,
+            Err(error) => Err(error),
+        };
         async_result.send(result);
         Ok(())
     }
