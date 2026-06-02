@@ -1,0 +1,17 @@
+---
+source: crates/etl-api/tests/destinations_pipelines.rs
+expression: response.config
+---
+Snowflake {
+    account_id: "myorg-myaccount",
+    user: "etl_user",
+    private_key: SerializableSecretString(
+        SecretBox<str>([REDACTED]),
+    ),
+    private_key_passphrase: None,
+    database: "my_database",
+    schema: "public",
+    role: Some(
+        "etl_role",
+    ),
+}

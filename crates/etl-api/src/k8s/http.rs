@@ -57,6 +57,13 @@ const DUCKLAKE_SECRET_NAME_SUFFIX: &str = "ducklake";
 const DUCKLAKE_S3_ACCESS_KEY_ID_KEY_NAME: &str = "s3-access-key-id";
 /// Name of s3 secret access key in the ducklake secret and its reference.
 const DUCKLAKE_S3_SECRET_ACCESS_KEY_KEY_NAME: &str = "s3-secret-access-key";
+/// Secret name suffix for Snowflake credentials.
+const SNOWFLAKE_SECRET_NAME_SUFFIX: &str = "snowflake";
+/// Name of the private key entry in the Snowflake secret and its reference.
+const SNOWFLAKE_PRIVATE_KEY_NAME: &str = "private-key";
+/// Name of the private key passphrase entry in the Snowflake secret and its
+/// reference.
+const SNOWFLAKE_PRIVATE_KEY_PASSPHRASE_NAME: &str = "private-key-passphrase";
 /// Secret name suffix for the Postgres password.
 const POSTGRES_SECRET_NAME_SUFFIX: &str = "postgres-password";
 /// ConfigMap name suffix for the replicator configuration files.
@@ -524,16 +531,36 @@ impl K8sClient for HttpK8sClient {
 
     async fn create_or_update_snowflake_secret(
         &self,
-        _prefix: &str,
-        _private_key: &str,
-        _private_key_passphrase: Option<&str>,
+        prefix: &str,
+        private_key: &str,
+        private_key_passphrase: Option<&str>,
     ) -> Result<(), K8sError> {
-        // Stub: real implementation in ETL-641
+        debug!("patching snowflake secret");
+
+        let snowflake_secret_name = create_snowflake_secret_name(prefix);
+        let replicator_app_name = create_replicator_app_name(prefix);
+        let secret = create_snowflake_secret(
+            &snowflake_secret_name,
+            &replicator_app_name,
+            private_key,
+            private_key_passphrase,
+        );
+
+        let pp = PatchParams::apply(&snowflake_secret_name).force();
+        self.secrets_api.patch(&snowflake_secret_name, &pp, &Patch::Apply(secret)).await?;
+
         Ok(())
     }
 
-    async fn delete_snowflake_secret(&self, _prefix: &str) -> Result<(), K8sError> {
-        // Stub: real implementation in ETL-641
+    async fn delete_snowflake_secret(&self, prefix: &str) -> Result<(), K8sError> {
+        debug!("deleting snowflake secret");
+
+        let snowflake_secret_name = create_snowflake_secret_name(prefix);
+        let dp = DeleteParams::default();
+        Self::handle_delete_with_404_ignore(
+            self.secrets_api.delete(&snowflake_secret_name, &dp).await,
+        )?;
+
         Ok(())
     }
 
@@ -773,6 +800,10 @@ fn create_ducklake_secret_name(prefix: &str) -> String {
     format!("{prefix}-{DUCKLAKE_SECRET_NAME_SUFFIX}")
 }
 
+fn create_snowflake_secret_name(prefix: &str) -> String {
+    format!("{prefix}-{SNOWFLAKE_SECRET_NAME_SUFFIX}")
+}
+
 fn create_ducklake_maintenance_name(prefix: &str) -> String {
     prefix.to_owned()
 }
@@ -875,6 +906,33 @@ fn create_clickhouse_password_secret(
             CLICKHOUSE_PASSWORD_NAME.to_owned(),
             clickhouse_password.to_owned(),
         )])),
+        ..Secret::default()
+    }
+}
+
+fn create_snowflake_secret(
+    secret_name: &str,
+    replicator_app_name: &str,
+    private_key: &str,
+    private_key_passphrase: Option<&str>,
+) -> Secret {
+    let mut string_data =
+        BTreeMap::from([(SNOWFLAKE_PRIVATE_KEY_NAME.to_owned(), private_key.to_owned())]);
+    if let Some(passphrase) = private_key_passphrase {
+        string_data.insert(SNOWFLAKE_PRIVATE_KEY_PASSPHRASE_NAME.to_owned(), passphrase.to_owned());
+    }
+    Secret {
+        metadata: ObjectMeta {
+            name: Some(secret_name.to_owned()),
+            namespace: Some(DATA_PLANE_NAMESPACE.to_owned()),
+            labels: Some(BTreeMap::from([
+                ("etl.supabase.com/app-name".to_owned(), replicator_app_name.to_owned()),
+                ("etl.supabase.com/app-type".to_owned(), REPLICATOR_APP_LABEL.to_owned()),
+            ])),
+            ..ObjectMeta::default()
+        },
+        type_: Some("Opaque".to_owned()),
+        string_data: Some(string_data),
         ..Secret::default()
     }
 }
@@ -1199,12 +1257,19 @@ fn create_container_environment_json(
                 }));
             }
         }
-        DestinationType::Snowflake => {
+        DestinationType::Snowflake { passphrase_secret_required } => {
             let postgres_secret_name = create_postgres_secret_name(prefix);
             let postgres_secret_env_var_json =
                 create_postgres_secret_env_var_json(&postgres_secret_name);
             container_environment.push(postgres_secret_env_var_json);
-            // Snowflake-specific env vars to be added in ETL-641
+
+            let snowflake_secret_name = create_snowflake_secret_name(prefix);
+            container_environment
+                .push(create_snowflake_private_key_env_var_json(&snowflake_secret_name));
+            if passphrase_secret_required {
+                container_environment
+                    .push(create_snowflake_passphrase_env_var_json(&snowflake_secret_name));
+            }
         }
     }
     container_environment
@@ -1424,6 +1489,30 @@ fn create_ducklake_s3_secret_access_key_env_var_json(
           "name": ducklake_secret_name,
           "key": DUCKLAKE_S3_SECRET_ACCESS_KEY_KEY_NAME,
           "optional": true
+        }
+      }
+    })
+}
+
+fn create_snowflake_private_key_env_var_json(snowflake_secret_name: &str) -> serde_json::Value {
+    json!({
+      "name": "APP_DESTINATION__SNOWFLAKE__PRIVATE_KEY",
+      "valueFrom": {
+        "secretKeyRef": {
+          "name": snowflake_secret_name,
+          "key": SNOWFLAKE_PRIVATE_KEY_NAME
+        }
+      }
+    })
+}
+
+fn create_snowflake_passphrase_env_var_json(snowflake_secret_name: &str) -> serde_json::Value {
+    json!({
+      "name": "APP_DESTINATION__SNOWFLAKE__PRIVATE_KEY_PASSPHRASE",
+      "valueFrom": {
+        "secretKeyRef": {
+          "name": snowflake_secret_name,
+          "key": SNOWFLAKE_PRIVATE_KEY_PASSPHRASE_NAME
         }
       }
     })
@@ -1661,6 +1750,7 @@ mod tests {
         let bq_secret_name = create_bq_secret_name(&prefix);
         let iceberg_secret_name = create_iceberg_secret_name(&prefix);
         let ducklake_secret_name = create_ducklake_secret_name(&prefix);
+        let snowflake_secret_name = create_snowflake_secret_name(&prefix);
         let config_map_name = create_replicator_config_map_name(&prefix);
         let ducklake_maintenance_name = create_ducklake_maintenance_name(&prefix);
         let stateful_set_name = create_stateful_set_name(&prefix);
@@ -1730,6 +1820,16 @@ mod tests {
                     "secret",
                     "secret",
                 ),
+            ),
+            (
+                "snowflake secret",
+                serde_json::to_value(create_snowflake_secret(
+                    &snowflake_secret_name,
+                    &replicator_app_name,
+                    "secret",
+                    Some("secret"),
+                ))
+                .unwrap(),
             ),
             (
                 "replicator config map",
@@ -2204,6 +2304,99 @@ mod tests {
             &container_environment,
             "APP_DESTINATION__CLICKHOUSE__PASSWORD",
         ));
+    }
+
+    #[test]
+    fn snowflake_with_passphrase_references_both_secrets() {
+        let prefix = create_k8s_object_prefix(TENANT_ID, 42);
+        let replicator_image = "ramsup/etl-replicator:2a41356af735f891de37d71c0e1a62864fe4630e";
+
+        let container_environment = create_container_environment_json(
+            &prefix,
+            &Environment::Dev,
+            replicator_image,
+            DestinationType::Snowflake { passphrase_secret_required: true },
+            None,
+            LogLevel::Info,
+        );
+
+        assert!(container_environment_has_var(
+            &container_environment,
+            "APP_PIPELINE__PG_CONNECTION__PASSWORD",
+        ));
+        assert!(container_environment_has_var(
+            &container_environment,
+            "APP_DESTINATION__SNOWFLAKE__PRIVATE_KEY",
+        ));
+        assert!(container_environment_has_var(
+            &container_environment,
+            "APP_DESTINATION__SNOWFLAKE__PRIVATE_KEY_PASSPHRASE",
+        ));
+    }
+
+    #[test]
+    fn snowflake_without_passphrase_omits_passphrase_secret() {
+        let prefix = create_k8s_object_prefix(TENANT_ID, 42);
+        let replicator_image = "ramsup/etl-replicator:2a41356af735f891de37d71c0e1a62864fe4630e";
+
+        let container_environment = create_container_environment_json(
+            &prefix,
+            &Environment::Dev,
+            replicator_image,
+            DestinationType::Snowflake { passphrase_secret_required: false },
+            None,
+            LogLevel::Info,
+        );
+
+        assert!(container_environment_has_var(
+            &container_environment,
+            "APP_PIPELINE__PG_CONNECTION__PASSWORD",
+        ));
+        assert!(container_environment_has_var(
+            &container_environment,
+            "APP_DESTINATION__SNOWFLAKE__PRIVATE_KEY",
+        ));
+        assert!(!container_environment_has_var(
+            &container_environment,
+            "APP_DESTINATION__SNOWFLAKE__PRIVATE_KEY_PASSPHRASE",
+        ));
+    }
+
+    #[test]
+    fn snowflake_secret_contains_private_key() {
+        let secret = create_snowflake_secret(
+            "tenant-42-snowflake",
+            "tenant-42-replicator-app",
+            "-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----",
+            None,
+        );
+
+        assert_eq!(secret.metadata.name.as_deref(), Some("tenant-42-snowflake"),);
+        assert_eq!(secret.metadata.namespace.as_deref(), Some(DATA_PLANE_NAMESPACE));
+        assert_eq!(secret.type_.as_deref(), Some("Opaque"));
+
+        let labels = secret.metadata.labels.as_ref().unwrap();
+        assert_eq!(labels["etl.supabase.com/app-name"], "tenant-42-replicator-app");
+        assert_eq!(labels["etl.supabase.com/app-type"], REPLICATOR_APP_LABEL);
+
+        let string_data = secret.string_data.as_ref().unwrap();
+        assert!(string_data.contains_key(SNOWFLAKE_PRIVATE_KEY_NAME));
+        assert!(!string_data.contains_key(SNOWFLAKE_PRIVATE_KEY_PASSPHRASE_NAME));
+    }
+
+    #[test]
+    fn snowflake_secret_contains_private_key_and_passphrase() {
+        let secret = create_snowflake_secret(
+            "tenant-42-snowflake",
+            "tenant-42-replicator-app",
+            "-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----",
+            Some("my-passphrase"),
+        );
+
+        let string_data = secret.string_data.as_ref().unwrap();
+        assert!(string_data.contains_key(SNOWFLAKE_PRIVATE_KEY_NAME));
+        assert!(string_data.contains_key(SNOWFLAKE_PRIVATE_KEY_PASSPHRASE_NAME));
+        assert_eq!(string_data[SNOWFLAKE_PRIVATE_KEY_PASSPHRASE_NAME], "my-passphrase");
     }
 
     #[test]
