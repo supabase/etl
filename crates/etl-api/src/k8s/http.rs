@@ -537,14 +537,18 @@ impl K8sClient for HttpK8sClient {
     ) -> Result<(), K8sError> {
         debug!("patching snowflake secret");
 
+        let encoded_private_key = BASE64_STANDARD.encode(private_key);
+        let encoded_passphrase = private_key_passphrase.map(|p| BASE64_STANDARD.encode(p));
+
         let snowflake_secret_name = create_snowflake_secret_name(prefix);
         let replicator_app_name = create_replicator_app_name(prefix);
-        let secret = create_snowflake_secret(
+        let snowflake_secret_json = create_snowflake_secret_json(
             &snowflake_secret_name,
             &replicator_app_name,
-            private_key,
-            private_key_passphrase,
+            &encoded_private_key,
+            encoded_passphrase.as_deref(),
         );
+        let secret: Secret = serde_json::from_value(snowflake_secret_json)?;
 
         let pp = PatchParams::apply(&snowflake_secret_name).force();
         self.secrets_api.patch(&snowflake_secret_name, &pp, &Patch::Apply(secret)).await?;
@@ -910,31 +914,37 @@ fn create_clickhouse_password_secret(
     }
 }
 
-fn create_snowflake_secret(
+fn create_snowflake_secret_json(
     secret_name: &str,
     replicator_app_name: &str,
-    private_key: &str,
-    private_key_passphrase: Option<&str>,
-) -> Secret {
-    let mut string_data =
-        BTreeMap::from([(SNOWFLAKE_PRIVATE_KEY_NAME.to_owned(), private_key.to_owned())]);
-    if let Some(passphrase) = private_key_passphrase {
-        string_data.insert(SNOWFLAKE_PRIVATE_KEY_PASSPHRASE_NAME.to_owned(), passphrase.to_owned());
+    encoded_private_key: &str,
+    encoded_private_key_passphrase: Option<&str>,
+) -> serde_json::Value {
+    let mut data = serde_json::Map::new();
+    data.insert(
+        SNOWFLAKE_PRIVATE_KEY_NAME.to_owned(),
+        serde_json::Value::String(encoded_private_key.to_owned()),
+    );
+    if let Some(encoded_passphrase) = encoded_private_key_passphrase {
+        data.insert(
+            SNOWFLAKE_PRIVATE_KEY_PASSPHRASE_NAME.to_owned(),
+            serde_json::Value::String(encoded_passphrase.to_owned()),
+        );
     }
-    Secret {
-        metadata: ObjectMeta {
-            name: Some(secret_name.to_owned()),
-            namespace: Some(DATA_PLANE_NAMESPACE.to_owned()),
-            labels: Some(BTreeMap::from([
-                ("etl.supabase.com/app-name".to_owned(), replicator_app_name.to_owned()),
-                ("etl.supabase.com/app-type".to_owned(), REPLICATOR_APP_LABEL.to_owned()),
-            ])),
-            ..ObjectMeta::default()
-        },
-        type_: Some("Opaque".to_owned()),
-        string_data: Some(string_data),
-        ..Secret::default()
-    }
+    json!({
+      "apiVersion": "v1",
+      "kind": "Secret",
+      "metadata": {
+        "name": secret_name,
+        "namespace": DATA_PLANE_NAMESPACE,
+        "labels": {
+          "etl.supabase.com/app-name": replicator_app_name,
+          "etl.supabase.com/app-type": REPLICATOR_APP_LABEL,
+        }
+      },
+      "type": "Opaque",
+      "data": data
+    })
 }
 
 fn create_bq_service_account_key_secret_json(
@@ -1823,13 +1833,12 @@ mod tests {
             ),
             (
                 "snowflake secret",
-                serde_json::to_value(create_snowflake_secret(
+                create_snowflake_secret_json(
                     &snowflake_secret_name,
                     &replicator_app_name,
-                    "secret",
-                    Some("secret"),
-                ))
-                .unwrap(),
+                    &BASE64_STANDARD.encode("secret"),
+                    Some(&BASE64_STANDARD.encode("secret")),
+                ),
             ),
             (
                 "replicator config map",
@@ -2364,14 +2373,17 @@ mod tests {
 
     #[test]
     fn snowflake_secret_contains_private_key() {
-        let secret = create_snowflake_secret(
+        let private_key = "-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----";
+        let encoded_private_key = BASE64_STANDARD.encode(private_key);
+        let snowflake_secret_json = create_snowflake_secret_json(
             "tenant-42-snowflake",
             "tenant-42-replicator-app",
-            "-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----",
+            &encoded_private_key,
             None,
         );
+        let secret: Secret = serde_json::from_value(snowflake_secret_json).unwrap();
 
-        assert_eq!(secret.metadata.name.as_deref(), Some("tenant-42-snowflake"),);
+        assert_eq!(secret.metadata.name.as_deref(), Some("tenant-42-snowflake"));
         assert_eq!(secret.metadata.namespace.as_deref(), Some(DATA_PLANE_NAMESPACE));
         assert_eq!(secret.type_.as_deref(), Some("Opaque"));
 
@@ -2379,24 +2391,31 @@ mod tests {
         assert_eq!(labels["etl.supabase.com/app-name"], "tenant-42-replicator-app");
         assert_eq!(labels["etl.supabase.com/app-type"], REPLICATOR_APP_LABEL);
 
-        let string_data = secret.string_data.as_ref().unwrap();
-        assert!(string_data.contains_key(SNOWFLAKE_PRIVATE_KEY_NAME));
-        assert!(!string_data.contains_key(SNOWFLAKE_PRIVATE_KEY_PASSPHRASE_NAME));
+        let data = secret.data.as_ref().unwrap();
+        let stored_private_key = data.get(SNOWFLAKE_PRIVATE_KEY_NAME).unwrap();
+        assert_eq!(stored_private_key.0, private_key.as_bytes());
+        assert!(!data.contains_key(SNOWFLAKE_PRIVATE_KEY_PASSPHRASE_NAME));
     }
 
     #[test]
     fn snowflake_secret_contains_private_key_and_passphrase() {
-        let secret = create_snowflake_secret(
+        let private_key = "-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----";
+        let passphrase = "my-passphrase";
+        let encoded_private_key = BASE64_STANDARD.encode(private_key);
+        let encoded_passphrase = BASE64_STANDARD.encode(passphrase);
+        let snowflake_secret_json = create_snowflake_secret_json(
             "tenant-42-snowflake",
             "tenant-42-replicator-app",
-            "-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----",
-            Some("my-passphrase"),
+            &encoded_private_key,
+            Some(&encoded_passphrase),
         );
+        let secret: Secret = serde_json::from_value(snowflake_secret_json).unwrap();
 
-        let string_data = secret.string_data.as_ref().unwrap();
-        assert!(string_data.contains_key(SNOWFLAKE_PRIVATE_KEY_NAME));
-        assert!(string_data.contains_key(SNOWFLAKE_PRIVATE_KEY_PASSPHRASE_NAME));
-        assert_eq!(string_data[SNOWFLAKE_PRIVATE_KEY_PASSPHRASE_NAME], "my-passphrase");
+        let data = secret.data.as_ref().unwrap();
+        let stored_private_key = data.get(SNOWFLAKE_PRIVATE_KEY_NAME).unwrap();
+        let stored_passphrase = data.get(SNOWFLAKE_PRIVATE_KEY_PASSPHRASE_NAME).unwrap();
+        assert_eq!(stored_private_key.0, private_key.as_bytes());
+        assert_eq!(stored_passphrase.0, passphrase.as_bytes());
     }
 
     #[test]
