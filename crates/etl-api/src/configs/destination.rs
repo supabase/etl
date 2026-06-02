@@ -151,7 +151,7 @@ pub enum FullApiDestinationConfig {
     },
     Snowflake {
         #[schema(example = "ORGNAME-ACCOUNTNAME")]
-        #[serde(deserialize_with = "crate::utils::trim_string")]
+        #[serde(deserialize_with = "crate::utils::trim_snowflake_account_id")]
         account_id: String,
         #[schema(example = "ETL_USER")]
         #[serde(deserialize_with = "crate::utils::trim_string")]
@@ -974,7 +974,7 @@ pub enum StoredIcebergConfig {
 pub enum FullApiIcebergConfig {
     Supabase {
         #[schema(example = "abcdefghijklmnopqrst")]
-        #[serde(deserialize_with = "crate::utils::trim_string")]
+        #[serde(deserialize_with = "crate::utils::trim_supabase_project_ref")]
         project_ref: String,
         #[schema(example = "my-warehouse")]
         #[serde(deserialize_with = "crate::utils::trim_string")]

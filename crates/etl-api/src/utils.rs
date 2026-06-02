@@ -48,6 +48,35 @@ where
     }
 }
 
+/// Deserializes and trims a Snowflake account identifier.
+///
+/// Values that are not strict account identifiers are rejected.
+///
+/// The account id is interpolated into the Snowflake account URL, so rejecting
+/// non-identifier characters here prevents host takeover (SSRF) and surfaces a
+/// clean, field-specific error at the API boundary.
+pub fn trim_snowflake_account_id<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?.trim().to_owned();
+    etl_config::shared::validate_snowflake_account_id(&s).map_err(D::Error::custom)?;
+    Ok(s)
+}
+
+/// Deserializes and trims a Supabase project ref.
+///
+/// Values that are not strict project refs are rejected.
+/// The project ref is interpolated into the Iceberg catalog URL.
+pub fn trim_supabase_project_ref<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?.trim().to_owned();
+    etl_config::shared::validate_supabase_project_ref(&s).map_err(D::Error::custom)?;
+    Ok(s)
+}
+
 /// Generates a random alphabetic string of length `len`.
 pub fn generate_random_alpha_str(len: usize) -> String {
     let chars = [
@@ -111,224 +140,160 @@ mod tests {
     use crate::utils::parse_docker_image_tag;
 
     #[test]
-    fn parse_with_tag() {
-        assert_eq!(parse_docker_image_tag("supabase/replicator:1.2.3"), "1.2.3");
-        assert_eq!(parse_docker_image_tag("example.com:5000/team/my-app:2.0"), "2.0");
-        assert_eq!(parse_docker_image_tag("ghcr.io/dockersamples/example-app:pr-311"), "pr-311");
+    fn docker_image_tag_parsing() {
+        let cases: &[(&str, &str)] = &[
+            // With explicit tag.
+            ("supabase/replicator:1.2.3", "1.2.3"),
+            ("example.com:5000/team/my-app:2.0", "2.0"),
+            ("ghcr.io/dockersamples/example-app:pr-311", "pr-311"),
+            // Tag with digest -- tag wins.
+            ("example.com:5000/team/my-app:2.0@sha256:abcdef0123456789", "2.0"),
+            // No tag defaults to "latest".
+            ("alpine", "latest"),
+            ("library/alpine", "latest"),
+            ("docker.io/library/alpine", "latest"),
+            // Digest only -- unavailable.
+            ("repo/name@sha256:abcdef0123456789", "unavailable"),
+        ];
+
+        for (input, expected) in cases {
+            assert_eq!(parse_docker_image_tag(input), *expected, "image {input:?}");
+        }
     }
 
     #[test]
-    fn parse_with_tag_and_digest() {
-        assert_eq!(
-            parse_docker_image_tag("example.com:5000/team/my-app:2.0@sha256:abcdef0123456789"),
-            "2.0"
-        );
-    }
-
-    #[test]
-    fn parse_without_tag_defaults_to_latest() {
-        assert_eq!(parse_docker_image_tag("alpine"), "latest");
-        assert_eq!(parse_docker_image_tag("library/alpine"), "latest");
-        assert_eq!(parse_docker_image_tag("docker.io/library/alpine"), "latest");
-    }
-
-    #[test]
-    fn parse_with_only_digest_unavailable() {
-        assert_eq!(parse_docker_image_tag("repo/name@sha256:abcdef0123456789"), "unavailable");
-    }
-
-    #[test]
-    fn trim_string_with_leading_and_trailing_whitespace() {
+    fn trim_string_deserializer() {
         #[derive(Deserialize)]
-        struct TestStruct {
+        struct T {
             #[serde(deserialize_with = "trim_string")]
             value: String,
         }
 
-        let json = r#"{"value": "  hello world  "}"#;
-        let result: TestStruct = serde_json::from_str(json).unwrap();
-        assert_eq!(result.value, "hello world");
-    }
+        let cases: &[(&str, &str)] = &[
+            (r#"{"value": "  hello world  "}"#, "hello world"),
+            (r#"{"value": "no_whitespace"}"#, "no_whitespace"),
+            (r#"{"value": "\t\n  trimmed  \n\t"}"#, "trimmed"),
+            (r#"{"value": ""}"#, ""),
+            (r#"{"value": "   \t\n   "}"#, ""),
+            (r#"{"value": "  hello   world  "}"#, "hello   world"),
+            (r#"{"value": "   leading"}"#, "leading"),
+            (r#"{"value": "trailing   "}"#, "trailing"),
+        ];
 
-    #[test]
-    fn trim_string_without_whitespace() {
-        #[derive(Deserialize)]
-        struct TestStruct {
-            #[serde(deserialize_with = "trim_string")]
-            value: String,
+        for (json, expected) in cases {
+            let result: T = serde_json::from_str(json).unwrap();
+            assert_eq!(result.value, *expected, "json {json}");
         }
-
-        let json = r#"{"value": "no_whitespace"}"#;
-        let result: TestStruct = serde_json::from_str(json).unwrap();
-        assert_eq!(result.value, "no_whitespace");
     }
 
     #[test]
-    fn trim_string_with_tabs_and_newlines() {
+    fn trim_option_string_deserializer() {
         #[derive(Deserialize)]
-        struct TestStruct {
-            #[serde(deserialize_with = "trim_string")]
-            value: String,
-        }
-
-        let json = r#"{"value": "\t\n  trimmed  \n\t"}"#;
-        let result: TestStruct = serde_json::from_str(json).unwrap();
-        assert_eq!(result.value, "trimmed");
-    }
-
-    #[test]
-    fn trim_string_empty_string() {
-        #[derive(Deserialize)]
-        struct TestStruct {
-            #[serde(deserialize_with = "trim_string")]
-            value: String,
-        }
-
-        let json = r#"{"value": ""}"#;
-        let result: TestStruct = serde_json::from_str(json).unwrap();
-        assert_eq!(result.value, "");
-    }
-
-    #[test]
-    fn trim_string_only_whitespace_becomes_empty() {
-        #[derive(Deserialize)]
-        struct TestStruct {
-            #[serde(deserialize_with = "trim_string")]
-            value: String,
-        }
-
-        let json = r#"{"value": "   \t\n   "}"#;
-        let result: TestStruct = serde_json::from_str(json).unwrap();
-        assert_eq!(result.value, "");
-    }
-
-    #[test]
-    fn trim_string_preserves_internal_whitespace() {
-        #[derive(Deserialize)]
-        struct TestStruct {
-            #[serde(deserialize_with = "trim_string")]
-            value: String,
-        }
-
-        let json = r#"{"value": "  hello   world  "}"#;
-        let result: TestStruct = serde_json::from_str(json).unwrap();
-        assert_eq!(result.value, "hello   world");
-    }
-
-    #[test]
-    fn trim_string_leading_only() {
-        #[derive(Deserialize)]
-        struct TestStruct {
-            #[serde(deserialize_with = "trim_string")]
-            value: String,
-        }
-
-        let json = r#"{"value": "   leading"}"#;
-        let result: TestStruct = serde_json::from_str(json).unwrap();
-        assert_eq!(result.value, "leading");
-    }
-
-    #[test]
-    fn trim_string_trailing_only() {
-        #[derive(Deserialize)]
-        struct TestStruct {
-            #[serde(deserialize_with = "trim_string")]
-            value: String,
-        }
-
-        let json = r#"{"value": "trailing   "}"#;
-        let result: TestStruct = serde_json::from_str(json).unwrap();
-        assert_eq!(result.value, "trailing");
-    }
-
-    #[test]
-    fn trim_option_string_with_whitespace() {
-        #[derive(Deserialize)]
-        struct TestStruct {
+        struct T {
             #[serde(default, deserialize_with = "trim_option_string")]
             value: Option<String>,
         }
 
-        let json = r#"{"value": "  hello world  "}"#;
-        let result: TestStruct = serde_json::from_str(json).unwrap();
-        assert_eq!(result.value, Some("hello world".to_owned()));
-    }
+        let cases: &[(&str, Option<&str>)] = &[
+            (r#"{"value": "  hello world  "}"#, Some("hello world")),
+            (r#"{"value": null}"#, None),
+            (r#"{}"#, None),
+            (r#"{"value": ""}"#, Some("")),
+            (r#"{"value": "   "}"#, Some("")),
+        ];
 
-    #[test]
-    fn trim_option_string_with_null() {
-        #[derive(Deserialize)]
-        struct TestStruct {
-            #[serde(default, deserialize_with = "trim_option_string")]
-            value: Option<String>,
+        for (json, expected) in cases {
+            let result: T = serde_json::from_str(json).unwrap();
+            assert_eq!(result.value.as_deref(), *expected, "json {json}");
         }
-
-        let json = r#"{"value": null}"#;
-        let result: TestStruct = serde_json::from_str(json).unwrap();
-        assert_eq!(result.value, None);
     }
 
     #[test]
-    fn trim_option_string_with_missing_field() {
-        #[derive(Deserialize)]
-        struct TestStruct {
-            #[serde(default, deserialize_with = "trim_option_string")]
-            value: Option<String>,
-        }
-
-        let json = r#"{}"#;
-        let result: TestStruct = serde_json::from_str(json).unwrap();
-        assert_eq!(result.value, None);
-    }
-
-    #[test]
-    fn trim_option_string_with_empty_string() {
-        #[derive(Deserialize)]
-        struct TestStruct {
-            #[serde(default, deserialize_with = "trim_option_string")]
-            value: Option<String>,
-        }
-
-        let json = r#"{"value": ""}"#;
-        let result: TestStruct = serde_json::from_str(json).unwrap();
-        assert_eq!(result.value, Some("".to_owned()));
-    }
-
-    #[test]
-    fn trim_option_string_whitespace_only_becomes_empty() {
-        #[derive(Deserialize)]
-        struct TestStruct {
-            #[serde(default, deserialize_with = "trim_option_string")]
-            value: Option<String>,
-        }
-
-        let json = r#"{"value": "   "}"#;
-        let result: TestStruct = serde_json::from_str(json).unwrap();
-        assert_eq!(result.value, Some("".to_owned()));
-    }
-
-    #[test]
-    fn trim_http_url_trims_and_parses() {
+    fn trim_http_url_deserializer() {
         #[derive(Debug, Deserialize)]
-        struct TestStruct {
+        struct T {
             #[serde(rename = "value", deserialize_with = "trim_http_url")]
-            _value: Url,
+            url: Url,
         }
 
-        let json = r#"{"value": "  https://example.com:8443/path  "}"#;
-        let result: TestStruct = serde_json::from_str(json).unwrap();
-        assert_eq!(result._value.as_str(), "https://example.com:8443/path");
+        // (input, Some(parsed_url) for valid, None for rejection)
+        let cases: &[(&str, Option<&str>)] = &[
+            ("  https://example.com:8443/path  ", Some("https://example.com:8443/path")),
+            ("ftp://example.com/data", None),
+        ];
+
+        for (input, expected) in cases {
+            let json = format!(r#"{{"value": "{input}"}}"#);
+            match expected {
+                Some(url) => {
+                    let result: T = serde_json::from_str(&json).unwrap();
+                    assert_eq!(result.url.as_str(), *url, "input {input:?}");
+                }
+                None => {
+                    assert!(serde_json::from_str::<T>(&json).is_err(), "should reject {input:?}");
+                }
+            }
+        }
     }
 
     #[test]
-    fn trim_http_url_rejects_non_http_scheme() {
+    fn trim_snowflake_account_id_deserializer() {
         #[derive(Debug, Deserialize)]
-        struct TestStruct {
-            #[serde(rename = "value", deserialize_with = "trim_http_url")]
-            _value: Url,
+        struct T {
+            #[serde(rename = "value", deserialize_with = "trim_snowflake_account_id")]
+            value: String,
         }
 
-        let json = r#"{"value": "ftp://example.com/data"}"#;
-        let error = serde_json::from_str::<TestStruct>(json).unwrap_err();
-        assert!(error.to_string().contains("url must use http or https scheme"));
+        // (input, Some(trimmed) for valid, None for rejection)
+        let cases: &[(&str, Option<&str>)] = &[
+            ("  myorg-myaccount  ", Some("myorg-myaccount")),
+            ("org-account", Some("org-account")),
+            ("127.0.0.1:8443/x", None),
+            ("attacker.example/foo", None),
+            ("169.254.169.254#", None),
+        ];
+
+        for (input, expected) in cases {
+            let json = format!(r#"{{"value": "{input}"}}"#);
+            match expected {
+                Some(val) => {
+                    let result: T = serde_json::from_str(&json).unwrap();
+                    assert_eq!(result.value, *val, "input {input:?}");
+                }
+                None => {
+                    assert!(serde_json::from_str::<T>(&json).is_err(), "should reject {input:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn trim_supabase_project_ref_deserializer() {
+        #[derive(Debug, Deserialize)]
+        struct T {
+            #[serde(rename = "value", deserialize_with = "trim_supabase_project_ref")]
+            value: String,
+        }
+
+        // (input, Some(trimmed) for valid, None for rejection)
+        let cases: &[(&str, Option<&str>)] = &[
+            ("  abcdefghijklmnopqrst  ", Some("abcdefghijklmnopqrst")),
+            ("attacker.example/foo", None),
+            ("169.254.169.254#", None),
+            ("tooshort", None),
+        ];
+
+        for (input, expected) in cases {
+            let json = format!(r#"{{"value": "{input}"}}"#);
+            match expected {
+                Some(val) => {
+                    let result: T = serde_json::from_str(&json).unwrap();
+                    assert_eq!(result.value, *val, "input {input:?}");
+                }
+                None => {
+                    assert!(serde_json::from_str::<T>(&json).is_err(), "should reject {input:?}");
+                }
+            }
+        }
     }
 }

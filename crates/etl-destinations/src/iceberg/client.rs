@@ -5,8 +5,9 @@ use etl::{
     error::EtlResult,
     types::{ColumnSchema, TableRow},
 };
+use etl_config::shared::validate_supabase_project_ref;
 use iceberg::{
-    Catalog, CatalogBuilder, NamespaceIdent, TableCreation, TableIdent,
+    Catalog, CatalogBuilder, ErrorKind, NamespaceIdent, TableCreation, TableIdent,
     io::{S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_REGION, S3_SECRET_ACCESS_KEY},
     spec::{DataFile, TableProperties},
     table::Table,
@@ -94,6 +95,9 @@ impl IcebergClient {
         s3_secret_access_key: String,
         s3_region: String,
     ) -> Result<Self, iceberg::Error> {
+        validate_supabase_project_ref(project_ref)
+            .map_err(|e| iceberg::Error::new(ErrorKind::DataInvalid, e.to_string()))?;
+
         let base_uri = format!("https://{project_ref}.storage.{supabase_domain}/storage");
         let catalog_uri = format!("{base_uri}/v1/iceberg");
         let s3_endpoint = format!("{base_uri}/v1/s3");
