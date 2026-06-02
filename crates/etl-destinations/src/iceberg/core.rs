@@ -17,9 +17,9 @@ use etl::{
     state::destination_table_metadata::DestinationTableMetadata,
     store::DestinationStore,
     types::{
-        Cell, ChangeKind, ColumnSchema, Event, EventSequenceKey, IdentityMask, IdentityType,
-        OldTableRow, ReplicatedTableSchema, ReplicationMask, RowImage, StreamBatch,
-        TableArrowBatch, TableId, TableName, TableRow, TableSchema, Type, generate_sequence_number,
+        Cell, ChangeKind, ColumnSchema, EventSequenceKey, IdentityMask, IdentityType,
+        ReplicatedTableSchema, ReplicationMask, RowImage, StreamBatch, TableArrowBatch, TableId,
+        TableName, TableRow, TableSchema, Type, generate_sequence_number,
     },
 };
 use tokio::{sync::Mutex, task::JoinSet};
@@ -269,7 +269,6 @@ where
     }
 
     /// Drops an Iceberg table before restarting a table copy.
-    #[allow(dead_code)]
     async fn drop_table_for_copy_inner(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
@@ -458,188 +457,6 @@ where
     /// separately and deduplicated for efficiency. Each event is augmented
     /// with CDC metadata including operation type and sequence number based
     /// on LSN information.
-    #[allow(dead_code)]
-    async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
-        let mut events_iter = events.into_iter().peekable();
-
-        while events_iter.peek().is_some() {
-            // Maps table ID to (schema, rows); schema is the first one seen for that table.
-            // Once schema change support is implemented, we will re-implement this.
-            let mut table_id_to_data: HashMap<TableId, (ReplicatedTableSchema, Vec<TableRow>)> =
-                HashMap::new();
-
-            // Process events until we hit a truncate event or run out of events
-            while let Some(event) = events_iter.peek() {
-                if matches!(event, Event::Truncate(_)) {
-                    break;
-                }
-
-                let Some(event) = events_iter.next() else {
-                    break;
-                };
-                match event {
-                    Event::Insert(mut insert) => {
-                        let sequence_key = insert.event_sequence_key().to_string();
-                        insert.table_row.values_mut().push(IcebergOperationType::Insert.into());
-                        insert.table_row.values_mut().push(Cell::String(sequence_key));
-
-                        let table_id = insert.replicated_table_schema.id();
-                        let entry = table_id_to_data.entry(table_id).or_insert_with(|| {
-                            (insert.replicated_table_schema.clone(), Vec::new())
-                        });
-                        entry.1.push(insert.table_row);
-                    }
-                    Event::Update(update) => {
-                        validate_iceberg_replica_identity(&update.replicated_table_schema)?;
-                        let sequence_key = update.event_sequence_key().to_string();
-                        let mut table_row = match update.updated_table_row {
-                            etl::types::UpdatedTableRow::Full(row) => row,
-                            etl::types::UpdatedTableRow::Partial(_) => {
-                                return Err(etl_error!(
-                                    ErrorKind::InvalidState,
-                                    "Iceberg update requires a full new row image",
-                                    format!(
-                                        "Table '{}' emitted a partial update row. Configure \
-                                         replication so all updated values are available before \
-                                         writing to Iceberg.",
-                                        update.replicated_table_schema.name()
-                                    )
-                                ));
-                            }
-                        };
-                        table_row.values_mut().push(IcebergOperationType::Update.into());
-                        table_row.values_mut().push(Cell::String(sequence_key));
-
-                        let table_id = update.replicated_table_schema.id();
-                        let entry = table_id_to_data.entry(table_id).or_insert_with(|| {
-                            (update.replicated_table_schema.clone(), Vec::new())
-                        });
-                        entry.1.push(table_row);
-                    }
-                    Event::Delete(delete) => {
-                        validate_iceberg_replica_identity(&delete.replicated_table_schema)?;
-                        let sequence_key = delete.event_sequence_key().to_string();
-                        let Some(old_table_row) = delete.old_table_row else {
-                            return Err(etl_error!(
-                                ErrorKind::InvalidState,
-                                "Iceberg delete requires an old row image",
-                                format!(
-                                    "Table '{}' emitted a delete without an old row image even \
-                                     though Iceberg requires FULL replica identity.",
-                                    delete.replicated_table_schema.name()
-                                )
-                            ));
-                        };
-                        let OldTableRow::Full(mut old_table_row) = old_table_row else {
-                            return Err(etl_error!(
-                                ErrorKind::InvalidState,
-                                "Iceberg delete requires a full old row image",
-                                format!(
-                                    "Table '{}' emitted a key-only delete image. Configure \
-                                     REPLICA IDENTITY FULL for Iceberg delete support.",
-                                    delete.replicated_table_schema.name()
-                                )
-                            ));
-                        };
-                        old_table_row.values_mut().push(IcebergOperationType::Delete.into());
-                        old_table_row.values_mut().push(Cell::String(sequence_key));
-
-                        let table_id = delete.replicated_table_schema.id();
-                        let entry = table_id_to_data.entry(table_id).or_insert_with(|| {
-                            (delete.replicated_table_schema.clone(), Vec::new())
-                        });
-                        entry.1.push(old_table_row);
-                    }
-                    Event::Relation(relation) => {
-                        validate_iceberg_replica_identity(&relation.replicated_table_schema)?;
-
-                        // Check if schema has changed - if so, error since Iceberg doesn't
-                        // support schema changes yet.
-                        let table_id = relation.replicated_table_schema.id();
-                        let new_snapshot_id = relation.replicated_table_schema.inner().snapshot_id;
-                        let new_replication_mask =
-                            relation.replicated_table_schema.replication_mask();
-
-                        if let Some(metadata) =
-                            self.store.get_applied_destination_table_metadata(table_id).await?
-                            && (metadata.snapshot_id != new_snapshot_id
-                                || &metadata.replication_mask != new_replication_mask)
-                        {
-                            return Err(etl_error!(
-                                ErrorKind::CorruptedTableSchema,
-                                "Schema changes not supported",
-                                format!(
-                                    "Iceberg destination does not support schema changes. Table \
-                                     {} schema changed from snapshot_id {} to {}.",
-                                    table_id, metadata.snapshot_id, new_snapshot_id
-                                )
-                            ));
-                        }
-                    }
-                    event => {
-                        // Every other event type is currently not supported.
-                        debug!(event_type = %event.event_type(), "skipping unsupported event type");
-                    }
-                }
-            }
-
-            // Process accumulated events for each table.
-            if !table_id_to_data.is_empty() {
-                let mut join_set = JoinSet::new();
-
-                for (_, (replicated_table_schema, table_rows)) in table_id_to_data {
-                    let (namespace, iceberg_table_name) = {
-                        // We hold the lock for the entire preparation to avoid race conditions
-                        // since the consistency of this code path is
-                        // critical.
-                        let mut inner = self.inner.lock().await;
-                        self.prepare_table_for_streaming(&mut inner, &replicated_table_schema)
-                            .await?
-                    };
-
-                    let client = self.client.clone();
-
-                    join_set.spawn(async move {
-                        client.insert_rows(namespace, iceberg_table_name, table_rows).await
-                    });
-                }
-
-                #[cfg_attr(not(feature = "egress"), allow(unused_mut, unused_variables))]
-                let mut bytes_sent = 0;
-                #[cfg_attr(not(feature = "egress"), allow(unused_assignments))]
-                while let Some(insert_result) = join_set.join_next().await {
-                    bytes_sent += insert_result
-                        .map_err(|_| etl_error!(ErrorKind::Unknown, "Failed to join future"))??;
-                }
-
-                #[cfg(feature = "egress")]
-                log_processed_bytes(Self::name(), PROCESSING_TYPE_STREAMING, bytes_sent, 0);
-            }
-
-            // Collect and deduplicate schemas from all truncate events.
-            //
-            // This is done as an optimization since if we have multiple tables being
-            // truncated in a row without applying other events in the
-            // meanwhile, it doesn't make any sense to create new empty tables
-            // for each of them.
-            let mut truncate_schemas: HashMap<TableId, ReplicatedTableSchema> = HashMap::new();
-
-            while let Some(Event::Truncate(_)) = events_iter.peek() {
-                if let Some(Event::Truncate(truncate_event)) = events_iter.next() {
-                    for schema in truncate_event.truncated_tables {
-                        truncate_schemas.insert(schema.id(), schema);
-                    }
-                }
-            }
-
-            for (_, schema) in truncate_schemas {
-                self.truncate_table(&schema).await?;
-            }
-        }
-
-        Ok(())
-    }
-
     /// Prepares a table for Iceberg writes with schema-aware table creation.
     ///
     /// Augments the provided schema with CDC columns and ensures the

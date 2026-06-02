@@ -20,11 +20,11 @@ use etl::{
     error::{ErrorKind, EtlError, EtlResult},
     etl_error, record_batch_to_table_rows,
     state::DestinationTableMetadata,
-    store::{schema::SchemaStore, state::StateStore},
+    store::DestinationStore,
     types::{
-        Cell, ChangeArrowBatch, ChangeKind, Event, OldTableRow, PipelineId, ReplicatedTableSchema,
-        ReplicationMask, RowImage, SnapshotId, StreamBatch, TableArrowBatch, TableId, TableName,
-        TableRow, TableSchema, UpdatedTableRow,
+        Cell, ChangeArrowBatch, ChangeKind, PipelineId, ReplicatedTableSchema, ReplicationMask,
+        RowImage, SnapshotId, StreamBatch, TableArrowBatch, TableId, TableName, TableRow,
+        TableSchema,
     },
 };
 use gcp_bigquery_client::storage::{MAX_BATCH_SIZE_BYTES, TableDescriptor};
@@ -51,13 +51,6 @@ use crate::{
 /// Converts a source [`TableName`] into a BigQuery table identifier.
 pub fn table_name_to_bigquery_table_id(table_name: &TableName) -> EtlResult<BigQueryTableId> {
     try_stringify_table_name(table_name)
-}
-
-/// Returns the table row payload carried by an old row image.
-fn old_table_row_to_table_row(old_table_row: OldTableRow) -> TableRow {
-    match old_table_row {
-        OldTableRow::Full(row) | OldTableRow::Key(row) => row,
-    }
 }
 
 /// A BigQuery table identifier with version sequence for truncate operations.
@@ -236,7 +229,7 @@ pub struct BigQueryDestination<S> {
 
 impl<S> BigQueryDestination<S>
 where
-    S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
+    S: DestinationStore,
 {
     /// Creates a new [`BigQueryDestination`] with a pre-configured client.
     ///
@@ -796,153 +789,6 @@ where
         self.write_table_rows(batch.table_id, table_rows).await
     }
 
-    /// Processes CDC events in batches with proper ordering and truncate
-    /// handling.
-    ///
-    /// Groups streaming operations (insert/update/delete) by table and
-    /// processes them together, then handles truncate events separately by
-    /// creating new versioned tables.
-    #[allow(dead_code)]
-    async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
-        let mut event_iter = events.into_iter().peekable();
-
-        while event_iter.peek().is_some() {
-            let mut table_id_to_table_rows: HashMap<TableId, Vec<BigQueryTableRow>> =
-                HashMap::new();
-
-            // Process events until we hit a truncate event or run out of events
-            while let Some(event) = event_iter.peek() {
-                if matches!(event, Event::Truncate(_)) {
-                    break;
-                }
-
-                let event = event_iter.next().unwrap();
-                match event {
-                    Event::Insert(mut insert) => {
-                        let table_id = insert.replicated_table_schema.id();
-                        let sequence_key = insert.event_sequence_key().to_string();
-                        insert
-                            .table_row
-                            .values_mut()
-                            .push(BigQueryOperationType::Upsert.into_cell());
-                        insert.table_row.values_mut().push(Cell::String(sequence_key));
-
-                        let table_rows: &mut Vec<BigQueryTableRow> =
-                            table_id_to_table_rows.entry(table_id).or_default();
-                        table_rows.push(BigQueryTableRow::try_from(insert.table_row)?);
-                    }
-                    Event::Update(update) => {
-                        let table_id = update.replicated_table_schema.id();
-                        let sequence_key = update.event_sequence_key().to_string();
-                        let mut table_row = match update.updated_table_row {
-                            UpdatedTableRow::Full(row) => row,
-                            UpdatedTableRow::Partial(_) => {
-                                return Err(etl_error!(
-                                    ErrorKind::ConversionError,
-                                    "BigQuery row event path cannot apply partial updates"
-                                ));
-                            }
-                        };
-                        table_row.values_mut().push(BigQueryOperationType::Upsert.into_cell());
-                        table_row.values_mut().push(Cell::String(sequence_key));
-
-                        let table_rows: &mut Vec<BigQueryTableRow> =
-                            table_id_to_table_rows.entry(table_id).or_default();
-                        table_rows.push(BigQueryTableRow::try_from(table_row)?);
-                    }
-                    Event::Delete(delete) => {
-                        let table_id = delete.replicated_table_schema.id();
-                        let sequence_key = delete.event_sequence_key().to_string();
-                        let Some(old_table_row) = delete.old_table_row else {
-                            info!("delete event has no row, skipping");
-                            continue;
-                        };
-                        let mut old_table_row = old_table_row_to_table_row(old_table_row);
-
-                        old_table_row.values_mut().push(BigQueryOperationType::Delete.into_cell());
-                        old_table_row.values_mut().push(Cell::String(sequence_key));
-
-                        let table_rows: &mut Vec<BigQueryTableRow> =
-                            table_id_to_table_rows.entry(table_id).or_default();
-                        table_rows.push(BigQueryTableRow::try_from(old_table_row)?);
-                    }
-                    event => {
-                        // Every other event type is currently not supported.
-                        debug!(event_type = %event.event_type(), "skipping unsupported event type");
-                    }
-                }
-            }
-
-            // Process accumulated events for each table.
-            if !table_id_to_table_rows.is_empty() {
-                let mut append_requests = Vec::with_capacity(table_id_to_table_rows.len());
-
-                for (batch_index, (table_id, table_rows)) in
-                    table_id_to_table_rows.into_iter().enumerate()
-                {
-                    let (sequenced_bigquery_table_id, table_descriptor) =
-                        self.prepare_table_for_streaming(&table_id, true).await?;
-                    let sequenced_bigquery_table_id_string =
-                        sequenced_bigquery_table_id.to_string();
-
-                    histogram!(ETL_BQ_APPEND_BATCHES_BATCH_SIZE).record(table_rows.len() as f64);
-
-                    let append_request = self.client.create_batch_append_request(
-                        self.pipeline_id,
-                        batch_index,
-                        &self.dataset_id,
-                        &sequenced_bigquery_table_id_string,
-                        table_descriptor.clone(),
-                        table_rows,
-                    )?;
-                    append_requests.push(append_request);
-                }
-
-                if !append_requests.is_empty() {
-                    #[cfg(feature = "egress")]
-                    {
-                        let (bytes_sent, bytes_received) =
-                            self.client.append_table_batches(append_requests).await?;
-
-                        log_processed_bytes(
-                            Self::name(),
-                            PROCESSING_TYPE_STREAMING,
-                            bytes_sent as u64,
-                            bytes_received as u64,
-                        );
-                    }
-
-                    #[cfg(not(feature = "egress"))]
-                    {
-                        self.client.append_table_batches(append_requests).await?;
-                    }
-                }
-            }
-
-            // Collect and deduplicate all table IDs from all truncate events.
-            //
-            // This is done as an optimization since if we have multiple table ids being
-            // truncated in a row without applying other events in the
-            // meanwhile, it doesn't make any sense to create new empty tables
-            // for each of them.
-            let mut truncate_table_ids = HashSet::new();
-
-            while let Some(Event::Truncate(_)) = event_iter.peek() {
-                if let Some(Event::Truncate(truncate_event)) = event_iter.next() {
-                    for truncated_table in truncate_event.truncated_tables {
-                        truncate_table_ids.insert(truncated_table.id());
-                    }
-                }
-            }
-
-            if !truncate_table_ids.is_empty() {
-                self.process_truncate_for_table_ids(truncate_table_ids.into_iter()).await?;
-            }
-        }
-
-        Ok(())
-    }
-
     /// Handles table truncation by creating new versioned tables and updating
     /// views.
     ///
@@ -1301,7 +1147,7 @@ where
 
 impl<S> Destination for BigQueryDestination<S>
 where
-    S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
+    S: DestinationStore,
 {
     fn name() -> &'static str {
         "bigquery"

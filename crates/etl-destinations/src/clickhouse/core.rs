@@ -9,18 +9,18 @@ use etl::{
     },
     error::{ErrorKind, EtlResult},
     etl_error, record_batch_to_table_rows,
-    state::destination_table_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus},
+    state::destination_table_metadata::DestinationTableMetadata,
     store::{schema::SchemaStore, state::StateStore},
     types::{
-        Cell, ChangeKind, Event, EventSequenceKey, IdentityType, OldTableRow, PgLsn,
-        ReplicatedTableSchema, ReplicationMask, RowImage, SchemaDiff, SnapshotId, StreamBatch,
-        TableArrowBatch, TableId, TableRow, Type, UpdatedTableRow, is_array_type,
+        Cell, ChangeKind, EventSequenceKey, IdentityType, PgLsn, ReplicatedTableSchema,
+        ReplicationMask, RowImage, SchemaDiff, SnapshotId, StreamBatch, TableArrowBatch, TableId,
+        TableRow, Type, is_array_type,
     },
 };
 use etl_config::shared::ClickHouseEngine;
 use parking_lot::RwLock;
 use tokio::task::JoinSet;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 use url::Url;
 
 use crate::{
@@ -603,12 +603,6 @@ where
         Ok(())
     }
 
-    #[allow(dead_code)]
-    async fn truncate_table_inner(&self, schema: &ReplicatedTableSchema) -> EtlResult<()> {
-        let (clickhouse_table_name, _) = self.ensure_table_exists(schema).await?;
-        self.client.truncate_table(&clickhouse_table_name).await
-    }
-
     async fn truncate_table_by_id(&self, table_id: TableId) -> EtlResult<()> {
         let Some(metadata) = self.store.get_applied_destination_table_metadata(table_id).await?
         else {
@@ -622,7 +616,6 @@ where
         self.client.truncate_table(&metadata.destination_table_id).await
     }
 
-    #[allow(dead_code)]
     async fn drop_table_for_copy_inner(&self, schema: &ReplicatedTableSchema) -> EtlResult<()> {
         let clickhouse_table_name = try_stringify_table_name(schema.name())?;
 
@@ -671,113 +664,6 @@ where
                 "copy",
             )
             .await
-    }
-
-    /// Handles a schema change event (Relation) by computing the diff and
-    /// applying ALTER TABLE statements.
-    #[allow(dead_code)]
-    async fn handle_relation_event(&self, new_schema: &ReplicatedTableSchema) -> EtlResult<()> {
-        validate_replica_identity_for_clickhouse(new_schema, self.inserter_config.engine)?;
-
-        let table_id = new_schema.id();
-        let new_snapshot_id = new_schema.inner().snapshot_id;
-        let new_replication_mask = new_schema.replication_mask().clone();
-
-        let metadata =
-            self.store.get_applied_destination_table_metadata(table_id).await?.ok_or_else(
-                || {
-                    etl_error!(
-                        ErrorKind::CorruptedTableSchema,
-                        "Missing destination table metadata",
-                        format!(
-                            "No destination table metadata found for table {} when processing \
-                             schema change. The metadata should have been recorded during initial \
-                             table synchronization.",
-                            table_id
-                        )
-                    )
-                },
-            )?;
-
-        let current_snapshot_id = metadata.snapshot_id;
-        let current_replication_mask = metadata.replication_mask.clone();
-
-        if current_snapshot_id == new_snapshot_id
-            && current_replication_mask == new_replication_mask
-        {
-            info!("schema for table {} unchanged (snapshot_id: {})", table_id, new_snapshot_id);
-            return Ok(());
-        }
-
-        info!(
-            "schema change detected for table {}: snapshot_id {} -> {}",
-            table_id, current_snapshot_id, new_snapshot_id
-        );
-
-        // Retrieve the old schema to compute the diff.
-        let current_table_schema =
-            self.store.get_table_schema(&table_id, current_snapshot_id).await?.ok_or_else(
-                || {
-                    etl_error!(
-                        ErrorKind::InvalidState,
-                        "Old schema not found",
-                        format!(
-                            "Could not find schema for table {} at snapshot_id {}",
-                            table_id, current_snapshot_id
-                        )
-                    )
-                },
-            )?;
-
-        let current_schema = ReplicatedTableSchema::from_mask(
-            current_table_schema,
-            current_replication_mask.clone(),
-        );
-
-        let clickhouse_table_name = &metadata.destination_table_id;
-
-        // Mark as Applying before DDL changes.
-        let updated_metadata = DestinationTableMetadata::new_applied(
-            clickhouse_table_name.clone(),
-            current_snapshot_id,
-            current_replication_mask,
-        )
-        .with_schema_change(
-            new_snapshot_id,
-            new_replication_mask,
-            DestinationTableSchemaStatus::Applying,
-        );
-        self.store.store_destination_table_metadata(table_id, updated_metadata.clone()).await?;
-
-        // Compute and apply the diff.
-        let diff = current_schema.diff(new_schema);
-        if let Err(err) =
-            self.apply_schema_diff(clickhouse_table_name, &diff, &current_schema, new_schema).await
-        {
-            warn!(
-                "schema change failed for table {}: {}. Manual intervention may be required.",
-                table_id, err
-            );
-            return Err(err);
-        }
-
-        // Mark as Applied.
-        self.store
-            .store_destination_table_metadata(table_id, updated_metadata.to_applied())
-            .await?;
-
-        // Invalidate cached nullable flags so the next write recomputes them.
-        {
-            let mut guard = self.table_cache.write();
-            guard.remove(clickhouse_table_name);
-        }
-
-        info!(
-            "schema change completed for table {}: snapshot_id {} applied",
-            table_id, new_snapshot_id
-        );
-
-        Ok(())
     }
 
     /// Applies a schema diff to a ClickHouse table: add columns, rename
@@ -857,127 +743,6 @@ where
 
         if is_replacing_merge_tree {
             self.refresh_current_view(clickhouse_table_name, new_schema).await?;
-        }
-
-        Ok(())
-    }
-
-    /// Processes events in passes driven by an outer loop that runs until the
-    /// iterator is exhausted. Each pass:
-    /// 1. Accumulates Insert/Update/Delete rows per table until a Truncate,
-    ///    Relation, or end of events.
-    /// 2. Writes those rows concurrently.
-    /// 3. Processes any Relation events (schema changes) sequentially.
-    /// 4. Drains consecutive Truncate events (deduplicated) and executes them.
-    #[allow(dead_code)]
-    async fn write_events_inner(&self, events: Vec<Event>) -> EtlResult<()> {
-        let mut event_iter = events.into_iter().peekable();
-
-        while event_iter.peek().is_some() {
-            let mut pending: HashMap<TableId, (ReplicatedTableSchema, Vec<PendingRow>)> =
-                HashMap::new();
-
-            // Accumulate data events until we hit a Truncate or Relation boundary.
-            while let Some(event) = event_iter.peek() {
-                if matches!(event, Event::Truncate(_) | Event::Relation(_)) {
-                    break;
-                }
-
-                let event = event_iter.next().expect("peeked event must be present; qed");
-                match event {
-                    Event::Insert(insert) => {
-                        let table_id = insert.replicated_table_schema.id();
-                        let entry = pending
-                            .entry(table_id)
-                            .or_insert_with(|| (insert.replicated_table_schema, Vec::new()));
-                        entry.1.push(PendingRow {
-                            operation: CdcOperation::Insert,
-                            commit_lsn: insert.commit_lsn,
-                            tx_ordinal: insert.tx_ordinal,
-                            cells: insert.table_row.into_values(),
-                        });
-                    }
-                    Event::Update(update) => {
-                        let UpdatedTableRow::Full(table_row) = update.updated_table_row else {
-                            return Err(etl_error!(
-                                ErrorKind::SourceReplicaIdentityError,
-                                "ClickHouse update requires a full new row image",
-                                format!(
-                                    "Table '{}' emitted a partial update row: some column values \
-                                     could not be reconstructed. Writing it would record NULL for \
-                                     the missing columns and misrepresent the source. Configuring \
-                                     the source so that all column values are available in the \
-                                     new- or old-row image (e.g. REPLICA IDENTITY FULL) prevents \
-                                     this.",
-                                    update.replicated_table_schema.name()
-                                )
-                            ));
-                        };
-                        let table_id = update.replicated_table_schema.id();
-                        let entry = pending
-                            .entry(table_id)
-                            .or_insert_with(|| (update.replicated_table_schema, Vec::new()));
-                        entry.1.push(PendingRow {
-                            operation: CdcOperation::Update,
-                            commit_lsn: update.commit_lsn,
-                            tx_ordinal: update.tx_ordinal,
-                            cells: table_row.into_values(),
-                        });
-                    }
-                    Event::Delete(delete) => {
-                        let Some(old_table_row) = delete.old_table_row else {
-                            debug!("delete event has no row data, skipping");
-                            continue;
-                        };
-                        let old_row = match old_table_row {
-                            OldTableRow::Full(row) => row,
-                            OldTableRow::Key(key_row) => {
-                                expand_key_row(key_row, &delete.replicated_table_schema)
-                            }
-                        };
-                        let table_id = delete.replicated_table_schema.id();
-                        let entry = pending
-                            .entry(table_id)
-                            .or_insert_with(|| (delete.replicated_table_schema, Vec::new()));
-                        entry.1.push(PendingRow {
-                            operation: CdcOperation::Delete,
-                            commit_lsn: delete.commit_lsn,
-                            tx_ordinal: delete.tx_ordinal,
-                            cells: old_row.into_values(),
-                        });
-                    }
-                    event => {
-                        debug!(
-                            event_type = %event.event_type(),
-                            "skipping unsupported event type"
-                        );
-                    }
-                }
-            }
-
-            self.flush_pending_rows(pending).await?;
-
-            // Process Relation events (schema changes) sequentially.
-            while let Some(Event::Relation(_)) = event_iter.peek() {
-                if let Some(Event::Relation(relation)) = event_iter.next() {
-                    self.handle_relation_event(&relation.replicated_table_schema).await?;
-                }
-            }
-
-            // Collect and deduplicate truncate events.
-            let mut truncate_schemas: HashMap<TableId, ReplicatedTableSchema> = HashMap::new();
-            while let Some(Event::Truncate(_)) = event_iter.peek() {
-                if let Some(Event::Truncate(truncate_event)) = event_iter.next() {
-                    for schema in truncate_event.truncated_tables {
-                        truncate_schemas.entry(schema.id()).or_insert(schema);
-                    }
-                }
-            }
-
-            futures::future::try_join_all(
-                truncate_schemas.values().map(|schema| self.truncate_table_inner(schema)),
-            )
-            .await?;
         }
 
         Ok(())

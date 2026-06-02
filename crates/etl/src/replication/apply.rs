@@ -52,7 +52,7 @@ use crate::{
         },
     },
     destination::{
-        Destination,
+        PipelineDestination,
         async_result::{
             ApplyLoopAsyncResultMetadata, CompletedWriteStreamBatchesResult, DispatchMetrics,
             PendingWriteStreamBatchesResult, WriteStreamBatchesResult,
@@ -72,7 +72,7 @@ use crate::{
         stream::{EventsStream, StatusUpdateType},
     },
     state::{TableError, TableState, TableStateType},
-    store::{PipelineStore, state::StateStore},
+    store::{PipelineStore, SharedStateStore, state::StateStore},
     types::{
         ChangeArrowBatch, ChangeKind, Event, OldTableRow, PipelineId, RelationEvent, RowImage,
         SizeHint, StreamBatch, TableChangeSet, TableRow, TruncateBatch, UpdatedTableRow,
@@ -1594,7 +1594,7 @@ pub(crate) struct ApplyLoop<S, D> {
 impl<S, D> ApplyLoop<S, D>
 where
     S: PipelineStore,
-    D: Destination + Clone + Send + Sync + 'static,
+    D: PipelineDestination,
 {
     /// Starts the apply loop for processing replication events.
     ///
@@ -3174,7 +3174,7 @@ mod apply_worker {
         remote_final_lsn: PgLsn,
     ) -> EtlResult<bool>
     where
-        S: StateStore + Clone + Send + Sync + 'static,
+        S: SharedStateStore,
     {
         fn is_phase_ready_for_changes(phase: TableState, remote_final_lsn: PgLsn) -> bool {
             match phase {
@@ -3211,7 +3211,7 @@ mod apply_worker {
     ) -> EtlResult<Option<ExitIntent>>
     where
         S: PipelineStore,
-        D: Destination + Clone + Send + Sync + 'static,
+        D: PipelineDestination,
     {
         for (table_id, table_replication_phase) in get_syncing_tables(&ctx.store).await? {
             let exit_intent = process_single_syncing_table_after_commit(
@@ -3242,7 +3242,7 @@ mod apply_worker {
     ) -> EtlResult<Option<ExitIntent>>
     where
         S: PipelineStore,
-        D: Destination + Clone + Send + Sync + 'static,
+        D: PipelineDestination,
     {
         let worker_state = ctx.pool.get_active_worker_state(table_id).await;
 
@@ -3392,7 +3392,7 @@ mod apply_worker {
     ) -> EtlResult<()>
     where
         S: PipelineStore,
-        D: Destination + Clone + Send + Sync + 'static,
+        D: PipelineDestination,
     {
         for (table_id, table_replication_phase) in get_syncing_tables(&ctx.store).await? {
             process_single_syncing_table_after_flush(
@@ -3418,7 +3418,7 @@ mod apply_worker {
     ) -> EtlResult<()>
     where
         S: PipelineStore,
-        D: Destination + Clone + Send + Sync + 'static,
+        D: PipelineDestination,
     {
         let worker_state = ctx.pool.get_active_worker_state(table_id).await;
 
@@ -3521,7 +3521,7 @@ mod apply_worker {
     ) -> EtlResult<Option<ExitIntent>>
     where
         S: PipelineStore,
-        D: Destination + Clone + Send + Sync + 'static,
+        D: PipelineDestination,
     {
         for (table_id, table_replication_phase) in get_syncing_tables(&ctx.store).await? {
             let exit_intent = process_single_syncing_table_when_idle(
@@ -3553,7 +3553,7 @@ mod apply_worker {
     ) -> EtlResult<Option<ExitIntent>>
     where
         S: PipelineStore,
-        D: Destination + Clone + Send + Sync + 'static,
+        D: PipelineDestination,
     {
         let worker_state = ctx.pool.get_active_worker_state(table_id).await;
 
@@ -3725,7 +3725,7 @@ mod apply_worker {
         table_replication_error: TableError,
     ) -> EtlResult<Option<ExitIntent>>
     where
-        S: StateStore + Clone + Send + Sync + 'static,
+        S: SharedStateStore,
     {
         ctx.store.update_table_state(table_id, table_replication_error.into()).await?;
 
@@ -3776,7 +3776,7 @@ mod apply_worker {
     ) -> Pin<Box<dyn Future<Output = EtlResult<()>> + Send>>
     where
         S: PipelineStore,
-        D: Destination + Clone + Send + Sync + 'static,
+        D: PipelineDestination,
     {
         Box::pin(async move { worker.spawn_into_pool(&pool).await })
     }
@@ -3844,7 +3844,7 @@ mod table_sync_worker {
         current_lsn: PgLsn,
     ) -> EtlResult<Option<ExitIntent>>
     where
-        S: StateStore + Clone + Send + Sync + 'static,
+        S: SharedStateStore,
     {
         try_complete_catchup(ctx, current_lsn).await
     }
@@ -3858,7 +3858,7 @@ mod table_sync_worker {
         current_lsn: PgLsn,
     ) -> EtlResult<Option<ExitIntent>>
     where
-        S: StateStore + Clone + Send + Sync + 'static,
+        S: SharedStateStore,
     {
         try_complete_catchup(ctx, current_lsn).await
     }
@@ -3872,7 +3872,7 @@ mod table_sync_worker {
         current_lsn: PgLsn,
     ) -> EtlResult<Option<ExitIntent>>
     where
-        S: StateStore + Clone + Send + Sync + 'static,
+        S: SharedStateStore,
     {
         let worker_type = WorkerType::TableSync { table_id: ctx.table_id };
         let mut inner = ctx.table_sync_worker_state.lock().await;
@@ -3921,7 +3921,7 @@ mod table_sync_worker {
         table_replication_error: TableError,
     ) -> EtlResult<Option<ExitIntent>>
     where
-        S: StateStore + Clone + Send + Sync + 'static,
+        S: SharedStateStore,
     {
         if ctx.table_id != table_id {
             return Ok(None);

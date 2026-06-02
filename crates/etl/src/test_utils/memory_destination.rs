@@ -11,7 +11,7 @@ use crate::{
     },
     error::EtlResult,
     state::DestinationTableMetadata,
-    store::state::StateStore,
+    store::SharedStateStore,
     types::{ReplicatedTableSchema, ReplicationMask, StreamBatch},
 };
 
@@ -23,7 +23,7 @@ pub struct MemoryDestination<S> {
 
 impl<S> MemoryDestination<S>
 where
-    S: StateStore + Clone + Send + Sync + 'static,
+    S: SharedStateStore,
 {
     /// Creates a new memory destination.
     pub fn new(state_store: S) -> Self {
@@ -33,7 +33,7 @@ where
 
 impl<S> Destination for MemoryDestination<S>
 where
-    S: StateStore + Clone + Send + Sync + 'static,
+    S: SharedStateStore,
 {
     fn name() -> &'static str {
         "memory"

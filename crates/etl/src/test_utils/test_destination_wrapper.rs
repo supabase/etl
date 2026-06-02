@@ -15,7 +15,7 @@ use tokio_postgres::types::PgLsn;
 use crate::{
     conversions::arrow::record_batch_to_table_rows,
     destination::{
-        Destination,
+        Destination, PipelineDestination,
         async_result::{
             ApplyLoopAsyncResultMetadata, DispatchMetrics, DropTableForCopyResult,
             WriteSnapshotBatchResult, WriteStreamBatchesResult,
@@ -421,7 +421,7 @@ impl<D> TestDestinationWrapper<D> {
 
 impl<D> Destination for TestDestinationWrapper<D>
 where
-    D: Destination + Send + Sync + Clone + 'static,
+    D: PipelineDestination,
 {
     fn name() -> &'static str {
         "wrapper"

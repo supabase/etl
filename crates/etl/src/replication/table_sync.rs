@@ -16,7 +16,7 @@ use crate::{
     concurrency::{BatchBudgetController, MemoryMonitor, ShutdownRx},
     conversions::arrow::table_rows_to_arrow_batch,
     destination::{
-        Destination,
+        PipelineDestination,
         async_result::{DropTableForCopyResult, WriteSnapshotBatchResult},
     },
     error::{ErrorKind, EtlResult},
@@ -106,7 +106,7 @@ pub(crate) async fn start_table_sync<S, D>(
 ) -> EtlResult<TableSyncResult>
 where
     S: PipelineStore,
-    D: Destination + Clone + Send + 'static,
+    D: PipelineDestination,
 {
     info!(table_id = table_id.0, "starting initial table sync");
 
