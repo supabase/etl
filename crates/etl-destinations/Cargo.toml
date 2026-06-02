@@ -109,8 +109,8 @@ etl-config = { workspace = true }
 etl-maintenance = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
 gcp-bigquery-client = { workspace = true, optional = true, features = ["rust-tls", "aws-lc-rs"] }
-hyper-util = { version = "0.1.20", optional = true }
 humantime = { workspace = true, optional = true }
+hyper-util = { version = "0.1.20", optional = true }
 iceberg = { workspace = true, optional = true }
 iceberg-catalog-rest = { workspace = true, optional = true }
 jsonwebtoken = { workspace = true, optional = true }
