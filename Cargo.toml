@@ -64,7 +64,7 @@ unnested_or_patterns = "warn"
 [workspace.dependencies]
 
 anyhow = { version = "1.0.98", default-features = false }
-arrow = { version = "=58.0.0", default-features = false }
+arrow = { version = "58.3", default-features = false }
 arrow57 = { package = "arrow", version = "57.0", default-features = false }
 async-trait = { version = "0.1.88" }
 aws-lc-rs = { version = "1.13.3", default-features = false }

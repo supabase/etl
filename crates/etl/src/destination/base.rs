@@ -54,8 +54,9 @@ pub trait Destination {
     ///
     /// This operation is called during initial table synchronization to ensure
     /// the destination table starts from a clean state before bulk loading.
-    /// Truncation is best-effort and may be skipped if table metadata is
-    /// missing, and callers may continue after a truncation error.
+    /// Callers may skip truncation when there is no prior table metadata. When
+    /// truncation is attempted, failures are treated as correctness errors and
+    /// the copy must not continue.
     ///
     /// Implementations complete `async_result` when truncation is actually
     /// done. ETL still waits for that result immediately before continuing.

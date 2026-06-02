@@ -76,7 +76,7 @@ pub(super) struct ArrowAppendRowsRequest {
 
 pub(super) mod arrow_append_rows_request {
     #[derive(Clone, PartialEq, ::prost::Message)]
-    pub struct ArrowData {
+    pub(in crate::bigquery) struct ArrowData {
         #[prost(message, optional, tag = "1")]
         pub writer_schema: Option<super::ArrowSchemaPayload>,
         #[prost(message, optional, tag = "2")]
@@ -84,7 +84,7 @@ pub(super) mod arrow_append_rows_request {
     }
 
     #[derive(Clone, PartialEq, ::prost::Oneof)]
-    pub enum Rows {
+    pub(in crate::bigquery) enum Rows {
         #[prost(message, tag = "5")]
         ArrowRows(ArrowData),
     }

@@ -70,7 +70,7 @@ fn calculate_skew_metrics(values: &[f64]) -> f64 {
 
 /// Result of a table copy operation.
 #[derive(Debug)]
-pub enum TableCopyResult {
+pub(crate) enum TableCopyResult {
     /// All rows copied successfully.
     Completed { total_rows: u64, total_duration_secs: f64 },
     /// Copy was interrupted by a shutdown signal.
@@ -203,7 +203,7 @@ enum CopyPartition {
 /// per-leaf-partition parallelism (for partitioned tables) across multiple
 /// child connections that share the same exported snapshot.
 #[expect(clippy::too_many_arguments)]
-pub async fn table_copy<D: Destination + Clone + Send + 'static>(
+pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
     transaction: &PgReplicationTransaction<'_>,
     table_id: TableId,
     table_schema: Arc<TableSchema>,

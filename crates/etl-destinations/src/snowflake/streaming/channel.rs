@@ -56,7 +56,7 @@ impl<C> Clone for ChannelHandle<C> {
 
 impl<C: StreamClient> ChannelHandle<C> {
     /// New handle with no offset or continuation tokens.
-    pub fn new(
+    pub(crate) fn new(
         client: Arc<C>,
         pipeline: PipelineId,
         database: String,
@@ -78,7 +78,7 @@ impl<C: StreamClient> ChannelHandle<C> {
     /// Open (or reopen) the channel.
     ///
     /// Idempotent, reopening preserves offset history.
-    pub async fn open(&mut self) -> Result<()> {
+    pub(crate) async fn open(&mut self) -> Result<()> {
         let response = self
             .client
             .open_channel(&self.database, &self.schema, &self.table, &self.channel)
@@ -93,7 +93,7 @@ impl<C: StreamClient> ChannelHandle<C> {
     /// Drop the channel.
     ///
     /// Committed data remains in the table.
-    pub async fn drop_channel(&mut self) -> Result<()> {
+    pub(crate) async fn drop_channel(&mut self) -> Result<()> {
         self.client.drop_channel(&self.database, &self.schema, &self.table, &self.channel).await?;
 
         self.last_offset_token = None;
@@ -103,13 +103,13 @@ impl<C: StreamClient> ChannelHandle<C> {
     }
 
     /// Drop and reopen the channel, resetting offsets.
-    pub async fn reset(&mut self) -> Result<()> {
+    pub(crate) async fn reset(&mut self) -> Result<()> {
         self.drop_channel().await?;
         self.open().await
     }
 
     /// Send all batches, recovering from channel GC errors.
-    pub async fn process_batches(&mut self, batches: Vec<RowBatch>) -> Result<()> {
+    pub(crate) async fn process_batches(&mut self, batches: Vec<RowBatch>) -> Result<()> {
         fn is_stale_channel(e: &Error) -> bool {
             matches!(e, Error::Snowpipe { status_code: 4, .. })
                 || matches!(e, Error::HttpStatus { status: StatusCode::NOT_FOUND, .. })
@@ -154,7 +154,7 @@ impl<C: StreamClient> ChannelHandle<C> {
     }
 
     /// Last offset token committed by Snowflake for this channel.
-    pub async fn committed_offset(&self) -> Result<Option<OffsetToken>> {
+    pub(crate) async fn committed_offset(&self) -> Result<Option<OffsetToken>> {
         let status = self
             .client
             .channel_status(&self.database, &self.schema, &self.table, &self.channel)

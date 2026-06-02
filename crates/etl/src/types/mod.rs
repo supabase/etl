@@ -11,14 +11,20 @@ mod pipeline;
 mod sized;
 mod table_row;
 
-pub use arrow_batch::*;
-pub use cell::*;
+pub use arrow_batch::{
+    ChangeArrowBatch, ChangeKind, RowImage, StreamBatch, TableArrowBatch, TableChangeSet,
+    TruncateBatch,
+};
 // Re-exports.
+pub use cell::{ArrayCell, ArrayCellNonOptional, Cell, CellNonOptional};
 pub use etl_postgres::types::*;
-pub use event::*;
-pub use pipeline::*;
-pub use sized::*;
-pub use table_row::*;
+pub use event::{
+    BeginEvent, CommitEvent, DeleteEvent, Event, EventSequenceKey, EventType, InsertEvent,
+    RelationEvent, TruncateEvent, UpdateEvent,
+};
+pub use pipeline::PipelineId;
+pub use sized::SizeHint;
+pub use table_row::{OldTableRow, PartialTableRow, TableRow, UpdatedTableRow};
 pub use tokio_postgres::types::*;
 
-pub use crate::conversions::numeric::{PgNumeric, Sign};
+pub use crate::conversions::{PgNumeric, Sign};

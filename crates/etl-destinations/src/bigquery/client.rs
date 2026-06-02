@@ -319,14 +319,14 @@ fn row_error_to_etl_error(err: RowError) -> EtlError {
 
 /// Change Data Capture operation types for BigQuery streaming.
 #[derive(Debug)]
-pub enum BigQueryOperationType {
+pub(super) enum BigQueryOperationType {
     Upsert,
     Delete,
 }
 
 impl BigQueryOperationType {
     /// Converts the operation type into a [`Cell`] for streaming.
-    pub fn into_cell(self) -> Cell {
+    pub(super) fn into_cell(self) -> Cell {
         Cell::String(self.to_string())
     }
 }

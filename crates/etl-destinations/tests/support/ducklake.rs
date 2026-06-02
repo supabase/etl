@@ -7,7 +7,7 @@ use pg_escape::quote_literal;
 use tempfile::TempDir;
 use url::Url;
 
-const DUCKDB_EXTENSION_VERSION: &str = "1.5.2";
+const DUCKDB_EXTENSION_VERSION: &str = "1.5.3";
 const DUCKLAKE_EXTENSION_FILE: &str = "ducklake.duckdb_extension";
 const JSON_EXTENSION_FILE: &str = "json.duckdb_extension";
 const PARQUET_EXTENSION_FILE: &str = "parquet.duckdb_extension";

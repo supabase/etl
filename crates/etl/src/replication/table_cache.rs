@@ -135,7 +135,6 @@ impl SharedTableCache {
     /// This is intentionally idempotent: a first copy may not have cached state
     /// yet, while an in-process copy restart may have stale ready state from
     /// the previous copy.
-    #[cfg(test)]
     pub(crate) async fn remove_table(&self, table_id: TableId) {
         let mut guard = self.inner.write().await;
         guard.remove(&table_id);

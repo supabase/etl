@@ -31,7 +31,7 @@ use etl::{
 };
 use metrics::{gauge, histogram};
 use parking_lot::Mutex;
-use pg_escape::{quote_identifier, quote_literal};
+use pg_escape::quote_literal;
 #[cfg(feature = "test-utils")]
 use tokio::sync::oneshot;
 use tokio::{
@@ -940,13 +940,7 @@ where
             }
         }
 
-        // `build_create_table_sql_ducklake` generates `CREATE TABLE IF NOT EXISTS
-        // "name" (...)`. Prefix the table name with the catalog alias so
-        // DuckLake knows which catalog to create the table in.
         let ddl = build_create_table_sql_ducklake(&table_name, &table_schema.column_schemas);
-        let quoted_table_name = quote_identifier(&table_name).into_owned();
-        let qualified_ddl =
-            ddl.replace(&quoted_table_name, &format!("{LAKE_CATALOG}.{quoted_table_name}"));
 
         let created_tables = Arc::clone(&self.created_tables);
         let table_name_clone = table_name.clone();
@@ -957,7 +951,7 @@ where
             Arc::clone(&self.blocking_slots),
             DuckDbBlockingOperationKind::Foreground,
             move |conn| -> EtlResult<()> {
-                match conn.execute_batch(&qualified_ddl) {
+                match conn.execute_batch(&ddl) {
                     Ok(()) => {
                         created_tables.lock().insert(table_name_clone);
                     }
@@ -968,7 +962,7 @@ where
                         return Err(etl_error!(
                             ErrorKind::DestinationQueryFailed,
                             "DuckLake CREATE TABLE failed",
-                            format_query_error_detail(&qualified_ddl, &e),
+                            format_query_error_detail(&ddl, &e),
                             source: e
                         ));
                     }
@@ -1393,7 +1387,8 @@ mod tests {
             .collect::<Vec<_>>();
 
         for root in candidate_roots {
-            let extension_dir = root.join("1.5.2").join(platform_dir);
+            let extension_dir =
+                root.join(crate::ducklake::config::DUCKDB_EXTENSION_VERSION).join(platform_dir);
             let ducklake_extension = extension_dir.join("ducklake.duckdb_extension");
             let json_extension = extension_dir.join("json.duckdb_extension");
             let parquet_extension = extension_dir.join("parquet.duckdb_extension");

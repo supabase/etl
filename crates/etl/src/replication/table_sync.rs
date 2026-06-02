@@ -37,7 +37,7 @@ use crate::{
 /// providing context for how the table sync worker should proceed with the
 /// table.
 #[derive(Debug)]
-pub enum TableSyncResult {
+pub(crate) enum TableSyncResult {
     /// Synchronization was stopped due to shutdown or external signal.
     Stopped,
     /// Synchronization was not required (table already synchronized).
@@ -68,7 +68,7 @@ fn arrow_table_schema(replicated_table_schema: &ReplicatedTableSchema) -> Arc<Ta
 /// including data copying, state management, and coordination with the apply
 /// worker.
 #[expect(clippy::too_many_arguments)]
-pub async fn start_table_sync<S, D>(
+pub(crate) async fn start_table_sync<S, D>(
     pipeline_id: PipelineId,
     config: Arc<PipelineConfig>,
     replication_client: &mut PgReplicationClient,
@@ -131,76 +131,62 @@ where
     let slot_name: String =
         EtlReplicationSlot::for_table_sync_worker(pipeline_id, table_id).try_into()?;
 
-    // There are three phases in which the table can be in:
-    // - `Init` -> this means that the table sync was never done, so we just perform
-    //   it.
-    // - `DataSync` -> this means that there was a failure during data sync, and we
-    //   have to restart
-    //  copying all the table data and delete the slot.
-    // - `FinishedCopy` -> this means that the table was successfully copied, but we
-    //   didn't manage to
-    //  complete the table sync function, so we just want to continue the cdc stream
-    // from the slot's confirmed_flush_lsn value.
+    // There are three phases from which table sync can start:
+    // - `Init` -> the table sync was never done or the state was reset, so we
+    //   perform it.
+    // - `DataSync` -> a previous copy did not complete, so we restart the copy from
+    //   a clean snapshot.
+    // - `FinishedCopy` -> the copy completed, but the table sync worker did not
+    //   finish the ownership handoff. This is a narrow crash window, so we
+    //   intentionally restart the copy instead of trying to resume catchup.
+    //   Resuming soundly would require persisting the exact runtime relation
+    //   decoding state, including identity masks, and making handoff safe when no
+    //   further `RELATION` message arrives.
     //
     // In case the phase is any other phase, we will return an error.
     let start_lsn = match phase_type {
         TableStateType::Init | TableStateType::DataSync | TableStateType::FinishedCopy => {
-            // When we are in these states, it could be for the following reasons:
-            // - `Init` -> we can be in this state because we just started replicating the
-            //   table or the state
-            //  was reset. In this case we don't want to make assumptions about the previous
-            // state, so we  just try to delete the slot and truncate the table.
-            // - `DataSync` -> we can be in this state because we failed during data sync,
-            //   meaning that table
-            //  copy failed. In this case, we want to delete the slot and truncate the
-            // table.
+            // We must truncate destination rows before starting a copy to avoid
+            // data inconsistencies when there is a previous table.
             //
-            // We try to delete the slot also during `Init` because we support state
-            // rollback and a slot might be there from the previous run.
-            replication_client.delete_slot_if_exists(&slot_name).await?;
-
-            // We should truncate the destination table before starting a copy to avoid data
-            // inconsistencies. Example scenario:
+            // Example scenario:
             // 1. The source table has a single row (id = 1) that is copied to the
             //    destination during the initial copy.
             // 2. Before the table's phase is set to `FinishedCopy`, the process crashes.
             // 3. While down, the source deletes row id = 1 and inserts row id = 2.
-            // 4. When restarted, the process sees the table in the ` DataSync ` state,
+            // 4. When restarted, the process sees the table in the `DataSync` state,
             //    deletes the slot, and copies again.
             // 5. This time, only row id = 2 is copied, but row id = 1 still exists in the
             //    destination.
-            // Result: the destination has two rows (id = 1 and id = 2) instead of only one
-            // (id = 2). Fix: truncate the destination table before starting a
-            // copy when we have enough metadata.
             //
-            // We try to truncate the table also during `Init` because we support state
-            // rollback and a table might be there from a previous run.
+            // Result: the destination has two rows (id = 1 and id = 2) instead
+            // of only one (id = 2).
             //
-            // We only attempt truncation when both table schema and mapping are present in
-            // the store. If either is missing, we skip this step. However, if
-            // the mapping exists, it doesn't say anything about the existence
-            // of the table in the destination since our internal metadata
-            // operations are not atomic with the destination operations. We are
-            // investigating how to introduce atomicity there.
+            // Fix: truncate destination rows before starting a fresh copy when
+            // we have a stored schema for the table. If truncation fails, the
+            // copy must not continue.
             let existing_table_schema =
                 store.get_table_schema(&table_id, SnapshotId::max()).await?;
             if existing_table_schema.is_some() {
                 let (truncate_result, pending_truncate_result) = TruncateTableResult::new(());
 
-                if let Err(err) = destination.truncate_table(table_id, truncate_result).await {
-                    warn!(
-                        table_id = table_id.0,
-                        error = %err,
-                        "failed to dispatch destination table truncation before copy, continuing"
-                    );
-                } else if let Err(err) = pending_truncate_result.await.into_result() {
-                    warn!(
-                        table_id = table_id.0,
-                        error = %err,
-                        "failed to truncate destination table before copy, continuing"
-                    );
-                }
+                destination.truncate_table(table_id, truncate_result).await?;
+                pending_truncate_result.await.into_result()?;
             }
+
+            // We try to delete the slot if it already exists, since we might be
+            // starting a table copy after a previous one was reset or did not
+            // complete successfully.
+            replication_client.delete_slot_if_exists(&slot_name).await?;
+
+            // We clear durable and in-memory table-copy state only after
+            // external cleanup succeeds. The shared cache removal is
+            // idempotent: a first copy has no cached state yet, while an
+            // in-process retry can still hold the previous ready runtime
+            // schema. The fresh copy schema below is the only state allowed to
+            // repopulate the cache.
+            store.clear_table_copy_state(table_id).await?;
+            shared_table_cache.remove_table(table_id).await;
 
             // We are ready to start copying table data, and we update the state
             // accordingly.

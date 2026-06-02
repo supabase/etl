@@ -110,7 +110,7 @@ impl Stream for RawTableCopyStream {
 /// The status update type when sending a status update message back to
 /// Postgres.
 #[derive(Debug)]
-pub enum StatusUpdateType {
+pub(super) enum StatusUpdateType {
     /// Represents an update in response to a keep alive from Postgres.
     KeepAlive,
     /// Represents a periodic heartbeat sent while the apply loop is otherwise
@@ -146,7 +146,7 @@ impl Display for StatusUpdateType {
 pin_project! {
     /// A stream that yields replication events from a Postgres logical replication stream and keeps
     /// track of last sent status updates.
-pub struct EventsStream {
+    pub(super) struct EventsStream {
         #[pin]
         stream: LogicalReplicationStream,
         last_update: Option<Instant>,
@@ -158,7 +158,7 @@ pub struct EventsStream {
 
 impl EventsStream {
     /// Creates a new [`EventsStream`] from a [`LogicalReplicationStream`].
-    pub fn wrap(stream: LogicalReplicationStream, pipeline_id: PipelineId) -> Self {
+    pub(super) fn wrap(stream: LogicalReplicationStream, pipeline_id: PipelineId) -> Self {
         Self { stream, last_update: None, last_write_lsn: None, last_flush_lsn: None, pipeline_id }
     }
 
@@ -168,7 +168,7 @@ impl EventsStream {
     /// need for progress information with network efficiency and system
     /// performance. It handles multiple error scenarios and edge cases
     /// related to time synchronization and network communication.
-    pub async fn send_status_update(
+    pub(super) async fn send_status_update(
         self: Pin<&mut Self>,
         mut write_lsn: PgLsn,
         mut flush_lsn: PgLsn,

@@ -9,7 +9,6 @@
 
 use std::{
     collections::HashMap,
-    fmt::{Display, Formatter},
     future::Future,
     pin::Pin,
     sync::Arc,
@@ -18,12 +17,9 @@ use std::{
 
 use arrow::array::UInt64Array;
 use etl_config::shared::PipelineConfig;
-use etl_postgres::{
-    replication::slots::EtlReplicationSlot,
-    types::{
-        IdentityMask, ReplicatedTableSchema, ReplicationMask, SchemaError, SnapshotId, TableId,
-        TableSchema,
-    },
+use etl_postgres::types::{
+    IdentityMask, ReplicatedTableSchema, ReplicationMask, SchemaError, SnapshotId, TableId,
+    TableSchema,
 };
 use futures::StreamExt;
 use metrics::{counter, histogram};
@@ -71,7 +67,7 @@ use crate::{
         ETL_TRANSACTIONS_TOTAL, EVENT_TYPE_LABEL, PIPELINE_ID_LABEL, WORKER_TYPE_LABEL,
     },
     replication::{
-        SharedTableCache,
+        SharedTableCache, WorkerType,
         client::{PgReplicationClient, PostgresConnectionUpdate},
         stream::{EventsStream, StatusUpdateType},
     },
@@ -108,53 +104,12 @@ const KEEP_ALIVE_DEADLINE_FRACTION: f64 = 0.6;
 /// alives, which is not operationally useful. We clamp to `100ms`.
 const MIN_KEEP_ALIVE_DEADLINE_DURATION: Duration = Duration::from_millis(100);
 
-/// Type of worker driving the apply loop.
-#[derive(Debug, Copy, Clone)]
-pub enum WorkerType {
-    /// The main apply worker that coordinates table sync workers.
-    Apply,
-    /// A table sync worker that synchronizes a specific table.
-    TableSync {
-        /// The table being synchronized.
-        table_id: TableId,
-    },
-}
-
-impl WorkerType {
-    /// Builds an [`EtlReplicationSlot`] for this worker type.
-    pub fn build_etl_replication_slot(&self, pipeline_id: u64) -> EtlReplicationSlot {
-        match self {
-            Self::Apply => EtlReplicationSlot::Apply { pipeline_id },
-            Self::TableSync { table_id } => {
-                EtlReplicationSlot::TableSync { pipeline_id, table_id: *table_id }
-            }
-        }
-    }
-
-    /// Returns a low-cardinality worker type label for metrics and tags.
-    pub fn to_simple_string(self) -> &'static str {
-        match self {
-            Self::Apply => "apply",
-            Self::TableSync { .. } => "table_sync",
-        }
-    }
-}
-
-impl Display for WorkerType {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Apply => write!(f, "apply"),
-            Self::TableSync { table_id } => write!(f, "table_sync({table_id})"),
-        }
-    }
-}
-
 /// Result type for the apply loop execution.
 ///
 /// Indicates the reason why the apply loop terminated, enabling appropriate
 /// cleanup and error handling by the caller.
 #[derive(Debug, Copy, Clone)]
-pub enum ApplyLoopResult {
+pub(crate) enum ApplyLoopResult {
     /// The apply loop was paused and could be resumed in the future.
     Paused,
     /// The apply loop was completed and will never be invoked again.
@@ -194,7 +149,7 @@ impl ExitIntent {
 /// acknowledges our flush position before we terminate to prevent data
 /// duplication on restart.
 #[derive(Debug, Clone)]
-pub enum ShutdownState {
+pub(crate) enum ShutdownState {
     /// No shutdown requested, normal operation.
     NoShutdown,
     /// Shutdown in progress, waiting for PostgreSQL to acknowledge our flush
@@ -209,7 +164,7 @@ pub enum ShutdownState {
 
 impl ShutdownState {
     /// Returns `true` if a shutdown has been requested.
-    pub fn is_requested(&self) -> bool {
+    pub(crate) fn is_requested(&self) -> bool {
         !matches!(self, Self::NoShutdown)
     }
 }
@@ -219,28 +174,28 @@ impl ShutdownState {
 /// Contains all state and dependencies needed by the apply worker to coordinate
 /// with table sync workers and manage table lifecycle transitions.
 #[derive(Debug)]
-pub struct ApplyWorkerContext<S, D> {
+pub(crate) struct ApplyWorkerContext<S, D> {
     /// Unique identifier for the pipeline.
-    pub pipeline_id: PipelineId,
+    pub(crate) pipeline_id: PipelineId,
     /// Shared configuration for all coordinated operations.
-    pub config: Arc<PipelineConfig>,
+    pub(crate) config: Arc<PipelineConfig>,
     /// Pool of table sync workers that this worker coordinates.
-    pub pool: Arc<TableSyncWorkerPool>,
+    pub(crate) pool: Arc<TableSyncWorkerPool>,
     /// State store for tracking table replication progress.
-    pub store: S,
+    pub(crate) store: S,
     /// Destination where replicated data is written.
-    pub destination: D,
+    pub(crate) destination: D,
     /// Shared per-table protocol state used to decode relation and row
     /// messages.
-    pub shared_table_cache: SharedTableCache,
+    pub(crate) shared_table_cache: SharedTableCache,
     /// Shutdown signal receiver for graceful termination.
-    pub shutdown_rx: ShutdownRx,
+    pub(crate) shutdown_rx: ShutdownRx,
     /// Semaphore controlling maximum concurrent table sync workers.
-    pub table_sync_worker_permits: Arc<Semaphore>,
+    pub(crate) table_sync_worker_permits: Arc<Semaphore>,
     /// Shared memory backpressure controller.
-    pub memory_monitor: MemoryMonitor,
+    pub(crate) memory_monitor: MemoryMonitor,
     /// Shared batch budget controller.
-    pub batch_budget: BatchBudgetController,
+    pub(crate) batch_budget: BatchBudgetController,
 }
 
 /// Resources for the table sync worker during the apply loop.
@@ -248,13 +203,13 @@ pub struct ApplyWorkerContext<S, D> {
 /// Contains state and dependencies needed by a table sync worker to track
 /// its synchronization progress and coordinate with the apply worker.
 #[derive(Debug)]
-pub struct TableSyncWorkerContext<S> {
+pub(crate) struct TableSyncWorkerContext<S> {
     /// Unique identifier for the table being synchronized.
-    pub table_id: TableId,
+    pub(crate) table_id: TableId,
     /// Thread-safe state management for this worker.
-    pub table_sync_worker_state: TableSyncWorkerState,
+    pub(crate) table_sync_worker_state: TableSyncWorkerState,
     /// State store for persisting replication progress.
-    pub state_store: S,
+    pub(crate) state_store: S,
 }
 
 /// Context for the worker driving the apply loop.
@@ -263,7 +218,7 @@ pub struct TableSyncWorkerContext<S> {
 /// worker-specific resources and enabling different behavior based on the
 /// worker type at various points in the replication cycle.
 #[derive(Debug)]
-pub enum WorkerContext<S, D> {
+pub(crate) enum WorkerContext<S, D> {
     /// Context for the apply worker.
     Apply(ApplyWorkerContext<S, D>),
     /// Context for a table sync worker.
@@ -272,7 +227,7 @@ pub enum WorkerContext<S, D> {
 
 impl<S, D> WorkerContext<S, D> {
     /// Returns the [`WorkerType`] for this context.
-    pub fn worker_type(&self) -> WorkerType {
+    pub(crate) fn worker_type(&self) -> WorkerType {
         match self {
             Self::Apply(_) => WorkerType::Apply,
             Self::TableSync(ctx) => WorkerType::TableSync { table_id: ctx.table_id },
@@ -929,6 +884,18 @@ impl PendingChangeRows {
         }
     }
 
+    /// Returns whether this group can accept another row.
+    fn can_append(
+        &self,
+        change: ChangeKind,
+        row_image: RowImage,
+        table_schema: &TableSchema,
+    ) -> bool {
+        self.change == change
+            && self.row_image == row_image
+            && table_schemas_are_compatible(&self.table_schema, table_schema)
+    }
+
     /// Creates pending rows from prebuilt direct pgoutput Arrow rows.
     fn from_pgoutput_rows(rows: PendingPgOutputRows) -> Self {
         Self {
@@ -1009,6 +976,21 @@ fn identity_arrow_table_schema(
     ))
 }
 
+/// Returns whether two table schemas describe the same Arrow batch shape.
+fn table_schemas_are_compatible(left: &TableSchema, right: &TableSchema) -> bool {
+    left.snapshot_id == right.snapshot_id
+        && left.column_schemas.iter().eq(right.column_schemas.iter())
+}
+
+/// Returns whether an Arrow table schema matches replicated table columns.
+fn table_schema_matches_replicated(
+    table_schema: &TableSchema,
+    replicated_table_schema: &ReplicatedTableSchema,
+) -> bool {
+    table_schema.snapshot_id == replicated_table_schema.inner().snapshot_id
+        && table_schema.column_schemas.iter().eq(replicated_table_schema.column_schemas())
+}
+
 /// Destination group targeted by a decoded change row.
 #[derive(Clone, Copy)]
 struct PendingChangeTarget {
@@ -1046,17 +1028,16 @@ fn push_pending_change(
     meta: PendingChangeMeta,
     table_schema: impl FnOnce() -> Arc<TableSchema>,
 ) -> EtlResult<()> {
+    let table_schema = table_schema();
     let entry = table_changes.entry(target.table_id).or_insert_with(|| {
         table_order.push(target.table_id);
         PendingTableChangeSet::default()
     });
 
     let group = match entry.groups.last_mut() {
-        Some(group) if group.change == target.change && group.row_image == target.row_image => {
-            group
-        }
+        Some(group) if group.can_append(target.change, target.row_image, &table_schema) => group,
         _ => {
-            let group = PendingChangeRows::new(target.change, target.row_image, table_schema());
+            let group = PendingChangeRows::new(target.change, target.row_image, table_schema);
             entry.groups.push(group);
             entry.groups.last_mut().expect("pushed group must exist")
         }
@@ -1208,16 +1189,21 @@ struct HomogeneousFullNewBatchPlan {
 fn update_homogeneous_full_new_batch_plan(
     plan_table_id: &mut Option<TableId>,
     plan_change: &mut Option<ChangeKind>,
+    plan_table_schema: &mut Option<Arc<TableSchema>>,
     table_id: TableId,
     change: ChangeKind,
+    replicated_table_schema: &ReplicatedTableSchema,
 ) -> bool {
-    match (*plan_table_id, *plan_change) {
-        (Some(existing_table_id), Some(existing_change)) => {
-            existing_table_id == table_id && existing_change == change
+    match (*plan_table_id, *plan_change, plan_table_schema.as_deref()) {
+        (Some(existing_table_id), Some(existing_change), Some(existing_table_schema)) => {
+            existing_table_id == table_id
+                && existing_change == change
+                && table_schema_matches_replicated(existing_table_schema, replicated_table_schema)
         }
-        (None, None) => {
+        (None, None, None) => {
             *plan_table_id = Some(table_id);
             *plan_change = Some(change);
+            *plan_table_schema = Some(replicated_arrow_table_schema(replicated_table_schema));
             true
         }
         _ => false,
@@ -1229,6 +1215,7 @@ fn homogeneous_full_new_batch_plan(
 ) -> EtlResult<Option<HomogeneousFullNewBatchPlan>> {
     let mut table_id = None;
     let mut change = None;
+    let mut table_schema = None;
     let mut first_data_event_index = None;
     let mut row_count = 0;
 
@@ -1238,8 +1225,10 @@ fn homogeneous_full_new_batch_plan(
                 if !update_homogeneous_full_new_batch_plan(
                     &mut table_id,
                     &mut change,
+                    &mut table_schema,
                     insert.replicated_table_schema.id(),
                     ChangeKind::Insert,
+                    &insert.replicated_table_schema,
                 ) {
                     return Ok(None);
                 }
@@ -1256,8 +1245,10 @@ fn homogeneous_full_new_batch_plan(
                 if !update_homogeneous_full_new_batch_plan(
                     &mut table_id,
                     &mut change,
+                    &mut table_schema,
                     update.replicated_table_schema.id(),
                     ChangeKind::Update,
+                    &update.replicated_table_schema,
                 ) {
                     return Ok(None);
                 }
@@ -1272,24 +1263,14 @@ fn homogeneous_full_new_batch_plan(
         }
     }
 
-    let Some(first_data_event_index) = first_data_event_index else {
+    if first_data_event_index.is_none() {
         return Ok(None);
-    };
-
-    let table_schema = match &pending_items[first_data_event_index] {
-        PendingBatchItem::Event(Event::Insert(insert)) => {
-            replicated_arrow_table_schema(&insert.replicated_table_schema)
-        }
-        PendingBatchItem::Event(Event::Update(update)) => {
-            replicated_arrow_table_schema(&update.replicated_table_schema)
-        }
-        _ => unreachable!("first data event index must point to insert or update"),
-    };
+    }
 
     Ok(Some(HomogeneousFullNewBatchPlan {
         table_id: table_id.expect("data event must set table id"),
         change: change.expect("data event must set change kind"),
-        table_schema,
+        table_schema: table_schema.expect("data event must set table schema"),
         row_count,
     }))
 }
@@ -1582,7 +1563,7 @@ fn normalize_pending_batch_items(
 ///
 /// [`ApplyLoop`] encapsulates the apply loop's immutable dependencies plus its
 /// mutable runtime state.
-pub struct ApplyLoop<S, D> {
+pub(crate) struct ApplyLoop<S, D> {
     /// Unique identifier for the pipeline.
     pipeline_id: PipelineId,
     /// Shared immutable configuration.
@@ -1619,7 +1600,7 @@ where
     ///
     /// This is the main entry point that creates the loop instance and runs it.
     #[expect(clippy::too_many_arguments)]
-    pub async fn start(
+    pub(crate) async fn start(
         pipeline_id: PipelineId,
         start_lsn: PgLsn,
         config: Arc<PipelineConfig>,
@@ -2211,7 +2192,7 @@ where
 
         counter!(
             ETL_EVENTS_PROCESSED_TOTAL,
-            WORKER_TYPE_LABEL => self.worker_context.worker_type().to_simple_string(),
+            WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
             ACTION_LABEL => "table_streaming",
             PIPELINE_ID_LABEL => self.pipeline_id.to_string(),
             DESTINATION_LABEL => D::name(),
@@ -2220,7 +2201,7 @@ where
 
         histogram!(
             ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
-            WORKER_TYPE_LABEL => self.worker_context.worker_type().to_simple_string(),
+            WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
             ACTION_LABEL => "table_streaming",
             PIPELINE_ID_LABEL => self.pipeline_id.to_string(),
             DESTINATION_LABEL => D::name(),
@@ -2417,7 +2398,7 @@ where
         counter!(
             ETL_REPLICATION_MESSAGES_TOTAL,
             PIPELINE_ID_LABEL => self.pipeline_id.to_string(),
-            WORKER_TYPE_LABEL => self.worker_context.worker_type().to_simple_string(),
+            WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
         )
         .increment(1);
 
@@ -3987,6 +3968,32 @@ mod tests {
         ))
     }
 
+    fn scalar_table_schema_with_snapshot(
+        snapshot_id: u64,
+        columns: Vec<ColumnSchema>,
+    ) -> Arc<TableSchema> {
+        Arc::new(TableSchema::with_snapshot_id(
+            TableId::new(777),
+            TableName::new("public".to_owned(), "direct_pgoutput".to_owned()),
+            columns,
+            SnapshotId::from(snapshot_id),
+        ))
+    }
+
+    fn insert_event(
+        replicated_table_schema: ReplicatedTableSchema,
+        tx_ordinal: u64,
+        table_row: TableRow,
+    ) -> PendingBatchItem {
+        PendingBatchItem::Event(Event::Insert(crate::types::InsertEvent {
+            start_lsn: PgLsn::from(1),
+            commit_lsn: PgLsn::from(99),
+            tx_ordinal,
+            replicated_table_schema,
+            table_row,
+        }))
+    }
+
     #[test]
     fn normalizer_preserves_direct_pgoutput_arrow_rows() {
         let replicated_table_schema = ReplicatedTableSchema::all(scalar_table_schema());
@@ -4032,6 +4039,41 @@ mod tests {
                 Cell::Bool(true),
                 Cell::String(r#"{"k": 1}"#.to_owned()),
             ])]
+        );
+    }
+
+    #[test]
+    fn normalizer_keeps_homogeneous_schema_versions_separate() {
+        let schema_v1 = ReplicatedTableSchema::all(scalar_table_schema_with_snapshot(
+            10,
+            vec![column("id", Type::INT8, 1, true)],
+        ));
+        let schema_v2 = ReplicatedTableSchema::all(scalar_table_schema_with_snapshot(
+            20,
+            vec![column("id", Type::INT8, 1, true), column("name", Type::TEXT, 2, false)],
+        ));
+        let pending_items = vec![
+            insert_event(schema_v1, 0, TableRow::new(vec![Cell::I64(1)])),
+            insert_event(
+                schema_v2,
+                1,
+                TableRow::new(vec![Cell::I64(2), Cell::String("two".to_owned())]),
+            ),
+        ];
+
+        let batches = normalize_pending_batch_items(pending_items).unwrap();
+
+        let [StreamBatch::Changes(change_set)] = batches.as_slice() else {
+            panic!("expected one change batch");
+        };
+        assert_eq!(change_set.groups.len(), 2);
+        assert_eq!(
+            record_batch_to_table_rows(&change_set.groups[0].rows.batch),
+            vec![TableRow::new(vec![Cell::I64(1)])]
+        );
+        assert_eq!(
+            record_batch_to_table_rows(&change_set.groups[1].rows.batch),
+            vec![TableRow::new(vec![Cell::I64(2), Cell::String("two".to_owned())])]
         );
     }
 
