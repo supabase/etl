@@ -623,6 +623,22 @@ mod tests {
         }
     }
 
+    fn snowflake_destination_config(passphrase: Option<&str>) -> StoredDestinationConfig {
+        StoredDestinationConfig::Snowflake {
+            account_id: "myorg-myaccount".to_owned(),
+            user: "etl_user".to_owned(),
+            private_key: SerializableSecretString::from(
+                "-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----".to_owned(),
+            ),
+            private_key_passphrase: passphrase
+                .map(ToOwned::to_owned)
+                .map(SerializableSecretString::from),
+            database: "my_database".to_owned(),
+            schema: "public".to_owned(),
+            role: Some("etl_role".to_owned()),
+        }
+    }
+
     #[async_trait]
     impl K8sClient for RecordingK8sClient {
         async fn create_or_update_postgres_secret(
@@ -885,6 +901,22 @@ mod tests {
                 "postgres:tenant-42:password".to_owned(),
                 "delete-clickhouse:tenant-42".to_owned(),
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn snowflake_creates_postgres_and_snowflake_secrets() {
+        let source_config = source_config_with_password();
+        let destination_config = snowflake_destination_config(Some("passphrase123"));
+
+        let secrets = build_secrets_from_configs(&source_config, &destination_config);
+        let client = RecordingK8sClient::default();
+
+        create_or_update_dynamic_replicator_secrets(&client, "tenant-42", secrets).await.unwrap();
+
+        assert_eq!(
+            client.calls(),
+            vec!["postgres:tenant-42:password".to_owned(), "snowflake:tenant-42".to_owned(),]
         );
     }
 

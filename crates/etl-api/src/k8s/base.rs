@@ -91,7 +91,11 @@ pub enum DestinationType {
     /// DuckLake destination.
     Ducklake,
     /// Snowflake destination.
-    Snowflake,
+    Snowflake {
+        /// Whether the StatefulSet must reference the Snowflake passphrase
+        /// secret entry.
+        passphrase_secret_required: bool,
+    },
 }
 
 impl From<&StoredDestinationConfig> for DestinationType {
@@ -104,7 +108,11 @@ impl From<&StoredDestinationConfig> for DestinationType {
                 DestinationType::ClickHouse { password_secret_required: password.is_some() }
             }
             StoredDestinationConfig::Ducklake { .. } => DestinationType::Ducklake,
-            StoredDestinationConfig::Snowflake { .. } => DestinationType::Snowflake,
+            StoredDestinationConfig::Snowflake { private_key_passphrase, .. } => {
+                DestinationType::Snowflake {
+                    passphrase_secret_required: private_key_passphrase.is_some(),
+                }
+            }
         }
     }
 }
