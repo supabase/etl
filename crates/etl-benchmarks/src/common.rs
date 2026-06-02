@@ -15,11 +15,13 @@ use clap::{Args, ValueEnum};
 use etl::{
     destination::{
         Destination, PipelineDestination,
-        async_result::{DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult},
+        async_result::{
+            DropTableForCopyResult, WriteSnapshotBatchResult, WriteStreamBatchesResult,
+        },
     },
     error::EtlResult,
     test_utils::notifying_store::NotifyingStore,
-    types::{Event, ReplicatedTableSchema, SizeHint, TableRow},
+    types::{ChangeKind, ReplicatedTableSchema, RowImage, SizeHint, StreamBatch, TableArrowBatch},
 };
 use etl_config::{
     Environment,
@@ -373,6 +375,10 @@ where
         self.inner.shutdown().await
     }
 
+    async fn startup(&self) -> EtlResult<()> {
+        self.inner.startup().await
+    }
+
     async fn drop_table_for_copy(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
@@ -381,15 +387,14 @@ where
         self.inner.drop_table_for_copy(replicated_table_schema, async_result).await
     }
 
-    async fn write_table_rows(
+    async fn write_snapshot_batch(
         &self,
-        replicated_table_schema: &ReplicatedTableSchema,
-        table_rows: Vec<TableRow>,
-        async_result: WriteTableRowsResult<()>,
+        batch: TableArrowBatch,
+        async_result: WriteSnapshotBatchResult<()>,
     ) -> EtlResult<()> {
-        let row_count = table_rows.len() as u64;
-        let row_bytes = table_rows.iter().map(SizeHint::size_hint).sum::<usize>() as u64;
-        self.inner.write_table_rows(replicated_table_schema, table_rows, async_result).await?;
+        let row_count = batch.row_count() as u64;
+        let row_bytes = batch.size_hint() as u64;
+        self.inner.write_snapshot_batch(batch, async_result).await?;
 
         self.stats.table_rows.fetch_add(row_count, Ordering::Relaxed);
         self.stats.table_row_bytes.fetch_add(row_bytes, Ordering::Relaxed);
@@ -400,13 +405,13 @@ where
         Ok(())
     }
 
-    async fn write_events(
+    async fn write_stream_batches(
         &self,
-        events: Vec<Event>,
-        async_result: WriteEventsResult<()>,
+        batches: Vec<StreamBatch>,
+        async_result: WriteStreamBatchesResult<()>,
     ) -> EtlResult<()> {
-        let counts = classify_events(&events);
-        self.inner.write_events(events, async_result).await?;
+        let counts = classify_stream_batches(&batches);
+        self.inner.write_stream_batches(batches, async_result).await?;
 
         Self::count_events(&self.stats, &counts);
         let target = self.stats.cdc_target.load(Ordering::Acquire);
@@ -436,20 +441,19 @@ impl Destination for NullDestination {
         Ok(())
     }
 
-    async fn write_table_rows(
+    async fn write_snapshot_batch(
         &self,
-        _replicated_table_schema: &ReplicatedTableSchema,
-        _table_rows: Vec<TableRow>,
-        async_result: WriteTableRowsResult<()>,
+        _batch: TableArrowBatch,
+        async_result: WriteSnapshotBatchResult<()>,
     ) -> EtlResult<()> {
         async_result.send(Ok(()));
         Ok(())
     }
 
-    async fn write_events(
+    async fn write_stream_batches(
         &self,
-        _events: Vec<Event>,
-        async_result: WriteEventsResult<()>,
+        _batches: Vec<StreamBatch>,
+        async_result: WriteStreamBatchesResult<()>,
     ) -> EtlResult<()> {
         async_result.send(Ok(()));
         Ok(())
@@ -630,6 +634,16 @@ impl Destination for BenchDestination {
         }
     }
 
+    async fn startup(&self) -> EtlResult<()> {
+        match self {
+            Self::Null(destination) => destination.startup().await,
+            #[cfg(feature = "bigquery")]
+            Self::BigQuery(destination) => destination.startup().await,
+            #[cfg(feature = "snowflake")]
+            Self::Snowflake(destination) => destination.startup().await,
+        }
+    }
+
     async fn drop_table_for_copy(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
@@ -650,44 +664,41 @@ impl Destination for BenchDestination {
         }
     }
 
-    async fn write_table_rows(
+    async fn write_snapshot_batch(
         &self,
-        replicated_table_schema: &ReplicatedTableSchema,
-        table_rows: Vec<TableRow>,
-        async_result: WriteTableRowsResult<()>,
+        batch: TableArrowBatch,
+        async_result: WriteSnapshotBatchResult<()>,
     ) -> EtlResult<()> {
         match self {
-            Self::Null(destination) => {
-                destination
-                    .write_table_rows(replicated_table_schema, table_rows, async_result)
-                    .await
-            }
+            Self::Null(destination) => destination.write_snapshot_batch(batch, async_result).await,
             #[cfg(feature = "bigquery")]
             Self::BigQuery(destination) => {
-                destination
-                    .write_table_rows(replicated_table_schema, table_rows, async_result)
-                    .await
+                destination.write_snapshot_batch(batch, async_result).await
             }
             #[cfg(feature = "snowflake")]
             Self::Snowflake(destination) => {
-                destination
-                    .write_table_rows(replicated_table_schema, table_rows, async_result)
-                    .await
+                destination.write_snapshot_batch(batch, async_result).await
             }
         }
     }
 
-    async fn write_events(
+    async fn write_stream_batches(
         &self,
-        events: Vec<Event>,
-        async_result: WriteEventsResult<()>,
+        batches: Vec<StreamBatch>,
+        async_result: WriteStreamBatchesResult<()>,
     ) -> EtlResult<()> {
         match self {
-            Self::Null(destination) => destination.write_events(events, async_result).await,
+            Self::Null(destination) => {
+                destination.write_stream_batches(batches, async_result).await
+            }
             #[cfg(feature = "bigquery")]
-            Self::BigQuery(destination) => destination.write_events(events, async_result).await,
+            Self::BigQuery(destination) => {
+                destination.write_stream_batches(batches, async_result).await
+            }
             #[cfg(feature = "snowflake")]
-            Self::Snowflake(destination) => destination.write_events(events, async_result).await,
+            Self::Snowflake(destination) => {
+                destination.write_stream_batches(batches, async_result).await
+            }
         }
     }
 }
@@ -932,37 +943,52 @@ pub fn split_table_name(table_name: &str) -> Result<(String, String)> {
     }
 }
 
-fn classify_events(events: &[Event]) -> EventBatchCounts {
-    let mut counts = EventBatchCounts { total_events: events.len() as u64, ..Default::default() };
-    for event in events {
-        let event_bytes = event.size_hint() as u64;
-        counts.total_event_bytes += event_bytes;
-        match event {
-            Event::Insert(_) => {
-                counts.inserts += 1;
-                counts.data_events += 1;
-                counts.data_event_bytes += event_bytes;
+fn classify_stream_batches(batches: &[StreamBatch]) -> EventBatchCounts {
+    let mut counts = EventBatchCounts::default();
+    for batch in batches {
+        match batch {
+            StreamBatch::Changes(changes) => {
+                for group in &changes.groups {
+                    let rows = group.rows.row_count() as u64;
+                    if rows == 0 {
+                        continue;
+                    }
+
+                    let group_bytes = group.size_hint() as u64;
+                    match (group.change, group.row_image) {
+                        (ChangeKind::Insert, RowImage::New) => {
+                            counts.inserts += rows;
+                            counts.data_events += rows;
+                            counts.data_event_bytes += group_bytes;
+                            counts.total_events += rows;
+                            counts.total_event_bytes += group_bytes;
+                        }
+                        (ChangeKind::Update, RowImage::New) => {
+                            counts.updates += rows;
+                            counts.data_events += rows;
+                            counts.data_event_bytes += group_bytes;
+                            counts.total_events += rows;
+                            counts.total_event_bytes += group_bytes;
+                        }
+                        (ChangeKind::Delete, RowImage::Old { .. }) => {
+                            counts.deletes += rows;
+                            counts.data_events += rows;
+                            counts.data_event_bytes += group_bytes;
+                            counts.total_events += rows;
+                            counts.total_event_bytes += group_bytes;
+                        }
+                        (ChangeKind::Update, RowImage::Old { .. })
+                        | (ChangeKind::Delete, RowImage::New)
+                        | (ChangeKind::Insert, RowImage::Old { .. }) => {}
+                    }
+                }
             }
-            Event::Update(_) => {
-                counts.updates += 1;
-                counts.data_events += 1;
-                counts.data_event_bytes += event_bytes;
+            StreamBatch::Truncate(truncate) => {
+                let events = truncate.rel_ids.len() as u64;
+                counts.truncates += events;
+                counts.total_events += events;
+                counts.total_event_bytes += truncate.size_hint() as u64;
             }
-            Event::Delete(_) => {
-                counts.deletes += 1;
-                counts.data_events += 1;
-                counts.data_event_bytes += event_bytes;
-            }
-            Event::Truncate(_) => {
-                counts.truncates += 1;
-            }
-            Event::Relation(_) => {
-                counts.relations += 1;
-            }
-            Event::Begin(_) | Event::Commit(_) => {
-                counts.transaction_events += 1;
-            }
-            Event::Unsupported => {}
         }
     }
 

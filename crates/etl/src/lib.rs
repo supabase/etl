@@ -36,22 +36,14 @@
 //! external systems.
 //!
 //! ## Store
-//! The [`store::PipelineStore`] trait defines the complete store surface needed
-//! by the pipeline runtime. It combines narrower capabilities for table
-//! schemas, table state, destination table metadata, and table lifecycle
-//! operations. These stores are critical to a pipeline's operation, as they
-//! allow it to be safely paused and resumed.
+//! The [`store::schema::SchemaStore`] and [`store::state::StateStore`] traits
+//! define where the table schemas, replication state, and table mappings are
+//! stored. These stores are critical to a pipeline's operation, as they allow
+//! it to be safely paused and resumed.
 //!
-//! The [`store::state::StateStore`] trait handles table states,
-//! durable replication progress, and destination table metadata, providing a
-//! single interface for all state-related storage operations.
-//!
-//! The [`store::schema::SchemaStore`] trait handles versioned table schemas,
-//! and [`store::TableLifecycleStore`] handles table-scoped reset and removal
-//! operations that must update state, schema, and metadata consistently.
-//! [`store::SharedStateStore`], [`store::DestinationStore`], and
-//! [`store::PipelineStore`] are facade traits for code that needs common
-//! combinations of these capabilities.
+//! The [`store::state::StateStore`] trait handles both table replication states
+//! and table mappings, providing a single interface for all state-related
+//! storage operations.
 //!
 //! **Note:** To pause and resume a pipeline after the process is stopped, it
 //! must be able to persist data durably. The crate itself provides no
@@ -72,12 +64,13 @@
 //!         PipelineConfig, TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
 //!     },
 //!     destination::{
-//!         Destination, DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult,
+//!         Destination,
+//!         async_result::{WriteSnapshotBatchResult, WriteStreamBatchesResult},
 //!     },
 //!     error::EtlResult,
 //!     pipeline::Pipeline,
-//!     store::MemoryStore,
-//!     types::{Event, ReplicatedTableSchema, TableRow},
+//!     store::both::memory::MemoryStore,
+//!     types::{ReplicatedTableSchema, StreamBatch, TableArrowBatch},
 //! };
 //!
 //! #[derive(Clone)]
@@ -90,24 +83,23 @@
 //!     async fn drop_table_for_copy(
 //!         &self,
 //!         _replicated_table_schema: &ReplicatedTableSchema,
-//!         async_result: DropTableForCopyResult<()>,
+//!         async_result: etl::destination::async_result::DropTableForCopyResult<()>,
 //!     ) -> EtlResult<()> {
 //!         async_result.send(Ok(()));
 //!         Ok(())
 //!     }
-//!     async fn write_table_rows(
+//!     async fn write_snapshot_batch(
 //!         &self,
-//!         _replicated_table_schema: &ReplicatedTableSchema,
-//!         _table_rows: Vec<TableRow>,
-//!         async_result: WriteTableRowsResult<()>,
+//!         _batch: TableArrowBatch,
+//!         async_result: WriteSnapshotBatchResult<()>,
 //!     ) -> EtlResult<()> {
 //!         async_result.send(Ok(()));
 //!         Ok(())
 //!     }
-//!     async fn write_events(
+//!     async fn write_stream_batches(
 //!         &self,
-//!         _events: Vec<Event>,
-//!         async_result: WriteEventsResult<()>,
+//!         _batches: Vec<StreamBatch>,
+//!         async_result: WriteStreamBatchesResult<()>,
 //!     ) -> EtlResult<()> {
 //!         async_result.send(Ok(()));
 //!         Ok(())
@@ -119,7 +111,6 @@
 //!     // Configure Postgres connection
 //!     let pg_config = PgConnectionConfig {
 //!         host: "localhost".to_string(),
-//!         hostaddr: None,
 //!         port: 5432,
 //!         name: "mydb".to_string(),
 //!         username: "postgres".to_string(),
@@ -128,7 +119,7 @@
 //!         keepalive: TcpKeepaliveConfig::default(),
 //!     };
 //!
-//!     // Create memory-based store and destination for testing.
+//!     // Create memory-based store and destination for testing
 //!     let store = MemoryStore::new();
 //!     let destination = NoopDestination;
 //!
@@ -171,14 +162,14 @@
 
 pub mod concurrency;
 pub mod config;
-mod conversions;
+pub mod conversions;
 pub mod destination;
 #[cfg(feature = "egress")]
 pub mod egress;
 pub mod error;
 #[cfg(feature = "failpoints")]
 pub mod failpoints;
-mod macros;
+pub mod macros;
 pub mod metrics;
 pub mod migrations;
 pub mod pipeline;
@@ -189,4 +180,8 @@ pub mod store;
 pub mod test_utils;
 pub mod types;
 mod utils;
-mod workers;
+pub mod workers;
+
+pub use crate::conversions::arrow::{
+    record_batch_to_table_rows, table_rows_to_arrow_batch, table_schema_to_arrow_schema,
+};

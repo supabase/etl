@@ -164,6 +164,7 @@ fn build_truncate_table_sql(table_name: &str) -> String {
 }
 
 /// Builds the SQL used to drop a ClickHouse table.
+#[allow(dead_code)]
 fn build_drop_table_sql(table_name: &str) -> String {
     let table_name = quote_identifier(table_name);
     format!("DROP TABLE IF EXISTS {table_name}")
@@ -182,6 +183,7 @@ fn build_insert_rows_sql(table_name: &str) -> String {
 pub(crate) enum DdlKind {
     CreateTable,
     CreateView,
+    #[allow(dead_code)]
     DropTable,
     DropView,
     TruncateTable,
@@ -478,6 +480,7 @@ impl ClickHouseClient {
     }
 
     /// Executes `DROP TABLE IF EXISTS` for the supplied table.
+    #[allow(dead_code)]
     pub(crate) async fn drop_table(&self, table_name: &str) -> EtlResult<()> {
         let sql = build_drop_table_sql(table_name);
         self.execute_ddl(DdlKind::DropTable, &sql).await

@@ -5,6 +5,7 @@ use crate::{
     bail,
     conversions::PgNumeric,
     error::{ErrorKind, EtlError},
+    etl_error,
 };
 
 macro_rules! convert_array_variant {
@@ -65,6 +66,8 @@ pub enum Cell {
     Timestamp(NaiveDateTime),
     /// Timestamp with timezone information in UTC
     TimestampTz(DateTime<Utc>),
+    /// Timestamp with timezone information as microseconds since Unix epoch.
+    TimestampTzMicros(i64),
     /// UUID (Universally Unique Identifier)
     Uuid(Uuid),
     /// JSON data as parsed value
@@ -92,6 +95,7 @@ impl Cell {
             Cell::Time(t) => *t = NaiveTime::default(),
             Cell::Timestamp(t) => *t = NaiveDateTime::default(),
             Cell::TimestampTz(t) => *t = DateTime::<Utc>::default(),
+            Cell::TimestampTzMicros(t) => *t = 0,
             Cell::Uuid(u) => *u = Uuid::default(),
             Cell::Json(j) => *j = serde_json::Value::default(),
             Cell::U32(u) => *u = 0,
@@ -222,6 +226,16 @@ impl TryFrom<Cell> for CellNonOptional {
             Cell::Time(val) => Ok(CellNonOptional::Time(val)),
             Cell::Timestamp(val) => Ok(CellNonOptional::Timestamp(val)),
             Cell::TimestampTz(val) => Ok(CellNonOptional::TimestampTz(val)),
+            Cell::TimestampTzMicros(val) => {
+                let val = DateTime::<Utc>::from_timestamp_micros(val).ok_or_else(|| {
+                    etl_error!(
+                        ErrorKind::ConversionError,
+                        "Timestamp with timezone value is out of range",
+                        format!("Microsecond timestamp {val} cannot be represented as chrono UTC")
+                    )
+                })?;
+                Ok(CellNonOptional::TimestampTz(val))
+            }
             Cell::Uuid(val) => Ok(CellNonOptional::Uuid(val)),
             Cell::Json(val) => Ok(CellNonOptional::Json(val)),
             Cell::Bytes(val) => Ok(CellNonOptional::Bytes(val)),

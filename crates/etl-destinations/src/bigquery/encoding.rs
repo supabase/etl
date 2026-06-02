@@ -84,6 +84,7 @@ impl BigQueryTableRow {
 
     /// Returns the tagged non-null cells for assertions in tests.
     #[cfg(test)]
+    #[allow(dead_code)]
     pub(super) fn debug_cells(&self) -> &[(u32, CellNonOptional)] {
         &self.0
     }

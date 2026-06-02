@@ -12,6 +12,7 @@ use crate::bigquery::client::{BigQueryDatasetId, BigQueryProjectId, BigQueryTabl
 /// escape sequences as string literals. Empty quoted identifiers are invalid,
 /// and control characters are rejected to avoid relying on less-readable
 /// numeric escapes.
+#[allow(dead_code)]
 fn escape_identifier(identifier: &str, context: &str) -> EtlResult<String> {
     if identifier.is_empty() {
         return Err(etl_error!(
@@ -43,6 +44,7 @@ fn escape_identifier(identifier: &str, context: &str) -> EtlResult<String> {
 }
 
 /// Quotes one BigQuery SQL identifier with backticks.
+#[allow(dead_code)]
 pub(super) fn quote_identifier(identifier: &str, context: &str) -> EtlResult<String> {
     Ok(format!("`{}`", escape_identifier(identifier, context)?))
 }
@@ -53,6 +55,7 @@ pub(super) fn quote_identifier(identifier: &str, context: &str) -> EtlResult<Str
 /// BigQuery treats backtick-quoted table paths as dotted path expressions, so
 /// the project, dataset, and table parts are escaped separately and then joined
 /// inside one quoted path.
+#[allow(dead_code)]
 pub(super) fn quote_table_path(
     project_id: &BigQueryProjectId,
     dataset_id: &BigQueryDatasetId,
@@ -69,6 +72,7 @@ pub(super) fn quote_table_path(
 ///
 /// The fixed `INFORMATION_SCHEMA.TABLES` suffix is intentionally not escaped as
 /// user input.
+#[allow(dead_code)]
 pub(super) fn quote_information_schema_tables_path(
     project_id: &BigQueryProjectId,
     dataset_id: &BigQueryDatasetId,

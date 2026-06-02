@@ -9,7 +9,6 @@ use etl::{
         database::{
             local_pg_read_replica_connection_config, spawn_source_database, test_table_name,
         },
-        event::EventCondition,
         memory_destination::MemoryDestination,
         notifying_store::NotifyingStore,
         pipeline::create_pipeline,
@@ -289,13 +288,7 @@ async fn pipeline_replicates_table_copy_and_cdc_from_read_replica() {
     // while the primary should only own the physical standby slot.
     assert_replication_slot_absent(&primary, &apply_slot_name).await;
 
-    let users_inserted = destination
-        .wait_for_all_events(vec![EventCondition::Table(
-            EventType::Insert,
-            database_schema.users_schema().id,
-            3,
-        )])
-        .await;
+    let users_inserted = destination.wait_for_all_events(vec![(EventType::Insert, 3)]).await;
 
     insert_users_data(&mut primary, &database_schema.users_schema().name, 3..=3).await;
     wait_for_read_replica_to_catch_up(&primary, &replica_config).await;

@@ -1,8 +1,9 @@
-use arrow::error::ArrowError;
 use etl::{
     error::{ErrorKind, EtlError},
     etl_error,
 };
+
+use crate::iceberg::arrow::error::ArrowError;
 
 /// Converts iceberg errors to ETL errors with appropriate classification.
 ///

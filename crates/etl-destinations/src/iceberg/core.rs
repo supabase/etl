@@ -8,15 +8,18 @@ use etl::{
     concurrency::TaskSet,
     destination::{
         Destination,
-        async_result::{DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult},
+        async_result::{
+            DropTableForCopyResult, WriteSnapshotBatchResult, WriteStreamBatchesResult,
+        },
     },
     error::{ErrorKind, EtlResult},
-    etl_error,
+    etl_error, record_batch_to_table_rows,
     state::destination_table_metadata::DestinationTableMetadata,
-    store::SharedStateStore,
+    store::DestinationStore,
     types::{
-        Cell, ColumnSchema, Event, IdentityType, OldTableRow, ReplicatedTableSchema, TableId,
-        TableName, TableRow, Type, generate_sequence_number,
+        Cell, ChangeKind, ColumnSchema, Event, EventSequenceKey, IdentityMask, IdentityType,
+        OldTableRow, ReplicatedTableSchema, ReplicationMask, RowImage, StreamBatch,
+        TableArrowBatch, TableId, TableName, TableRow, TableSchema, Type, generate_sequence_number,
     },
 };
 use tokio::{sync::Mutex, task::JoinSet};
@@ -164,7 +167,7 @@ struct Inner {
 
 impl<S> IcebergDestination<S>
 where
-    S: SharedStateStore,
+    S: DestinationStore,
 {
     /// Creates a new Iceberg destination instance.
     ///
@@ -230,7 +233,43 @@ where
         Ok(())
     }
 
+    /// Truncates an Iceberg table by source table ID.
+    async fn truncate_table_by_id(&self, table_id: TableId) -> EtlResult<()> {
+        let Some(metadata) = self.store.get_applied_destination_table_metadata(table_id).await?
+        else {
+            warn!(
+                %table_id,
+                "skipping truncate because no metadata exists (table was likely never created)",
+            );
+            return Ok(());
+        };
+
+        let table_schema =
+            self.store.get_table_schema(&table_id, metadata.snapshot_id).await?.ok_or_else(
+                || {
+                    etl_error!(
+                        ErrorKind::MissingTableSchema,
+                        "Table not found in the schema store",
+                        format!(
+                            "The table schema for table {table_id} at snapshot {} was not found \
+                             in the schema store",
+                            metadata.snapshot_id
+                        )
+                    )
+                },
+            )?;
+        let identity_mask = IdentityMask::from_bytes(metadata.replication_mask.as_slice().to_vec());
+        let replicated_table_schema = ReplicatedTableSchema::from_masks(
+            table_schema,
+            metadata.replication_mask,
+            identity_mask,
+        );
+
+        self.truncate_table(&replicated_table_schema).await
+    }
+
     /// Drops an Iceberg table before restarting a table copy.
+    #[allow(dead_code)]
     async fn drop_table_for_copy_inner(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
@@ -300,6 +339,118 @@ where
         Ok(())
     }
 
+    /// Processes and writes destination-facing Arrow CDC batches.
+    async fn write_stream_batches_inner(&self, batches: Vec<StreamBatch>) -> EtlResult<()> {
+        let mut batch_iter = batches.into_iter().peekable();
+
+        while batch_iter.peek().is_some() {
+            let mut table_id_to_data: HashMap<TableId, (ReplicatedTableSchema, Vec<TableRow>)> =
+                HashMap::new();
+
+            while let Some(batch) = batch_iter.peek() {
+                if matches!(batch, StreamBatch::Truncate(_)) {
+                    break;
+                }
+
+                let StreamBatch::Changes(change_set) =
+                    batch_iter.next().expect("peeked batch must be present")
+                else {
+                    unreachable!("truncate batches are handled separately");
+                };
+
+                for group in change_set.groups {
+                    let replicated_table_schema =
+                        Self::replicated_schema_for_arrow_batch(&group.rows.table_schema);
+                    let rows = record_batch_to_table_rows(&group.rows.batch);
+
+                    for (row_idx, mut table_row) in rows.into_iter().enumerate() {
+                        let sequence_key = EventSequenceKey::new(
+                            group.commit_lsns.value(row_idx).into(),
+                            group.tx_ordinals.value(row_idx),
+                        )
+                        .to_string();
+                        let operation = match (group.change, group.row_image) {
+                            (ChangeKind::Insert, RowImage::New) => IcebergOperationType::Insert,
+                            (ChangeKind::Update, RowImage::New) => IcebergOperationType::Update,
+                            (ChangeKind::Update, RowImage::Old { .. }) => continue,
+                            (ChangeKind::Delete, RowImage::Old { key_only: false }) => {
+                                IcebergOperationType::Delete
+                            }
+                            (ChangeKind::Delete, RowImage::Old { key_only: true }) => {
+                                return Err(etl_error!(
+                                    ErrorKind::SourceReplicaIdentityError,
+                                    "Iceberg delete requires a full old row image",
+                                    format!(
+                                        "Table '{}' emitted a key-only delete image. Configure \
+                                         REPLICA IDENTITY FULL for Iceberg delete support.",
+                                        replicated_table_schema.name()
+                                    )
+                                ));
+                            }
+                            (ChangeKind::Delete, RowImage::New)
+                            | (ChangeKind::Insert, RowImage::Old { .. }) => {
+                                warn!(
+                                    table_id = ?change_set.table_id,
+                                    "skipping unsupported iceberg change batch row image"
+                                );
+                                continue;
+                            }
+                        };
+
+                        table_row.values_mut().push(operation.into());
+                        table_row.values_mut().push(Cell::String(sequence_key));
+
+                        let entry = table_id_to_data
+                            .entry(change_set.table_id)
+                            .or_insert_with(|| (replicated_table_schema.clone(), Vec::new()));
+                        entry.1.push(table_row);
+                    }
+                }
+            }
+
+            if !table_id_to_data.is_empty() {
+                let mut join_set = JoinSet::new();
+
+                for (_, (replicated_table_schema, table_rows)) in table_id_to_data {
+                    let (namespace, iceberg_table_name) = {
+                        let mut inner = self.inner.lock().await;
+                        self.prepare_table_for_streaming(&mut inner, &replicated_table_schema)
+                            .await?
+                    };
+
+                    let client = self.client.clone();
+                    join_set.spawn(async move {
+                        client.insert_rows(namespace, iceberg_table_name, table_rows).await
+                    });
+                }
+
+                #[cfg_attr(not(feature = "egress"), allow(unused_mut, unused_variables))]
+                let mut bytes_sent = 0;
+                #[cfg_attr(not(feature = "egress"), allow(unused_assignments))]
+                while let Some(insert_result) = join_set.join_next().await {
+                    bytes_sent += insert_result
+                        .map_err(|_| etl_error!(ErrorKind::Unknown, "Failed to join future"))??;
+                }
+
+                #[cfg(feature = "egress")]
+                log_processed_bytes(Self::name(), PROCESSING_TYPE_STREAMING, bytes_sent, 0);
+            }
+
+            let mut truncated_tables: HashSet<TableId> = HashSet::new();
+            while let Some(StreamBatch::Truncate(_)) = batch_iter.peek() {
+                if let Some(StreamBatch::Truncate(truncate)) = batch_iter.next() {
+                    truncated_tables.extend(truncate.rel_ids);
+                }
+            }
+
+            for table_id in truncated_tables {
+                self.truncate_table_by_id(table_id).await?;
+            }
+        }
+
+        Ok(())
+    }
+
     /// Processes and writes CDC events to Iceberg tables.
     ///
     /// Handles a stream of CDC events by batching non-truncate events by table
@@ -307,6 +458,7 @@ where
     /// separately and deduplicated for efficiency. Each event is augmented
     /// with CDC metadata including operation type and sequence number based
     /// on LSN information.
+    #[allow(dead_code)]
     async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
         let mut events_iter = events.into_iter().peekable();
 
@@ -586,6 +738,14 @@ where
         Ok(namespace)
     }
 
+    /// Builds a replicated schema for Arrow batches that already contain only
+    /// destination-visible columns.
+    fn replicated_schema_for_arrow_batch(table_schema: &Arc<TableSchema>) -> ReplicatedTableSchema {
+        let replication_mask = ReplicationMask::all(table_schema);
+        let identity_mask = IdentityMask::from_bytes(replication_mask.as_slice().to_vec());
+        ReplicatedTableSchema::from_masks(Arc::clone(table_schema), replication_mask, identity_mask)
+    }
+
     /// Builds column schemas with CDC-specific columns added.
     ///
     /// Takes the replicated columns from the schema and adds two additional
@@ -616,7 +776,7 @@ where
 
 impl<S> Destination for IcebergDestination<S>
 where
-    S: SharedStateStore,
+    S: DestinationStore,
 {
     /// Returns the identifier name for this destination type.
     fn name() -> &'static str {
@@ -627,10 +787,6 @@ where
         self.tasks.shutdown().await
     }
 
-    /// Drops the specified table before a fresh copy.
-    ///
-    /// The table sync worker clears ETL metadata after this succeeds, and the
-    /// next copy recreates the table from the fresh `0/0` schema.
     async fn drop_table_for_copy(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
@@ -642,40 +798,31 @@ where
         Ok(())
     }
 
-    /// Writes table rows to the destination as upsert operations.
-    ///
-    /// Augments each row with CDC metadata and inserts them into the
-    /// corresponding Iceberg changelog table. All rows are treated
-    /// as upsert operations with generated sequence numbers.
-    async fn write_table_rows(
+    async fn write_snapshot_batch(
         &self,
-        replicated_table_schema: &ReplicatedTableSchema,
-        table_rows: Vec<TableRow>,
-        async_result: WriteTableRowsResult<()>,
+        batch: TableArrowBatch,
+        async_result: WriteSnapshotBatchResult<()>,
     ) -> EtlResult<()> {
+        let replicated_table_schema = Self::replicated_schema_for_arrow_batch(&batch.table_schema);
+        let table_rows = record_batch_to_table_rows(&batch.batch);
         let result =
-            IcebergDestination::write_table_rows(self, replicated_table_schema, table_rows).await;
+            IcebergDestination::write_table_rows(self, &replicated_table_schema, table_rows).await;
         async_result.send(result);
 
         Ok(())
     }
 
-    /// Processes and writes CDC events to the destination tables.
-    ///
-    /// Handles insert, update, delete, and truncate events by converting
-    /// them to appropriate Iceberg operations. Events are batched by table
-    /// and processed concurrently for optimal performance.
-    async fn write_events(
+    async fn write_stream_batches(
         &self,
-        events: Vec<Event>,
-        async_result: WriteEventsResult<()>,
+        batches: Vec<StreamBatch>,
+        async_result: WriteStreamBatchesResult<()>,
     ) -> EtlResult<()> {
         self.tasks.try_reap().await?;
 
         let destination = self.clone();
         self.tasks
             .spawn(async move {
-                let result = destination.write_events(events).await;
+                let result = destination.write_stream_batches_inner(batches).await;
                 async_result.send(result);
             })
             .await;

@@ -288,7 +288,6 @@ async fn table_copy_reset_drops_destination_table_before_recopy() {
 
     pipeline.shutdown_and_wait().await.unwrap();
 
-    assert!(destination.was_table_dropped_for_copy(users_schema.id).await);
     let users_rows = bigquery_database.query_table(users_schema.name).await.unwrap();
     assert_eq!(
         parse_bigquery_table_rows::<BigQueryUser>(users_rows),

@@ -33,6 +33,17 @@ impl TableRow {
         Self { size_hint_bytes, values }
     }
 
+    /// Creates a row using a precomputed payload size estimate.
+    pub(crate) fn new_with_payload_size_hint(
+        values: Vec<Cell>,
+        payload_size_hint_bytes: usize,
+    ) -> Self {
+        let size_hint_bytes = estimate_table_row_base_bytes(values.capacity())
+            .saturating_add(payload_size_hint_bytes);
+
+        Self { size_hint_bytes, values }
+    }
+
     /// Returns the row values in table column order.
     pub fn values(&self) -> &[Cell] {
         &self.values
@@ -248,16 +259,7 @@ impl SizeHint for OldTableRow {
 
 /// Returns an estimate of allocated bytes for a table row payload.
 fn estimate_table_row_allocated_bytes(values: &[Cell], values_capacity: usize) -> usize {
-    let mut total = size_of::<TableRow>();
-    total = checked_add_or_saturating(
-        total,
-        checked_mul_or_saturating(
-            values_capacity,
-            size_of::<Cell>(),
-            "table_row.values_capacity_mul_cell_size",
-        ),
-        "table_row.base_add_values_capacity",
-    );
+    let mut total = estimate_table_row_base_bytes(values_capacity);
 
     for cell in values {
         total = checked_add_or_saturating(
@@ -268,6 +270,19 @@ fn estimate_table_row_allocated_bytes(values: &[Cell], values_capacity: usize) -
     }
 
     total
+}
+
+/// Returns the fixed allocation estimate for a row and its values vector.
+fn estimate_table_row_base_bytes(values_capacity: usize) -> usize {
+    checked_add_or_saturating(
+        size_of::<TableRow>(),
+        checked_mul_or_saturating(
+            values_capacity,
+            size_of::<Cell>(),
+            "table_row.values_capacity_mul_cell_size",
+        ),
+        "table_row.base_add_values_capacity",
+    )
 }
 
 /// Returns an estimate of allocated bytes for a partial row payload.
@@ -307,6 +322,7 @@ fn estimate_cell_allocated_bytes(cell: &Cell) -> usize {
         | Cell::Time(_)
         | Cell::Timestamp(_)
         | Cell::TimestampTz(_)
+        | Cell::TimestampTzMicros(_)
         | Cell::Uuid(_) => 0,
         Cell::Numeric(value) => estimated_pg_numeric_allocated_bytes(value),
         Cell::String(value) => value.capacity(),

@@ -1,18 +1,19 @@
 use std::sync::Arc;
 
-use arrow::{
+use chrono::{NaiveDate, NaiveTime};
+use etl::types::{ArrayCell, Cell, DATE_FORMAT, TIME_FORMAT, TIMESTAMP_FORMAT, TableRow};
+
+use crate::iceberg::arrow::{
     array::{
         ArrayRef, ArrowPrimitiveType, BooleanBuilder, FixedSizeBinaryBuilder, LargeBinaryBuilder,
         ListBuilder, PrimitiveBuilder, RecordBatch, StringBuilder, TimestampMicrosecondBuilder,
     },
     datatypes::{
-        DataType, Date32Type, FieldRef, Float32Type, Float64Type, Int32Type, Int64Type, Schema,
-        Time64MicrosecondType, TimeUnit, TimestampMicrosecondType,
+        DataType, Date32Type, Field, FieldRef, Float32Type, Float64Type, Int32Type, Int64Type,
+        Schema, Time64MicrosecondType, TimeUnit, TimestampMicrosecondType,
     },
     error::ArrowError,
 };
-use chrono::{NaiveDate, NaiveTime};
-use etl::types::{ArrayCell, Cell, DATE_FORMAT, TIME_FORMAT, TIMESTAMP_FORMAT, TableRow};
 
 pub const UNIX_EPOCH: NaiveDate =
     NaiveDate::from_ymd_opt(1970, 1, 1).expect("unix epoch is a valid date");
@@ -298,6 +299,7 @@ fn cell_to_timestamp(cell: &Cell) -> Option<i64> {
 fn cell_to_timestamptz(cell: &Cell) -> Option<i64> {
     match cell {
         Cell::TimestampTz(ts) => Some(ts.timestamp_micros()),
+        Cell::TimestampTzMicros(micros) => Some(*micros),
         _ => None,
     }
 }
@@ -351,6 +353,7 @@ fn cell_to_string(cell: &Cell) -> Option<String> {
         Cell::Time(_) => None,
         Cell::Timestamp(_) => None,
         Cell::TimestampTz(_) => None,
+        Cell::TimestampTzMicros(_) => None,
         Cell::Uuid(_) => None,
         Cell::Json(j) => Some(j.to_string()),
         Cell::Bytes(_) => None,
@@ -782,7 +785,7 @@ fn build_uuid_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef) -
 fn build_list_array_for_strings(rows: &[TableRow], field_idx: usize, field: FieldRef) -> ArrayRef {
     // Create a new field with Utf8 data type for string list elements
     let field = Arc::new(
-        arrow::datatypes::Field::new(field.name(), DataType::Utf8, field.is_nullable())
+        Field::new(field.name(), DataType::Utf8, field.is_nullable())
             .with_metadata(field.metadata().clone()),
     );
     let mut list_builder = ListBuilder::new(StringBuilder::new()).with_field(field);
@@ -965,6 +968,7 @@ mod tests {
     use etl::types::ArrayCell;
 
     use super::*;
+    use crate::iceberg::arrow;
 
     #[test]
     fn cell_to_bool_fn() {

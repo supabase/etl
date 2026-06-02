@@ -1,3 +1,5 @@
+#![allow(clippy::redundant_test_prefix, clippy::str_to_string)]
+
 mod support;
 
 #[cfg(all(feature = "bigquery", feature = "test-utils"))]

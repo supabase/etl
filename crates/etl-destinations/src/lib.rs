@@ -1,3 +1,5 @@
+#![cfg_attr(test, allow(clippy::redundant_test_prefix, clippy::str_to_string))]
+
 //! ETL destination implementations.
 //!
 //! Provides implementations of the ETL destination trait for various data
