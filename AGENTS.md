@@ -92,6 +92,11 @@
   `format!("{error}")` into the message or detail. Keep detail fields for
   contextual data we own, such as operation names, table names, IDs, counts, or
   SQL statements.
+- Prefer preserving lower-level failures in the error source chain so display,
+  logging, and Sentry formatting can decide how much of the chain to show. Only
+  copy an underlying error message into a description or detail when that is
+  intentionally safer or clearer, such as replacing a sensitive internal error
+  with a sanitized customer-facing explanation.
 - Do not leak Postgres, SQLx, or other database errors from `etl-api` HTTP
   responses. Keep the original error in the internal chain and logs, but return
   a generic customer-facing message for database failures.
