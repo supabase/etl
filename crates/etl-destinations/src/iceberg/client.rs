@@ -14,14 +14,13 @@ use etl::{
     types::{ColumnSchema, SchemaDiff, TableRow},
 };
 use iceberg::{
-    Catalog, CatalogBuilder, NamespaceIdent, TableCreation, TableIdent, TableRequirement,
-    TableUpdate,
+    Catalog, CatalogBuilder,
     io::{S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_REGION, S3_SECRET_ACCESS_KEY},
     spec::{
         DataFile, DataFileFormat, FormatVersion, MAIN_BRANCH, ManifestContentType, ManifestFile,
         ManifestListWriter, ManifestWriter, ManifestWriterBuilder, NestedFieldRef, Operation,
         PrimitiveType, Schema as IcebergSchema, SchemaRef, Snapshot, SnapshotReference,
-        SnapshotRetention, SnapshotSummaryCollector, Summary, TableProperties, Type as IcebergType,
+        SnapshotRetention, SnapshotSummaryCollector, Summary, Type as IcebergType,
     },
     transaction::{ApplyTransactionAction, Transaction},
     writer::{
@@ -170,7 +169,7 @@ impl IcebergClient {
     /// namespaces (e.g., "warehouse.schema").
     pub async fn create_namespace_if_missing(&self, namespace: &str) -> Result<(), iceberg::Error> {
         debug!(%namespace, "creating namespace");
-        let namespace_ident = NamespaceIdent::from_strs(namespace.split('.'))?;
+        let namespace_ident = iceberg::NamespaceIdent::from_strs(namespace.split('.'))?;
         if !self.catalog.namespace_exists(&namespace_ident).await? {
             self.catalog.create_namespace(&namespace_ident, HashMap::new()).await?;
         }
@@ -185,7 +184,7 @@ impl IcebergClient {
     /// namespaces.
     pub async fn namespace_exists(&self, namespace: &str) -> Result<bool, iceberg::Error> {
         debug!(%namespace, "checking if namespace exists");
-        let namespace_ident = NamespaceIdent::from_strs(namespace.split('.'))?;
+        let namespace_ident = iceberg::NamespaceIdent::from_strs(namespace.split('.'))?;
         self.catalog.namespace_exists(&namespace_ident).await
     }
 
@@ -221,12 +220,12 @@ impl IcebergClient {
         column_schemas: &[ColumnSchema],
     ) -> Result<(), iceberg::Error> {
         debug!(%table_name, %namespace, "creating table if missing");
-        let namespace_ident = NamespaceIdent::from_strs(namespace.split('.'))?;
-        let table_ident = TableIdent::new(namespace_ident.clone(), table_name.clone());
+        let namespace_ident = iceberg::NamespaceIdent::from_strs(namespace.split('.'))?;
+        let table_ident = iceberg::TableIdent::new(namespace_ident.clone(), table_name.clone());
 
         if !self.catalog.table_exists(&table_ident).await? {
             let iceberg_schema = postgres_to_iceberg_schema(column_schemas)?;
-            let creation = TableCreation::builder()
+            let creation = iceberg::TableCreation::builder()
                 .name(table_name)
                 .schema(iceberg_schema)
                 .format_version(FormatVersion::V2)
@@ -254,8 +253,8 @@ impl IcebergClient {
     ) -> Result<(), iceberg::Error> {
         debug!(%table_name, %namespace, "evolving iceberg table schema");
 
-        let namespace_ident = NamespaceIdent::from_strs(namespace.split('.'))?;
-        let table_ident = TableIdent::new(namespace_ident, table_name);
+        let namespace_ident = iceberg::NamespaceIdent::from_strs(namespace.split('.'))?;
+        let table_ident = iceberg::TableIdent::new(namespace_ident, table_name);
         let current_schema = postgres_to_iceberg_schema(current_column_schemas)?;
         let desired_schema = postgres_to_iceberg_schema(desired_column_schemas)?;
         validate_postgres_schema_evolution(&current_schema, &desired_schema, diff)?;
@@ -308,8 +307,8 @@ impl IcebergClient {
         namespace: &str,
         table_name: String,
     ) -> Result<HashSet<i32>, iceberg::Error> {
-        let namespace_ident = NamespaceIdent::from_strs(namespace.split('.'))?;
-        let table_ident = TableIdent::new(namespace_ident, table_name);
+        let namespace_ident = iceberg::NamespaceIdent::from_strs(namespace.split('.'))?;
+        let table_ident = iceberg::TableIdent::new(namespace_ident, table_name);
         let table = self.catalog.load_table(&table_ident).await?;
 
         Ok(table
@@ -332,19 +331,25 @@ impl IcebergClient {
     fn get_table_properties() -> HashMap<String, String> {
         let mut props = HashMap::new();
         props.insert(
-            TableProperties::PROPERTY_COMMIT_MIN_RETRY_WAIT_MS.to_owned(),
+            iceberg::spec::TableProperties::PROPERTY_COMMIT_MIN_RETRY_WAIT_MS.to_owned(),
             "100".to_owned(),
         );
         props.insert(
-            TableProperties::PROPERTY_COMMIT_MAX_RETRY_WAIT_MS.to_owned(),
+            iceberg::spec::TableProperties::PROPERTY_COMMIT_MAX_RETRY_WAIT_MS.to_owned(),
             "10000".to_owned(),
         );
-        props.insert(TableProperties::PROPERTY_COMMIT_NUM_RETRIES.to_owned(), "10".to_owned());
         props.insert(
-            TableProperties::PROPERTY_COMMIT_TOTAL_RETRY_TIME_MS.to_owned(),
+            iceberg::spec::TableProperties::PROPERTY_COMMIT_NUM_RETRIES.to_owned(),
+            "10".to_owned(),
+        );
+        props.insert(
+            iceberg::spec::TableProperties::PROPERTY_COMMIT_TOTAL_RETRY_TIME_MS.to_owned(),
             "1800000".to_owned(),
         );
-        props.insert(TableProperties::PROPERTY_FORMAT_VERSION.to_owned(), "2".to_owned());
+        props.insert(
+            iceberg::spec::TableProperties::PROPERTY_FORMAT_VERSION.to_owned(),
+            "2".to_owned(),
+        );
         props
     }
 
@@ -359,8 +364,8 @@ impl IcebergClient {
     ) -> Result<bool, iceberg::Error> {
         debug!(%table_name, %namespace, "checking if table exists");
 
-        let namespace_ident = NamespaceIdent::from_strs(namespace.split('.'))?;
-        let table_ident = TableIdent::new(namespace_ident, table_name);
+        let namespace_ident = iceberg::NamespaceIdent::from_strs(namespace.split('.'))?;
+        let table_ident = iceberg::TableIdent::new(namespace_ident, table_name);
         self.catalog.table_exists(&table_ident).await
     }
 
@@ -376,8 +381,8 @@ impl IcebergClient {
     ) -> Result<bool, iceberg::Error> {
         debug!(%table_name, %namespace, "dropping table if exists");
 
-        let namespace_ident = NamespaceIdent::from_strs(namespace.split('.'))?;
-        let table_ident = TableIdent::new(namespace_ident, table_name);
+        let namespace_ident = iceberg::NamespaceIdent::from_strs(namespace.split('.'))?;
+        let table_ident = iceberg::TableIdent::new(namespace_ident, table_name);
 
         if !self.catalog.table_exists(&table_ident).await? {
             return Ok(false);
@@ -395,7 +400,7 @@ impl IcebergClient {
     /// dropped.
     pub async fn drop_namespace(&self, namespace: &str) -> Result<(), iceberg::Error> {
         debug!(%namespace, "dropping namespace");
-        let namespace_ident = NamespaceIdent::from_strs(namespace.split('.'))?;
+        let namespace_ident = iceberg::NamespaceIdent::from_strs(namespace.split('.'))?;
         self.catalog.drop_namespace(&namespace_ident).await
     }
 
@@ -411,8 +416,8 @@ impl IcebergClient {
         table_name: String,
     ) -> Result<iceberg::table::Table, iceberg::Error> {
         debug!(%table_name, %namespace, "loading table");
-        let namespace_ident = NamespaceIdent::new(namespace);
-        let table_ident = TableIdent::new(namespace_ident, table_name);
+        let namespace_ident = iceberg::NamespaceIdent::new(namespace);
+        let table_ident = iceberg::TableIdent::new(namespace_ident, table_name);
         self.catalog.load_table(&table_ident).await
     }
 
@@ -433,8 +438,8 @@ impl IcebergClient {
             return Ok(0);
         }
 
-        let namespace_ident = NamespaceIdent::new(namespace);
-        let table_ident = TableIdent::new(namespace_ident, table_name);
+        let namespace_ident = iceberg::NamespaceIdent::new(namespace);
+        let table_ident = iceberg::TableIdent::new(namespace_ident, table_name);
 
         let table =
             self.catalog.load_table(&table_ident).await.map_err(iceberg_error_to_etl_error)?;
@@ -470,8 +475,8 @@ impl IcebergClient {
             return Ok(0);
         }
 
-        let namespace_ident = NamespaceIdent::new(namespace);
-        let table_ident = TableIdent::new(namespace_ident, table_name);
+        let namespace_ident = iceberg::NamespaceIdent::new(namespace);
+        let table_ident = iceberg::TableIdent::new(namespace_ident, table_name);
         let table =
             self.catalog.load_table(&table_ident).await.map_err(iceberg_error_to_etl_error)?;
 
@@ -705,7 +710,7 @@ impl IcebergClient {
     /// Commits data and equality-delete files in a single row-delta snapshot.
     async fn commit_row_delta(
         &self,
-        table_ident: TableIdent,
+        table_ident: iceberg::TableIdent,
         data_files: Vec<DataFile>,
         delete_files: Vec<DataFile>,
     ) -> Result<(), iceberg::Error> {
@@ -750,9 +755,9 @@ impl IcebergClient {
 /// Request body needed for a REST table metadata commit.
 struct RestTableCommit {
     /// Requirements that must still hold at commit time.
-    requirements: Vec<TableRequirement>,
+    requirements: Vec<iceberg::TableRequirement>,
     /// Table metadata updates to apply.
-    updates: Vec<TableUpdate>,
+    updates: Vec<iceberg::TableUpdate>,
 }
 
 /// REST commit helper for table updates that iceberg-rust can represent
@@ -789,7 +794,7 @@ struct ResolvedRestConfig {
 
 impl ResolvedRestConfig {
     /// Builds the REST table endpoint for a table.
-    fn table_endpoint(&self, table: &TableIdent) -> Result<String, iceberg::Error> {
+    fn table_endpoint(&self, table: &iceberg::TableIdent) -> Result<String, iceberg::Error> {
         let mut url = Url::parse(self.catalog_uri.trim_end_matches('/')).map_err(|error| {
             iceberg::Error::new(iceberg::ErrorKind::DataInvalid, "Invalid Iceberg REST catalog URI")
                 .with_context("uri", self.catalog_uri.clone())
@@ -839,7 +844,7 @@ impl RestCommitClient {
     /// Commits table updates through the Iceberg REST API.
     async fn commit_table(
         &self,
-        table_ident: &TableIdent,
+        table_ident: &iceberg::TableIdent,
         commit: RestTableCommit,
     ) -> Result<(), iceberg::Error> {
         let config = self.load_config().await?;
@@ -1083,15 +1088,15 @@ fn build_schema_update_commit(
     }
 
     let updates = vec![
-        TableUpdate::AddSchema { schema: desired_schema },
-        TableUpdate::SetCurrentSchema { schema_id: -1 },
+        iceberg::TableUpdate::AddSchema { schema: desired_schema },
+        iceberg::TableUpdate::SetCurrentSchema { schema_id: -1 },
     ];
     let requirements = vec![
-        TableRequirement::UuidMatch { uuid: table.metadata().uuid() },
-        TableRequirement::CurrentSchemaIdMatch {
+        iceberg::TableRequirement::UuidMatch { uuid: table.metadata().uuid() },
+        iceberg::TableRequirement::CurrentSchemaIdMatch {
             current_schema_id: table.metadata().current_schema_id(),
         },
-        TableRequirement::LastAssignedFieldIdMatch {
+        iceberg::TableRequirement::LastAssignedFieldIdMatch {
             last_assigned_field_id: table.metadata().last_column_id(),
         },
     ];
@@ -1322,8 +1327,8 @@ async fn build_row_delta_commit(
     let snapshot = build_snapshot(table, snapshot_id, manifest_list_path, summary);
 
     let updates = vec![
-        TableUpdate::AddSnapshot { snapshot },
-        TableUpdate::SetSnapshotRef {
+        iceberg::TableUpdate::AddSnapshot { snapshot },
+        iceberg::TableUpdate::SetSnapshotRef {
             ref_name: MAIN_BRANCH.to_owned(),
             reference: SnapshotReference::new(
                 snapshot_id,
@@ -1332,8 +1337,8 @@ async fn build_row_delta_commit(
         },
     ];
     let requirements = vec![
-        TableRequirement::UuidMatch { uuid: table.metadata().uuid() },
-        TableRequirement::RefSnapshotIdMatch {
+        iceberg::TableRequirement::UuidMatch { uuid: table.metadata().uuid() },
+        iceberg::TableRequirement::RefSnapshotIdMatch {
             r#ref: MAIN_BRANCH.to_owned(),
             snapshot_id: table.metadata().current_snapshot_id(),
         },
@@ -1569,8 +1574,6 @@ fn total_file_size(files: &[DataFile]) -> u64 {
 mod tests {
     use std::collections::HashMap;
 
-    use iceberg::{NamespaceIdent, TableIdent};
-
     use crate::iceberg::client::ResolvedRestConfig;
 
     #[test]
@@ -1579,8 +1582,8 @@ mod tests {
             catalog_uri: "http://localhost:8181/catalog/".to_owned(),
             props: HashMap::new(),
         };
-        let table = TableIdent::new(
-            NamespaceIdent::new("public".to_owned()),
+        let table = iceberg::TableIdent::new(
+            iceberg::NamespaceIdent::new("public".to_owned()),
             "quoted/table ? name".to_owned(),
         );
 
@@ -1598,8 +1601,8 @@ mod tests {
             catalog_uri: "http://localhost:8181/catalog".to_owned(),
             props: HashMap::from([("prefix".to_owned(), "/warehouse/main/".to_owned())]),
         };
-        let table = TableIdent::new(
-            NamespaceIdent::from_strs(["tenant one", "public"]).unwrap(),
+        let table = iceberg::TableIdent::new(
+            iceberg::NamespaceIdent::from_strs(["tenant one", "public"]).unwrap(),
             "café".to_owned(),
         );
 

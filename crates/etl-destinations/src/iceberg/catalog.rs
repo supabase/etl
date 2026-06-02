@@ -2,10 +2,8 @@ use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 use iceberg::{
-    Catalog, Namespace, NamespaceIdent, Result, TableCommit, TableCreation, TableIdent,
+    Result,
     io::{FileIO, FileIOBuilder, StorageFactory},
-    spec::{Schema, SortOrder, TableMetadata, UnboundPartitionSpec},
-    table::Table,
 };
 use iceberg_catalog_rest::{REST_CATALOG_PROP_WAREHOUSE, RestCatalog};
 use iceberg_storage_opendal::OpenDalStorageFactory;
@@ -107,21 +105,21 @@ impl SupabaseCatalog {
     }
 }
 
-/// Implementation of the [`Catalog`] trait for Supabase.
+/// Implementation of the [`iceberg::Catalog`] trait for Supabase.
 ///
 /// Routes operations to either the standard REST catalog or the
 /// Supabase-specific client based on endpoint compatibility. Table creation and
 /// deletion use the custom client, while other operations delegate to the
 /// standard implementation.
 #[async_trait]
-impl Catalog for SupabaseCatalog {
+impl iceberg::Catalog for SupabaseCatalog {
     /// Lists all namespaces under the specified parent namespace.
     ///
     /// Delegates to the standard REST catalog as this endpoint is compatible.
     async fn list_namespaces(
         &self,
-        parent: Option<&NamespaceIdent>,
-    ) -> Result<Vec<NamespaceIdent>> {
+        parent: Option<&iceberg::NamespaceIdent>,
+    ) -> Result<Vec<iceberg::NamespaceIdent>> {
         self.inner.list_namespaces(parent).await
     }
 
@@ -130,23 +128,26 @@ impl Catalog for SupabaseCatalog {
     /// Delegates to the standard REST catalog as this endpoint is compatible.
     async fn create_namespace(
         &self,
-        namespace: &NamespaceIdent,
+        namespace: &iceberg::NamespaceIdent,
         properties: HashMap<String, String>,
-    ) -> Result<Namespace> {
+    ) -> Result<iceberg::Namespace> {
         self.inner.create_namespace(namespace, properties).await
     }
 
     /// Retrieves metadata for the specified namespace.
     ///
     /// Delegates to the standard REST catalog as this endpoint is compatible.
-    async fn get_namespace(&self, namespace: &NamespaceIdent) -> Result<Namespace> {
+    async fn get_namespace(
+        &self,
+        namespace: &iceberg::NamespaceIdent,
+    ) -> Result<iceberg::Namespace> {
         self.inner.get_namespace(namespace).await
     }
 
     /// Checks whether the specified namespace exists in the catalog.
     ///
     /// Delegates to the standard REST catalog as this endpoint is compatible.
-    async fn namespace_exists(&self, namespace: &NamespaceIdent) -> Result<bool> {
+    async fn namespace_exists(&self, namespace: &iceberg::NamespaceIdent) -> Result<bool> {
         self.inner.namespace_exists(namespace).await
     }
 
@@ -155,7 +156,7 @@ impl Catalog for SupabaseCatalog {
     /// Delegates to the standard REST catalog as this endpoint is compatible.
     async fn update_namespace(
         &self,
-        namespace: &NamespaceIdent,
+        namespace: &iceberg::NamespaceIdent,
         properties: HashMap<String, String>,
     ) -> Result<()> {
         self.inner.update_namespace(namespace, properties).await
@@ -164,28 +165,31 @@ impl Catalog for SupabaseCatalog {
     /// Removes the specified namespace from the catalog.
     ///
     /// Delegates to the standard REST catalog as this endpoint is compatible.
-    async fn drop_namespace(&self, namespace: &NamespaceIdent) -> Result<()> {
+    async fn drop_namespace(&self, namespace: &iceberg::NamespaceIdent) -> Result<()> {
         self.inner.drop_namespace(namespace).await
     }
 
     /// Lists all tables within the specified namespace.
     ///
     /// Delegates to the standard REST catalog as this endpoint is compatible.
-    async fn list_tables(&self, namespace: &NamespaceIdent) -> Result<Vec<TableIdent>> {
+    async fn list_tables(
+        &self,
+        namespace: &iceberg::NamespaceIdent,
+    ) -> Result<Vec<iceberg::TableIdent>> {
         self.inner.list_tables(namespace).await
     }
 
     /// Checks whether the specified table exists in the catalog.
     ///
     /// Delegates to the standard REST catalog as this endpoint is compatible.
-    async fn table_exists(&self, identifier: &TableIdent) -> Result<bool> {
+    async fn table_exists(&self, identifier: &iceberg::TableIdent) -> Result<bool> {
         self.inner.table_exists(identifier).await
     }
 
     /// Removes the specified table from the catalog.
     ///
     /// Uses the Supabase-specific client due to non-standard endpoint behavior.
-    async fn drop_table(&self, identifier: &TableIdent) -> Result<()> {
+    async fn drop_table(&self, identifier: &iceberg::TableIdent) -> Result<()> {
         self.client.drop_table(identifier).await
     }
 
@@ -193,14 +197,18 @@ impl Catalog for SupabaseCatalog {
     /// identifier.
     ///
     /// Delegates to the standard REST catalog as this endpoint is compatible.
-    async fn rename_table(&self, src: &TableIdent, dest: &TableIdent) -> Result<()> {
+    async fn rename_table(
+        &self,
+        src: &iceberg::TableIdent,
+        dest: &iceberg::TableIdent,
+    ) -> Result<()> {
         self.inner.rename_table(src, dest).await
     }
 
     /// Loads an existing table by its identifier.
     ///
     /// Delegates to the standard REST catalog as this endpoint is compatible.
-    async fn load_table(&self, identifier: &TableIdent) -> Result<Table> {
+    async fn load_table(&self, identifier: &iceberg::TableIdent) -> Result<iceberg::table::Table> {
         self.inner.load_table(identifier).await
     }
 
@@ -210,16 +218,16 @@ impl Catalog for SupabaseCatalog {
     /// requirements.
     async fn create_table(
         &self,
-        namespace: &NamespaceIdent,
-        creation: TableCreation,
-    ) -> Result<Table> {
+        namespace: &iceberg::NamespaceIdent,
+        creation: iceberg::TableCreation,
+    ) -> Result<iceberg::table::Table> {
         self.client.create_table(namespace, creation).await
     }
 
     /// Updates an existing table with the specified commit operations.
     ///
     /// Delegates to the standard REST catalog as this endpoint is compatible.
-    async fn update_table(&self, commit: TableCommit) -> Result<Table> {
+    async fn update_table(&self, commit: iceberg::TableCommit) -> Result<iceberg::table::Table> {
         self.inner.update_table(commit).await
     }
 
@@ -229,9 +237,9 @@ impl Catalog for SupabaseCatalog {
     /// Delegates to the standard REST catalog as this endpoint is compatible.
     async fn register_table(
         &self,
-        identifier: &TableIdent,
+        identifier: &iceberg::TableIdent,
         metadata_location: String,
-    ) -> Result<Table> {
+    ) -> Result<iceberg::table::Table> {
         self.inner.register_table(identifier, metadata_location).await
     }
 }
@@ -284,15 +292,15 @@ impl SupabaseClient {
 
     /// Creates a new table using Supabase-specific API format.
     ///
-    /// Converts the standard [`TableCreation`] request to Supabase's expected
-    /// format and handles the non-standard response structure. Returns a
-    /// fully configured [`Table`] instance with metadata and file I/O
-    /// capabilities.
+    /// Converts the standard [`iceberg::TableCreation`] request to Supabase's
+    /// expected format and handles the non-standard response structure.
+    /// Returns a fully configured [`iceberg::table::Table`] instance with
+    /// metadata and file I/O capabilities.
     async fn create_table(
         &self,
-        namespace: &NamespaceIdent,
-        creation: TableCreation,
-    ) -> Result<Table> {
+        namespace: &iceberg::NamespaceIdent,
+        creation: iceberg::TableCreation,
+    ) -> Result<iceberg::table::Table> {
         let supabase_request = CreateTableRequest {
             name: creation.name.clone(),
             location: creation.location.clone(),
@@ -348,10 +356,12 @@ impl SupabaseClient {
 
         let file_io = self.load_file_io(Some(metadata_location), Some(config))?;
 
-        let table_ident = TableIdent::new(namespace.clone(), creation.name.clone());
+        let table_ident = iceberg::TableIdent::new(namespace.clone(), creation.name.clone());
 
-        let table_builder =
-            Table::builder().identifier(table_ident).file_io(file_io).metadata(response.metadata);
+        let table_builder = iceberg::table::Table::builder()
+            .identifier(table_ident)
+            .file_io(file_io)
+            .metadata(response.metadata);
 
         if let Some(metadata_location) = response.metadata_location {
             table_builder.metadata_location(metadata_location).build()
@@ -365,7 +375,7 @@ impl SupabaseClient {
     /// Sends a DELETE request with `purgeRequested=true` so storage-backed
     /// catalogs remove table data during deletion. Returns an error if the
     /// table does not exist.
-    async fn drop_table(&self, table: &TableIdent) -> Result<()> {
+    async fn drop_table(&self, table: &iceberg::TableIdent) -> Result<()> {
         let namespace_path = table.namespace().as_ref().join(".");
         let url = self.table_url(&namespace_path, table.name());
 
@@ -506,18 +516,18 @@ struct CreateTableRequest {
     location: Option<String>,
 
     /// Table schema definition.
-    schema: Schema,
+    schema: iceberg::spec::Schema,
 
     /// Partition specification for the table.
     ///
     /// Named `spec` instead of the standard `partition-spec` to match
     /// Supabase's API expectations.
     #[serde(skip_serializing_if = "Option::is_none")]
-    spec: Option<UnboundPartitionSpec>,
+    spec: Option<iceberg::spec::UnboundPartitionSpec>,
 
     /// Sort order specification for the table.
     #[serde(skip_serializing_if = "Option::is_none")]
-    sort_order: Option<SortOrder>,
+    sort_order: Option<iceberg::spec::SortOrder>,
 
     /// Whether to stage the table creation operation.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -538,7 +548,7 @@ struct LoadTableResponse {
     /// Location of the table's metadata file.
     metadata_location: Option<String>,
     /// Complete table metadata specification.
-    metadata: TableMetadata,
+    metadata: iceberg::spec::TableMetadata,
     /// Additional configuration properties for the table.
     config: Option<HashMap<String, String>>,
 }
