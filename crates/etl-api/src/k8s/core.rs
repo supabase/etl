@@ -929,7 +929,7 @@ mod tests {
         let source_config = source_config_with_password();
         let destination_config = snowflake_destination_config(Some("passphrase123"));
 
-        let secrets = build_secrets_from_configs(&source_config, &destination_config);
+        let secrets = build_secrets_from_configs(&source_config, &destination_config).unwrap();
         let client = RecordingK8sClient::default();
 
         create_or_update_dynamic_replicator_secrets(&client, "tenant-42", secrets).await.unwrap();
