@@ -308,7 +308,7 @@ fn operation_policy(resource: &DynamicObject) -> ExternalMaintenanceOperationPol
         inline_flush_enabled: enabled_value(inline_flush, true),
         merge_adjacent_files_enabled: enabled_value(merge_adjacent_files, true),
         rewrite_data_files_enabled: enabled_value(rewrite_data_files, true),
-        expire_snapshots_enabled: enabled_value(expire_snapshots, false),
+        expire_snapshots_enabled: enabled_value(expire_snapshots, true),
         cleanup_old_files_enabled: enabled_value(cleanup_old_files, true),
     }
 }
@@ -340,7 +340,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn operation_policy_defaults_expire_snapshots_disabled() {
+    fn operation_policy_defaults_expire_snapshots_enabled() {
         let resource: DynamicObject = serde_json::from_value(json!({
             "apiVersion": "etl.supabase.com/v1alpha1",
             "kind": "DuckLakeMaintenance",
@@ -360,6 +360,6 @@ mod tests {
 
         assert!(policy.inline_flush_enabled);
         assert!(policy.rewrite_data_files_enabled);
-        assert!(!policy.expire_snapshots_enabled);
+        assert!(policy.expire_snapshots_enabled);
     }
 }
