@@ -21,8 +21,8 @@ use crate::support::{
         create_default_image,
         destinations::{
             create_destination, new_bigquery_destination_config,
-            new_iceberg_supabase_destination_config, new_name, updated_destination_config,
-            updated_iceberg_supabase_destination_config, updated_name,
+            new_iceberg_supabase_destination_config, new_name, new_snowflake_destination_config,
+            updated_destination_config, updated_iceberg_supabase_destination_config, updated_name,
         },
         pipelines::{new_pipeline_config, updated_pipeline_config},
         sources::create_source,
@@ -128,6 +128,52 @@ async fn iceberg_supabase_destination_and_pipeline_can_be_created() {
     let destination_pipeline = CreateDestinationPipelineRequest {
         destination_name: "Iceberg Supabase Destination".to_owned(),
         destination_config: new_iceberg_supabase_destination_config(),
+        source_id,
+        pipeline_config: new_pipeline_config(),
+    };
+    let response = app.create_destination_pipeline(tenant_id, &destination_pipeline).await;
+
+    // Assert
+    assert!(response.status().is_success());
+    let response: CreateDestinationPipelineResponse =
+        response.json().await.expect("failed to deserialize response");
+    assert_eq!(response.destination_id, 1);
+    assert_eq!(response.pipeline_id, 1);
+
+    let destination_id = response.destination_id;
+    let pipeline_id = response.pipeline_id;
+
+    let response = app.read_destination(tenant_id, destination_id).await;
+    let response: ReadDestinationResponse =
+        response.json().await.expect("failed to deserialize response");
+    assert_eq!(response.id, destination_id);
+    assert_eq!(response.name, destination_pipeline.destination_name);
+    insta::assert_debug_snapshot!(response.config);
+
+    let response = app.read_pipeline(tenant_id, pipeline_id).await;
+    let response: ReadPipelineResponse =
+        response.json().await.expect("failed to deserialize response");
+    assert_eq!(response.id, pipeline_id);
+    assert_eq!(&response.tenant_id, tenant_id);
+    assert_eq!(response.source_id, source_id);
+    assert_eq!(response.destination_id, destination_id);
+    assert_eq!(response.replicator_id, 1);
+    insta::assert_debug_snapshot!(response.config);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn snowflake_destination_and_pipeline_can_be_created() {
+    init_test_tracing();
+    // Arrange
+    let app = spawn_test_app().await;
+    let tenant_id = &create_tenant(&app).await;
+    let source_id = create_source(&app, tenant_id).await;
+    create_default_image(&app).await;
+
+    // Act
+    let destination_pipeline = CreateDestinationPipelineRequest {
+        destination_name: "Snowflake Destination".to_owned(),
+        destination_config: new_snowflake_destination_config(),
         source_id,
         pipeline_config: new_pipeline_config(),
     };
