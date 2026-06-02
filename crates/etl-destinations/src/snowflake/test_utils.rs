@@ -33,7 +33,8 @@ pub fn load_test_config() -> Config {
         std::env::var(SNOWFLAKE_DATABASE_ENV).unwrap_or_else(|_| DEFAULT_DATABASE.to_owned());
     let schema = std::env::var(SNOWFLAKE_SCHEMA_ENV).unwrap_or_else(|_| DEFAULT_SCHEMA.to_owned());
 
-    let mut config = Config::new(&account_id, &username, &database, &schema);
+    let mut config = Config::new(&account_id, &username, &database, &schema)
+        .expect("valid Snowflake account id");
     if let Ok(role) = std::env::var(SNOWFLAKE_ROLE_ENV) {
         config = config.with_role(&role);
     }

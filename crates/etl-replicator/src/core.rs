@@ -225,7 +225,8 @@ pub(crate) async fn start_replicator_with_config(
             schema,
             role,
         } => {
-            let mut config = snowflake::Config::new(account_id, user, database, schema);
+            let mut config = snowflake::Config::new(account_id, user, database, schema)
+                .map_err(ReplicatorError::config)?;
             if let Some(r) = role {
                 config = config.with_role(r);
             }
@@ -235,7 +236,7 @@ pub(crate) async fn start_replicator_with_config(
                     private_key.expose_secret(),
                     private_key_passphrase.as_ref(),
                 )
-                .map_err(|e| ReplicatorError::config(std::io::Error::other(e.to_string())))?,
+                .map_err(ReplicatorError::config)?,
             );
             let client = snowflake::Client::new(config, auth, pipeline_id);
             let destination = snowflake::Destination::new(client, store.clone());

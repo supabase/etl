@@ -339,7 +339,7 @@ mod tests {
         account_id: &str,
         username: &str,
     ) -> AuthManager<TestExchanger> {
-        let config = Config::new(account_id, username, "TEST_DB", "PUBLIC");
+        let config = Config::new(account_id, username, "TEST_DB", "PUBLIC").expect("valid config");
         let pem = std::fs::read_to_string(TEST_KEY_PATH).expect("test key");
 
         AuthManager::with_exchanger(&config, &pem, None, TestExchanger)
@@ -400,7 +400,7 @@ mod tests {
 
     #[test]
     fn config_derives_account_url() {
-        let config = Config::new("ORG-ACCT", "USER", "TEST_DB", "PUBLIC");
+        let config = Config::new("ORG-ACCT", "USER", "TEST_DB", "PUBLIC").expect("valid config");
         assert_eq!(config.account_url(), "https://ORG-ACCT.snowflakecomputing.com");
     }
 

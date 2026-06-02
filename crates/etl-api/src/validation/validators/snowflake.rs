@@ -65,8 +65,20 @@ impl Validator for SnowflakeValidator {
             )]);
         }
 
-        let mut config =
-            snowflake::Config::new(&self.account_id, &self.user, &self.database, &self.schema);
+        let mut config = match snowflake::Config::new(
+            &self.account_id,
+            &self.user,
+            &self.database,
+            &self.schema,
+        ) {
+            Ok(config) => config,
+            Err(err) => {
+                return Ok(vec![ValidationFailure::critical(
+                    "Invalid Snowflake Account ID",
+                    format!("The Snowflake account identifier is not valid.\n\nError: {err}"),
+                )]);
+            }
+        };
         if let Some(role) = &self.role {
             config = config.with_role(role);
         }
