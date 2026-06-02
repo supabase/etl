@@ -1,5 +1,7 @@
 use std::time::Duration;
 
+use etl_config::shared::{ValidationError, validate_snowflake_account_id};
+
 pub(crate) const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 pub(crate) const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
 
@@ -34,17 +36,26 @@ pub struct Config {
 
 impl Config {
     /// Create a config with the required connection parameters.
-    pub fn new(account_id: &str, username: &str, database: &str, schema: &str) -> Self {
+    pub fn new(
+        account_id: &str,
+        username: &str,
+        database: &str,
+        schema: &str,
+    ) -> Result<Self, ValidationError> {
+        // The account id is interpolated into the account URL, so this rejects values
+        // that could take over the host (SSRF).
+        validate_snowflake_account_id(account_id)?;
+
         let account_url = format!("https://{}.snowflakecomputing.com", account_id.to_uppercase());
 
-        Self {
+        Ok(Self {
             account_url,
             account_id: account_id.to_owned(),
             username: username.to_owned(),
             database: database.to_owned(),
             schema: schema.to_owned(),
             role: None,
-        }
+        })
     }
 
     /// HTTPS-only account URL used for all API requests.
@@ -66,5 +77,27 @@ impl Config {
     pub fn with_role(mut self, role: &str) -> Self {
         self.role = Some(role.to_owned());
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_builds_account_url_for_valid_id() {
+        let config = Config::new("myorg-myaccount", "USER", "DB", "PUBLIC").expect("valid id");
+        assert_eq!(config.account_url(), "https://MYORG-MYACCOUNT.snowflakecomputing.com");
+    }
+
+    #[test]
+    fn new_rejects_injection_in_account_id() {
+        for id in ["127.0.0.1:8443/x", "attacker.example/foo", "169.254.169.254#", "evil@host", ""]
+        {
+            assert!(
+                Config::new(id, "USER", "DB", "PUBLIC").is_err(),
+                "should reject account_id {id:?}"
+            );
+        }
     }
 }
