@@ -5,17 +5,20 @@ use super::ValidationError;
 const SNOWFLAKE_ACCOUNT_ID_MAX_LEN: usize = 63;
 const SUPABASE_PROJECT_REF_LEN: usize = 20;
 
-/// Validates that a Snowflake account identifier is in the preferred
-/// `orgname-accountname` format.
+/// Validates a Snowflake account identifier.
+///
+/// Accepts two forms:
+/// - Org-account: `ORGNAME-ACCOUNTNAME` (preferred).
+/// - Legacy single-part locator: `xy12345` (ASCII alphanumeric, starts with a
+///   letter).
 ///
 /// See https://docs.snowflake.com/en/user-guide/admin-account-identifier for details.
 pub fn validate_snowflake_account_id(account_id: &str) -> Result<(), ValidationError> {
     let invalid = || ValidationError::InvalidFieldValue {
         field: "account_id".to_owned(),
-        constraint: "must be a valid Snowflake account identifier in orgname-accountname format \
-                     (e.g. MYORG-MYACCOUNT): orgname is ASCII letters and digits starting with a \
-                     letter; accountname is ASCII letters, digits and underscores starting with a \
-                     letter and not ending with an underscore; max 63 characters"
+        constraint: "must be a valid Snowflake account identifier: either orgname-accountname \
+                     (e.g. MYORG-MYACCOUNT) or a single-part account locator (e.g. xy12345); max \
+                     63 characters"
             .to_owned(),
     };
 
@@ -23,23 +26,27 @@ pub fn validate_snowflake_account_id(account_id: &str) -> Result<(), ValidationE
         return Err(invalid());
     }
 
-    let Some((org, account)) = account_id.split_once('-') else {
-        return Err(invalid());
-    };
+    if let Some((org, account)) = account_id.split_once('-') {
+        if org.is_empty()
+            || !org.starts_with(|c: char| c.is_ascii_alphabetic())
+            || !org.chars().all(|c| c.is_ascii_alphanumeric())
+        {
+            return Err(invalid());
+        }
 
-    if org.is_empty()
-        || !org.starts_with(|c: char| c.is_ascii_alphabetic())
-        || !org.chars().all(|c| c.is_ascii_alphanumeric())
-    {
-        return Err(invalid());
-    }
-
-    if account.is_empty()
-        || !account.starts_with(|c: char| c.is_ascii_alphabetic())
-        || !account.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-        || account.ends_with('_')
-    {
-        return Err(invalid());
+        if account.is_empty()
+            || !account.starts_with(|c: char| c.is_ascii_alphabetic())
+            || !account.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            || account.ends_with('_')
+        {
+            return Err(invalid());
+        }
+    } else {
+        if !account_id.starts_with(|c: char| c.is_ascii_alphabetic())
+            || !account_id.chars().all(|c| c.is_ascii_alphanumeric())
+        {
+            return Err(invalid());
+        }
     }
 
     Ok(())
@@ -93,11 +100,20 @@ mod tests {
             ("host?x=1", false),
             ("a b", false),
             ("abc%2f", false),
-            // Legacy dotted locators are not accepted.
+            // Valid legacy single-part locators.
+            ("xy12345", true),
+            ("abc123", true),
+            // Legacy locator must start with a letter.
+            ("123abc", false),
+            // Underscores not allowed in locators.
+            ("xy_12345", false),
+            // Dotted locators rejected: URL host and JWT claim need different values.
+            ("xy12345.us-east-2.aws", false),
             ("xy12345.us-east-1.aws", false),
-            ("xy12345", false),
-            // No hyphen (single part).
-            ("abc123", false),
+            // Locator with injection characters.
+            ("xy12345/us", false),
+            ("xy12345:443", false),
+            ("xy12345#", false),
             // Org must start with a letter.
             ("1org-account", false),
             // Account must start with a letter.
