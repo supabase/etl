@@ -1,0 +1,239 @@
+use std::net::IpAddr;
+
+use etl_config::{
+    SerializableSecretString,
+    shared::{PgConnectionConfig, TcpKeepaliveConfig, TlsConfig},
+};
+use secrecy::ExposeSecret;
+use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
+
+use crate::configs::{
+    encryption::{
+        Decrypt, DecryptionError, Encrypt, EncryptedValue, EncryptionError, EncryptionKeyring,
+        decrypt_text, encrypt_text,
+    },
+    store::Store,
+};
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct FullApiSourceConfig {
+    #[schema(example = "localhost")]
+    #[serde(deserialize_with = "crate::utils::trim_string")]
+    pub host: String,
+    #[schema(value_type = String, example = "2a05:d014:1c06:5f0c:d7a9:8616:bee2:30df")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hostaddr: Option<IpAddr>,
+    #[schema(example = 5432)]
+    pub port: u16,
+    #[schema(example = "mydb")]
+    #[serde(deserialize_with = "crate::utils::trim_string")]
+    pub name: String,
+    #[schema(example = "postgres")]
+    #[serde(deserialize_with = "crate::utils::trim_string")]
+    pub username: String,
+    #[schema(example = "secret123")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub password: Option<SerializableSecretString>,
+}
+
+impl From<StoredSourceConfig> for FullApiSourceConfig {
+    fn from(stored_source_config: StoredSourceConfig) -> Self {
+        Self {
+            host: stored_source_config.host,
+            hostaddr: stored_source_config.hostaddr,
+            port: stored_source_config.port,
+            name: stored_source_config.name,
+            username: stored_source_config.username,
+            password: stored_source_config.password,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct StrippedApiSourceConfig {
+    #[schema(example = "localhost")]
+    pub host: String,
+    #[schema(value_type = String, example = "2a05:d014:1c06:5f0c:d7a9:8616:bee2:30df")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hostaddr: Option<IpAddr>,
+    #[schema(example = 5432)]
+    pub port: u16,
+    #[schema(example = "mydb")]
+    pub name: String,
+    #[schema(example = "postgres")]
+    pub username: String,
+}
+
+impl From<StoredSourceConfig> for StrippedApiSourceConfig {
+    fn from(source: StoredSourceConfig) -> Self {
+        Self {
+            host: source.host,
+            hostaddr: source.hostaddr,
+            port: source.port,
+            name: source.name,
+            username: source.username,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct StoredSourceConfig {
+    pub host: String,
+    pub hostaddr: Option<IpAddr>,
+    pub port: u16,
+    pub name: String,
+    pub username: String,
+    pub password: Option<SerializableSecretString>,
+}
+
+impl StoredSourceConfig {
+    /// Converts the stored source config into a Postgres connection config with
+    /// TLS settings.
+    pub fn into_connection_config(self, tls_config: TlsConfig) -> PgConnectionConfig {
+        PgConnectionConfig {
+            host: self.host,
+            hostaddr: self.hostaddr,
+            port: self.port,
+            name: self.name,
+            username: self.username,
+            password: self.password.map(Into::into),
+            tls: tls_config,
+            keepalive: TcpKeepaliveConfig::default(),
+        }
+    }
+}
+
+impl From<FullApiSourceConfig> for StoredSourceConfig {
+    fn from(full_api_source_config: FullApiSourceConfig) -> Self {
+        Self {
+            host: full_api_source_config.host,
+            hostaddr: full_api_source_config.hostaddr,
+            port: full_api_source_config.port,
+            name: full_api_source_config.name,
+            username: full_api_source_config.username,
+            password: full_api_source_config.password,
+        }
+    }
+}
+
+impl Encrypt<EncryptedStoredSourceConfig> for StoredSourceConfig {
+    fn encrypt(
+        self,
+        encryption_key: &EncryptionKeyring,
+    ) -> Result<EncryptedStoredSourceConfig, EncryptionError> {
+        let mut encrypted_password = None;
+        if let Some(password) = self.password {
+            encrypted_password =
+                Some(encrypt_text(password.expose_secret().to_owned(), encryption_key)?);
+        }
+
+        Ok(EncryptedStoredSourceConfig {
+            host: self.host,
+            hostaddr: self.hostaddr,
+            port: self.port,
+            name: self.name,
+            username: self.username,
+            password: encrypted_password,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EncryptedStoredSourceConfig {
+    host: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hostaddr: Option<IpAddr>,
+    port: u16,
+    name: String,
+    username: String,
+    password: Option<EncryptedValue>,
+}
+
+impl Store for EncryptedStoredSourceConfig {}
+
+impl Decrypt<StoredSourceConfig> for EncryptedStoredSourceConfig {
+    fn decrypt(
+        self,
+        encryption_key: &EncryptionKeyring,
+    ) -> Result<StoredSourceConfig, DecryptionError> {
+        let mut decrypted_password = None;
+        if let Some(password) = self.password {
+            let pwd = decrypt_text(password, encryption_key)?;
+            decrypted_password = Some(SerializableSecretString::from(pwd));
+        }
+
+        Ok(StoredSourceConfig {
+            host: self.host,
+            hostaddr: self.hostaddr,
+            port: self.port,
+            name: self.name,
+            username: self.username,
+            password: decrypted_password,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::configs::encryption::{EncryptionKey, EncryptionKeyring, generate_random_key};
+
+    #[test]
+    fn stored_source_config_encryption_decryption() {
+        let config = StoredSourceConfig {
+            host: "localhost".to_owned(),
+            hostaddr: Some("2a05:d014:1c06:5f0c:d7a9:8616:bee2:30df".parse().unwrap()),
+            port: 5432,
+            name: "testdb".to_owned(),
+            username: "user".to_owned(),
+            password: Some(SerializableSecretString::from("password".to_owned())),
+        };
+
+        let key = EncryptionKeyring::from(EncryptionKey {
+            id: 1,
+            key: generate_random_key::<32>().unwrap(),
+        });
+
+        let encrypted = config.clone().encrypt(&key).unwrap();
+        let decrypted = encrypted.decrypt(&key).unwrap();
+
+        assert_eq!(config.host, decrypted.host);
+        assert_eq!(config.hostaddr, decrypted.hostaddr);
+        assert_eq!(config.port, decrypted.port);
+        assert_eq!(config.name, decrypted.name);
+        assert_eq!(config.username, decrypted.username);
+
+        // Assert that password was encrypted and decrypted correctly
+        match (config.password, decrypted.password) {
+            (Some(original), Some(decrypted_pwd)) => {
+                assert_eq!(original.expose_secret(), decrypted_pwd.expose_secret());
+            }
+            (None, None) => {}
+            _ => panic!("Password encryption/decryption failed"),
+        }
+    }
+
+    #[test]
+    fn full_api_source_config_conversion() {
+        let full_config = FullApiSourceConfig {
+            host: "localhost".to_owned(),
+            hostaddr: Some("2a05:d014:1c06:5f0c:d7a9:8616:bee2:30df".parse().unwrap()),
+            port: 5432,
+            name: "testdb".to_owned(),
+            username: "user".to_owned(),
+            password: Some(SerializableSecretString::from("password".to_owned())),
+        };
+
+        let stored: StoredSourceConfig = full_config.clone().into();
+        let back_to_full: FullApiSourceConfig = stored.into();
+
+        assert_eq!(full_config.host, back_to_full.host);
+        assert_eq!(full_config.hostaddr, back_to_full.hostaddr);
+        assert_eq!(full_config.port, back_to_full.port);
+        assert_eq!(full_config.name, back_to_full.name);
+        assert_eq!(full_config.username, back_to_full.username);
+    }
+}

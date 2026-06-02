@@ -1,0 +1,15 @@
+---
+source: crates/etl-api/src/data/sources.rs
+expression: deserialized.unwrap()
+---
+StoredSourceConfig {
+    host: "localhost",
+    port: 5432,
+    name: "postgres",
+    username: "postgres",
+    password: Some(
+        SerializableSecretString(
+            SecretBox<str>([REDACTED]),
+        ),
+    ),
+}

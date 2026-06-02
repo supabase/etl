@@ -1,5 +1,9 @@
+# Build the task runner into its own target dir so alternating between
+# `cargo x ...` and `cargo build`/`cargo run` stops invalidating shared crates.io
+# deps whose unified feature sets differ between the two graphs.
 [alias]
-xtask = "run --package xtask --"
+xtask = "run --target-dir target/xtask --package xtask --"
+x = "run --target-dir target/xtask --package xtask --"
 
 # Use lld linker for faster linking (1.5-2x faster than default ld)
 # lld is part of the LLVM toolchain and widely available

@@ -1,0 +1,226 @@
+#![allow(dead_code)]
+
+use std::{
+    collections::BTreeMap,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
+
+use async_trait::async_trait;
+use etl_api::{
+    configs::pipeline::ReplicatorResourcesConfig,
+    k8s::{
+        DuckLakeMaintenanceResourceConfig, K8sClient, K8sError, PodStatus, ReplicatorConfigMapFile,
+        ReplicatorStatefulSetConfig,
+        http::{TRUSTED_ROOT_CERT_CONFIG_MAP_NAME, TRUSTED_ROOT_CERT_KEY_NAME},
+    },
+};
+use etl_postgres::test_utils::test_tls_root_certs_from_env;
+use k8s_openapi::api::core::v1::ConfigMap;
+use tokio::sync::RwLock;
+
+#[derive(Clone)]
+pub(crate) struct MockK8sState {
+    pod_status: Arc<RwLock<PodStatus>>,
+    create_calls: Arc<AtomicUsize>,
+    ducklake_maintenance_create_calls: Arc<AtomicUsize>,
+    last_replicator_resources: Arc<RwLock<Option<ReplicatorResourcesConfig>>>,
+}
+
+impl Default for MockK8sState {
+    fn default() -> Self {
+        Self {
+            pod_status: Arc::new(RwLock::new(PodStatus::Started)),
+            create_calls: Arc::new(AtomicUsize::new(0)),
+            ducklake_maintenance_create_calls: Arc::new(AtomicUsize::new(0)),
+            last_replicator_resources: Arc::new(RwLock::new(None)),
+        }
+    }
+}
+
+impl MockK8sState {
+    pub(crate) async fn set_pod_status(&self, pod_status: PodStatus) {
+        *self.pod_status.write().await = pod_status;
+    }
+
+    pub(crate) fn create_calls(&self) -> usize {
+        self.create_calls.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn ducklake_maintenance_create_calls(&self) -> usize {
+        self.ducklake_maintenance_create_calls.load(Ordering::Relaxed)
+    }
+
+    pub(crate) async fn last_replicator_resources(&self) -> Option<ReplicatorResourcesConfig> {
+        self.last_replicator_resources.read().await.clone()
+    }
+}
+
+pub(crate) struct MockK8sClient {
+    state: MockK8sState,
+}
+
+impl MockK8sClient {
+    pub(crate) fn new(state: MockK8sState) -> Self {
+        Self { state }
+    }
+
+    fn record_create_call(&self) {
+        self.state.create_calls.fetch_add(1, Ordering::Relaxed);
+    }
+
+    async fn set_last_replicator_resources(
+        &self,
+        replicator_resources: Option<&ReplicatorResourcesConfig>,
+    ) {
+        *self.state.last_replicator_resources.write().await = replicator_resources.cloned();
+    }
+}
+
+#[async_trait]
+impl K8sClient for MockK8sClient {
+    async fn create_or_update_postgres_secret(
+        &self,
+        _prefix: &str,
+        _postgres_password: &str,
+    ) -> Result<(), K8sError> {
+        self.record_create_call();
+        Ok(())
+    }
+
+    async fn create_or_update_bigquery_secret(
+        &self,
+        _prefix: &str,
+        _bq_service_account_key: &str,
+    ) -> Result<(), K8sError> {
+        self.record_create_call();
+        Ok(())
+    }
+
+    async fn create_or_update_clickhouse_secret(
+        &self,
+        _prefix: &str,
+        _password: Option<&str>,
+    ) -> Result<(), K8sError> {
+        Ok(())
+    }
+
+    async fn create_or_update_iceberg_secret(
+        &self,
+        _prefix: &str,
+        _catalog_token: &str,
+        _s3_access_key_id: &str,
+        _s3_secret_access_key: &str,
+    ) -> Result<(), K8sError> {
+        self.record_create_call();
+        Ok(())
+    }
+
+    async fn create_or_update_ducklake_secret(
+        &self,
+        _prefix: &str,
+        _s3_access_key_id: &str,
+        _s3_secret_access_key: &str,
+    ) -> Result<(), K8sError> {
+        Ok(())
+    }
+
+    async fn delete_postgres_secret(&self, _prefix: &str) -> Result<(), K8sError> {
+        Ok(())
+    }
+
+    async fn delete_clickhouse_secret(&self, _prefix: &str) -> Result<(), K8sError> {
+        Ok(())
+    }
+
+    async fn delete_bigquery_secret(&self, _prefix: &str) -> Result<(), K8sError> {
+        Ok(())
+    }
+
+    async fn delete_iceberg_secret(&self, _prefix: &str) -> Result<(), K8sError> {
+        Ok(())
+    }
+
+    async fn delete_ducklake_secret(&self, _prefix: &str) -> Result<(), K8sError> {
+        Ok(())
+    }
+
+    async fn create_or_update_snowflake_secret(
+        &self,
+        _prefix: &str,
+        _private_key: &str,
+        _private_key_passphrase: Option<&str>,
+    ) -> Result<(), K8sError> {
+        self.record_create_call();
+        Ok(())
+    }
+
+    async fn delete_snowflake_secret(&self, _prefix: &str) -> Result<(), K8sError> {
+        Ok(())
+    }
+
+    async fn get_config_map(&self, config_map_name: &str) -> Result<ConfigMap, K8sError> {
+        // For tests to pass the TRUSTED_ROOT_CERT_CONFIG_MAP_NAME config map expects
+        // a key named TRUSTED_ROOT_CERT_KEY_NAME to be present with non-empty certs
+        if config_map_name == TRUSTED_ROOT_CERT_CONFIG_MAP_NAME {
+            let mut map = BTreeMap::new();
+            let certs = test_tls_root_certs_from_env().unwrap_or_else(|| {
+                "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----".to_owned()
+            });
+            map.insert(TRUSTED_ROOT_CERT_KEY_NAME.to_owned(), certs);
+            let cm = ConfigMap { data: Some(map), ..ConfigMap::default() };
+            Ok(cm)
+        } else {
+            Ok(ConfigMap::default())
+        }
+    }
+
+    async fn create_or_update_replicator_config_map(
+        &self,
+        _prefix: &str,
+        _files: Vec<ReplicatorConfigMapFile>,
+    ) -> Result<(), K8sError> {
+        self.record_create_call();
+        Ok(())
+    }
+
+    async fn delete_replicator_config_map(&self, _prefix: &str) -> Result<(), K8sError> {
+        Ok(())
+    }
+
+    async fn create_or_update_replicator_stateful_set(
+        &self,
+        config: ReplicatorStatefulSetConfig,
+    ) -> Result<(), K8sError> {
+        self.set_last_replicator_resources(config.replicator_resources.as_ref()).await;
+        self.record_create_call();
+        Ok(())
+    }
+
+    async fn delete_replicator_stateful_set(&self, _prefix: &str) -> Result<(), K8sError> {
+        Ok(())
+    }
+
+    async fn replicator_stateful_set_exists(&self, _prefix: &str) -> Result<bool, K8sError> {
+        Ok(false)
+    }
+
+    async fn create_or_update_ducklake_maintenance(
+        &self,
+        _prefix: &str,
+        _config: DuckLakeMaintenanceResourceConfig,
+    ) -> Result<(), K8sError> {
+        self.state.ducklake_maintenance_create_calls.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    async fn delete_ducklake_maintenance(&self, _prefix: &str) -> Result<(), K8sError> {
+        Ok(())
+    }
+
+    async fn get_replicator_pod_status(&self, _prefix: &str) -> Result<PodStatus, K8sError> {
+        Ok(*self.state.pod_status.read().await)
+    }
+}

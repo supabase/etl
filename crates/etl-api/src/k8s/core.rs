@@ -1,0 +1,969 @@
+use etl_config::{
+    Environment,
+    shared::{
+        DuckLakeMaintenanceMode, ReplicatorConfigWithoutSecrets, SupabaseConfigWithoutSecrets,
+        TlsConfig,
+    },
+};
+use etl_maintenance::{
+    DuckLakeMaintenanceMaterialization, MaintenanceIdentity, MaintenanceMaterializationError,
+    MaintenanceMaterializer, MaintenanceRuntimeRefs,
+};
+use secrecy::ExposeSecret;
+use thiserror::Error;
+
+use crate::{
+    configs::{
+        destination::{StoredDestinationConfig, StoredIcebergConfig},
+        pipeline::StoredPipelineConfig,
+        source::StoredSourceConfig,
+    },
+    data::{
+        destinations::Destination,
+        images::Image,
+        pipelines::{Pipeline, PipelineDeletion},
+        replicators::Replicator,
+        sources::Source,
+    },
+    k8s::{
+        DestinationType, K8sClient, K8sError, KubernetesMaintenanceMaterializer, PodStatus,
+        ReplicatorConfigMapFile, ReplicatorStatefulSetConfig,
+        ducklake_maintenance_policy_from_config,
+    },
+};
+
+/// Errors raised while preparing or applying Kubernetes pipeline resources.
+#[derive(Debug, Error)]
+pub enum K8sCoreError {
+    #[error("A K8s error occurred: {0}")]
+    K8s(#[from] K8sError),
+
+    #[error("Invalid destination config")]
+    InvalidConfig(#[from] serde_json::Error),
+
+    #[error("Could not load app environment")]
+    MissingEnvironment,
+
+    #[error("Maintenance materialization failed: {0}")]
+    MaintenanceMaterialization(#[from] MaintenanceMaterializationError),
+}
+
+/// Secret types required by different destination configurations.
+///
+/// This enum encapsulates the various credential combinations needed for
+/// different replicator destinations, ensuring type-safe secret management.
+#[derive(Debug)]
+pub enum Secrets {
+    /// No secrets required for the destination.
+    None,
+    /// Credentials for BigQuery destinations.
+    BigQuery {
+        /// PostgreSQL source database password.
+        postgres_password: String,
+        /// Google Cloud service account key JSON for BigQuery authentication.
+        big_query_service_account_key: String,
+    },
+    /// Credentials for ClickHouse destinations.
+    ClickHouse {
+        /// PostgreSQL source database password.
+        postgres_password: String,
+        /// Clickhouse password
+        password: Option<String>,
+    },
+    /// Credentials for Iceberg destinations.
+    Iceberg {
+        /// PostgreSQL source database password.
+        postgres_password: String,
+        /// Authentication token for the Iceberg catalog.
+        catalog_token: String,
+        /// AWS S3 access key ID for object storage.
+        s3_access_key_id: String,
+        /// AWS S3 secret access key for object storage.
+        s3_secret_access_key: String,
+    },
+    /// Credentials for DuckLake destinations using S3-compatible storage.
+    Ducklake {
+        /// PostgreSQL source database password.
+        postgres_password: String,
+        /// S3-compatible access key ID.
+        s3_access_key_id: Option<String>,
+        /// S3-compatible secret access key.
+        s3_secret_access_key: Option<String>,
+    },
+    /// Credentials for Snowflake destinations.
+    Snowflake {
+        /// PostgreSQL source database password.
+        postgres_password: String,
+        /// RSA private key PEM contents.
+        private_key: String,
+        /// Optional passphrase for encrypted private key.
+        private_key_passphrase: Option<String>,
+    },
+}
+
+/// Creates or updates all Kubernetes resources required for a pipeline.
+///
+/// This function orchestrates the creation or update of secrets, config maps,
+/// and stateful sets needed to run a pipeline in Kubernetes. It extracts
+/// credentials from the source and destination configurations, builds the
+/// replicator configuration, and applies all resources to the cluster.
+#[allow(clippy::too_many_arguments)]
+pub async fn create_or_update_pipeline_resources_in_k8s(
+    k8s_client: &dyn K8sClient,
+    tenant_id: &str,
+    pipeline: Pipeline,
+    replicator: Replicator,
+    image: Image,
+    source: Source,
+    destination: Destination,
+    supabase_api_url: Option<&str>,
+    tls_config: TlsConfig,
+) -> Result<(), K8sCoreError> {
+    let prefix = create_k8s_object_prefix(tenant_id, replicator.id);
+
+    let secrets = build_secrets_from_configs(&source.config, &destination.config);
+
+    let environment = Environment::load().map_err(|_| K8sCoreError::MissingEnvironment)?;
+
+    let destination_type = (&destination.config).into();
+    let ducklake_maintenance_mode = match &destination.config {
+        StoredDestinationConfig::Ducklake { maintenance_mode, .. } => Some(*maintenance_mode),
+        _ => None,
+    };
+
+    let supabase_config = SupabaseConfigWithoutSecrets {
+        project_ref: tenant_id.to_owned(),
+        api_url: supabase_api_url.map(ToOwned::to_owned),
+    };
+
+    let log_level = pipeline.config.log_level.clone().unwrap_or_default();
+    let replicator_resources = pipeline.config.replicator_resources.clone();
+    let ducklake_maintenance = pipeline.config.ducklake_maintenance.clone();
+    let replicator_config = build_replicator_config_without_secrets(
+        // We are safe to perform this conversion, since the i64 -> u64 conversion performs wrap
+        // around, and we won't have two different values map to the same u64, since the domain
+        // size is the same.
+        pipeline.id as u64,
+        source.config,
+        destination.config,
+        pipeline.config,
+        supabase_config,
+        tls_config,
+    );
+
+    create_or_update_dynamic_replicator_secrets(k8s_client, &prefix, secrets).await?;
+    create_or_update_replicator_config(k8s_client, &prefix, replicator_config, environment).await?;
+    let replicator_image = image.name;
+    let ducklake_maintenance_for_kubernetes =
+        matches!(ducklake_maintenance_mode, Some(DuckLakeMaintenanceMode::Kubernetes))
+            .then(|| ducklake_maintenance.clone().unwrap_or_default());
+    let maintenance_identity = MaintenanceIdentity {
+        tenant_id: tenant_id.to_owned(),
+        pipeline_id: pipeline.id,
+        replicator_id: replicator.id,
+        resource_prefix: prefix.clone(),
+    };
+    let maintenance_materializer = KubernetesMaintenanceMaterializer::new(k8s_client);
+
+    create_or_update_ducklake_maintenance(
+        &maintenance_materializer,
+        maintenance_identity,
+        &replicator_image,
+        destination_type,
+        ducklake_maintenance_for_kubernetes.clone(),
+    )
+    .await?;
+    create_or_update_replicator_stateful_set(
+        k8s_client,
+        ReplicatorStatefulSetConfig {
+            prefix,
+            replicator_image,
+            environment,
+            replicator_resources,
+            destination_type,
+            ducklake_maintenance: ducklake_maintenance_for_kubernetes,
+            log_level,
+        },
+    )
+    .await?;
+
+    Ok(())
+}
+
+/// Deletes all Kubernetes resources associated with a pipeline.
+///
+/// This function removes all secrets, config maps, and stateful sets created
+/// for a replicator. It uses the tenant ID and replicator ID to identify and
+/// delete the correct resources.
+pub async fn delete_pipeline_resources_in_k8s(
+    k8s_client: &dyn K8sClient,
+    tenant_id: &str,
+    replicator: Replicator,
+) -> Result<(), K8sCoreError> {
+    let prefix = create_k8s_object_prefix(tenant_id, replicator.id);
+
+    k8s_client.delete_ducklake_maintenance(&prefix).await?;
+    delete_dynamic_replicator_secrets(k8s_client, &prefix).await?;
+    delete_replicator_config(k8s_client, &prefix).await?;
+    delete_replicator_stateful_set(k8s_client, &prefix).await?;
+
+    Ok(())
+}
+
+/// Returns `true` if the replicator pod is stopped, `false` otherwise.
+pub async fn is_replicator_pod_stopped(
+    k8s_client: &dyn K8sClient,
+    tenant_id: &str,
+    replicator_id: i64,
+) -> Result<bool, K8sCoreError> {
+    let prefix = create_k8s_object_prefix(tenant_id, replicator_id);
+    let pod_status = k8s_client.get_replicator_pod_status(&prefix).await?;
+
+    Ok(matches!(pod_status, PodStatus::Stopped))
+}
+
+/// Returns `true` if existing Kubernetes resources should be reconciled.
+///
+/// A stopped pod normally means the pipeline is intentionally inactive. A
+/// StatefulSet without a pod means Kubernetes still has desired runtime state,
+/// so reconciliation should repair or migrate it.
+pub async fn should_reconcile_replicator_resources(
+    k8s_client: &dyn K8sClient,
+    tenant_id: &str,
+    replicator_id: i64,
+) -> Result<bool, K8sCoreError> {
+    let prefix = create_k8s_object_prefix(tenant_id, replicator_id);
+    let pod_status = k8s_client.get_replicator_pod_status(&prefix).await?;
+    if !matches!(pod_status, PodStatus::Stopped) {
+        return Ok(true);
+    }
+
+    Ok(k8s_client.replicator_stateful_set_exists(&prefix).await?)
+}
+
+/// Returns `true` when the replicator is active in Kubernetes.
+pub async fn is_replicator_active(
+    k8s_client: &dyn K8sClient,
+    tenant_id: &str,
+    replicator_id: i64,
+) -> Result<bool, K8sCoreError> {
+    let prefix = create_k8s_object_prefix(tenant_id, replicator_id);
+    let pod_status = k8s_client.get_replicator_pod_status(&prefix).await?;
+
+    Ok(matches!(
+        pod_status,
+        PodStatus::Starting
+            | PodStatus::Started
+            | PodStatus::Stopping
+            | PodStatus::Failed
+            | PodStatus::Unknown
+    ))
+}
+
+/// Returns the first active pipeline id, if any pipeline is currently active in
+/// Kubernetes.
+pub async fn first_active_pipeline_id(
+    k8s_client: &dyn K8sClient,
+    tenant_id: &str,
+    pipelines: &[PipelineDeletion],
+) -> Result<Option<i64>, K8sCoreError> {
+    for pipeline in pipelines {
+        if is_replicator_active(k8s_client, tenant_id, pipeline.replicator_id).await? {
+            return Ok(Some(pipeline.id));
+        }
+    }
+
+    Ok(None)
+}
+
+/// Extracts and combines credentials from source and destination
+/// configurations.
+///
+/// This function determines which credentials are needed based on the
+/// destination type and extracts them from the provided configurations,
+/// exposing secrets as plain strings for Kubernetes secret creation.
+fn build_secrets_from_configs(
+    source_config: &StoredSourceConfig,
+    destination_config: &StoredDestinationConfig,
+) -> Secrets {
+    let postgres_password =
+        source_config.password.as_ref().map(|p| p.expose_secret().to_owned()).unwrap_or_default();
+
+    match destination_config {
+        StoredDestinationConfig::BigQuery { service_account_key, .. } => Secrets::BigQuery {
+            postgres_password,
+            big_query_service_account_key: service_account_key.expose_secret().to_owned(),
+        },
+        StoredDestinationConfig::Iceberg { config: StoredIcebergConfig::Rest { .. } } => {
+            Secrets::None
+        }
+        StoredDestinationConfig::Iceberg {
+            config:
+                StoredIcebergConfig::Supabase {
+                    catalog_token,
+                    s3_access_key_id,
+                    s3_secret_access_key,
+                    ..
+                },
+        } => Secrets::Iceberg {
+            postgres_password,
+            catalog_token: catalog_token.expose_secret().to_owned(),
+            s3_access_key_id: s3_access_key_id.expose_secret().to_owned(),
+            s3_secret_access_key: s3_secret_access_key.expose_secret().to_owned(),
+        },
+        StoredDestinationConfig::ClickHouse { password, .. } => Secrets::ClickHouse {
+            postgres_password,
+            password: password.as_ref().map(|p| p.expose_secret().to_owned()),
+        },
+        StoredDestinationConfig::Ducklake { s3_access_key_id, s3_secret_access_key, .. } => {
+            Secrets::Ducklake {
+                postgres_password,
+                s3_access_key_id: s3_access_key_id
+                    .as_ref()
+                    .map(|value| value.expose_secret().to_owned()),
+                s3_secret_access_key: s3_secret_access_key
+                    .as_ref()
+                    .map(|value| value.expose_secret().to_owned()),
+            }
+        }
+        StoredDestinationConfig::Snowflake { private_key, private_key_passphrase, .. } => {
+            Secrets::Snowflake {
+                postgres_password,
+                private_key: private_key.expose_secret().to_owned(),
+                private_key_passphrase: private_key_passphrase
+                    .as_ref()
+                    .map(|p| p.expose_secret().to_owned()),
+            }
+        }
+    }
+}
+
+/// Builds a replicator configuration with credentials omitted.
+///
+/// This function constructs a [`ReplicatorConfigWithoutSecrets`] by combining
+/// pipeline, source, and destination configurations. It uses the provided
+/// trusted root certificates for TLS configuration. Secrets are managed
+/// separately through Kubernetes secret resources.
+fn build_replicator_config_without_secrets(
+    pipeline_id: u64,
+    source_config: StoredSourceConfig,
+    destination_config: StoredDestinationConfig,
+    pipeline_config: StoredPipelineConfig,
+    supabase_config: SupabaseConfigWithoutSecrets,
+    tls_config: TlsConfig,
+) -> ReplicatorConfigWithoutSecrets {
+    let pg_connection_config = source_config.into_connection_config(tls_config);
+
+    ReplicatorConfigWithoutSecrets {
+        destination: destination_config.into_etl_config().into(),
+        pipeline: pipeline_config.into_etl_config(pipeline_id, pg_connection_config).into(),
+        supabase: Some(supabase_config),
+    }
+}
+
+/// Creates a consistent naming prefix for Kubernetes resources.
+///
+/// This function generates a prefix string by combining the tenant ID and
+/// replicator ID, which is used to name all Kubernetes resources (secrets,
+/// config maps, stateful sets) associated with a specific pipeline instance.
+pub fn create_k8s_object_prefix(tenant_id: &str, replicator_id: i64) -> String {
+    format!("{tenant_id}-{replicator_id}")
+}
+
+/// Creates or updates Kubernetes secrets based on the destination type.
+///
+/// This function creates different sets of secrets depending on the [`Secrets`]
+/// variant, handling PostgreSQL credentials and destination-specific
+/// authentication credentials. For [`Secrets::None`], no secrets are created.
+async fn create_or_update_dynamic_replicator_secrets(
+    k8s_client: &dyn K8sClient,
+    prefix: &str,
+    secrets: Secrets,
+) -> Result<(), K8sCoreError> {
+    match secrets {
+        Secrets::None => {}
+        Secrets::BigQuery { postgres_password, big_query_service_account_key } => {
+            k8s_client.create_or_update_postgres_secret(prefix, &postgres_password).await?;
+            k8s_client
+                .create_or_update_bigquery_secret(prefix, &big_query_service_account_key)
+                .await?;
+        }
+        Secrets::Iceberg {
+            postgres_password,
+            catalog_token,
+            s3_access_key_id,
+            s3_secret_access_key,
+        } => {
+            k8s_client.create_or_update_postgres_secret(prefix, &postgres_password).await?;
+            k8s_client
+                .create_or_update_iceberg_secret(
+                    prefix,
+                    &catalog_token,
+                    &s3_access_key_id,
+                    &s3_secret_access_key,
+                )
+                .await?;
+        }
+        Secrets::ClickHouse { postgres_password, password } => {
+            k8s_client.create_or_update_postgres_secret(prefix, &postgres_password).await?;
+            if let Some(password) = password.as_deref() {
+                k8s_client.create_or_update_clickhouse_secret(prefix, Some(password)).await?;
+            } else {
+                k8s_client.delete_clickhouse_secret(prefix).await?;
+            }
+        }
+        Secrets::Ducklake { postgres_password, s3_access_key_id, s3_secret_access_key } => {
+            k8s_client.create_or_update_postgres_secret(prefix, &postgres_password).await?;
+            if let (Some(s3_access_key_id), Some(s3_secret_access_key)) =
+                (s3_access_key_id, s3_secret_access_key)
+            {
+                k8s_client
+                    .create_or_update_ducklake_secret(
+                        prefix,
+                        &s3_access_key_id,
+                        &s3_secret_access_key,
+                    )
+                    .await?;
+            } else {
+                k8s_client.delete_ducklake_secret(prefix).await?;
+            }
+        }
+        Secrets::Snowflake { postgres_password, private_key, private_key_passphrase } => {
+            k8s_client.create_or_update_postgres_secret(prefix, &postgres_password).await?;
+            k8s_client
+                .create_or_update_snowflake_secret(
+                    prefix,
+                    &private_key,
+                    private_key_passphrase.as_deref(),
+                )
+                .await?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Creates or updates the replicator configuration in a Kubernetes config map.
+///
+/// This function serializes the [`ReplicatorConfigWithoutSecrets`] to JSON and
+/// stores it in a Kubernetes config map. The replicator pods mount this config
+/// map to access their runtime configuration.
+async fn create_or_update_replicator_config(
+    k8s_client: &dyn K8sClient,
+    prefix: &str,
+    config: ReplicatorConfigWithoutSecrets,
+    environment: Environment,
+) -> Result<(), K8sCoreError> {
+    let env_config = serde_json::to_string(&config)?;
+
+    let files = vec![
+        ReplicatorConfigMapFile {
+            filename: "base.json".to_owned(),
+            // For our setup, we don't need to add config params to the base config file; everything
+            // is added directly in the environment-specific config file.
+            content: "{}".to_owned(),
+        },
+        ReplicatorConfigMapFile { filename: format!("{environment}.json"), content: env_config },
+    ];
+
+    k8s_client.create_or_update_replicator_config_map(prefix, files).await?;
+
+    Ok(())
+}
+
+/// Creates or updates the Kubernetes stateful set for the replicator.
+///
+/// This function creates a stateful set that runs the replicator container with
+/// the specified image. The stateful set is configured with
+/// environment-specific settings and destination-type-specific resource
+/// requirements.
+async fn create_or_update_replicator_stateful_set(
+    k8s_client: &dyn K8sClient,
+    config: ReplicatorStatefulSetConfig,
+) -> Result<(), K8sCoreError> {
+    k8s_client.create_or_update_replicator_stateful_set(config).await?;
+
+    Ok(())
+}
+
+/// Creates, updates, or deletes the DuckLake maintenance CR.
+async fn create_or_update_ducklake_maintenance(
+    materializer: &dyn MaintenanceMaterializer,
+    identity: MaintenanceIdentity,
+    replicator_image: &str,
+    destination_type: DestinationType,
+    ducklake_maintenance: Option<crate::configs::pipeline::DuckLakeMaintenanceConfig>,
+) -> Result<(), K8sCoreError> {
+    let Some(ducklake_maintenance) = ducklake_maintenance else {
+        materializer.delete_ducklake_maintenance(identity).await?;
+        return Ok(());
+    };
+
+    if !matches!(destination_type, DestinationType::Ducklake) {
+        materializer.delete_ducklake_maintenance(identity).await?;
+        return Ok(());
+    }
+
+    let policy = ducklake_maintenance_policy_from_config(ducklake_maintenance);
+    materializer
+        .reconcile_ducklake_maintenance(DuckLakeMaintenanceMaterialization {
+            identity,
+            policy,
+            runtime_refs: MaintenanceRuntimeRefs { replicator_image: replicator_image.to_owned() },
+        })
+        .await?;
+
+    Ok(())
+}
+
+/// Deletes all Kubernetes secrets associated with a replicator.
+///
+/// This function deletes PostgreSQL, BigQuery, and Iceberg secrets for the
+/// given prefix. It attempts to delete all secret types regardless of which
+/// were actually created, safely handling cases where secrets don't exist. This
+/// approach prevents orphaned secrets when a pipeline's destination type is
+/// changed.
+async fn delete_dynamic_replicator_secrets(
+    k8s_client: &dyn K8sClient,
+    prefix: &str,
+) -> Result<(), K8sCoreError> {
+    k8s_client.delete_postgres_secret(prefix).await?;
+
+    // Delete all destination-specific secret types unconditionally. Only one will
+    // exist at a time, but if a pipeline's destination was changed (e.g. BigQuery →
+    // ClickHouse) the old secret type might still be present. Deleting a
+    // non-existent secret is a safe no-op.
+    k8s_client.delete_bigquery_secret(prefix).await?;
+    k8s_client.delete_clickhouse_secret(prefix).await?;
+    k8s_client.delete_iceberg_secret(prefix).await?;
+    k8s_client.delete_ducklake_secret(prefix).await?;
+    k8s_client.delete_snowflake_secret(prefix).await?;
+
+    Ok(())
+}
+
+/// Deletes the Kubernetes config map containing replicator configuration.
+async fn delete_replicator_config(
+    k8s_client: &dyn K8sClient,
+    prefix: &str,
+) -> Result<(), K8sCoreError> {
+    k8s_client.delete_replicator_config_map(prefix).await?;
+
+    Ok(())
+}
+
+/// Deletes the Kubernetes stateful set running the replicator.
+async fn delete_replicator_stateful_set(
+    k8s_client: &dyn K8sClient,
+    prefix: &str,
+) -> Result<(), K8sCoreError> {
+    k8s_client.delete_replicator_stateful_set(prefix).await?;
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use etl_config::{SerializableSecretString, shared::ClickHouseEngine};
+    use k8s_openapi::api::core::v1::ConfigMap;
+
+    use super::*;
+    use crate::{
+        configs::{destination::StoredDestinationConfig, source::StoredSourceConfig},
+        k8s::{
+            DuckLakeMaintenanceResourceConfig, K8sClient, K8sError, PodStatus,
+            ReplicatorConfigMapFile,
+        },
+    };
+
+    #[derive(Debug, Clone)]
+    struct RecordingK8sClient {
+        calls: Arc<Mutex<Vec<String>>>,
+        pod_status: PodStatus,
+        stateful_set_exists: bool,
+    }
+
+    impl RecordingK8sClient {
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl Default for RecordingK8sClient {
+        fn default() -> Self {
+            Self {
+                calls: Arc::default(),
+                pod_status: PodStatus::Stopped,
+                stateful_set_exists: false,
+            }
+        }
+    }
+
+    fn source_config_with_password() -> StoredSourceConfig {
+        StoredSourceConfig {
+            host: "localhost".to_owned(),
+            hostaddr: None,
+            port: 5432,
+            name: "postgres".to_owned(),
+            username: "postgres".to_owned(),
+            password: Some(SerializableSecretString::from("password".to_owned())),
+        }
+    }
+
+    fn clickhouse_destination_config(password: Option<&str>) -> StoredDestinationConfig {
+        StoredDestinationConfig::ClickHouse {
+            url: "http://localhost:8123".parse().unwrap(),
+            user: "default".to_owned(),
+            password: password.map(ToOwned::to_owned).map(SerializableSecretString::from),
+            database: "default".to_owned(),
+            engine: ClickHouseEngine::default(),
+        }
+    }
+
+    #[async_trait]
+    impl K8sClient for RecordingK8sClient {
+        async fn create_or_update_postgres_secret(
+            &self,
+            prefix: &str,
+            postgres_password: &str,
+        ) -> Result<(), K8sError> {
+            self.calls.lock().unwrap().push(format!("postgres:{prefix}:{postgres_password}"));
+            Ok(())
+        }
+
+        async fn create_or_update_bigquery_secret(
+            &self,
+            _prefix: &str,
+            _bq_service_account_key: &str,
+        ) -> Result<(), K8sError> {
+            Ok(())
+        }
+
+        async fn create_or_update_iceberg_secret(
+            &self,
+            _prefix: &str,
+            _catalog_token: &str,
+            _s3_access_key_id: &str,
+            _s3_secret_access_key: &str,
+        ) -> Result<(), K8sError> {
+            Ok(())
+        }
+
+        async fn create_or_update_clickhouse_secret(
+            &self,
+            prefix: &str,
+            password: Option<&str>,
+        ) -> Result<(), K8sError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("clickhouse:{prefix}:{}", password.unwrap_or("<none>")));
+            Ok(())
+        }
+
+        async fn create_or_update_ducklake_secret(
+            &self,
+            prefix: &str,
+            s3_access_key_id: &str,
+            s3_secret_access_key: &str,
+        ) -> Result<(), K8sError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("ducklake:{prefix}:{s3_access_key_id}:{s3_secret_access_key}"));
+            Ok(())
+        }
+
+        async fn delete_postgres_secret(&self, _prefix: &str) -> Result<(), K8sError> {
+            Ok(())
+        }
+
+        async fn delete_bigquery_secret(&self, _prefix: &str) -> Result<(), K8sError> {
+            Ok(())
+        }
+
+        async fn delete_iceberg_secret(&self, _prefix: &str) -> Result<(), K8sError> {
+            Ok(())
+        }
+
+        async fn delete_clickhouse_secret(&self, prefix: &str) -> Result<(), K8sError> {
+            self.calls.lock().unwrap().push(format!("delete-clickhouse:{prefix}"));
+            Ok(())
+        }
+
+        async fn delete_ducklake_secret(&self, prefix: &str) -> Result<(), K8sError> {
+            self.calls.lock().unwrap().push(format!("delete-ducklake:{prefix}"));
+            Ok(())
+        }
+
+        async fn create_or_update_snowflake_secret(
+            &self,
+            prefix: &str,
+            _private_key: &str,
+            _private_key_passphrase: Option<&str>,
+        ) -> Result<(), K8sError> {
+            self.calls.lock().unwrap().push(format!("snowflake:{prefix}"));
+            Ok(())
+        }
+
+        async fn delete_snowflake_secret(&self, prefix: &str) -> Result<(), K8sError> {
+            self.calls.lock().unwrap().push(format!("delete-snowflake:{prefix}"));
+            Ok(())
+        }
+
+        async fn get_config_map(&self, _config_map_name: &str) -> Result<ConfigMap, K8sError> {
+            Ok(ConfigMap::default())
+        }
+
+        async fn create_or_update_replicator_config_map(
+            &self,
+            _prefix: &str,
+            _files: Vec<ReplicatorConfigMapFile>,
+        ) -> Result<(), K8sError> {
+            Ok(())
+        }
+
+        async fn delete_replicator_config_map(&self, _prefix: &str) -> Result<(), K8sError> {
+            Ok(())
+        }
+
+        async fn create_or_update_replicator_stateful_set(
+            &self,
+            _config: ReplicatorStatefulSetConfig,
+        ) -> Result<(), K8sError> {
+            Ok(())
+        }
+
+        async fn delete_replicator_stateful_set(&self, _prefix: &str) -> Result<(), K8sError> {
+            Ok(())
+        }
+
+        async fn replicator_stateful_set_exists(&self, _prefix: &str) -> Result<bool, K8sError> {
+            Ok(self.stateful_set_exists)
+        }
+
+        async fn create_or_update_ducklake_maintenance(
+            &self,
+            prefix: &str,
+            _config: DuckLakeMaintenanceResourceConfig,
+        ) -> Result<(), K8sError> {
+            self.calls.lock().unwrap().push(format!("ducklake-maintenance:{prefix}"));
+            Ok(())
+        }
+
+        async fn delete_ducklake_maintenance(&self, prefix: &str) -> Result<(), K8sError> {
+            self.calls.lock().unwrap().push(format!("delete-ducklake-maintenance:{prefix}"));
+            Ok(())
+        }
+
+        async fn get_replicator_pod_status(&self, _prefix: &str) -> Result<PodStatus, K8sError> {
+            Ok(self.pod_status)
+        }
+    }
+
+    fn maintenance_identity() -> MaintenanceIdentity {
+        MaintenanceIdentity {
+            tenant_id: "tenant-42".to_owned(),
+            pipeline_id: 123,
+            replicator_id: 456,
+            resource_prefix: "tenant-42-456".to_owned(),
+        }
+    }
+
+    #[tokio::test]
+    async fn ducklake_maintenance_is_deleted_when_config_is_absent() {
+        let client = RecordingK8sClient::default();
+        let materializer = KubernetesMaintenanceMaterializer::new(&client);
+
+        create_or_update_ducklake_maintenance(
+            &materializer,
+            maintenance_identity(),
+            "etl-replicator:test",
+            DestinationType::Ducklake,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(client.calls(), vec!["delete-ducklake-maintenance:tenant-42-456"]);
+    }
+
+    #[tokio::test]
+    async fn ducklake_maintenance_is_created_for_ducklake_config() {
+        let client = RecordingK8sClient::default();
+        let materializer = KubernetesMaintenanceMaterializer::new(&client);
+
+        create_or_update_ducklake_maintenance(
+            &materializer,
+            maintenance_identity(),
+            "etl-replicator:test",
+            DestinationType::Ducklake,
+            Some(crate::configs::pipeline::DuckLakeMaintenanceConfig::default()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(client.calls(), vec!["ducklake-maintenance:tenant-42-456"]);
+    }
+
+    #[tokio::test]
+    async fn failed_pod_is_considered_active_for_deletion_guards() {
+        let client = RecordingK8sClient { pod_status: PodStatus::Failed, ..Default::default() };
+        let pipeline =
+            PipelineDeletion { id: 1, source_id: 2, destination_id: 3, replicator_id: 4 };
+
+        let is_active = is_replicator_active(&client, "tenant-42", pipeline.replicator_id)
+            .await
+            .expect("failed to inspect pipeline status");
+
+        assert!(is_active);
+    }
+
+    #[tokio::test]
+    async fn stopped_pod_with_stateful_set_is_reconciled() {
+        let client = RecordingK8sClient {
+            pod_status: PodStatus::Stopped,
+            stateful_set_exists: true,
+            ..Default::default()
+        };
+
+        let should_reconcile =
+            should_reconcile_replicator_resources(&client, "tenant-42", 4).await.unwrap();
+
+        assert!(should_reconcile);
+    }
+
+    #[tokio::test]
+    async fn stopped_pod_without_stateful_set_is_not_reconciled() {
+        let client = RecordingK8sClient {
+            pod_status: PodStatus::Stopped,
+            stateful_set_exists: false,
+            ..Default::default()
+        };
+
+        let should_reconcile =
+            should_reconcile_replicator_resources(&client, "tenant-42", 4).await.unwrap();
+
+        assert!(!should_reconcile);
+    }
+
+    #[tokio::test]
+    async fn clickhouse_with_password_creates_password_secret() {
+        let source_config = source_config_with_password();
+        let destination_config = clickhouse_destination_config(Some("clickhouse-password"));
+
+        let secrets = build_secrets_from_configs(&source_config, &destination_config);
+        let client = RecordingK8sClient::default();
+
+        create_or_update_dynamic_replicator_secrets(&client, "tenant-42", secrets).await.unwrap();
+
+        assert_eq!(
+            client.calls(),
+            vec![
+                "postgres:tenant-42:password".to_owned(),
+                "clickhouse:tenant-42:clickhouse-password".to_owned(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn passwordless_clickhouse_deletes_any_stale_password_secret() {
+        let source_config = source_config_with_password();
+        let destination_config = clickhouse_destination_config(None);
+
+        let secrets = build_secrets_from_configs(&source_config, &destination_config);
+        let client = RecordingK8sClient::default();
+
+        create_or_update_dynamic_replicator_secrets(&client, "tenant-42", secrets).await.unwrap();
+
+        assert_eq!(
+            client.calls(),
+            vec![
+                "postgres:tenant-42:password".to_owned(),
+                "delete-clickhouse:tenant-42".to_owned(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn ducklake_creates_postgres_and_s3_secrets() {
+        let source_config = StoredSourceConfig {
+            host: "localhost".to_owned(),
+            hostaddr: None,
+            port: 5432,
+            name: "postgres".to_owned(),
+            username: "postgres".to_owned(),
+            password: Some(SerializableSecretString::from("password".to_owned())),
+        };
+        let destination_config = StoredDestinationConfig::Ducklake {
+            catalog_url: "postgres://catalog".to_owned(),
+            data_path: "s3://bucket/path".to_owned(),
+            pool_size: 4,
+            s3_access_key_id: Some(SerializableSecretString::from("key-id".to_owned())),
+            s3_secret_access_key: Some(SerializableSecretString::from("secret-key".to_owned())),
+            s3_region: None,
+            s3_endpoint: None,
+            s3_url_style: None,
+            s3_use_ssl: None,
+            metadata_schema: None,
+            duckdb_memory_cache_limit: None,
+            maintenance_target_file_size: None,
+            expire_snapshots_older_than: None,
+            maintenance_mode: DuckLakeMaintenanceMode::Kubernetes,
+        };
+
+        let secrets = build_secrets_from_configs(&source_config, &destination_config);
+        let client = RecordingK8sClient::default();
+
+        create_or_update_dynamic_replicator_secrets(&client, "tenant-42", secrets).await.unwrap();
+
+        assert_eq!(
+            client.calls(),
+            vec![
+                "postgres:tenant-42:password".to_owned(),
+                "ducklake:tenant-42:key-id:secret-key".to_owned(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn ducklake_without_s3_still_creates_postgres_secret() {
+        let source_config = StoredSourceConfig {
+            host: "localhost".to_owned(),
+            hostaddr: None,
+            port: 5432,
+            name: "postgres".to_owned(),
+            username: "postgres".to_owned(),
+            password: Some(SerializableSecretString::from("password".to_owned())),
+        };
+        let destination_config = StoredDestinationConfig::Ducklake {
+            catalog_url: "postgres://catalog".to_owned(),
+            data_path: "file:///tmp/lake".to_owned(),
+            pool_size: 4,
+            s3_access_key_id: None,
+            s3_secret_access_key: None,
+            s3_region: None,
+            s3_endpoint: None,
+            s3_url_style: None,
+            s3_use_ssl: None,
+            metadata_schema: None,
+            duckdb_memory_cache_limit: None,
+            maintenance_target_file_size: None,
+            expire_snapshots_older_than: None,
+            maintenance_mode: DuckLakeMaintenanceMode::Kubernetes,
+        };
+
+        let secrets = build_secrets_from_configs(&source_config, &destination_config);
+        let client = RecordingK8sClient::default();
+
+        create_or_update_dynamic_replicator_secrets(&client, "tenant-42", secrets).await.unwrap();
+
+        assert_eq!(
+            client.calls(),
+            vec!["postgres:tenant-42:password".to_owned(), "delete-ducklake:tenant-42".to_owned(),]
+        );
+    }
+}

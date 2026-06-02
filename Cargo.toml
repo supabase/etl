@@ -1,16 +1,17 @@
 [workspace]
 resolver = "3"
 members = [
-    "etl",
-    "etl-api",
-    "etl-benchmarks",
-    "etl-config",
-    "etl-destinations",
-    "etl-examples",
-    "etl-postgres",
-    "etl-replicator",
-    "etl-telemetry",
-    "xtask",
+    "crates/etl",
+    "crates/etl-api",
+    "crates/etl-benchmarks",
+    "crates/etl-config",
+    "crates/etl-destinations",
+    "crates/etl-examples",
+    "crates/etl-maintenance",
+    "crates/etl-postgres",
+    "crates/etl-replicator",
+    "crates/etl-telemetry",
+    "crates/xtask",
 ]
 
 [workspace.package]
@@ -23,79 +24,124 @@ homepage = "https://supabase.github.io/etl/"
 [workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tokio_unstable)'] }
 
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "deny"
+
 [workspace.lints.clippy]
+# Correctness & safety
 await_holding_lock = "deny"
+clone_on_ref_ptr = "deny"
 unused_async = "deny"
+large_futures = "deny"
+
+# Style & clarity
+cloned_instead_of_copied = "warn"
+copy_iterator = "warn"
+dbg_macro = "warn"
+enum_glob_use = "warn"
+explicit_into_iter_loop = "warn"
+explicit_iter_loop = "warn"
+flat_map_option = "warn"
+implicit_clone = "warn"
+map_flatten = "warn"
+manual_let_else = "warn"
+manual_ok_or = "warn"
+manual_async_fn = "warn"
+map_unwrap_or = "warn"
+redundant_closure = "warn"
+redundant_closure_call = "warn"
+redundant_closure_for_method_calls = "warn"
+redundant_else = "warn"
+redundant_clone = "warn"
+redundant_field_names = "warn"
+redundant_test_prefix = "warn"
+semicolon_if_nothing_returned = "warn"
+str_to_string = "warn"
+todo = "warn"
+uninlined_format_args = "warn"
+unnested_or_patterns = "warn"
 
 [workspace.dependencies]
-etl = { path = "etl", default-features = false }
-etl-config = { path = "etl-config", default-features = false }
-etl-destinations = { path = "etl-destinations", default-features = false }
-etl-postgres = { path = "etl-postgres", default-features = false }
-etl-telemetry = { path = "etl-telemetry", default-features = false }
 
-actix-web = { version = "4.11.0", default-features = false }
-actix-web-httpauth = { version = "0.8.2", default-features = false }
-actix-web-metrics = { version = "0.3.0", default-features = false }
 anyhow = { version = "1.0.98", default-features = false }
 arrow = { version = "=58.0.0", default-features = false }
+arrow57 = { package = "arrow", version = "57.0", default-features = false }
 async-trait = { version = "0.1.88" }
 aws-lc-rs = { version = "1.13.3", default-features = false }
+axum = { version = "0.8.9", default-features = false }
 base64 = { version = "0.22.1", default-features = false }
 byteorder = { version = "1.5.0", default-features = false }
 bytes = { version = "1.10.1" }
 chrono = { version = "0.4.41", default-features = false }
 clap = { version = "4.5.42", default-features = false }
+clickhouse = { version = "0.14", default-features = false }
 config = { version = "0.14", default-features = false }
 configcat = { version = "0.1.3", default-features = false }
 const-oid = { version = "0.9.6", default-features = false }
 constant_time_eq = { version = "0.4.2" }
 duckdb = { version = "1", default-features = false }
+etl = { path = "crates/etl", default-features = false }
+etl-config = { path = "crates/etl-config", default-features = false }
+etl-destinations = { path = "crates/etl-destinations", default-features = false }
+etl-maintenance = { path = "crates/etl-maintenance", default-features = false }
+etl-postgres = { path = "crates/etl-postgres", default-features = false }
+etl-telemetry = { path = "crates/etl-telemetry", default-features = false }
 fail = { version = "0.5.1", default-features = false }
 futures = { version = "0.3.31", default-features = false }
 gcp-bigquery-client = { git = "https://github.com/iambriccardo/gcp-bigquery-client", rev = "c4fc59e338ca181d29b0dd53cac786fbe8513633", default-features = false }
+hex = { version = "0.4", default-features = false }
+humantime = { version = "2.3.0", default-features = false }
 iceberg = { version = "0.8.0", default-features = false }
 iceberg-catalog-rest = { version = "0.8.0", default-features = false }
 insta = { version = "1.43.1", default-features = false }
+# aws_lc_rs backend avoids the `rsa` crate (RUSTSEC-2023-0071, unpatched timing
+# side-channel). We only sign JWTs, but cargo-deny flags the advisory regardless.
+jsonwebtoken = { version = "10.3", default-features = false, features = ["aws_lc_rs"] }
 k8s-openapi = { version = "0.25.0", default-features = false }
 kube = { version = "1.1.0", default-features = false }
 metrics = { version = "0.24.2", default-features = false }
 metrics-exporter-prometheus = { version = "0.17.2", default-features = false }
 parking_lot = { version = "0.12.5" }
-parquet = { version = "58.0", default-features = false }
+parquet57 = { package = "parquet", version = "57.0", default-features = false }
 pg_escape = { version = "0.1.1", default-features = false }
 pin-project-lite = { version = "0.2.16", default-features = false }
-postgres-replication = { git = "https://github.com/MaterializeInc/rust-postgres", default-features = false, rev = "c4b473b478b3adfbf8667d2fbe895d8423f1290b" }
+pkcs8 = { version = "0.11", default-features = false, features = ["pem", "encryption"] }
+postgres-replication = { git = "https://github.com/iambriccardo/rust-postgres", default-features = false, rev = "31acf55c7e5c2244e5bb3a36e7afa2a01bf52c38" }
 prost = { version = "0.14.1", default-features = false }
 r2d2 = { version = "0.8", default-features = false }
 rand = { version = "0.9.2", default-features = false }
+regex = { version = "1.12.3", default-features = false, features = ["std", "unicode"] }
 reqwest = { version = "0.12.22", default-features = false }
 rustls = { version = "0.23.31", default-features = false }
 secrecy = { version = "0.10.3", default-features = false }
 sentry = { version = "0.42.0" }
 serde = { version = "1.0.219", default-features = false }
 serde_json = { version = "1.0.141", default-features = false }
-sqlx = { version = "0.8.6", default-features = false }
+sha2 = { version = "0.11", default-features = false }
+# Use the 0.9 alpha for the rustls VerifyCa fix in https://github.com/launchbadge/sqlx/pull/3861.
+sqlx = { version = "0.9.0-alpha.1", default-features = false }
 sysinfo = { version = "0.38.2", default-features = false }
 tempfile = { version = "3.23.0", default-features = false }
 thiserror = "2.0.12"
 tikv-jemalloc-ctl = { version = "0.6.0", default-features = false, features = ["stats"] }
 tikv-jemallocator = { version = "0.6.1", default-features = false, features = ["background_threads_runtime_support", "unprefixed_malloc_on_supported_platforms"] }
 tokio = { version = "1.47.0", default-features = false }
-tokio-postgres = { git = "https://github.com/MaterializeInc/rust-postgres", default-features = false, rev = "c4b473b478b3adfbf8667d2fbe895d8423f1290b" }
+tokio-postgres = { git = "https://github.com/iambriccardo/rust-postgres", default-features = false, rev = "31acf55c7e5c2244e5bb3a36e7afa2a01bf52c38" }
 tokio-rustls = { version = "0.26.2", default-features = false }
 tokio-stream = { version = "0.1.18", default-features = false, features = ["sync"] }
 tonic = { version = "0.14.2", default-features = false }
+tower = { version = "0.5.3", default-features = false }
+tower-http = { version = "0.6.8", default-features = false }
 tracing = { version = "0.1.41", default-features = false }
-tracing-actix-web = { version = "0.7.19", default-features = false }
 tracing-appender = { version = "0.2.3", default-features = false }
 tracing-log = { version = "0.2.0", default-features = false }
 tracing-subscriber = { version = "0.3.19", default-features = false }
-url = { version = "2.5.8" }
+url = { version = "2.5.8", features = ["serde"] }
 utoipa = { version = "5.4.0", default-features = false }
 utoipa-swagger-ui = { version = "9.0.2", default-features = false, features = ["vendored"] }
 uuid = { version = "1.17.0", default-features = false }
 x509-cert = { version = "0.2.2", default-features = false }
+zstd = { version = "0.13", default-features = false }
 
 [profile.bench]
 debug = true

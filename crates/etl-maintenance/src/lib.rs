@@ -1,0 +1,23 @@
+//! External maintenance coordination and runners for ETL.
+
+mod coordination;
+mod materialization;
+
+#[cfg(feature = "ducklake")]
+pub mod ducklake;
+
+#[cfg(feature = "ducklake")]
+pub use coordination::KubernetesExternalMaintenanceStore;
+pub use coordination::{
+    ExternalMaintenanceOperationHistory, ExternalMaintenanceOperationPolicy,
+    ExternalMaintenanceOperationRequest, ExternalMaintenanceOperationRun,
+    ExternalMaintenanceOperations, ExternalMaintenancePause, ExternalMaintenanceReplicatorState,
+    ExternalMaintenanceReplicatorStatus, ExternalMaintenanceRequestOutcome, ExternalMaintenanceRun,
+    ExternalMaintenanceState, ExternalMaintenanceStore, ExternalMaintenanceWatcherConfig,
+    PostgresExternalMaintenanceStore,
+};
+pub use materialization::{
+    DisabledMaintenanceMaterializer, DuckLakeMaintenanceMaterialization, DuckLakeMaintenancePolicy,
+    MaintenanceIdentity, MaintenanceMaterializationError, MaintenanceMaterializer,
+    MaintenanceMaterializerKind, MaintenanceRuntimeRefs, PostgresMaintenanceMaterializer,
+};

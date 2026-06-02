@@ -1,0 +1,1781 @@
+use std::{collections::HashMap, sync::Arc, time::Duration};
+
+use etl::{
+    destination::{
+        Destination,
+        async_result::{TruncateTableResult, WriteSnapshotBatchResult, WriteStreamBatchesResult},
+    },
+    error::{ErrorKind, EtlResult},
+    etl_error, record_batch_to_table_rows,
+    state::destination_table_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus},
+    store::{schema::SchemaStore, state::StateStore},
+    types::{
+        Cell, ChangeKind, Event, EventSequenceKey, IdentityType, OldTableRow, PgLsn,
+        ReplicatedTableSchema, ReplicationMask, RowImage, SchemaDiff, SnapshotId, StreamBatch,
+        TableArrowBatch, TableId, TableRow, Type, UpdatedTableRow, is_array_type,
+    },
+};
+use etl_config::shared::ClickHouseEngine;
+use parking_lot::RwLock;
+use tokio::task::JoinSet;
+use tracing::{debug, info, warn};
+use url::Url;
+
+use crate::{
+    clickhouse::{
+        client::{ClickHouseClient, ClickHouseTableColumn, DdlKind},
+        encoding::{ClickHouseValue, cell_to_clickhouse_value},
+        metrics::register_metrics,
+        schema::{
+            create_current_view_sql, create_table_sql, drop_current_view_sql,
+            trailing_cdc_column_names,
+        },
+    },
+    table_name::try_stringify_table_name,
+};
+
+/// Postgres CDC operation kind. Written to the `cdc_operation` column as the
+/// matching uppercase string (`"INSERT"`, `"UPDATE"`, `"DELETE"`) so downstream
+/// consumers (ReplacingMergeTree dedup, materialized views, etc.) can filter
+/// or branch on operation type.
+#[derive(Copy, Clone)]
+enum CdcOperation {
+    /// New row inserted on the source.
+    Insert,
+    /// Existing row updated on the source. Carries the post-update values.
+    Update,
+    /// Row deleted on the source. Carries pre-delete values for the PK
+    /// columns; non-PK columns are filled in by `expand_key_row` (NULL for
+    /// nullable columns, type-appropriate zero for non-nullable).
+    Delete,
+}
+
+impl std::fmt::Display for CdcOperation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CdcOperation::Insert => write!(f, "INSERT"),
+            CdcOperation::Update => write!(f, "UPDATE"),
+            CdcOperation::Delete => write!(f, "DELETE"),
+        }
+    }
+}
+
+/// A row pending insertion with its CDC metadata.
+struct PendingRow {
+    /// CDC op kind. Drives both the MergeTree `cdc_operation` string and the
+    /// ReplacingMergeTree `_etl_deleted` tombstone flag.
+    operation: CdcOperation,
+    /// Transaction commit LSN. Written to the MergeTree `cdc_lsn` column,
+    /// and forms the high 64 bits of the ReplacingMergeTree `_etl_version`
+    /// column.
+    commit_lsn: PgLsn,
+    /// Zero-based ordinal of this event within its transaction. Forms the
+    /// low 64 bits of the ReplacingMergeTree `_etl_version` column so
+    /// multi-event same-commit transactions tie-break correctly under
+    /// `FINAL`.
+    tx_ordinal: u64,
+    /// User column values in source schema order. The trailing CDC columns
+    /// are appended at encode time and are not present here.
+    cells: Vec<Cell>,
+}
+
+/// Converts a Postgres LSN into the ClickHouse CDC LSN value.
+fn cdc_lsn_to_clickhouse_value(lsn: PgLsn) -> ClickHouseValue {
+    ClickHouseValue::UInt64(u64::from(lsn))
+}
+
+/// Appends the trailing engine-specific CDC columns to the row encoding.
+///
+/// MergeTree: `cdc_operation` (String), `cdc_lsn` (UInt64 commit LSN).
+/// ReplacingMergeTree: `_etl_version` (UInt128 packed `EventSequenceKey`),
+/// `_etl_deleted` (UInt8 tombstone flag).
+fn append_cdc_columns(
+    values: &mut Vec<ClickHouseValue>,
+    operation: CdcOperation,
+    commit_lsn: PgLsn,
+    tx_ordinal: u64,
+    engine: ClickHouseEngine,
+) {
+    match engine {
+        ClickHouseEngine::MergeTree => {
+            values.push(ClickHouseValue::String(operation.to_string()));
+            values.push(cdc_lsn_to_clickhouse_value(commit_lsn));
+        }
+        ClickHouseEngine::ReplacingMergeTree => {
+            let version = EventSequenceKey::new(commit_lsn, tx_ordinal).as_u128();
+            values.push(ClickHouseValue::UInt128(version));
+            values.push(ClickHouseValue::UInt8(matches!(operation, CdcOperation::Delete) as u8));
+        }
+    }
+}
+
+/// Returns true if the ClickHouse type has an outer Nullable wrapper.
+fn clickhouse_type_expects_nullable_marker(type_name: &str) -> bool {
+    type_name.starts_with("Nullable(")
+}
+
+/// Returns expected ClickHouse column names for a replicated schema under
+/// the given engine: user columns in source order, then the engine's
+/// trailing CDC columns.
+fn expected_clickhouse_column_names(
+    schema: &ReplicatedTableSchema,
+    engine: ClickHouseEngine,
+) -> Vec<String> {
+    schema
+        .column_schemas()
+        .map(|c| c.name.as_str())
+        .chain(trailing_cdc_column_names(engine).iter().copied())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Derives RowBinary nullable flags from the actual ClickHouse table schema.
+///
+/// RowBinary requires a leading null-marker byte before each `Nullable(T)`
+/// column. The actual nullability of a ClickHouse column can drift from the
+/// source Postgres column: `ALTER TABLE ADD COLUMN` forces the new column to
+/// `Nullable(T)` regardless of the upstream `NOT NULL` constraint, because
+/// ClickHouse cannot backfill a non-null default for existing rows. Deriving
+/// flags from the destination schema therefore matches what ClickHouse expects
+/// on the wire even after schema evolution.
+///
+/// The column-count and column-order checks are an integrity guard: if the
+/// destination has otherwise drifted from `ReplicatedTableSchema`, we surface
+/// a `CorruptedTableSchema` error rather than emit misaligned RowBinary bytes.
+fn nullable_flags_from_clickhouse_columns(
+    clickhouse_table_name: &str,
+    expected_column_names: &[String],
+    actual_columns: &[ClickHouseTableColumn],
+) -> EtlResult<Arc<[bool]>> {
+    if actual_columns.len() != expected_column_names.len() {
+        return Err(etl_error!(
+            ErrorKind::CorruptedTableSchema,
+            "ClickHouse table schema does not match replicated schema",
+            format!(
+                "table '{}' has {} columns, but {} were expected",
+                clickhouse_table_name,
+                actual_columns.len(),
+                expected_column_names.len()
+            )
+        ));
+    }
+
+    let mut nullable_flags = Vec::with_capacity(actual_columns.len());
+    for (index, (actual_column, expected_name)) in
+        actual_columns.iter().zip(expected_column_names).enumerate()
+    {
+        if actual_column.name != *expected_name {
+            return Err(etl_error!(
+                ErrorKind::CorruptedTableSchema,
+                "ClickHouse table schema does not match replicated schema",
+                format!(
+                    "table '{}' column {} is named '{}', but '{}' was expected",
+                    clickhouse_table_name,
+                    index + 1,
+                    actual_column.name,
+                    expected_name
+                )
+            ));
+        }
+
+        nullable_flags.push(clickhouse_type_expects_nullable_marker(&actual_column.type_name));
+    }
+
+    Ok(nullable_flags.into())
+}
+
+/// Controls intermediate flushing inside a single `write_table_rows` /
+/// `write_events` call.
+///
+/// The upstream `BatchConfig::max_fill_ms` controls when `write_events` is
+/// called; this limit prevents unbounded memory use for very large batches
+/// (e.g. initial copy).
+#[derive(Copy, Clone)]
+pub struct ClickHouseInserterConfig {
+    /// Start a new INSERT after this many uncompressed bytes. Fixed cap
+    /// because incoming and outgoing buffers can both be near-full at once;
+    /// could be made tunable later if needed.
+    pub max_bytes_per_insert: u64,
+    /// Table engine used when creating replicated tables on ClickHouse.
+    pub engine: ClickHouseEngine,
+}
+
+impl ClickHouseInserterConfig {
+    /// Default per-INSERT byte cap. 64 MiB lands in the upper end of
+    /// ClickHouse's recommended bulk-insert range (10k - 100k rows per
+    /// INSERT) for typical CDC payload widths.
+    ///
+    /// See <https://clickhouse.com/docs/optimize/bulk-inserts>.
+    pub const DEFAULT_MAX_BYTES_PER_INSERT: u64 = 64 * 1024 * 1024;
+}
+
+impl Default for ClickHouseInserterConfig {
+    fn default() -> Self {
+        Self {
+            max_bytes_per_insert: Self::DEFAULT_MAX_BYTES_PER_INSERT,
+            engine: ClickHouseEngine::default(),
+        }
+    }
+}
+
+/// Configuration for the [`ClickHouseClient`].
+///
+/// Holds the server-side and client-side timeouts applied to each operation
+/// bucket. Additional client-level knobs can be added here over time.
+#[derive(Copy, Clone)]
+pub struct ClickHouseClientConfig {
+    /// Server-side budget for the connectivity check (`SELECT 1`).
+    pub connectivity_check_timeout: Duration,
+    /// Server-side budget for schema lookups (`system.columns`).
+    pub schema_query_timeout: Duration,
+    /// Server-side budget for DDL (CREATE / ALTER / DROP / RENAME / TRUNCATE).
+    pub ddl_timeout: Duration,
+    /// Server-side budget per INSERT statement. Wraps `insert.end().await`,
+    /// which is the only awaited network step inside `insert_rows`; each
+    /// flushed chunk therefore gets its own deadline.
+    pub insert_timeout: Duration,
+    /// Slack added to the server-side budget to derive the client-side
+    /// `tokio::time::timeout`.
+    pub client_timeout_epsilon: Duration,
+}
+
+impl ClickHouseClientConfig {
+    /// Default server-side budget for the connectivity check.
+    pub const DEFAULT_CONNECTIVITY_CHECK_TIMEOUT: Duration = Duration::from_secs(8);
+    /// Default server-side budget for schema lookups.
+    pub const DEFAULT_SCHEMA_QUERY_TIMEOUT: Duration = Duration::from_secs(16);
+    /// Default server-side budget for DDL.
+    pub const DEFAULT_DDL_TIMEOUT: Duration = Duration::from_secs(128);
+    /// Default server-side budget per INSERT statement.
+    pub const DEFAULT_INSERT_TIMEOUT: Duration = Duration::from_secs(256);
+    /// Default slack between server-side and client-side budgets.
+    pub const DEFAULT_CLIENT_TIMEOUT_EPSILON: Duration = Duration::from_secs(4);
+
+    /// Server-side timeout for `op`.
+    pub(crate) fn server_timeout_for(&self, op: ClickHouseOperationKind) -> Duration {
+        match op {
+            ClickHouseOperationKind::ConnectivityCheck => self.connectivity_check_timeout,
+            ClickHouseOperationKind::SchemaQuery => self.schema_query_timeout,
+            ClickHouseOperationKind::Ddl => self.ddl_timeout,
+            ClickHouseOperationKind::Insert => self.insert_timeout,
+        }
+    }
+
+    /// Client-side `tokio::time::timeout` for `op`:
+    /// `server_timeout_for(op) + client_timeout_epsilon`.
+    pub(crate) fn client_timeout_for(&self, op: ClickHouseOperationKind) -> Duration {
+        self.server_timeout_for(op) + self.client_timeout_epsilon
+    }
+}
+
+impl Default for ClickHouseClientConfig {
+    fn default() -> Self {
+        Self {
+            connectivity_check_timeout: Self::DEFAULT_CONNECTIVITY_CHECK_TIMEOUT,
+            schema_query_timeout: Self::DEFAULT_SCHEMA_QUERY_TIMEOUT,
+            ddl_timeout: Self::DEFAULT_DDL_TIMEOUT,
+            insert_timeout: Self::DEFAULT_INSERT_TIMEOUT,
+            client_timeout_epsilon: Self::DEFAULT_CLIENT_TIMEOUT_EPSILON,
+        }
+    }
+}
+
+/// Categories of ClickHouse client calls.
+///
+/// Used to:
+/// - select the corresponding server-side budget,
+/// - map a generic clickhouse error onto the appropriate [`ErrorKind`].
+#[derive(Copy, Clone)]
+pub(crate) enum ClickHouseOperationKind {
+    /// Connectivity check (`SELECT 1`).
+    ConnectivityCheck,
+    /// Schema lookup against `system.columns`.
+    SchemaQuery,
+    /// DDL: CREATE / ALTER / DROP / RENAME / TRUNCATE.
+    Ddl,
+    /// INSERT statement flush.
+    Insert,
+}
+
+impl ClickHouseOperationKind {
+    /// Error kind used when the inner future returns a
+    /// `clickhouse::error::Error`.
+    pub(crate) fn failed_kind(self) -> ErrorKind {
+        match self {
+            ClickHouseOperationKind::ConnectivityCheck => ErrorKind::DestinationConnectionFailed,
+            ClickHouseOperationKind::SchemaQuery | ClickHouseOperationKind::Ddl => {
+                ErrorKind::DestinationQueryFailed
+            }
+            ClickHouseOperationKind::Insert => ErrorKind::DestinationAtomicBatchRetryable,
+        }
+    }
+}
+
+impl std::fmt::Display for ClickHouseOperationKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            ClickHouseOperationKind::ConnectivityCheck => "connectivity check",
+            ClickHouseOperationKind::SchemaQuery => "schema query",
+            ClickHouseOperationKind::Ddl => "DDL",
+            ClickHouseOperationKind::Insert => "insert",
+        };
+        f.write_str(name)
+    }
+}
+
+/// CDC-capable ClickHouse destination that replicates Postgres tables.
+///
+/// The table engine is configured via [`ClickHouseInserterConfig::engine`];
+/// see [`ClickHouseEngine`] for the engine-specific layouts.
+#[derive(Clone)]
+pub struct ClickHouseDestination<S> {
+    /// HTTP client used for all DDL and RowBinary INSERT traffic.
+    client: ClickHouseClient,
+    /// Per-INSERT byte budget; gates intermediate flushes within a single
+    /// `write_table_rows` / `write_events` call.
+    inserter_config: ClickHouseInserterConfig,
+    /// Schema/state store used to persist destination table metadata
+    /// (Applying / Applied) and to look up replicated schemas.
+    store: Arc<S>,
+    /// ClickHouse table name -> per-column nullable flags (in column order,
+    /// including the two trailing CDC columns which are always `false`).
+    ///
+    /// Populated lazily on first encounter of a table and consulted on the
+    /// hot insert path. `std::sync::RwLock` is sufficient: every critical
+    /// section is a brief in-memory map op with no `.await` inside, so the
+    /// async `tokio::sync::RwLock` would be needless overhead.
+    table_cache: Arc<RwLock<HashMap<String, Arc<[bool]>>>>,
+}
+
+impl<S> ClickHouseDestination<S>
+where
+    S: StateStore + SchemaStore + Send + Sync,
+{
+    /// Creates a new `ClickHouseDestination`.
+    ///
+    /// When using an `https://` URL, TLS is handled automatically by the `rustls-tls`
+    /// feature using webpki root certificates.
+    pub fn new(
+        url: Url,
+        user: impl Into<String>,
+        password: Option<String>,
+        database: impl Into<String>,
+        inserter_config: ClickHouseInserterConfig,
+        client_config: ClickHouseClientConfig,
+        store: S,
+    ) -> EtlResult<Self> {
+        register_metrics();
+        Ok(Self {
+            client: ClickHouseClient::new(url, user, password, database, client_config),
+            inserter_config,
+            store: Arc::new(store),
+            table_cache: Arc::new(RwLock::new(HashMap::new())),
+        })
+    }
+
+    /// Probes the server version and rejects unsupported engine/version pairs.
+    /// Currently the only gate: ReplacingMergeTree requires CH >= 23.5.
+    pub async fn validate_engine_support(&self) -> EtlResult<()> {
+        let server_version = self.client.server_version().await?;
+        ensure_engine_supported(self.inserter_config.engine, server_version)
+    }
+
+    /// Creates a ClickHouse table for a never-before-seen `table_id`,
+    /// bracketing the DDL with `DestinationTableMetadata` writes so the
+    /// operation is crash-recoverable.
+    ///
+    /// Sequence:
+    /// 1. Persist `Applying` metadata (so a crash between this write and step 3
+    ///    leaves a marker that lets restart logic detect the interrupted
+    ///    operation).
+    /// 2. Execute `CREATE TABLE IF NOT EXISTS` against ClickHouse.
+    /// 3. Persist `Applied` metadata.
+    ///
+    /// Recovery is handled by `ensure_table_exists`: on restart, an
+    /// `Applying` row signals that the previous run died mid-creation, so
+    /// it re-runs the idempotent DDL and transitions the metadata to
+    /// `Applied` itself.
+    async fn create_table_with_metadata(
+        &self,
+        table_id: TableId,
+        clickhouse_table_name: &str,
+        schema: &ReplicatedTableSchema,
+        snapshot_id: etl::types::SnapshotId,
+        replication_mask: etl::types::ReplicationMask,
+    ) -> EtlResult<()> {
+        let metadata = DestinationTableMetadata::new_applying(
+            clickhouse_table_name.to_owned(),
+            snapshot_id,
+            replication_mask,
+        );
+        self.store.store_destination_table_metadata(table_id, metadata.clone()).await?;
+
+        self.issue_create_table_stmt(clickhouse_table_name, schema).await?;
+
+        self.store.store_destination_table_metadata(table_id, metadata.to_applied()).await?;
+
+        Ok(())
+    }
+
+    /// Rejects writing to a pre-existing ClickHouse table whose engine does
+    /// not match the configured one. No-op if the table doesn't exist yet.
+    async fn ensure_engine_matches(&self, clickhouse_table_name: &str) -> EtlResult<()> {
+        let Some(existing) = self.client.table_engine(clickhouse_table_name).await? else {
+            return Ok(());
+        };
+        let configured = self.inserter_config.engine.as_clickhouse_str();
+        if existing == configured {
+            return Ok(());
+        }
+
+        Err(etl_error!(
+            ErrorKind::ConfigError,
+            "ClickHouse table engine mismatch",
+            format!(
+                "Table '{clickhouse_table_name}' was previously created with engine '{existing}', \
+                 but the pipeline is configured for engine '{configured}'. Either drop the \
+                 destination table and re-sync, or reconfigure the pipeline's `engine` to match \
+                 the existing table."
+            )
+        ))
+    }
+
+    /// Issues the engine-correct `CREATE TABLE`, and under ReplacingMergeTree
+    /// also the companion `CREATE VIEW "<table>__current"`. Both statements
+    /// are `IF NOT EXISTS`, so retries on the recovery path are idempotent.
+    async fn issue_create_table_stmt(
+        &self,
+        clickhouse_table_name: &str,
+        schema: &ReplicatedTableSchema,
+    ) -> EtlResult<()> {
+        let engine = self.inserter_config.engine;
+        let ddl = create_table_sql(engine, clickhouse_table_name, schema.column_schemas())?;
+        self.client.execute_ddl(DdlKind::CreateTable, &ddl).await?;
+
+        if matches!(engine, ClickHouseEngine::ReplacingMergeTree) {
+            let view_ddl = create_current_view_sql(clickhouse_table_name, schema.column_schemas());
+            self.client.execute_ddl(DdlKind::CreateView, &view_ddl).await?;
+        }
+        Ok(())
+    }
+
+    /// Rebuilds the ReplacingMergeTree current-state view from the current
+    /// replicated schema.
+    ///
+    /// The base table can evolve through `ALTER TABLE`, but ClickHouse views
+    /// keep the projection they were created with. Drop and recreate the view
+    /// after schema changes so `"<table>__current"` follows ADD, DROP, and
+    /// RENAME changes. Both statements are idempotent for recovery retries.
+    async fn refresh_current_view(
+        &self,
+        clickhouse_table_name: &str,
+        schema: &ReplicatedTableSchema,
+    ) -> EtlResult<()> {
+        let drop_view = drop_current_view_sql(clickhouse_table_name);
+        self.client.execute_ddl(DdlKind::DropView, &drop_view).await?;
+
+        let create_view = create_current_view_sql(clickhouse_table_name, schema.column_schemas());
+        self.client.execute_ddl(DdlKind::CreateView, &create_view).await
+    }
+
+    /// Ensures the ClickHouse table for the given schema exists, returning
+    /// `(clickhouse_table_name, nullable_flags)`.
+    ///
+    /// On first encounter, executes `CREATE TABLE IF NOT EXISTS` and stores
+    /// destination metadata with `Applied` status. Subsequent calls return
+    /// the cached result.
+    async fn ensure_table_exists(
+        &self,
+        schema: &ReplicatedTableSchema,
+    ) -> EtlResult<(String, Arc<[bool]>)> {
+        validate_replica_identity_for_clickhouse(schema, self.inserter_config.engine)?;
+        let clickhouse_table_name = try_stringify_table_name(schema.name())?;
+
+        if let Some(flags) = self.table_cache.read().get(&clickhouse_table_name).cloned() {
+            return Ok((clickhouse_table_name, flags));
+        }
+
+        // Engine-mismatch detection runs before any DDL or metadata mutation:
+        // a pre-existing table created under a different engine must hard-fail
+        // here, not silently get an idempotent CREATE TABLE IF NOT EXISTS that
+        // would then mis-align RowBinary on insert.
+        self.ensure_engine_matches(&clickhouse_table_name).await?;
+
+        let table_id = schema.id();
+        match self.store.get_destination_table_metadata(table_id).await? {
+            None => {
+                self.create_table_with_metadata(
+                    table_id,
+                    &clickhouse_table_name,
+                    schema,
+                    schema.inner().snapshot_id,
+                    schema.replication_mask().clone(),
+                )
+                .await?;
+            }
+            Some(metadata) => {
+                if metadata.is_applying() {
+                    self.recover_applying_metadata(
+                        table_id,
+                        &clickhouse_table_name,
+                        schema,
+                        metadata,
+                    )
+                    .await?;
+                }
+                // Otherwise the metadata is already `Applied`: this branch
+                // runs after `handle_relation_event` invalidated the cache,
+                // so no DDL is needed and we just fall through to recompute
+                // nullable flags below.
+            }
+        }
+
+        // Compute nullable flags from the actual ClickHouse schema. This matters after
+        // `ALTER TABLE ADD COLUMN`: ClickHouse scalar columns are forced to
+        // `Nullable(T)` even when the Postgres column is `NOT NULL`, so RowBinary must
+        // include the nullable marker byte ClickHouse expects.
+        let actual_columns = self.client.table_columns(&clickhouse_table_name).await?;
+        let expected_column_names =
+            expected_clickhouse_column_names(schema, self.inserter_config.engine);
+        let nullable_flags = nullable_flags_from_clickhouse_columns(
+            &clickhouse_table_name,
+            &expected_column_names,
+            &actual_columns,
+        )?;
+
+        // `or_insert_with` handles the race where a concurrent caller populated
+        // the entry between our read-miss and this write.
+        let flags = {
+            let mut guard = self.table_cache.write();
+            Arc::clone(
+                guard
+                    .entry(clickhouse_table_name.clone())
+                    .or_insert_with(|| Arc::clone(&nullable_flags)),
+            )
+        };
+
+        Ok((clickhouse_table_name, flags))
+    }
+
+    /// Re-runs an interrupted DDL idempotently and transitions metadata to
+    /// `Applied`. Distinguishes between an interrupted schema change (replays
+    /// the diff against the previous snapshot) and an interrupted initial
+    /// creation (re-issues `CREATE TABLE IF NOT EXISTS`).
+    async fn recover_applying_metadata(
+        &self,
+        table_id: TableId,
+        clickhouse_table_name: &str,
+        schema: &ReplicatedTableSchema,
+        metadata: DestinationTableMetadata,
+    ) -> EtlResult<()> {
+        warn!("table {} has Applying metadata, recovering interrupted operation", table_id);
+
+        match metadata.previous_snapshot_id {
+            Some(prev_snapshot_id) => {
+                let old_table_schema =
+                    self.store.get_table_schema(&table_id, prev_snapshot_id).await?.ok_or_else(
+                        || {
+                            etl_error!(
+                                ErrorKind::InvalidState,
+                                "Old schema not found for recovery",
+                                format!(
+                                    "Cannot find schema for table {} at snapshot_id {}",
+                                    table_id, prev_snapshot_id
+                                )
+                            )
+                        },
+                    )?;
+                let old_schema = ReplicatedTableSchema::from_mask(
+                    old_table_schema,
+                    metadata.replication_mask.clone(),
+                );
+                let diff = old_schema.diff(schema);
+                self.apply_schema_diff(clickhouse_table_name, &diff, &old_schema, schema).await?;
+            }
+            None => {
+                self.issue_create_table_stmt(clickhouse_table_name, schema).await?;
+            }
+        }
+
+        self.store.store_destination_table_metadata(table_id, metadata.to_applied()).await?;
+        Ok(())
+    }
+
+    async fn truncate_table_inner(&self, schema: &ReplicatedTableSchema) -> EtlResult<()> {
+        let (clickhouse_table_name, _) = self.ensure_table_exists(schema).await?;
+        self.client.truncate_table(&clickhouse_table_name).await
+    }
+
+    async fn truncate_table_by_id(&self, table_id: TableId) -> EtlResult<()> {
+        let Some(metadata) = self.store.get_applied_destination_table_metadata(table_id).await?
+        else {
+            debug!(
+                table_id = table_id.0,
+                "skipping truncate because destination table metadata is missing"
+            );
+            return Ok(());
+        };
+
+        self.client.truncate_table(&metadata.destination_table_id).await
+    }
+
+    async fn drop_table_for_copy_inner(&self, schema: &ReplicatedTableSchema) -> EtlResult<()> {
+        let clickhouse_table_name = try_stringify_table_name(schema.name())?;
+
+        if matches!(self.inserter_config.engine, ClickHouseEngine::ReplacingMergeTree) {
+            let drop_view = drop_current_view_sql(&clickhouse_table_name);
+            self.client.execute_ddl(DdlKind::DropView, &drop_view).await?;
+        }
+
+        self.client.drop_table(&clickhouse_table_name).await?;
+        self.table_cache.write().remove(&clickhouse_table_name);
+
+        Ok(())
+    }
+
+    async fn write_table_rows_inner(
+        &self,
+        schema: &ReplicatedTableSchema,
+        table_rows: Vec<TableRow>,
+    ) -> EtlResult<()> {
+        let (clickhouse_table_name, nullable_flags) = self.ensure_table_exists(schema).await?;
+
+        let engine = self.inserter_config.engine;
+        let rows: Vec<Vec<ClickHouseValue>> = table_rows
+            .into_iter()
+            .map(|table_row| {
+                let mut values: Vec<ClickHouseValue> = table_row
+                    .into_values()
+                    .into_iter()
+                    .map(cell_to_clickhouse_value)
+                    .collect::<EtlResult<_>>()?;
+                // Initial-copy rows are tagged as INSERT with LSN 0 / tx_ordinal 0
+                // (sentinel meaning "this row pre-dates the streaming cursor"). For
+                // ReplacingMergeTree, any streaming event then wins on FINAL because its packed
+                // `_etl_version` is non-zero.
+                append_cdc_columns(&mut values, CdcOperation::Insert, PgLsn::from(0), 0, engine);
+                Ok(values)
+            })
+            .collect::<EtlResult<_>>()?;
+
+        self.client
+            .insert_rows(
+                &clickhouse_table_name,
+                rows,
+                &nullable_flags,
+                self.inserter_config.max_bytes_per_insert,
+                "copy",
+            )
+            .await
+    }
+
+    /// Handles a schema change event (Relation) by computing the diff and
+    /// applying ALTER TABLE statements.
+    async fn handle_relation_event(&self, new_schema: &ReplicatedTableSchema) -> EtlResult<()> {
+        validate_replica_identity_for_clickhouse(new_schema, self.inserter_config.engine)?;
+
+        let table_id = new_schema.id();
+        let new_snapshot_id = new_schema.inner().snapshot_id;
+        let new_replication_mask = new_schema.replication_mask().clone();
+
+        let metadata =
+            self.store.get_applied_destination_table_metadata(table_id).await?.ok_or_else(
+                || {
+                    etl_error!(
+                        ErrorKind::CorruptedTableSchema,
+                        "Missing destination table metadata",
+                        format!(
+                            "No destination table metadata found for table {} when processing \
+                             schema change. The metadata should have been recorded during initial \
+                             table synchronization.",
+                            table_id
+                        )
+                    )
+                },
+            )?;
+
+        let current_snapshot_id = metadata.snapshot_id;
+        let current_replication_mask = metadata.replication_mask.clone();
+
+        if current_snapshot_id == new_snapshot_id
+            && current_replication_mask == new_replication_mask
+        {
+            info!("schema for table {} unchanged (snapshot_id: {})", table_id, new_snapshot_id);
+            return Ok(());
+        }
+
+        info!(
+            "schema change detected for table {}: snapshot_id {} -> {}",
+            table_id, current_snapshot_id, new_snapshot_id
+        );
+
+        // Retrieve the old schema to compute the diff.
+        let current_table_schema =
+            self.store.get_table_schema(&table_id, current_snapshot_id).await?.ok_or_else(
+                || {
+                    etl_error!(
+                        ErrorKind::InvalidState,
+                        "Old schema not found",
+                        format!(
+                            "Could not find schema for table {} at snapshot_id {}",
+                            table_id, current_snapshot_id
+                        )
+                    )
+                },
+            )?;
+
+        let current_schema = ReplicatedTableSchema::from_mask(
+            current_table_schema,
+            current_replication_mask.clone(),
+        );
+
+        let clickhouse_table_name = &metadata.destination_table_id;
+
+        // Mark as Applying before DDL changes.
+        let updated_metadata = DestinationTableMetadata::new_applied(
+            clickhouse_table_name.clone(),
+            current_snapshot_id,
+            current_replication_mask,
+        )
+        .with_schema_change(
+            new_snapshot_id,
+            new_replication_mask,
+            DestinationTableSchemaStatus::Applying,
+        );
+        self.store.store_destination_table_metadata(table_id, updated_metadata.clone()).await?;
+
+        // Compute and apply the diff.
+        let diff = current_schema.diff(new_schema);
+        if let Err(err) =
+            self.apply_schema_diff(clickhouse_table_name, &diff, &current_schema, new_schema).await
+        {
+            warn!(
+                "schema change failed for table {}: {}. Manual intervention may be required.",
+                table_id, err
+            );
+            return Err(err);
+        }
+
+        // Mark as Applied.
+        self.store
+            .store_destination_table_metadata(table_id, updated_metadata.to_applied())
+            .await?;
+
+        // Invalidate cached nullable flags so the next write recomputes them.
+        {
+            let mut guard = self.table_cache.write();
+            guard.remove(clickhouse_table_name);
+        }
+
+        info!(
+            "schema change completed for table {}: snapshot_id {} applied",
+            table_id, new_snapshot_id
+        );
+
+        Ok(())
+    }
+
+    /// Applies a schema diff to a ClickHouse table: add columns, rename
+    /// columns, then drop columns (in that order for safety), and refreshes
+    /// the ReplacingMergeTree current-state view when needed.
+    ///
+    /// New columns are placed AFTER the last existing user column (before the
+    /// CDC columns) using ClickHouse's `AFTER` clause. This is critical because
+    /// RowBinary encoding is positional -- without explicit placement, ADD
+    /// COLUMN appends after `cdc_lsn`, misaligning the encoding.
+    ///
+    /// Schema changes create an inherently inconsistent window: rows written
+    /// before the ALTER were encoded with the old column set, while rows
+    /// after use the new one. Specifically:
+    ///
+    /// - ADD COLUMN: existing rows get NULL/default for the new column.
+    /// - DROP COLUMN: data in the dropped column is lost for all rows.
+    /// - RENAME COLUMN: existing data is preserved under the new name.
+    ///
+    /// ClickHouse does not support transactional DDL, so if the replicator is
+    /// killed between individual ALTER statements the table may be left in a
+    /// partially altered state. The `DestinationTableMetadata` Applying/Applied
+    /// status tracks this for diagnostic purposes.
+    async fn apply_schema_diff(
+        &self,
+        clickhouse_table_name: &str,
+        diff: &SchemaDiff,
+        current_schema: &ReplicatedTableSchema,
+        new_schema: &ReplicatedTableSchema,
+    ) -> EtlResult<()> {
+        let is_replacing_merge_tree =
+            matches!(self.inserter_config.engine, ClickHouseEngine::ReplacingMergeTree);
+        if diff.is_empty() {
+            if is_replacing_merge_tree {
+                self.refresh_current_view(clickhouse_table_name, new_schema).await?;
+            }
+            return Ok(());
+        }
+
+        // The ReplacingMergeTree table's `ORDER BY` clause is the source primary key,
+        // and ClickHouse uses that ORDER BY as the dedup key during merges.
+        // Dropping or renaming a PK column would invalidate that key in a
+        // way `ALTER TABLE` cannot fix, so reject the diff before any ALTER
+        // is issued.
+        if is_replacing_merge_tree {
+            reject_pk_alters_under_replacing_merge_tree(
+                clickhouse_table_name,
+                diff,
+                current_schema,
+            )?;
+        }
+
+        // Track the last user column name for AFTER placement. New columns
+        // are inserted after this column, and each added column becomes the
+        // new anchor for the next. `None` (no user columns in the current
+        // schema) falls through to `FIRST` placement inside `add_column`,
+        // which still keeps the new column before the trailing CDC columns.
+        let mut last_user_column: Option<String> =
+            current_schema.column_schemas().last().map(|c| c.name.clone());
+
+        for column in &diff.columns_to_add {
+            self.client
+                .add_column(clickhouse_table_name, column, last_user_column.as_deref())
+                .await?;
+            last_user_column = Some(column.name.clone());
+        }
+
+        for rename in &diff.columns_to_rename {
+            self.client
+                .rename_column(clickhouse_table_name, &rename.old_name, &rename.new_name)
+                .await?;
+        }
+
+        for column in &diff.columns_to_remove {
+            self.client.drop_column(clickhouse_table_name, &column.name).await?;
+        }
+
+        if is_replacing_merge_tree {
+            self.refresh_current_view(clickhouse_table_name, new_schema).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Processes events in passes driven by an outer loop that runs until the
+    /// iterator is exhausted. Each pass:
+    /// 1. Accumulates Insert/Update/Delete rows per table until a Truncate,
+    ///    Relation, or end of events.
+    /// 2. Writes those rows concurrently.
+    /// 3. Processes any Relation events (schema changes) sequentially.
+    /// 4. Drains consecutive Truncate events (deduplicated) and executes them.
+    async fn write_events_inner(&self, events: Vec<Event>) -> EtlResult<()> {
+        let mut event_iter = events.into_iter().peekable();
+
+        while event_iter.peek().is_some() {
+            let mut pending: HashMap<TableId, (ReplicatedTableSchema, Vec<PendingRow>)> =
+                HashMap::new();
+
+            // Accumulate data events until we hit a Truncate or Relation boundary.
+            while let Some(event) = event_iter.peek() {
+                if matches!(event, Event::Truncate(_) | Event::Relation(_)) {
+                    break;
+                }
+
+                let event = event_iter.next().expect("peeked event must be present; qed");
+                match event {
+                    Event::Insert(insert) => {
+                        let table_id = insert.replicated_table_schema.id();
+                        let entry = pending
+                            .entry(table_id)
+                            .or_insert_with(|| (insert.replicated_table_schema, Vec::new()));
+                        entry.1.push(PendingRow {
+                            operation: CdcOperation::Insert,
+                            commit_lsn: insert.commit_lsn,
+                            tx_ordinal: insert.tx_ordinal,
+                            cells: insert.table_row.into_values(),
+                        });
+                    }
+                    Event::Update(update) => {
+                        let UpdatedTableRow::Full(table_row) = update.updated_table_row else {
+                            return Err(etl_error!(
+                                ErrorKind::SourceReplicaIdentityError,
+                                "ClickHouse update requires a full new row image",
+                                format!(
+                                    "Table '{}' emitted a partial update row: some column values \
+                                     could not be reconstructed. Writing it would record NULL for \
+                                     the missing columns and misrepresent the source. Configuring \
+                                     the source so that all column values are available in the \
+                                     new- or old-row image (e.g. REPLICA IDENTITY FULL) prevents \
+                                     this.",
+                                    update.replicated_table_schema.name()
+                                )
+                            ));
+                        };
+                        let table_id = update.replicated_table_schema.id();
+                        let entry = pending
+                            .entry(table_id)
+                            .or_insert_with(|| (update.replicated_table_schema, Vec::new()));
+                        entry.1.push(PendingRow {
+                            operation: CdcOperation::Update,
+                            commit_lsn: update.commit_lsn,
+                            tx_ordinal: update.tx_ordinal,
+                            cells: table_row.into_values(),
+                        });
+                    }
+                    Event::Delete(delete) => {
+                        let Some(old_table_row) = delete.old_table_row else {
+                            debug!("delete event has no row data, skipping");
+                            continue;
+                        };
+                        let old_row = match old_table_row {
+                            OldTableRow::Full(row) => row,
+                            OldTableRow::Key(key_row) => {
+                                expand_key_row(key_row, &delete.replicated_table_schema)
+                            }
+                        };
+                        let table_id = delete.replicated_table_schema.id();
+                        let entry = pending
+                            .entry(table_id)
+                            .or_insert_with(|| (delete.replicated_table_schema, Vec::new()));
+                        entry.1.push(PendingRow {
+                            operation: CdcOperation::Delete,
+                            commit_lsn: delete.commit_lsn,
+                            tx_ordinal: delete.tx_ordinal,
+                            cells: old_row.into_values(),
+                        });
+                    }
+                    event => {
+                        debug!(
+                            event_type = %event.event_type(),
+                            "skipping unsupported event type"
+                        );
+                    }
+                }
+            }
+
+            self.flush_pending_rows(pending).await?;
+
+            // Process Relation events (schema changes) sequentially.
+            while let Some(Event::Relation(_)) = event_iter.peek() {
+                if let Some(Event::Relation(relation)) = event_iter.next() {
+                    self.handle_relation_event(&relation.replicated_table_schema).await?;
+                }
+            }
+
+            // Collect and deduplicate truncate events.
+            let mut truncate_schemas: HashMap<TableId, ReplicatedTableSchema> = HashMap::new();
+            while let Some(Event::Truncate(_)) = event_iter.peek() {
+                if let Some(Event::Truncate(truncate_event)) = event_iter.next() {
+                    for schema in truncate_event.truncated_tables {
+                        truncate_schemas.entry(schema.id()).or_insert(schema);
+                    }
+                }
+            }
+
+            futures::future::try_join_all(
+                truncate_schemas.values().map(|schema| self.truncate_table_inner(schema)),
+            )
+            .await?;
+        }
+
+        Ok(())
+    }
+
+    async fn write_stream_batches_inner(&self, batches: Vec<StreamBatch>) -> EtlResult<()> {
+        let mut batch_iter = batches.into_iter().peekable();
+
+        while batch_iter.peek().is_some() {
+            let mut pending: HashMap<TableId, (ReplicatedTableSchema, Vec<PendingRow>)> =
+                HashMap::new();
+
+            while let Some(batch) = batch_iter.peek() {
+                if matches!(batch, StreamBatch::Truncate(_)) {
+                    break;
+                }
+
+                let StreamBatch::Changes(change_set) =
+                    batch_iter.next().expect("peeked batch must be present")
+                else {
+                    unreachable!("truncate batches are handled separately");
+                };
+                let table_schema =
+                    self.replicated_table_schema_for_stream_batch(change_set.table_id).await?;
+
+                for group in change_set.groups {
+                    let rows = record_batch_to_table_rows(&group.rows.batch);
+
+                    for (row_idx, table_row) in rows.into_iter().enumerate() {
+                        let commit_lsn = PgLsn::from(group.commit_lsns.value(row_idx));
+                        let tx_ordinal = group.tx_ordinals.value(row_idx);
+                        let operation = match (group.change, group.row_image) {
+                            (ChangeKind::Insert, RowImage::New) => CdcOperation::Insert,
+                            (ChangeKind::Update, RowImage::New) => CdcOperation::Update,
+                            (ChangeKind::Update, RowImage::Old { .. }) => continue,
+                            (ChangeKind::Delete, RowImage::Old { key_only }) => {
+                                let old_row = if key_only {
+                                    expand_key_row(table_row, &table_schema)
+                                } else {
+                                    table_row
+                                };
+                                let entry = pending
+                                    .entry(change_set.table_id)
+                                    .or_insert_with(|| (table_schema.clone(), Vec::new()));
+                                entry.1.push(PendingRow {
+                                    operation: CdcOperation::Delete,
+                                    commit_lsn,
+                                    tx_ordinal,
+                                    cells: old_row.into_values(),
+                                });
+                                continue;
+                            }
+                            (ChangeKind::Delete, RowImage::New)
+                            | (ChangeKind::Insert, RowImage::Old { .. }) => {
+                                debug!(
+                                    table_id = change_set.table_id.0,
+                                    "skipping unsupported clickhouse change batch row image"
+                                );
+                                continue;
+                            }
+                        };
+
+                        let entry = pending
+                            .entry(change_set.table_id)
+                            .or_insert_with(|| (table_schema.clone(), Vec::new()));
+                        entry.1.push(PendingRow {
+                            operation,
+                            commit_lsn,
+                            tx_ordinal,
+                            cells: table_row.into_values(),
+                        });
+                    }
+                }
+            }
+
+            self.flush_pending_rows(pending).await?;
+
+            let mut truncate_table_ids = HashMap::new();
+            while let Some(StreamBatch::Truncate(_)) = batch_iter.peek() {
+                if let Some(StreamBatch::Truncate(truncate)) = batch_iter.next() {
+                    for table_id in truncate.rel_ids {
+                        truncate_table_ids.entry(table_id).or_insert(());
+                    }
+                }
+            }
+
+            futures::future::try_join_all(
+                truncate_table_ids.into_keys().map(|table_id| self.truncate_table_by_id(table_id)),
+            )
+            .await?;
+        }
+
+        Ok(())
+    }
+
+    async fn replicated_table_schema_for_stream_batch(
+        &self,
+        table_id: TableId,
+    ) -> EtlResult<ReplicatedTableSchema> {
+        if let Some(metadata) = self.store.get_applied_destination_table_metadata(table_id).await? {
+            let table_schema =
+                self.store.get_table_schema(&table_id, metadata.snapshot_id).await?.ok_or_else(
+                    || {
+                        etl_error!(
+                            ErrorKind::MissingTableSchema,
+                            "Table not found in the schema store",
+                            format!(
+                                "The table schema for table {table_id} at snapshot {} was not \
+                                 found in the schema store",
+                                metadata.snapshot_id
+                            )
+                        )
+                    },
+                )?;
+
+            return Ok(ReplicatedTableSchema::from_mask(table_schema, metadata.replication_mask));
+        }
+
+        let table_schema =
+            self.store.get_table_schema(&table_id, SnapshotId::max()).await?.ok_or_else(|| {
+                etl_error!(
+                    ErrorKind::MissingTableSchema,
+                    "Table not found in the schema store",
+                    format!(
+                        "The table schema for table {table_id} was not found in the schema store"
+                    )
+                )
+            })?;
+
+        Ok(ReplicatedTableSchema::from_mask(
+            table_schema.clone(),
+            ReplicationMask::all(&table_schema),
+        ))
+    }
+
+    /// Encodes the accumulated `PendingRow` batches and inserts them into
+    /// ClickHouse, one `JoinSet` task per table. No-op if `pending` is empty.
+    ///
+    /// All `ensure_table_exists` calls run sequentially before any insert is
+    /// spawned, so a schema-resolution failure aborts the whole pass without
+    /// any partial-write side effects.
+    async fn flush_pending_rows(
+        &self,
+        pending: HashMap<TableId, (ReplicatedTableSchema, Vec<PendingRow>)>,
+    ) -> EtlResult<()> {
+        if pending.is_empty() {
+            return Ok(());
+        }
+
+        let mut prepared: Vec<(String, Arc<[bool]>, Vec<PendingRow>)> =
+            Vec::with_capacity(pending.len());
+        for (_, (schema, rows)) in pending {
+            let (clickhouse_table_name, nullable_flags) = self.ensure_table_exists(&schema).await?;
+            prepared.push((clickhouse_table_name, nullable_flags, rows));
+        }
+
+        let mut join_set: JoinSet<EtlResult<()>> = JoinSet::new();
+        let engine = self.inserter_config.engine;
+        for (clickhouse_table_name, nullable_flags, rows) in prepared {
+            let client = self.client.clone();
+            let max_bytes = self.inserter_config.max_bytes_per_insert;
+
+            join_set.spawn(async move {
+                let rows: Vec<Vec<ClickHouseValue>> = rows
+                    .into_iter()
+                    .map(|PendingRow { operation, commit_lsn, tx_ordinal, cells }| {
+                        let mut values: Vec<ClickHouseValue> = cells
+                            .into_iter()
+                            .map(cell_to_clickhouse_value)
+                            .collect::<EtlResult<_>>()?;
+                        append_cdc_columns(&mut values, operation, commit_lsn, tx_ordinal, engine);
+                        Ok(values)
+                    })
+                    .collect::<EtlResult<_>>()?;
+
+                client
+                    .insert_rows(
+                        &clickhouse_table_name,
+                        rows,
+                        &nullable_flags,
+                        max_bytes,
+                        "streaming",
+                    )
+                    .await
+            });
+        }
+
+        while let Some(result) = join_set.join_next().await {
+            result.map_err(
+                |err| etl_error!(ErrorKind::ApplyWorkerPanic, "Insert task failed", source: err),
+            )??;
+        }
+
+        Ok(())
+    }
+}
+
+/// Rejects schema diffs that would drop or rename a primary-key column on
+/// an ReplacingMergeTree table.
+///
+/// The destination emits `CREATE TABLE ... ENGINE = ReplacingMergeTree(...)
+/// ORDER BY (<pk cols>)`, so the table's sort and dedup keys are bound to
+/// those PK column names. ClickHouse `ALTER TABLE` can change column shapes
+/// but cannot rewrite the ORDER BY expression, so a PK drop or rename would
+/// leave the ORDER BY referring to a column that no longer exists (or has a
+/// different meaning), silently breaking dedup. We error before the ALTER
+/// reaches the server.
+fn reject_pk_alters_under_replacing_merge_tree(
+    clickhouse_table_name: &str,
+    diff: &SchemaDiff,
+    current_schema: &ReplicatedTableSchema,
+) -> EtlResult<()> {
+    for column in &diff.columns_to_remove {
+        if column.primary_key_ordinal_position.is_some() {
+            return Err(etl_error!(
+                ErrorKind::SourceSchemaError,
+                "ReplacingMergeTree does not support dropping a primary-key column",
+                format!(
+                    "Table '{clickhouse_table_name}': DROP COLUMN '{name}' would invalidate the \
+                     ReplacingMergeTree ORDER BY / dedup key. Switch this table to `engine: \
+                     merge_tree` or restore the column on the source.",
+                    name = column.name
+                )
+            ));
+        }
+    }
+
+    for rename in &diff.columns_to_rename {
+        let was_pk = current_schema
+            .column_schemas()
+            .find(|c| c.name == rename.old_name)
+            .is_some_and(|c| c.primary_key_ordinal_position.is_some());
+        if was_pk {
+            return Err(etl_error!(
+                ErrorKind::SourceSchemaError,
+                "ReplacingMergeTree does not support renaming a primary-key column",
+                format!(
+                    "Table '{clickhouse_table_name}': RENAME COLUMN '{old}' -> '{new}' would \
+                     invalidate the ReplacingMergeTree ORDER BY / dedup key. Switch this table to \
+                     `engine: merge_tree` or revert the rename on the source.",
+                    old = rename.old_name,
+                    new = rename.new_name
+                )
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Verifies the engine's `min_server_version()` constraint against the given
+/// server version. The per-engine version requirement lives on
+/// [`ClickHouseEngine`] itself; this function is just the error-construction
+/// shell that surfaces the mismatch as an `EtlResult`.
+fn ensure_engine_supported(engine: ClickHouseEngine, server_version: (u32, u32)) -> EtlResult<()> {
+    if let Some(min) = engine.min_server_version()
+        && server_version < min
+    {
+        let (min_major, min_minor) = min;
+        let (major, minor) = server_version;
+
+        return Err(etl_error!(
+            ErrorKind::ConfigError,
+            "ClickHouse server version is too old for the configured engine",
+            format!(
+                "Detected ClickHouse {major}.{minor}; engine `{cfg}` requires \
+                 {min_major}.{min_minor} or newer. Upgrade ClickHouse or set `engine: merge_tree`.",
+                cfg = engine.as_clickhouse_str()
+            )
+        ));
+    }
+
+    Ok(())
+}
+
+/// Rejects replica identities and schemas the ClickHouse destination cannot
+/// represent for the configured engine.
+///
+/// Common to both engines: `expand_key_row` assumes the key-only old-row image
+/// carries primary-key values, so the row identity must match the primary key.
+/// `Full` is also fine because it bypasses `expand_key_row` entirely.
+/// `AlternativeKey` (a non-PK unique index) and `Missing` would either land
+/// identity values in the wrong PK slots or leave us without enough data to
+/// write a well-formed tombstone.
+///
+/// ReplacingMergeTree-only: the source table must have a primary key.
+/// ReplacingMergeTree uses the PK as `ORDER BY`, which is also the dedup key;
+/// without a PK there is nothing to merge on.
+fn validate_replica_identity_for_clickhouse(
+    replicated_table_schema: &ReplicatedTableSchema,
+    engine: ClickHouseEngine,
+) -> EtlResult<()> {
+    if !replicated_table_schema.all_primary_key_columns_replicated() {
+        let omitted_columns = replicated_table_schema
+            .unreplicated_primary_key_column_schemas()
+            .map(|column_schema| column_schema.name.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        return Err(etl_error!(
+            ErrorKind::SourceSchemaError,
+            "ClickHouse requires all source primary-key columns to be replicated",
+            format!(
+                "Table '{}' omits source primary-key columns from replication: {}",
+                replicated_table_schema.name(),
+                omitted_columns
+            )
+        ));
+    }
+
+    if matches!(engine, ClickHouseEngine::ReplacingMergeTree)
+        && replicated_table_schema.primary_key_column_schemas().next().is_none()
+    {
+        return Err(etl_error!(
+            ErrorKind::SourceSchemaError,
+            "ClickHouse ReplacingMergeTree requires a primary key",
+            format!(
+                "Table '{}' has no primary-key columns; set `engine: merge_tree` or define a PK \
+                 on the source table.",
+                replicated_table_schema.name()
+            )
+        ));
+    }
+
+    match replicated_table_schema.identity_type() {
+        IdentityType::PrimaryKey | IdentityType::Full => Ok(()),
+        identity_type => Err(etl_error!(
+            ErrorKind::SourceReplicaIdentityError,
+            "ClickHouse requires primary-key or full replica identity",
+            format!(
+                "Table '{}' uses replica identity {:?}. ClickHouse needs the source row identity \
+                 to match the primary key (so DELETE tombstones land in the right PK slots) or to \
+                 carry the full row image. Configure REPLICA IDENTITY DEFAULT (when the PK is the \
+                 natural identity) or REPLICA IDENTITY FULL.",
+                replicated_table_schema.name(),
+                identity_type
+            )
+        )),
+    }
+}
+
+/// Expands a key-only delete row to full column width for RowBinary encoding.
+///
+/// PK columns keep their real values. Non-PK columns get `Cell::Null` if
+/// nullable, or a type-appropriate zero value if non-nullable (since RowBinary
+/// rejects NULL for non-nullable columns).
+///
+/// Caller must ensure the source replica identity is `PrimaryKey` (or `Full`,
+/// in which case this function isn't invoked) -- see
+/// [`validate_replica_identity_for_clickhouse`].
+fn expand_key_row(key_row: TableRow, schema: &ReplicatedTableSchema) -> TableRow {
+    let key_cells = key_row.into_values();
+    let mut key_iter = key_cells.into_iter();
+    let cells: Vec<Cell> = schema
+        .column_schemas()
+        .map(|col| {
+            if col.primary_key_ordinal_position.is_some() {
+                key_iter.next().unwrap_or(Cell::Null)
+            } else if col.nullable && !is_array_type(&col.typ) {
+                // Nullable scalars -> NULL. Array columns are never nullable
+                // in ClickHouse (Array(Nullable(T)) without outer Nullable),
+                // so they must use an empty array default instead.
+                Cell::Null
+            } else {
+                default_cell(&col.typ)
+            }
+        })
+        .collect();
+    TableRow::new(cells)
+}
+
+/// Returns a zero-value Cell for a Postgres type, used to fill non-PK columns
+/// in key-only DELETE tombstones. Array types produce empty arrays. All other
+/// non-primitive types fall through to an empty String, which is a valid zero
+/// value for every ClickHouse String-mapped type (numeric, time, json, bytea).
+/// Date, Timestamp, and UUID use typed zero values because their ClickHouse
+/// wire format is not String.
+fn default_cell(typ: &Type) -> Cell {
+    use etl::types::ArrayCell;
+
+    match *typ {
+        Type::BOOL => Cell::Bool(false),
+        Type::INT2 => Cell::I16(0),
+        Type::INT4 => Cell::I32(0),
+        Type::INT8 => Cell::I64(0),
+        Type::OID => Cell::U32(0),
+        Type::FLOAT4 => Cell::F32(0.0),
+        Type::FLOAT8 => Cell::F64(0.0),
+        Type::DATE => Cell::Date(chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap()),
+        Type::TIMESTAMP => Cell::Timestamp(chrono::DateTime::UNIX_EPOCH.naive_utc()),
+        Type::TIMESTAMPTZ => Cell::TimestampTz(chrono::DateTime::UNIX_EPOCH),
+        Type::UUID => Cell::Uuid(uuid::Uuid::nil()),
+        Type::CHAR
+        | Type::BPCHAR
+        | Type::VARCHAR
+        | Type::NAME
+        | Type::TEXT
+        | Type::NUMERIC
+        | Type::MONEY
+        | Type::TIME
+        | Type::JSON
+        | Type::JSONB
+        | Type::BYTEA => Cell::String(String::new()),
+        Type::BOOL_ARRAY => Cell::Array(ArrayCell::Bool(Vec::new())),
+        Type::INT2_ARRAY => Cell::Array(ArrayCell::I16(Vec::new())),
+        Type::INT4_ARRAY => Cell::Array(ArrayCell::I32(Vec::new())),
+        Type::INT8_ARRAY => Cell::Array(ArrayCell::I64(Vec::new())),
+        Type::OID_ARRAY => Cell::Array(ArrayCell::U32(Vec::new())),
+        Type::FLOAT4_ARRAY => Cell::Array(ArrayCell::F32(Vec::new())),
+        Type::FLOAT8_ARRAY => Cell::Array(ArrayCell::F64(Vec::new())),
+        Type::TEXT_ARRAY
+        | Type::VARCHAR_ARRAY
+        | Type::CHAR_ARRAY
+        | Type::BPCHAR_ARRAY
+        | Type::NAME_ARRAY
+        | Type::MONEY_ARRAY => Cell::Array(ArrayCell::String(Vec::new())),
+        Type::NUMERIC_ARRAY => Cell::Array(ArrayCell::Numeric(Vec::new())),
+        Type::DATE_ARRAY => Cell::Array(ArrayCell::Date(Vec::new())),
+        Type::TIME_ARRAY => Cell::Array(ArrayCell::Time(Vec::new())),
+        Type::TIMESTAMP_ARRAY => Cell::Array(ArrayCell::Timestamp(Vec::new())),
+        Type::TIMESTAMPTZ_ARRAY => Cell::Array(ArrayCell::TimestampTz(Vec::new())),
+        Type::UUID_ARRAY => Cell::Array(ArrayCell::Uuid(Vec::new())),
+        Type::JSON_ARRAY | Type::JSONB_ARRAY => Cell::Array(ArrayCell::Json(Vec::new())),
+        Type::BYTEA_ARRAY => Cell::Array(ArrayCell::Bytes(Vec::new())),
+        _ if is_array_type(typ) => Cell::Array(ArrayCell::String(Vec::new())),
+        _ => Cell::String(String::new()),
+    }
+}
+
+impl<S> Destination for ClickHouseDestination<S>
+where
+    S: StateStore + SchemaStore + Send + Sync,
+{
+    fn name() -> &'static str {
+        "clickhouse"
+    }
+
+    // The trait methods below intentionally do not use `?` on the inner work.
+    // Errors must reach the caller via `async_result.send(result)`, not via the
+    // outer `EtlResult<()>`; using `?` would short-circuit before `send` runs
+    // and leave the receiver waiting. The outer return value just signals
+    // "work accepted, watch the channel for completion". `AsyncResult::send`
+    // itself returns `()`, and its `Drop` impl synthesizes a "dropped without
+    // sending" error if the path ever skips `send`, so the receiver is never
+    // silently abandoned.
+
+    async fn truncate_table(
+        &self,
+        table_id: TableId,
+        async_result: TruncateTableResult<()>,
+    ) -> EtlResult<()> {
+        let result = self.truncate_table_by_id(table_id).await;
+        async_result.send(result);
+        Ok(())
+    }
+
+    async fn write_snapshot_batch(
+        &self,
+        batch: TableArrowBatch,
+        async_result: WriteSnapshotBatchResult<()>,
+    ) -> EtlResult<()> {
+        let table_schema = ReplicatedTableSchema::all(Arc::clone(&batch.table_schema));
+        let table_rows = record_batch_to_table_rows(&batch.batch);
+        let result = self.write_table_rows_inner(&table_schema, table_rows).await;
+        async_result.send(result);
+        Ok(())
+    }
+
+    async fn write_stream_batches(
+        &self,
+        batches: Vec<StreamBatch>,
+        async_result: WriteStreamBatchesResult<()>,
+    ) -> EtlResult<()> {
+        let result = self.write_stream_batches_inner(batches).await;
+        async_result.send(result);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use etl::types::{
+        ArrayCell, ColumnSchema, IdentityMask, ReplicationMask, TableName, TableSchema,
+    };
+
+    use super::*;
+    use crate::clickhouse::schema::{CDC_LSN_COLUMN_NAME, CDC_OPERATION_COLUMN_NAME};
+
+    fn clickhouse_column(name: &str, type_name: &str) -> ClickHouseTableColumn {
+        ClickHouseTableColumn { name: name.to_owned(), type_name: type_name.to_owned() }
+    }
+
+    fn replicated_schema(identity_type: IdentityType) -> ReplicatedTableSchema {
+        let table_schema = Arc::new(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_owned(), "users".to_owned()),
+            vec![
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
+                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true),
+            ],
+        ));
+        let replication_mask = ReplicationMask::all(&table_schema);
+        let identity_mask = match identity_type {
+            IdentityType::Full => IdentityMask::from_bytes(vec![1, 1]),
+            IdentityType::PrimaryKey => IdentityMask::from_bytes(vec![1, 0]),
+            IdentityType::AlternativeKey => IdentityMask::from_bytes(vec![0, 1]),
+            IdentityType::Missing => IdentityMask::from_bytes(vec![0, 0]),
+        };
+        ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask)
+    }
+
+    fn replicated_schema_with_partial_primary_key() -> ReplicatedTableSchema {
+        let table_schema = Arc::new(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_owned(), "users".to_owned()),
+            vec![
+                ColumnSchema::new("tenant_id".to_owned(), Type::INT4, -1, 1, Some(1), false),
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 2, Some(2), false),
+                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 3, None, true),
+            ],
+        ));
+        let replication_mask = ReplicationMask::from_bytes(vec![0, 1, 1]);
+        let identity_mask = IdentityMask::from_bytes(vec![0, 1, 0]);
+
+        ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask)
+    }
+
+    #[test]
+    fn validate_replica_identity_for_clickhouse_accepts_primary_key() {
+        validate_replica_identity_for_clickhouse(
+            &replicated_schema(IdentityType::PrimaryKey),
+            ClickHouseEngine::MergeTree,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn validate_replica_identity_for_clickhouse_accepts_full() {
+        validate_replica_identity_for_clickhouse(
+            &replicated_schema(IdentityType::Full),
+            ClickHouseEngine::MergeTree,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn validate_replica_identity_for_clickhouse_rejects_alternative_key() {
+        let err = validate_replica_identity_for_clickhouse(
+            &replicated_schema(IdentityType::AlternativeKey),
+            ClickHouseEngine::MergeTree,
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::SourceReplicaIdentityError);
+    }
+
+    #[test]
+    fn validate_replica_identity_for_clickhouse_rejects_missing() {
+        let err = validate_replica_identity_for_clickhouse(
+            &replicated_schema(IdentityType::Missing),
+            ClickHouseEngine::MergeTree,
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::SourceReplicaIdentityError);
+    }
+
+    #[test]
+    fn validate_replica_identity_for_clickhouse_rejects_partial_primary_key() {
+        let err = validate_replica_identity_for_clickhouse(
+            &replicated_schema_with_partial_primary_key(),
+            ClickHouseEngine::MergeTree,
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::SourceSchemaError);
+        assert!(err.to_string().contains("tenant_id"));
+    }
+
+    #[test]
+    fn validate_replica_identity_for_clickhouse_rejects_pkless_schema_under_replacing_merge_tree() {
+        // --- GIVEN: a PK-less schema and engine = ReplacingMergeTree ---
+        let table_schema = Arc::new(TableSchema::new(
+            TableId::new(2),
+            TableName::new("public".to_owned(), "events".to_owned()),
+            vec![ColumnSchema::new("value".to_owned(), Type::TEXT, -1, 1, None, true)],
+        ));
+        let replication_mask = ReplicationMask::all(&table_schema);
+        let identity_mask = IdentityMask::from_bytes(vec![1]);
+        let schema =
+            ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask);
+
+        // --- WHEN: validating under ReplacingMergeTree ---
+        let err =
+            validate_replica_identity_for_clickhouse(&schema, ClickHouseEngine::ReplacingMergeTree)
+                .unwrap_err();
+
+        // --- THEN: rejected with SourceSchemaError ---
+        assert_eq!(err.kind(), ErrorKind::SourceSchemaError);
+    }
+
+    #[test]
+    fn ensure_engine_supported_rejects_replacing_merge_tree_on_old_server() {
+        // --- GIVEN: server below the ReplacingMergeTree minimum ---
+        let err =
+            ensure_engine_supported(ClickHouseEngine::ReplacingMergeTree, (23, 4)).unwrap_err();
+        // --- THEN: surfaced as a config error ---
+        assert_eq!(err.kind(), ErrorKind::ConfigError);
+    }
+
+    #[test]
+    fn ensure_engine_supported_accepts_merge_tree_on_any_server() {
+        ensure_engine_supported(ClickHouseEngine::MergeTree, (20, 0)).unwrap();
+    }
+
+    #[test]
+    fn ensure_engine_supported_accepts_replacing_merge_tree_on_supported_server() {
+        ensure_engine_supported(ClickHouseEngine::ReplacingMergeTree, (23, 5)).unwrap();
+        ensure_engine_supported(ClickHouseEngine::ReplacingMergeTree, (24, 1)).unwrap();
+    }
+
+    /// Schema with composite PK `(tenant_id, id)` plus a non-PK `value`
+    /// column. Used by the PK-ALTER-guard tests.
+    fn replicated_schema_for_pk_alters() -> ReplicatedTableSchema {
+        let table_schema = Arc::new(TableSchema::new(
+            TableId::new(7),
+            TableName::new("public".to_owned(), "replacing_merge_tree_alter".to_owned()),
+            vec![
+                ColumnSchema::new("tenant_id".to_owned(), Type::INT4, -1, 1, Some(1), false),
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 2, Some(2), false),
+                ColumnSchema::new("value".to_owned(), Type::TEXT, -1, 3, None, true),
+            ],
+        ));
+        let replication_mask = ReplicationMask::all(&table_schema);
+        let identity_mask = IdentityMask::from_bytes(vec![1, 1, 0]);
+        ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask)
+    }
+
+    #[test]
+    fn reject_pk_alters_under_replacing_merge_tree_allows_non_pk_drop() {
+        // --- GIVEN: a diff that drops the non-PK `value` column ---
+        let schema = replicated_schema_for_pk_alters();
+        let diff = SchemaDiff {
+            columns_to_add: Vec::new(),
+            columns_to_remove: vec![ColumnSchema::new(
+                "value".to_owned(),
+                Type::TEXT,
+                -1,
+                3,
+                None,
+                true,
+            )],
+            columns_to_rename: Vec::new(),
+        };
+        // --- WHEN/THEN: guard passes ---
+        reject_pk_alters_under_replacing_merge_tree(
+            "public_replacing_merge_tree__alter",
+            &diff,
+            &schema,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn reject_pk_alters_under_replacing_merge_tree_rejects_pk_drop() {
+        // --- GIVEN: a diff that drops the PK column `tenant_id` ---
+        let schema = replicated_schema_for_pk_alters();
+        let diff = SchemaDiff {
+            columns_to_add: Vec::new(),
+            columns_to_remove: vec![ColumnSchema::new(
+                "tenant_id".to_owned(),
+                Type::INT4,
+                -1,
+                1,
+                Some(1),
+                false,
+            )],
+            columns_to_rename: Vec::new(),
+        };
+        // --- WHEN: validating ---
+        let err = reject_pk_alters_under_replacing_merge_tree(
+            "public_replacing_merge_tree__alter",
+            &diff,
+            &schema,
+        )
+        .unwrap_err();
+        // --- THEN: rejected with SourceSchemaError naming the column ---
+        assert_eq!(err.kind(), ErrorKind::SourceSchemaError);
+        assert!(err.to_string().contains("tenant_id"), "error must name the PK column: {err}");
+    }
+
+    #[test]
+    fn reject_pk_alters_under_replacing_merge_tree_allows_non_pk_rename() {
+        // --- GIVEN: a rename of the non-PK `value` column ---
+        let schema = replicated_schema_for_pk_alters();
+        let diff = SchemaDiff {
+            columns_to_add: Vec::new(),
+            columns_to_remove: Vec::new(),
+            columns_to_rename: vec![etl::types::ColumnRename {
+                old_name: "value".to_owned(),
+                new_name: "payload".to_owned(),
+                ordinal_position: 3,
+            }],
+        };
+        // --- WHEN/THEN: guard passes ---
+        reject_pk_alters_under_replacing_merge_tree(
+            "public_replacing_merge_tree__alter",
+            &diff,
+            &schema,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn reject_pk_alters_under_replacing_merge_tree_rejects_pk_rename() {
+        // --- GIVEN: a rename of the PK column `id` ---
+        let schema = replicated_schema_for_pk_alters();
+        let diff = SchemaDiff {
+            columns_to_add: Vec::new(),
+            columns_to_remove: Vec::new(),
+            columns_to_rename: vec![etl::types::ColumnRename {
+                old_name: "id".to_owned(),
+                new_name: "row_id".to_owned(),
+                ordinal_position: 2,
+            }],
+        };
+        // --- WHEN: validating ---
+        let err = reject_pk_alters_under_replacing_merge_tree(
+            "public_replacing_merge_tree__alter",
+            &diff,
+            &schema,
+        )
+        .unwrap_err();
+        // --- THEN: rejected with SourceSchemaError naming the rename ---
+        assert_eq!(err.kind(), ErrorKind::SourceSchemaError);
+        assert!(
+            err.to_string().contains("'id'") && err.to_string().contains("'row_id'"),
+            "error must name old + new names: {err}"
+        );
+    }
+
+    #[test]
+    fn cdc_lsn_value_preserves_full_u64_range() {
+        let value = cdc_lsn_to_clickhouse_value(PgLsn::from(u64::MAX));
+
+        match value {
+            ClickHouseValue::UInt64(lsn) => assert_eq!(lsn, u64::MAX),
+            _ => panic!("expected UInt64 CDC LSN value"),
+        }
+    }
+
+    #[test]
+    fn default_cell_money_values_are_strings() {
+        assert_eq!(default_cell(&Type::MONEY), Cell::String(String::new()));
+        assert_eq!(default_cell(&Type::MONEY_ARRAY), Cell::Array(ArrayCell::String(Vec::new())));
+    }
+
+    #[test]
+    fn nullable_flags_use_clickhouse_destination_nullability() {
+        let expected_names = vec![
+            "id".to_owned(),
+            "score".to_owned(),
+            "tags".to_owned(),
+            CDC_OPERATION_COLUMN_NAME.to_owned(),
+            CDC_LSN_COLUMN_NAME.to_owned(),
+        ];
+        let actual_columns = vec![
+            clickhouse_column("id", "Int64"),
+            clickhouse_column("score", "Nullable(Int32)"),
+            clickhouse_column("tags", "Array(Nullable(String))"),
+            clickhouse_column(CDC_OPERATION_COLUMN_NAME, "String"),
+            clickhouse_column(CDC_LSN_COLUMN_NAME, "UInt64"),
+        ];
+
+        let flags =
+            nullable_flags_from_clickhouse_columns("test_table", &expected_names, &actual_columns)
+                .unwrap();
+
+        assert_eq!(flags.as_ref(), [false, true, false, false, false]);
+    }
+
+    #[test]
+    fn nullable_flags_reject_clickhouse_column_count_mismatch() {
+        let expected_names = vec!["id".to_owned(), CDC_OPERATION_COLUMN_NAME.to_owned()];
+        let actual_columns = vec![clickhouse_column("id", "Int64")];
+
+        let err =
+            nullable_flags_from_clickhouse_columns("test_table", &expected_names, &actual_columns)
+                .unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::CorruptedTableSchema);
+        assert_eq!(err.detail(), Some("table 'test_table' has 1 columns, but 2 were expected"));
+    }
+
+    #[test]
+    fn nullable_flags_reject_clickhouse_column_order_mismatch() {
+        let expected_names = vec!["id".to_owned(), "name".to_owned()];
+        let actual_columns =
+            vec![clickhouse_column("name", "String"), clickhouse_column("id", "Int64")];
+
+        let err =
+            nullable_flags_from_clickhouse_columns("test_table", &expected_names, &actual_columns)
+                .unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::CorruptedTableSchema);
+        assert_eq!(
+            err.detail(),
+            Some("table 'test_table' column 1 is named 'name', but 'id' was expected")
+        );
+    }
+}

@@ -1,0 +1,200 @@
+use std::{collections::HashMap, sync::Arc};
+
+use etl::{
+    error::{EtlError, EtlResult},
+    replication::WorkerType,
+    state::{
+        TableState,
+        destination_table_metadata::{AppliedDestinationTableMetadata, DestinationTableMetadata},
+    },
+    store::{
+        lifecycle::TableLifecycleStore,
+        schema::{SchemaStore, TableSchemaRetention},
+        state::{StateStore, TableStates},
+    },
+    types::{PgLsn, SnapshotId, TableId, TableSchema},
+};
+use tracing::info;
+
+use crate::{error_notification::ErrorNotificationClient, sentry};
+
+/// State store decorator that reports persisted table replication errors.
+///
+/// After [`StateStore::update_table_states`] succeeds, this wrapper
+/// reports each [`TableState::Errored`] update to Sentry and, when
+/// configured, to the Supabase error-notification endpoint.
+#[derive(Debug, Clone)]
+pub(crate) struct ErrorReportingStateStore<S> {
+    inner: S,
+    notification_client: Option<Arc<ErrorNotificationClient>>,
+}
+
+/// Persisted table error waiting to be reported.
+#[derive(Debug)]
+struct ReportableTableError {
+    /// Table whose table state was persisted as errored.
+    table_id: TableId,
+    /// Source ETL error captured in the persisted table state.
+    source_err: EtlError,
+}
+
+impl<S> ErrorReportingStateStore<S> {
+    /// Creates a reporting wrapper around `inner`.
+    pub(crate) fn new(inner: S, notification_client: Option<ErrorNotificationClient>) -> Self {
+        Self { inner, notification_client: notification_client.map(Arc::new) }
+    }
+
+    /// Reports persisted errored table state updates.
+    async fn report_errored_updates(&self, updates: Vec<ReportableTableError>) {
+        let notification_client = self.notification_client.as_ref();
+
+        for update in updates {
+            info!(table_id = update.table_id.0, "reporting table replication error");
+
+            sentry::capture_table_error(update.table_id, &update.source_err);
+            if let Some(notification_client) = notification_client {
+                notification_client
+                    .notify_error(update.source_err.to_string(), &update.source_err)
+                    .await;
+            }
+        }
+    }
+
+    /// Extracts only the errored state updates that need post-persistence
+    /// reporting.
+    fn collect_reportable_errors(updates: &[(TableId, TableState)]) -> Vec<ReportableTableError> {
+        updates
+            .iter()
+            .filter_map(|(table_id, state)| match state {
+                TableState::Errored { source_err, .. } => Some(ReportableTableError {
+                    table_id: *table_id,
+                    source_err: source_err.clone(),
+                }),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+impl<S> StateStore for ErrorReportingStateStore<S>
+where
+    S: StateStore + Send + Sync,
+{
+    async fn get_table_state(&self, table_id: TableId) -> EtlResult<Option<TableState>> {
+        self.inner.get_table_state(table_id).await
+    }
+
+    async fn get_table_states(&self) -> EtlResult<TableStates> {
+        self.inner.get_table_states().await
+    }
+
+    async fn load_table_states(&self) -> EtlResult<usize> {
+        self.inner.load_table_states().await
+    }
+
+    async fn update_table_states(&self, updates: Vec<(TableId, TableState)>) -> EtlResult<()> {
+        // We collect all errors in advance, to avoid cloning the whole set of updates.
+        let reportable_errors = Self::collect_reportable_errors(&updates);
+
+        self.inner.update_table_states(updates).await?;
+
+        // This operation must be infallible or at least not propagate failures,
+        // otherwise the error thrown here, will be caught and handled by the
+        // core of etl itself. There is no infinite recursion problem, but it
+        // might make the system harder to understand.
+        self.report_errored_updates(reportable_errors).await;
+
+        Ok(())
+    }
+
+    async fn rollback_table_state(&self, table_id: TableId) -> EtlResult<TableState> {
+        self.inner.rollback_table_state(table_id).await
+    }
+
+    async fn get_replication_progress(&self, worker_type: WorkerType) -> EtlResult<Option<PgLsn>> {
+        self.inner.get_replication_progress(worker_type).await
+    }
+
+    async fn upsert_replication_progress(
+        &self,
+        worker_type: WorkerType,
+        flush_lsn: PgLsn,
+    ) -> EtlResult<PgLsn> {
+        self.inner.upsert_replication_progress(worker_type, flush_lsn).await
+    }
+
+    async fn delete_replication_progress(&self, worker_type: WorkerType) -> EtlResult<()> {
+        self.inner.delete_replication_progress(worker_type).await
+    }
+
+    async fn get_destination_table_metadata(
+        &self,
+        table_id: TableId,
+    ) -> EtlResult<Option<DestinationTableMetadata>> {
+        self.inner.get_destination_table_metadata(table_id).await
+    }
+
+    async fn get_applied_destination_table_metadata(
+        &self,
+        table_id: TableId,
+    ) -> EtlResult<Option<AppliedDestinationTableMetadata>> {
+        self.inner.get_applied_destination_table_metadata(table_id).await
+    }
+
+    async fn load_destination_tables_metadata(&self) -> EtlResult<usize> {
+        self.inner.load_destination_tables_metadata().await
+    }
+
+    async fn store_destination_table_metadata(
+        &self,
+        table_id: TableId,
+        metadata: DestinationTableMetadata,
+    ) -> EtlResult<()> {
+        self.inner.store_destination_table_metadata(table_id, metadata).await
+    }
+}
+
+impl<S> SchemaStore for ErrorReportingStateStore<S>
+where
+    S: SchemaStore + Send + Sync,
+{
+    async fn get_table_schema(
+        &self,
+        table_id: &TableId,
+        snapshot_id: SnapshotId,
+    ) -> EtlResult<Option<Arc<TableSchema>>> {
+        self.inner.get_table_schema(table_id, snapshot_id).await
+    }
+
+    async fn get_table_schemas(&self) -> EtlResult<Vec<Arc<TableSchema>>> {
+        self.inner.get_table_schemas().await
+    }
+
+    async fn load_table_schemas(&self) -> EtlResult<usize> {
+        self.inner.load_table_schemas().await
+    }
+
+    async fn store_table_schema(&self, table_schema: TableSchema) -> EtlResult<Arc<TableSchema>> {
+        self.inner.store_table_schema(table_schema).await
+    }
+
+    async fn prune_table_schemas(
+        &self,
+        table_schema_retentions: HashMap<TableId, TableSchemaRetention>,
+    ) -> EtlResult<u64> {
+        self.inner.prune_table_schemas(table_schema_retentions).await
+    }
+}
+
+impl<S> TableLifecycleStore for ErrorReportingStateStore<S>
+where
+    S: TableLifecycleStore + Send + Sync,
+{
+    async fn clear_table_copy_state(&self, table_id: TableId) -> EtlResult<()> {
+        self.inner.clear_table_copy_state(table_id).await
+    }
+
+    async fn delete_table_pipeline_state(&self, table_id: TableId) -> EtlResult<()> {
+        self.inner.delete_table_pipeline_state(table_id).await
+    }
+}

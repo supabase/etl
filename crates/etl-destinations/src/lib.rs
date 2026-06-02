@@ -1,0 +1,31 @@
+//! ETL destination implementations.
+//!
+//! Provides implementations of the ETL destination trait for various data
+//! warehouses and analytics platforms, enabling data replication from Postgres
+//! to cloud services.
+
+#[cfg(any(feature = "bigquery", feature = "ducklake", feature = "iceberg", feature = "snowflake"))]
+mod retry;
+#[cfg(any(feature = "clickhouse", feature = "ducklake", feature = "snowflake"))]
+mod sql;
+#[cfg(any(
+    feature = "bigquery",
+    feature = "clickhouse",
+    feature = "ducklake",
+    feature = "iceberg",
+    feature = "snowflake"
+))]
+mod table_name;
+
+#[cfg(feature = "bigquery")]
+pub mod bigquery;
+#[cfg(feature = "clickhouse")]
+pub mod clickhouse;
+#[cfg(feature = "ducklake")]
+pub mod ducklake;
+#[cfg(feature = "egress")]
+pub mod egress;
+#[cfg(feature = "iceberg")]
+pub mod iceberg;
+#[cfg(feature = "snowflake")]
+pub mod snowflake;

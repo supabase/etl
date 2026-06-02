@@ -1,0 +1,299 @@
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
+
+use tokio::sync::Mutex;
+
+use crate::{
+    error::{ErrorKind, EtlResult},
+    etl_error,
+    replication::WorkerType,
+    state::{
+        TableState,
+        destination_table_metadata::{AppliedDestinationTableMetadata, DestinationTableMetadata},
+    },
+    store::{
+        lifecycle::TableLifecycleStore,
+        schema::{SchemaStore, TableSchemaRetention, TableSchemaSnapshots},
+        state::{DestinationTablesMetadata, StateStore, TableStates},
+    },
+    types::{PgLsn, SnapshotId, TableId, TableSchema},
+};
+
+/// Inner state of [`MemoryStore`].
+#[derive(Debug)]
+struct Inner {
+    /// Current table state for each table - this is the authoritative
+    /// source of truth for table states. Every table being replicated must
+    /// have an entry here.
+    table_states: TableStates,
+    /// Complete history of state transitions for each table, used for debugging
+    /// and auditing. This is an append-only log that grows over time and
+    /// provides visibility into table state evolution. Entries are
+    /// chronologically ordered.
+    table_state_history: HashMap<TableId, Vec<TableState>>,
+    /// Cached table schema snapshots.
+    table_schemas: Arc<TableSchemaSnapshots>,
+    /// Cached destination table metadata indexed by table ID.
+    destination_tables_metadata: DestinationTablesMetadata,
+    /// Durable replication progress indexed by worker type and optional table.
+    replication_progress: HashMap<WorkerType, PgLsn>,
+}
+
+/// In-memory storage for ETL pipeline state and schema information.
+///
+/// [`MemoryStore`] implements the store traits required by
+/// [`crate::store::PipelineStore`], providing a complete storage solution that
+/// keeps all data in memory. This is ideal for testing, development, and
+/// scenarios where persistence is not required.
+///
+/// All state information, including table states, schema
+/// definitions, and destination table metadata are stored in memory and will be
+/// lost on process restart.
+#[derive(Debug, Clone)]
+pub struct MemoryStore {
+    inner: Arc<Mutex<Inner>>,
+}
+
+/// Scope of table-scoped state removal.
+#[derive(Debug, Clone, Copy)]
+enum TableStateCleanupScope {
+    /// Clear state that belongs to the previous table copy.
+    CopyRestart,
+    /// Delete all ETL state for a table removed from the publication.
+    PipelineRemoval,
+}
+
+impl MemoryStore {
+    /// Creates a new empty memory store.
+    ///
+    /// The store initializes with empty collections for all state and schema
+    /// data. As the pipeline runs, it will populate these collections with
+    /// table state and schema information.
+    pub fn new() -> Self {
+        let inner = Inner {
+            table_states: Arc::new(BTreeMap::new()),
+            table_state_history: HashMap::new(),
+            table_schemas: Arc::new(TableSchemaSnapshots::default()),
+            destination_tables_metadata: Arc::new(BTreeMap::new()),
+            replication_progress: HashMap::new(),
+        };
+
+        Self { inner: Arc::new(Mutex::new(inner)) }
+    }
+
+    /// Deletes table-scoped state according to the requested scope.
+    async fn delete_table_state_for_scope(
+        &self,
+        table_id: TableId,
+        scope: TableStateCleanupScope,
+    ) -> EtlResult<()> {
+        let mut inner = self.inner.lock().await;
+
+        if matches!(scope, TableStateCleanupScope::PipelineRemoval) {
+            Arc::make_mut(&mut inner.table_states).remove(&table_id);
+            inner.table_state_history.remove(&table_id);
+        }
+
+        Arc::make_mut(&mut inner.table_schemas).remove_table(table_id);
+        Arc::make_mut(&mut inner.destination_tables_metadata).remove(&table_id);
+        inner.replication_progress.remove(&WorkerType::TableSync { table_id });
+
+        Ok(())
+    }
+}
+
+impl Default for MemoryStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl StateStore for MemoryStore {
+    async fn get_table_state(&self, table_id: TableId) -> EtlResult<Option<TableState>> {
+        let inner = self.inner.lock().await;
+
+        Ok(inner.table_states.get(&table_id).cloned())
+    }
+
+    async fn get_table_states(&self) -> EtlResult<TableStates> {
+        let inner = self.inner.lock().await;
+
+        Ok(Arc::clone(&inner.table_states))
+    }
+
+    async fn load_table_states(&self) -> EtlResult<usize> {
+        let inner = self.inner.lock().await;
+
+        Ok(inner.table_states.len())
+    }
+
+    async fn update_table_states(&self, updates: Vec<(TableId, TableState)>) -> EtlResult<()> {
+        let mut guard = self.inner.lock().await;
+        // To enable split-borrow (`Arc::make_mut()` borrows `table_states`
+        // mutably, while `inner.table_state_history` borrows different field).
+        let inner = &mut *guard;
+
+        let states = Arc::make_mut(&mut inner.table_states);
+        for (table_id, state) in updates {
+            // Store the current state in history before updating.
+            if let Some(current_state) = states.get(&table_id).cloned() {
+                inner
+                    .table_state_history
+                    .entry(table_id)
+                    .or_insert_with(Vec::new)
+                    .push(current_state);
+            }
+
+            states.insert(table_id, state);
+        }
+
+        Ok(())
+    }
+
+    async fn rollback_table_state(&self, table_id: TableId) -> EtlResult<TableState> {
+        let mut inner = self.inner.lock().await;
+
+        // Get the previous state from history.
+        let previous_state =
+            inner.table_state_history.get_mut(&table_id).and_then(Vec::pop).ok_or_else(|| {
+                etl_error!(
+                    ErrorKind::StateRollbackError,
+                    "No previous state available to roll back to"
+                )
+            })?;
+
+        // Update the current state to the previous state.
+        Arc::make_mut(&mut inner.table_states).insert(table_id, previous_state.clone());
+
+        Ok(previous_state)
+    }
+
+    async fn get_replication_progress(&self, worker_type: WorkerType) -> EtlResult<Option<PgLsn>> {
+        let inner = self.inner.lock().await;
+
+        Ok(inner.replication_progress.get(&worker_type).copied())
+    }
+
+    async fn upsert_replication_progress(
+        &self,
+        worker_type: WorkerType,
+        flush_lsn: PgLsn,
+    ) -> EtlResult<PgLsn> {
+        let mut inner = self.inner.lock().await;
+        let stored_lsn = inner
+            .replication_progress
+            .entry(worker_type)
+            .and_modify(|stored_lsn| {
+                if flush_lsn > *stored_lsn {
+                    *stored_lsn = flush_lsn;
+                }
+            })
+            .or_insert(flush_lsn);
+
+        Ok(*stored_lsn)
+    }
+
+    async fn delete_replication_progress(&self, worker_type: WorkerType) -> EtlResult<()> {
+        let mut inner = self.inner.lock().await;
+        inner.replication_progress.remove(&worker_type);
+
+        Ok(())
+    }
+
+    async fn get_destination_table_metadata(
+        &self,
+        table_id: TableId,
+    ) -> EtlResult<Option<DestinationTableMetadata>> {
+        let inner = self.inner.lock().await;
+
+        Ok(inner.destination_tables_metadata.get(&table_id).cloned())
+    }
+
+    async fn get_applied_destination_table_metadata(
+        &self,
+        table_id: TableId,
+    ) -> EtlResult<Option<AppliedDestinationTableMetadata>> {
+        let inner = self.inner.lock().await;
+
+        inner
+            .destination_tables_metadata
+            .get(&table_id)
+            .cloned()
+            .map(DestinationTableMetadata::into_applied)
+            .transpose()
+    }
+
+    async fn load_destination_tables_metadata(&self) -> EtlResult<usize> {
+        let inner = self.inner.lock().await;
+
+        Ok(inner.destination_tables_metadata.len())
+    }
+
+    async fn store_destination_table_metadata(
+        &self,
+        table_id: TableId,
+        metadata: DestinationTableMetadata,
+    ) -> EtlResult<()> {
+        let mut inner = self.inner.lock().await;
+        Arc::make_mut(&mut inner.destination_tables_metadata).insert(table_id, metadata);
+
+        Ok(())
+    }
+}
+
+impl SchemaStore for MemoryStore {
+    /// Returns the table schema for the given table at the specified snapshot
+    /// point.
+    ///
+    /// Returns the schema version with the largest snapshot_id <= the requested
+    /// snapshot_id. For MemoryStore, this only looks in the in-memory
+    /// cache.
+    async fn get_table_schema(
+        &self,
+        table_id: &TableId,
+        snapshot_id: SnapshotId,
+    ) -> EtlResult<Option<Arc<TableSchema>>> {
+        let inner = self.inner.lock().await;
+
+        Ok(inner.table_schemas.get_at_or_before(*table_id, snapshot_id))
+    }
+
+    async fn get_table_schemas(&self) -> EtlResult<Vec<Arc<TableSchema>>> {
+        let inner = self.inner.lock().await;
+
+        Ok(inner.table_schemas.all())
+    }
+
+    async fn load_table_schemas(&self) -> EtlResult<usize> {
+        let inner = self.inner.lock().await;
+
+        Ok(inner.table_schemas.total_snapshots_count())
+    }
+
+    async fn store_table_schema(&self, table_schema: TableSchema) -> EtlResult<Arc<TableSchema>> {
+        let mut inner = self.inner.lock().await;
+
+        Ok(Arc::make_mut(&mut inner.table_schemas).insert(table_schema))
+    }
+
+    async fn prune_table_schemas(
+        &self,
+        table_schema_retentions: HashMap<TableId, TableSchemaRetention>,
+    ) -> EtlResult<u64> {
+        let mut inner = self.inner.lock().await;
+
+        Ok(Arc::make_mut(&mut inner.table_schemas).prune(&table_schema_retentions))
+    }
+}
+
+impl TableLifecycleStore for MemoryStore {
+    async fn clear_table_copy_state(&self, table_id: TableId) -> EtlResult<()> {
+        self.delete_table_state_for_scope(table_id, TableStateCleanupScope::CopyRestart).await
+    }
+
+    async fn delete_table_pipeline_state(&self, table_id: TableId) -> EtlResult<()> {
+        self.delete_table_state_for_scope(table_id, TableStateCleanupScope::PipelineRemoval).await
+    }
+}

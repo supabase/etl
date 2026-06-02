@@ -42,7 +42,7 @@ options:
   -h, --help                  show this help
 
 notes:
-  - config files are sourced from etl-replicator/configuration:
+  - config files are sourced from crates/etl-replicator/configuration:
     base.yaml + dev.yaml + staging.yaml.
   - if staging.yaml is missing, dev.yaml is copied as staging.yaml.
   - config is mounted as files in /etc/etl/replicator-config.
@@ -128,9 +128,9 @@ if ! kubectl config get-contexts -o name | grep -qx "${CONTEXT}"; then
   exit 1
 fi
 
-BASE_SOURCE="${REPO_ROOT}/etl-replicator/configuration/base.yaml"
-DEV_SOURCE="${REPO_ROOT}/etl-replicator/configuration/dev.yaml"
-STAGING_SOURCE="${REPO_ROOT}/etl-replicator/configuration/staging.yaml"
+BASE_SOURCE="${REPO_ROOT}/crates/etl-replicator/configuration/base.yaml"
+DEV_SOURCE="${REPO_ROOT}/crates/etl-replicator/configuration/dev.yaml"
+STAGING_SOURCE="${REPO_ROOT}/crates/etl-replicator/configuration/staging.yaml"
 
 if [[ ! -f "${BASE_SOURCE}" ]]; then
   echo "missing config file: ${BASE_SOURCE}" >&2
@@ -165,15 +165,7 @@ if [[ "${SKIP_BUILD}" -eq 0 ]]; then
     "Cargo.toml"
     "Cargo.lock"
     ".cargo"
-    "etl"
-    "etl-api"
-    "etl-benchmarks"
-    "etl-config"
-    "etl-destinations"
-    "etl-examples"
-    "etl-postgres"
-    "etl-replicator"
-    "etl-telemetry"
+    "crates"
     "scripts"
   )
 
@@ -190,7 +182,7 @@ if [[ "${SKIP_BUILD}" -eq 0 ]]; then
   done
 
   echo "building image ${IMAGE}..."
-  docker build -f "${BUILD_CONTEXT_DIR}/etl-replicator/Dockerfile" -t "${IMAGE}" "${BUILD_CONTEXT_DIR}"
+  docker build -f "${BUILD_CONTEXT_DIR}/crates/etl-replicator/Dockerfile" -t "${IMAGE}" "${BUILD_CONTEXT_DIR}"
 fi
 
 CONFIG_MAP_NAME="${NAME}-config"

@@ -110,7 +110,7 @@ jobs:
     with:
       image: public.ecr.aws/supabase/${{ matrix.image }}
       context: .
-      file: ./${{ matrix.image }}/Dockerfile
+      file: ./crates/${{ matrix.image }}/Dockerfile
       push: true
       tag_with_version: true
       version: ${{ needs.version.outputs.version }}

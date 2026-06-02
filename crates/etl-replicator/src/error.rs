@@ -1,0 +1,146 @@
+use std::{backtrace::Backtrace, error::Error, fmt};
+
+use etl::error::EtlError;
+
+/// Returns whether terminal output should include backtraces.
+fn should_render_backtrace() -> bool {
+    matches!(std::env::var("RUST_BACKTRACE").as_deref(), Ok("1" | "full"))
+}
+
+/// Result type for replicator operations.
+pub(crate) type ReplicatorResult<T> = Result<T, ReplicatorError>;
+
+/// Captured backtrace wrapper to avoid thiserror's unstable feature detection.
+pub(crate) struct CapturedBacktrace(Backtrace);
+
+impl CapturedBacktrace {
+    /// Captures a new backtrace for an error variant.
+    fn capture() -> Self {
+        Self(Backtrace::capture())
+    }
+}
+
+impl fmt::Debug for CapturedBacktrace {
+    /// Renders the wrapped backtrace for debugging output.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// Error type for the replicator service.
+///
+/// Wraps [`EtlError`] for pipeline errors and provides variants for
+/// infrastructure errors.
+#[derive(Debug)]
+pub(crate) enum ReplicatorError {
+    /// Pipeline or ETL-related error.
+    Etl(EtlError),
+    /// Configuration error.
+    Config(Box<dyn Error + Send + Sync>, CapturedBacktrace),
+    /// Database migration error.
+    Migration(sqlx::Error, CapturedBacktrace),
+    /// I/O error.
+    Io(std::io::Error, CapturedBacktrace),
+}
+
+impl ReplicatorError {
+    /// Returns a short category label for this error.
+    fn category(&self) -> &'static str {
+        match self {
+            ReplicatorError::Etl(_) => "Replicator error",
+            ReplicatorError::Config(_, _) => "Configuration error",
+            ReplicatorError::Migration(_, _) => "Migration error",
+            ReplicatorError::Io(_, _) => "I/O error",
+        }
+    }
+
+    /// Returns the backtrace for this error.
+    pub(crate) fn backtrace(&self) -> Option<&Backtrace> {
+        match self {
+            ReplicatorError::Etl(err) => err.backtrace(),
+            ReplicatorError::Config(_, cb)
+            | ReplicatorError::Migration(_, cb)
+            | ReplicatorError::Io(_, cb) => Some(&cb.0),
+        }
+    }
+
+    /// Creates a configuration error from any boxed source.
+    pub(crate) fn config<E: Error + Send + Sync + 'static>(err: E) -> Self {
+        ReplicatorError::Config(Box::new(err), CapturedBacktrace::capture())
+    }
+
+    /// Returns a user-oriented report for terminal output.
+    pub(crate) fn render_report(&self) -> String {
+        let mut out = String::new();
+        out.push_str("Replicator failed\n");
+        out.push_str(&format!("Category: {}\n", self.category()));
+        out.push_str(&format!("Error: {self}\n"));
+
+        if !matches!(self, ReplicatorError::Etl(err) if err.errors().is_some()) {
+            let mut source = Error::source(self);
+            let mut idx = 1usize;
+            while let Some(err) = source {
+                out.push_str(&format!("Cause {idx}: {err}\n"));
+                source = err.source();
+                idx += 1;
+            }
+        }
+
+        if should_render_backtrace()
+            && let Some(backtrace) = self.backtrace()
+        {
+            out.push_str("Backtrace:\n");
+            out.push_str(&backtrace.to_string());
+            if !out.ends_with('\n') {
+                out.push('\n');
+            }
+        }
+
+        out
+    }
+}
+
+impl fmt::Display for ReplicatorError {
+    /// Renders a user-focused one-line description for terminal and log output.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ReplicatorError::Etl(err) => write!(f, "{err}"),
+            ReplicatorError::Config(source, _) => write!(f, "Configuration error: {source}"),
+            ReplicatorError::Migration(source, _) => write!(f, "Migration error: {source}"),
+            ReplicatorError::Io(source, _) => write!(f, "I/O error: {source}"),
+        }
+    }
+}
+
+impl Error for ReplicatorError {
+    /// Returns the direct cause for this error variant.
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            ReplicatorError::Etl(err) => err.source(),
+            ReplicatorError::Config(source, _) => Some(source.as_ref()),
+            ReplicatorError::Migration(source, _) => Some(source),
+            ReplicatorError::Io(source, _) => Some(source),
+        }
+    }
+}
+
+impl From<sqlx::Error> for ReplicatorError {
+    /// Converts a SQLx error into a migration error variant.
+    fn from(err: sqlx::Error) -> Self {
+        ReplicatorError::Migration(err, CapturedBacktrace::capture())
+    }
+}
+
+impl From<std::io::Error> for ReplicatorError {
+    /// Converts an I/O error into an I/O error variant.
+    fn from(err: std::io::Error) -> Self {
+        ReplicatorError::Io(err, CapturedBacktrace::capture())
+    }
+}
+
+impl From<EtlError> for ReplicatorError {
+    /// Converts an ETL error into a replicator ETL error variant.
+    fn from(err: EtlError) -> Self {
+        ReplicatorError::Etl(err)
+    }
+}

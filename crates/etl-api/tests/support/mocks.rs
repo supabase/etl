@@ -1,0 +1,354 @@
+#![allow(dead_code)]
+
+use etl_api::{
+    configs::{
+        destination::FullApiDestinationConfig, pipeline::FullApiPipelineConfig,
+        source::FullApiSourceConfig,
+    },
+    routes::{
+        destinations::{CreateDestinationRequest, CreateDestinationResponse},
+        images::{CreateImageRequest, CreateImageResponse},
+        pipelines::{CreatePipelineRequest, CreatePipelineResponse},
+        sources::{CreateSourceRequest, CreateSourceResponse},
+    },
+};
+use etl_config::{SerializableSecretString, shared::DuckLakeMaintenanceMode};
+
+use crate::support::test_app::TestApp;
+
+/// Creates a default image and returns its id.
+pub(crate) async fn create_default_image(app: &TestApp) -> i64 {
+    create_image_with_name(app, "some/image".to_owned(), true).await
+}
+
+/// Creates an image with the provided name and default flag and returns its id.
+pub(crate) async fn create_image_with_name(app: &TestApp, name: String, is_default: bool) -> i64 {
+    let image = CreateImageRequest { name, is_default };
+    let response = app.create_image(&image).await;
+    let response: CreateImageResponse =
+        response.json().await.expect("failed to deserialize response");
+
+    response.id
+}
+
+/// Destination helpers.
+pub(crate) mod destinations {
+    use super::*;
+
+    /// Returns a default destination name.
+    pub(crate) fn new_name() -> String {
+        "BigQuery Destination".to_owned()
+    }
+
+    /// Returns an updated destination name.
+    pub(crate) fn updated_name() -> String {
+        "BigQuery Destination (Updated)".to_owned()
+    }
+
+    /// Returns an updated destination config.
+    pub(crate) fn updated_destination_config() -> FullApiDestinationConfig {
+        FullApiDestinationConfig::BigQuery {
+            project_id: "project-id-updated".to_owned(),
+            dataset_id: "dataset-id-updated".to_owned(),
+            service_account_key: SerializableSecretString::from(
+                "service-account-key-updated".to_owned(),
+            ),
+            max_staleness_mins: Some(10),
+            connection_pool_size: Some(1),
+        }
+    }
+
+    /// Returns a default destination config (BigQuery).
+    pub(crate) fn new_bigquery_destination_config() -> FullApiDestinationConfig {
+        FullApiDestinationConfig::BigQuery {
+            project_id: "project-id".to_owned(),
+            dataset_id: "dataset-id".to_owned(),
+            service_account_key: SerializableSecretString::from("service-account-key".to_owned()),
+            max_staleness_mins: None,
+            connection_pool_size: Some(1),
+        }
+    }
+
+    /// Returns a default DuckLake destination config.
+    pub(crate) fn new_ducklake_destination_config() -> FullApiDestinationConfig {
+        FullApiDestinationConfig::Ducklake {
+            catalog_url: "postgres://postgres:postgres@localhost:5432/postgres".to_owned(),
+            data_path: "s3://ducklake/".to_owned(),
+            pool_size: Some(1),
+            s3_access_key_id: Some(SerializableSecretString::from("access-key-id".to_owned())),
+            s3_secret_access_key: Some(SerializableSecretString::from(
+                "secret-access-key".to_owned(),
+            )),
+            s3_region: Some("us-east-1".to_owned()),
+            s3_endpoint: Some("localhost:9000".to_owned()),
+            s3_url_style: Some("path".to_owned()),
+            s3_use_ssl: Some(false),
+            metadata_schema: Some("ducklake".to_owned()),
+            duckdb_memory_cache_limit: None,
+            maintenance_target_file_size: Some("10MB".to_owned()),
+            expire_snapshots_older_than: Some("7 days".to_owned()),
+            maintenance_mode: DuckLakeMaintenanceMode::Kubernetes,
+        }
+    }
+
+    /// Returns a default Iceberg Supabase destination config.
+    pub(crate) fn new_iceberg_supabase_destination_config() -> FullApiDestinationConfig {
+        use etl_api::configs::destination::FullApiIcebergConfig;
+
+        FullApiDestinationConfig::Iceberg {
+            config: FullApiIcebergConfig::Supabase {
+                project_ref: "abcdefghijklmnopqrst".to_owned(),
+                warehouse_name: "my-warehouse".to_owned(),
+                namespace: Some("my-namespace".to_owned()),
+                catalog_token: SerializableSecretString::from(
+                    "eyJ0eXAiOiJKV1QiLCJhbGciOiJFUzI1NiIsImtpZCI6IjFkNzFjMGEyNmIxMDFjODQ5ZTkxZmQ1NjdjYjA5NTJmIn0.eyJleHAiOjIwNzA3MTcxNjAsImlhdCI6MTc1NjE0NTE1MCwiaXNzIjoic3VwYWJhc2UiLCJyZWYiOiJhYmNkZWZnaGlqbGttbm9wcXJzdCIsInJvbGUiOiJzZXJ2aWNlX3JvbGUifQ.YdTWkkIvwjSkXot3NC07xyjPjGWQMNzLq5EPzumzrdLzuHrj-zuzI-nlyQtQ5V7gZauysm-wGwmpztRXfPc3AQ".to_owned()
+                ),
+                s3_access_key_id: SerializableSecretString::from("9156667efc2c70d89af6588da86d2924".to_owned()),
+                s3_secret_access_key: SerializableSecretString::from(
+                    "ca833e890916d848c69135924bcd75e5909184814a0ebc6c988937ee094120d4".to_owned()
+                ),
+                s3_region: "ap-southeast-1".to_owned(),
+            },
+        }
+    }
+
+    /// Returns an updated Iceberg Supabase destination config.
+    pub(crate) fn updated_iceberg_supabase_destination_config() -> FullApiDestinationConfig {
+        use etl_api::configs::destination::FullApiIcebergConfig;
+
+        FullApiDestinationConfig::Iceberg {
+            config: FullApiIcebergConfig::Supabase {
+                project_ref: "tsrqponmlkjihgfedcba".to_owned(),
+                warehouse_name: "my-updated-warehouse".to_owned(),
+                namespace: Some("my-updated-namespace".to_owned()),
+                catalog_token: SerializableSecretString::from(
+                    "eyJ0eXAiOiJKV1QiLCJhbGciOiJFUzI1NiIsImtpZCI6IjJlOGQxZDNjN2MyMTJkOTU4ZmEyOGU2ZDhjZDEwYTMzIn0.eyJleHAiOjIwNzA3MTcxNjAsImlhdCI6MTc1NjE0NTE1MCwiaXNzIjoic3VwYWJhc2UiLCJyZWYiOiJ0c3JxcG9ubWxramloZ2ZlZGNiYSIsInJvbGUiOiJzZXJ2aWNlX3JvbGUifQ.UpdatedTokenSignatureForTesting".to_owned()
+                ),
+                s3_access_key_id: SerializableSecretString::from("updated9156667efc2c70d89af6588da86d2924".to_owned()),
+                s3_secret_access_key: SerializableSecretString::from(
+                    "updatedca833e890916d848c69135924bcd75e5909184814a0ebc6c988937ee094120d4".to_owned()
+                ),
+                s3_region: "us-west-2".to_owned(),
+            },
+        }
+    }
+
+    /// Creates a destination with the provided name and config and returns its
+    /// id.
+    pub(crate) async fn create_destination_with_config(
+        app: &TestApp,
+        tenant_id: &str,
+        name: String,
+        config: FullApiDestinationConfig,
+    ) -> i64 {
+        let destination = CreateDestinationRequest { name, config };
+        let response = app.create_destination(tenant_id, &destination).await;
+        let response: CreateDestinationResponse =
+            response.json().await.expect("failed to deserialize response");
+        response.id
+    }
+
+    /// Creates a default destination and returns its id.
+    pub(crate) async fn create_destination(app: &TestApp, tenant_id: &str) -> i64 {
+        create_destination_with_config(
+            app,
+            tenant_id,
+            new_name(),
+            new_bigquery_destination_config(),
+        )
+        .await
+    }
+
+    /// Returns a default Snowflake destination config.
+    pub(crate) fn new_snowflake_destination_config() -> FullApiDestinationConfig {
+        FullApiDestinationConfig::Snowflake {
+            account_id: "myorg-myaccount".to_owned(),
+            user: "etl_user".to_owned(),
+            private_key: SerializableSecretString::from(
+                "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBg...\n-----END PRIVATE KEY-----"
+                    .to_owned(),
+            ),
+            private_key_passphrase: None,
+            database: "my_database".to_owned(),
+            schema: "public".to_owned(),
+            role: Some("etl_role".to_owned()),
+        }
+    }
+
+    /// Returns an updated Snowflake destination config.
+    pub(crate) fn updated_snowflake_destination_config() -> FullApiDestinationConfig {
+        FullApiDestinationConfig::Snowflake {
+            account_id: "updatedorg-updatedaccount".to_owned(),
+            user: "updated_etl_user".to_owned(),
+            private_key: SerializableSecretString::from(
+                "-----BEGIN PRIVATE KEY-----\nUPDATED...\n-----END PRIVATE KEY-----".to_owned(),
+            ),
+            private_key_passphrase: Some(SerializableSecretString::from(
+                "passphrase123".to_owned(),
+            )),
+            database: "updated_database".to_owned(),
+            schema: "updated_schema".to_owned(),
+            role: Some("updated_role".to_owned()),
+        }
+    }
+}
+
+/// Source helpers.
+pub(crate) mod sources {
+    use super::*;
+
+    /// Returns a default source name.
+    pub(crate) fn new_name() -> String {
+        "Postgres Source".to_owned()
+    }
+
+    /// Returns a default Postgres source config.
+    pub(crate) fn new_source_config() -> FullApiSourceConfig {
+        FullApiSourceConfig {
+            host: "localhost".to_owned(),
+            hostaddr: None,
+            port: 5432,
+            name: "postgres".to_owned(),
+            username: "postgres".to_owned(),
+            password: Some(SerializableSecretString::from("postgres".to_owned())),
+        }
+    }
+
+    /// Returns an updated source name.
+    pub(crate) fn updated_name() -> String {
+        "Postgres Source (Updated)".to_owned()
+    }
+
+    /// Returns an updated Postgres source config.
+    pub(crate) fn updated_source_config() -> FullApiSourceConfig {
+        FullApiSourceConfig {
+            host: "example.com".to_owned(),
+            hostaddr: None,
+            port: 2345,
+            name: "sergtsop".to_owned(),
+            username: "sergtsop".to_owned(),
+            password: Some(SerializableSecretString::from("sergtsop".to_owned())),
+        }
+    }
+
+    /// Creates a default source and returns its id.
+    pub(crate) async fn create_source(app: &TestApp, tenant_id: &str) -> i64 {
+        create_source_with_config(app, tenant_id, new_name(), new_source_config()).await
+    }
+
+    /// Creates a source with the provided name and config and returns its id.
+    pub(crate) async fn create_source_with_config(
+        app: &TestApp,
+        tenant_id: &str,
+        name: String,
+        config: FullApiSourceConfig,
+    ) -> i64 {
+        let source = CreateSourceRequest { name, config };
+        let response = app.create_source(tenant_id, &source).await;
+        let response: CreateSourceResponse =
+            response.json().await.expect("failed to deserialize response");
+        response.id
+    }
+}
+
+/// Tenant helpers.
+pub(crate) mod tenants {
+    use etl_api::routes::tenants::{CreateTenantRequest, CreateTenantResponse};
+
+    use super::*;
+
+    /// Creates a default tenant and returns its id.
+    pub(crate) async fn create_tenant(app: &TestApp) -> String {
+        create_tenant_with_id_and_name(
+            app,
+            "abcdefghijklmnopqrst".to_owned(),
+            "NewTenant".to_owned(),
+        )
+        .await
+    }
+
+    /// Creates a tenant with a given id and name and returns its id.
+    pub(crate) async fn create_tenant_with_id_and_name(
+        app: &TestApp,
+        id: String,
+        name: String,
+    ) -> String {
+        let tenant = CreateTenantRequest { id, name };
+        let response = app.create_tenant(&tenant).await;
+        let response: CreateTenantResponse =
+            response.json().await.expect("failed to deserialize response");
+        response.id
+    }
+}
+
+/// Pipeline config helpers.
+pub(crate) mod pipelines {
+    use etl_api::configs::log::LogLevel;
+    use etl_config::shared::{BatchConfig, MemoryBackpressureConfig, TableSyncCopyConfig};
+
+    use super::*;
+
+    /// Returns a default pipeline config.
+    pub(crate) fn new_pipeline_config() -> FullApiPipelineConfig {
+        FullApiPipelineConfig {
+            publication_name: "publication".to_owned(),
+            batch: Some(BatchConfig {
+                max_fill_ms: 5,
+                memory_budget_ratio: 0.2,
+                max_bytes: 8 * 1024 * 1024,
+            }),
+            table_error_retry_delay_ms: Some(10000),
+            table_error_retry_max_attempts: Some(5),
+            max_table_sync_workers: Some(2),
+            memory_refresh_interval_ms: Some(100),
+            max_copy_connections_per_table: Some(2),
+            memory_backpressure: Some(MemoryBackpressureConfig::default()),
+            table_sync_copy: Some(TableSyncCopyConfig::IncludeAllTables),
+            invalidated_slot_behavior: None,
+            replicator_resources: None,
+            ducklake_maintenance: None,
+            log_level: Some(LogLevel::Info),
+        }
+    }
+
+    /// Returns an updated pipeline config.
+    pub(crate) fn updated_pipeline_config() -> FullApiPipelineConfig {
+        FullApiPipelineConfig {
+            publication_name: "updated_publication".to_owned(),
+            batch: Some(BatchConfig {
+                max_fill_ms: 10,
+                memory_budget_ratio: 0.2,
+                max_bytes: 8 * 1024 * 1024,
+            }),
+            table_error_retry_delay_ms: Some(20000),
+            table_error_retry_max_attempts: Some(10),
+            max_table_sync_workers: Some(4),
+            memory_refresh_interval_ms: Some(100),
+            max_copy_connections_per_table: Some(8),
+            memory_backpressure: Some(MemoryBackpressureConfig::default()),
+            table_sync_copy: Some(TableSyncCopyConfig::IncludeAllTables),
+            invalidated_slot_behavior: None,
+            replicator_resources: None,
+            ducklake_maintenance: None,
+            log_level: Some(LogLevel::Info),
+        }
+    }
+
+    /// Creates a pipeline with the provided config and returns its id.
+    pub(crate) async fn create_pipeline_with_config(
+        app: &TestApp,
+        tenant_id: &str,
+        source_id: i64,
+        destination_id: i64,
+        config: FullApiPipelineConfig,
+    ) -> i64 {
+        let pipeline = CreatePipelineRequest { source_id, destination_id, config };
+        let response = app.create_pipeline(tenant_id, &pipeline).await;
+        assert!(response.status().is_success(), "failed to created pipeline");
+
+        let response: CreatePipelineResponse =
+            response.json().await.expect("failed to deserialize response");
+
+        response.id
+    }
+}
