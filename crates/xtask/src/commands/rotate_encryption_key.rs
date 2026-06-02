@@ -354,7 +354,7 @@ const SOURCE_BATCH_QUERY: &str = r#"
 select id, config
 from app.sources
 where id > $1
-  and ($3::text is null or tenant_id = $3)
+  and ($3::text is null or tenant_id = $3::text)
 order by id
 limit $2
 "#;
@@ -363,7 +363,7 @@ const DESTINATION_BATCH_QUERY: &str = r#"
 select id, config
 from app.destinations
 where id > $1
-  and ($3::text is null or tenant_id = $3)
+  and ($3::text is null or tenant_id = $3::text)
 order by id
 limit $2
 "#;
