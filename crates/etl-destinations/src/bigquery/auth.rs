@@ -38,7 +38,7 @@ impl Authenticator for ServiceAccountTokenProvider {
             .await?
             .token()
             .ok_or(BQError::NoToken)?
-            .to_string())
+            .to_owned())
     }
 }
 
@@ -59,7 +59,7 @@ impl Authenticator for InstalledFlowTokenProvider {
             .await?
             .token()
             .ok_or(BQError::NoToken)?
-            .to_string())
+            .to_owned())
     }
 }
 
@@ -80,7 +80,7 @@ impl Authenticator for ApplicationDefaultCredentialsTokenProvider {
             .await?
             .token()
             .ok_or(BQError::NoToken)?
-            .to_string())
+            .to_owned())
     }
 }
 
@@ -101,7 +101,7 @@ impl Authenticator for AuthorizedUserTokenProvider {
             .await?
             .token()
             .ok_or(BQError::NoToken)?
-            .to_string())
+            .to_owned())
     }
 }
 
@@ -129,7 +129,7 @@ pub(super) async fn service_account_key_authenticator(
 
     Ok(Arc::new(ServiceAccountTokenProvider {
         authenticator,
-        scopes: vec![BIGQUERY_SCOPE.to_string()],
+        scopes: vec![BIGQUERY_SCOPE.to_owned()],
     }))
 }
 
@@ -154,7 +154,7 @@ where
 
     Ok(Arc::new(InstalledFlowTokenProvider {
         authenticator,
-        scopes: vec![BIGQUERY_SCOPE.to_string()],
+        scopes: vec![BIGQUERY_SCOPE.to_owned()],
     }))
 }
 
@@ -178,7 +178,7 @@ pub(super) async fn application_default_credentials_authenticator()
 
     Ok(Arc::new(ApplicationDefaultCredentialsTokenProvider {
         authenticator,
-        scopes: vec![BIGQUERY_SCOPE.to_string()],
+        scopes: vec![BIGQUERY_SCOPE.to_owned()],
     }))
 }
 
@@ -213,13 +213,11 @@ struct CredentialType {
 
 /// Loads authorized user credentials from the ADC path when present.
 async fn try_load_authorized_user_credentials() -> Result<Option<BigQueryAuthenticator>, BQError> {
-    let credential_path = match adc_credential_path() {
-        Some(path) => path,
-        None => return Ok(None),
+    let Some(credential_path) = adc_credential_path() else {
+        return Ok(None);
     };
-    let contents = match tokio::fs::read_to_string(&credential_path).await {
-        Ok(contents) => contents,
-        Err(_) => return Ok(None),
+    let Ok(contents) = tokio::fs::read_to_string(&credential_path).await else {
+        return Ok(None);
     };
     let credential_type: CredentialType = match serde_json::from_str(&contents) {
         Ok(credential_type) => credential_type,
@@ -240,6 +238,6 @@ async fn try_load_authorized_user_credentials() -> Result<Option<BigQueryAuthent
 
     Ok(Some(Arc::new(AuthorizedUserTokenProvider {
         authenticator,
-        scopes: vec![BIGQUERY_SCOPE.to_string()],
+        scopes: vec![BIGQUERY_SCOPE.to_owned()],
     })))
 }

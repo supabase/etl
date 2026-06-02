@@ -346,7 +346,7 @@ pub(super) async fn ensure_applied_batches_table_exists(
              );"#
     );
     let created = Arc::clone(&applied_batches_table_created);
-    let table_name = APPLIED_BATCHES_TABLE.to_string();
+    let table_name = APPLIED_BATCHES_TABLE.to_owned();
 
     run_duckdb_blocking(
         pool,
@@ -415,7 +415,7 @@ pub(super) async fn ensure_streaming_progress_table_exists(
              );"#
     );
     let created = Arc::clone(&streaming_progress_table_created);
-    let table_name = STREAMING_PROGRESS_TABLE.to_string();
+    let table_name = STREAMING_PROGRESS_TABLE.to_owned();
 
     run_duckdb_blocking(
         pool,
@@ -1234,7 +1234,7 @@ fn push_prepared_mutation_batch(
     let mutations = tracked_mutations.into_iter().map(|tracked| tracked.mutation).collect();
 
     prepared_batches.push(PreparedDuckLakeTableBatch {
-        table_name: table_name.to_string(),
+        table_name: table_name.to_owned(),
         batch_id: identity.batch_id,
         batch_kind: DuckLakeTableBatchKind::Mutation,
         first_start_lsn: identity.first_start_lsn,
@@ -1279,7 +1279,7 @@ fn push_prepared_change_batch(
     let first_sequence_key = groups.first().and_then(change_group_first_sequence_key);
     let last_sequence_key = groups.last().and_then(change_group_last_sequence_key);
     prepared_batches.push(PreparedDuckLakeTableBatch {
-        table_name: table_name.to_string(),
+        table_name: table_name.to_owned(),
         batch_id: identity.batch_id,
         batch_kind: DuckLakeTableBatchKind::Mutation,
         first_start_lsn: identity.first_start_lsn,
@@ -1883,7 +1883,7 @@ impl ReusableStagingTable {
     /// Creates a fresh staging-table manager for one destination table.
     fn new(table_name: &str) -> Self {
         Self {
-            table_name: table_name.to_string(),
+            table_name: table_name.to_owned(),
             staging_name: format!("__staging_{table_name}"),
             created: false,
         }
@@ -2266,7 +2266,7 @@ fn apply_truncate_batch_action(conn: &duckdb::Connection, table_name: &str) -> E
 
 /// Formats an optional LSN for marker-table inserts.
 fn optional_lsn_to_sql_literal(lsn: Option<PgLsn>) -> String {
-    lsn.map(|value| u64::from(value).to_string()).unwrap_or_else(|| "NULL".to_string())
+    lsn.map_or_else(|| "NULL".to_owned(), |value| u64::from(value).to_string())
 }
 
 /// Returns the last DuckDB-profiled statement latency in seconds, if available.
@@ -2468,7 +2468,9 @@ fn apply_upsert_mutation(
 ) -> EtlResult<()> {
     let row_count = match prepared_rows {
         PreparedRows::Appender(values) => values.len(),
-        PreparedRows::Arrow(batches) => batches.iter().map(|batch| batch.num_rows()).sum(),
+        PreparedRows::Arrow(batches) => {
+            batches.iter().map(duckdb::arrow::record_batch::RecordBatch::num_rows).sum()
+        }
     };
 
     if row_count == 0 {
@@ -2680,7 +2682,9 @@ fn apply_update_mutation(
 fn prepared_rows_count(prepared_rows: &PreparedRows) -> usize {
     match prepared_rows {
         PreparedRows::Appender(values) => values.len(),
-        PreparedRows::Arrow(batches) => batches.iter().map(|batch| batch.num_rows()).sum(),
+        PreparedRows::Arrow(batches) => {
+            batches.iter().map(duckdb::arrow::record_batch::RecordBatch::num_rows).sum()
+        }
     }
 }
 
@@ -2778,7 +2782,9 @@ fn apply_sub_batch_rows(batch: &PreparedDuckLakeTableBatch) -> Option<usize> {
         PreparedTableMutation::Copy(prepared_rows) => Some(prepared_rows_count(prepared_rows)),
         PreparedTableMutation::Upsert(prepared_rows) => Some(match prepared_rows {
             PreparedRows::Appender(values) => values.len(),
-            PreparedRows::Arrow(batches) => batches.iter().map(|batch| batch.num_rows()).sum(),
+            PreparedRows::Arrow(batches) => {
+                batches.iter().map(duckdb::arrow::record_batch::RecordBatch::num_rows).sum()
+            }
         }),
         PreparedTableMutation::Delete { .. }
         | PreparedTableMutation::DeleteKeys { .. }
@@ -2825,14 +2831,14 @@ static STAGING_TABLE_CREATIONS_BY_TABLE: LazyLock<Mutex<HashMap<String, usize>>>
 /// batch.
 #[cfg(feature = "test-utils")]
 pub fn arm_fail_after_atomic_batch_commit_once_for_tests(table_name: &str) {
-    *FAIL_AFTER_ATOMIC_BATCH_COMMIT_TABLE.lock() = Some(table_name.to_string());
+    *FAIL_AFTER_ATOMIC_BATCH_COMMIT_TABLE.lock() = Some(table_name.to_owned());
 }
 
 /// Arms a test hook that injects one post-commit failure for the next copy
 /// batch.
 #[cfg(feature = "test-utils")]
 pub fn arm_fail_after_copy_batch_commit_once_for_tests(table_name: &str) {
-    *FAIL_AFTER_COPY_BATCH_COMMIT_TABLE.lock() = Some(table_name.to_string());
+    *FAIL_AFTER_COPY_BATCH_COMMIT_TABLE.lock() = Some(table_name.to_owned());
 }
 
 /// Clears DuckLake destination test hooks.
@@ -2914,8 +2920,8 @@ mod tests {
             TableId::new(1),
             TableName::new("public".to_string(), "users".to_string()),
             vec![
-                ColumnSchema::new("id".to_string(), PgType::INT4, -1, false, true),
-                ColumnSchema::new("name".to_string(), PgType::TEXT, -1, true, false),
+                ColumnSchema::new("id".to_string(), PgType::INT4, -1, 1, Some(1), false),
+                ColumnSchema::new("name".to_string(), PgType::TEXT, -1, 2, None, true),
             ],
         )
     }
@@ -2929,9 +2935,9 @@ mod tests {
             TableId::new(1),
             TableName::new("public".to_string(), "users".to_string()),
             vec![
-                ColumnSchema::new("tenant_id".to_string(), PgType::INT4, -1, false, true),
-                ColumnSchema::new("id".to_string(), PgType::INT4, -1, false, true),
-                ColumnSchema::new("name".to_string(), PgType::TEXT, -1, true, false),
+                ColumnSchema::new("tenant_id".to_string(), PgType::INT4, -1, 1, Some(1), false),
+                ColumnSchema::new("id".to_string(), PgType::INT4, -1, 2, Some(2), false),
+                ColumnSchema::new("name".to_string(), PgType::TEXT, -1, 3, None, true),
             ],
         );
         let row =

@@ -782,7 +782,7 @@ async fn run_ducklake_maintenance_worker(
 
                 let now = Instant::now();
                 table_states
-                    .entry(notification.table_name().to_string())
+                    .entry(notification.table_name().to_owned())
                     .and_modify(|state| match &notification {
                         TableMaintenanceNotification::WriteActivity(activity) => {
                             state.record_write_activity(activity, now);
@@ -978,7 +978,7 @@ pub(super) fn table_write_slot(
     table_name: &str,
 ) -> Arc<Semaphore> {
     let mut slots = table_write_slots.lock();
-    slots.entry(table_name.to_string()).or_insert_with(|| Arc::new(Semaphore::new(1))).clone()
+    Arc::clone(slots.entry(table_name.to_owned()).or_insert_with(|| Arc::new(Semaphore::new(1))))
 }
 
 /// Tries to acquire the table-local semaphore without blocking the maintenance

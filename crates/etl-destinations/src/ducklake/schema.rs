@@ -96,6 +96,7 @@ pub(super) fn build_create_table_sql_ducklake(
 ///
 /// Added columns are always nullable at the destination because existing rows
 /// cannot be backfilled from the source-side default expression.
+#[allow(dead_code)]
 pub(super) fn build_add_column_sql_ducklake(
     table_name: &str,
     column_schema: &ColumnSchema,
@@ -107,6 +108,7 @@ pub(super) fn build_add_column_sql_ducklake(
 }
 
 /// Builds a DuckLake `alter table drop column` statement.
+#[allow(dead_code)]
 pub(super) fn build_drop_column_sql_ducklake(table_name: &str, column_name: &str) -> String {
     let table_name = qualified_lake_table_name(table_name);
     let column_name = quote_identifier(column_name);
@@ -115,6 +117,7 @@ pub(super) fn build_drop_column_sql_ducklake(table_name: &str, column_name: &str
 }
 
 /// Builds a DuckLake `alter table rename column` statement.
+#[allow(dead_code)]
 pub(super) fn build_rename_column_sql_ducklake(
     table_name: &str,
     old_name: &str,

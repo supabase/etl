@@ -50,6 +50,7 @@ impl DuckLakeSetupPlan {
 
     /// Builds a setup plan from explicit setup steps.
     #[cfg(test)]
+    #[allow(dead_code)]
     pub(super) fn from_steps(steps: Vec<DuckLakeSetupStep>) -> Self {
         Self { steps }
     }

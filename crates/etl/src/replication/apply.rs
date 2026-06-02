@@ -46,12 +46,13 @@ use crate::{
         table_sync_worker_apply_stream_id,
     },
     conversions::{
-        arrow::{ScalarTableArrowBatchBuilder, table_rows_to_arrow_batch},
+        arrow::{PgOutputArrowAppendResult, TableArrowBatchBuilder, table_rows_to_arrow_batch},
         event::{
-            parse_event_from_begin_message, parse_event_from_commit_message,
+            calculate_tuple_bytes, parse_event_from_begin_message, parse_event_from_commit_message,
             parse_event_from_delete_message, parse_event_from_insert_message,
             parse_event_from_truncate_message, parse_event_from_update_message,
             parse_replica_identity_column_names, parse_replicated_column_names,
+            tuple_bytes_to_size_hint,
         },
     },
     destination::{
@@ -65,9 +66,9 @@ use crate::{
     etl_error,
     metrics::{
         ACTION_LABEL, DESTINATION_LABEL, ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
-        ETL_EVENTS_PROCESSED_TOTAL, ETL_REPLICATION_MESSAGES_TOTAL,
-        ETL_TRANSACTION_DURATION_SECONDS, ETL_TRANSACTION_SIZE, ETL_TRANSACTIONS_TOTAL,
-        PIPELINE_ID_LABEL, WORKER_TYPE_LABEL,
+        ETL_BYTES_PROCESSED_TOTAL, ETL_EVENTS_PROCESSED_TOTAL, ETL_REPLICATION_MESSAGES_TOTAL,
+        ETL_ROW_SIZE_BYTES, ETL_TRANSACTION_DURATION_SECONDS, ETL_TRANSACTION_SIZE,
+        ETL_TRANSACTIONS_TOTAL, EVENT_TYPE_LABEL, PIPELINE_ID_LABEL, WORKER_TYPE_LABEL,
     },
     replication::{
         SharedTableCache,
@@ -131,7 +132,7 @@ impl WorkerType {
     }
 
     /// Returns a low-cardinality worker type label for metrics and tags.
-    pub fn to_simple_string(&self) -> &'static str {
+    pub fn to_simple_string(self) -> &'static str {
         match self {
             Self::Apply => "apply",
             Self::TableSync { .. } => "table_sync",
@@ -318,16 +319,261 @@ impl ReplicationProgress {
 enum EndBatch {
     /// The batch should include the last processed event and end.
     Inclusive,
-    /// The batch should exclude the last processed event and end.
-    Exclusive,
+}
+
+/// A buffered item waiting to be normalized for the destination.
+enum PendingBatchItem {
+    /// A decoded logical replication event.
+    Event(Event),
+    /// Pgoutput change rows that were appended directly to Arrow.
+    PgOutputChange(PendingPgOutputChange),
+}
+
+impl PendingBatchItem {
+    /// Returns the approximate size of this pending item.
+    fn size_hint(&self) -> usize {
+        match self {
+            Self::Event(event) => event.size_hint(),
+            Self::PgOutputChange(change) => change.size_hint,
+        }
+    }
+
+    /// Returns the number of logical items represented by this pending item.
+    fn item_count(&self) -> usize {
+        match self {
+            Self::Event(_) => 1,
+            Self::PgOutputChange(change) => change.event_count,
+        }
+    }
+}
+
+/// A pgoutput change event or coalesced sequence of compatible events.
+struct PendingPgOutputChange {
+    groups: Vec<PendingPgOutputRows>,
+    event_count: usize,
+    size_hint: usize,
+}
+
+impl PendingPgOutputChange {
+    /// Creates a direct change with a single row group.
+    fn new_single_group(group: PendingPgOutputRows) -> Self {
+        Self { event_count: group.row_count, size_hint: group.size_hint, groups: vec![group] }
+    }
+
+    /// Creates a direct change with multiple row-image groups for one event.
+    fn new_multi_group(groups: Vec<PendingPgOutputRows>) -> Self {
+        let size_hint = groups.iter().map(|group| group.size_hint).sum();
+
+        Self { groups, event_count: 1, size_hint }
+    }
+
+    /// Returns whether this change can append to its only row group.
+    fn can_append_single_group(
+        &self,
+        table_id: TableId,
+        change: ChangeKind,
+        row_image: RowImage,
+        table_schema: &TableSchema,
+    ) -> bool {
+        let [group] = self.groups.as_slice() else {
+            return false;
+        };
+
+        group.can_append(table_id, change, row_image, table_schema)
+    }
+
+    /// Appends one tuple to this change's single row group.
+    fn append_single_tuple(
+        &mut self,
+        tuple_data: &[protocol::TupleData],
+        meta: PendingPgOutputRowMeta,
+    ) -> EtlResult<()> {
+        let [group] = self.groups.as_mut_slice() else {
+            bail!(
+                ErrorKind::ConversionError,
+                "pgoutput tuple cannot be appended to a multi-group direct change"
+            );
+        };
+
+        group.append_tuple(tuple_data, meta)?;
+        self.event_count += 1;
+        self.size_hint = self.size_hint.saturating_add(meta.size_hint);
+
+        Ok(())
+    }
+}
+
+/// Destination group targeted by a direct pgoutput row append.
+struct PendingPgOutputRowsTarget {
+    table_id: TableId,
+    change: ChangeKind,
+    row_image: RowImage,
+    table_schema: Arc<TableSchema>,
+}
+
+impl PendingPgOutputRowsTarget {
+    /// Creates a direct row group target.
+    fn new(
+        table_id: TableId,
+        change: ChangeKind,
+        row_image: RowImage,
+        table_schema: Arc<TableSchema>,
+    ) -> Self {
+        Self { table_id, change, row_image, table_schema }
+    }
+}
+
+/// Replication metadata attached to a direct pgoutput row.
+#[derive(Clone, Copy)]
+struct PendingPgOutputRowMeta {
+    commit_lsn: PgLsn,
+    tx_ordinal: u64,
+    size_hint: usize,
+}
+
+impl PendingPgOutputRowMeta {
+    /// Creates row metadata for a direct pgoutput row.
+    fn new(commit_lsn: PgLsn, tx_ordinal: u64, size_hint: usize) -> Self {
+        Self { commit_lsn, tx_ordinal, size_hint }
+    }
+}
+
+/// Pgoutput tuples appended directly to one Arrow change group.
+struct PendingPgOutputRows {
+    table_id: TableId,
+    change: ChangeKind,
+    row_image: RowImage,
+    table_schema: Arc<TableSchema>,
+    rows_builder: TableArrowBatchBuilder,
+    commit_lsns: Vec<u64>,
+    tx_ordinals: Vec<u64>,
+    row_count: usize,
+    size_hint: usize,
+}
+
+impl PendingPgOutputRows {
+    /// Creates rows from the first direct pgoutput tuple.
+    fn try_new(
+        target: PendingPgOutputRowsTarget,
+        tuple_data: &[protocol::TupleData],
+        meta: PendingPgOutputRowMeta,
+    ) -> EtlResult<Self> {
+        let rows_builder = TableArrowBatchBuilder::try_new(Arc::clone(&target.table_schema), 1)
+            .expect("Arrow batch builder supports all PostgreSQL table columns");
+
+        let mut rows = Self {
+            table_id: target.table_id,
+            change: target.change,
+            row_image: target.row_image,
+            table_schema: target.table_schema,
+            rows_builder,
+            commit_lsns: Vec::new(),
+            tx_ordinals: Vec::new(),
+            row_count: 0,
+            size_hint: 0,
+        };
+        rows.append_tuple(tuple_data, meta)?;
+
+        Ok(rows)
+    }
+
+    /// Creates rows from selected fields in the first direct pgoutput tuple.
+    fn try_new_projected(
+        target: PendingPgOutputRowsTarget,
+        tuple_data: &[protocol::TupleData],
+        projection: &[usize],
+        meta: PendingPgOutputRowMeta,
+    ) -> EtlResult<Self> {
+        let rows_builder = TableArrowBatchBuilder::try_new(Arc::clone(&target.table_schema), 1)
+            .expect("Arrow batch builder supports all PostgreSQL table columns");
+
+        let mut rows = Self {
+            table_id: target.table_id,
+            change: target.change,
+            row_image: target.row_image,
+            table_schema: target.table_schema,
+            rows_builder,
+            commit_lsns: Vec::new(),
+            tx_ordinals: Vec::new(),
+            row_count: 0,
+            size_hint: 0,
+        };
+        rows.append_projected_tuple(tuple_data, projection, meta)?;
+
+        Ok(rows)
+    }
+
+    /// Returns whether this row group can accept another tuple.
+    fn can_append(
+        &self,
+        table_id: TableId,
+        change: ChangeKind,
+        row_image: RowImage,
+        table_schema: &TableSchema,
+    ) -> bool {
+        self.table_id == table_id
+            && self.change == change
+            && self.row_image == row_image
+            && self.table_schema.snapshot_id == table_schema.snapshot_id
+            && self.table_schema.column_schemas.iter().eq(table_schema.column_schemas.iter())
+    }
+
+    /// Appends another borrowed pgoutput tuple directly into the Arrow builder.
+    fn append_tuple(
+        &mut self,
+        tuple_data: &[protocol::TupleData],
+        meta: PendingPgOutputRowMeta,
+    ) -> EtlResult<()> {
+        match self.rows_builder.append_pgoutput_tuple(tuple_data)? {
+            PgOutputArrowAppendResult::Appended => {}
+            PgOutputArrowAppendResult::Unsupported => {
+                bail!(
+                    ErrorKind::ConversionError,
+                    "pgoutput tuple cannot be appended directly to Arrow"
+                );
+            }
+        }
+
+        self.commit_lsns.push(u64::from(meta.commit_lsn));
+        self.tx_ordinals.push(meta.tx_ordinal);
+        self.row_count += 1;
+        self.size_hint = self.size_hint.saturating_add(meta.size_hint);
+
+        Ok(())
+    }
+
+    /// Appends selected fields from another borrowed pgoutput tuple.
+    fn append_projected_tuple(
+        &mut self,
+        tuple_data: &[protocol::TupleData],
+        projection: &[usize],
+        meta: PendingPgOutputRowMeta,
+    ) -> EtlResult<()> {
+        match self.rows_builder.append_projected_pgoutput_tuple(tuple_data, projection)? {
+            PgOutputArrowAppendResult::Appended => {}
+            PgOutputArrowAppendResult::Unsupported => {
+                bail!(
+                    ErrorKind::ConversionError,
+                    "pgoutput tuple cannot be appended directly to Arrow"
+                );
+            }
+        }
+
+        self.commit_lsns.push(u64::from(meta.commit_lsn));
+        self.tx_ordinals.push(meta.tx_ordinal);
+        self.row_count += 1;
+        self.size_hint = self.size_hint.saturating_add(meta.size_hint);
+
+        Ok(())
+    }
 }
 
 /// Result returned from [`ApplyLoop::handle_replication_message`] and related
 /// functions.
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct HandleMessageResult {
-    /// The event converted from the replication message.
-    event: Option<Event>,
+    /// The item converted from the replication message.
+    batch_item: Option<PendingBatchItem>,
     /// Set to a commit message's end_lsn value, [`None`] otherwise.
     end_lsn: Option<PgLsn>,
     /// Set when a batch should be ended earlier than the normal batching
@@ -335,6 +581,8 @@ struct HandleMessageResult {
     end_batch: Option<EndBatch>,
     /// Set when the table has encountered an error.
     table_replication_error: Option<(TableId, TableError)>,
+    /// Set when a handler already added directly to the pending batch.
+    batch_updated: bool,
 }
 
 impl HandleMessageResult {
@@ -345,22 +593,21 @@ impl HandleMessageResult {
 
     /// Creates a result that returns an event without affecting batch state.
     fn return_event(event: Event) -> Self {
-        Self { event: Some(event), ..Default::default() }
+        Self::return_batch_item(PendingBatchItem::Event(event))
     }
 
-    /// Creates a result that excludes the current event and requests batch
-    /// termination.
-    fn finish_batch_and_exclude_event(table_id: TableId, error: TableError) -> Self {
-        Self {
-            end_batch: Some(EndBatch::Exclusive),
-            table_replication_error: Some((table_id, error)),
-            ..Default::default()
-        }
+    /// Creates a result that returns a pending batch item.
+    fn return_batch_item(batch_item: PendingBatchItem) -> Self {
+        Self { batch_item: Some(batch_item), ..Default::default() }
+    }
+
+    /// Creates a result for handlers that already updated the pending batch.
+    fn batch_updated() -> Self {
+        Self { batch_updated: true, ..Default::default() }
     }
 }
 
 /// Mutable runtime state that evolves throughout the apply loop.
-#[derive(Debug)]
 struct ApplyLoopState {
     /// The highest LSN received from the [`end_lsn`] field of a [`Commit`]
     /// message.
@@ -371,10 +618,10 @@ struct ApplyLoopState {
     /// The current replication progress tracking received and flushed LSN
     /// positions.
     replication_progress: ReplicationProgress,
-    /// A batch of events to send to the destination.
-    events_batch: Vec<Event>,
-    /// Approximate total size in bytes of events currently in the batch.
-    events_batch_bytes: usize,
+    /// A batch of items to send to the destination.
+    pending_batch: Vec<PendingBatchItem>,
+    /// Approximate total size in bytes of items currently in the batch.
+    pending_batch_bytes: usize,
     /// Instant from when a transaction began.
     current_tx_begin_ts: Option<Instant>,
     /// Number of events observed in the current transaction (excluding
@@ -416,8 +663,8 @@ impl ApplyLoopState {
             last_commit_end_lsn: None,
             remote_final_lsn: None,
             replication_progress,
-            events_batch: Vec::new(),
-            events_batch_bytes: 0,
+            pending_batch: Vec::new(),
+            pending_batch_bytes: 0,
             current_tx_begin_ts: None,
             current_tx_events: 0,
             next_tx_ordinal: 0,
@@ -430,23 +677,58 @@ impl ApplyLoopState {
         }
     }
 
-    /// Adds an event to the batch.
-    fn add_event_to_batch(&mut self, event: Event) {
+    /// Adds an item to the batch.
+    fn add_item_to_batch(&mut self, item: PendingBatchItem) {
         // We track the current number of bytes in the batch.
-        self.events_batch_bytes = self.events_batch_bytes.saturating_add(event.size_hint());
+        self.pending_batch_bytes = self.pending_batch_bytes.saturating_add(item.size_hint());
 
         // We add the element to the pending batch.
-        self.events_batch.push(event);
+        self.pending_batch.push(item);
     }
 
-    /// Takes the events batch for further processing. Replacing it with a new
-    /// empty batch.
-    fn take_events_batch(&mut self) -> (Vec<Event>, usize) {
-        let events_batch = std::mem::take(&mut self.events_batch);
-        let events_batch_bytes = self.events_batch_bytes;
-        self.events_batch_bytes = 0;
+    /// Appends a borrowed pgoutput tuple directly into the pending Arrow batch.
+    fn add_pgoutput_tuple_to_batch(
+        &mut self,
+        target: PendingPgOutputRowsTarget,
+        tuple_data: &[protocol::TupleData],
+        meta: PendingPgOutputRowMeta,
+    ) -> EtlResult<()> {
+        if let Some(PendingBatchItem::PgOutputChange(direct_change)) = self.pending_batch.last_mut()
+            && direct_change.can_append_single_group(
+                target.table_id,
+                target.change,
+                target.row_image,
+                &target.table_schema,
+            )
+        {
+            direct_change.append_single_tuple(tuple_data, meta)?;
+            self.pending_batch_bytes = self.pending_batch_bytes.saturating_add(meta.size_hint);
 
-        (events_batch, events_batch_bytes)
+            return Ok(());
+        }
+
+        let rows = PendingPgOutputRows::try_new(target, tuple_data, meta)?;
+        let direct_change = PendingPgOutputChange::new_single_group(rows);
+        self.pending_batch_bytes = self.pending_batch_bytes.saturating_add(meta.size_hint);
+        self.pending_batch.push(PendingBatchItem::PgOutputChange(direct_change));
+
+        Ok(())
+    }
+
+    /// Adds a direct pgoutput change containing prebuilt Arrow row groups.
+    fn add_pgoutput_change_to_batch(&mut self, direct_change: PendingPgOutputChange) {
+        self.pending_batch_bytes = self.pending_batch_bytes.saturating_add(direct_change.size_hint);
+        self.pending_batch.push(PendingBatchItem::PgOutputChange(direct_change));
+    }
+
+    /// Takes the pending batch for further processing. Replacing it with a new
+    /// empty batch.
+    fn take_pending_batch(&mut self) -> (Vec<PendingBatchItem>, usize) {
+        let pending_batch = std::mem::take(&mut self.pending_batch);
+        let pending_batch_bytes = self.pending_batch_bytes;
+        self.pending_batch_bytes = 0;
+
+        (pending_batch, pending_batch_bytes)
     }
 
     /// Sets the batch flush deadline, if not already set.
@@ -552,7 +834,7 @@ impl ApplyLoopState {
     /// Returns `true` if there is a pending batch of events waiting to be
     /// flushed.
     fn has_pending_batch(&self) -> bool {
-        !self.events_batch.is_empty()
+        !self.pending_batch.is_empty()
     }
 
     /// Returns `true` if there is a batch flush in flight whose result has not
@@ -611,36 +893,93 @@ impl ApplyLoopState {
     }
 }
 
-#[derive(Debug)]
+/// Storage for rows gathered into one destination change group.
+enum PendingChangeRowsStorage {
+    /// Decoded rows waiting for Arrow conversion.
+    Rows(Vec<TableRow>),
+    /// Rows being appended directly to Arrow.
+    Arrow(TableArrowBatchBuilder),
+}
+
+/// Rows and metadata for one destination change group.
 struct PendingChangeRows {
     change: ChangeKind,
     row_image: RowImage,
     table_schema: Arc<TableSchema>,
-    table_rows: Vec<TableRow>,
+    storage: PendingChangeRowsStorage,
     commit_lsns: Vec<u64>,
     tx_ordinals: Vec<u64>,
 }
 
 impl PendingChangeRows {
+    /// Creates an empty pending change group.
     fn new(change: ChangeKind, row_image: RowImage, table_schema: Arc<TableSchema>) -> Self {
+        let storage = TableArrowBatchBuilder::try_new(Arc::clone(&table_schema), 0).map_or_else(
+            || PendingChangeRowsStorage::Rows(Vec::new()),
+            PendingChangeRowsStorage::Arrow,
+        );
+
         Self {
             change,
             row_image,
             table_schema,
-            table_rows: Vec::new(),
+            storage,
             commit_lsns: Vec::new(),
             tx_ordinals: Vec::new(),
         }
     }
 
-    fn push_row(&mut self, table_row: TableRow, commit_lsn: PgLsn, tx_ordinal: u64) {
-        self.table_rows.push(table_row);
+    /// Creates pending rows from prebuilt direct pgoutput Arrow rows.
+    fn from_pgoutput_rows(rows: PendingPgOutputRows) -> Self {
+        Self {
+            change: rows.change,
+            row_image: rows.row_image,
+            table_schema: rows.table_schema,
+            storage: PendingChangeRowsStorage::Arrow(rows.rows_builder),
+            commit_lsns: rows.commit_lsns,
+            tx_ordinals: rows.tx_ordinals,
+        }
+    }
+
+    /// Appends a decoded table row to this change group.
+    fn push_row(
+        &mut self,
+        table_row: TableRow,
+        commit_lsn: PgLsn,
+        tx_ordinal: u64,
+    ) -> EtlResult<()> {
+        match &mut self.storage {
+            PendingChangeRowsStorage::Rows(table_rows) => table_rows.push(table_row),
+            PendingChangeRowsStorage::Arrow(builder) => builder.append_trusted_row(&table_row)?,
+        }
+
         self.commit_lsns.push(u64::from(commit_lsn));
         self.tx_ordinals.push(tx_ordinal);
+
+        Ok(())
+    }
+
+    /// Converts this group into a destination-facing Arrow change batch.
+    fn into_change_arrow_batch(self) -> EtlResult<ChangeArrowBatch> {
+        let rows = match self.storage {
+            PendingChangeRowsStorage::Rows(table_rows) => {
+                table_rows_to_arrow_batch(self.table_schema, table_rows.as_slice())?
+            }
+            PendingChangeRowsStorage::Arrow(builder) => builder.finish()?,
+        };
+
+        Ok(ChangeArrowBatch {
+            rows,
+            change: self.change,
+            row_image: self.row_image,
+            commit_lsns: UInt64Array::from(self.commit_lsns),
+            tx_ordinals: UInt64Array::from(self.tx_ordinals),
+        })
     }
 }
 
-#[derive(Debug, Default)]
+/// Pending change groups for one table.
+#[derive(Default)]
 struct PendingTableChangeSet {
     groups: Vec<PendingChangeRows>,
 }
@@ -670,30 +1009,190 @@ fn identity_arrow_table_schema(
     ))
 }
 
-fn push_pending_change(
-    table_changes: &mut HashMap<TableId, PendingTableChangeSet>,
-    table_order: &mut Vec<TableId>,
+/// Destination group targeted by a decoded change row.
+#[derive(Clone, Copy)]
+struct PendingChangeTarget {
     table_id: TableId,
     change: ChangeKind,
     row_image: RowImage,
-    table_row: TableRow,
+}
+
+impl PendingChangeTarget {
+    /// Creates a decoded change row target.
+    fn new(table_id: TableId, change: ChangeKind, row_image: RowImage) -> Self {
+        Self { table_id, change, row_image }
+    }
+}
+
+/// Replication metadata attached to a decoded change row.
+#[derive(Clone, Copy)]
+struct PendingChangeMeta {
     commit_lsn: PgLsn,
     tx_ordinal: u64,
+}
+
+impl PendingChangeMeta {
+    /// Creates row metadata for a decoded change row.
+    fn new(commit_lsn: PgLsn, tx_ordinal: u64) -> Self {
+        Self { commit_lsn, tx_ordinal }
+    }
+}
+
+fn push_pending_change(
+    table_changes: &mut HashMap<TableId, PendingTableChangeSet>,
+    table_order: &mut Vec<TableId>,
+    target: PendingChangeTarget,
+    table_row: TableRow,
+    meta: PendingChangeMeta,
     table_schema: impl FnOnce() -> Arc<TableSchema>,
-) {
-    let entry = table_changes.entry(table_id).or_insert_with(|| {
-        table_order.push(table_id);
+) -> EtlResult<()> {
+    let entry = table_changes.entry(target.table_id).or_insert_with(|| {
+        table_order.push(target.table_id);
         PendingTableChangeSet::default()
     });
 
-    match entry.groups.last_mut() {
-        Some(group) if group.change == change && group.row_image == row_image => {
-            group.push_row(table_row, commit_lsn, tx_ordinal);
+    let group = match entry.groups.last_mut() {
+        Some(group) if group.change == target.change && group.row_image == target.row_image => {
+            group
         }
         _ => {
-            let mut group = PendingChangeRows::new(change, row_image, table_schema());
-            group.push_row(table_row, commit_lsn, tx_ordinal);
+            let group = PendingChangeRows::new(target.change, target.row_image, table_schema());
             entry.groups.push(group);
+            entry.groups.last_mut().expect("pushed group must exist")
+        }
+    };
+
+    group.push_row(table_row, meta.commit_lsn, meta.tx_ordinal)?;
+
+    Ok(())
+}
+
+/// Pushes direct pgoutput rows into pending table changes.
+fn push_pending_pgoutput_rows(
+    table_changes: &mut HashMap<TableId, PendingTableChangeSet>,
+    table_order: &mut Vec<TableId>,
+    rows: PendingPgOutputRows,
+) -> EtlResult<()> {
+    let entry = table_changes.entry(rows.table_id).or_insert_with(|| {
+        table_order.push(rows.table_id);
+        PendingTableChangeSet::default()
+    });
+
+    entry.groups.push(PendingChangeRows::from_pgoutput_rows(rows));
+
+    Ok(())
+}
+
+/// Pushes direct pgoutput change groups into pending table changes.
+fn push_pending_pgoutput_change(
+    table_changes: &mut HashMap<TableId, PendingTableChangeSet>,
+    table_order: &mut Vec<TableId>,
+    direct_change: PendingPgOutputChange,
+) -> EtlResult<()> {
+    for rows in direct_change.groups {
+        push_pending_pgoutput_rows(table_changes, table_order, rows)?;
+    }
+
+    Ok(())
+}
+
+/// Records CDC tuple byte metrics for a direct pgoutput tuple.
+fn record_cdc_tuple_metrics(event_type: &'static str, row_size_bytes: u64) {
+    counter!(ETL_BYTES_PROCESSED_TOTAL, EVENT_TYPE_LABEL => event_type).increment(row_size_bytes);
+
+    histogram!(ETL_ROW_SIZE_BYTES, EVENT_TYPE_LABEL => event_type).record(row_size_bytes as f64);
+}
+
+/// Returns whether a tuple can be buffered for direct Arrow append.
+fn can_append_pgoutput_tuple_directly(tuple_data: &[protocol::TupleData]) -> bool {
+    !tuple_data.iter().any(|tuple_data| matches!(tuple_data, protocol::TupleData::UnchangedToast))
+}
+
+/// Builds a direct Arrow row group for a full-width tuple.
+fn pending_pgoutput_full_row_group(
+    replicated_table_schema: &ReplicatedTableSchema,
+    change: ChangeKind,
+    row_image: RowImage,
+    tuple_data: &[protocol::TupleData],
+    meta: PendingPgOutputRowMeta,
+) -> EtlResult<PendingPgOutputRows> {
+    let target = PendingPgOutputRowsTarget::new(
+        replicated_table_schema.id(),
+        change,
+        row_image,
+        replicated_arrow_table_schema(replicated_table_schema),
+    );
+    PendingPgOutputRows::try_new(target, tuple_data, meta)
+}
+
+/// Builds a direct Arrow row group for a key-image tuple.
+fn pending_pgoutput_key_row_group(
+    replicated_table_schema: &ReplicatedTableSchema,
+    change: ChangeKind,
+    row_image: RowImage,
+    tuple_data: &[protocol::TupleData],
+    meta: PendingPgOutputRowMeta,
+) -> EtlResult<PendingPgOutputRows> {
+    let table_schema = identity_arrow_table_schema(replicated_table_schema);
+    let target = PendingPgOutputRowsTarget::new(
+        replicated_table_schema.id(),
+        change,
+        row_image,
+        table_schema,
+    );
+
+    match pgoutput_key_tuple_projection(replicated_table_schema, tuple_data)? {
+        Some(projection) => {
+            PendingPgOutputRows::try_new_projected(target, tuple_data, &projection, meta)
+        }
+        None => PendingPgOutputRows::try_new(target, tuple_data, meta),
+    }
+}
+
+/// Returns the projection needed to append a key tuple to identity columns.
+fn pgoutput_key_tuple_projection(
+    replicated_table_schema: &ReplicatedTableSchema,
+    tuple_data: &[protocol::TupleData],
+) -> EtlResult<Option<Vec<usize>>> {
+    let identity_column_count = replicated_table_schema.identity_column_schemas().len();
+    let replicated_column_count = replicated_table_schema.column_schemas().len();
+
+    if identity_column_count == 0 {
+        bail!(
+            ErrorKind::ConversionError,
+            "Replica-identity tuple missing key columns",
+            "Key-image row was received for a table without replicated replica-identity columns"
+        );
+    }
+
+    match tuple_data.len() {
+        len if len == identity_column_count => Ok(None),
+        len if len == replicated_column_count => {
+            let mut projection = Vec::with_capacity(identity_column_count);
+            let mut identity_columns = replicated_table_schema.identity_column_schemas().peekable();
+
+            for (index, column_schema) in replicated_table_schema.column_schemas().enumerate() {
+                if identity_columns.peek().is_some_and(|identity_column| {
+                    identity_column.ordinal_position == column_schema.ordinal_position
+                }) {
+                    projection.push(index);
+                    let _ = identity_columns.next();
+                }
+            }
+
+            Ok(Some(projection))
+        }
+        _ => {
+            bail!(
+                ErrorKind::ConversionError,
+                "Replica-identity tuple shape does not match schema",
+                format!(
+                    "Expected {} key values or {} replicated values for key image, got {}",
+                    identity_column_count,
+                    replicated_column_count,
+                    tuple_data.len()
+                )
+            );
         }
     }
 }
@@ -726,16 +1225,16 @@ fn update_homogeneous_full_new_batch_plan(
 }
 
 fn homogeneous_full_new_batch_plan(
-    events: &[Event],
+    pending_items: &[PendingBatchItem],
 ) -> EtlResult<Option<HomogeneousFullNewBatchPlan>> {
     let mut table_id = None;
     let mut change = None;
     let mut first_data_event_index = None;
     let mut row_count = 0;
 
-    for (event_index, event) in events.iter().enumerate() {
-        match event {
-            Event::Insert(insert) => {
+    for (event_index, item) in pending_items.iter().enumerate() {
+        match item {
+            PendingBatchItem::Event(Event::Insert(insert)) => {
                 if !update_homogeneous_full_new_batch_plan(
                     &mut table_id,
                     &mut change,
@@ -747,7 +1246,7 @@ fn homogeneous_full_new_batch_plan(
                 first_data_event_index.get_or_insert(event_index);
                 row_count += 1;
             }
-            Event::Update(update) => {
+            PendingBatchItem::Event(Event::Update(update)) => {
                 if update.old_table_row.is_some()
                     || !matches!(update.updated_table_row, UpdatedTableRow::Full(_))
                 {
@@ -765,8 +1264,11 @@ fn homogeneous_full_new_batch_plan(
                 first_data_event_index.get_or_insert(event_index);
                 row_count += 1;
             }
-            Event::Begin(_) | Event::Commit(_) | Event::Relation(_) | Event::Unsupported => {}
-            Event::Delete(_) | Event::Truncate(_) => return Ok(None),
+            PendingBatchItem::PgOutputChange(_) => return Ok(None),
+            PendingBatchItem::Event(
+                Event::Begin(_) | Event::Commit(_) | Event::Relation(_) | Event::Unsupported,
+            ) => {}
+            PendingBatchItem::Event(Event::Delete(_) | Event::Truncate(_)) => return Ok(None),
         }
     }
 
@@ -774,9 +1276,13 @@ fn homogeneous_full_new_batch_plan(
         return Ok(None);
     };
 
-    let table_schema = match &events[first_data_event_index] {
-        Event::Insert(insert) => replicated_arrow_table_schema(&insert.replicated_table_schema),
-        Event::Update(update) => replicated_arrow_table_schema(&update.replicated_table_schema),
+    let table_schema = match &pending_items[first_data_event_index] {
+        PendingBatchItem::Event(Event::Insert(insert)) => {
+            replicated_arrow_table_schema(&insert.replicated_table_schema)
+        }
+        PendingBatchItem::Event(Event::Update(update)) => {
+            replicated_arrow_table_schema(&update.replicated_table_schema)
+        }
         _ => unreachable!("first data event index must point to insert or update"),
     };
 
@@ -789,28 +1295,32 @@ fn homogeneous_full_new_batch_plan(
 }
 
 fn normalize_homogeneous_full_new_batch(
-    events: Vec<Event>,
+    pending_items: Vec<PendingBatchItem>,
     plan: HomogeneousFullNewBatchPlan,
 ) -> EtlResult<Vec<StreamBatch>> {
     if let Some(rows_builder) =
-        ScalarTableArrowBatchBuilder::try_new(Arc::clone(&plan.table_schema), plan.row_count)
+        TableArrowBatchBuilder::try_new(Arc::clone(&plan.table_schema), plan.row_count)
     {
-        return normalize_homogeneous_full_new_batch_with_builder(events, plan, rows_builder);
+        return normalize_homogeneous_full_new_batch_with_builder(
+            pending_items,
+            plan,
+            rows_builder,
+        );
     }
 
     let mut table_rows = Vec::with_capacity(plan.row_count);
     let mut commit_lsns = Vec::with_capacity(plan.row_count);
     let mut tx_ordinals = Vec::with_capacity(plan.row_count);
 
-    for event in events {
-        match event {
-            Event::Insert(insert) => {
+    for item in pending_items {
+        match item {
+            PendingBatchItem::Event(Event::Insert(insert)) => {
                 debug_assert_eq!(plan.change, ChangeKind::Insert);
                 table_rows.push(insert.table_row);
                 commit_lsns.push(u64::from(insert.commit_lsn));
                 tx_ordinals.push(insert.tx_ordinal);
             }
-            Event::Update(update) => {
+            PendingBatchItem::Event(Event::Update(update)) => {
                 debug_assert_eq!(plan.change, ChangeKind::Update);
                 let UpdatedTableRow::Full(row) = update.updated_table_row else {
                     unreachable!("homogeneous plan already rejected partial updates");
@@ -819,8 +1329,13 @@ fn normalize_homogeneous_full_new_batch(
                 commit_lsns.push(u64::from(update.commit_lsn));
                 tx_ordinals.push(update.tx_ordinal);
             }
-            Event::Begin(_) | Event::Commit(_) | Event::Relation(_) | Event::Unsupported => {}
-            Event::Delete(_) | Event::Truncate(_) => {
+            PendingBatchItem::PgOutputChange(_) => {
+                unreachable!("homogeneous plan rejected direct pgoutput row groups");
+            }
+            PendingBatchItem::Event(
+                Event::Begin(_) | Event::Commit(_) | Event::Relation(_) | Event::Unsupported,
+            ) => {}
+            PendingBatchItem::Event(Event::Delete(_) | Event::Truncate(_)) => {
                 unreachable!("homogeneous plan already rejected deletes and truncates");
             }
         }
@@ -840,22 +1355,22 @@ fn normalize_homogeneous_full_new_batch(
 }
 
 fn normalize_homogeneous_full_new_batch_with_builder(
-    events: Vec<Event>,
+    pending_items: Vec<PendingBatchItem>,
     plan: HomogeneousFullNewBatchPlan,
-    mut rows_builder: ScalarTableArrowBatchBuilder,
+    mut rows_builder: TableArrowBatchBuilder,
 ) -> EtlResult<Vec<StreamBatch>> {
     let mut commit_lsns = Vec::with_capacity(plan.row_count);
     let mut tx_ordinals = Vec::with_capacity(plan.row_count);
 
-    for event in events {
-        match event {
-            Event::Insert(insert) => {
+    for item in pending_items {
+        match item {
+            PendingBatchItem::Event(Event::Insert(insert)) => {
                 debug_assert_eq!(plan.change, ChangeKind::Insert);
                 rows_builder.append_trusted_row(&insert.table_row)?;
                 commit_lsns.push(u64::from(insert.commit_lsn));
                 tx_ordinals.push(insert.tx_ordinal);
             }
-            Event::Update(update) => {
+            PendingBatchItem::Event(Event::Update(update)) => {
                 debug_assert_eq!(plan.change, ChangeKind::Update);
                 let UpdatedTableRow::Full(row) = update.updated_table_row else {
                     unreachable!("homogeneous plan already rejected partial updates");
@@ -864,8 +1379,13 @@ fn normalize_homogeneous_full_new_batch_with_builder(
                 commit_lsns.push(u64::from(update.commit_lsn));
                 tx_ordinals.push(update.tx_ordinal);
             }
-            Event::Begin(_) | Event::Commit(_) | Event::Relation(_) | Event::Unsupported => {}
-            Event::Delete(_) | Event::Truncate(_) => {
+            PendingBatchItem::PgOutputChange(_) => {
+                unreachable!("homogeneous plan rejected direct pgoutput row groups");
+            }
+            PendingBatchItem::Event(
+                Event::Begin(_) | Event::Commit(_) | Event::Relation(_) | Event::Unsupported,
+            ) => {}
+            PendingBatchItem::Event(Event::Delete(_) | Event::Truncate(_)) => {
                 unreachable!("homogeneous plan already rejected deletes and truncates");
             }
         }
@@ -882,6 +1402,180 @@ fn normalize_homogeneous_full_new_batch_with_builder(
             tx_ordinals: UInt64Array::from(tx_ordinals),
         }],
     })])
+}
+
+/// Normalizes pending replication items into destination-facing Arrow batches.
+fn normalize_pending_batch_items(
+    pending_items: Vec<PendingBatchItem>,
+) -> EtlResult<Vec<StreamBatch>> {
+    if let Some(plan) = homogeneous_full_new_batch_plan(&pending_items)? {
+        return normalize_homogeneous_full_new_batch(pending_items, plan);
+    }
+
+    let mut batches = Vec::new();
+    let mut item_iter = pending_items.into_iter().peekable();
+
+    while item_iter.peek().is_some() {
+        let mut table_changes: HashMap<TableId, PendingTableChangeSet> = HashMap::new();
+        let mut table_order = Vec::new();
+
+        while let Some(item) = item_iter.peek() {
+            if matches!(item, PendingBatchItem::Event(Event::Truncate(_))) {
+                break;
+            }
+
+            let item = item_iter.next().expect("peeked item must exist");
+            match item {
+                PendingBatchItem::Event(Event::Insert(insert)) => {
+                    let table_id = insert.replicated_table_schema.id();
+                    push_pending_change(
+                        &mut table_changes,
+                        &mut table_order,
+                        PendingChangeTarget::new(table_id, ChangeKind::Insert, RowImage::New),
+                        insert.table_row,
+                        PendingChangeMeta::new(insert.commit_lsn, insert.tx_ordinal),
+                        || replicated_arrow_table_schema(&insert.replicated_table_schema),
+                    )?;
+                }
+                PendingBatchItem::Event(Event::Update(update)) => {
+                    let table_id = update.replicated_table_schema.id();
+
+                    if let Some(old_table_row) = update.old_table_row {
+                        let (key_only, table_schema, table_row) = match old_table_row {
+                            OldTableRow::Full(row) => (false, None, row),
+                            OldTableRow::Key(row) => (
+                                true,
+                                Some(identity_arrow_table_schema(&update.replicated_table_schema)),
+                                row,
+                            ),
+                        };
+
+                        push_pending_change(
+                            &mut table_changes,
+                            &mut table_order,
+                            PendingChangeTarget::new(
+                                table_id,
+                                ChangeKind::Update,
+                                RowImage::Old { key_only },
+                            ),
+                            table_row,
+                            PendingChangeMeta::new(update.commit_lsn, update.tx_ordinal),
+                            || {
+                                table_schema.unwrap_or_else(|| {
+                                    replicated_arrow_table_schema(&update.replicated_table_schema)
+                                })
+                            },
+                        )?;
+                    }
+
+                    let table_row = match update.updated_table_row {
+                        UpdatedTableRow::Full(row) => row,
+                        UpdatedTableRow::Partial(_) => {
+                            bail!(
+                                ErrorKind::ConversionError,
+                                "Partial update rows cannot be normalized to Arrow batches yet",
+                                format!(
+                                    "Table {} emitted an update with unchanged TOAST values that \
+                                     could not be reconstructed",
+                                    update.replicated_table_schema.name()
+                                )
+                            );
+                        }
+                    };
+
+                    push_pending_change(
+                        &mut table_changes,
+                        &mut table_order,
+                        PendingChangeTarget::new(table_id, ChangeKind::Update, RowImage::New),
+                        table_row,
+                        PendingChangeMeta::new(update.commit_lsn, update.tx_ordinal),
+                        || replicated_arrow_table_schema(&update.replicated_table_schema),
+                    )?;
+                }
+                PendingBatchItem::Event(Event::Delete(delete)) => {
+                    let Some(old_table_row) = delete.old_table_row else {
+                        bail!(
+                            ErrorKind::ConversionError,
+                            "Delete event missing old row image",
+                            format!(
+                                "Table {} emitted a delete without an old row image",
+                                delete.replicated_table_schema.name()
+                            )
+                        );
+                    };
+                    let table_id = delete.replicated_table_schema.id();
+                    let (key_only, table_schema, table_row) = match old_table_row {
+                        OldTableRow::Full(row) => (
+                            false,
+                            replicated_arrow_table_schema(&delete.replicated_table_schema),
+                            row,
+                        ),
+                        OldTableRow::Key(row) => (
+                            true,
+                            identity_arrow_table_schema(&delete.replicated_table_schema),
+                            row,
+                        ),
+                    };
+
+                    push_pending_change(
+                        &mut table_changes,
+                        &mut table_order,
+                        PendingChangeTarget::new(
+                            table_id,
+                            ChangeKind::Delete,
+                            RowImage::Old { key_only },
+                        ),
+                        table_row,
+                        PendingChangeMeta::new(delete.commit_lsn, delete.tx_ordinal),
+                        || table_schema,
+                    )?;
+                }
+                PendingBatchItem::PgOutputChange(direct_change) => {
+                    push_pending_pgoutput_change(
+                        &mut table_changes,
+                        &mut table_order,
+                        direct_change,
+                    )?;
+                }
+                PendingBatchItem::Event(
+                    Event::Begin(_) | Event::Commit(_) | Event::Relation(_) | Event::Unsupported,
+                ) => {}
+                PendingBatchItem::Event(Event::Truncate(_)) => {
+                    unreachable!("truncate events are handled separately");
+                }
+            }
+        }
+
+        for table_id in table_order {
+            let pending = table_changes
+                .remove(&table_id)
+                .expect("table order must only include known tables");
+            let mut groups = Vec::with_capacity(pending.groups.len());
+
+            for pending_group in pending.groups {
+                groups.push(pending_group.into_change_arrow_batch()?);
+            }
+
+            batches.push(StreamBatch::Changes(TableChangeSet { table_id, groups }));
+        }
+
+        while let Some(PendingBatchItem::Event(Event::Truncate(_))) = item_iter.peek() {
+            if let Some(PendingBatchItem::Event(Event::Truncate(truncate))) = item_iter.next() {
+                batches.push(StreamBatch::Truncate(TruncateBatch {
+                    rel_ids: truncate
+                        .truncated_tables
+                        .into_iter()
+                        .map(|schema| schema.id())
+                        .collect(),
+                    commit_lsn: truncate.commit_lsn,
+                    tx_ordinal: truncate.tx_ordinal,
+                    options: truncate.options,
+                }));
+            }
+        }
+    }
+
+    Ok(batches)
 }
 
 /// Main apply loop implementation that processes replication events.
@@ -975,7 +1669,7 @@ where
 
         let mut apply_loop = Self {
             pipeline_id,
-            config: config.clone(),
+            config: Arc::clone(&config),
             schema_store,
             destination,
             shared_table_cache,
@@ -1023,7 +1717,7 @@ where
                 ShutdownState::NoShutdown => {
                     self.run_active_iteration(
                         events_stream.as_mut(),
-                        &replication_client,
+                        replication_client,
                         &mut connection_updates_rx,
                     )
                     .await?
@@ -1279,7 +1973,7 @@ where
 
     /// Waits until the keep alive deadline expires.
     async fn wait_for_keep_alive_deadline(deadline: Instant) {
-        tokio::time::sleep_until(deadline.into()).await
+        tokio::time::sleep_until(deadline.into()).await;
     }
 
     /// Computes the keep alive deadline from PostgreSQL's `wal_sender_timeout`.
@@ -1484,185 +2178,11 @@ where
 
     /// Normalizes raw logical-replication events into destination-facing Arrow
     /// batches.
-    async fn normalize_events_batch(&self, events: Vec<Event>) -> EtlResult<Vec<StreamBatch>> {
-        if let Some(plan) = homogeneous_full_new_batch_plan(&events)? {
-            return normalize_homogeneous_full_new_batch(events, plan);
-        }
-
-        let mut batches = Vec::new();
-        let mut event_iter = events.into_iter().peekable();
-
-        while event_iter.peek().is_some() {
-            let mut table_changes: HashMap<TableId, PendingTableChangeSet> = HashMap::new();
-            let mut table_order = Vec::new();
-
-            while let Some(event) = event_iter.peek() {
-                if matches!(event, Event::Truncate(_)) {
-                    break;
-                }
-
-                let event = event_iter.next().expect("peeked event must exist");
-                match event {
-                    Event::Insert(insert) => {
-                        let table_id = insert.replicated_table_schema.id();
-                        push_pending_change(
-                            &mut table_changes,
-                            &mut table_order,
-                            table_id,
-                            ChangeKind::Insert,
-                            RowImage::New,
-                            insert.table_row,
-                            insert.commit_lsn,
-                            insert.tx_ordinal,
-                            || replicated_arrow_table_schema(&insert.replicated_table_schema),
-                        );
-                    }
-                    Event::Update(update) => {
-                        let table_id = update.replicated_table_schema.id();
-
-                        if let Some(old_table_row) = update.old_table_row {
-                            let (key_only, table_schema, table_row) = match old_table_row {
-                                OldTableRow::Full(row) => (false, None, row),
-                                OldTableRow::Key(row) => (
-                                    true,
-                                    Some(identity_arrow_table_schema(
-                                        &update.replicated_table_schema,
-                                    )),
-                                    row,
-                                ),
-                            };
-
-                            push_pending_change(
-                                &mut table_changes,
-                                &mut table_order,
-                                table_id,
-                                ChangeKind::Update,
-                                RowImage::Old { key_only },
-                                table_row,
-                                update.commit_lsn,
-                                update.tx_ordinal,
-                                || {
-                                    table_schema.unwrap_or_else(|| {
-                                        replicated_arrow_table_schema(
-                                            &update.replicated_table_schema,
-                                        )
-                                    })
-                                },
-                            );
-                        }
-
-                        let table_row = match update.updated_table_row {
-                            UpdatedTableRow::Full(row) => row,
-                            UpdatedTableRow::Partial(_) => {
-                                bail!(
-                                    ErrorKind::ConversionError,
-                                    "Partial update rows cannot be normalized to Arrow batches yet",
-                                    format!(
-                                        "Table {} emitted an update with unchanged TOAST values \
-                                         that could not be reconstructed",
-                                        update.replicated_table_schema.name()
-                                    )
-                                );
-                            }
-                        };
-
-                        push_pending_change(
-                            &mut table_changes,
-                            &mut table_order,
-                            table_id,
-                            ChangeKind::Update,
-                            RowImage::New,
-                            table_row,
-                            update.commit_lsn,
-                            update.tx_ordinal,
-                            || replicated_arrow_table_schema(&update.replicated_table_schema),
-                        );
-                    }
-                    Event::Delete(delete) => {
-                        let Some(old_table_row) = delete.old_table_row else {
-                            bail!(
-                                ErrorKind::ConversionError,
-                                "Delete event missing old row image",
-                                format!(
-                                    "Table {} emitted a delete without an old row image",
-                                    delete.replicated_table_schema.name()
-                                )
-                            );
-                        };
-                        let table_id = delete.replicated_table_schema.id();
-                        let (key_only, table_schema, table_row) = match old_table_row {
-                            OldTableRow::Full(row) => (
-                                false,
-                                replicated_arrow_table_schema(&delete.replicated_table_schema),
-                                row,
-                            ),
-                            OldTableRow::Key(row) => (
-                                true,
-                                identity_arrow_table_schema(&delete.replicated_table_schema),
-                                row,
-                            ),
-                        };
-
-                        push_pending_change(
-                            &mut table_changes,
-                            &mut table_order,
-                            table_id,
-                            ChangeKind::Delete,
-                            RowImage::Old { key_only },
-                            table_row,
-                            delete.commit_lsn,
-                            delete.tx_ordinal,
-                            || table_schema,
-                        );
-                    }
-                    Event::Begin(_)
-                    | Event::Commit(_)
-                    | Event::Relation(_)
-                    | Event::Unsupported => {}
-                    Event::Truncate(_) => unreachable!("truncate events are handled separately"),
-                }
-            }
-
-            for table_id in table_order {
-                let pending = table_changes
-                    .remove(&table_id)
-                    .expect("table order must only include known tables");
-                let mut groups = Vec::with_capacity(pending.groups.len());
-
-                for pending_group in pending.groups {
-                    let rows = table_rows_to_arrow_batch(
-                        pending_group.table_schema,
-                        pending_group.table_rows.as_slice(),
-                    )?;
-                    groups.push(ChangeArrowBatch {
-                        rows,
-                        change: pending_group.change,
-                        row_image: pending_group.row_image,
-                        commit_lsns: UInt64Array::from(pending_group.commit_lsns),
-                        tx_ordinals: UInt64Array::from(pending_group.tx_ordinals),
-                    });
-                }
-
-                batches.push(StreamBatch::Changes(TableChangeSet { table_id, groups }));
-            }
-
-            while let Some(Event::Truncate(_)) = event_iter.peek() {
-                if let Some(Event::Truncate(truncate)) = event_iter.next() {
-                    batches.push(StreamBatch::Truncate(TruncateBatch {
-                        rel_ids: truncate
-                            .truncated_tables
-                            .into_iter()
-                            .map(|schema| schema.id())
-                            .collect(),
-                        commit_lsn: truncate.commit_lsn,
-                        tx_ordinal: truncate.tx_ordinal,
-                        options: truncate.options,
-                    }));
-                }
-            }
-        }
-
-        Ok(batches)
+    fn normalize_pending_batch(
+        &self,
+        pending_items: Vec<PendingBatchItem>,
+    ) -> EtlResult<Vec<StreamBatch>> {
+        normalize_pending_batch_items(pending_items)
     }
 
     /// Waits for the pending flush result, if any.
@@ -1784,12 +2304,16 @@ where
         let result = self.handle_replication_message(events_stream.as_mut(), message).await?;
 
         let should_include_event = matches!(result.end_batch, None | Some(EndBatch::Inclusive));
-        if let Some(event) = result.event
+        let mut batch_updated = result.batch_updated;
+        if let Some(batch_item) = result.batch_item
             && should_include_event
         {
             // We add the element to the pending batch.
-            self.state.add_event_to_batch(event);
+            self.state.add_item_to_batch(batch_item);
+            batch_updated = true;
+        }
 
+        if batch_updated {
             // We update the last end lsn of the commit that we encountered, if any.
             self.state.update_last_commit_end_lsn(result.end_lsn);
 
@@ -1801,7 +2325,7 @@ where
         // We check for the batch flushing conditions before deciding whether to flush
         // or not.
         let batch_size_reached =
-            self.state.events_batch_bytes >= self.cached_batch_budget.current_batch_size_bytes();
+            self.state.pending_batch_bytes >= self.cached_batch_budget.current_batch_size_bytes();
         let early_flush_requested = result.end_batch.is_some();
         let should_flush = batch_size_reached || early_flush_requested;
 
@@ -1844,13 +2368,13 @@ where
 
         // We replace the existing vector with a new one and reset the accumulated batch
         // bytes size.
-        let (events_batch, events_batch_bytes) = self.state.take_events_batch();
+        let (pending_batch, pending_batch_bytes) = self.state.take_pending_batch();
 
-        let events_batch_size = events_batch.len();
+        let pending_batch_size = pending_batch.iter().map(PendingBatchItem::item_count).sum();
         info!(
             worker_type = %self.worker_context.worker_type(),
-            batch_size = events_batch_size,
-            batch_size_bytes = events_batch_bytes,
+            batch_size = pending_batch_size,
+            batch_size_bytes = pending_batch_bytes,
             %reason,
             "flushing batch to destination",
         );
@@ -1860,7 +2384,7 @@ where
         let metadata = ApplyLoopAsyncResultMetadata {
             commit_end_lsn: self.state.last_commit_end_lsn.take(),
             metrics: DispatchMetrics {
-                items_count: events_batch_size,
+                items_count: pending_batch_size,
                 dispatched_at: Instant::now(),
             },
         };
@@ -1868,7 +2392,7 @@ where
         // Create the flush result channel: the sender is handed to the destination and
         // the pending receiver is stored on the loop state until the
         // destination signals completion.
-        let stream_batches = self.normalize_events_batch(events_batch).await?;
+        let stream_batches = self.normalize_pending_batch(pending_batch)?;
         let (flush_result, pending_flush_result) = WriteStreamBatchesResult::new(metadata);
         self.destination.write_stream_batches(stream_batches, flush_result).await?;
         self.state.pending_flush_result = Some(pending_flush_result);
@@ -2062,7 +2586,7 @@ where
         let event = parse_event_from_commit_message(start_lsn, commit_lsn, tx_ordinal, message);
 
         let mut result = HandleMessageResult {
-            event: Some(Event::Commit(event)),
+            batch_item: Some(PendingBatchItem::Event(Event::Commit(event))),
             end_lsn: Some(end_lsn),
             ..Default::default()
         };
@@ -2193,6 +2717,27 @@ where
 
         let replicated_table_schema =
             self.get_ready_replicated_table_schema(table_id, "insert").await?;
+        let tuple_data = message.tuple().tuple_data();
+        if can_append_pgoutput_tuple_directly(tuple_data) {
+            let row_size_bytes = calculate_tuple_bytes(tuple_data);
+            record_cdc_tuple_metrics("insert", row_size_bytes);
+
+            let target = PendingPgOutputRowsTarget::new(
+                table_id,
+                ChangeKind::Insert,
+                RowImage::New,
+                replicated_arrow_table_schema(&replicated_table_schema),
+            );
+            let meta = PendingPgOutputRowMeta::new(
+                remote_final_lsn,
+                tx_ordinal,
+                tuple_bytes_to_size_hint(row_size_bytes),
+            );
+            self.state.add_pgoutput_tuple_to_batch(target, tuple_data, meta)?;
+
+            return Ok(HandleMessageResult::batch_updated());
+        }
+
         let event = parse_event_from_insert_message(
             replicated_table_schema,
             start_lsn,
@@ -2227,6 +2772,104 @@ where
 
         let replicated_table_schema =
             self.get_ready_replicated_table_schema(table_id, "update").await?;
+        let new_tuple_data = message.new_tuple().tuple_data();
+        if can_append_pgoutput_tuple_directly(new_tuple_data) {
+            match (message.old_tuple(), message.key_tuple()) {
+                (None, None) => {
+                    let row_size_bytes = calculate_tuple_bytes(new_tuple_data);
+                    record_cdc_tuple_metrics("update", row_size_bytes);
+
+                    let target = PendingPgOutputRowsTarget::new(
+                        table_id,
+                        ChangeKind::Update,
+                        RowImage::New,
+                        replicated_arrow_table_schema(&replicated_table_schema),
+                    );
+                    let meta = PendingPgOutputRowMeta::new(
+                        remote_final_lsn,
+                        tx_ordinal,
+                        tuple_bytes_to_size_hint(row_size_bytes),
+                    );
+                    self.state.add_pgoutput_tuple_to_batch(target, new_tuple_data, meta)?;
+
+                    return Ok(HandleMessageResult::batch_updated());
+                }
+                (Some(old_tuple), None)
+                    if can_append_pgoutput_tuple_directly(old_tuple.tuple_data()) =>
+                {
+                    let old_tuple_data = old_tuple.tuple_data();
+                    let old_tuple_bytes = calculate_tuple_bytes(old_tuple_data);
+                    let new_tuple_bytes = calculate_tuple_bytes(new_tuple_data);
+                    record_cdc_tuple_metrics("update", old_tuple_bytes + new_tuple_bytes);
+
+                    let old_rows = pending_pgoutput_full_row_group(
+                        &replicated_table_schema,
+                        ChangeKind::Update,
+                        RowImage::Old { key_only: false },
+                        old_tuple_data,
+                        PendingPgOutputRowMeta::new(
+                            remote_final_lsn,
+                            tx_ordinal,
+                            tuple_bytes_to_size_hint(old_tuple_bytes),
+                        ),
+                    )?;
+                    let new_rows = pending_pgoutput_full_row_group(
+                        &replicated_table_schema,
+                        ChangeKind::Update,
+                        RowImage::New,
+                        new_tuple_data,
+                        PendingPgOutputRowMeta::new(
+                            remote_final_lsn,
+                            tx_ordinal,
+                            tuple_bytes_to_size_hint(new_tuple_bytes),
+                        ),
+                    )?;
+                    let direct_change =
+                        PendingPgOutputChange::new_multi_group(vec![old_rows, new_rows]);
+                    self.state.add_pgoutput_change_to_batch(direct_change);
+
+                    return Ok(HandleMessageResult::batch_updated());
+                }
+                (None, Some(key_tuple))
+                    if can_append_pgoutput_tuple_directly(key_tuple.tuple_data()) =>
+                {
+                    let key_tuple_data = key_tuple.tuple_data();
+                    let key_tuple_bytes = calculate_tuple_bytes(key_tuple_data);
+                    let new_tuple_bytes = calculate_tuple_bytes(new_tuple_data);
+                    record_cdc_tuple_metrics("update", key_tuple_bytes + new_tuple_bytes);
+
+                    let old_rows = pending_pgoutput_key_row_group(
+                        &replicated_table_schema,
+                        ChangeKind::Update,
+                        RowImage::Old { key_only: true },
+                        key_tuple_data,
+                        PendingPgOutputRowMeta::new(
+                            remote_final_lsn,
+                            tx_ordinal,
+                            tuple_bytes_to_size_hint(key_tuple_bytes),
+                        ),
+                    )?;
+                    let new_rows = pending_pgoutput_full_row_group(
+                        &replicated_table_schema,
+                        ChangeKind::Update,
+                        RowImage::New,
+                        new_tuple_data,
+                        PendingPgOutputRowMeta::new(
+                            remote_final_lsn,
+                            tx_ordinal,
+                            tuple_bytes_to_size_hint(new_tuple_bytes),
+                        ),
+                    )?;
+                    let direct_change =
+                        PendingPgOutputChange::new_multi_group(vec![old_rows, new_rows]);
+                    self.state.add_pgoutput_change_to_batch(direct_change);
+
+                    return Ok(HandleMessageResult::batch_updated());
+                }
+                _ => {}
+            }
+        }
+
         let event = parse_event_from_update_message(
             replicated_table_schema,
             start_lsn,
@@ -2261,6 +2904,45 @@ where
 
         let replicated_table_schema =
             self.get_ready_replicated_table_schema(table_id, "delete").await?;
+        let is_key = message.old_tuple().is_none();
+        let old_tuple = message.old_tuple().or(message.key_tuple());
+        if let Some(old_tuple) = old_tuple
+            && can_append_pgoutput_tuple_directly(old_tuple.tuple_data())
+        {
+            let old_tuple_data = old_tuple.tuple_data();
+            let old_tuple_bytes = calculate_tuple_bytes(old_tuple_data);
+            record_cdc_tuple_metrics("delete", old_tuple_bytes);
+
+            let rows = if is_key {
+                pending_pgoutput_key_row_group(
+                    &replicated_table_schema,
+                    ChangeKind::Delete,
+                    RowImage::Old { key_only: true },
+                    old_tuple_data,
+                    PendingPgOutputRowMeta::new(
+                        remote_final_lsn,
+                        tx_ordinal,
+                        tuple_bytes_to_size_hint(old_tuple_bytes),
+                    ),
+                )?
+            } else {
+                pending_pgoutput_full_row_group(
+                    &replicated_table_schema,
+                    ChangeKind::Delete,
+                    RowImage::Old { key_only: false },
+                    old_tuple_data,
+                    PendingPgOutputRowMeta::new(
+                        remote_final_lsn,
+                        tx_ordinal,
+                        tuple_bytes_to_size_hint(old_tuple_bytes),
+                    ),
+                )?
+            };
+            self.state.add_pgoutput_change_to_batch(PendingPgOutputChange::new_single_group(rows));
+
+            return Ok(HandleMessageResult::batch_updated());
+        }
+
         let event = parse_event_from_delete_message(
             replicated_table_schema,
             start_lsn,
@@ -2289,11 +2971,11 @@ where
         let tx_ordinal = self.state.next_tx_ordinal();
 
         let mut rel_ids = Vec::with_capacity(message.rel_ids().len());
-        for &table_id in message.rel_ids().iter() {
+        for &table_id in message.rel_ids() {
             let should_apply_truncate =
                 self.should_apply_changes(TableId::new(table_id), remote_final_lsn).await?;
             if should_apply_truncate {
-                rel_ids.push(table_id)
+                rel_ids.push(table_id);
             }
         }
 
@@ -2704,7 +3386,7 @@ mod apply_worker {
                     // Start a new worker for this table.
                     let table_sync_worker = build_table_sync_worker(ctx, table_id);
                     if let Err(err) =
-                        start_table_sync_worker(ctx.pool.clone(), table_sync_worker).await
+                        start_table_sync_worker(Arc::clone(&ctx.pool), table_sync_worker).await
                     {
                         error!(
                             worker_type = %WorkerType::Apply,
@@ -2831,7 +3513,7 @@ mod apply_worker {
                     // Start a new worker for this table.
                     let table_sync_worker = build_table_sync_worker(ctx, table_id);
                     if let Err(err) =
-                        start_table_sync_worker(ctx.pool.clone(), table_sync_worker).await
+                        start_table_sync_worker(Arc::clone(&ctx.pool), table_sync_worker).await
                     {
                         error!(
                             worker_type = %WorkerType::Apply,
@@ -3037,7 +3719,7 @@ mod apply_worker {
                     // Start a new worker for this table.
                     let table_sync_worker = build_table_sync_worker(ctx, table_id);
                     if let Err(err) =
-                        start_table_sync_worker(ctx.pool.clone(), table_sync_worker).await
+                        start_table_sync_worker(Arc::clone(&ctx.pool), table_sync_worker).await
                     {
                         error!(
                             worker_type = %WorkerType::Apply,
@@ -3082,14 +3764,14 @@ mod apply_worker {
 
         TableSyncWorker::new(
             ctx.pipeline_id,
-            ctx.config.clone(),
-            ctx.pool.clone(),
+            Arc::clone(&ctx.config),
+            Arc::clone(&ctx.pool),
             table_id,
             ctx.store.clone(),
             ctx.destination.clone(),
             ctx.shared_table_cache.clone(),
             ctx.shutdown_rx.clone(),
-            ctx.table_sync_worker_permits.clone(),
+            Arc::clone(&ctx.table_sync_worker_permits),
             ctx.memory_monitor.clone(),
             ctx.batch_budget.clone(),
         )
@@ -3268,5 +3950,132 @@ mod table_sync_worker {
         inner.set_and_store(table_replication_error.into(), &ctx.state_store).await?;
 
         Ok(Some(ExitIntent::Complete))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use etl_postgres::types::{ColumnSchema, TableName};
+    use postgres_replication::protocol::TupleData;
+
+    use super::*;
+    use crate::{
+        conversions::arrow::record_batch_to_table_rows,
+        types::{Cell, Type},
+    };
+
+    fn column(name: &str, typ: Type, ordinal_position: i32, primary_key: bool) -> ColumnSchema {
+        ColumnSchema::new(
+            name.to_owned(),
+            typ,
+            -1,
+            ordinal_position,
+            if primary_key { Some(1) } else { None },
+            false,
+        )
+    }
+
+    fn scalar_table_schema() -> Arc<TableSchema> {
+        Arc::new(TableSchema::new(
+            TableId::new(777),
+            TableName::new("public".to_owned(), "direct_pgoutput".to_owned()),
+            vec![
+                column("id", Type::INT8, 1, true),
+                column("active", Type::BOOL, 2, false),
+                column("payload", Type::JSONB, 3, false),
+            ],
+        ))
+    }
+
+    #[test]
+    fn normalizer_preserves_direct_pgoutput_arrow_rows() {
+        let replicated_table_schema = ReplicatedTableSchema::all(scalar_table_schema());
+        let tuple_data = vec![
+            TupleData::Text(b"42".to_vec().into()),
+            TupleData::Text(b"t".to_vec().into()),
+            TupleData::Text(br#"{"k": 1}"#.to_vec().into()),
+        ];
+        let row_size_bytes = calculate_tuple_bytes(&tuple_data);
+        let pending_items =
+            vec![PendingBatchItem::PgOutputChange(PendingPgOutputChange::new_single_group(
+                pending_pgoutput_full_row_group(
+                    &replicated_table_schema,
+                    ChangeKind::Insert,
+                    RowImage::New,
+                    &tuple_data,
+                    PendingPgOutputRowMeta::new(
+                        PgLsn::from(99),
+                        3,
+                        tuple_bytes_to_size_hint(row_size_bytes),
+                    ),
+                )
+                .unwrap(),
+            ))];
+
+        let batches = normalize_pending_batch_items(pending_items).unwrap();
+
+        let [StreamBatch::Changes(change_set)] = batches.as_slice() else {
+            panic!("expected one change batch");
+        };
+        assert_eq!(change_set.table_id, TableId::new(777));
+        let [group] = change_set.groups.as_slice() else {
+            panic!("expected one change group");
+        };
+        assert_eq!(group.change, ChangeKind::Insert);
+        assert_eq!(group.row_image, RowImage::New);
+        assert_eq!(group.commit_lsns.value(0), 99);
+        assert_eq!(group.tx_ordinals.value(0), 3);
+        assert_eq!(
+            record_batch_to_table_rows(&group.rows.batch),
+            vec![TableRow::new(vec![
+                Cell::I64(42),
+                Cell::Bool(true),
+                Cell::String(r#"{"k": 1}"#.to_owned()),
+            ])]
+        );
+    }
+
+    #[test]
+    fn normalizer_preserves_direct_pgoutput_projected_key_rows() {
+        let replicated_table_schema = ReplicatedTableSchema::all(scalar_table_schema());
+        let tuple_data = vec![
+            TupleData::Text(b"42".to_vec().into()),
+            TupleData::Text(b"t".to_vec().into()),
+            TupleData::Text(br#"{"k": 1}"#.to_vec().into()),
+        ];
+        let row_size_bytes = calculate_tuple_bytes(&tuple_data);
+        let pending_items =
+            vec![PendingBatchItem::PgOutputChange(PendingPgOutputChange::new_single_group(
+                pending_pgoutput_key_row_group(
+                    &replicated_table_schema,
+                    ChangeKind::Delete,
+                    RowImage::Old { key_only: true },
+                    &tuple_data,
+                    PendingPgOutputRowMeta::new(
+                        PgLsn::from(101),
+                        5,
+                        tuple_bytes_to_size_hint(row_size_bytes),
+                    ),
+                )
+                .unwrap(),
+            ))];
+
+        let batches = normalize_pending_batch_items(pending_items).unwrap();
+
+        let [StreamBatch::Changes(change_set)] = batches.as_slice() else {
+            panic!("expected one change batch");
+        };
+        assert_eq!(change_set.table_id, TableId::new(777));
+        let [group] = change_set.groups.as_slice() else {
+            panic!("expected one change group");
+        };
+        assert_eq!(group.change, ChangeKind::Delete);
+        assert_eq!(group.row_image, RowImage::Old { key_only: true });
+        assert_eq!(group.commit_lsns.value(0), 101);
+        assert_eq!(group.tx_ordinals.value(0), 5);
+        assert_eq!(
+            record_batch_to_table_rows(&group.rows.batch),
+            vec![TableRow::new(vec![Cell::I64(42)])]
+        );
     }
 }

@@ -1,6 +1,6 @@
 use std::fmt::{Display, Formatter};
 
-use etl_postgres::{replication::slots::EtlReplicationSlot, types::TableId};
+use etl_postgres::types::TableId;
 
 /// Type of worker driving replication.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
@@ -15,16 +15,6 @@ pub enum WorkerType {
 }
 
 impl WorkerType {
-    /// Builds an [`EtlReplicationSlot`] for this worker type.
-    pub(crate) fn build_etl_replication_slot(&self, pipeline_id: u64) -> EtlReplicationSlot {
-        match self {
-            Self::Apply => EtlReplicationSlot::Apply { pipeline_id },
-            Self::TableSync { table_id } => {
-                EtlReplicationSlot::TableSync { pipeline_id, table_id: *table_id }
-            }
-        }
-    }
-
     /// Returns a low-cardinality worker type label for metrics and tags.
     pub(crate) fn as_str(self) -> &'static str {
         match self {

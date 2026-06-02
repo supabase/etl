@@ -130,7 +130,7 @@ impl FromStr for SequencedBigQueryTableId {
                 )
             })?;
 
-            Ok(SequencedBigQueryTableId(table_name.to_string(), sequence_number))
+            Ok(SequencedBigQueryTableId(table_name.to_owned(), sequence_number))
         } else {
             bail!(
                 ErrorKind::DestinationTableNameInvalid,
@@ -580,7 +580,7 @@ where
             let table_rows = record_batch_to_table_rows(&group.rows.batch);
 
             match (group.change, group.row_image) {
-                (ChangeKind::Insert, RowImage::New) | (ChangeKind::Update, RowImage::New) => {
+                (ChangeKind::Insert | ChangeKind::Update, RowImage::New) => {
                     for (mut table_row, sequence_key) in table_rows.into_iter().zip(sequence_keys) {
                         table_row.values_mut().push(BigQueryOperationType::Upsert.into_cell());
                         table_row.values_mut().push(Cell::String(sequence_key));
@@ -611,8 +611,7 @@ where
 
         for group in groups {
             match (group.change, group.row_image) {
-                (ChangeKind::Insert, RowImage::New)
-                | (ChangeKind::Update, RowImage::New)
+                (ChangeKind::Insert | ChangeKind::Update, RowImage::New)
                 | (ChangeKind::Delete, RowImage::Old { .. }) => {
                     let Some(prepared_batch) = prepare_stream_arrow_batch(group)? else {
                         return Ok(None);
@@ -1640,7 +1639,7 @@ mod tests {
         assert_eq!(result.len(), 4);
 
         // Verify all rows are accounted for
-        let total_rows: usize = result.iter().map(|batch| batch.len()).sum();
+        let total_rows: usize = result.iter().map(Vec::len).sum();
         assert_eq!(total_rows, 10);
 
         // Verify approximately equal distribution

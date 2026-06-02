@@ -601,6 +601,7 @@ where
         Ok(())
     }
 
+    #[allow(dead_code)]
     async fn truncate_table_inner(&self, schema: &ReplicatedTableSchema) -> EtlResult<()> {
         let (clickhouse_table_name, _) = self.ensure_table_exists(schema).await?;
         self.client.truncate_table(&clickhouse_table_name).await
@@ -619,6 +620,7 @@ where
         self.client.truncate_table(&metadata.destination_table_id).await
     }
 
+    #[allow(dead_code)]
     async fn drop_table_for_copy_inner(&self, schema: &ReplicatedTableSchema) -> EtlResult<()> {
         let clickhouse_table_name = try_stringify_table_name(schema.name())?;
 
@@ -671,6 +673,7 @@ where
 
     /// Handles a schema change event (Relation) by computing the diff and
     /// applying ALTER TABLE statements.
+    #[allow(dead_code)]
     async fn handle_relation_event(&self, new_schema: &ReplicatedTableSchema) -> EtlResult<()> {
         validate_replica_identity_for_clickhouse(new_schema, self.inserter_config.engine)?;
 
@@ -864,6 +867,7 @@ where
     /// 2. Writes those rows concurrently.
     /// 3. Processes any Relation events (schema changes) sequentially.
     /// 4. Drains consecutive Truncate events (deduplicated) and executes them.
+    #[allow(dead_code)]
     async fn write_events_inner(&self, events: Vec<Event>) -> EtlResult<()> {
         let mut event_iter = events.into_iter().peekable();
 
@@ -1102,7 +1106,7 @@ where
             })?;
 
         Ok(ReplicatedTableSchema::from_mask(
-            table_schema.clone(),
+            Arc::clone(&table_schema),
             ReplicationMask::all(&table_schema),
         ))
     }

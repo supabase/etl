@@ -231,9 +231,6 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         args.ducklake_args.pool_size,
         s3_config,
         args.ducklake_args.metadata_schema,
-        None,
-        None,
-        None,
         store.clone(),
     )
     .await?;

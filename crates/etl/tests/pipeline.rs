@@ -15,7 +15,7 @@ use etl::{
             PipelineBuilder, create_pipeline, create_pipeline_with_batch_config,
             create_pipeline_with_table_sync_copy_config,
         },
-        table::assert_table_schema,
+        schema::assert_table_schema_columns,
         test_destination_wrapper::TestDestinationWrapper,
         test_schema::{
             TableSelection, assert_events_equal, build_expected_orders_inserts,
@@ -257,7 +257,7 @@ async fn exclusive_pipeline_recovers_when_slot_invalidated_with_recreate_behavio
     // Validate that we have users data.
     let table_rows = destination.get_table_rows().await;
     let users_table_copied_rows =
-        table_rows.get(&database_schema.users_schema().id).map(|r| r.len()).unwrap_or(0);
+        table_rows.get(&database_schema.users_schema().id).map_or(0, std::vec::Vec::len);
     assert_eq!(users_table_copied_rows, 5);
 
     // Wait for the slot to become inactive.
@@ -285,7 +285,7 @@ async fn exclusive_pipeline_recovers_when_slot_invalidated_with_recreate_behavio
 
     // Set up notification for when the table becomes Ready again (after resync).
     let table_ready_notify = store
-        .notify_on_future_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
+        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
@@ -295,7 +295,7 @@ async fn exclusive_pipeline_recovers_when_slot_invalidated_with_recreate_behavio
     // Validate that we have users data.
     let table_rows = destination.get_table_rows().await;
     let users_table_copied_rows =
-        table_rows.get(&database_schema.users_schema().id).map(|r| r.len()).unwrap_or(0);
+        table_rows.get(&database_schema.users_schema().id).map_or(0, std::vec::Vec::len);
     assert_eq!(users_table_copied_rows, 5);
 
     // Verify the slot was recreated and is active.
@@ -346,7 +346,11 @@ async fn table_copy_replicates_many_rows_with_parallel_connections() {
         destination.clone(),
     )
     .with_max_copy_connections_per_table(100)
-    .with_batch_config(BatchConfig { max_fill_ms: 1000, memory_budget_ratio: 0.2 })
+    .with_batch_config(BatchConfig {
+        max_fill_ms: 1000,
+        memory_budget_ratio: 0.2,
+        ..BatchConfig::default()
+    })
     .build();
 
     // Wait for the table to be ready.
@@ -361,7 +365,7 @@ async fn table_copy_replicates_many_rows_with_parallel_connections() {
 
     // Verify that all 100k rows were copied.
     let table_rows = destination.get_table_rows().await;
-    let copied_rows = table_rows.get(&table_id).map(|r| r.len()).unwrap_or(0);
+    let copied_rows = table_rows.get(&table_id).map_or(0, std::vec::Vec::len);
     assert_eq!(copied_rows, total_rows as usize);
 }
 
@@ -417,7 +421,11 @@ async fn table_copy_with_row_filter_and_parallel_connections() {
         destination.clone(),
     )
     .with_max_copy_connections_per_table(100)
-    .with_batch_config(BatchConfig { max_fill_ms: 1000, memory_budget_ratio: 0.2 })
+    .with_batch_config(BatchConfig {
+        max_fill_ms: 1000,
+        memory_budget_ratio: 0.2,
+        ..BatchConfig::default()
+    })
     .build();
 
     // Wait for the table to be ready.
@@ -432,7 +440,7 @@ async fn table_copy_with_row_filter_and_parallel_connections() {
 
     // Verify that only rows matching the filter were copied.
     let table_rows = destination.get_table_rows().await;
-    let copied_rows = table_rows.get(&table_id).map(|r| r.len()).unwrap_or(0);
+    let copied_rows = table_rows.get(&table_id).map_or(0, std::vec::Vec::len);
     assert_eq!(copied_rows, expected_rows);
 }
 
@@ -471,7 +479,7 @@ async fn table_schema_copy_survives_pipeline_restarts() {
     pipeline.shutdown_and_wait().await.unwrap();
 
     // We check that the table schemas have been stored.
-    let table_schemas = store.get_table_schemas().await;
+    let table_schemas = store.get_latest_table_schemas().await;
     assert_eq!(table_schemas.len(), 2);
     assert_eq!(
         *table_schemas.get(&database_schema.users_schema().id).unwrap(),
@@ -556,7 +564,7 @@ async fn publication_changes_are_correctly_handled() {
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
-        publication_name.to_string(),
+        publication_name.to_owned(),
         store.clone(),
         destination.clone(),
     );
@@ -601,7 +609,7 @@ async fn publication_changes_are_correctly_handled() {
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
-        publication_name.to_string(),
+        publication_name.to_owned(),
         store.clone(),
         destination.clone(),
     );
@@ -690,7 +698,9 @@ async fn streaming_reconnect_does_not_replay_already_flushed_events() {
         .await
         .into_iter()
         .find_map(|event| match event {
-            Event::Insert(insert) if insert.table_id == database_schema.users_schema().id => {
+            Event::Insert(insert)
+                if insert.replicated_table_schema.id() == database_schema.users_schema().id =>
+            {
                 Some(insert)
             }
             _ => None,
@@ -799,7 +809,7 @@ async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart()
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
-        publication_name.to_string(),
+        publication_name.to_owned(),
         store.clone(),
         destination.clone(),
     );
@@ -833,7 +843,7 @@ async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart()
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
-        publication_name.to_string(),
+        publication_name.to_owned(),
         store.clone(),
         destination.clone(),
     );
@@ -914,8 +924,8 @@ async fn run_table_sync_copy_case<F>(
 
     // We validate that the table rows are correct.
     let table_rows = destination.get_table_rows().await;
-    let users_table_copied_rows = table_rows.get(&users_table_id).map(|r| r.len()).unwrap_or(0);
-    let orders_table_copied_rows = table_rows.get(&orders_table_id).map(|r| r.len()).unwrap_or(0);
+    let users_table_copied_rows = table_rows.get(&users_table_id).map_or(0, std::vec::Vec::len);
+    let orders_table_copied_rows = table_rows.get(&orders_table_id).map_or(0, std::vec::Vec::len);
     assert_eq!(users_table_copied_rows, expected_users_copied_rows);
     assert_eq!(orders_table_copied_rows, expected_orders_copied_rows);
     // We always expect the method to be called since the downstream table should be
@@ -1143,12 +1153,12 @@ async fn table_copy_and_sync_streams_new_data() {
     // Build expected events for verification
     let expected_users_inserts = build_expected_users_inserts(
         11,
-        database_schema.users_schema().id,
+        &database_schema.users_schema(),
         vec![("user_11", 11), ("user_12", 12), ("user_13", 13), ("user_14", 14)],
     );
     let expected_orders_inserts = build_expected_orders_inserts(
         11,
-        database_schema.orders_schema().id,
+        &database_schema.orders_schema(),
         vec!["description_11", "description_12", "description_13", "description_14"],
     );
     assert_events_equal(users_inserts, &expected_users_inserts);
@@ -1180,7 +1190,8 @@ async fn table_sync_streams_new_data_with_batch_timeout_expired() {
     let pipeline_id: PipelineId = random();
     // We set a batch of 1000 elements to check if after 1000ms we still get the
     // batch which is < 1000 elements.
-    let batch_config = BatchConfig { max_fill_ms: 1000, memory_budget_ratio: 0.2 };
+    let batch_config =
+        BatchConfig { max_fill_ms: 1000, memory_budget_ratio: 0.2, ..BatchConfig::default() };
     let mut pipeline = create_pipeline_with_batch_config(
         &database.config,
         pipeline_id,
@@ -1217,7 +1228,7 @@ async fn table_sync_streams_new_data_with_batch_timeout_expired() {
     // Build expected events for verification
     let expected_users_inserts = build_expected_users_inserts(
         1,
-        database_schema.users_schema().id,
+        &database_schema.users_schema(),
         vec![("user_1", 1), ("user_2", 2), ("user_3", 3), ("user_4", 4), ("user_5", 5)],
     );
     assert_events_equal(users_inserts, &expected_users_inserts);
@@ -1240,7 +1251,8 @@ async fn table_processing_converges_to_apply_loop_with_no_events_coming() {
     let pipeline_id: PipelineId = random();
     // We set a batch of 1000 elements to still check that even with batching we are
     // getting all the data.
-    let batch_config = BatchConfig { max_fill_ms: 1000, memory_budget_ratio: 0.2 };
+    let batch_config =
+        BatchConfig { max_fill_ms: 1000, memory_budget_ratio: 0.2, ..BatchConfig::default() };
     let mut pipeline = create_pipeline_with_batch_config(
         &database.config,
         pipeline_id,
@@ -1366,7 +1378,7 @@ async fn table_processing_with_schema_change_errors_table() {
     pipeline.shutdown_and_wait().await.unwrap();
 
     // We assert that the schema is the initial one.
-    let table_schemas = store.get_table_schemas().await;
+    let table_schemas = store.get_latest_table_schemas().await;
     assert_eq!(table_schemas.len(), 1);
     assert_eq!(
         *table_schemas.get(&database_schema.orders_schema().id).unwrap(),
@@ -1382,7 +1394,7 @@ async fn table_processing_with_schema_change_errors_table() {
 
     let expected_orders_inserts = build_expected_orders_inserts(
         2,
-        database_schema.orders_schema().id,
+        &database_schema.orders_schema(),
         vec!["description_2", "description_3"],
     );
     assert_events_equal(orders_inserts, &expected_orders_inserts);
@@ -1397,7 +1409,7 @@ async fn table_without_primary_key_is_errored() {
     let table_id =
         database.create_table(table_name.clone(), false, &[("name", "text")]).await.unwrap();
 
-    let publication_name = "test_pub".to_string();
+    let publication_name = "test_pub".to_owned();
     database
         .create_publication(&publication_name, std::slice::from_ref(&table_name))
         .await
@@ -1465,7 +1477,7 @@ async fn pipeline_respects_column_level_publication() {
         .unwrap();
 
     // Create publication with only a subset of columns (excluding 'email').
-    let publication_name = "test_pub".to_string();
+    let publication_name = "test_pub".to_owned();
     database
         .run_sql(&format!(
             "create publication {} for table {} (id, name, age)",
@@ -1531,7 +1543,7 @@ async fn pipeline_respects_column_level_publication() {
     }
 
     // Also verify the stored table schema only includes published columns.
-    let table_schemas = state_store.get_table_schemas().await;
+    let table_schemas = state_store.get_latest_table_schemas().await;
     let stored_schema = table_schemas.get(&table_id).unwrap();
     let column_names: Vec<&str> =
         stored_schema.column_schemas.iter().map(|c| c.name.as_str()).collect();
@@ -1589,28 +1601,16 @@ async fn empty_tables_are_created_at_destination() {
     pipeline.shutdown_and_wait().await.unwrap();
 
     // Verify the table schema was stored.
-    let table_schemas = state_store.get_table_schemas().await;
+    let table_schemas = state_store.get_latest_table_schemas().await;
     let table_schema = table_schemas.get(&table_id).unwrap();
-    assert_table_schema(
+    assert_eq!(table_schema.id, table_id);
+    assert_eq!(table_schema.name, table_name);
+    assert_table_schema_columns(
         table_schema,
-        table_id,
-        table_name,
         &[
             id_column_schema(),
-            ColumnSchema {
-                name: "name".to_string(),
-                typ: Type::TEXT,
-                modifier: -1,
-                nullable: true,
-                primary: false,
-            },
-            ColumnSchema {
-                name: "created_at".to_string(),
-                typ: Type::TIMESTAMP,
-                modifier: -1,
-                nullable: true,
-                primary: false,
-            },
+            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true),
+            ColumnSchema::new("created_at".to_owned(), Type::TIMESTAMP, -1, 3, None, true),
         ],
     );
 
@@ -1699,19 +1699,17 @@ async fn pipeline_processes_concurrent_inserts_during_startup() {
     let grouped_events = group_events_by_type_and_table_id(&events);
 
     let users_copied_rows =
-        table_rows.get(&database_schema.users_schema().id).map(|r| r.len()).unwrap_or(0);
+        table_rows.get(&database_schema.users_schema().id).map_or(0, std::vec::Vec::len);
     let users_insert_events = grouped_events
         .get(&(EventType::Insert, database_schema.users_schema().id))
-        .map(|e| e.len())
-        .unwrap_or(0);
+        .map_or(0, std::vec::Vec::len);
     let total_users = users_copied_rows + users_insert_events;
 
     let orders_copied_rows =
-        table_rows.get(&database_schema.orders_schema().id).map(|r| r.len()).unwrap_or(0);
+        table_rows.get(&database_schema.orders_schema().id).map_or(0, std::vec::Vec::len);
     let orders_insert_events = grouped_events
         .get(&(EventType::Insert, database_schema.orders_schema().id))
-        .map(|e| e.len())
-        .unwrap_or(0);
+        .map_or(0, std::vec::Vec::len);
     let total_orders = orders_copied_rows + orders_insert_events;
 
     assert_eq!(total_users, rows_to_insert);
@@ -1800,21 +1798,17 @@ async fn pipeline_processes_concurrent_inserts_during_startup() {
 
     let users_updates = grouped_events
         .get(&(EventType::Update, database_schema.users_schema().id))
-        .map(|e| e.len())
-        .unwrap_or(0);
+        .map_or(0, std::vec::Vec::len);
     let users_deletes = grouped_events
         .get(&(EventType::Delete, database_schema.users_schema().id))
-        .map(|e| e.len())
-        .unwrap_or(0);
+        .map_or(0, std::vec::Vec::len);
 
     let orders_updates = grouped_events
         .get(&(EventType::Update, database_schema.orders_schema().id))
-        .map(|e| e.len())
-        .unwrap_or(0);
+        .map_or(0, std::vec::Vec::len);
     let orders_deletes = grouped_events
         .get(&(EventType::Delete, database_schema.orders_schema().id))
-        .map(|e| e.len())
-        .unwrap_or(0);
+        .map_or(0, std::vec::Vec::len);
 
     assert_eq!(users_updates, rows_to_update);
     assert_eq!(users_deletes, rows_to_delete);

@@ -52,7 +52,7 @@ pub(super) fn project_primary_key_batch(
         .iter()
         .enumerate()
         .filter(|(_, column_schema)| column_schema.primary_key())
-        .map(|(index, _)| batch.column(index).clone())
+        .map(|(index, _)| Arc::clone(batch.column(index)))
         .collect::<Vec<_>>();
 
     arrow::record_batch::RecordBatch::try_new(
@@ -140,22 +140,25 @@ mod tests {
                     "tenant_id".to_string(),
                     etl::types::Type::INT4,
                     -1,
+                    1,
+                    Some(1),
                     false,
-                    true,
                 ),
                 etl::types::ColumnSchema::new(
                     "id".to_string(),
                     etl::types::Type::INT4,
                     -1,
+                    2,
+                    Some(2),
                     false,
-                    true,
                 ),
                 etl::types::ColumnSchema::new(
                     "name".to_string(),
                     etl::types::Type::TEXT,
                     -1,
+                    3,
+                    None,
                     true,
-                    false,
                 ),
             ],
         );

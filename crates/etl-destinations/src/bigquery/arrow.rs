@@ -245,7 +245,7 @@ fn convert_uuid_array(column: &ArrayRef) -> Result<ArrayRef, ArrowErrorAdapter> 
     let values = column
         .as_any()
         .downcast_ref::<FixedSizeBinaryArray>()
-        .ok_or_else(|| ArrowErrorAdapter("expected uuid fixed-size binary array".to_string()))?;
+        .ok_or_else(|| ArrowErrorAdapter("expected uuid fixed-size binary array".to_owned()))?;
 
     let mut builder = arrow::array::StringBuilder::new();
     for row_index in 0..values.len() {
@@ -366,9 +366,9 @@ fn make_arrow_append_request(
     };
 
     ArrowAppendRowsRequest {
-        write_stream: stream_name.to_string(),
+        write_stream: stream_name.to_owned(),
         offset: None,
-        trace_id: trace_id.to_string(),
+        trace_id: trace_id.to_owned(),
         missing_value_interpretations: HashMap::new(),
         default_missing_value_interpretation: 0,
         rows: Some(arrow_append_rows_request::Rows::ArrowRows(
@@ -693,21 +693,38 @@ mod tests {
     use super::*;
 
     fn make_schema(columns: Vec<ColumnSchema>) -> Arc<TableSchema> {
-        Arc::new(TableSchema {
-            id: TableId::new(42),
-            name: TableName::new("public".to_string(), "users".to_string()),
-            column_schemas: columns,
-        })
+        Arc::new(TableSchema::new(
+            TableId::new(42),
+            TableName::new("public".to_string(), "users".to_string()),
+            columns,
+        ))
+    }
+
+    fn column(
+        name: &str,
+        typ: Type,
+        ordinal_position: i32,
+        primary_key_ordinal_position: Option<i32>,
+        nullable: bool,
+    ) -> ColumnSchema {
+        ColumnSchema::new(
+            name.to_owned(),
+            typ,
+            -1,
+            ordinal_position,
+            primary_key_ordinal_position,
+            nullable,
+        )
     }
 
     #[test]
     fn test_prepare_snapshot_arrow_batch_converts_supported_scalars() {
         let schema = make_schema(vec![
-            ColumnSchema::new("id".to_string(), Type::INT4, -1, false, true),
-            ColumnSchema::new("score".to_string(), Type::FLOAT4, -1, true, false),
-            ColumnSchema::new("joined_at".to_string(), Type::TIMESTAMP, -1, true, false),
-            ColumnSchema::new("avatar".to_string(), Type::BYTEA, -1, true, false),
-            ColumnSchema::new("user_id".to_string(), Type::UUID, -1, true, false),
+            column("id", Type::INT4, 1, Some(1), false),
+            column("score", Type::FLOAT4, 2, None, true),
+            column("joined_at", Type::TIMESTAMP, 3, None, true),
+            column("avatar", Type::BYTEA, 4, None, true),
+            column("user_id", Type::UUID, 5, None, true),
         ]);
         let rows = vec![TableRow::new(vec![
             Cell::I32(7),
@@ -745,13 +762,7 @@ mod tests {
 
     #[test]
     fn test_prepare_snapshot_arrow_batch_falls_back_for_array_columns() {
-        let schema = make_schema(vec![ColumnSchema::new(
-            "tags".to_string(),
-            Type::TEXT_ARRAY,
-            -1,
-            true,
-            false,
-        )]);
+        let schema = make_schema(vec![column("tags", Type::TEXT_ARRAY, 1, None, true)]);
         let rows =
             vec![TableRow::new(vec![Cell::Array(etl::types::ArrayCell::String(vec![Some(
                 "a".to_string(),
@@ -763,8 +774,7 @@ mod tests {
 
     #[test]
     fn test_build_arrow_append_requests_round_trips_ipc_payload() {
-        let schema =
-            make_schema(vec![ColumnSchema::new("id".to_string(), Type::INT4, -1, false, true)]);
+        let schema = make_schema(vec![column("id", Type::INT4, 1, Some(1), false)]);
         let rows = vec![TableRow::new(vec![Cell::I32(1)]), TableRow::new(vec![Cell::I32(2)])];
         let batch = table_rows_to_arrow_batch(schema, &rows).unwrap();
         let prepared = prepare_snapshot_arrow_batch(&batch).unwrap().unwrap();
@@ -778,9 +788,8 @@ mod tests {
 
         assert_eq!(requests.len(), 1);
 
-        let arrow_rows = match requests[0].rows.as_ref().unwrap() {
-            arrow_append_rows_request::Rows::ArrowRows(arrow_rows) => arrow_rows,
-        };
+        let arrow_append_rows_request::Rows::ArrowRows(arrow_rows) =
+            requests[0].rows.as_ref().unwrap();
 
         let mut stream_bytes = arrow_rows.writer_schema.as_ref().unwrap().serialized_schema.clone();
         stream_bytes.extend_from_slice(&arrow_rows.rows.as_ref().unwrap().serialized_record_batch);

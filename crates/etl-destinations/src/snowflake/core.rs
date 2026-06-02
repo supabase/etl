@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use etl::{
     bail,
@@ -165,8 +165,7 @@ where
                 self.prepare_table_for_streaming(&table_schema).await?;
 
                 for group in change_set.groups {
-                    let columns: Vec<_> =
-                        group.rows.table_schema.column_schemas.iter().cloned().collect();
+                    let columns = group.rows.table_schema.column_schemas.clone();
                     let rows = record_batch_to_table_rows(&group.rows.batch);
 
                     for (row_idx, table_row) in rows.into_iter().enumerate() {
@@ -274,7 +273,7 @@ where
                 )
             })?;
         Ok(ReplicatedTableSchema::from_mask(
-            table_schema.clone(),
+            Arc::clone(&table_schema),
             ReplicationMask::all(&table_schema),
         ))
     }
@@ -581,7 +580,7 @@ where
         batch: TableArrowBatch,
         async_result: WriteSnapshotBatchResult<()>,
     ) -> EtlResult<()> {
-        let table_schema = ReplicatedTableSchema::all(batch.table_schema.clone());
+        let table_schema = ReplicatedTableSchema::all(Arc::clone(&batch.table_schema));
         let table_rows = record_batch_to_table_rows(&batch.batch);
         let result = self.write_table_rows(&table_schema, table_rows).await;
         async_result.send(result);

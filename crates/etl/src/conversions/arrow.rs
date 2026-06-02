@@ -1,3 +1,4 @@
+use core::str;
 use std::sync::Arc;
 
 use arrow::{
@@ -15,6 +16,7 @@ use arrow::{
     error::ArrowError,
 };
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
+use postgres_replication::protocol;
 
 use crate::{
     bail,
@@ -37,6 +39,15 @@ pub const UNIX_EPOCH: NaiveDate =
 
 const MIDNIGHT: NaiveTime = NaiveTime::from_hms_opt(0, 0, 0).expect("midnight is a valid time");
 const UUID_BYTE_WIDTH: i32 = 16;
+
+/// The result of appending a pgoutput tuple directly to Arrow builders.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PgOutputArrowAppendResult {
+    /// The tuple was fully appended.
+    Appended,
+    /// The tuple cannot be appended without falling back to row decoding.
+    Unsupported,
+}
 
 /// Converts a source table schema to the canonical Arrow schema used across
 /// destinations.
@@ -62,16 +73,12 @@ pub fn table_rows_to_arrow_batch(
     table_rows: &[TableRow],
 ) -> EtlResult<TableArrowBatch> {
     let schema = table_schema_to_arrow_schema(&table_schema);
-    let batch = if table_schema.column_schemas.iter().any(|column| is_array_type(&column.typ)) {
-        rows_to_record_batch(table_rows, schema).map_err(arrow_error_to_etl_error)?
-    } else {
-        scalar_rows_to_record_batch(&table_schema, table_rows, schema)?
-    };
+    let batch = rows_to_arrow_record_batch(&table_schema, table_rows, schema)?;
 
     Ok(TableArrowBatch::new(table_schema.id, table_schema, batch))
 }
 
-fn scalar_rows_to_record_batch(
+fn rows_to_arrow_record_batch(
     table_schema: &TableSchema,
     table_rows: &[TableRow],
     schema: Schema,
@@ -79,37 +86,33 @@ fn scalar_rows_to_record_batch(
     let mut builders = table_schema
         .column_schemas
         .iter()
-        .map(|column_schema| ScalarColumnBuilder::new(&column_schema.typ, table_rows.len()))
+        .map(|column_schema| ArrowColumnBuilder::new(&column_schema.typ, table_rows.len()))
         .collect::<Vec<_>>();
 
     for table_row in table_rows {
-        append_scalar_row(&mut builders, table_schema, table_row)?;
+        append_arrow_row(&mut builders, table_schema, table_row)?;
     }
 
     let arrays =
-        builders.into_iter().map(ScalarColumnBuilder::finish).collect::<EtlResult<Vec<_>>>()?;
+        builders.into_iter().map(ArrowColumnBuilder::finish).collect::<EtlResult<Vec<_>>>()?;
     RecordBatch::try_new(Arc::new(schema), arrays).map_err(arrow_error_to_etl_error)
 }
 
-/// Incrementally builds a scalar-only [`TableArrowBatch`].
-pub(crate) struct ScalarTableArrowBatchBuilder {
+/// Incrementally builds a [`TableArrowBatch`].
+pub(crate) struct TableArrowBatchBuilder {
     table_schema: Arc<TableSchema>,
     schema: Schema,
-    builders: Vec<ScalarColumnBuilder>,
+    builders: Vec<ArrowColumnBuilder>,
 }
 
-impl ScalarTableArrowBatchBuilder {
-    /// Creates a builder when every table column has a scalar Arrow type.
+impl TableArrowBatchBuilder {
+    /// Creates a builder for the table schema.
     pub(crate) fn try_new(table_schema: Arc<TableSchema>, row_capacity: usize) -> Option<Self> {
-        if table_schema.column_schemas.iter().any(|column| is_array_type(&column.typ)) {
-            return None;
-        }
-
         let schema = table_schema_to_arrow_schema(&table_schema);
         let builders = table_schema
             .column_schemas
             .iter()
-            .map(|column_schema| ScalarColumnBuilder::new(&column_schema.typ, row_capacity))
+            .map(|column_schema| ArrowColumnBuilder::new(&column_schema.typ, row_capacity))
             .collect();
 
         Some(Self { table_schema, schema, builders })
@@ -118,11 +121,111 @@ impl ScalarTableArrowBatchBuilder {
     /// Appends one row after the caller has validated the row shape.
     pub(crate) fn append_trusted_row(&mut self, table_row: &TableRow) -> EtlResult<()> {
         debug_assert_eq!(table_row.values().len(), self.builders.len());
-        for (builder, cell) in self.builders.iter_mut().zip(table_row.values()) {
-            builder.append_trusted(cell)?;
+        for ((builder, column_schema), cell) in self
+            .builders
+            .iter_mut()
+            .zip(self.table_schema.column_schemas.iter())
+            .zip(table_row.values())
+        {
+            builder.append_trusted(&column_schema.typ, cell)?;
         }
 
         Ok(())
+    }
+
+    /// Appends one pgoutput tuple directly into the Arrow builders.
+    pub(crate) fn append_pgoutput_tuple(
+        &mut self,
+        tuple_data: &[protocol::TupleData],
+    ) -> EtlResult<PgOutputArrowAppendResult> {
+        let column_schemas = self.table_schema.column_schemas.as_slice();
+        if tuple_data.len() != column_schemas.len() {
+            bail!(
+                ErrorKind::ConversionError,
+                "Tuple data field count does not match schema",
+                format!("Expected {} tuple values, got {}", column_schemas.len(), tuple_data.len())
+            );
+        }
+
+        if tuple_data
+            .iter()
+            .any(|tuple_data| matches!(tuple_data, protocol::TupleData::UnchangedToast))
+        {
+            return Ok(PgOutputArrowAppendResult::Unsupported);
+        }
+
+        validate_pgoutput_tuple_data(column_schemas, tuple_data)?;
+
+        for ((builder, column_schema), tuple_data) in
+            self.builders.iter_mut().zip(column_schemas.iter()).zip(tuple_data.iter())
+        {
+            builder.append_pgoutput_tuple_data(
+                &column_schema.name,
+                &column_schema.typ,
+                column_schema.nullable,
+                tuple_data,
+            )?;
+        }
+
+        Ok(PgOutputArrowAppendResult::Appended)
+    }
+
+    /// Appends selected fields from one pgoutput tuple directly into Arrow.
+    pub(crate) fn append_projected_pgoutput_tuple(
+        &mut self,
+        tuple_data: &[protocol::TupleData],
+        projection: &[usize],
+    ) -> EtlResult<PgOutputArrowAppendResult> {
+        let column_schemas = self.table_schema.column_schemas.as_slice();
+        if projection.len() != column_schemas.len() {
+            bail!(
+                ErrorKind::ConversionError,
+                "Tuple projection field count does not match schema",
+                format!(
+                    "Expected {} projected tuple values, got {}",
+                    column_schemas.len(),
+                    projection.len()
+                )
+            );
+        }
+
+        for &source_index in projection {
+            let Some(tuple_data) = tuple_data.get(source_index) else {
+                bail!(
+                    ErrorKind::ConversionError,
+                    "Tuple projection field is out of bounds",
+                    format!(
+                        "Projection referenced tuple field {} but tuple has {} fields",
+                        source_index + 1,
+                        tuple_data.len()
+                    )
+                );
+            };
+            if matches!(tuple_data, protocol::TupleData::UnchangedToast) {
+                return Ok(PgOutputArrowAppendResult::Unsupported);
+            }
+        }
+
+        for (column_schema, &source_index) in column_schemas.iter().zip(projection.iter()) {
+            let tuple_data = &tuple_data[source_index];
+            validate_pgoutput_tuple_data(
+                std::slice::from_ref(column_schema),
+                std::slice::from_ref(tuple_data),
+            )?;
+        }
+
+        for ((builder, column_schema), &source_index) in
+            self.builders.iter_mut().zip(column_schemas.iter()).zip(projection.iter())
+        {
+            builder.append_pgoutput_tuple_data(
+                &column_schema.name,
+                &column_schema.typ,
+                column_schema.nullable,
+                &tuple_data[source_index],
+            )?;
+        }
+
+        Ok(PgOutputArrowAppendResult::Appended)
     }
 
     /// Finishes the builder into a [`TableArrowBatch`].
@@ -130,7 +233,7 @@ impl ScalarTableArrowBatchBuilder {
         let arrays = self
             .builders
             .into_iter()
-            .map(ScalarColumnBuilder::finish)
+            .map(ArrowColumnBuilder::finish)
             .collect::<EtlResult<Vec<_>>>()?;
         let batch = RecordBatch::try_new(Arc::new(self.schema), arrays)
             .map_err(arrow_error_to_etl_error)?;
@@ -139,9 +242,37 @@ impl ScalarTableArrowBatchBuilder {
     }
 }
 
+/// Validates pgoutput tuple data that can be checked without mutating builders.
+fn validate_pgoutput_tuple_data(
+    column_schemas: &[crate::types::ColumnSchema],
+    tuple_data: &[protocol::TupleData],
+) -> EtlResult<()> {
+    for (column_schema, tuple_data) in column_schemas.iter().zip(tuple_data.iter()) {
+        match tuple_data {
+            protocol::TupleData::Null if !column_schema.nullable => {
+                bail!(
+                    ErrorKind::InvalidData,
+                    "Required column missing from tuple",
+                    format!(
+                        "Non-nullable column '{}' received NULL value, indicating protocol-level \
+                         corruption",
+                        column_schema.name
+                    )
+                );
+            }
+            protocol::TupleData::Binary(_) => {
+                bail!(ErrorKind::ConversionError, "Binary format not supported in tuple data");
+            }
+            _ => {}
+        }
+    }
+
+    Ok(())
+}
+
 /// Appends a scalar table row to column builders.
-fn append_scalar_row(
-    builders: &mut [ScalarColumnBuilder],
+fn append_arrow_row(
+    builders: &mut [ArrowColumnBuilder],
     table_schema: &TableSchema,
     table_row: &TableRow,
 ) -> EtlResult<()> {
@@ -298,7 +429,7 @@ fn postgres_array_element_type_to_arrow_type(typ: &Type) -> DataType {
     }
 }
 
-enum ScalarColumnBuilder {
+enum ArrowColumnBuilder {
     Boolean(BooleanBuilder),
     Int32(PrimitiveBuilder<Int32Type>),
     Int64(PrimitiveBuilder<Int64Type>),
@@ -311,9 +442,21 @@ enum ScalarColumnBuilder {
     Timestamp(PrimitiveBuilder<TimestampMicrosecondType>),
     TimestampTz(TimestampMicrosecondBuilder),
     Uuid(FixedSizeBinaryBuilder),
+    BooleanList(ListBuilder<BooleanBuilder>),
+    Int32List(ListBuilder<PrimitiveBuilder<Int32Type>>),
+    Int64List(ListBuilder<PrimitiveBuilder<Int64Type>>),
+    Float32List(ListBuilder<PrimitiveBuilder<Float32Type>>),
+    Float64List(ListBuilder<PrimitiveBuilder<Float64Type>>),
+    Utf8List(ListBuilder<StringBuilder>),
+    LargeBinaryList(ListBuilder<LargeBinaryBuilder>),
+    Date32List(ListBuilder<PrimitiveBuilder<Date32Type>>),
+    Time64List(ListBuilder<PrimitiveBuilder<Time64MicrosecondType>>),
+    TimestampList(ListBuilder<PrimitiveBuilder<TimestampMicrosecondType>>),
+    TimestampTzList(ListBuilder<TimestampMicrosecondBuilder>),
+    UuidList(ListBuilder<FixedSizeBinaryBuilder>),
 }
 
-impl ScalarColumnBuilder {
+impl ArrowColumnBuilder {
     fn new(typ: &Type, _row_capacity: usize) -> Self {
         match *typ {
             Type::BOOL => Self::Boolean(BooleanBuilder::new()),
@@ -329,6 +472,55 @@ impl ScalarColumnBuilder {
                 Self::TimestampTz(TimestampMicrosecondBuilder::new().with_timezone("UTC"))
             }
             Type::UUID => Self::Uuid(FixedSizeBinaryBuilder::new(UUID_BYTE_WIDTH)),
+            Type::BOOL_ARRAY => Self::BooleanList(
+                ListBuilder::new(BooleanBuilder::new()).with_field(list_field(DataType::Boolean)),
+            ),
+            Type::INT2_ARRAY | Type::INT4_ARRAY => Self::Int32List(
+                ListBuilder::new(PrimitiveBuilder::<Int32Type>::new())
+                    .with_field(list_field(DataType::Int32)),
+            ),
+            Type::INT8_ARRAY | Type::OID_ARRAY => Self::Int64List(
+                ListBuilder::new(PrimitiveBuilder::<Int64Type>::new())
+                    .with_field(list_field(DataType::Int64)),
+            ),
+            Type::FLOAT4_ARRAY => Self::Float32List(
+                ListBuilder::new(PrimitiveBuilder::<Float32Type>::new())
+                    .with_field(list_field(DataType::Float32)),
+            ),
+            Type::FLOAT8_ARRAY => Self::Float64List(
+                ListBuilder::new(PrimitiveBuilder::<Float64Type>::new())
+                    .with_field(list_field(DataType::Float64)),
+            ),
+            Type::BYTEA_ARRAY => Self::LargeBinaryList(
+                ListBuilder::new(LargeBinaryBuilder::new())
+                    .with_field(list_field(DataType::LargeBinary)),
+            ),
+            Type::DATE_ARRAY => Self::Date32List(
+                ListBuilder::new(PrimitiveBuilder::<Date32Type>::new())
+                    .with_field(list_field(DataType::Date32)),
+            ),
+            Type::TIME_ARRAY => Self::Time64List(
+                ListBuilder::new(PrimitiveBuilder::<Time64MicrosecondType>::new())
+                    .with_field(list_field(DataType::Time64(TimeUnit::Microsecond))),
+            ),
+            Type::TIMESTAMP_ARRAY => Self::TimestampList(
+                ListBuilder::new(PrimitiveBuilder::<TimestampMicrosecondType>::new())
+                    .with_field(list_field(DataType::Timestamp(TimeUnit::Microsecond, None))),
+            ),
+            Type::TIMESTAMPTZ_ARRAY => Self::TimestampTzList(
+                ListBuilder::new(TimestampMicrosecondBuilder::new().with_timezone("UTC"))
+                    .with_field(list_field(DataType::Timestamp(
+                        TimeUnit::Microsecond,
+                        Some("UTC".into()),
+                    ))),
+            ),
+            Type::UUID_ARRAY => Self::UuidList(
+                ListBuilder::new(FixedSizeBinaryBuilder::new(UUID_BYTE_WIDTH))
+                    .with_field(list_field(DataType::FixedSizeBinary(UUID_BYTE_WIDTH))),
+            ),
+            _ if is_array_type(typ) => Self::Utf8List(
+                ListBuilder::new(StringBuilder::new()).with_field(list_field(DataType::Utf8)),
+            ),
             _ => Self::Utf8(StringBuilder::new()),
         }
     }
@@ -360,12 +552,24 @@ impl ScalarColumnBuilder {
                 }
                 _ => builder.append_null(),
             },
+            Self::BooleanList(builder) => append_cell_bool_list(builder, typ, cell)?,
+            Self::Int32List(builder) => append_cell_int32_list(builder, typ, cell)?,
+            Self::Int64List(builder) => append_cell_int64_list(builder, typ, cell)?,
+            Self::Float32List(builder) => append_cell_float32_list(builder, typ, cell)?,
+            Self::Float64List(builder) => append_cell_float64_list(builder, typ, cell)?,
+            Self::Utf8List(builder) => append_cell_utf8_list(builder, cell),
+            Self::LargeBinaryList(builder) => append_cell_binary_list(builder, typ, cell)?,
+            Self::Date32List(builder) => append_cell_date32_list(builder, typ, cell)?,
+            Self::Time64List(builder) => append_cell_time64_list(builder, typ, cell)?,
+            Self::TimestampList(builder) => append_cell_timestamp_list(builder, typ, cell)?,
+            Self::TimestampTzList(builder) => append_cell_timestamptz_list(builder, typ, cell)?,
+            Self::UuidList(builder) => append_cell_uuid_list(builder, typ, cell)?,
         }
 
         Ok(())
     }
 
-    fn append_trusted(&mut self, cell: &Cell) -> EtlResult<()> {
+    fn append_trusted(&mut self, typ: &Type, cell: &Cell) -> EtlResult<()> {
         if matches!(cell, Cell::Null) {
             self.append_null();
             return Ok(());
@@ -392,6 +596,92 @@ impl ScalarColumnBuilder {
                 }
                 _ => builder.append_null(),
             },
+            Self::BooleanList(builder) => append_cell_bool_list(builder, typ, cell)?,
+            Self::Int32List(builder) => append_cell_int32_list(builder, typ, cell)?,
+            Self::Int64List(builder) => append_cell_int64_list(builder, typ, cell)?,
+            Self::Float32List(builder) => append_cell_float32_list(builder, typ, cell)?,
+            Self::Float64List(builder) => append_cell_float64_list(builder, typ, cell)?,
+            Self::Utf8List(builder) => append_cell_utf8_list(builder, cell),
+            Self::LargeBinaryList(builder) => append_cell_binary_list(builder, typ, cell)?,
+            Self::Date32List(builder) => append_cell_date32_list(builder, typ, cell)?,
+            Self::Time64List(builder) => append_cell_time64_list(builder, typ, cell)?,
+            Self::TimestampList(builder) => append_cell_timestamp_list(builder, typ, cell)?,
+            Self::TimestampTzList(builder) => append_cell_timestamptz_list(builder, typ, cell)?,
+            Self::UuidList(builder) => append_cell_uuid_list(builder, typ, cell)?,
+        }
+
+        Ok(())
+    }
+
+    fn append_pgoutput_tuple_data(
+        &mut self,
+        column_name: &str,
+        typ: &Type,
+        nullable: bool,
+        tuple_data: &protocol::TupleData,
+    ) -> EtlResult<()> {
+        match tuple_data {
+            protocol::TupleData::Null => {
+                if nullable {
+                    self.append_null();
+                    Ok(())
+                } else {
+                    bail!(
+                        ErrorKind::InvalidData,
+                        "Required column missing from tuple",
+                        format!(
+                            "Non-nullable column '{}' received NULL value, indicating \
+                             protocol-level corruption",
+                            column_name
+                        )
+                    );
+                }
+            }
+            protocol::TupleData::Text(bytes) => {
+                let value = str::from_utf8(bytes.as_ref())?;
+                self.append_pgoutput_text(typ, value)
+            }
+            protocol::TupleData::Binary(_) => {
+                bail!(ErrorKind::ConversionError, "Binary format not supported in tuple data");
+            }
+            protocol::TupleData::UnchangedToast => {
+                bail!(
+                    ErrorKind::ConversionError,
+                    "Unchanged TOAST value cannot be appended directly to Arrow"
+                );
+            }
+        }
+    }
+
+    fn append_pgoutput_text(&mut self, typ: &Type, value: &str) -> EtlResult<()> {
+        match self {
+            Self::Boolean(builder) => builder.append_value(parse_bool(value)?),
+            Self::Int32(builder) => builder.append_value(parse_copy_i32(typ, value)?),
+            Self::Int64(builder) => builder.append_value(parse_copy_i64(typ, value)?),
+            Self::Float32(builder) => builder.append_value(value.parse::<f32>()?),
+            Self::Float64(builder) => builder.append_value(value.parse::<f64>()?),
+            Self::Utf8(builder) => append_pgoutput_utf8(builder, typ, value)?,
+            Self::LargeBinary(builder) => builder.append_value(hex::parse_bytea_hex_string(value)?),
+            Self::Date32(builder) => builder.append_value(parse_copy_date32(value)?),
+            Self::Time64(builder) => builder.append_value(parse_copy_time64(value)?),
+            Self::Timestamp(builder) => builder.append_value(parse_copy_timestamp(value)?),
+            Self::TimestampTz(builder) => builder.append_value(parse_copy_timestamptz(value)?),
+            Self::Uuid(builder) => {
+                let value = uuid::Uuid::parse_str(value)?;
+                builder.append_value(value.as_bytes()).map_err(arrow_error_to_etl_error)?;
+            }
+            Self::BooleanList(builder) => append_pgoutput_bool_list(builder, value)?,
+            Self::Int32List(builder) => append_pgoutput_int32_list(builder, typ, value)?,
+            Self::Int64List(builder) => append_pgoutput_int64_list(builder, typ, value)?,
+            Self::Float32List(builder) => append_pgoutput_float32_list(builder, value)?,
+            Self::Float64List(builder) => append_pgoutput_float64_list(builder, value)?,
+            Self::Utf8List(builder) => append_pgoutput_utf8_list(builder, value)?,
+            Self::LargeBinaryList(builder) => append_pgoutput_binary_list(builder, value)?,
+            Self::Date32List(builder) => append_pgoutput_date32_list(builder, value)?,
+            Self::Time64List(builder) => append_pgoutput_time64_list(builder, value)?,
+            Self::TimestampList(builder) => append_pgoutput_timestamp_list(builder, value)?,
+            Self::TimestampTzList(builder) => append_pgoutput_timestamptz_list(builder, value)?,
+            Self::UuidList(builder) => append_pgoutput_uuid_list(builder, value)?,
         }
 
         Ok(())
@@ -411,6 +701,18 @@ impl ScalarColumnBuilder {
             Self::Timestamp(builder) => builder.append_null(),
             Self::TimestampTz(builder) => builder.append_null(),
             Self::Uuid(builder) => builder.append_null(),
+            Self::BooleanList(builder) => builder.append_null(),
+            Self::Int32List(builder) => builder.append_null(),
+            Self::Int64List(builder) => builder.append_null(),
+            Self::Float32List(builder) => builder.append_null(),
+            Self::Float64List(builder) => builder.append_null(),
+            Self::Utf8List(builder) => builder.append_null(),
+            Self::LargeBinaryList(builder) => builder.append_null(),
+            Self::Date32List(builder) => builder.append_null(),
+            Self::Time64List(builder) => builder.append_null(),
+            Self::TimestampList(builder) => builder.append_null(),
+            Self::TimestampTzList(builder) => builder.append_null(),
+            Self::UuidList(builder) => builder.append_null(),
         }
     }
 
@@ -428,6 +730,18 @@ impl ScalarColumnBuilder {
             Self::Timestamp(mut builder) => Arc::new(builder.finish()),
             Self::TimestampTz(mut builder) => Arc::new(builder.finish()),
             Self::Uuid(mut builder) => Arc::new(builder.finish()),
+            Self::BooleanList(mut builder) => Arc::new(builder.finish()),
+            Self::Int32List(mut builder) => Arc::new(builder.finish()),
+            Self::Int64List(mut builder) => Arc::new(builder.finish()),
+            Self::Float32List(mut builder) => Arc::new(builder.finish()),
+            Self::Float64List(mut builder) => Arc::new(builder.finish()),
+            Self::Utf8List(mut builder) => Arc::new(builder.finish()),
+            Self::LargeBinaryList(mut builder) => Arc::new(builder.finish()),
+            Self::Date32List(mut builder) => Arc::new(builder.finish()),
+            Self::Time64List(mut builder) => Arc::new(builder.finish()),
+            Self::TimestampList(mut builder) => Arc::new(builder.finish()),
+            Self::TimestampTzList(mut builder) => Arc::new(builder.finish()),
+            Self::UuidList(mut builder) => Arc::new(builder.finish()),
         })
     }
 }
@@ -456,6 +770,532 @@ fn append_trusted_cell_as_utf8(builder: &mut StringBuilder, cell: &Cell) -> EtlR
         _ => builder.append_null(),
     }
 
+    Ok(())
+}
+
+fn append_cell_bool_list(
+    builder: &mut ListBuilder<BooleanBuilder>,
+    typ: &Type,
+    cell: &Cell,
+) -> EtlResult<()> {
+    match cell_to_array_cell(cell) {
+        Some(ArrayCell::Bool(values)) => {
+            for value in values {
+                builder.values().append_option(*value);
+            }
+            builder.append(true);
+            Ok(())
+        }
+        Some(actual) => Err(unexpected_copy_array_cell_error(typ, "boolean", actual)),
+        None => {
+            builder.append_null();
+            Ok(())
+        }
+    }
+}
+
+fn append_cell_int32_list(
+    builder: &mut ListBuilder<PrimitiveBuilder<Int32Type>>,
+    typ: &Type,
+    cell: &Cell,
+) -> EtlResult<()> {
+    match cell_to_array_cell(cell) {
+        Some(ArrayCell::I16(values)) => {
+            for value in values {
+                builder.values().append_option(value.map(i32::from));
+            }
+            builder.append(true);
+            Ok(())
+        }
+        Some(ArrayCell::I32(values)) => {
+            for value in values {
+                builder.values().append_option(*value);
+            }
+            builder.append(true);
+            Ok(())
+        }
+        Some(actual) => Err(unexpected_copy_array_cell_error(typ, "int32", actual)),
+        None => {
+            builder.append_null();
+            Ok(())
+        }
+    }
+}
+
+fn append_cell_int64_list(
+    builder: &mut ListBuilder<PrimitiveBuilder<Int64Type>>,
+    typ: &Type,
+    cell: &Cell,
+) -> EtlResult<()> {
+    match cell_to_array_cell(cell) {
+        Some(ArrayCell::I64(values)) => {
+            for value in values {
+                builder.values().append_option(*value);
+            }
+            builder.append(true);
+            Ok(())
+        }
+        Some(ArrayCell::U32(values)) => {
+            for value in values {
+                builder.values().append_option(value.map(i64::from));
+            }
+            builder.append(true);
+            Ok(())
+        }
+        Some(actual) => Err(unexpected_copy_array_cell_error(typ, "int64", actual)),
+        None => {
+            builder.append_null();
+            Ok(())
+        }
+    }
+}
+
+fn append_cell_float32_list(
+    builder: &mut ListBuilder<PrimitiveBuilder<Float32Type>>,
+    typ: &Type,
+    cell: &Cell,
+) -> EtlResult<()> {
+    match cell_to_array_cell(cell) {
+        Some(ArrayCell::F32(values)) => {
+            for value in values {
+                builder.values().append_option(*value);
+            }
+            builder.append(true);
+            Ok(())
+        }
+        Some(actual) => Err(unexpected_copy_array_cell_error(typ, "float32", actual)),
+        None => {
+            builder.append_null();
+            Ok(())
+        }
+    }
+}
+
+fn append_cell_float64_list(
+    builder: &mut ListBuilder<PrimitiveBuilder<Float64Type>>,
+    typ: &Type,
+    cell: &Cell,
+) -> EtlResult<()> {
+    match cell_to_array_cell(cell) {
+        Some(ArrayCell::F64(values)) => {
+            for value in values {
+                builder.values().append_option(*value);
+            }
+            builder.append(true);
+            Ok(())
+        }
+        Some(actual) => Err(unexpected_copy_array_cell_error(typ, "float64", actual)),
+        None => {
+            builder.append_null();
+            Ok(())
+        }
+    }
+}
+
+fn append_cell_utf8_list(builder: &mut ListBuilder<StringBuilder>, cell: &Cell) {
+    match cell_to_array_cell(cell) {
+        Some(array_cell) => {
+            append_array_cell_as_strings(builder, array_cell);
+            builder.append(true);
+        }
+        None => builder.append_null(),
+    }
+}
+
+fn append_cell_binary_list(
+    builder: &mut ListBuilder<LargeBinaryBuilder>,
+    typ: &Type,
+    cell: &Cell,
+) -> EtlResult<()> {
+    match cell_to_array_cell(cell) {
+        Some(ArrayCell::Bytes(values)) => {
+            for value in values {
+                match value {
+                    Some(value) => builder.values().append_value(value),
+                    None => builder.values().append_null(),
+                }
+            }
+            builder.append(true);
+            Ok(())
+        }
+        Some(actual) => Err(unexpected_copy_array_cell_error(typ, "bytes", actual)),
+        None => {
+            builder.append_null();
+            Ok(())
+        }
+    }
+}
+
+fn append_cell_date32_list(
+    builder: &mut ListBuilder<PrimitiveBuilder<Date32Type>>,
+    typ: &Type,
+    cell: &Cell,
+) -> EtlResult<()> {
+    match cell_to_array_cell(cell) {
+        Some(ArrayCell::Date(values)) => {
+            for value in values {
+                builder.values().append_option(
+                    value.map(|date| date.signed_duration_since(UNIX_EPOCH).num_days() as i32),
+                );
+            }
+            builder.append(true);
+            Ok(())
+        }
+        Some(actual) => Err(unexpected_copy_array_cell_error(typ, "date", actual)),
+        None => {
+            builder.append_null();
+            Ok(())
+        }
+    }
+}
+
+fn append_cell_time64_list(
+    builder: &mut ListBuilder<PrimitiveBuilder<Time64MicrosecondType>>,
+    typ: &Type,
+    cell: &Cell,
+) -> EtlResult<()> {
+    match cell_to_array_cell(cell) {
+        Some(ArrayCell::Time(values)) => {
+            for value in values {
+                builder.values().append_option(
+                    value
+                        .map(|time| {
+                            time.signed_duration_since(MIDNIGHT).num_microseconds().ok_or_else(
+                                || {
+                                    etl_error!(
+                                        ErrorKind::ConversionError,
+                                        "Time value is out of microsecond range"
+                                    )
+                                },
+                            )
+                        })
+                        .transpose()?,
+                );
+            }
+            builder.append(true);
+            Ok(())
+        }
+        Some(actual) => Err(unexpected_copy_array_cell_error(typ, "time", actual)),
+        None => {
+            builder.append_null();
+            Ok(())
+        }
+    }
+}
+
+fn append_cell_timestamp_list(
+    builder: &mut ListBuilder<PrimitiveBuilder<TimestampMicrosecondType>>,
+    typ: &Type,
+    cell: &Cell,
+) -> EtlResult<()> {
+    match cell_to_array_cell(cell) {
+        Some(ArrayCell::Timestamp(values)) => {
+            for value in values {
+                builder
+                    .values()
+                    .append_option(value.map(|timestamp| timestamp.and_utc().timestamp_micros()));
+            }
+            builder.append(true);
+            Ok(())
+        }
+        Some(actual) => Err(unexpected_copy_array_cell_error(typ, "timestamp", actual)),
+        None => {
+            builder.append_null();
+            Ok(())
+        }
+    }
+}
+
+fn append_cell_timestamptz_list(
+    builder: &mut ListBuilder<TimestampMicrosecondBuilder>,
+    typ: &Type,
+    cell: &Cell,
+) -> EtlResult<()> {
+    match cell_to_array_cell(cell) {
+        Some(ArrayCell::TimestampTz(values)) => {
+            for value in values {
+                builder.values().append_option(value.map(|timestamp| timestamp.timestamp_micros()));
+            }
+            builder.append(true);
+            Ok(())
+        }
+        Some(actual) => Err(unexpected_copy_array_cell_error(typ, "timestamptz", actual)),
+        None => {
+            builder.append_null();
+            Ok(())
+        }
+    }
+}
+
+fn append_cell_uuid_list(
+    builder: &mut ListBuilder<FixedSizeBinaryBuilder>,
+    typ: &Type,
+    cell: &Cell,
+) -> EtlResult<()> {
+    match cell_to_array_cell(cell) {
+        Some(ArrayCell::Uuid(values)) => {
+            for value in values {
+                match value {
+                    Some(value) => builder
+                        .values()
+                        .append_value(value.as_bytes())
+                        .map_err(arrow_error_to_etl_error)?,
+                    None => builder.values().append_null(),
+                }
+            }
+            builder.append(true);
+            Ok(())
+        }
+        Some(actual) => Err(unexpected_copy_array_cell_error(typ, "uuid", actual)),
+        None => {
+            builder.append_null();
+            Ok(())
+        }
+    }
+}
+
+fn parse_postgres_text_array_elements<F>(value: &str, mut append_element: F) -> EtlResult<()>
+where
+    F: FnMut(Option<&str>) -> EtlResult<()>,
+{
+    if value.len() < 2 {
+        bail!(ErrorKind::ConversionError, "Array input too short");
+    }
+
+    if !value.starts_with('{') || !value.ends_with('}') {
+        bail!(ErrorKind::ConversionError, "Array input missing braces");
+    }
+
+    let value = &value[1..(value.len() - 1)];
+    let mut value_text = String::with_capacity(10);
+    let mut in_quotes = false;
+    let mut in_escape = false;
+    let mut value_quoted = false;
+    let mut chars = value.chars();
+    let mut done = value.is_empty();
+
+    while !done {
+        loop {
+            match chars.next() {
+                Some(c) => match c {
+                    c if in_escape => {
+                        value_text.push(c);
+                        in_escape = false;
+                    }
+                    '"' => {
+                        if !in_quotes {
+                            value_quoted = true;
+                        }
+                        in_quotes = !in_quotes;
+                    }
+                    '\\' => in_escape = true,
+                    ',' if !in_quotes => break,
+                    c => value_text.push(c),
+                },
+                None => {
+                    done = true;
+                    break;
+                }
+            }
+        }
+
+        if !value_quoted && value_text.eq_ignore_ascii_case("null") {
+            append_element(None)?;
+        } else {
+            append_element(Some(value_text.as_str()))?;
+        }
+        value_text.clear();
+        value_quoted = false;
+    }
+
+    Ok(())
+}
+
+fn append_pgoutput_bool_list(
+    builder: &mut ListBuilder<BooleanBuilder>,
+    value: &str,
+) -> EtlResult<()> {
+    parse_postgres_text_array_elements(value, |value| {
+        match value {
+            Some(value) => builder.values().append_value(parse_bool(value)?),
+            None => builder.values().append_null(),
+        }
+        Ok(())
+    })?;
+    builder.append(true);
+    Ok(())
+}
+
+fn append_pgoutput_int32_list(
+    builder: &mut ListBuilder<PrimitiveBuilder<Int32Type>>,
+    typ: &Type,
+    value: &str,
+) -> EtlResult<()> {
+    parse_postgres_text_array_elements(value, |value| {
+        match value {
+            Some(value) => builder.values().append_value(parse_copy_i32(typ, value)?),
+            None => builder.values().append_null(),
+        }
+        Ok(())
+    })?;
+    builder.append(true);
+    Ok(())
+}
+
+fn append_pgoutput_int64_list(
+    builder: &mut ListBuilder<PrimitiveBuilder<Int64Type>>,
+    typ: &Type,
+    value: &str,
+) -> EtlResult<()> {
+    parse_postgres_text_array_elements(value, |value| {
+        match value {
+            Some(value) => builder.values().append_value(parse_copy_i64(typ, value)?),
+            None => builder.values().append_null(),
+        }
+        Ok(())
+    })?;
+    builder.append(true);
+    Ok(())
+}
+
+fn append_pgoutput_float32_list(
+    builder: &mut ListBuilder<PrimitiveBuilder<Float32Type>>,
+    value: &str,
+) -> EtlResult<()> {
+    parse_postgres_text_array_elements(value, |value| {
+        match value {
+            Some(value) => builder.values().append_value(value.parse::<f32>()?),
+            None => builder.values().append_null(),
+        }
+        Ok(())
+    })?;
+    builder.append(true);
+    Ok(())
+}
+
+fn append_pgoutput_float64_list(
+    builder: &mut ListBuilder<PrimitiveBuilder<Float64Type>>,
+    value: &str,
+) -> EtlResult<()> {
+    parse_postgres_text_array_elements(value, |value| {
+        match value {
+            Some(value) => builder.values().append_value(value.parse::<f64>()?),
+            None => builder.values().append_null(),
+        }
+        Ok(())
+    })?;
+    builder.append(true);
+    Ok(())
+}
+
+fn append_pgoutput_utf8_list(
+    builder: &mut ListBuilder<StringBuilder>,
+    value: &str,
+) -> EtlResult<()> {
+    parse_postgres_text_array_elements(value, |value| {
+        match value {
+            Some(value) => builder.values().append_value(value),
+            None => builder.values().append_null(),
+        }
+        Ok(())
+    })?;
+    builder.append(true);
+    Ok(())
+}
+
+fn append_pgoutput_binary_list(
+    builder: &mut ListBuilder<LargeBinaryBuilder>,
+    value: &str,
+) -> EtlResult<()> {
+    parse_postgres_text_array_elements(value, |value| {
+        match value {
+            Some(value) => builder.values().append_value(hex::parse_bytea_hex_string(value)?),
+            None => builder.values().append_null(),
+        }
+        Ok(())
+    })?;
+    builder.append(true);
+    Ok(())
+}
+
+fn append_pgoutput_date32_list(
+    builder: &mut ListBuilder<PrimitiveBuilder<Date32Type>>,
+    value: &str,
+) -> EtlResult<()> {
+    parse_postgres_text_array_elements(value, |value| {
+        match value {
+            Some(value) => builder.values().append_value(parse_copy_date32(value)?),
+            None => builder.values().append_null(),
+        }
+        Ok(())
+    })?;
+    builder.append(true);
+    Ok(())
+}
+
+fn append_pgoutput_time64_list(
+    builder: &mut ListBuilder<PrimitiveBuilder<Time64MicrosecondType>>,
+    value: &str,
+) -> EtlResult<()> {
+    parse_postgres_text_array_elements(value, |value| {
+        match value {
+            Some(value) => builder.values().append_value(parse_copy_time64(value)?),
+            None => builder.values().append_null(),
+        }
+        Ok(())
+    })?;
+    builder.append(true);
+    Ok(())
+}
+
+fn append_pgoutput_timestamp_list(
+    builder: &mut ListBuilder<PrimitiveBuilder<TimestampMicrosecondType>>,
+    value: &str,
+) -> EtlResult<()> {
+    parse_postgres_text_array_elements(value, |value| {
+        match value {
+            Some(value) => builder.values().append_value(parse_copy_timestamp(value)?),
+            None => builder.values().append_null(),
+        }
+        Ok(())
+    })?;
+    builder.append(true);
+    Ok(())
+}
+
+fn append_pgoutput_timestamptz_list(
+    builder: &mut ListBuilder<TimestampMicrosecondBuilder>,
+    value: &str,
+) -> EtlResult<()> {
+    parse_postgres_text_array_elements(value, |value| {
+        match value {
+            Some(value) => builder.values().append_value(parse_copy_timestamptz(value)?),
+            None => builder.values().append_null(),
+        }
+        Ok(())
+    })?;
+    builder.append(true);
+    Ok(())
+}
+
+fn append_pgoutput_uuid_list(
+    builder: &mut ListBuilder<FixedSizeBinaryBuilder>,
+    value: &str,
+) -> EtlResult<()> {
+    parse_postgres_text_array_elements(value, |value| {
+        match value {
+            Some(value) => {
+                let value = uuid::Uuid::parse_str(value)?;
+                builder
+                    .values()
+                    .append_value(value.as_bytes())
+                    .map_err(arrow_error_to_etl_error)?;
+            }
+            None => builder.values().append_null(),
+        }
+        Ok(())
+    })?;
+    builder.append(true);
     Ok(())
 }
 
@@ -964,6 +1804,11 @@ fn append_copy_utf8(builder: &mut StringBuilder, _typ: &Type, value: &str) -> Et
     Ok(())
 }
 
+fn append_pgoutput_utf8(builder: &mut StringBuilder, _typ: &Type, value: &str) -> EtlResult<()> {
+    builder.append_value(value);
+    Ok(())
+}
+
 fn parse_copy_date32(value: &str) -> EtlResult<i32> {
     let value = NaiveDate::parse_from_str(value, DATE_FORMAT)?;
     Ok(value.signed_duration_since(UNIX_EPOCH).num_days() as i32)
@@ -1006,7 +1851,7 @@ fn build_array_for_field(rows: &[TableRow], field_idx: usize, data_type: &DataTy
             build_primitive_array::<TimestampMicrosecondType, _>(rows, field_idx, cell_to_timestamp)
         }
         DataType::FixedSizeBinary(UUID_BYTE_WIDTH) => build_uuid_array(rows, field_idx),
-        DataType::List(field) => build_list_array(rows, field_idx, field.clone()),
+        DataType::List(field) => build_list_array(rows, field_idx, Arc::clone(field)),
         _ => build_string_array(rows, field_idx),
     }
 }
@@ -1104,7 +1949,7 @@ fn build_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef) -> Arr
 }
 
 fn build_boolean_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef) -> ArrayRef {
-    let mut builder = ListBuilder::new(BooleanBuilder::new()).with_field(field.clone());
+    let mut builder = ListBuilder::new(BooleanBuilder::new()).with_field(Arc::clone(&field));
 
     for row in rows {
         match cell_to_array_cell(&row.values()[field_idx]) {
@@ -1124,7 +1969,7 @@ fn build_boolean_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef
 
 fn build_int32_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef) -> ArrayRef {
     let mut builder =
-        ListBuilder::new(PrimitiveBuilder::<Int32Type>::new()).with_field(field.clone());
+        ListBuilder::new(PrimitiveBuilder::<Int32Type>::new()).with_field(Arc::clone(&field));
 
     for row in rows {
         match cell_to_array_cell(&row.values()[field_idx]) {
@@ -1150,7 +1995,7 @@ fn build_int32_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef) 
 
 fn build_int64_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef) -> ArrayRef {
     let mut builder =
-        ListBuilder::new(PrimitiveBuilder::<Int64Type>::new()).with_field(field.clone());
+        ListBuilder::new(PrimitiveBuilder::<Int64Type>::new()).with_field(Arc::clone(&field));
 
     for row in rows {
         match cell_to_array_cell(&row.values()[field_idx]) {
@@ -1176,7 +2021,7 @@ fn build_int64_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef) 
 
 fn build_float32_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef) -> ArrayRef {
     let mut builder =
-        ListBuilder::new(PrimitiveBuilder::<Float32Type>::new()).with_field(field.clone());
+        ListBuilder::new(PrimitiveBuilder::<Float32Type>::new()).with_field(Arc::clone(&field));
 
     for row in rows {
         match cell_to_array_cell(&row.values()[field_idx]) {
@@ -1196,7 +2041,7 @@ fn build_float32_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef
 
 fn build_float64_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef) -> ArrayRef {
     let mut builder =
-        ListBuilder::new(PrimitiveBuilder::<Float64Type>::new()).with_field(field.clone());
+        ListBuilder::new(PrimitiveBuilder::<Float64Type>::new()).with_field(Arc::clone(&field));
 
     for row in rows {
         match cell_to_array_cell(&row.values()[field_idx]) {
@@ -1215,7 +2060,7 @@ fn build_float64_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef
 }
 
 fn build_string_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef) -> ArrayRef {
-    let mut builder = ListBuilder::new(StringBuilder::new()).with_field(field.clone());
+    let mut builder = ListBuilder::new(StringBuilder::new()).with_field(Arc::clone(&field));
 
     for row in rows {
         match cell_to_array_cell(&row.values()[field_idx]) {
@@ -1255,7 +2100,7 @@ fn build_string_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef)
 }
 
 fn build_binary_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef) -> ArrayRef {
-    let mut builder = ListBuilder::new(LargeBinaryBuilder::new()).with_field(field.clone());
+    let mut builder = ListBuilder::new(LargeBinaryBuilder::new()).with_field(Arc::clone(&field));
 
     for row in rows {
         match cell_to_array_cell(&row.values()[field_idx]) {
@@ -1278,7 +2123,7 @@ fn build_binary_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef)
 
 fn build_date32_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef) -> ArrayRef {
     let mut builder =
-        ListBuilder::new(PrimitiveBuilder::<Date32Type>::new()).with_field(field.clone());
+        ListBuilder::new(PrimitiveBuilder::<Date32Type>::new()).with_field(Arc::clone(&field));
 
     for row in rows {
         match cell_to_array_cell(&row.values()[field_idx]) {
@@ -1300,7 +2145,7 @@ fn build_date32_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef)
 
 fn build_time64_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef) -> ArrayRef {
     let mut builder = ListBuilder::new(PrimitiveBuilder::<Time64MicrosecondType>::new())
-        .with_field(field.clone());
+        .with_field(Arc::clone(&field));
 
     for row in rows {
         match cell_to_array_cell(&row.values()[field_idx]) {
@@ -1324,7 +2169,7 @@ fn build_time64_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef)
 
 fn build_timestamp_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef) -> ArrayRef {
     let mut builder = ListBuilder::new(PrimitiveBuilder::<TimestampMicrosecondType>::new())
-        .with_field(field.clone());
+        .with_field(Arc::clone(&field));
 
     for row in rows {
         match cell_to_array_cell(&row.values()[field_idx]) {
@@ -1346,13 +2191,13 @@ fn build_timestamp_list_array(rows: &[TableRow], field_idx: usize, field: FieldR
 
 fn build_timestamptz_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef) -> ArrayRef {
     let tz = if let DataType::Timestamp(TimeUnit::Microsecond, Some(tz)) = field.data_type() {
-        tz.clone()
+        Arc::clone(tz)
     } else {
-        Arc::from("UTC".to_string())
+        Arc::from("UTC".to_owned())
     };
     let mut builder =
         ListBuilder::new(arrow::array::TimestampMicrosecondBuilder::new().with_timezone(tz))
-            .with_field(field.clone());
+            .with_field(Arc::clone(&field));
 
     for row in rows {
         match cell_to_array_cell(&row.values()[field_idx]) {
@@ -1373,8 +2218,8 @@ fn build_timestamptz_list_array(rows: &[TableRow], field_idx: usize, field: Fiel
 }
 
 fn build_uuid_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef) -> ArrayRef {
-    let mut builder =
-        ListBuilder::new(FixedSizeBinaryBuilder::new(UUID_BYTE_WIDTH)).with_field(field.clone());
+    let mut builder = ListBuilder::new(FixedSizeBinaryBuilder::new(UUID_BYTE_WIDTH))
+        .with_field(Arc::clone(&field));
 
     for row in rows {
         match cell_to_array_cell(&row.values()[field_idx]) {
@@ -1424,7 +2269,14 @@ fn append_array_cell_as_strings(builder: &mut ListBuilder<StringBuilder>, array_
             builder,
             values.iter().map(|value| value.map(|value| value.to_string())),
         ),
-        ArrayCell::String(values) => append_option_strings(builder, values.iter().cloned()),
+        ArrayCell::String(values) => {
+            for value in values {
+                match value {
+                    Some(value) => builder.values().append_value(value),
+                    None => builder.values().append_null(),
+                }
+            }
+        }
         ArrayCell::I16(values) => append_option_strings(
             builder,
             values.iter().map(|value| value.map(|value| value.to_string())),
@@ -1625,7 +2477,7 @@ fn arrow_value_to_cell(array: &ArrayRef, row_idx: usize) -> Cell {
         }
         DataType::Utf8 => {
             let array = array.as_any().downcast_ref::<StringArray>().unwrap();
-            Cell::String(array.value(row_idx).to_string())
+            Cell::String(array.value(row_idx).to_owned())
         }
         DataType::LargeBinary => {
             let array = array.as_any().downcast_ref::<LargeBinaryArray>().unwrap();
@@ -1664,7 +2516,7 @@ fn arrow_value_to_cell(array: &ArrayRef, row_idx: usize) -> Cell {
         DataType::List(field) => arrow_list_value_to_cell(array, row_idx, field),
         _ => {
             let array = array.as_any().downcast_ref::<StringArray>().unwrap();
-            Cell::String(array.value(row_idx).to_string())
+            Cell::String(array.value(row_idx).to_owned())
         }
     }
 }
@@ -1676,27 +2528,27 @@ fn arrow_list_value_to_cell(array: &ArrayRef, row_idx: usize, field: &FieldRef) 
     match field.data_type() {
         DataType::Boolean => Cell::Array(ArrayCell::Bool(option_values::<BooleanArray, _, _>(
             &list_value,
-            |array, index| array.value(index),
+            BooleanArray::value,
         ))),
         DataType::Int32 => Cell::Array(ArrayCell::I32(option_values::<Int32Array, _, _>(
             &list_value,
-            |array, index| array.value(index),
+            Int32Array::value,
         ))),
         DataType::Int64 => Cell::Array(ArrayCell::I64(option_values::<Int64Array, _, _>(
             &list_value,
-            |array, index| array.value(index),
+            Int64Array::value,
         ))),
         DataType::Float32 => Cell::Array(ArrayCell::F32(option_values::<Float32Array, _, _>(
             &list_value,
-            |array, index| array.value(index),
+            Float32Array::value,
         ))),
         DataType::Float64 => Cell::Array(ArrayCell::F64(option_values::<Float64Array, _, _>(
             &list_value,
-            |array, index| array.value(index),
+            Float64Array::value,
         ))),
         DataType::Utf8 => Cell::Array(ArrayCell::String(option_values::<StringArray, _, _>(
             &list_value,
-            |array, index| array.value(index).to_string(),
+            |array, index| array.value(index).to_owned(),
         ))),
         DataType::LargeBinary => {
             Cell::Array(ArrayCell::Bytes(option_values::<LargeBinaryArray, _, _>(
@@ -1760,7 +2612,7 @@ fn arrow_list_value_to_cell(array: &ArrayRef, row_idx: usize, field: &FieldRef) 
         }
         _ => Cell::Array(ArrayCell::String(option_values::<StringArray, _, _>(
             &list_value,
-            |array, index| array.value(index).to_string(),
+            |array, index| array.value(index).to_owned(),
         ))),
     }
 }
@@ -1802,6 +2654,8 @@ fn micros_to_time(micros: i64) -> NaiveTime {
 
 #[cfg(test)]
 mod tests {
+    use postgres_replication::protocol::TupleData;
+
     use super::*;
     use crate::{
         conversions::table_row::parse_table_row_from_postgres_copy_bytes,
@@ -1844,6 +2698,22 @@ mod tests {
         ))
     }
 
+    fn scalar_pgoutput_schema() -> Arc<TableSchema> {
+        Arc::new(TableSchema::new(
+            TableId::new(456),
+            TableName::new("public".to_owned(), "pgoutput_test".to_owned()),
+            vec![
+                column("id", Type::INT8, 1, false, true),
+                column("account_id", Type::INT4, 2, true, false),
+                column("active", Type::BOOL, 3, false, false),
+                column("amount", Type::NUMERIC, 4, false, false),
+                column("payload", Type::JSONB, 5, false, false),
+                column("data", Type::BYTEA, 6, false, false),
+                column("notes", Type::TEXT, 7, true, false),
+            ],
+        ))
+    }
+
     #[test]
     fn postgres_copy_rows_to_arrow_batch_matches_row_conversion() {
         let table_schema = scalar_and_array_copy_schema();
@@ -1857,7 +2727,7 @@ mod tests {
         ];
 
         let direct_batch =
-            postgres_copy_rows_to_arrow_batch(table_schema.clone(), &copy_rows).unwrap();
+            postgres_copy_rows_to_arrow_batch(Arc::clone(&table_schema), &copy_rows).unwrap();
         let table_rows = copy_rows
             .iter()
             .map(|row| {
@@ -1891,5 +2761,113 @@ mod tests {
 
         assert_eq!(amount.value(0), "0012.300");
         assert_eq!(payload.value(0), r#"{"i": 1}"#);
+    }
+
+    #[test]
+    fn scalar_builder_appends_pgoutput_tuple_directly() {
+        let table_schema = scalar_pgoutput_schema();
+        let mut builder = TableArrowBatchBuilder::try_new(table_schema, 1).unwrap();
+        let tuple_data = vec![
+            TupleData::Text(b"1".to_vec().into()),
+            TupleData::Null,
+            TupleData::Text(b"t".to_vec().into()),
+            TupleData::Text(b"0012.300".to_vec().into()),
+            TupleData::Text(br#"{"i": 1}"#.to_vec().into()),
+            TupleData::Text(br#"\x6869"#.to_vec().into()),
+            TupleData::Text(b"hello".to_vec().into()),
+        ];
+
+        let result = builder.append_pgoutput_tuple(&tuple_data).unwrap();
+        let batch = builder.finish().unwrap();
+
+        assert_eq!(result, PgOutputArrowAppendResult::Appended);
+        assert_eq!(
+            record_batch_to_table_rows(&batch.batch),
+            vec![TableRow::new(vec![
+                Cell::I64(1),
+                Cell::Null,
+                Cell::Bool(true),
+                Cell::String("0012.300".to_owned()),
+                Cell::String(r#"{"i": 1}"#.to_owned()),
+                Cell::Bytes(b"hi".to_vec()),
+                Cell::String("hello".to_owned()),
+            ])]
+        );
+    }
+
+    #[test]
+    fn builder_appends_pgoutput_array_tuple_directly() {
+        let table_schema = scalar_and_array_copy_schema();
+        let mut builder = TableArrowBatchBuilder::try_new(table_schema, 1).unwrap();
+        let tuple_data = vec![
+            TupleData::Text(b"1".to_vec().into()),
+            TupleData::Text(b"42".to_vec().into()),
+            TupleData::Text(b"t".to_vec().into()),
+            TupleData::Text(b"0012.300".to_vec().into()),
+            TupleData::Text(b"2024-01-02 03:04:05.123456+00".to_vec().into()),
+            TupleData::Text(br#"{"i": 1}"#.to_vec().into()),
+            TupleData::Null,
+            TupleData::Text(br#"{red,"blue,green",NULL}"#.to_vec().into()),
+            TupleData::Text(b"{1,2,NULL}".to_vec().into()),
+            TupleData::Text(b"{t,f,NULL}".to_vec().into()),
+        ];
+
+        let result = builder.append_pgoutput_tuple(&tuple_data).unwrap();
+        let batch = builder.finish().unwrap();
+        let rows = record_batch_to_table_rows(&batch.batch);
+        let values = rows[0].values();
+
+        assert_eq!(result, PgOutputArrowAppendResult::Appended);
+        assert_eq!(
+            values[7],
+            Cell::Array(ArrayCell::String(vec![
+                Some("red".to_owned()),
+                Some("blue,green".to_owned()),
+                None,
+            ]))
+        );
+        assert_eq!(values[8], Cell::Array(ArrayCell::I32(vec![Some(1), Some(2), None])));
+        assert_eq!(values[9], Cell::Array(ArrayCell::Bool(vec![Some(true), Some(false), None])));
+    }
+
+    #[test]
+    fn scalar_builder_falls_back_for_unchanged_toast_without_appending() {
+        let table_schema = scalar_pgoutput_schema();
+        let mut builder = TableArrowBatchBuilder::try_new(table_schema, 1).unwrap();
+        let tuple_data = vec![
+            TupleData::Text(b"1".to_vec().into()),
+            TupleData::Null,
+            TupleData::Text(b"t".to_vec().into()),
+            TupleData::Text(b"0012.300".to_vec().into()),
+            TupleData::UnchangedToast,
+            TupleData::Text(br#"\x6869"#.to_vec().into()),
+            TupleData::Text(b"hello".to_vec().into()),
+        ];
+
+        let result = builder.append_pgoutput_tuple(&tuple_data).unwrap();
+        let batch = builder.finish().unwrap();
+
+        assert_eq!(result, PgOutputArrowAppendResult::Unsupported);
+        assert_eq!(batch.batch.num_rows(), 0);
+    }
+
+    #[test]
+    fn scalar_builder_rejects_pgoutput_null_for_non_nullable_columns() {
+        let table_schema = scalar_pgoutput_schema();
+        let mut builder = TableArrowBatchBuilder::try_new(table_schema, 1).unwrap();
+        let tuple_data = vec![
+            TupleData::Null,
+            TupleData::Null,
+            TupleData::Text(b"t".to_vec().into()),
+            TupleData::Text(b"0012.300".to_vec().into()),
+            TupleData::Text(br#"{"i": 1}"#.to_vec().into()),
+            TupleData::Text(br#"\x6869"#.to_vec().into()),
+            TupleData::Text(b"hello".to_vec().into()),
+        ];
+
+        let error = builder.append_pgoutput_tuple(&tuple_data).unwrap_err();
+
+        assert!(matches!(error.kind(), ErrorKind::InvalidData));
+        assert_eq!(error.description(), Some("Required column missing from tuple"));
     }
 }

@@ -146,7 +146,7 @@ where
 
                 let before_sending = Instant::now();
                 let snapshot_batch =
-                    postgres_copy_rows_to_arrow_batch(table_schema.clone(), &copy_rows)?;
+                    postgres_copy_rows_to_arrow_batch(Arc::clone(&table_schema), &copy_rows)?;
                 let (flush_result, pending_flush_result) = WriteSnapshotBatchResult::new(());
 
                 destination
@@ -287,7 +287,7 @@ async fn serial_table_copy<D: Destination + Clone + Send + 'static>(
         table_copy_stream.as_mut(),
         shutdown_rx,
         connection_updates_rx,
-        table_schema.clone(),
+        Arc::clone(&table_schema),
         pipeline_id,
         "false",
         destination,
@@ -391,7 +391,7 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
     for partition in copy_partitions {
         // Acquire a concurrency slot to make sure we are always using at most
         // `max_copy_connections`.
-        let permit = semaphore.clone().acquire_owned().await.map_err(|err| {
+        let permit = Arc::clone(&semaphore).acquire_owned().await.map_err(|err| {
             etl_error!(
                 ErrorKind::InvalidState,
                 "Could not acquire semaphore while copying a table in parallel",
@@ -401,7 +401,7 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
 
         let child_replication_client = transaction.fork_child().await?;
         let snapshot_id = snapshot_id.clone();
-        let table_schema = table_schema.clone();
+        let table_schema = Arc::clone(&table_schema);
         let publication_name = publication_name.clone();
         let batch_config = batch_config.clone();
         let shutdown_rx = shutdown_rx.clone();
@@ -610,7 +610,7 @@ where
         table_copy_stream.as_mut(),
         shutdown_rx,
         connection_updates_rx,
-        table_schema.clone(),
+        Arc::clone(&table_schema),
         pipeline_id,
         "true",
         destination,

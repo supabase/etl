@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use etl_postgres::types::TableId;
 use tracing::info;
@@ -87,7 +87,7 @@ where
                     StreamBatch::Changes(change_set) => {
                         if let Some(group) = change_set.groups.first() {
                             table_schemas
-                                .insert(change_set.table_id, group.rows.table_schema.clone());
+                                .insert(change_set.table_id, Arc::clone(&group.rows.table_schema));
                         }
                     }
                     StreamBatch::Truncate(truncate) => {

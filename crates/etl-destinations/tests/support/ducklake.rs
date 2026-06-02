@@ -4,11 +4,19 @@ use std::path::{Path, PathBuf};
 
 use duckdb::{Config, Connection};
 use pg_escape::quote_literal;
+use tempfile::TempDir;
+use url::Url;
 
 const DUCKDB_EXTENSION_VERSION: &str = "1.5.2";
 const DUCKLAKE_EXTENSION_FILE: &str = "ducklake.duckdb_extension";
 const JSON_EXTENSION_FILE: &str = "json.duckdb_extension";
 const PARQUET_EXTENSION_FILE: &str = "parquet.duckdb_extension";
+
+pub struct TestLake {
+    pub catalog_url: Url,
+    pub data_url: Url,
+    _temp_dir: TempDir,
+}
 
 fn current_vendored_extension_dir() -> Option<PathBuf> {
     let platform_dir = match (std::env::consts::OS, std::env::consts::ARCH) {
@@ -77,5 +85,33 @@ pub fn ducklake_load_sql() -> String {
     }
 
     "INSTALL ducklake; LOAD ducklake; INSTALL json; LOAD json; INSTALL parquet; LOAD parquet;"
-        .to_string()
+        .to_owned()
+}
+
+pub fn catalog_attach_target(catalog: &Url) -> String {
+    if catalog.scheme() == "file" {
+        return catalog
+            .to_file_path()
+            .expect("file catalog url should convert to a path")
+            .display()
+            .to_string();
+    }
+
+    catalog.as_str().to_owned()
+}
+
+pub async fn create_test_lake(test_name: &str) -> TestLake {
+    let temp_dir = tempfile::Builder::new()
+        .prefix(&format!("etl_ducklake_{test_name}_"))
+        .tempdir()
+        .expect("failed to create DuckLake test directory");
+    let catalog_path = temp_dir.path().join("catalog.ducklake");
+    let data_path = temp_dir.path().join("data");
+    std::fs::create_dir_all(&data_path).expect("failed to create DuckLake data directory");
+
+    TestLake {
+        catalog_url: Url::from_file_path(&catalog_path).expect("failed to build catalog file url"),
+        data_url: Url::from_directory_path(&data_path).expect("failed to build data file url"),
+        _temp_dir: temp_dir,
+    }
 }

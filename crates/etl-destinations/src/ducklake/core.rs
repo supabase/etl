@@ -103,6 +103,7 @@ pub(super) fn is_create_table_conflict(error: &duckdb::Error, table_name: &str) 
 /// deferred to background maintenance.
 #[derive(Clone)]
 pub struct DuckLakeDestination<S> {
+    #[cfg(feature = "test-utils")]
     manager: Arc<DuckLakeConnectionManager>,
     pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
     blocking_slots: Arc<Semaphore>,
@@ -325,6 +326,7 @@ where
         let merge_adjacent_files_dirty = Arc::new(AtomicBool::new(false));
         let checkpoint_requested = Arc::new(AtomicBool::new(false));
         let mut destination = Self {
+            #[cfg(feature = "test-utils")]
             manager,
             pool: Arc::clone(&pool),
             blocking_slots: Arc::clone(&blocking_slots),
@@ -927,7 +929,7 @@ where
         }
 
         let _table_creation_permit =
-            self.table_creation_slots.clone().acquire_owned().await.map_err(|_| {
+            Arc::clone(&self.table_creation_slots).acquire_owned().await.map_err(|_| {
                 etl_error!(ErrorKind::InvalidState, "DuckLake table creation semaphore closed")
             })?;
 
@@ -1210,15 +1212,15 @@ fn table_write_activity_for_change_set(
     let mut write_activity = TableWriteActivity { table_name, approx_bytes: 0, inserted_rows: 0 };
 
     for group in &change_set.groups {
-        match (group.change, group.row_image) {
-            (etl::types::ChangeKind::Insert, etl::types::RowImage::New)
-            | (etl::types::ChangeKind::Update, etl::types::RowImage::New) => {
-                write_activity.approx_bytes =
-                    write_activity.approx_bytes.saturating_add(group.rows.approx_bytes as u64);
-                write_activity.inserted_rows =
-                    write_activity.inserted_rows.saturating_add(group.rows.row_count() as u64);
-            }
-            _ => {}
+        if let (
+            etl::types::ChangeKind::Insert | etl::types::ChangeKind::Update,
+            etl::types::RowImage::New,
+        ) = (group.change, group.row_image)
+        {
+            write_activity.approx_bytes =
+                write_activity.approx_bytes.saturating_add(group.rows.approx_bytes as u64);
+            write_activity.inserted_rows =
+                write_activity.inserted_rows.saturating_add(group.rows.row_count() as u64);
         }
     }
 
@@ -1363,8 +1365,8 @@ mod tests {
             TableId::new(table_id),
             TableName::new(schema.to_string(), table.to_string()),
             vec![
-                ColumnSchema::new("id".to_string(), PgType::INT4, -1, false, true),
-                ColumnSchema::new("name".to_string(), PgType::TEXT, -1, true, false),
+                ColumnSchema::new("id".to_string(), PgType::INT4, -1, 1, Some(1), false),
+                ColumnSchema::new("name".to_string(), PgType::TEXT, -1, 2, None, true),
             ],
         )
     }

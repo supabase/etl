@@ -47,8 +47,10 @@ use etl::{
     store::{both::memory::MemoryStore, schema::SchemaStore},
     table_rows_to_arrow_batch,
     types::{
-        Cell, ChangeArrowBatch, ChangeKind, ColumnSchema, Event, PgLsn, RowImage, StreamBatch,
-        TableChangeSet, TableId, TableName, TableRow, TableSchema, Type as PgType,
+        Cell, ChangeArrowBatch, ChangeKind, ColumnSchema, DeleteEvent, Event, InsertEvent,
+        OldTableRow, PgLsn, ReplicatedTableSchema, RowImage, StreamBatch, TableChangeSet, TableId,
+        TableName, TableRow, TableSchema, TruncateEvent, Type as PgType, UpdateEvent,
+        UpdatedTableRow,
     },
 };
 use etl_destinations::ducklake::{DuckLakeDestination, table_name_to_ducklake_table_name};
@@ -104,8 +106,8 @@ fn make_schema(table_id: u32, schema: &str, table: &str) -> TableSchema {
         TableId::new(table_id),
         TableName::new(schema.to_string(), table.to_string()),
         vec![
-            ColumnSchema::new("id".to_string(), PgType::INT4, -1, false, true),
-            ColumnSchema::new("name".to_string(), PgType::TEXT, -1, true, false),
+            ColumnSchema::new("id".to_string(), PgType::INT4, -1, 1, Some(1), false),
+            ColumnSchema::new("name".to_string(), PgType::TEXT, -1, 2, None, true),
         ],
     )
 }
@@ -115,13 +117,69 @@ fn make_rich_schema(table_id: u32) -> TableSchema {
         TableId::new(table_id),
         TableName::new("public".to_string(), "rich".to_string()),
         vec![
-            ColumnSchema::new("id".to_string(), PgType::INT4, -1, false, true),
-            ColumnSchema::new("label".to_string(), PgType::VARCHAR, -1, true, false),
-            ColumnSchema::new("score".to_string(), PgType::FLOAT8, -1, true, false),
-            ColumnSchema::new("active".to_string(), PgType::BOOL, -1, true, false),
-            ColumnSchema::new("birthday".to_string(), PgType::DATE, -1, true, false),
+            ColumnSchema::new("id".to_string(), PgType::INT4, -1, 1, Some(1), false),
+            ColumnSchema::new("label".to_string(), PgType::VARCHAR, -1, 2, None, true),
+            ColumnSchema::new("score".to_string(), PgType::FLOAT8, -1, 3, None, true),
+            ColumnSchema::new("active".to_string(), PgType::BOOL, -1, 4, None, true),
+            ColumnSchema::new("birthday".to_string(), PgType::DATE, -1, 5, None, true),
         ],
     )
+}
+
+fn replicated_schema(schema: &TableSchema) -> ReplicatedTableSchema {
+    ReplicatedTableSchema::all(Arc::new(schema.clone()))
+}
+
+fn insert_event(schema: &TableSchema, lsn: PgLsn, tx_ordinal: u64, table_row: TableRow) -> Event {
+    Event::Insert(InsertEvent {
+        start_lsn: lsn,
+        commit_lsn: lsn,
+        tx_ordinal,
+        replicated_table_schema: replicated_schema(schema),
+        table_row,
+    })
+}
+
+fn update_event(
+    schema: &TableSchema,
+    lsn: PgLsn,
+    tx_ordinal: u64,
+    table_row: TableRow,
+    old_table_row: Option<OldTableRow>,
+) -> Event {
+    Event::Update(UpdateEvent {
+        start_lsn: lsn,
+        commit_lsn: lsn,
+        tx_ordinal,
+        replicated_table_schema: replicated_schema(schema),
+        updated_table_row: UpdatedTableRow::Full(table_row),
+        old_table_row,
+    })
+}
+
+fn delete_event(
+    schema: &TableSchema,
+    lsn: PgLsn,
+    tx_ordinal: u64,
+    old_table_row: Option<OldTableRow>,
+) -> Event {
+    Event::Delete(DeleteEvent {
+        start_lsn: lsn,
+        commit_lsn: lsn,
+        tx_ordinal,
+        replicated_table_schema: replicated_schema(schema),
+        old_table_row,
+    })
+}
+
+fn truncate_event(schema: &TableSchema, lsn: PgLsn, tx_ordinal: u64, options: i8) -> Event {
+    Event::Truncate(TruncateEvent {
+        start_lsn: lsn,
+        commit_lsn: lsn,
+        tx_ordinal,
+        options,
+        truncated_tables: vec![replicated_schema(schema)],
+    })
 }
 
 /// Opens a verification connection to the same DuckLake catalog and returns it.
@@ -333,7 +391,7 @@ async fn test_write_table_rows_basic() {
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
-    store.store_table_schema(schema).await.unwrap();
+    store.store_table_schema(schema.clone()).await.unwrap();
 
     let destination =
         DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
@@ -434,7 +492,7 @@ async fn test_write_table_rows_small_batch_stays_inlined_after_return() {
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
-    store.store_table_schema(schema).await.unwrap();
+    store.store_table_schema(schema.clone()).await.unwrap();
 
     let destination =
         DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
@@ -502,7 +560,7 @@ async fn test_write_table_rows_reuses_warm_pooled_connection() {
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
-    store.store_table_schema(schema).await.unwrap();
+    store.store_table_schema(schema.clone()).await.unwrap();
 
     let destination =
         DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
@@ -554,7 +612,7 @@ async fn test_write_table_rows_replaces_broken_pooled_connection_after_retry() {
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
-    store.store_table_schema(schema).await.unwrap();
+    store.store_table_schema(schema.clone()).await.unwrap();
 
     let destination =
         DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
@@ -608,7 +666,7 @@ async fn test_write_table_rows_retry_after_post_commit_failure_is_idempotent() {
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
-    store.store_table_schema(schema).await.unwrap();
+    store.store_table_schema(schema.clone()).await.unwrap();
 
     let destination =
         DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
@@ -651,7 +709,7 @@ async fn test_concurrent_same_table_copy_batches_complete() {
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
-    store.store_table_schema(schema).await.unwrap();
+    store.store_table_schema(schema.clone()).await.unwrap();
 
     let destination = Arc::new(
         DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
@@ -715,7 +773,7 @@ async fn test_write_table_rows_empty_creates_table() {
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
-    store.store_table_schema(schema).await.unwrap();
+    store.store_table_schema(schema.clone()).await.unwrap();
 
     let destination =
         DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
@@ -743,7 +801,7 @@ async fn test_truncate_clears_rows() {
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
-    store.store_table_schema(schema).await.unwrap();
+    store.store_table_schema(schema.clone()).await.unwrap();
 
     let destination =
         DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
@@ -798,7 +856,7 @@ async fn test_truncate_clears_copy_markers_for_recopy() {
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
-    store.store_table_schema(schema).await.unwrap();
+    store.store_table_schema(schema.clone()).await.unwrap();
 
     let destination =
         DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
@@ -823,7 +881,7 @@ async fn test_truncate_clears_copy_markers_for_recopy() {
 /// state.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_write_events() {
-    use etl::types::{DeleteEvent, InsertEvent, PgLsn, UpdateEvent};
+    use etl::types::PgLsn;
 
     let dir = make_test_dir("write_events");
     let catalog = dir.join("catalog.ducklake");
@@ -833,12 +891,11 @@ async fn test_write_events() {
     let catalog_url = path_to_file_url(&catalog);
     let data_url = path_to_file_url(&data);
 
-    let table_id = TableId::new(4);
     let schema = make_schema(4, "public", "products");
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
-    store.store_table_schema(schema).await.unwrap();
+    store.store_table_schema(schema.clone()).await.unwrap();
 
     let destination =
         DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
@@ -848,38 +905,34 @@ async fn test_write_events() {
     let lsn = PgLsn::from(100u64);
     destination
         .write_events(vec![
-            Event::Insert(InsertEvent {
-                start_lsn: lsn,
-                commit_lsn: lsn,
-                tx_ordinal: 0,
-                table_id,
-                table_row: TableRow::new(vec![Cell::I32(1), Cell::String("Widget".to_string())]),
-            }),
-            Event::Update(UpdateEvent {
-                start_lsn: lsn,
-                commit_lsn: lsn,
-                tx_ordinal: 1,
-                table_id,
-                table_row: TableRow::new(vec![Cell::I32(1), Cell::String("Gadget".to_string())]),
-                old_table_row: None,
-            }),
-            Event::Insert(InsertEvent {
-                start_lsn: lsn,
-                commit_lsn: lsn,
-                tx_ordinal: 2,
-                table_id,
-                table_row: TableRow::new(vec![Cell::I32(2), Cell::String("Spare".to_string())]),
-            }),
-            Event::Delete(DeleteEvent {
-                start_lsn: lsn,
-                commit_lsn: lsn,
-                tx_ordinal: 3,
-                table_id,
-                old_table_row: Some((
-                    false,
-                    TableRow::new(vec![Cell::I32(2), Cell::String("Spare".to_string())]),
-                )),
-            }),
+            insert_event(
+                &schema,
+                lsn,
+                0,
+                TableRow::new(vec![Cell::I32(1), Cell::String("Widget".to_string())]),
+            ),
+            update_event(
+                &schema,
+                lsn,
+                1,
+                TableRow::new(vec![Cell::I32(1), Cell::String("Gadget".to_string())]),
+                None,
+            ),
+            insert_event(
+                &schema,
+                lsn,
+                2,
+                TableRow::new(vec![Cell::I32(2), Cell::String("Spare".to_string())]),
+            ),
+            delete_event(
+                &schema,
+                lsn,
+                3,
+                Some(OldTableRow::Full(TableRow::new(vec![
+                    Cell::I32(2),
+                    Cell::String("Spare".to_string()),
+                ]))),
+            ),
         ])
         .await
         .expect("write_events failed");
@@ -924,7 +977,7 @@ async fn test_trait_write_events_dispatches_asynchronously_for_ducklake() {
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
-    store.store_table_schema(schema).await.unwrap();
+    store.store_table_schema(schema.clone()).await.unwrap();
 
     let destination =
         DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
@@ -1065,7 +1118,7 @@ async fn test_write_stream_batches_arrow_cdc() {
 /// Small CDC batches should remain inlined after the caller returns.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_write_events_small_batch_stays_inlined_after_return() {
-    use etl::types::{InsertEvent, PgLsn};
+    use etl::types::PgLsn;
 
     let dir = make_test_dir("write_events_small_batch_stays_inlined_after_return");
     let catalog = dir.join("catalog.ducklake");
@@ -1075,12 +1128,11 @@ async fn test_write_events_small_batch_stays_inlined_after_return() {
     let catalog_url = path_to_file_url(&catalog);
     let data_url = path_to_file_url(&data);
 
-    let table_id = TableId::new(17);
     let schema = make_schema(17, "public", "cdc_flush");
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
-    store.store_table_schema(schema).await.unwrap();
+    store.store_table_schema(schema.clone()).await.unwrap();
 
     let destination =
         DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
@@ -1089,13 +1141,12 @@ async fn test_write_events_small_batch_stays_inlined_after_return() {
 
     let lsn = PgLsn::from(700u64);
     destination
-        .write_events(vec![Event::Insert(InsertEvent {
-            start_lsn: lsn,
-            commit_lsn: lsn,
-            tx_ordinal: 0,
-            table_id,
-            table_row: TableRow::new(vec![Cell::I32(1), Cell::String("created".to_string())]),
-        })])
+        .write_events(vec![insert_event(
+            &schema,
+            lsn,
+            0,
+            TableRow::new(vec![Cell::I32(1), Cell::String("created".to_string())]),
+        )])
         .await
         .unwrap();
 
@@ -1113,7 +1164,7 @@ async fn test_write_events_small_batch_stays_inlined_after_return() {
 /// `write_events` keeps update events with old rows on the current-state path.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_write_events_with_old_row_update() {
-    use etl::types::{InsertEvent, PgLsn, UpdateEvent};
+    use etl::types::PgLsn;
 
     let dir = make_test_dir("write_events_with_old_row_update");
     let catalog = dir.join("catalog.ducklake");
@@ -1123,12 +1174,11 @@ async fn test_write_events_with_old_row_update() {
     let catalog_url = path_to_file_url(&catalog);
     let data_url = path_to_file_url(&data);
 
-    let table_id = TableId::new(8);
     let schema = make_schema(8, "public", "inventory");
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
-    store.store_table_schema(schema).await.unwrap();
+    store.store_table_schema(schema.clone()).await.unwrap();
 
     let destination =
         DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
@@ -1138,24 +1188,22 @@ async fn test_write_events_with_old_row_update() {
     let lsn = PgLsn::from(200u64);
     destination
         .write_events(vec![
-            Event::Insert(InsertEvent {
-                start_lsn: lsn,
-                commit_lsn: lsn,
-                tx_ordinal: 0,
-                table_id,
-                table_row: TableRow::new(vec![Cell::I32(1), Cell::String("Widget".to_string())]),
-            }),
-            Event::Update(UpdateEvent {
-                start_lsn: lsn,
-                commit_lsn: lsn,
-                tx_ordinal: 1,
-                table_id,
-                table_row: TableRow::new(vec![Cell::I32(1), Cell::String("Gadget".to_string())]),
-                old_table_row: Some((
-                    false,
-                    TableRow::new(vec![Cell::I32(1), Cell::String("Widget".to_string())]),
-                )),
-            }),
+            insert_event(
+                &schema,
+                lsn,
+                0,
+                TableRow::new(vec![Cell::I32(1), Cell::String("Widget".to_string())]),
+            ),
+            update_event(
+                &schema,
+                lsn,
+                1,
+                TableRow::new(vec![Cell::I32(1), Cell::String("Gadget".to_string())]),
+                Some(OldTableRow::Full(TableRow::new(vec![
+                    Cell::I32(1),
+                    Cell::String("Widget".to_string()),
+                ]))),
+            ),
         ])
         .await
         .expect("write_events with old row update failed");
@@ -1182,7 +1230,7 @@ async fn test_write_events_with_old_row_update() {
 /// committed.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_write_events_replay_is_idempotent() {
-    use etl::types::{DeleteEvent, InsertEvent, PgLsn, UpdateEvent};
+    use etl::types::PgLsn;
 
     let dir = make_test_dir("write_events_replay_is_idempotent");
     let catalog = dir.join("catalog.ducklake");
@@ -1192,12 +1240,11 @@ async fn test_write_events_replay_is_idempotent() {
     let catalog_url = path_to_file_url(&catalog);
     let data_url = path_to_file_url(&data);
 
-    let table_id = TableId::new(9);
     let schema = make_schema(9, "public", "orders");
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
-    store.store_table_schema(schema).await.unwrap();
+    store.store_table_schema(schema.clone()).await.unwrap();
 
     let destination =
         DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
@@ -1206,41 +1253,37 @@ async fn test_write_events_replay_is_idempotent() {
 
     let lsn = PgLsn::from(300u64);
     let batch = vec![
-        Event::Insert(InsertEvent {
-            start_lsn: lsn,
-            commit_lsn: lsn,
-            tx_ordinal: 0,
-            table_id,
-            table_row: TableRow::new(vec![Cell::I32(1), Cell::String("draft".to_string())]),
-        }),
-        Event::Update(UpdateEvent {
-            start_lsn: lsn,
-            commit_lsn: lsn,
-            tx_ordinal: 1,
-            table_id,
-            table_row: TableRow::new(vec![Cell::I32(1), Cell::String("paid".to_string())]),
-            old_table_row: Some((
-                false,
-                TableRow::new(vec![Cell::I32(1), Cell::String("draft".to_string())]),
-            )),
-        }),
-        Event::Insert(InsertEvent {
-            start_lsn: lsn,
-            commit_lsn: lsn,
-            tx_ordinal: 2,
-            table_id,
-            table_row: TableRow::new(vec![Cell::I32(2), Cell::String("temp".to_string())]),
-        }),
-        Event::Delete(DeleteEvent {
-            start_lsn: lsn,
-            commit_lsn: lsn,
-            tx_ordinal: 3,
-            table_id,
-            old_table_row: Some((
-                false,
-                TableRow::new(vec![Cell::I32(2), Cell::String("temp".to_string())]),
-            )),
-        }),
+        insert_event(
+            &schema,
+            lsn,
+            0,
+            TableRow::new(vec![Cell::I32(1), Cell::String("draft".to_string())]),
+        ),
+        update_event(
+            &schema,
+            lsn,
+            1,
+            TableRow::new(vec![Cell::I32(1), Cell::String("paid".to_string())]),
+            Some(OldTableRow::Full(TableRow::new(vec![
+                Cell::I32(1),
+                Cell::String("draft".to_string()),
+            ]))),
+        ),
+        insert_event(
+            &schema,
+            lsn,
+            2,
+            TableRow::new(vec![Cell::I32(2), Cell::String("temp".to_string())]),
+        ),
+        delete_event(
+            &schema,
+            lsn,
+            3,
+            Some(OldTableRow::Full(TableRow::new(vec![
+                Cell::I32(2),
+                Cell::String("temp".to_string()),
+            ]))),
+        ),
     ];
 
     destination.write_events(batch.clone()).await.unwrap();
@@ -1269,8 +1312,6 @@ async fn test_write_events_replay_is_idempotent() {
 /// Streaming progress must compare transaction ordinals when commit LSNs match.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_write_events_same_commit_lsn_higher_tx_ordinal_still_applies() {
-    use etl::types::{InsertEvent, UpdateEvent};
-
     let dir = make_test_dir("write_events_same_commit_lsn_higher_tx_ordinal_still_applies");
     let catalog = dir.join("catalog.ducklake");
     let data = dir.join("data");
@@ -1279,12 +1320,11 @@ async fn test_write_events_same_commit_lsn_higher_tx_ordinal_still_applies() {
     let catalog_url = path_to_file_url(&catalog);
     let data_url = path_to_file_url(&data);
 
-    let table_id = TableId::new(18);
     let schema = make_schema(18, "public", "tx_ordinal_progress");
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
-    store.store_table_schema(schema).await.unwrap();
+    store.store_table_schema(schema.clone()).await.unwrap();
 
     let destination =
         DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
@@ -1293,27 +1333,25 @@ async fn test_write_events_same_commit_lsn_higher_tx_ordinal_still_applies() {
 
     let lsn = PgLsn::from(350u64);
     destination
-        .write_events(vec![Event::Insert(InsertEvent {
-            start_lsn: lsn,
-            commit_lsn: lsn,
-            tx_ordinal: 0,
-            table_id,
-            table_row: TableRow::new(vec![Cell::I32(1), Cell::String("queued".to_string())]),
-        })])
+        .write_events(vec![insert_event(
+            &schema,
+            lsn,
+            0,
+            TableRow::new(vec![Cell::I32(1), Cell::String("queued".to_string())]),
+        )])
         .await
         .unwrap();
     destination
-        .write_events(vec![Event::Update(UpdateEvent {
-            start_lsn: lsn,
-            commit_lsn: lsn,
-            tx_ordinal: 1,
-            table_id,
-            table_row: TableRow::new(vec![Cell::I32(1), Cell::String("posted".to_string())]),
-            old_table_row: Some((
-                false,
-                TableRow::new(vec![Cell::I32(1), Cell::String("queued".to_string())]),
-            )),
-        })])
+        .write_events(vec![update_event(
+            &schema,
+            lsn,
+            1,
+            TableRow::new(vec![Cell::I32(1), Cell::String("posted".to_string())]),
+            Some(OldTableRow::Full(TableRow::new(vec![
+                Cell::I32(1),
+                Cell::String("queued".to_string()),
+            ]))),
+        )])
         .await
         .unwrap();
 
@@ -1339,8 +1377,6 @@ async fn test_write_events_same_commit_lsn_higher_tx_ordinal_still_applies() {
 /// overlaps.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_write_events_restart_overlap_rebatches_only_pending_suffix() {
-    use etl::types::InsertEvent;
-
     let dir = make_test_dir("write_events_restart_overlap_rebatches_only_pending_suffix");
     let catalog = dir.join("catalog.ducklake");
     let data = dir.join("data");
@@ -1349,12 +1385,11 @@ async fn test_write_events_restart_overlap_rebatches_only_pending_suffix() {
     let catalog_url = path_to_file_url(&catalog);
     let data_url = path_to_file_url(&data);
 
-    let table_id = TableId::new(19);
     let schema = make_schema(19, "public", "restart_overlap_progress");
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
-    store.store_table_schema(schema).await.unwrap();
+    store.store_table_schema(schema.clone()).await.unwrap();
 
     let destination = DuckLakeDestination::new(
         catalog_url.clone(),
@@ -1372,16 +1407,15 @@ async fn test_write_events_restart_overlap_rebatches_only_pending_suffix() {
             (0..8)
                 .map(|idx| {
                     let lsn = PgLsn::from(400u64 + idx as u64);
-                    Event::Insert(InsertEvent {
-                        start_lsn: lsn,
-                        commit_lsn: lsn,
-                        tx_ordinal: 0,
-                        table_id,
-                        table_row: TableRow::new(vec![
+                    insert_event(
+                        &schema,
+                        lsn,
+                        0,
+                        TableRow::new(vec![
                             Cell::I32(idx + 1),
                             Cell::String(format!("name-{}", idx + 1)),
                         ]),
-                    })
+                    )
                 })
                 .collect(),
         )
@@ -1401,16 +1435,15 @@ async fn test_write_events_restart_overlap_rebatches_only_pending_suffix() {
             (3..16)
                 .map(|idx| {
                     let lsn = PgLsn::from(400u64 + idx as u64);
-                    Event::Insert(InsertEvent {
-                        start_lsn: lsn,
-                        commit_lsn: lsn,
-                        tx_ordinal: 0,
-                        table_id,
-                        table_row: TableRow::new(vec![
+                    insert_event(
+                        &schema,
+                        lsn,
+                        0,
+                        TableRow::new(vec![
                             Cell::I32(idx + 1),
                             Cell::String(format!("name-{}", idx + 1)),
                         ]),
-                    })
+                    )
                 })
                 .collect(),
         )
@@ -1443,8 +1476,6 @@ async fn test_write_events_restart_overlap_rebatches_only_pending_suffix() {
 #[cfg(feature = "test-utils")]
 #[tokio::test(flavor = "multi_thread")]
 async fn test_write_events_reuses_one_staging_table_per_atomic_batch() {
-    use etl::types::{InsertEvent, UpdateEvent};
-
     let _test_hook_guard = acquire_ducklake_test_hook_guard().await;
     reset_ducklake_test_hooks();
 
@@ -1456,12 +1487,11 @@ async fn test_write_events_reuses_one_staging_table_per_atomic_batch() {
     let catalog_url = path_to_file_url(&catalog);
     let data_url = path_to_file_url(&data);
 
-    let table_id = TableId::new(19);
     let schema = make_schema(19, "public", "staging_reuse");
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
-    store.store_table_schema(schema).await.unwrap();
+    store.store_table_schema(schema.clone()).await.unwrap();
 
     let destination =
         DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
@@ -1471,31 +1501,28 @@ async fn test_write_events_reuses_one_staging_table_per_atomic_batch() {
     let lsn = PgLsn::from(360u64);
     destination
         .write_events(vec![
-            Event::Insert(InsertEvent {
-                start_lsn: lsn,
-                commit_lsn: lsn,
-                tx_ordinal: 0,
-                table_id,
-                table_row: TableRow::new(vec![Cell::I32(1), Cell::String("before".to_string())]),
-            }),
-            Event::Update(UpdateEvent {
-                start_lsn: lsn,
-                commit_lsn: lsn,
-                tx_ordinal: 1,
-                table_id,
-                table_row: TableRow::new(vec![Cell::I32(1), Cell::String("after".to_string())]),
-                old_table_row: Some((
-                    false,
-                    TableRow::new(vec![Cell::I32(1), Cell::String("before".to_string())]),
-                )),
-            }),
-            Event::Insert(InsertEvent {
-                start_lsn: lsn,
-                commit_lsn: lsn,
-                tx_ordinal: 2,
-                table_id,
-                table_row: TableRow::new(vec![Cell::I32(2), Cell::String("tail".to_string())]),
-            }),
+            insert_event(
+                &schema,
+                lsn,
+                0,
+                TableRow::new(vec![Cell::I32(1), Cell::String("before".to_string())]),
+            ),
+            update_event(
+                &schema,
+                lsn,
+                1,
+                TableRow::new(vec![Cell::I32(1), Cell::String("after".to_string())]),
+                Some(OldTableRow::Full(TableRow::new(vec![
+                    Cell::I32(1),
+                    Cell::String("before".to_string()),
+                ]))),
+            ),
+            insert_event(
+                &schema,
+                lsn,
+                2,
+                TableRow::new(vec![Cell::I32(2), Cell::String("tail".to_string())]),
+            ),
         ])
         .await
         .unwrap();
@@ -1538,7 +1565,7 @@ async fn test_applied_batches_table_uses_data_inlining() {
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
-    store.store_table_schema(schema).await.unwrap();
+    store.store_table_schema(schema.clone()).await.unwrap();
 
     let destination =
         DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
@@ -1575,7 +1602,7 @@ async fn test_shutdown_flushes_inlined_copy_rows() {
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
-    store.store_table_schema(schema).await.unwrap();
+    store.store_table_schema(schema.clone()).await.unwrap();
 
     let destination =
         DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
@@ -1623,7 +1650,7 @@ async fn test_shutdown_flushes_inlined_copy_rows() {
 /// Shutdown should flush inlined CDC rows for all known tables.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_shutdown_flushes_inlined_cdc_rows_for_all_known_tables() {
-    use etl::types::{InsertEvent, PgLsn};
+    use etl::types::PgLsn;
 
     let dir = make_test_dir("shutdown_flushes_inlined_cdc_rows_for_all_known_tables");
     let catalog = dir.join("catalog.ducklake");
@@ -1633,16 +1660,14 @@ async fn test_shutdown_flushes_inlined_cdc_rows_for_all_known_tables() {
     let catalog_url = path_to_file_url(&catalog);
     let data_url = path_to_file_url(&data);
 
-    let table_id_a = TableId::new(35);
-    let table_id_b = TableId::new(36);
     let schema_a = make_schema(35, "public", "shutdown_cdc_alpha");
     let schema_b = make_schema(36, "public", "shutdown_cdc_beta");
     let table_name_a = table_name_to_ducklake_table_name(&schema_a.name).unwrap();
     let table_name_b = table_name_to_ducklake_table_name(&schema_b.name).unwrap();
 
     let store = MemoryStore::new();
-    store.store_table_schema(schema_a).await.unwrap();
-    store.store_table_schema(schema_b).await.unwrap();
+    store.store_table_schema(schema_a.clone()).await.unwrap();
+    store.store_table_schema(schema_b.clone()).await.unwrap();
 
     let destination =
         DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
@@ -1652,20 +1677,18 @@ async fn test_shutdown_flushes_inlined_cdc_rows_for_all_known_tables() {
     let lsn = PgLsn::from(900u64);
     destination
         .write_events(vec![
-            Event::Insert(InsertEvent {
-                start_lsn: lsn,
-                commit_lsn: lsn,
-                tx_ordinal: 0,
-                table_id: table_id_a,
-                table_row: TableRow::new(vec![Cell::I32(1), Cell::String("alpha".to_string())]),
-            }),
-            Event::Insert(InsertEvent {
-                start_lsn: lsn,
-                commit_lsn: lsn,
-                tx_ordinal: 1,
-                table_id: table_id_b,
-                table_row: TableRow::new(vec![Cell::I32(2), Cell::String("beta".to_string())]),
-            }),
+            insert_event(
+                &schema_a,
+                lsn,
+                0,
+                TableRow::new(vec![Cell::I32(1), Cell::String("alpha".to_string())]),
+            ),
+            insert_event(
+                &schema_b,
+                lsn,
+                1,
+                TableRow::new(vec![Cell::I32(2), Cell::String("beta".to_string())]),
+            ),
         ])
         .await
         .unwrap();
@@ -1724,7 +1747,7 @@ async fn test_shutdown_flushes_inlined_cdc_rows_for_all_known_tables() {
 /// flush.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_write_events_mixed_multi_table_batches() {
-    use etl::types::{DeleteEvent, InsertEvent, PgLsn, UpdateEvent};
+    use etl::types::PgLsn;
 
     let dir = make_test_dir("write_events_mixed_multi_table_batches");
     let catalog = dir.join("catalog.ducklake");
@@ -1734,16 +1757,14 @@ async fn test_write_events_mixed_multi_table_batches() {
     let catalog_url = path_to_file_url(&catalog);
     let data_url = path_to_file_url(&data);
 
-    let table_id_a = TableId::new(10);
-    let table_id_b = TableId::new(11);
     let schema_a = make_schema(10, "public", "alpha_events");
     let schema_b = make_schema(11, "public", "beta_events");
     let table_name_a = table_name_to_ducklake_table_name(&schema_a.name).unwrap();
     let table_name_b = table_name_to_ducklake_table_name(&schema_b.name).unwrap();
 
     let store = MemoryStore::new();
-    store.store_table_schema(schema_a).await.unwrap();
-    store.store_table_schema(schema_b).await.unwrap();
+    store.store_table_schema(schema_a.clone()).await.unwrap();
+    store.store_table_schema(schema_b.clone()).await.unwrap();
 
     let destination =
         DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
@@ -1753,51 +1774,43 @@ async fn test_write_events_mixed_multi_table_batches() {
     let lsn = PgLsn::from(400u64);
     destination
         .write_events(vec![
-            Event::Insert(InsertEvent {
-                start_lsn: lsn,
-                commit_lsn: lsn,
-                tx_ordinal: 0,
-                table_id: table_id_a,
-                table_row: TableRow::new(vec![Cell::I32(1), Cell::String("a-one".to_string())]),
-            }),
-            Event::Insert(InsertEvent {
-                start_lsn: lsn,
-                commit_lsn: lsn,
-                tx_ordinal: 1,
-                table_id: table_id_b,
-                table_row: TableRow::new(vec![Cell::I32(1), Cell::String("b-one".to_string())]),
-            }),
-            Event::Update(UpdateEvent {
-                start_lsn: lsn,
-                commit_lsn: lsn,
-                tx_ordinal: 2,
-                table_id: table_id_a,
-                table_row: TableRow::new(vec![
+            insert_event(
+                &schema_a,
+                lsn,
+                0,
+                TableRow::new(vec![Cell::I32(1), Cell::String("a-one".to_string())]),
+            ),
+            insert_event(
+                &schema_b,
+                lsn,
+                1,
+                TableRow::new(vec![Cell::I32(1), Cell::String("b-one".to_string())]),
+            ),
+            update_event(
+                &schema_a,
+                lsn,
+                2,
+                TableRow::new(vec![Cell::I32(1), Cell::String("a-one-updated".to_string())]),
+                Some(OldTableRow::Full(TableRow::new(vec![
                     Cell::I32(1),
-                    Cell::String("a-one-updated".to_string()),
-                ]),
-                old_table_row: Some((
-                    false,
-                    TableRow::new(vec![Cell::I32(1), Cell::String("a-one".to_string())]),
-                )),
-            }),
-            Event::Insert(InsertEvent {
-                start_lsn: lsn,
-                commit_lsn: lsn,
-                tx_ordinal: 3,
-                table_id: table_id_b,
-                table_row: TableRow::new(vec![Cell::I32(2), Cell::String("b-two".to_string())]),
-            }),
-            Event::Delete(DeleteEvent {
-                start_lsn: lsn,
-                commit_lsn: lsn,
-                tx_ordinal: 4,
-                table_id: table_id_b,
-                old_table_row: Some((
-                    false,
-                    TableRow::new(vec![Cell::I32(1), Cell::String("b-one".to_string())]),
-                )),
-            }),
+                    Cell::String("a-one".to_string()),
+                ]))),
+            ),
+            insert_event(
+                &schema_b,
+                lsn,
+                3,
+                TableRow::new(vec![Cell::I32(2), Cell::String("b-two".to_string())]),
+            ),
+            delete_event(
+                &schema_b,
+                lsn,
+                4,
+                Some(OldTableRow::Full(TableRow::new(vec![
+                    Cell::I32(1),
+                    Cell::String("b-one".to_string()),
+                ]))),
+            ),
         ])
         .await
         .unwrap();
@@ -1851,7 +1864,7 @@ async fn test_write_events_mixed_multi_table_batches() {
 #[cfg(feature = "test-utils")]
 #[tokio::test(flavor = "multi_thread")]
 async fn test_write_events_truncate_retry_after_post_commit_failure_is_idempotent() {
-    use etl::types::{InsertEvent, PgLsn, TruncateEvent};
+    use etl::types::PgLsn;
 
     let _test_hook_guard = acquire_ducklake_test_hook_guard().await;
     reset_ducklake_test_hooks();
@@ -1869,7 +1882,7 @@ async fn test_write_events_truncate_retry_after_post_commit_failure_is_idempoten
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
-    store.store_table_schema(schema).await.unwrap();
+    store.store_table_schema(schema.clone()).await.unwrap();
 
     let destination =
         DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
@@ -1892,23 +1905,13 @@ async fn test_write_events_truncate_retry_after_post_commit_failure_is_idempoten
     let lsn = PgLsn::from(800u64);
     destination
         .write_events(vec![
-            Event::Truncate(TruncateEvent {
-                start_lsn: lsn,
-                commit_lsn: lsn,
-                tx_ordinal: 0,
-                options: 0,
-                rel_ids: vec![table_id.0],
-            }),
-            Event::Insert(InsertEvent {
-                start_lsn: lsn,
-                commit_lsn: lsn,
-                tx_ordinal: 1,
-                table_id,
-                table_row: TableRow::new(vec![
-                    Cell::I32(3),
-                    Cell::String("after-truncate".to_string()),
-                ]),
-            }),
+            truncate_event(&schema, lsn, 0, 0),
+            insert_event(
+                &schema,
+                lsn,
+                1,
+                TableRow::new(vec![Cell::I32(3), Cell::String("after-truncate".to_string())]),
+            ),
         ])
         .await
         .unwrap();
@@ -1941,7 +1944,7 @@ async fn test_write_events_truncate_retry_after_post_commit_failure_is_idempoten
 #[cfg(feature = "test-utils")]
 #[tokio::test(flavor = "multi_thread")]
 async fn test_write_events_retry_after_post_commit_failure_is_idempotent() {
-    use etl::types::{DeleteEvent, InsertEvent, PgLsn, UpdateEvent};
+    use etl::types::PgLsn;
 
     let _test_hook_guard = acquire_ducklake_test_hook_guard().await;
     reset_ducklake_test_hooks();
@@ -1954,12 +1957,11 @@ async fn test_write_events_retry_after_post_commit_failure_is_idempotent() {
     let catalog_url = path_to_file_url(&catalog);
     let data_url = path_to_file_url(&data);
 
-    let table_id = TableId::new(12);
     let schema = make_schema(12, "public", "payments");
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
-    store.store_table_schema(schema).await.unwrap();
+    store.store_table_schema(schema.clone()).await.unwrap();
 
     let destination =
         DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
@@ -1971,41 +1973,37 @@ async fn test_write_events_retry_after_post_commit_failure_is_idempotent() {
     let lsn = PgLsn::from(500u64);
     destination
         .write_events(vec![
-            Event::Insert(InsertEvent {
-                start_lsn: lsn,
-                commit_lsn: lsn,
-                tx_ordinal: 0,
-                table_id,
-                table_row: TableRow::new(vec![Cell::I32(1), Cell::String("queued".to_string())]),
-            }),
-            Event::Update(UpdateEvent {
-                start_lsn: lsn,
-                commit_lsn: lsn,
-                tx_ordinal: 1,
-                table_id,
-                table_row: TableRow::new(vec![Cell::I32(1), Cell::String("posted".to_string())]),
-                old_table_row: Some((
-                    false,
-                    TableRow::new(vec![Cell::I32(1), Cell::String("queued".to_string())]),
-                )),
-            }),
-            Event::Insert(InsertEvent {
-                start_lsn: lsn,
-                commit_lsn: lsn,
-                tx_ordinal: 2,
-                table_id,
-                table_row: TableRow::new(vec![Cell::I32(2), Cell::String("tmp".to_string())]),
-            }),
-            Event::Delete(DeleteEvent {
-                start_lsn: lsn,
-                commit_lsn: lsn,
-                tx_ordinal: 3,
-                table_id,
-                old_table_row: Some((
-                    false,
-                    TableRow::new(vec![Cell::I32(2), Cell::String("tmp".to_string())]),
-                )),
-            }),
+            insert_event(
+                &schema,
+                lsn,
+                0,
+                TableRow::new(vec![Cell::I32(1), Cell::String("queued".to_string())]),
+            ),
+            update_event(
+                &schema,
+                lsn,
+                1,
+                TableRow::new(vec![Cell::I32(1), Cell::String("posted".to_string())]),
+                Some(OldTableRow::Full(TableRow::new(vec![
+                    Cell::I32(1),
+                    Cell::String("queued".to_string()),
+                ]))),
+            ),
+            insert_event(
+                &schema,
+                lsn,
+                2,
+                TableRow::new(vec![Cell::I32(2), Cell::String("tmp".to_string())]),
+            ),
+            delete_event(
+                &schema,
+                lsn,
+                3,
+                Some(OldTableRow::Full(TableRow::new(vec![
+                    Cell::I32(2),
+                    Cell::String("tmp".to_string()),
+                ]))),
+            ),
         ])
         .await
         .unwrap();
@@ -2105,7 +2103,7 @@ async fn test_type_mapping_round_trip() {
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
-    store.store_table_schema(schema).await.unwrap();
+    store.store_table_schema(schema.clone()).await.unwrap();
 
     let destination =
         DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)

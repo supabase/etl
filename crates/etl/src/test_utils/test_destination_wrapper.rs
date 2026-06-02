@@ -51,7 +51,7 @@ fn table_change_set_to_events(change_set: &TableChangeSet) -> Vec<Event> {
         match (group.change, group.row_image) {
             (ChangeKind::Insert, RowImage::New) => {
                 let replicated_table_schema =
-                    ReplicatedTableSchema::all(group.rows.table_schema.clone());
+                    ReplicatedTableSchema::all(Arc::clone(&group.rows.table_schema));
                 for (row_index, row) in rows.into_iter().enumerate() {
                     let commit_lsn = PgLsn::from(group.commit_lsns.values()[row_index]);
                     let tx_ordinal = group.tx_ordinals.values()[row_index];
@@ -72,7 +72,7 @@ fn table_change_set_to_events(change_set: &TableChangeSet) -> Vec<Event> {
                 {
                     let new_rows = record_batch_to_table_rows(&next_group.rows.batch);
                     let replicated_table_schema =
-                        ReplicatedTableSchema::all(next_group.rows.table_schema.clone());
+                        ReplicatedTableSchema::all(Arc::clone(&next_group.rows.table_schema));
                     for row_index in 0..rows.len() {
                         let commit_lsn = PgLsn::from(group.commit_lsns.values()[row_index]);
                         let tx_ordinal = group.tx_ordinals.values()[row_index];
@@ -93,7 +93,7 @@ fn table_change_set_to_events(change_set: &TableChangeSet) -> Vec<Event> {
                     index += 2;
                 } else {
                     let replicated_table_schema =
-                        ReplicatedTableSchema::all(group.rows.table_schema.clone());
+                        ReplicatedTableSchema::all(Arc::clone(&group.rows.table_schema));
                     for (row_index, row) in rows.into_iter().enumerate() {
                         let commit_lsn = PgLsn::from(group.commit_lsns.values()[row_index]);
                         let tx_ordinal = group.tx_ordinals.values()[row_index];
@@ -112,7 +112,7 @@ fn table_change_set_to_events(change_set: &TableChangeSet) -> Vec<Event> {
             }
             (ChangeKind::Update, RowImage::New) => {
                 let replicated_table_schema =
-                    ReplicatedTableSchema::all(group.rows.table_schema.clone());
+                    ReplicatedTableSchema::all(Arc::clone(&group.rows.table_schema));
                 for (row_index, row) in rows.into_iter().enumerate() {
                     let commit_lsn = PgLsn::from(group.commit_lsns.values()[row_index]);
                     let tx_ordinal = group.tx_ordinals.values()[row_index];
@@ -129,7 +129,7 @@ fn table_change_set_to_events(change_set: &TableChangeSet) -> Vec<Event> {
             }
             (ChangeKind::Delete, RowImage::Old { key_only }) => {
                 let replicated_table_schema =
-                    ReplicatedTableSchema::all(group.rows.table_schema.clone());
+                    ReplicatedTableSchema::all(Arc::clone(&group.rows.table_schema));
                 for (row_index, row) in rows.into_iter().enumerate() {
                     let commit_lsn = PgLsn::from(group.commit_lsns.values()[row_index]);
                     let tx_ordinal = group.tx_ordinals.values()[row_index];
@@ -310,7 +310,7 @@ impl<D> TestDestinationWrapper<D> {
     {
         let notify = Arc::new(Notify::new());
         let mut inner = self.inner.write().await;
-        inner.event_conditions.push((Box::new(condition), notify.clone()));
+        inner.event_conditions.push((Box::new(condition), Arc::clone(&notify)));
 
         // Check conditions immediately in case they're already satisfied
         inner.check_conditions();
@@ -371,7 +371,7 @@ impl<D> TestDestinationWrapper<D> {
             check_all_events_count(events, table_rows, conditions)
         });
 
-        inner.combined_conditions.push((condition, notify.clone()));
+        inner.combined_conditions.push((condition, Arc::clone(&notify)));
 
         // Check conditions immediately in case they're already satisfied.
         inner.check_conditions();
@@ -514,7 +514,7 @@ where
         // the methods on the outside block on the result right after calling
         // the method, so it's not needed to simulate asynchronous work to make
         // the code continue and do something else in the meanwhile.
-        let inner = self.inner.clone();
+        let inner = Arc::clone(&self.inner);
         tokio::spawn(async move {
             let result = pending_result.await.into_result();
 

@@ -488,7 +488,7 @@ impl BigQueryClient {
         let max_staleness_option = if let Some(max_staleness_mins) = max_staleness_mins {
             Self::max_staleness_option(max_staleness_mins)
         } else {
-            "".to_string()
+            String::new()
         };
 
         info!(
@@ -543,7 +543,7 @@ impl BigQueryClient {
         let max_staleness_option = if let Some(max_staleness_mins) = max_staleness_mins {
             Self::max_staleness_option(max_staleness_mins)
         } else {
-            "".to_string()
+            String::new()
         };
 
         info!(%full_table_name, "creating table in bigquery");
@@ -665,7 +665,7 @@ impl BigQueryClient {
     /// Retries for transient request and transport failures are handled inside
     /// the underlying Storage Write API library. This method only evaluates
     /// final per-batch outcomes and converts failures into ETL errors.
-    pub async fn append_table_batches(
+    pub(super) async fn append_table_batches(
         &self,
         append_requests: Vec<BatchAppendRequest<BigQueryTableRow>>,
     ) -> EtlResult<(usize, usize)> {
@@ -755,12 +755,9 @@ impl BigQueryClient {
             return Ok((0, 0));
         }
 
-        let stream_name = StreamName::new_default(
-            self.project_id.clone(),
-            dataset_id.to_string(),
-            table_id.to_string(),
-        )
-        .to_string();
+        let stream_name =
+            StreamName::new_default(self.project_id.clone(), dataset_id.clone(), table_id.clone())
+                .to_string();
         let trace_id = create_append_trace_id(pipeline_id, table_id, batch_index);
         let requests = build_arrow_append_requests(
             &stream_name,
@@ -812,7 +809,7 @@ impl BigQueryClient {
     ///
     /// Converts TableRow instances to BigQueryTableRow and creates a properly
     /// configured [`BatchAppendRequest`] for efficient append retries.
-    pub fn create_batch_append_request(
+    pub(super) fn create_batch_append_request(
         &self,
         pipeline_id: PipelineId,
         batch_index: usize,
@@ -824,11 +821,8 @@ impl BigQueryClient {
         // We want to use the default stream from BigQuery since it allows multiple
         // connections to send data to it. In addition, it's available by
         // default for every table, so it also reduces complexity.
-        let stream_name = StreamName::new_default(
-            self.project_id.clone(),
-            dataset_id.to_string(),
-            table_id.to_string(),
-        );
+        let stream_name =
+            StreamName::new_default(self.project_id.clone(), dataset_id.clone(), table_id.clone());
 
         let table_batch = TableBatch::new(stream_name, table_descriptor, validated_rows);
         let trace_id =
@@ -918,7 +912,7 @@ impl BigQueryClient {
             .collect::<EtlResult<Vec<_>>>()?;
 
         if identity_columns.is_empty() {
-            return Ok("".to_string());
+            return Ok(String::new());
         }
 
         Ok(format!(", primary key ({}) not enforced", identity_columns.join(",")))
@@ -980,7 +974,7 @@ impl BigQueryClient {
             &Type::BYTEA => "bytes",
             _ => "string",
         }
-        .to_string()
+        .to_owned()
     }
 
     /// Converts Postgres column schemas to a BigQuery [`TableDescriptor`].
@@ -1059,7 +1053,7 @@ impl BigQueryClient {
 
         field_descriptors.push(FieldDescriptor {
             number,
-            name: BIGQUERY_CDC_SPECIAL_COLUMN.to_string(),
+            name: BIGQUERY_CDC_SPECIAL_COLUMN.to_owned(),
             typ: ColumnType::String,
             mode: ColumnMode::Required,
         });
@@ -1068,7 +1062,7 @@ impl BigQueryClient {
         if use_cdc_sequence_column {
             field_descriptors.push(FieldDescriptor {
                 number,
-                name: BIGQUERY_CDC_SEQUENCE_COLUMN.to_string(),
+                name: BIGQUERY_CDC_SEQUENCE_COLUMN.to_owned(),
                 typ: ColumnType::String,
                 mode: ColumnMode::Required,
             });
@@ -1088,6 +1082,30 @@ impl fmt::Debug for BigQueryClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn nullable_column(name: &str, typ: Type, ordinal_position: i32) -> ColumnSchema {
+        ColumnSchema::new(name.to_owned(), typ, -1, ordinal_position, None, true)
+    }
+
+    fn required_column(name: &str, typ: Type, ordinal_position: i32) -> ColumnSchema {
+        ColumnSchema::new(name.to_owned(), typ, -1, ordinal_position, None, false)
+    }
+
+    fn primary_key_column(
+        name: &str,
+        typ: Type,
+        ordinal_position: i32,
+        primary_key_ordinal_position: i32,
+    ) -> ColumnSchema {
+        ColumnSchema::new(
+            name.to_owned(),
+            typ,
+            -1,
+            ordinal_position,
+            Some(primary_key_ordinal_position),
+            false,
+        )
+    }
 
     #[test]
     fn test_postgres_to_bigquery_type_basic_types() {
@@ -1117,24 +1135,23 @@ mod tests {
 
     #[test]
     fn test_column_spec() {
-        let column_schema = ColumnSchema::new("test_col".to_string(), Type::TEXT, -1, true, false);
+        let column_schema = nullable_column("test_col", Type::TEXT, 1);
         let spec = BigQueryClient::column_spec(&column_schema).expect("column spec generation");
         assert_eq!(spec, "`test_col` string");
 
-        let not_null_column = ColumnSchema::new("id".to_string(), Type::INT4, -1, false, true);
+        let not_null_column = primary_key_column("id", Type::INT4, 1, 1);
         let not_null_spec =
             BigQueryClient::column_spec(&not_null_column).expect("not null column spec");
         assert_eq!(not_null_spec, "`id` int64 not null");
 
-        let array_column =
-            ColumnSchema::new("tags".to_string(), Type::TEXT_ARRAY, -1, false, false);
+        let array_column = required_column("tags", Type::TEXT_ARRAY, 1);
         let array_spec = BigQueryClient::column_spec(&array_column).expect("array column spec");
         assert_eq!(array_spec, "`tags` array<string>");
     }
 
     #[test]
     fn test_column_spec_escapes_backticks() {
-        let column_schema = ColumnSchema::new("pwn`name".to_string(), Type::TEXT, -1, true, false);
+        let column_schema = nullable_column("pwn`name", Type::TEXT, 1);
 
         let spec = BigQueryClient::column_spec(&column_schema).expect("escaped column spec");
 
@@ -1154,27 +1171,25 @@ mod tests {
     #[test]
     fn test_add_primary_key_clause() {
         let columns_with_pk = vec![
-            ColumnSchema::new("id".to_string(), Type::INT4, -1, false, true),
-            ColumnSchema::new("name".to_string(), Type::TEXT, -1, true, false),
+            primary_key_column("id", Type::INT4, 1, 1),
+            nullable_column("name", Type::TEXT, 2),
         ];
         let pk_clause =
             BigQueryClient::add_primary_key_clause(&columns_with_pk).expect("pk clause");
         assert_eq!(pk_clause, ", primary key (`id`) not enforced");
 
         let columns_with_composite_pk = vec![
-            ColumnSchema::new("tenant_id".to_string(), Type::INT4, -1, false, true),
-            ColumnSchema::new("id".to_string(), Type::INT4, -1, false, true),
-            ColumnSchema::new("name".to_string(), Type::TEXT, -1, true, false),
+            primary_key_column("tenant_id", Type::INT4, 1, 1),
+            primary_key_column("id", Type::INT4, 2, 2),
+            nullable_column("name", Type::TEXT, 3),
         ];
         let composite_pk_clause =
             BigQueryClient::add_primary_key_clause(&columns_with_composite_pk)
                 .expect("composite pk clause");
         assert_eq!(composite_pk_clause, ", primary key (`tenant_id`,`id`) not enforced");
 
-        let columns_no_pk = vec![
-            ColumnSchema::new("name".to_string(), Type::TEXT, -1, true, false),
-            ColumnSchema::new("age".to_string(), Type::INT4, -1, true, false),
-        ];
+        let columns_no_pk =
+            vec![nullable_column("name", Type::TEXT, 1), nullable_column("age", Type::INT4, 2)];
         let no_pk_clause =
             BigQueryClient::add_primary_key_clause(&columns_no_pk).expect("no pk clause");
         assert_eq!(no_pk_clause, "");
@@ -1183,9 +1198,9 @@ mod tests {
     #[test]
     fn test_create_columns_spec() {
         let columns = vec![
-            ColumnSchema::new("id".to_string(), Type::INT4, -1, false, true),
-            ColumnSchema::new("name".to_string(), Type::TEXT, -1, true, false),
-            ColumnSchema::new("active".to_string(), Type::BOOL, -1, false, false),
+            primary_key_column("id", Type::INT4, 1, 1),
+            nullable_column("name", Type::TEXT, 2),
+            required_column("active", Type::BOOL, 3),
         ];
         let spec = BigQueryClient::create_columns_spec(&columns).expect("columns spec");
         assert_eq!(
@@ -1204,10 +1219,10 @@ mod tests {
     #[test]
     fn test_column_schemas_to_table_descriptor() {
         let columns = vec![
-            ColumnSchema::new("id".to_string(), Type::INT4, -1, false, true),
-            ColumnSchema::new("name".to_string(), Type::TEXT, -1, true, false),
-            ColumnSchema::new("active".to_string(), Type::BOOL, -1, false, false),
-            ColumnSchema::new("tags".to_string(), Type::TEXT_ARRAY, -1, false, false),
+            primary_key_column("id", Type::INT4, 1, 1),
+            nullable_column("name", Type::TEXT, 2),
+            required_column("active", Type::BOOL, 3),
+            required_column("tags", Type::TEXT_ARRAY, 4),
         ];
 
         let descriptor = BigQueryClient::column_schemas_to_table_descriptor(&columns, true);
@@ -1245,12 +1260,12 @@ mod tests {
     #[test]
     fn test_column_schemas_to_table_descriptor_complex_types() {
         let columns = vec![
-            ColumnSchema::new("uuid_col".to_string(), Type::UUID, -1, true, false),
-            ColumnSchema::new("json_col".to_string(), Type::JSON, -1, true, false),
-            ColumnSchema::new("bytea_col".to_string(), Type::BYTEA, -1, true, false),
-            ColumnSchema::new("numeric_col".to_string(), Type::NUMERIC, -1, true, false),
-            ColumnSchema::new("date_col".to_string(), Type::DATE, -1, true, false),
-            ColumnSchema::new("time_col".to_string(), Type::TIME, -1, true, false),
+            nullable_column("uuid_col", Type::UUID, 1),
+            nullable_column("json_col", Type::JSON, 2),
+            nullable_column("bytea_col", Type::BYTEA, 3),
+            nullable_column("numeric_col", Type::NUMERIC, 4),
+            nullable_column("date_col", Type::DATE, 5),
+            nullable_column("time_col", Type::TIME, 6),
         ];
 
         let descriptor = BigQueryClient::column_schemas_to_table_descriptor(&columns, true);
@@ -1289,8 +1304,8 @@ mod tests {
         let table_id = "test_table";
 
         let columns = vec![
-            ColumnSchema::new("id".to_string(), Type::INT4, -1, false, true),
-            ColumnSchema::new("name".to_string(), Type::TEXT, -1, true, false),
+            primary_key_column("id", Type::INT4, 1, 1),
+            nullable_column("name", Type::TEXT, 2),
         ];
 
         // Simulate the query generation logic
@@ -1315,7 +1330,7 @@ mod tests {
         let table_id = "test_table";
         let max_staleness_mins = 15;
 
-        let columns = vec![ColumnSchema::new("id".to_string(), Type::INT4, -1, false, true)];
+        let columns = vec![primary_key_column("id", Type::INT4, 1, 1)];
 
         // Simulate the query generation logic with staleness
         let full_table_name = format!(

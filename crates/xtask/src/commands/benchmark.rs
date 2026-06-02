@@ -551,7 +551,8 @@ impl BenchmarkArgs {
             return Ok(false);
         }
 
-        Ok(self.fetch_expected_row_count(&[self.synthetic_table.clone()])? == self.synthetic_rows)
+        Ok(self.fetch_expected_row_count(std::slice::from_ref(&self.synthetic_table))?
+            == self.synthetic_rows)
     }
 
     fn ensure_synthetic_table_exists(&self) -> Result<()> {

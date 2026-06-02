@@ -1,8 +1,5 @@
 use core::str;
-use std::{
-    collections::{HashMap, HashSet},
-    str::FromStr,
-};
+use std::collections::{HashMap, HashSet};
 
 use etl_postgres::types::{
     ColumnSchema, IdentityMask, ReplicatedTableSchema, ReplicationMask, SnapshotId, TableId,
@@ -16,85 +13,13 @@ use tokio_postgres::types::PgLsn;
 use crate::{
     bail,
     conversions::text::parse_cell_from_postgres_text,
-    error::{ErrorKind, EtlError, EtlResult},
-    etl_error,
+    error::{ErrorKind, EtlResult},
     metrics::{ETL_BYTES_PROCESSED_TOTAL, ETL_ROW_SIZE_BYTES, EVENT_TYPE_LABEL},
     types::{
         BeginEvent, Cell, CommitEvent, DeleteEvent, InsertEvent, OldTableRow, PartialTableRow,
         TableRow, TruncateEvent, Type, UpdateEvent, UpdatedTableRow,
     },
 };
-
-/// The prefix used for DDL schema change messages emitted by the
-/// `etl.emit_schema_change_messages` event trigger. Messages with this prefix
-/// contain JSON-encoded schema information.
-pub(crate) const DDL_MESSAGE_PREFIX: &str = "supabase_etl_ddl";
-
-/// Represents a schema change message emitted by Postgres event trigger.
-///
-/// This message is emitted when ALTER TABLE commands are executed on tables
-/// that are part of a publication.
-///
-/// Unknown fields are ignored on purpose so the SQL payload can grow richer
-/// without forcing a synchronized rollout of every consumer.
-#[derive(Debug, Clone, Deserialize)]
-pub(crate) struct SchemaChangeMessage {
-    /// The command tag from `pg_event_trigger_ddl_commands().command_tag`.
-    pub(crate) command_tag: String,
-    /// The schema name from `pg_namespace.nspname`.
-    pub(crate) nspname: String,
-    /// The table name from `pg_class.relname`.
-    pub(crate) relname: String,
-    /// The table OID from `pg_class.oid`.
-    ///
-    /// PostgreSQL table OIDs are `u32` values, but JSON serialization from the
-    /// event trigger uses `bigint` (i64) for transmission. The cast back to
-    /// `u32` in [`into_table_schema`] is safe because PostgreSQL OIDs are
-    /// always within the `u32` range.
-    pub(crate) oid: i64,
-    /// The identity metadata emitted by Postgres for this table snapshot.
-    pub(crate) identity: IdentityMessage,
-    /// The columns of the table after the schema change.
-    pub(crate) columns: Vec<ColumnSchemaMessage>,
-}
-
-impl SchemaChangeMessage {
-    /// Returns the table identifier as [`TableId`].
-    pub(crate) fn table_id(&self) -> TableId {
-        TableId::new(self.oid as u32)
-    }
-
-    /// Converts a [`SchemaChangeMessage`] to a [`TableSchema`] with a specific
-    /// snapshot ID.
-    ///
-    /// This is used to update the stored table schema when a DDL change is
-    /// detected. The snapshot_id should be the start_lsn of the DDL
-    /// message.
-    pub(crate) fn into_table_schema(self, snapshot_id: SnapshotId) -> TableSchema {
-        let table_id = self.table_id();
-        build_table_schema(
-            table_id,
-            TableName::new(self.nspname, self.relname),
-            self.columns,
-            self.identity.primary_key_attnums,
-            snapshot_id,
-        )
-    }
-}
-
-impl FromStr for SchemaChangeMessage {
-    type Err = EtlError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        serde_json::from_str(s).map_err(|e| {
-            etl_error!(
-                ErrorKind::ConversionError,
-                "Failed to parse schema change message",
-                format!("Invalid JSON in schema change message: {}", e)
-            )
-        })
-    }
-}
 
 /// The identity metadata emitted by Postgres.
 #[derive(Debug, Clone, Deserialize)]
@@ -257,7 +182,7 @@ pub(crate) fn build_table_schema(
 ///
 /// This is used only for coarse event-size metrics, so `NULL` and
 /// `UnchangedToast` fields contribute zero bytes.
-fn calculate_tuple_bytes(tuple_data: &[protocol::TupleData]) -> u64 {
+pub(crate) fn calculate_tuple_bytes(tuple_data: &[protocol::TupleData]) -> u64 {
     tuple_data
         .iter()
         .map(|data| match data {
@@ -270,7 +195,7 @@ fn calculate_tuple_bytes(tuple_data: &[protocol::TupleData]) -> u64 {
 }
 
 /// Converts a tuple byte count into a row payload size hint.
-fn tuple_bytes_to_size_hint(tuple_bytes: u64) -> usize {
+pub(crate) fn tuple_bytes_to_size_hint(tuple_bytes: u64) -> usize {
     usize::try_from(tuple_bytes).unwrap_or(usize::MAX)
 }
 
@@ -566,6 +491,7 @@ pub(crate) fn parse_event_from_truncate_message(
 /// The tuple width must exactly match the number of provided column schemas.
 /// Every field must decode to a concrete [`Cell`]; `UnchangedToast` is
 /// therefore rejected here because full row images must be self-contained.
+#[cfg(test)]
 fn convert_tuple_to_row<'a>(
     column_schemas: impl ExactSizeIterator<Item = &'a ColumnSchema>,
     tuple_data: &[protocol::TupleData],
@@ -640,6 +566,7 @@ fn convert_tuple_to_row_inner<'a>(
 /// When PostgreSQL emits `UnchangedToast` for a column that cannot be resolved
 /// from the available old-row image, the column position is marked missing and
 /// the result becomes [`UpdatedTableRow::Partial`].
+#[cfg(test)]
 fn convert_update_tuple_to_updated_table_row(
     replicated_table_schema: &ReplicatedTableSchema,
     tuple_data: &[protocol::TupleData],
@@ -1033,6 +960,7 @@ fn convert_full_width_key_tuple_to_row(
 /// In both cases this function normalizes the result to the internal dense
 /// key-row shape so downstream code does not need to reason about the wire
 /// layout it came from.
+#[cfg(test)]
 fn normalize_key_tuple_to_row(
     replicated_table_schema: &ReplicatedTableSchema,
     tuple_data: &[protocol::TupleData],
