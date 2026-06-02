@@ -121,11 +121,10 @@ async fn run(config: ReplicatorConfig) -> MaintenanceResult<()> {
         },
         expire_snapshots: ExpireSnapshotsMaintenanceConfig {
             enabled: env_bool("ETL_DUCKLAKE_MAINTENANCE__EXPIRE_SNAPSHOTS__ENABLED", false),
-            older_than: expire_snapshots_older_than.clone().unwrap_or_else(|| "7 days".to_owned()),
+            older_than: expire_snapshots_older_than.unwrap_or_else(|| "7 days".to_owned()),
         },
         cleanup_old_files: CleanupOldFilesMaintenanceConfig {
             enabled: env_bool("ETL_DUCKLAKE_MAINTENANCE__CLEANUP_OLD_FILES__ENABLED", true),
-            older_than: expire_snapshots_older_than.unwrap_or_else(|| "7 days".to_owned()),
         },
     };
 
@@ -146,7 +145,6 @@ async fn run(config: ReplicatorConfig) -> MaintenanceResult<()> {
         expire_snapshots_enabled = maintenance_config.expire_snapshots.enabled,
         expire_snapshots_older_than = %maintenance_config.expire_snapshots.older_than,
         cleanup_old_files_enabled = maintenance_config.cleanup_old_files.enabled,
-        cleanup_old_files_older_than = %maintenance_config.cleanup_old_files.older_than,
         "ducklake external maintenance job starting"
     );
 
