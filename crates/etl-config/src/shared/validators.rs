@@ -41,12 +41,10 @@ pub fn validate_snowflake_account_id(account_id: &str) -> Result<(), ValidationE
         {
             return Err(invalid());
         }
-    } else {
-        if !account_id.starts_with(|c: char| c.is_ascii_alphabetic())
-            || !account_id.chars().all(|c| c.is_ascii_alphanumeric())
-        {
-            return Err(invalid());
-        }
+    } else if !account_id.starts_with(|c: char| c.is_ascii_alphabetic())
+        || !account_id.chars().all(|c| c.is_ascii_alphanumeric())
+    {
+        return Err(invalid());
     }
 
     Ok(())
