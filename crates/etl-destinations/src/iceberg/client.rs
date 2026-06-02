@@ -4,9 +4,13 @@ use std::{
     time::Duration,
 };
 
-use arrow::array::RecordBatch;
+use arrow::{
+    array::{RecordBatch, new_null_array},
+    datatypes::{Field, Schema as ArrowSchema},
+};
 use etl::{
     error::EtlResult,
+    etl_error,
     types::{ColumnSchema, SchemaDiff, TableRow},
 };
 use iceberg::{
@@ -19,7 +23,6 @@ use iceberg::{
         PrimitiveType, Schema as IcebergSchema, SchemaRef, Snapshot, SnapshotReference,
         SnapshotRetention, SnapshotSummaryCollector, Summary, TableProperties, Type as IcebergType,
     },
-    table::Table,
     transaction::{ApplyTransactionAction, Transaction},
     writer::{
         IcebergWriter, IcebergWriterBuilder,
@@ -37,9 +40,11 @@ use iceberg::{
 use iceberg_catalog_rest::{
     CommitTableRequest, REST_CATALOG_PROP_URI, REST_CATALOG_PROP_WAREHOUSE, RestCatalogBuilder,
 };
-use parquet::{basic::Compression, file::properties::WriterProperties};
+use parquet::{
+    arrow::PARQUET_FIELD_ID_META_KEY, basic::Compression, file::properties::WriterProperties,
+};
 use reqwest::{
-    Client, Method, StatusCode,
+    Client, Method, StatusCode, Url,
     header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, USER_AGENT},
 };
 use serde::Deserialize;
@@ -396,7 +401,8 @@ impl IcebergClient {
 
     /// Loads a table from the catalog.
     ///
-    /// This method retrieves the table metadata and returns a [`Table`]
+    /// This method retrieves the table metadata and returns an
+    /// [`iceberg::table::Table`]
     /// instance that can be used for further operations such as reading
     /// data, writing data, or inspecting the table schema and properties.
     pub async fn load_table(
@@ -487,7 +493,7 @@ impl IcebergClient {
             return Ok(bytes_sent);
         }
 
-        let record_batch = self.rows_to_table_record_batch(&table, &delete_rows)?;
+        let record_batch = self.rows_to_equality_delete_record_batch(&table, &delete_rows)?;
         let delete_files =
             self.write_equality_delete_files(&table, record_batch).await.map_err(|error| {
                 tracing::error!(error = %error, "failed to write iceberg equality-delete files");
@@ -507,7 +513,7 @@ impl IcebergClient {
     /// schema.
     fn rows_to_table_record_batch(
         &self,
-        table: &Table,
+        table: &iceberg::table::Table,
         table_rows: &[TableRow],
     ) -> EtlResult<RecordBatch> {
         let table_metadata = table.metadata();
@@ -521,6 +527,70 @@ impl IcebergClient {
         Ok(record_batch)
     }
 
+    /// Converts dense equality-key rows to the table-shaped batch expected by
+    /// iceberg-rust's equality-delete writer projector.
+    fn rows_to_equality_delete_record_batch(
+        &self,
+        table: &iceberg::table::Table,
+        table_rows: &[TableRow],
+    ) -> EtlResult<RecordBatch> {
+        let table_metadata = table.metadata();
+        let iceberg_schema = table_metadata.current_schema();
+        let equality_ids = identifier_field_ids_in_schema_order(iceberg_schema);
+
+        if equality_ids.is_empty() {
+            return Err(etl_error!(
+                etl::error::ErrorKind::InvalidState,
+                "Iceberg equality deletes require identifier fields"
+            ));
+        }
+
+        for table_row in table_rows {
+            if table_row.values().len() != equality_ids.len() {
+                return Err(etl_error!(
+                    etl::error::ErrorKind::InvalidState,
+                    "Iceberg equality-delete row width does not match identifier fields",
+                    format!(
+                        "Delete row has {} values for {} identifier fields.",
+                        table_row.values().len(),
+                        equality_ids.len()
+                    )
+                ));
+            }
+        }
+
+        let config = EqualityDeleteWriterConfig::new(equality_ids, Arc::clone(iceberg_schema))
+            .map_err(iceberg_error_to_etl_error)?;
+        let projected_arrow_schema = config.projected_arrow_schema_ref().as_ref().clone();
+        let projected_batch = rows_to_record_batch(table_rows, projected_arrow_schema)
+            .map_err(arrow_error_to_etl_error)?;
+        let full_arrow_schema = iceberg::arrow::schema_to_arrow_schema(iceberg_schema)
+            .map_err(iceberg_error_to_etl_error)?;
+        let field_positions = arrow_field_positions_by_id(&full_arrow_schema)?;
+        let mut columns = full_arrow_schema
+            .fields()
+            .iter()
+            .map(|field| new_null_array(field.data_type(), table_rows.len()))
+            .collect::<Vec<_>>();
+
+        for (projected_index, projected_field) in
+            config.projected_arrow_schema_ref().fields().iter().enumerate()
+        {
+            let field_id = arrow_field_id(projected_field)?;
+            let Some(&full_index) = field_positions.get(&field_id) else {
+                return Err(etl_error!(
+                    etl::error::ErrorKind::InvalidState,
+                    "Iceberg equality-delete field is missing from table schema",
+                    format!("Field id {field_id} is not present in the current table schema.")
+                ));
+            };
+
+            columns[full_index] = Arc::clone(projected_batch.column(projected_index));
+        }
+
+        RecordBatch::try_new(Arc::new(full_arrow_schema), columns).map_err(arrow_error_to_etl_error)
+    }
+
     /// Writes a RecordBatch to an Iceberg table using Parquet format.
     ///
     /// This method handles the low-level details of writing Arrow RecordBatch
@@ -530,7 +600,7 @@ impl IcebergClient {
     /// files.
     async fn write_record_batch(
         &self,
-        table: &Table,
+        table: &iceberg::table::Table,
         record_batch: RecordBatch,
     ) -> Result<u64, iceberg::Error> {
         let data_files = self.write_data_files(table, record_batch).await?;
@@ -544,7 +614,7 @@ impl IcebergClient {
     /// Writes a [`RecordBatch`] to data files without committing them.
     async fn write_data_files(
         &self,
-        table: &Table,
+        table: &iceberg::table::Table,
         record_batch: RecordBatch,
     ) -> Result<Vec<DataFile>, iceberg::Error> {
         let writer_props = WriterProperties::builder().set_compression(Compression::SNAPPY).build();
@@ -570,11 +640,10 @@ impl IcebergClient {
     /// Writes equality-delete files for the table identifier fields.
     async fn write_equality_delete_files(
         &self,
-        table: &Table,
+        table: &iceberg::table::Table,
         record_batch: RecordBatch,
     ) -> Result<Vec<DataFile>, iceberg::Error> {
-        let equality_ids: Vec<_> =
-            table.metadata().current_schema().identifier_field_ids().collect();
+        let equality_ids = identifier_field_ids_in_schema_order(table.metadata().current_schema());
 
         if equality_ids.is_empty() {
             return Err(iceberg::Error::new(
@@ -612,7 +681,7 @@ impl IcebergClient {
     /// unique file names for every batch and avoids the extra metadata scan.
     async fn commit_append(
         &self,
-        table: &Table,
+        table: &iceberg::table::Table,
         data_files: Vec<DataFile>,
     ) -> Result<(), iceberg::Error> {
         if data_files.is_empty() {
@@ -717,17 +786,34 @@ struct ResolvedRestConfig {
 
 impl ResolvedRestConfig {
     /// Builds the REST table endpoint for a table.
-    fn table_endpoint(&self, table: &TableIdent) -> String {
-        let namespace = table.namespace.to_url_string();
-        let mut parts = vec![self.catalog_uri.trim_end_matches('/'), REST_API_ROOT];
+    fn table_endpoint(&self, table: &TableIdent) -> Result<String, iceberg::Error> {
+        let mut url = Url::parse(self.catalog_uri.trim_end_matches('/')).map_err(|error| {
+            iceberg::Error::new(iceberg::ErrorKind::DataInvalid, "Invalid Iceberg REST catalog URI")
+                .with_context("uri", self.catalog_uri.clone())
+                .with_source(error)
+        })?;
 
-        if let Some(prefix) = self.props.get("prefix") {
-            parts.push(prefix);
+        {
+            let mut path = url.path_segments_mut().map_err(|()| {
+                iceberg::Error::new(
+                    iceberg::ErrorKind::DataInvalid,
+                    "Iceberg REST catalog URI cannot be used as a base URL",
+                )
+                .with_context("uri", self.catalog_uri.clone())
+            })?;
+
+            path.push(REST_API_ROOT);
+            if let Some(prefix) = self.props.get("prefix") {
+                for segment in
+                    prefix.trim_matches('/').split('/').filter(|segment| !segment.is_empty())
+                {
+                    path.push(segment);
+                }
+            }
+            path.extend(["namespaces", &table.namespace.to_url_string(), "tables", &table.name]);
         }
 
-        parts.extend(["namespaces", &namespace, "tables", &table.name]);
-
-        parts.join("/")
+        Ok(url.into())
     }
 }
 
@@ -754,7 +840,7 @@ impl RestCommitClient {
         commit: RestTableCommit,
     ) -> Result<(), iceberg::Error> {
         let config = self.load_config().await?;
-        let url = config.table_endpoint(table_ident);
+        let url = config.table_endpoint(table_ident)?;
         let body = CommitTableRequest {
             identifier: Some(table_ident.clone()),
             requirements: commit.requirements,
@@ -974,7 +1060,7 @@ impl RestCommitClient {
 
 /// Builds an Iceberg schema update commit when the desired schema differs.
 fn build_schema_update_commit(
-    table: &Table,
+    table: &iceberg::table::Table,
     expected_current_schema: &IcebergSchema,
     desired_schema: IcebergSchema,
 ) -> Result<Option<RestTableCommit>, iceberg::Error> {
@@ -1073,6 +1159,48 @@ fn identifier_field_ids(schema: &IcebergSchema) -> HashSet<i32> {
     schema.identifier_field_ids().collect()
 }
 
+/// Returns identifier field IDs in top-level schema order.
+fn identifier_field_ids_in_schema_order(schema: &IcebergSchema) -> Vec<i32> {
+    let identifier_ids = identifier_field_ids(schema);
+
+    schema
+        .as_struct()
+        .fields()
+        .iter()
+        .filter_map(|field| identifier_ids.contains(&field.id).then_some(field.id))
+        .collect()
+}
+
+/// Returns top-level Arrow field positions keyed by Iceberg field ID.
+fn arrow_field_positions_by_id(schema: &ArrowSchema) -> EtlResult<HashMap<i32, usize>> {
+    schema
+        .fields()
+        .iter()
+        .enumerate()
+        .map(|(index, field)| arrow_field_id(field).map(|field_id| (field_id, index)))
+        .collect()
+}
+
+/// Returns the Iceberg field ID stored in Arrow field metadata.
+fn arrow_field_id(field: &Field) -> EtlResult<i32> {
+    let Some(field_id) = field.metadata().get(PARQUET_FIELD_ID_META_KEY) else {
+        return Err(etl_error!(
+            etl::error::ErrorKind::InvalidState,
+            "Iceberg Arrow field is missing field ID metadata",
+            format!("Field '{}' has no Iceberg field ID metadata.", field.name())
+        ));
+    };
+
+    field_id.parse().map_err(|error| {
+        etl_error!(
+            etl::error::ErrorKind::InvalidState,
+            "Iceberg Arrow field ID metadata is invalid",
+            format!("Field '{}' has invalid field ID metadata.", field.name()),
+            source: error
+        )
+    })
+}
+
 /// Validates evolution for a field that exists in both schemas.
 fn validate_field_evolution(
     current_field: &NestedFieldRef,
@@ -1127,7 +1255,7 @@ fn is_supported_type_evolution(current_type: &IcebergType, desired_type: &Iceber
 
 /// Builds and writes a row-delta Iceberg metadata commit.
 async fn build_row_delta_commit(
-    table: &Table,
+    table: &iceberg::table::Table,
     data_files: Vec<DataFile>,
     delete_files: Vec<DataFile>,
 ) -> Result<RestTableCommit, iceberg::Error> {
@@ -1197,7 +1325,9 @@ async fn build_row_delta_commit(
 }
 
 /// Returns the currently live manifests for the table.
-async fn existing_manifests(table: &Table) -> Result<Vec<ManifestFile>, iceberg::Error> {
+async fn existing_manifests(
+    table: &iceberg::table::Table,
+) -> Result<Vec<ManifestFile>, iceberg::Error> {
     let Some(snapshot) = table.metadata().current_snapshot() else {
         return Ok(Vec::new());
     };
@@ -1215,7 +1345,7 @@ async fn existing_manifests(table: &Table) -> Result<Vec<ManifestFile>, iceberg:
 
 /// Writes a manifest file containing added data or delete files.
 async fn write_manifest(
-    table: &Table,
+    table: &iceberg::table::Table,
     snapshot_id: i64,
     commit_uuid: uuid::Uuid,
     manifest_counter: &mut u64,
@@ -1232,7 +1362,7 @@ async fn write_manifest(
 
 /// Creates a manifest writer for the table format version.
 fn new_manifest_writer(
-    table: &Table,
+    table: &iceberg::table::Table,
     snapshot_id: i64,
     commit_uuid: uuid::Uuid,
     manifest_counter: &mut u64,
@@ -1271,7 +1401,7 @@ fn new_manifest_writer(
 
 /// Writes the manifest list for a new snapshot.
 async fn write_manifest_list(
-    table: &Table,
+    table: &iceberg::table::Table,
     snapshot_id: i64,
     commit_uuid: uuid::Uuid,
     manifests: Vec<ManifestFile>,
@@ -1316,7 +1446,7 @@ async fn write_manifest_list(
 
 /// Builds a snapshot summary for a row-delta commit.
 fn build_snapshot_summary(
-    table: &Table,
+    table: &iceberg::table::Table,
     operation: Operation,
     data_files: &[DataFile],
     delete_files: &[DataFile],
@@ -1334,7 +1464,7 @@ fn build_snapshot_summary(
 
 /// Builds the snapshot metadata for a row-delta commit.
 fn build_snapshot(
-    table: &Table,
+    table: &iceberg::table::Table,
     snapshot_id: i64,
     manifest_list_path: String,
     summary: Summary,
@@ -1351,7 +1481,7 @@ fn build_snapshot(
 }
 
 /// Generates a snapshot ID that is not already used by the table.
-fn generate_snapshot_id(table: &Table) -> i64 {
+fn generate_snapshot_id(table: &iceberg::table::Table) -> i64 {
     loop {
         let (lhs, rhs) = uuid::Uuid::new_v4().as_u64_pair();
         let snapshot_id = (lhs ^ rhs) as i64;
@@ -1365,7 +1495,7 @@ fn generate_snapshot_id(table: &Table) -> i64 {
 
 /// Creates a rolling Parquet writer builder for data or delete files.
 fn parquet_rolling_writer_builder(
-    table: &Table,
+    table: &iceberg::table::Table,
     writer_props: WriterProperties,
     target_file_size: usize,
     prefix: &str,
@@ -1396,7 +1526,7 @@ fn parquet_rolling_writer_builder(
 }
 
 /// Returns the target equality-delete file size for a table.
-fn table_delete_target_file_size(table: &Table) -> Result<usize, iceberg::Error> {
+fn table_delete_target_file_size(table: &iceberg::table::Table) -> Result<usize, iceberg::Error> {
     let Some(value) = table.metadata().properties().get(WRITE_DELETE_TARGET_FILE_SIZE_BYTES) else {
         return Ok(WRITE_DELETE_TARGET_FILE_SIZE_BYTES_DEFAULT);
     };
@@ -1415,4 +1545,51 @@ fn table_delete_target_file_size(table: &Table) -> Result<usize, iceberg::Error>
 /// Returns the total file size for a list of Iceberg data files.
 fn total_file_size(files: &[DataFile]) -> u64 {
     files.iter().map(DataFile::file_size_in_bytes).sum()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use iceberg::{NamespaceIdent, TableIdent};
+
+    use crate::iceberg::client::ResolvedRestConfig;
+
+    #[test]
+    fn rest_table_endpoint_encodes_table_name_path_segment() {
+        let config = ResolvedRestConfig {
+            catalog_uri: "http://localhost:8181/catalog/".to_owned(),
+            props: HashMap::new(),
+        };
+        let table = TableIdent::new(
+            NamespaceIdent::new("public".to_owned()),
+            "quoted/table ? name".to_owned(),
+        );
+
+        let endpoint = config.table_endpoint(&table).unwrap();
+
+        assert_eq!(
+            endpoint,
+            "http://localhost:8181/catalog/v1/namespaces/public/tables/quoted%2Ftable%20%3F%20name"
+        );
+    }
+
+    #[test]
+    fn rest_table_endpoint_encodes_namespace_and_prefix_path_segments() {
+        let config = ResolvedRestConfig {
+            catalog_uri: "http://localhost:8181/catalog".to_owned(),
+            props: HashMap::from([("prefix".to_owned(), "/warehouse/main/".to_owned())]),
+        };
+        let table = TableIdent::new(
+            NamespaceIdent::from_strs(["tenant one", "public"]).unwrap(),
+            "café".to_owned(),
+        );
+
+        let endpoint = config.table_endpoint(&table).unwrap();
+
+        assert_eq!(
+            endpoint,
+            "http://localhost:8181/catalog/v1/warehouse/main/namespaces/tenant%20one%1Fpublic/tables/caf%C3%A9"
+        );
+    }
 }

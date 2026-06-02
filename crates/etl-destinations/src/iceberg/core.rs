@@ -14,9 +14,8 @@ use etl::{
     state::destination_table_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus},
     store::DestinationStore,
     types::{
-        ArrayCell, Cell, ColumnSchema, Event, IdentityType, OldTableRow, ReplicatedTableSchema,
-        ReplicationMask, SnapshotId, TableId, TableName, TableRow, TableSchema, Type,
-        UpdatedTableRow,
+        Cell, Event, IdentityType, OldTableRow, ReplicatedTableSchema, ReplicationMask, SnapshotId,
+        TableId, TableName, TableRow, TableSchema, UpdatedTableRow,
     },
 };
 use tokio::{sync::Mutex, task::JoinSet};
@@ -420,11 +419,7 @@ where
                         let batch = table_id_to_data.entry(table_id).or_insert_with(|| {
                             TableEventBatch::new(insert.replicated_table_schema.clone())
                         });
-                        batch.table_delta.insert(
-                            insert.table_row,
-                            &batch.replicated_table_schema,
-                            &batch.key_indices,
-                        );
+                        batch.table_delta.insert(insert.table_row, &batch.key_indices);
                     }
                     Event::Update(update) => {
                         validate_iceberg_table_identity(&update.replicated_table_schema)?;
@@ -455,7 +450,6 @@ where
                             )?,
                             None => equality_delete_row_from_full_row(
                                 &updated_table_row,
-                                &batch.replicated_table_schema,
                                 &batch.key_indices,
                             ),
                         };
@@ -463,7 +457,6 @@ where
                         batch.table_delta.update(
                             delete_table_row,
                             updated_table_row,
-                            &batch.replicated_table_schema,
                             &batch.key_indices,
                         );
                     }
@@ -490,7 +483,7 @@ where
                             &batch.key_indices,
                         )?;
 
-                        batch.table_delta.delete(delete_table_row, &batch.key_indices);
+                        batch.table_delta.delete(delete_table_row);
                     }
                     event => {
                         // Every other event type is currently not supported.
@@ -925,15 +918,9 @@ struct TableDelta {
 
 impl TableDelta {
     /// Records an inserted row as an upsert.
-    fn insert(
-        &mut self,
-        table_row: TableRow,
-        replicated_table_schema: &ReplicatedTableSchema,
-        key_indices: &[usize],
-    ) {
+    fn insert(&mut self, table_row: TableRow, key_indices: &[usize]) {
         let key = row_key(&table_row, key_indices);
-        let delete_row =
-            equality_delete_row_from_full_row(&table_row, replicated_table_schema, key_indices);
+        let delete_row = equality_delete_row_from_full_row(&table_row, key_indices);
         let mut change = self.changes.remove(&key).unwrap_or_default();
 
         change.delete_rows.push(PendingDelete::new(key.clone(), delete_row));
@@ -943,18 +930,11 @@ impl TableDelta {
     }
 
     /// Records an updated row as delete-old-key plus upsert-new-row.
-    fn update(
-        &mut self,
-        delete_row: TableRow,
-        data_row: TableRow,
-        replicated_table_schema: &ReplicatedTableSchema,
-        key_indices: &[usize],
-    ) {
-        let old_key = row_key(&delete_row, key_indices);
+    fn update(&mut self, delete_row: TableRow, data_row: TableRow, key_indices: &[usize]) {
+        let old_key = row_key_from_key_row(&delete_row);
         let new_key = row_key(&data_row, key_indices);
-        let new_key_delete_row = (old_key != new_key).then(|| {
-            equality_delete_row_from_full_row(&data_row, replicated_table_schema, key_indices)
-        });
+        let new_key_delete_row =
+            (old_key != new_key).then(|| equality_delete_row_from_full_row(&data_row, key_indices));
         let mut change = self
             .changes
             .remove(&old_key)
@@ -969,8 +949,8 @@ impl TableDelta {
     }
 
     /// Records a deleted row.
-    fn delete(&mut self, delete_row: TableRow, key_indices: &[usize]) {
-        let key = row_key(&delete_row, key_indices);
+    fn delete(&mut self, delete_row: TableRow) {
+        let key = row_key_from_key_row(&delete_row);
         let mut change = self
             .changes
             .remove(&key)
@@ -1035,7 +1015,7 @@ impl PendingChange {
 struct PendingDelete {
     /// Primary key targeted by the equality delete.
     key: RowKey,
-    /// Full-width row passed to the Iceberg equality-delete writer.
+    /// Dense key row passed to the Iceberg equality-delete writer adapter.
     row: TableRow,
 }
 
@@ -1046,7 +1026,7 @@ impl PendingDelete {
     }
 }
 
-/// Converts an old-row image into a full-width equality-delete row.
+/// Converts an old-row image into a dense equality-delete key row.
 fn old_table_row_to_delete_row(
     old_table_row: OldTableRow,
     replicated_table_schema: &ReplicatedTableSchema,
@@ -1054,30 +1034,21 @@ fn old_table_row_to_delete_row(
 ) -> EtlResult<TableRow> {
     match old_table_row {
         OldTableRow::Full(table_row) => {
-            Ok(equality_delete_row_from_full_row(&table_row, replicated_table_schema, key_indices))
+            Ok(equality_delete_row_from_full_row(&table_row, key_indices))
         }
         OldTableRow::Key(table_row) => {
-            expand_key_row(replicated_table_schema, table_row, key_indices)
+            validate_key_row_width(replicated_table_schema, table_row, key_indices)
         }
     }
 }
 
-/// Builds a full-width equality-delete row from a full row.
-fn equality_delete_row_from_full_row(
-    table_row: &TableRow,
-    replicated_table_schema: &ReplicatedTableSchema,
-    key_indices: &[usize],
-) -> TableRow {
-    let mut values = placeholder_row_values(replicated_table_schema);
-    for &index in key_indices {
-        values[index] = table_row.values()[index].clone();
-    }
-
-    TableRow::new(values)
+/// Builds a dense equality-delete key row from a full row.
+fn equality_delete_row_from_full_row(table_row: &TableRow, key_indices: &[usize]) -> TableRow {
+    TableRow::new(key_indices.iter().map(|&index| table_row.values()[index].clone()).collect())
 }
 
-/// Expands a dense primary-key row into the full replicated table width.
-fn expand_key_row(
+/// Validates a dense primary-key row emitted by the replication stream.
+fn validate_key_row_width(
     replicated_table_schema: &ReplicatedTableSchema,
     key_row: TableRow,
     key_indices: &[usize],
@@ -1095,58 +1066,7 @@ fn expand_key_row(
         ));
     }
 
-    let mut values = placeholder_row_values(replicated_table_schema);
-    for (&index, value) in key_indices.iter().zip(key_row.into_values()) {
-        values[index] = value;
-    }
-
-    Ok(TableRow::new(values))
-}
-
-/// Builds full-width placeholder values for an equality-delete input row.
-fn placeholder_row_values(replicated_table_schema: &ReplicatedTableSchema) -> Vec<Cell> {
-    replicated_table_schema.column_schemas().map(placeholder_cell_for_column).collect()
-}
-
-/// Returns a type-correct placeholder value for a non-key delete column.
-fn placeholder_cell_for_column(column_schema: &ColumnSchema) -> Cell {
-    match column_schema.typ {
-        Type::BOOL => Cell::Bool(false),
-        Type::INT2 => Cell::I16(0),
-        Type::INT4 => Cell::I32(0),
-        Type::INT8 => Cell::I64(0),
-        Type::OID => Cell::U32(0),
-        Type::FLOAT4 => Cell::F32(0.0),
-        Type::FLOAT8 => Cell::F64(0.0),
-        Type::BYTEA => Cell::Bytes(Vec::new()),
-        Type::DATE => Cell::Date(chrono::NaiveDate::default()),
-        Type::TIME => Cell::Time(chrono::NaiveTime::default()),
-        Type::TIMESTAMP => Cell::Timestamp(chrono::NaiveDateTime::default()),
-        Type::TIMESTAMPTZ => Cell::TimestampTz(chrono::DateTime::<chrono::Utc>::default()),
-        Type::UUID => Cell::Uuid(uuid::Uuid::default()),
-        Type::BOOL_ARRAY => Cell::Array(ArrayCell::Bool(Vec::new())),
-        Type::CHAR_ARRAY
-        | Type::BPCHAR_ARRAY
-        | Type::VARCHAR_ARRAY
-        | Type::NAME_ARRAY
-        | Type::TEXT_ARRAY => Cell::Array(ArrayCell::String(Vec::new())),
-        Type::INT2_ARRAY => Cell::Array(ArrayCell::I16(Vec::new())),
-        Type::INT4_ARRAY => Cell::Array(ArrayCell::I32(Vec::new())),
-        Type::INT8_ARRAY => Cell::Array(ArrayCell::I64(Vec::new())),
-        Type::FLOAT4_ARRAY => Cell::Array(ArrayCell::F32(Vec::new())),
-        Type::FLOAT8_ARRAY => Cell::Array(ArrayCell::F64(Vec::new())),
-        Type::NUMERIC_ARRAY => Cell::Array(ArrayCell::Numeric(Vec::new())),
-        Type::DATE_ARRAY => Cell::Array(ArrayCell::Date(Vec::new())),
-        Type::TIME_ARRAY => Cell::Array(ArrayCell::Time(Vec::new())),
-        Type::TIMESTAMP_ARRAY => Cell::Array(ArrayCell::Timestamp(Vec::new())),
-        Type::TIMESTAMPTZ_ARRAY => Cell::Array(ArrayCell::TimestampTz(Vec::new())),
-        Type::UUID_ARRAY => Cell::Array(ArrayCell::Uuid(Vec::new())),
-        Type::JSON_ARRAY | Type::JSONB_ARRAY => Cell::Array(ArrayCell::Json(Vec::new())),
-        Type::OID_ARRAY => Cell::Array(ArrayCell::U32(Vec::new())),
-        Type::BYTEA_ARRAY => Cell::Array(ArrayCell::Bytes(Vec::new())),
-        Type::NUMERIC | Type::JSON | Type::JSONB => Cell::String(String::new()),
-        _ => Cell::String(String::new()),
-    }
+    Ok(key_row)
 }
 
 /// Returns replicated-column indexes for the source primary key.
@@ -1174,6 +1094,11 @@ fn row_key(table_row: &TableRow, key_indices: &[usize]) -> RowKey {
     }
 
     RowKey { values }
+}
+
+/// Returns the in-memory key for a dense equality-delete key row.
+fn row_key_from_key_row(key_row: &TableRow) -> RowKey {
+    RowKey { values: key_row.values().iter().map(RowKeyValue::from_cell).collect() }
 }
 
 /// Builds the previous-schema replication mask from the actual Iceberg schema.
@@ -1412,22 +1337,6 @@ mod tests {
         ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask)
     }
 
-    fn replicated_composite_key_schema() -> ReplicatedTableSchema {
-        let table_schema = Arc::new(TableSchema::new(
-            TableId::new(1),
-            TableName::new("public".to_owned(), "users".to_owned()),
-            vec![
-                ColumnSchema::new("tenant".to_owned(), Type::TEXT, -1, 1, Some(1), false),
-                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 2, Some(2), false),
-                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 3, None, true),
-            ],
-        ));
-        let replication_mask = ReplicationMask::all(&table_schema);
-        let identity_mask = IdentityMask::from_bytes(vec![1, 1, 0]);
-
-        ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask)
-    }
-
     fn replicated_schema_with_partial_primary_key() -> ReplicatedTableSchema {
         let table_schema = Arc::new(TableSchema::new(
             TableId::new(1),
@@ -1481,12 +1390,8 @@ mod tests {
         ])
     }
 
-    fn delete_row(
-        table_row: &TableRow,
-        replicated_table_schema: &ReplicatedTableSchema,
-        key_indices: &[usize],
-    ) -> TableRow {
-        equality_delete_row_from_full_row(table_row, replicated_table_schema, key_indices)
+    fn delete_row(table_row: &TableRow, key_indices: &[usize]) -> TableRow {
+        equality_delete_row_from_full_row(table_row, key_indices)
     }
 
     #[test]
@@ -1502,14 +1407,13 @@ mod tests {
 
     #[test]
     fn table_delta_repeated_insert_keeps_latest_row() {
-        let replicated_table_schema = replicated_schema(IdentityType::PrimaryKey);
         let key_indices = [0];
         let first_row = test_row(1, "alice");
         let second_row = test_row(1, "alice-updated");
         let mut table_delta = TableDelta::default();
 
-        table_delta.insert(first_row, &replicated_table_schema, &key_indices);
-        table_delta.insert(second_row.clone(), &replicated_table_schema, &key_indices);
+        table_delta.insert(first_row, &key_indices);
+        table_delta.insert(second_row.clone(), &key_indices);
 
         let (data_rows, delete_rows) = table_delta.into_parts();
         assert_eq!(data_rows, vec![second_row]);
@@ -1518,14 +1422,13 @@ mod tests {
 
     #[test]
     fn table_delta_insert_then_delete_writes_only_delete() {
-        let replicated_table_schema = replicated_schema(IdentityType::PrimaryKey);
         let key_indices = [0];
         let row = test_row(1, "alice");
-        let delete_row = delete_row(&row, &replicated_table_schema, &key_indices);
+        let delete_row = delete_row(&row, &key_indices);
         let mut table_delta = TableDelta::default();
 
-        table_delta.insert(row, &replicated_table_schema, &key_indices);
-        table_delta.delete(delete_row.clone(), &key_indices);
+        table_delta.insert(row, &key_indices);
+        table_delta.delete(delete_row.clone());
 
         let (data_rows, delete_rows) = table_delta.into_parts();
         assert!(data_rows.is_empty());
@@ -1534,15 +1437,14 @@ mod tests {
 
     #[test]
     fn table_delta_delete_then_insert_writes_delete_and_final_row() {
-        let replicated_table_schema = replicated_schema(IdentityType::PrimaryKey);
         let key_indices = [0];
         let old_row = test_row(1, "alice");
         let new_row = test_row(1, "alice-updated");
-        let delete_row = delete_row(&old_row, &replicated_table_schema, &key_indices);
+        let delete_row = delete_row(&old_row, &key_indices);
         let mut table_delta = TableDelta::default();
 
-        table_delta.delete(delete_row.clone(), &key_indices);
-        table_delta.insert(new_row.clone(), &replicated_table_schema, &key_indices);
+        table_delta.delete(delete_row.clone());
+        table_delta.insert(new_row.clone(), &key_indices);
 
         let (data_rows, delete_rows) = table_delta.into_parts();
         assert_eq!(data_rows, vec![new_row]);
@@ -1551,19 +1453,13 @@ mod tests {
 
     #[test]
     fn table_delta_non_key_update_keeps_updated_row() {
-        let replicated_table_schema = replicated_schema(IdentityType::PrimaryKey);
         let key_indices = [0];
         let old_row = test_row(1, "alice");
         let new_row = test_row(1, "alice-updated");
-        let delete_row = delete_row(&old_row, &replicated_table_schema, &key_indices);
+        let delete_row = delete_row(&old_row, &key_indices);
         let mut table_delta = TableDelta::default();
 
-        table_delta.update(
-            delete_row.clone(),
-            new_row.clone(),
-            &replicated_table_schema,
-            &key_indices,
-        );
+        table_delta.update(delete_row.clone(), new_row.clone(), &key_indices);
 
         let (data_rows, delete_rows) = table_delta.into_parts();
         assert_eq!(data_rows, vec![new_row]);
@@ -1572,22 +1468,16 @@ mod tests {
 
     #[test]
     fn table_delta_update_then_delete_writes_old_and_new_key_deletes() {
-        let replicated_table_schema = replicated_schema(IdentityType::PrimaryKey);
         let key_indices = [0];
         let old_row = test_row(1, "alice");
         let updated_row = test_row(2, "alice");
-        let old_delete_row = delete_row(&old_row, &replicated_table_schema, &key_indices);
-        let updated_delete_row = delete_row(&updated_row, &replicated_table_schema, &key_indices);
+        let old_delete_row = delete_row(&old_row, &key_indices);
+        let updated_delete_row = delete_row(&updated_row, &key_indices);
         let expected_updated_delete_row = updated_delete_row.clone();
         let mut table_delta = TableDelta::default();
 
-        table_delta.update(
-            old_delete_row.clone(),
-            updated_row,
-            &replicated_table_schema,
-            &key_indices,
-        );
-        table_delta.delete(updated_delete_row, &key_indices);
+        table_delta.update(old_delete_row.clone(), updated_row, &key_indices);
+        table_delta.delete(updated_delete_row);
 
         let (data_rows, delete_rows) = table_delta.into_parts();
         assert!(data_rows.is_empty());
@@ -1596,14 +1486,13 @@ mod tests {
 
     #[test]
     fn table_delta_composite_primary_key_keeps_distinct_rows() {
-        let replicated_table_schema = replicated_composite_key_schema();
         let key_indices = [0, 1];
         let first_row = composite_key_row("tenant_1", 1, "alice");
         let second_row = composite_key_row("tenant_2", 1, "alice");
         let mut table_delta = TableDelta::default();
 
-        table_delta.insert(first_row.clone(), &replicated_table_schema, &key_indices);
-        table_delta.insert(second_row.clone(), &replicated_table_schema, &key_indices);
+        table_delta.insert(first_row.clone(), &key_indices);
+        table_delta.insert(second_row.clone(), &key_indices);
 
         let (mut data_rows, delete_rows) = table_delta.into_parts();
         data_rows.sort_by(|left, right| {
@@ -1616,17 +1505,16 @@ mod tests {
 
     #[test]
     fn table_delta_primary_key_update_chain_keeps_final_row() {
-        let replicated_table_schema = replicated_schema(IdentityType::PrimaryKey);
         let key_indices = [0];
         let row_1 = test_row(1, "alice");
         let row_2 = test_row(2, "alice");
         let row_3 = test_row(3, "alice");
-        let delete_row_1 = delete_row(&row_1, &replicated_table_schema, &key_indices);
-        let delete_row_2 = delete_row(&row_2, &replicated_table_schema, &key_indices);
+        let delete_row_1 = delete_row(&row_1, &key_indices);
+        let delete_row_2 = delete_row(&row_2, &key_indices);
         let mut table_delta = TableDelta::default();
 
-        table_delta.update(delete_row_1.clone(), row_2, &replicated_table_schema, &key_indices);
-        table_delta.update(delete_row_2, row_3.clone(), &replicated_table_schema, &key_indices);
+        table_delta.update(delete_row_1.clone(), row_2, &key_indices);
+        table_delta.update(delete_row_2, row_3.clone(), &key_indices);
 
         let (data_rows, delete_rows) = table_delta.into_parts();
         assert_eq!(data_rows, vec![row_3]);
@@ -1634,10 +1522,29 @@ mod tests {
             delete_rows,
             vec![
                 delete_row_1,
-                delete_row(&test_row(2, "alice"), &replicated_table_schema, &key_indices),
-                delete_row(&test_row(3, "alice"), &replicated_table_schema, &key_indices),
+                delete_row(&test_row(2, "alice"), &key_indices),
+                delete_row(&test_row(3, "alice"), &key_indices),
             ]
         );
+    }
+
+    #[test]
+    fn table_delta_delete_row_uses_dense_key_values() {
+        let key_indices = [1];
+        let old_row = TableRow::new(vec![
+            Cell::String("tenant_1".to_owned()),
+            Cell::I32(7),
+            Cell::String("alice".to_owned()),
+        ]);
+        let delete_row = delete_row(&old_row, &key_indices);
+        let mut table_delta = TableDelta::default();
+
+        table_delta.delete(delete_row.clone());
+
+        let (data_rows, delete_rows) = table_delta.into_parts();
+        assert!(data_rows.is_empty());
+        assert_eq!(delete_row.values(), &[Cell::I32(7)]);
+        assert_eq!(delete_rows, vec![delete_row]);
     }
 
     #[test]

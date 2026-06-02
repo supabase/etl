@@ -94,11 +94,12 @@ impl DestinationTableMetadata {
 
     /// Transitions this metadata to applied status.
     ///
-    /// Clears the previous_snapshot_id since the change completed successfully, and we won't need that
-    /// schema snapshot anymore.
+    /// Clears the previous_snapshot_id since the change completed successfully,
+    /// and we won't need that schema snapshot anymore.
     ///
-    /// In practice, we could keep it, but in this way we allow schema cleanup to happen more effectively
-    /// since the snapshots frontier is moved faster.
+    /// In practice, we could keep it, but in this way we allow schema cleanup
+    /// to happen more effectively since the snapshots frontier is moved
+    /// faster.
     pub fn to_applied(mut self) -> Self {
         self.schema_status = DestinationTableSchemaStatus::Applied;
         self.previous_snapshot_id = None;
