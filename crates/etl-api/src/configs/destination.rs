@@ -1101,10 +1101,13 @@ mod tests {
 
     #[test]
     fn stored_destination_config_encryption_decryption_bigquery() {
+        let service_account_key_plaintext = "{\"test\": \"key\"}";
         let config = StoredDestinationConfig::BigQuery {
             project_id: "test-project".to_owned(),
             dataset_id: "test_dataset".to_owned(),
-            service_account_key: SerializableSecretString::from("{\"test\": \"key\"}".to_owned()),
+            service_account_key: SerializableSecretString::from(
+                service_account_key_plaintext.to_owned(),
+            ),
             max_staleness_mins: Some(15),
             connection_pool_size: 8,
         };
@@ -1116,10 +1119,10 @@ mod tests {
 
         let encrypted = config.clone().encrypt(&key).unwrap();
         let encrypted_json = serde_json::to_string(&encrypted).unwrap();
-        assert!(!encrypted_json.contains("user:pass"));
+        assert!(!encrypted_json.contains(r#"{\"test\": \"key\"}"#));
         match &encrypted {
-            EncryptedStoredDestinationConfig::Ducklake { catalog_url, .. } => {
-                assert!(matches!(catalog_url, EncryptedStoredCatalogUrl::Encrypted(_)));
+            EncryptedStoredDestinationConfig::BigQuery { service_account_key, .. } => {
+                assert_ne!(service_account_key.value, service_account_key_plaintext);
             }
             _ => panic!("Config types don't match"),
         }
