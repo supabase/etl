@@ -128,7 +128,7 @@ impl Validator for DestinationValidator {
                 maintenance_mode: _,
             } => {
                 let validator = DucklakeValidator::new(
-                    catalog_url.clone(),
+                    catalog_url.expose_secret().to_owned(),
                     data_path.clone(),
                     pool_size.unwrap_or(
                         etl_config::shared::DestinationConfig::DEFAULT_DUCKLAKE_POOL_SIZE,

@@ -22,6 +22,15 @@ where
     Ok(opt.map(|s| s.trim().to_owned()))
 }
 
+/// Deserializes a secret string and trims leading and trailing whitespace.
+pub fn trim_secret_string<'de, D>(deserializer: D) -> Result<SerializableSecretString, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+    Ok(SerializableSecretString::from(s.trim().to_owned()))
+}
+
 /// Deserializes an optional secret string and trims leading and trailing
 /// whitespace if present.
 pub fn trim_option_secret_string<'de, D>(
