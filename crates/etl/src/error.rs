@@ -407,16 +407,45 @@ fn write_source_chain(
 
     while let Some(error) = current {
         writeln!(f)?;
-        write!(
-            f,
-            "{prefix}  {index}. {}",
-            error.to_string().lines().collect::<Vec<_>>().join(" ")
-        )?;
+        write!(f, "{prefix}  {index}. ")?;
+        write_source_error_head(error, f)?;
         current = error.source();
         index += 1;
     }
 
     Ok(())
+}
+
+/// Writes one source entry without recursively rendering its own source chain.
+fn write_source_error_head(
+    error: &(dyn error::Error + 'static),
+    f: &mut fmt::Formatter<'_>,
+) -> fmt::Result {
+    if let Some(error) = error.downcast_ref::<EtlError>() {
+        write_etl_error_head(error, f)
+    } else {
+        write!(f, "{}", error.to_string().lines().collect::<Vec<_>>().join(" "))
+    }
+}
+
+/// Writes the headline for an [`EtlError`] without its source chain.
+fn write_etl_error_head(error: &EtlError, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match &error.repr {
+        ErrorRepr::Single(payload) => {
+            write!(f, "[{:?}] {}", payload.kind, payload.description)?;
+
+            if let Some(detail) = &payload.detail
+                && !detail.trim().is_empty()
+            {
+                write!(f, ": {}", detail.lines().collect::<Vec<_>>().join(" "))?;
+            }
+
+            Ok(())
+        }
+        ErrorRepr::Many { errors } => {
+            write!(f, "{} error{} occurred", errors.len(), if errors.len() == 1 { "" } else { "s" },)
+        }
+    }
 }
 
 impl error::Error for EtlError {
@@ -1143,6 +1172,27 @@ mod tests {
             multi_err.to_string(),
             "2 errors occurred\n├─ [DestinationError] BigQuery invalid argument\n│  caused \
              by:\n│    1. Maximum length exceeded: 10485760\n└─ [ValidationError] Invalid schema"
+        );
+    }
+
+    #[test]
+    fn display_flattens_chained_etl_error_sources_without_embedded_causes() {
+        let inner = etl_error!(ErrorKind::DestinationError, "BigQuery invalid argument");
+        let middle = etl_error!(
+            ErrorKind::DestinationError,
+            "BigQuery invalid argument",
+            source: inner
+        );
+        let outer = etl_error!(
+            ErrorKind::DestinationError,
+            "BigQuery invalid argument",
+            source: middle
+        );
+
+        assert_eq!(
+            outer.to_string(),
+            "[DestinationError] BigQuery invalid argument\ncaused by:\n  1. [DestinationError] \
+             BigQuery invalid argument\n  2. [DestinationError] BigQuery invalid argument"
         );
     }
 
