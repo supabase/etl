@@ -221,6 +221,101 @@ async fn cdc_streaming_coalesces_insert_then_delete_in_one_batch() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn cdc_streaming_updates_primary_key() {
+    init_test_tracing();
+
+    let database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+
+    let store = NotifyingStore::new();
+    let pipeline_id: PipelineId = random();
+
+    let lakekeeper_client = LakekeeperClient::new(LAKEKEEPER_URL);
+    let (warehouse_name, warehouse_id) = lakekeeper_client.create_warehouse().await.unwrap();
+    let client = IcebergClient::new_with_rest_catalog(
+        get_catalog_url(),
+        warehouse_name,
+        create_minio_props(),
+    )
+    .await
+    .unwrap();
+
+    let namespace = "test_namespace";
+    client.create_namespace_if_missing(namespace).await.unwrap();
+
+    let raw_destination = IcebergDestination::new(
+        client.clone(),
+        DestinationNamespace::Single(namespace.to_owned()),
+        store.clone(),
+    );
+    let destination = TestDestinationWrapper::wrap(raw_destination);
+
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    let users_state_notify = store
+        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
+        .await;
+
+    pipeline.start().await.unwrap();
+    users_state_notify.notified().await;
+
+    let users_table_name = database_schema.users_schema().name;
+    let event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 2)]).await;
+    database
+        .insert_values(
+            users_table_name.clone(),
+            &["id", "name", "age"],
+            &[&1_i64, &"alice", &1_i32],
+        )
+        .await
+        .unwrap();
+    database
+        .insert_values(users_table_name.clone(), &["id", "name", "age"], &[&2_i64, &"bob", &2_i32])
+        .await
+        .unwrap();
+    event_notify.notified().await;
+    destination.clear_events().await;
+
+    let event_notify = destination.wait_for_events_count(vec![(EventType::Update, 1)]).await;
+    database
+        .update_values_where(
+            users_table_name.clone(),
+            &["id", "name", "age"],
+            &[&10_i64, &"alice_moved", &10_i32],
+            &["id"],
+            &["1"],
+            "",
+        )
+        .await
+        .unwrap();
+    event_notify.notified().await;
+
+    let users_table =
+        table_name_to_iceberg_table_name(&users_table_name, true).expect("valid table name");
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let mut actual_users = read_all_rows(&client, namespace.to_owned(), users_table.clone()).await;
+    sort_rows_by_id(&mut actual_users);
+
+    let expected_users = vec![
+        TableRow::new(vec![Cell::I64(2), Cell::String("bob".to_owned()), Cell::I32(2)]),
+        TableRow::new(vec![Cell::I64(10), Cell::String("alice_moved".to_owned()), Cell::I32(10)]),
+    ];
+    assert_table_rows_equal_ignoring_size(&actual_users, &expected_users);
+
+    client.drop_table_if_exists(namespace, users_table).await.unwrap();
+    client.drop_namespace(namespace).await.unwrap();
+    lakekeeper_client.drop_warehouse(warehouse_id).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn cdc_streaming_applies_schema_changes_end_to_end() {
     init_test_tracing();
 

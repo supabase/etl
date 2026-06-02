@@ -454,10 +454,11 @@ impl IcebergClient {
 
     /// Applies a CDC row-delta batch to an Iceberg table.
     ///
-    /// Data rows are appended as Parquet data files. Delete rows are written as
-    /// Iceberg v2 equality-delete files using the table identifier fields.
-    /// When delete files are present, the method commits data and deletes in
-    /// one snapshot through the REST catalog commit endpoint.
+    /// Data rows are appended as Parquet data files. Delete rows must contain
+    /// only the table identifier-field values, in current Iceberg schema order.
+    /// Those dense key rows are written as Iceberg v2 equality-delete files.
+    /// When delete files are present, the method commits data and deletes
+    /// in one snapshot through the REST catalog commit endpoint.
     pub async fn apply_row_delta(
         &self,
         namespace: String,
@@ -567,6 +568,7 @@ impl IcebergClient {
         let full_arrow_schema = iceberg::arrow::schema_to_arrow_schema(iceberg_schema)
             .map_err(iceberg_error_to_etl_error)?;
         let field_positions = arrow_field_positions_by_id(&full_arrow_schema)?;
+        let input_arrow_schema = nullable_arrow_schema(&full_arrow_schema);
         let mut columns = full_arrow_schema
             .fields()
             .iter()
@@ -588,7 +590,8 @@ impl IcebergClient {
             columns[full_index] = Arc::clone(projected_batch.column(projected_index));
         }
 
-        RecordBatch::try_new(Arc::new(full_arrow_schema), columns).map_err(arrow_error_to_etl_error)
+        RecordBatch::try_new(Arc::new(input_arrow_schema), columns)
+            .map_err(arrow_error_to_etl_error)
     }
 
     /// Writes a RecordBatch to an Iceberg table using Parquet format.
@@ -1199,6 +1202,21 @@ fn arrow_field_id(field: &Field) -> EtlResult<i32> {
             source: error
         )
     })
+}
+
+/// Returns a schema with the same fields and metadata but nullable top-level
+/// fields.
+fn nullable_arrow_schema(schema: &ArrowSchema) -> ArrowSchema {
+    ArrowSchema::new(
+        schema
+            .fields()
+            .iter()
+            .map(|field| {
+                Field::new(field.name(), field.data_type().clone(), true)
+                    .with_metadata(field.metadata().clone())
+            })
+            .collect::<Vec<_>>(),
+    )
 }
 
 /// Validates evolution for a field that exists in both schemas.
