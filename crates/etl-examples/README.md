@@ -142,7 +142,7 @@ consistent and queryable at all times.
 2. A **data directory** (local) or an S3 / S3-compatible bucket where Parquet
    files will be written.
 
-### Run (local data)
+### Run
 
 ```bash
 cargo run --bin ducklake -p etl-examples --features ducklake -- \
@@ -152,12 +152,11 @@ cargo run --bin ducklake -p etl-examples --features ducklake -- \
     --db-username postgres \
     --db-password mypassword \
     --catalog-url postgres://user:pass@localhost:5432/ducklake_catalog \
-    --data-path file:///absolute/path/to/lake_data \
-    --publication my_pub
+    --data-path s3://bucket/lake_data \
+    --publication my_pub \
+    --s3-access-key-id my-access-key \
+    --s3-secret-access-key my-secret-key
 ```
-
-The CLI also accepts plain local paths such as `./lake_data/` and normalizes
-them to absolute `file://` URLs before constructing the destination.
 
 ## ClickHouse Setup
 
@@ -264,7 +263,7 @@ authentication.
 
 ### Example configuration
 
-This is a fuller local example that also enables a dedicated DuckDB log dump on
+This is a fuller example that also enables a dedicated DuckDB log dump on
 shutdown:
 
 ```bash
@@ -275,8 +274,10 @@ cargo run --bin ducklake -p etl-examples --features ducklake -- \
     --db-username postgres \
     --db-password password \
     --catalog-url "postgres://postgres:password@postgres.etl-data-plane.svc.cluster.local:5432/mydb?sslmode=disable" \
-    --data-path /Users/bnj/misc/parquet_files \
+    --data-path s3://bucket/lake_data \
     --publication my_pub \
+    --s3-access-key-id my-access-key \
+    --s3-secret-access-key my-secret-key \
     --metadata-schema ducklake \
     --pool-size 4 \
     --max-batch-fill-duration-ms 5000 \
@@ -288,7 +289,7 @@ cargo run --bin ducklake -p etl-examples --features ducklake -- \
 In this example:
 
 - `--catalog-url` points to the PostgreSQL database that stores DuckLake metadata.
-- `--data-path` is a plain local path and will be normalized to a `file://` URL.
+- `--data-path` points to the S3 / S3-compatible location for Parquet files.
 - `--metadata-schema ducklake` keeps DuckLake metadata tables in a dedicated Postgres schema.
 - `--duckdb-log-storage-path` enables `CALL enable_logging(storage_path = ...)` for each DuckDB connection.
 - `--duckdb-log-dump-path` writes a CSV dump of `SELECT * FROM duckdb_logs` during graceful shutdown.
@@ -328,9 +329,8 @@ cargo run --bin ducklake -p etl-examples --features ducklake -- \
     --metadata-schema <schema-name>
 ```
 
-The example CLI exposes S3 / S3-compatible cloud credentials today. For
-`s3://` data paths, the destination loads DuckDB's `httpfs` extension during
-connection setup.
+The example CLI requires S3 / S3-compatible cloud credentials. The destination
+loads DuckDB's `httpfs` extension during connection setup.
 
 ### All flags
 
@@ -342,13 +342,13 @@ connection setup.
 | `--db-username`                | _(required)_ | Postgres user (must have REPLICATION)                             |
 | `--db-password`                | —            | Postgres password (omit for trust auth)                           |
 | `--catalog-url`                | _(required)_ | DuckLake catalog URL (`postgres://...` or `file://...`)           |
-| `--data-path`                  | _(required)_ | Local path / `file://` URL or `s3://` URI for Parquet files       |
+| `--data-path`                  | _(required)_ | `s3://` URI for Parquet files                                    |
 | `--pool-size`                  | `4`          | DuckDB connection pool size                                       |
 | `--max-batch-fill-duration-ms` | `5000`       | Max time to wait before flushing a batch                          |
 | `--max-table-sync-workers`     | `4`          | Concurrent workers during initial copy                            |
 | `--publication`                | _(required)_ | Postgres publication name                                         |
-| `--s3-access-key-id`           | —            | S3 access key ID (required for private S3 buckets)                |
-| `--s3-secret-access-key`       | —            | S3 secret access key                                              |
+| `--s3-access-key-id`           | _(required)_ | S3 access key ID                                                  |
+| `--s3-secret-access-key`       | _(required)_ | S3 secret access key                                              |
 | `--s3-region`                  | `us-east-1`  | S3 region                                                         |
 | `--s3-endpoint`                | —            | Custom S3 endpoint, e.g. `127.0.0.1:5000/s3` for Supabase Storage |
 | `--s3-url-style`               | `path`       | URL style: `path` (MinIO/Supabase) or `vhost` (AWS)               |
@@ -366,7 +366,7 @@ lake at any time — even while the pipeline is running:
 duckdb :memory: -c "
   INSTALL ducklake; LOAD ducklake;
   ATTACH 'ducklake:postgres:host=''localhost'' port=''5432'' dbname=''ducklake_catalog'' user=''user'' password=''pass'''
-    AS lake (DATA_PATH 'file:///absolute/path/to/lake_data');
+    AS lake (DATA_PATH 's3://bucket/lake_data');
   SELECT * FROM lake.public_orders;
   SELECT COUNT(*) FROM lake.public_customers;
 "

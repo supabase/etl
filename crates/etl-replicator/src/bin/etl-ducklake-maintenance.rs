@@ -3,7 +3,7 @@
 use std::{env, error::Error, process::ExitCode};
 
 use etl_config::{
-    load_config, parse_ducklake_url,
+    load_config, parse_ducklake_s3_data_path, parse_ducklake_url,
     shared::{DestinationConfig, ReplicatorConfig},
 };
 use etl_maintenance::ducklake::{
@@ -79,8 +79,8 @@ async fn run(config: ReplicatorConfig) -> MaintenanceResult<()> {
     };
 
     let maintenance_config = DuckLakeMaintenanceConfig {
-        catalog_url: parse_ducklake_url(&catalog_url)?,
-        data_path: parse_ducklake_url(&data_path)?,
+        catalog_url: parse_ducklake_url(catalog_url.expose_secret())?,
+        data_path: parse_ducklake_s3_data_path(&data_path)?,
         pool_size,
         s3,
         metadata_schema,
@@ -120,7 +120,7 @@ async fn run(config: ReplicatorConfig) -> MaintenanceResult<()> {
             )?,
         },
         expire_snapshots: ExpireSnapshotsMaintenanceConfig {
-            enabled: env_bool("ETL_DUCKLAKE_MAINTENANCE__EXPIRE_SNAPSHOTS__ENABLED", false),
+            enabled: env_bool("ETL_DUCKLAKE_MAINTENANCE__EXPIRE_SNAPSHOTS__ENABLED", true),
             older_than: expire_snapshots_older_than.unwrap_or_else(|| "7 days".to_owned()),
         },
         cleanup_old_files: CleanupOldFilesMaintenanceConfig {

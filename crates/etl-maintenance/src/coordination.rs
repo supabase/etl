@@ -228,7 +228,7 @@ impl Default for ExternalMaintenanceOperationPolicy {
             inline_flush_enabled: true,
             merge_adjacent_files_enabled: true,
             rewrite_data_files_enabled: true,
-            expire_snapshots_enabled: false,
+            expire_snapshots_enabled: true,
             cleanup_old_files_enabled: true,
         }
     }

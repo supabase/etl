@@ -29,6 +29,10 @@ pub(crate) struct RotateEncryptionKeyArgs {
     /// Resource table to rotate.
     #[arg(long, value_enum, default_value_t = RotationTarget::All)]
     target: RotationTarget,
+
+    /// Tenant/project ref to rotate. When omitted, all tenants are scanned.
+    #[arg(long)]
+    tenant_id: Option<String>,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -54,23 +58,35 @@ impl RotateEncryptionKeyArgs {
         let pool = connect_to_database(&config).await?;
 
         println!(
-            "[rotate-encryption-key] target key id: {latest_key_id}; dry run: {}",
-            self.dry_run
+            "[rotate-encryption-key] target key id: {latest_key_id}; dry run: {}; tenant_id: {}",
+            self.dry_run,
+            self.tenant_id.as_deref().unwrap_or("all")
         );
 
         let mut total_stats = RotationStats::default();
 
         if matches!(self.target, RotationTarget::All | RotationTarget::Sources) {
-            let stats =
-                rotate_sources(&pool, &encryption_keyring, self.batch_size, self.dry_run).await?;
+            let stats = rotate_sources(
+                &pool,
+                &encryption_keyring,
+                self.batch_size,
+                self.dry_run,
+                self.tenant_id.as_deref(),
+            )
+            .await?;
             stats.print("sources");
             total_stats += stats;
         }
 
         if matches!(self.target, RotationTarget::All | RotationTarget::Destinations) {
-            let stats =
-                rotate_destinations(&pool, &encryption_keyring, self.batch_size, self.dry_run)
-                    .await?;
+            let stats = rotate_destinations(
+                &pool,
+                &encryption_keyring,
+                self.batch_size,
+                self.dry_run,
+                self.tenant_id.as_deref(),
+            )
+            .await?;
             stats.print("destinations");
             total_stats += stats;
         }
@@ -147,6 +163,7 @@ async fn rotate_sources(
     encryption_keyring: &EncryptionKeyring,
     batch_size: i64,
     dry_run: bool,
+    tenant_id: Option<&str>,
 ) -> Result<RotationStats> {
     let latest_key_id = encryption_keyring.latest_key_id();
     let mut stats = RotationStats::default();
@@ -156,6 +173,7 @@ async fn rotate_sources(
         let records = sqlx::query_as::<_, ResourceRecord>(SOURCE_BATCH_QUERY)
             .bind(last_id)
             .bind(batch_size)
+            .bind(tenant_id)
             .fetch_all(pool)
             .await
             .context("Fetching source config batch")?;
@@ -209,6 +227,7 @@ async fn rotate_destinations(
     encryption_keyring: &EncryptionKeyring,
     batch_size: i64,
     dry_run: bool,
+    tenant_id: Option<&str>,
 ) -> Result<RotationStats> {
     let latest_key_id = encryption_keyring.latest_key_id();
     let mut stats = RotationStats::default();
@@ -218,6 +237,7 @@ async fn rotate_destinations(
         let records = sqlx::query_as::<_, ResourceRecord>(DESTINATION_BATCH_QUERY)
             .bind(last_id)
             .bind(batch_size)
+            .bind(tenant_id)
             .fetch_all(pool)
             .await
             .context("Fetching destination config batch")?;
@@ -334,6 +354,7 @@ const SOURCE_BATCH_QUERY: &str = r#"
 select id, config
 from app.sources
 where id > $1
+  and ($3::text is null or tenant_id = $3::text)
 order by id
 limit $2
 "#;
@@ -342,6 +363,7 @@ const DESTINATION_BATCH_QUERY: &str = r#"
 select id, config
 from app.destinations
 where id > $1
+  and ($3::text is null or tenant_id = $3::text)
 order by id
 limit $2
 "#;

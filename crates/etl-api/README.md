@@ -105,6 +105,14 @@ APP_ENVIRONMENT=prod \
 cargo x rotate-encryption-key
 ```
 
+To test one project/tenant first, pass its tenant id:
+
+```bash
+APP_CONFIG_DIR=/path/to/etl-api/configuration \
+APP_ENVIRONMENT=prod \
+cargo x rotate-encryption-key --dry-run --tenant-id <project-ref>
+```
+
 The command uses the keys and database connection from the API configuration.
 It decrypts rows using the stored key ids and writes updated configs with the
 highest configured key id.
