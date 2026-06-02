@@ -23,10 +23,6 @@ use crate::{
 /// with [`WriteStreamBatchesResult`], so destinations may still choose to
 /// structure their internal write paths in a similar way.
 pub type WriteSnapshotBatchResult<T = ()> = AsyncResult<T>;
-/// Pending async completion used for `Destination::write_snapshot_batch`.
-pub type PendingWriteSnapshotBatchResult<T = ()> = PendingAsyncResult<T, ()>;
-/// Completed async completion used for `Destination::write_snapshot_batch`.
-pub type CompletedWriteSnapshotBatchResult<T = ()> = CompletedAsyncResult<T, ()>;
 
 /// Async completion handle used for
 /// [`crate::destination::Destination::drop_table_for_copy`].
@@ -35,10 +31,6 @@ pub type CompletedWriteSnapshotBatchResult<T = ()> = CompletedAsyncResult<T, ()>
 /// hook rather than a mechanism for overlapping more ETL work with copy
 /// cleanup.
 pub type DropTableForCopyResult<T = ()> = AsyncResult<T>;
-/// Pending async completion used for `Destination::drop_table_for_copy`.
-pub type PendingDropTableForCopyResult<T = ()> = PendingAsyncResult<T, ()>;
-/// Completed async completion used for `Destination::drop_table_for_copy`.
-pub type CompletedDropTableForCopyResult<T = ()> = CompletedAsyncResult<T, ()>;
 
 /// Async completion handle used for
 /// [`crate::destination::Destination::write_stream_batches`].
@@ -48,41 +40,33 @@ pub type CompletedDropTableForCopyResult<T = ()> = CompletedAsyncResult<T, ()>;
 /// the destination finishes the batch.
 pub type WriteStreamBatchesResult<T = ()> = AsyncResult<T>;
 /// Pending async completion used for `Destination::write_stream_batches`.
-pub type PendingWriteStreamBatchesResult<T = ()> =
+pub(crate) type PendingWriteStreamBatchesResult<T = ()> =
     PendingAsyncResult<T, ApplyLoopAsyncResultMetadata>;
 /// Completed async completion used for `Destination::write_stream_batches`.
-pub type CompletedWriteStreamBatchesResult<T = ()> =
+pub(crate) type CompletedWriteStreamBatchesResult<T = ()> =
     CompletedAsyncResult<T, ApplyLoopAsyncResultMetadata>;
 
 /// Compatibility alias for callers migrating from row-based copy batches.
 pub type WriteTableRowsResult<T = ()> = WriteSnapshotBatchResult<T>;
-/// Compatibility alias for callers migrating from row-based copy batches.
-pub type PendingWriteTableRowsResult<T = ()> = PendingWriteSnapshotBatchResult<T>;
-/// Compatibility alias for callers migrating from row-based copy batches.
-pub type CompletedWriteTableRowsResult<T = ()> = CompletedWriteSnapshotBatchResult<T>;
 /// Compatibility alias for callers migrating from raw event batches.
 pub type WriteEventsResult<T = ()> = WriteStreamBatchesResult<T>;
-/// Compatibility alias for callers migrating from raw event batches.
-pub type PendingWriteEventsResult<T = ()> = PendingWriteStreamBatchesResult<T>;
-/// Compatibility alias for callers migrating from raw event batches.
-pub type CompletedWriteEventsResult<T = ()> = CompletedWriteStreamBatchesResult<T>;
 
 /// Dispatch-time metrics carried through an asynchronous completion result.
 #[derive(Debug, Clone, Copy)]
-pub struct DispatchMetrics {
+pub(crate) struct DispatchMetrics {
     /// Number of items in the dispatched batch.
-    pub items_count: usize,
+    pub(crate) items_count: usize,
     /// Instant at which the batch was handed off to the destination.
-    pub dispatched_at: Instant,
+    pub(crate) dispatched_at: Instant,
 }
 
 /// Metadata carried by apply-loop event write completions.
 #[derive(Debug, Clone, Copy)]
-pub struct ApplyLoopAsyncResultMetadata {
+pub(crate) struct ApplyLoopAsyncResultMetadata {
     /// Commit end LSN associated with the dispatched batch, if any.
-    pub commit_end_lsn: Option<PgLsn>,
+    pub(crate) commit_end_lsn: Option<PgLsn>,
     /// Dispatch-time metrics for the batch.
-    pub metrics: DispatchMetrics,
+    pub(crate) metrics: DispatchMetrics,
 }
 
 /// Sender half of a typed asynchronous completion result.
@@ -102,7 +86,7 @@ impl<T> AsyncResult<T> {
     ///
     /// The metadata is stored only on the pending/completed side so ETL can
     /// carry method-specific context across the asynchronous boundary.
-    pub fn new<M>(metadata: M) -> (Self, PendingAsyncResult<T, M>) {
+    pub(crate) fn new<M>(metadata: M) -> (Self, PendingAsyncResult<T, M>) {
         let (tx, rx) = oneshot::channel();
 
         (Self { tx: Some(tx) }, PendingAsyncResult { metadata: Some(metadata), rx })
@@ -137,19 +121,10 @@ pin_project! {
     /// Receiver half of a typed asynchronous completion result.
     #[must_use = "pending async results do nothing unless polled"]
     #[derive(Debug)]
-    pub struct PendingAsyncResult<T, M> {
+    pub(crate) struct PendingAsyncResult<T, M> {
         metadata: Option<M>,
         #[pin]
         rx: oneshot::Receiver<EtlResult<T>>,
-    }
-}
-
-impl<T, M> PendingAsyncResult<T, M> {
-    /// Returns the metadata attached to this pending result.
-    pub fn metadata(&self) -> &M {
-        self.metadata
-            .as_ref()
-            .expect("pending async result metadata is always present until completion")
     }
 }
 
@@ -184,24 +159,19 @@ impl<T, M> Future for PendingAsyncResult<T, M> {
 
 /// Completed typed asynchronous result.
 #[derive(Debug)]
-pub struct CompletedAsyncResult<T, M> {
+pub(crate) struct CompletedAsyncResult<T, M> {
     metadata: M,
     result: EtlResult<T>,
 }
 
 impl<T, M> CompletedAsyncResult<T, M> {
-    /// Returns the metadata attached to this result.
-    pub fn metadata(&self) -> &M {
-        &self.metadata
-    }
-
     /// Returns the final result.
-    pub fn into_result(self) -> EtlResult<T> {
+    pub(crate) fn into_result(self) -> EtlResult<T> {
         self.result
     }
 
     /// Returns the metadata and final result.
-    pub fn into_parts(self) -> (M, EtlResult<T>) {
+    pub(crate) fn into_parts(self) -> (M, EtlResult<T>) {
         (self.metadata, self.result)
     }
 }

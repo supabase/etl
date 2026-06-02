@@ -87,7 +87,11 @@ where
             for batch in &batches {
                 match batch {
                     StreamBatch::Changes(change_set) => {
-                        if let Some(group) = change_set.groups.first() {
+                        // A single normalized stream batch can contain multiple
+                        // groups for the same table across schema snapshots.
+                        // The destination metadata should reflect the latest
+                        // schema applied by the batch.
+                        if let Some(group) = change_set.groups.last() {
                             table_schemas
                                 .insert(change_set.table_id, Arc::clone(&group.rows.table_schema));
                         }

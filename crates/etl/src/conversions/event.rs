@@ -1,5 +1,8 @@
 use core::str;
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    str::FromStr,
+};
 
 use etl_postgres::types::{
     ColumnSchema, IdentityMask, ReplicatedTableSchema, ReplicationMask, SnapshotId, TableId,
@@ -13,13 +16,84 @@ use tokio_postgres::types::PgLsn;
 use crate::{
     bail,
     conversions::text::parse_cell_from_postgres_text,
-    error::{ErrorKind, EtlResult},
+    error::{ErrorKind, EtlError, EtlResult},
+    etl_error,
     metrics::{ETL_BYTES_PROCESSED_TOTAL, ETL_ROW_SIZE_BYTES, EVENT_TYPE_LABEL},
     types::{
         BeginEvent, Cell, CommitEvent, DeleteEvent, InsertEvent, OldTableRow, PartialTableRow,
         TableRow, TruncateEvent, Type, UpdateEvent, UpdatedTableRow,
     },
 };
+
+/// The prefix used for DDL schema change messages emitted by the
+/// `etl.emit_schema_change_messages` event trigger. Messages with this prefix
+/// contain JSON-encoded schema information.
+pub(crate) const DDL_MESSAGE_PREFIX: &str = "supabase_etl_ddl";
+
+/// Represents a schema change message emitted by Postgres event trigger.
+///
+/// This message is emitted when ALTER TABLE commands are executed on tables
+/// that are part of a publication.
+///
+/// Unknown fields are ignored on purpose so the SQL payload can grow richer
+/// without forcing a synchronized rollout of every consumer.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct SchemaChangeMessage {
+    /// The command tag from `pg_event_trigger_ddl_commands().command_tag`.
+    pub(crate) command_tag: String,
+    /// The schema name from `pg_namespace.nspname`.
+    pub(crate) nspname: String,
+    /// The table name from `pg_class.relname`.
+    pub(crate) relname: String,
+    /// The table OID from `pg_class.oid`.
+    ///
+    /// PostgreSQL table OIDs are `u32` values, but JSON serialization from the
+    /// event trigger uses `bigint` (`i64`) for transmission. The cast back to
+    /// `u32` in [`Self::into_table_schema`] is safe because PostgreSQL OIDs are
+    /// always within the `u32` range.
+    pub(crate) oid: i64,
+    /// The identity metadata emitted by Postgres for this table snapshot.
+    pub(crate) identity: IdentityMessage,
+    /// The columns of the table after the schema change.
+    pub(crate) columns: Vec<ColumnSchemaMessage>,
+}
+
+impl SchemaChangeMessage {
+    /// Returns the table identifier as [`TableId`].
+    pub(crate) fn table_id(&self) -> TableId {
+        TableId::new(self.oid as u32)
+    }
+
+    /// Converts a [`SchemaChangeMessage`] to a [`TableSchema`] with a specific
+    /// snapshot ID.
+    ///
+    /// This is used to update the stored table schema when a DDL change is
+    /// detected. The snapshot ID should be the start LSN of the DDL message.
+    pub(crate) fn into_table_schema(self, snapshot_id: SnapshotId) -> TableSchema {
+        let table_id = self.table_id();
+        build_table_schema(
+            table_id,
+            TableName::new(self.nspname, self.relname),
+            self.columns,
+            self.identity.primary_key_attnums,
+            snapshot_id,
+        )
+    }
+}
+
+impl FromStr for SchemaChangeMessage {
+    type Err = EtlError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        serde_json::from_str(s).map_err(|error| {
+            etl_error!(
+                ErrorKind::ConversionError,
+                "Failed to parse schema change message",
+                format!("Invalid JSON in schema change message: {error}")
+            )
+        })
+    }
+}
 
 /// The identity metadata emitted by Postgres.
 #[derive(Debug, Clone, Deserialize)]

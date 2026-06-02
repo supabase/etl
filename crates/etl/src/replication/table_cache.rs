@@ -52,7 +52,6 @@ use tokio::sync::RwLock;
 pub(crate) enum SharedTableState {
     /// A newer schema snapshot exists, but the runtime relation state for that
     /// snapshot has not been materialized yet.
-    #[cfg(test)]
     WaitingForRelation {
         /// The latest schema snapshot known for the table.
         snapshot_id: SnapshotId,
@@ -68,7 +67,6 @@ impl SharedTableState {
     /// Returns the snapshot that this shared state targets.
     pub(crate) fn snapshot_id(&self) -> SnapshotId {
         match self {
-            #[cfg(test)]
             Self::WaitingForRelation { snapshot_id } => *snapshot_id,
             Self::Ready { replicated_table_schema } => replicated_table_schema.inner().snapshot_id,
         }
@@ -77,7 +75,6 @@ impl SharedTableState {
     /// Returns the runtime replicated schema when it is ready.
     pub(crate) fn replicated_table_schema(&self) -> Option<&ReplicatedTableSchema> {
         match self {
-            #[cfg(test)]
             Self::WaitingForRelation { .. } => None,
             Self::Ready { replicated_table_schema } => Some(replicated_table_schema),
         }
@@ -104,7 +101,6 @@ impl SharedTableCache {
 
     /// Returns the current active table ids in the cache, which represent the
     /// active tables being replicated.
-    #[cfg(test)]
     pub(crate) async fn active_table_ids(&self) -> Vec<TableId> {
         let guard = self.inner.read().await;
         guard.keys().copied().collect()
@@ -112,7 +108,6 @@ impl SharedTableCache {
 
     /// Records that a table is waiting for a new relation-state refresh for
     /// the supplied snapshot.
-    #[cfg(test)]
     pub(crate) async fn note_waiting_for_relation(
         &self,
         table_id: TableId,

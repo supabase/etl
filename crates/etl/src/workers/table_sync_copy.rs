@@ -23,10 +23,9 @@ use crate::{
     error::{ErrorKind, EtlResult},
     etl_error,
     metrics::{
-        ACTION_LABEL, DESTINATION_LABEL, ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
-        ETL_EVENTS_PROCESSED_TOTAL, ETL_PARALLEL_TABLE_COPY_ROWS_IMBALANCE,
-        ETL_PARALLEL_TABLE_COPY_TIME_IMBALANCE, ETL_TABLE_COPY_ROWS, PARTITIONING_LABEL,
-        PIPELINE_ID_LABEL, WORKER_TYPE_LABEL,
+        ACTION_LABEL, ETL_BATCH_ITEMS_SEND_DURATION_SECONDS, ETL_EVENTS_PROCESSED_TOTAL,
+        ETL_PARALLEL_TABLE_COPY_ROWS_IMBALANCE, ETL_PARALLEL_TABLE_COPY_TIME_IMBALANCE,
+        ETL_TABLE_COPY_ROWS, PARTITIONING_LABEL, WORKER_TYPE_LABEL,
     },
     replication::{
         RawTableCopyStream, TableCopyRowBytes,
@@ -35,7 +34,6 @@ use crate::{
             PostgresConnectionUpdate,
         },
     },
-    types::PipelineId,
 };
 
 /// Calculates Load Imbalance Factor (LIF) for a set of values.
@@ -84,7 +82,6 @@ async fn copy_table_rows_from_stream<D, S>(
     mut shutdown_rx: ShutdownRx,
     mut connection_updates_rx: watch::Receiver<PostgresConnectionUpdate>,
     table_schema: Arc<TableSchema>,
-    pipeline_id: PipelineId,
     partitioning: &'static str,
     destination: D,
 ) -> EtlResult<ShutdownResult<u64, u64>>
@@ -110,7 +107,7 @@ where
                 if changed.is_err() {
                     return Err(etl_error!(
                         ErrorKind::SourceConnectionFailed,
-                        "postgresql connection updates ended during table copy"
+                        "PostgreSQL connection updates ended during table copy"
                     ));
                 }
 
@@ -120,13 +117,13 @@ where
                     PostgresConnectionUpdate::Terminated => {
                         return Err(etl_error!(
                             ErrorKind::SourceConnectionFailed,
-                            "postgresql connection terminated during table copy"
+                            "PostgreSQL connection terminated during table copy"
                         ));
                     }
                     PostgresConnectionUpdate::Errored { error } => {
                         return Err(etl_error!(
                             ErrorKind::SourceConnectionFailed,
-                            "postgresql connection errored during table copy",
+                            "PostgreSQL connection errored during table copy",
                             error.to_string()
                         ));
                     }
@@ -158,8 +155,6 @@ where
                     ETL_EVENTS_PROCESSED_TOTAL,
                     WORKER_TYPE_LABEL => "table_sync",
                     ACTION_LABEL => "table_copy",
-                    PIPELINE_ID_LABEL => pipeline_id.to_string(),
-                    DESTINATION_LABEL => D::name(),
                 )
                 .increment(batch_size);
 
@@ -168,8 +163,6 @@ where
                     ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
                     WORKER_TYPE_LABEL => "table_sync",
                     ACTION_LABEL => "table_copy",
-                    PIPELINE_ID_LABEL => pipeline_id.to_string(),
-                    DESTINATION_LABEL => D::name(),
                     PARTITIONING_LABEL => partitioning,
                 )
                 .record(send_duration_seconds);
@@ -211,7 +204,6 @@ pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
     max_copy_connections: u16,
     batch_config: BatchConfig,
     shutdown_rx: ShutdownRx,
-    pipeline_id: PipelineId,
     destination: D,
     memory_monitor: MemoryMonitor,
     batch_budget: BatchBudgetController,
@@ -225,7 +217,6 @@ pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
             max_copy_connections,
             batch_config,
             shutdown_rx,
-            pipeline_id,
             destination,
             memory_monitor,
             batch_budget,
@@ -239,7 +230,6 @@ pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
             publication_name,
             batch_config,
             shutdown_rx,
-            pipeline_id,
             destination,
             memory_monitor,
             batch_budget,
@@ -258,7 +248,6 @@ async fn serial_table_copy<D: Destination + Clone + Send + 'static>(
     publication_name: Option<&str>,
     batch_config: BatchConfig,
     shutdown_rx: ShutdownRx,
-    pipeline_id: PipelineId,
     destination: D,
     memory_monitor: MemoryMonitor,
     batch_budget: BatchBudgetController,
@@ -268,7 +257,7 @@ async fn serial_table_copy<D: Destination + Clone + Send + 'static>(
     let table_copy_stream = transaction
         .get_table_copy_stream(table_id, &table_schema.column_schemas, publication_name)
         .await?;
-    let table_copy_stream = RawTableCopyStream::wrap(table_copy_stream, pipeline_id);
+    let table_copy_stream = RawTableCopyStream::wrap(table_copy_stream);
     let connection_updates_rx = transaction.connection_updates_rx();
     let _table_copy_stream_guard = batch_budget.register_stream_load(1);
     let cached_batch_budget = batch_budget.cached();
@@ -288,7 +277,6 @@ async fn serial_table_copy<D: Destination + Clone + Send + 'static>(
         shutdown_rx,
         connection_updates_rx,
         Arc::clone(&table_schema),
-        pipeline_id,
         "false",
         destination,
     )
@@ -304,8 +292,6 @@ async fn serial_table_copy<D: Destination + Clone + Send + 'static>(
 
     histogram!(
         ETL_TABLE_COPY_ROWS,
-        PIPELINE_ID_LABEL => pipeline_id.to_string(),
-        DESTINATION_LABEL => D::name(),
         PARTITIONING_LABEL => "false",
     )
     .record(total_rows as f64);
@@ -332,7 +318,6 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
     max_copy_connections: u16,
     batch_config: BatchConfig,
     shutdown_rx: ShutdownRx,
-    pipeline_id: PipelineId,
     destination: D,
     memory_monitor: MemoryMonitor,
     batch_budget: BatchBudgetController,
@@ -395,7 +380,7 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
             etl_error!(
                 ErrorKind::InvalidState,
                 "Could not acquire semaphore while copying a table in parallel",
-                err.to_string()
+                source: err
             )
         })?;
 
@@ -422,7 +407,6 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
                 partition,
                 batch_config,
                 shutdown_rx,
-                pipeline_id,
                 destination,
                 memory_monitor,
                 batch_budget,
@@ -473,7 +457,7 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
                 return Err(etl_error!(
                     ErrorKind::TableSyncWorkerPanic,
                     "One or more parallel copy partition tasks panicked, aborting all",
-                    join_err.to_string()
+                    source: join_err
                 ));
             }
         }
@@ -487,19 +471,9 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
         calculate_skew_metrics(&partition_row_counts.iter().map(|&r| r as f64).collect::<Vec<_>>());
 
     // Record imbalance metrics.
-    histogram!(
-        ETL_PARALLEL_TABLE_COPY_TIME_IMBALANCE,
-        PIPELINE_ID_LABEL => pipeline_id.to_string(),
-        DESTINATION_LABEL => D::name(),
-    )
-    .record(time_lif);
+    histogram!(ETL_PARALLEL_TABLE_COPY_TIME_IMBALANCE).record(time_lif);
 
-    histogram!(
-        ETL_PARALLEL_TABLE_COPY_ROWS_IMBALANCE,
-        PIPELINE_ID_LABEL => pipeline_id.to_string(),
-        DESTINATION_LABEL => D::name(),
-    )
-    .record(rows_lif);
+    histogram!(ETL_PARALLEL_TABLE_COPY_ROWS_IMBALANCE).record(rows_lif);
 
     info!(
         table_id = table_id.0,
@@ -527,7 +501,6 @@ async fn copy_partition<D>(
     partition: CopyPartition,
     batch_config: BatchConfig,
     shutdown_rx: ShutdownRx,
-    pipeline_id: PipelineId,
     destination: D,
     memory_monitor: MemoryMonitor,
     batch_budget: BatchBudgetController,
@@ -593,7 +566,7 @@ where
         }
     };
 
-    let table_copy_stream = RawTableCopyStream::wrap(copy_stream, pipeline_id);
+    let table_copy_stream = RawTableCopyStream::wrap(copy_stream);
     let connection_updates_rx = child_transaction.connection_updates_rx();
     let _table_copy_stream_guard = batch_budget.register_stream_load(1);
     let cached_batch_budget = batch_budget.cached();
@@ -611,7 +584,6 @@ where
         shutdown_rx,
         connection_updates_rx,
         Arc::clone(&table_schema),
-        pipeline_id,
         "true",
         destination,
     )
@@ -634,8 +606,6 @@ where
 
     histogram!(
         ETL_TABLE_COPY_ROWS,
-        PIPELINE_ID_LABEL => pipeline_id.to_string(),
-        DESTINATION_LABEL => D::name(),
         PARTITIONING_LABEL => "true",
     )
     .record(total_rows as f64);

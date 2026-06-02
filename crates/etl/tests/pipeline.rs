@@ -1,14 +1,12 @@
-#![cfg(feature = "test-utils")]
-
 use std::time::Duration;
 
 use etl::{
     error::ErrorKind,
     state::{TableState, TableStateType},
-    store::state::StateStore,
+    store::{schema::SchemaStore, state::StateStore},
     test_utils::{
         database::{spawn_source_database, test_table_name},
-        event::group_events_by_type_and_table_id,
+        event::{EventCondition, group_events_by_type_and_table_id},
         memory_destination::MemoryDestination,
         notifying_store::NotifyingStore,
         pipeline::{
@@ -38,6 +36,24 @@ use pg_escape::{quote_identifier, quote_literal};
 use rand::random;
 use tokio::time::sleep;
 use tokio_postgres::types::PgLsn;
+
+/// Creates a test column schema with sensible defaults.
+fn test_column(
+    name: &str,
+    typ: Type,
+    ordinal_position: i32,
+    nullable: bool,
+    primary_key: bool,
+) -> ColumnSchema {
+    ColumnSchema::new(
+        name.to_owned(),
+        typ,
+        -1,
+        ordinal_position,
+        if primary_key { Some(1) } else { None },
+        nullable,
+    )
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn pipeline_shutdown_calls_destination_shutdown() {
@@ -146,9 +162,8 @@ async fn pipeline_fails_when_slot_deleted_with_non_init_tables() {
     assert_eq!(slot_state, None);
 }
 
+// Serialized via nextest test-group "shared-pg" (shares the source PG cluster).
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "modifies cluster-wide PG settings; run independently with: cargo test -- --ignored \
-            exclusive_ --test-threads=1"]
 async fn exclusive_pipeline_fails_when_slot_invalidated_with_error_behavior() {
     init_test_tracing();
 
@@ -212,9 +227,8 @@ async fn exclusive_pipeline_fails_when_slot_invalidated_with_error_behavior() {
     assert!(err.kinds().contains(&ErrorKind::ReplicationSlotInvalidated));
 }
 
+// Serialized via nextest test-group "shared-pg" (shares the source PG cluster).
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "modifies cluster-wide PG settings; run independently with: cargo test -- --ignored \
-            exclusive_ --test-threads=1"]
 async fn exclusive_pipeline_recovers_when_slot_invalidated_with_recreate_behavior() {
     init_test_tracing();
 
@@ -793,10 +807,11 @@ async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart()
         return;
     }
 
-    // Create first table.
+    // Create first table and insert one row.
     let table_1 = test_table_name("table_1");
     let table_1_id =
         database.create_table(table_1.clone(), true, &[("name", "text not null")]).await.unwrap();
+    database.insert_values(table_1.clone(), &["name"], &[&"test_name_1".to_owned()]).await.unwrap();
 
     // Create a publication for all tables in the test schema.
     let publication_name = "test_pub_all_schema";
@@ -821,23 +836,40 @@ async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart()
 
     table_ready_notify.notified().await;
 
+    // Wait for an insert event in table 1.
+    let insert_events_notify =
+        destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
+
+    database.insert_values(table_1.clone(), &["name"], &[&"test_name_2".to_owned()]).await.unwrap();
+
+    insert_events_notify.notified().await;
+
     // Create a new table in the same schema and insert a row.
     let table_2 = test_table_name("table_2");
     let table_2_id =
         database.create_table(table_2.clone(), true, &[("value", "int4 not null")]).await.unwrap();
     database.insert_values(table_2.clone(), &["value"], &[&1_i32]).await.unwrap();
 
-    // Wait for the events to come in from the new table.
+    // Wait for the events to come in from the new table to make sure the pipeline
+    // reacts to them gracefully even if they are not replicated.
     sleep(Duration::from_secs(2)).await;
 
     // Shutdown and verify no errors occurred.
     pipeline.shutdown_and_wait().await.unwrap();
 
     // Check that only the schemas of the first table were stored.
-    let table_schemas = store.get_table_schemas().await;
+    let table_schemas = store.get_latest_table_schemas().await;
     assert_eq!(table_schemas.len(), 1);
     assert!(table_schemas.contains_key(&table_1_id));
     assert!(!table_schemas.contains_key(&table_2_id));
+
+    // Verify the table rows and events inserted into table 1.
+    let table_rows = destination.get_table_rows().await;
+    assert_eq!(table_rows.get(&table_1_id).unwrap().len(), 1);
+    let events = destination.get_events().await;
+    let grouped_events = group_events_by_type_and_table_id(&events);
+    let insert_events = grouped_events.get(&(EventType::Insert, table_1_id)).unwrap();
+    assert_eq!(insert_events.len(), 1);
 
     // We restart the pipeline and verify that the new table is now processed.
     let mut pipeline = create_pipeline(
@@ -855,14 +887,33 @@ async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart()
 
     table_ready_notify.notified().await;
 
+    // We clear the events to make waiting more idiomatic down the line.
+    destination.clear_events().await;
+
+    // Wait for an insert event in table 2.
+    let insert_events_notify =
+        destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
+
+    database.insert_values(table_2.clone(), &["value"], &[&2_i32]).await.unwrap();
+
+    insert_events_notify.notified().await;
+
     // Shutdown and verify no errors occurred.
     pipeline.shutdown_and_wait().await.unwrap();
 
     // Check that both schemas exist.
-    let table_schemas = store.get_table_schemas().await;
+    let table_schemas = store.get_latest_table_schemas().await;
     assert_eq!(table_schemas.len(), 2);
     assert!(table_schemas.contains_key(&table_1_id));
     assert!(table_schemas.contains_key(&table_2_id));
+
+    // Verify the table rows and events inserted into table 2.
+    let table_rows = destination.get_table_rows().await;
+    assert_eq!(table_rows.get(&table_2_id).unwrap().len(), 1);
+    let events = destination.get_events().await;
+    let grouped_events = group_events_by_type_and_table_id(&events);
+    let insert_events = grouped_events.get(&(EventType::Insert, table_2_id)).unwrap();
+    assert_eq!(insert_events.len(), 1);
 }
 
 async fn run_table_sync_copy_case<F>(
@@ -1465,18 +1516,23 @@ async fn pipeline_respects_column_level_publication() {
         return;
     }
 
-    // Create a table with multiple columns including a sensitive 'email' column.
+    // Create a table with multiple columns.
     let table_name = test_table_name("users");
     let table_id = database
         .create_table(
             table_name.clone(),
             true,
-            &[("name", "text not null"), ("age", "integer not null"), ("email", "text not null")],
+            &[
+                ("name", "text not null"),
+                ("age", "integer not null"),
+                ("email", "text not null"),
+                ("phone", "text not null"),
+            ],
         )
         .await
         .unwrap();
 
-    // Create publication with only a subset of columns (excluding 'email').
+    // Create publication with only a subset of columns.
     let publication_name = "test_pub".to_owned();
     database
         .run_sql(&format!(
@@ -1507,15 +1563,15 @@ async fn pipeline_respects_column_level_publication() {
 
     table_ready_notify.notified().await;
 
-    // Wait for two insert events to be processed.
+    // Wait for an insert event to be processed.
     let insert_events_notify =
-        destination.wait_for_events_count(vec![(EventType::Insert, 2)]).await;
+        destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
 
-    // Insert test data with all columns (including email).
+    // Insert test data with all columns (including email and phone).
     database
         .run_sql(&format!(
-            "insert into {} (name, age, email) values ('Alice', 25, 'alice@example.com'), ('Bob', \
-             30, 'bob@example.com')",
+            "insert into {} (name, age, email, phone) values ('Alice', 25, 'alice@example.com', \
+             '555-0001')",
             table_name.as_quoted_identifier()
         ))
         .await
@@ -1523,35 +1579,107 @@ async fn pipeline_respects_column_level_publication() {
 
     insert_events_notify.notified().await;
 
-    pipeline.shutdown_and_wait().await.unwrap();
-
     // Verify the events and check that only published columns are included.
     let events = destination.get_events().await;
     let grouped_events = group_events_by_type_and_table_id(&events);
     let insert_events = grouped_events.get(&(EventType::Insert, table_id)).unwrap();
-    assert_eq!(insert_events.len(), 2);
+    assert_eq!(insert_events.len(), 1);
 
     // Check that each insert event contains only the published columns (id, name,
-    // age). Since Cell values don't include column names, we verify by checking
-    // the count.
+    // age) and that the schema used is correct.
     for event in insert_events {
-        if let Event::Insert(InsertEvent { table_row, .. }) = event {
+        if let Event::Insert(InsertEvent { replicated_table_schema, table_row, .. }) = event {
             // Verify exactly 3 columns (id, name, age).
-            // If email was included, there would be 4 values.
             assert_eq!(table_row.values().len(), 3);
+
+            let replicated_column_names: Vec<&str> =
+                replicated_table_schema.column_schemas().map(|c| c.name.as_str()).collect();
+            assert_eq!(replicated_column_names, vec!["id", "name", "age"]);
         }
     }
 
-    // Also verify the stored table schema only includes published columns.
-    let table_schemas = state_store.get_latest_table_schemas().await;
-    let stored_schema = table_schemas.get(&table_id).unwrap();
-    let column_names: Vec<&str> =
-        stored_schema.column_schemas.iter().map(|c| c.name.as_str()).collect();
-    assert!(column_names.contains(&"id"));
-    assert!(column_names.contains(&"name"));
-    assert!(column_names.contains(&"age"));
-    assert!(!column_names.contains(&"email"));
-    assert_eq!(stored_schema.column_schemas.len(), 3);
+    // Clear events before the next publication-shape check.
+    destination.clear_events().await;
+
+    // Add email column to publication -> (id, name, age, email).
+    database
+        .run_sql(&format!(
+            "alter publication {publication_name} set table {} (id, name, age, email)",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    // Wait for 1 insert event with 4 columns.
+    let insert_notify = destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
+
+    database
+        .run_sql(&format!(
+            "insert into {} (name, age, email, phone) values ('Charlie', 35, \
+             'charlie@example.com', '555-0003')",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    insert_notify.notified().await;
+
+    // Verify 4 columns arrived (id, name, age, email).
+    let events = destination.get_events().await;
+    let grouped = group_events_by_type_and_table_id(&events);
+    let inserts = grouped.get(&(EventType::Insert, table_id)).unwrap();
+    assert_eq!(inserts.len(), 1);
+
+    if let Event::Insert(InsertEvent { replicated_table_schema, table_row, .. }) = &inserts[0] {
+        assert_eq!(table_row.values().len(), 4);
+        let col_names: Vec<&str> =
+            replicated_table_schema.column_schemas().map(|c| c.name.as_str()).collect();
+        assert_eq!(col_names, vec!["id", "name", "age", "email"]);
+    } else {
+        panic!("Expected Insert event");
+    }
+
+    // Remove age column from publication -> (id, name, email).
+    database
+        .run_sql(&format!(
+            "alter publication {publication_name} set table {} (id, name, email)",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    destination.clear_events().await;
+
+    // Wait for 1 insert event with 3 columns (different set than before).
+    let insert_notify = destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
+
+    database
+        .run_sql(&format!(
+            "insert into {} (name, age, email, phone) values ('Diana', 40, 'diana@example.com', \
+             '555-0004')",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    insert_notify.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // Verify 3 columns arrived (id, name, email) - age and phone excluded.
+    let events = destination.get_events().await;
+    let grouped = group_events_by_type_and_table_id(&events);
+    let inserts = grouped.get(&(EventType::Insert, table_id)).unwrap();
+    assert_eq!(inserts.len(), 1);
+
+    if let Event::Insert(InsertEvent { replicated_table_schema, table_row, .. }) = &inserts[0] {
+        assert_eq!(table_row.values().len(), 3);
+        let col_names: Vec<&str> =
+            replicated_table_schema.column_schemas().map(|c| c.name.as_str()).collect();
+        assert_eq!(col_names, vec!["id", "name", "email"]);
+    } else {
+        panic!("Expected Insert event");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1590,11 +1718,13 @@ async fn empty_tables_are_created_at_destination() {
         destination.clone(),
     );
 
-    pipeline.start().await.unwrap();
-
-    // Wait for the table to be ready.
+    // Register the ready notifier before starting the pipeline so we do not
+    // miss the Init -> Ready transition driven by the apply worker during
+    // startup.
     let table_ready_notify =
         state_store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+
+    pipeline.start().await.unwrap();
 
     table_ready_notify.notified().await;
 
@@ -1609,8 +1739,8 @@ async fn empty_tables_are_created_at_destination() {
         table_schema,
         &[
             id_column_schema(),
-            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true),
-            ColumnSchema::new("created_at".to_owned(), Type::TIMESTAMP, -1, 3, None, true),
+            test_column("name", Type::TEXT, 2, true, false),
+            test_column("created_at", Type::TIMESTAMP, 3, true, false),
         ],
     );
 
@@ -1622,6 +1752,188 @@ async fn empty_tables_are_created_at_destination() {
 
     // Verify that the write table rows method was called nonetheless.
     assert_eq!(destination.write_table_rows_called().await, 1);
+}
+
+/// Tests that resetting a table's state to Init triggers a table sync that
+/// drops the destination table before re-copying data. This ensures no
+/// duplicate data after a state reset.
+///
+/// Test flow:
+/// 1. Initial table sync: 5 rows (ids 1-5) written to table_rows for both users
+///    and orders
+/// 2. CDC phase: 2 rows (ids 6-7) written as events for both tables
+/// 3. Reset users table state to Init
+/// 4. Insert 3 new rows (ids 100-102) for users only
+/// 5. Verify: users has 10 total rows (table_rows + events), orders unchanged
+#[tokio::test(flavor = "multi_thread")]
+async fn table_sync_drops_destination_table_after_state_reset() {
+    init_test_tracing();
+    let mut database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
+
+    let initial_rows = 5;
+    let cdc_rows = 2;
+    let new_rows_after_reset = 3;
+
+    // Insert initial test data (ids 1-5).
+    insert_mock_data(
+        &mut database,
+        &database_schema.users_schema().name,
+        &database_schema.orders_schema().name,
+        1..=initial_rows,
+        false,
+    )
+    .await;
+
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    // Wait for initial table sync to complete.
+    let users_ready_notify = store
+        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
+        .await;
+    let orders_ready_notify = store
+        .notify_on_table_state_type(database_schema.orders_schema().id, TableStateType::Ready)
+        .await;
+
+    pipeline.start().await.unwrap();
+
+    users_ready_notify.notified().await;
+    orders_ready_notify.notified().await;
+
+    // Insert CDC data (ids 6-7) for both tables.
+    let cdc_events_notify =
+        destination.wait_for_events_count(vec![(EventType::Insert, (cdc_rows * 2) as u64)]).await;
+
+    insert_mock_data(
+        &mut database,
+        &database_schema.users_schema().name,
+        &database_schema.orders_schema().name,
+        (initial_rows + 1)..=(initial_rows + cdc_rows),
+        true,
+    )
+    .await;
+
+    cdc_events_notify.notified().await;
+
+    // Verify state before reset: table_rows has initial data, events has CDC data.
+    let table_rows_before = destination.get_table_rows().await;
+    assert_eq!(
+        table_rows_before.get(&database_schema.users_schema().id).unwrap().len(),
+        initial_rows
+    );
+    assert_eq!(
+        table_rows_before.get(&database_schema.orders_schema().id).unwrap().len(),
+        initial_rows
+    );
+
+    let events_before = destination.get_events().await;
+    let grouped_events_before = group_events_by_type_and_table_id(&events_before);
+    assert_eq!(
+        grouped_events_before
+            .get(&(EventType::Insert, database_schema.users_schema().id))
+            .unwrap()
+            .len(),
+        cdc_rows
+    );
+    assert_eq!(
+        grouped_events_before
+            .get(&(EventType::Insert, database_schema.orders_schema().id))
+            .unwrap()
+            .len(),
+        cdc_rows
+    );
+
+    // We clear the events and rows to check that only users data is written.
+    //
+    // This deletion becomes a bit confusing when used in the context of a
+    // destination drop that should take care of deleting data by itself. In
+    // this test we just want to make sure that the drop is called and that the
+    // data is rewritten from scratch.
+    destination.clear_events().await;
+    destination.clear_table_rows().await;
+
+    // Register waits before resetting state so they observe the resync work from
+    // this point on.
+    let users_ready_notify = store
+        .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
+        .await;
+
+    // Reset users table state to Init, triggering a fresh table sync.
+    store.reset_table_state(database_schema.users_schema().id).await.unwrap();
+
+    users_ready_notify.notified().await;
+
+    // Wait for all user events (table_rows + CDC) to be processed.
+    // After the state reset, data can end up in either table_rows or events
+    // depending on timing.
+    let total_expected_users = initial_rows + cdc_rows + new_rows_after_reset;
+    let all_users_events_notify = destination
+        .wait_for_all_events(vec![EventCondition::Table(
+            EventType::Insert,
+            database_schema.users_schema().id,
+            total_expected_users as u64,
+        )])
+        .await;
+
+    // Insert new users (ids 100-102) after reset.
+    for id in 100i64..103i64 {
+        database
+            .insert_values(
+                database_schema.users_schema().name.clone(),
+                &["id", "name", "age"],
+                &[&id, &format!("user_{id}"), &(id as i32)],
+            )
+            .await
+            .unwrap();
+    }
+
+    all_users_events_notify.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // Verify the final state.
+    let table_rows_after = destination.get_table_rows().await;
+    let events_after = destination.get_events().await;
+    let grouped_events_after = group_events_by_type_and_table_id(&events_after);
+
+    // Users: table_rows + events should equal the total expected (data can be in
+    // either).
+    let users_rows = table_rows_after.get(&database_schema.users_schema().id).unwrap().len();
+    let users_events = grouped_events_after
+        .get(&(EventType::Insert, database_schema.users_schema().id))
+        .map_or(0, std::vec::Vec::len);
+    assert_eq!(users_rows + users_events, total_expected_users);
+
+    // Orders: no data, since we cleared it before restart and nothing should happen
+    // on orders.
+    assert!(!table_rows_after.contains_key(&database_schema.orders_schema().id));
+    assert!(
+        !grouped_events_after
+            .contains_key(&(EventType::Insert, database_schema.orders_schema().id))
+    );
+
+    // Verify the destination table was dropped for users but not for orders.
+    assert!(destination.was_table_dropped_for_copy(database_schema.users_schema().id).await);
+    assert!(!destination.was_table_dropped_for_copy(database_schema.orders_schema().id).await);
+
+    let user_schemas = SchemaStore::get_table_schemas(&store)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|schema| schema.id == database_schema.users_schema().id)
+        .collect::<Vec<_>>();
+    assert_eq!(user_schemas.len(), 1);
+    assert_eq!(user_schemas[0].snapshot_id, etl_postgres::types::SnapshotId::initial());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1642,18 +1954,11 @@ async fn pipeline_processes_concurrent_inserts_during_startup() {
         destination.clone(),
     );
 
-    // Start the pipeline after spawning the insert task.
-    pipeline.start().await.unwrap();
-
-    // Spawn a task that inserts data concurrently using a separate connection.
-    // This creates a race condition where some rows may be captured during table
-    // copy and others during streaming replication.
     let rows_to_insert = 10;
-    let users_table_name = database_schema.users_schema().name.clone();
-    let orders_table_name = database_schema.orders_schema().name.clone();
-    let mut duplicate_database = database.duplicate().await;
 
-    // Wait for both tables to reach Ready state.
+    // Register notifications before starting the pipeline so we do not miss
+    // state transitions or events that happen during startup. `notify_on_*`
+    // and `wait_for_*` only fire on updates that occur after registration.
     let users_ready_notify = store
         .notify_on_table_state_type(database_schema.users_schema().id, TableStateType::Ready)
         .await;
@@ -1665,8 +1970,22 @@ async fn pipeline_processes_concurrent_inserts_during_startup() {
     // inserts). This waits for 20 total inserts across both tables (10 users +
     // 10 orders).
     let all_events_notify = destination
-        .wait_for_all_events(vec![(EventType::Insert, (rows_to_insert * 2) as u64)])
+        .wait_for_all_events(vec![EventCondition::Any(
+            EventType::Insert,
+            (rows_to_insert * 2) as u64,
+        )])
         .await;
+
+    // Start the pipeline only after all notifications are registered so we
+    // cannot miss fast Ready transitions on CI.
+    pipeline.start().await.unwrap();
+
+    // Spawn a task that inserts data concurrently using a separate connection.
+    // This creates a race condition where some rows may be captured during table
+    // copy and others during streaming replication.
+    let users_table_name = database_schema.users_schema().name.clone();
+    let orders_table_name = database_schema.orders_schema().name.clone();
+    let mut duplicate_database = database.duplicate().await;
 
     // Use a JoinHandle to ensure the task completes and the database isn't dropped
     // prematurely.

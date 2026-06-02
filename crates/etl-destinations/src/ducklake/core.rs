@@ -862,7 +862,7 @@ where
     /// Converts destination-facing Arrow CDC batches back to DuckLake row
     /// events.
     async fn stream_batches_to_events(&self, batches: Vec<StreamBatch>) -> EtlResult<Vec<Event>> {
-        let mut events = Vec::new();
+        let mut events = Vec::with_capacity(batches.len());
 
         for batch in batches {
             match batch {

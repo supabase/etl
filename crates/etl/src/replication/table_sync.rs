@@ -21,7 +21,7 @@ use crate::{
     },
     error::{ErrorKind, EtlResult},
     etl_error,
-    metrics::{ETL_TABLE_COPY_DURATION_SECONDS, PARTITIONING_LABEL, PIPELINE_ID_LABEL},
+    metrics::{ETL_TABLE_COPY_DURATION_SECONDS, PARTITIONING_LABEL},
     replication::{SharedTableCache, client::PgReplicationClient},
     state::{TableState, TableStateType},
     store::{PipelineStore, schema::SchemaStore, state::StateStore},
@@ -272,7 +272,7 @@ where
                         etl_error!(
                             ErrorKind::InvalidState,
                             "Schema mismatch during table sync",
-                            err.to_string()
+                            source: err
                         )
                     },
                 )?;
@@ -294,7 +294,6 @@ where
                     config.max_copy_connections_per_table,
                     config.batch.clone(),
                     shutdown_rx.clone(),
-                    pipeline_id,
                     destination.clone(),
                     memory_monitor.clone(),
                     batch_budget.clone(),
@@ -339,7 +338,6 @@ where
             let with_partitioning = config.max_copy_connections_per_table > 1;
             histogram!(
                 ETL_TABLE_COPY_DURATION_SECONDS,
-                PIPELINE_ID_LABEL => pipeline_id.to_string(),
                 PARTITIONING_LABEL => with_partitioning.to_string(),
             )
             .record(total_table_copy_duration_secs);

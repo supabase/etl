@@ -17,16 +17,19 @@ use postgres_replication::{
 };
 use tokio_postgres::{CopyOutStream, types::PgLsn};
 use tracing::debug;
+#[cfg(feature = "failpoints")]
+use tracing::warn;
 
+#[cfg(feature = "failpoints")]
+use crate::failpoints::{SEND_STATUS_UPDATE_FP, etl_fail_point_active};
 use crate::{
     error::{ErrorKind, EtlResult},
     etl_error,
     metrics::{
         ETL_BYTES_PROCESSED_TOTAL, ETL_ROW_SIZE_BYTES, ETL_STATUS_UPDATES_SKIPPED_TOTAL,
-        ETL_STATUS_UPDATES_TOTAL, EVENT_TYPE_LABEL, FORCED_LABEL, PIPELINE_ID_LABEL,
-        STATUS_UPDATE_TYPE_LABEL,
+        ETL_STATUS_UPDATES_TOTAL, EVENT_TYPE_LABEL, FORCED_LABEL, STATUS_UPDATE_TYPE_LABEL,
     },
-    types::{PipelineId, SizeHint},
+    types::SizeHint,
 };
 
 /// The amount of milliseconds between two consecutive status updates in case no
@@ -64,14 +67,13 @@ pin_project! {
     pub(crate) struct RawTableCopyStream {
         #[pin]
         stream: CopyOutStream,
-        pipeline_id: PipelineId,
     }
 }
 
 impl RawTableCopyStream {
     /// Creates a new [`RawTableCopyStream`] from a [`CopyOutStream`].
-    pub(crate) fn wrap(stream: CopyOutStream, pipeline_id: PipelineId) -> Self {
-        Self { stream, pipeline_id }
+    pub(crate) fn wrap(stream: CopyOutStream) -> Self {
+        Self { stream }
     }
 }
 
@@ -85,19 +87,11 @@ impl Stream for RawTableCopyStream {
             Some(Ok(row)) => {
                 let row_size_bytes = row.len() as u64;
 
-                counter!(
-                    ETL_BYTES_PROCESSED_TOTAL,
-                    PIPELINE_ID_LABEL => this.pipeline_id.to_string(),
-                    EVENT_TYPE_LABEL => "copy"
-                )
-                .increment(row_size_bytes);
+                counter!(ETL_BYTES_PROCESSED_TOTAL, EVENT_TYPE_LABEL => "copy")
+                    .increment(row_size_bytes);
 
-                histogram!(
-                    ETL_ROW_SIZE_BYTES,
-                    PIPELINE_ID_LABEL => this.pipeline_id.to_string(),
-                    EVENT_TYPE_LABEL => "copy"
-                )
-                .record(row_size_bytes as f64);
+                histogram!(ETL_ROW_SIZE_BYTES, EVENT_TYPE_LABEL => "copy")
+                    .record(row_size_bytes as f64);
 
                 Poll::Ready(Some(Ok(TableCopyRowBytes::new(row))))
             }
@@ -109,8 +103,8 @@ impl Stream for RawTableCopyStream {
 
 /// The status update type when sending a status update message back to
 /// Postgres.
-#[derive(Debug)]
-pub(super) enum StatusUpdateType {
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum StatusUpdateType {
     /// Represents an update in response to a keep alive from Postgres.
     KeepAlive,
     /// Represents a periodic heartbeat sent while the apply loop is otherwise
@@ -119,6 +113,15 @@ pub(super) enum StatusUpdateType {
     /// Represents an update before shutdown that requires acknowledgement from
     /// Postgres.
     ShutdownFlush,
+}
+
+/// Outcome of a status update attempt.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum StatusUpdateResult {
+    /// A status update was accepted by the local replication stream wrapper.
+    Sent,
+    /// No status update was sent because throttling suppressed it.
+    Skipped,
 }
 
 impl StatusUpdateType {
@@ -146,20 +149,19 @@ impl Display for StatusUpdateType {
 pin_project! {
     /// A stream that yields replication events from a Postgres logical replication stream and keeps
     /// track of last sent status updates.
-    pub(super) struct EventsStream {
+    pub(crate) struct EventsStream {
         #[pin]
         stream: LogicalReplicationStream,
         last_update: Option<Instant>,
         last_write_lsn: Option<PgLsn>,
         last_flush_lsn: Option<PgLsn>,
-        pipeline_id: PipelineId,
     }
 }
 
 impl EventsStream {
     /// Creates a new [`EventsStream`] from a [`LogicalReplicationStream`].
-    pub(super) fn wrap(stream: LogicalReplicationStream, pipeline_id: PipelineId) -> Self {
-        Self { stream, last_update: None, last_write_lsn: None, last_flush_lsn: None, pipeline_id }
+    pub(crate) fn wrap(stream: LogicalReplicationStream) -> Self {
+        Self { stream, last_update: None, last_write_lsn: None, last_flush_lsn: None }
     }
 
     /// Sends a status update to the Postgres server.
@@ -168,15 +170,24 @@ impl EventsStream {
     /// need for progress information with network efficiency and system
     /// performance. It handles multiple error scenarios and edge cases
     /// related to time synchronization and network communication.
-    pub(super) async fn send_status_update(
+    pub(crate) async fn send_status_update(
         self: Pin<&mut Self>,
         mut write_lsn: PgLsn,
         mut flush_lsn: PgLsn,
         force: bool,
         status_update_type: StatusUpdateType,
-    ) -> EtlResult<()> {
+    ) -> EtlResult<StatusUpdateResult> {
+        // If the failpoint is active, we do not send any status update. This is useful
+        // for testing the system when we want to check what happens when no
+        // status updates are sent.
+        #[cfg(feature = "failpoints")]
+        if etl_fail_point_active(SEND_STATUS_UPDATE_FP) {
+            warn!("not sending status update due to active failpoint");
+
+            return Ok(StatusUpdateResult::Skipped);
+        }
+
         let this = self.project();
-        let pipeline_id = *this.pipeline_id;
 
         // If the new write lsn is less than the last one, we can safely ignore it,
         // since we only want to report monotonically increasing values.
@@ -219,7 +230,6 @@ impl EventsStream {
             if flush_lsn == *last_flush && last_update.elapsed() < STATUS_UPDATE_INTERVAL {
                 counter!(
                     ETL_STATUS_UPDATES_SKIPPED_TOTAL,
-                    PIPELINE_ID_LABEL => pipeline_id.to_string(),
                     STATUS_UPDATE_TYPE_LABEL => status_update_type.to_string(),
                 )
                 .increment(1);
@@ -231,7 +241,7 @@ impl EventsStream {
                     "skipping status update"
                 );
 
-                return Ok(());
+                return Ok(StatusUpdateResult::Skipped);
             }
         }
 
@@ -239,9 +249,9 @@ impl EventsStream {
         // midnight on 2000-01-01.
         let ts = POSTGRES_EPOCH
             .elapsed()
-            .map_err(|err| {
-                etl_error!(ErrorKind::InvalidState, "Invalid PostgreSQL epoch", err.to_string())
-            })?
+            .map_err(
+                |err| etl_error!(ErrorKind::InvalidState, "Invalid PostgreSQL epoch", source: err),
+            )?
             .as_micros() as i64;
 
         // We will send the `flush_lsn` as `apply_lsn` since in our case, we don't
@@ -256,7 +266,6 @@ impl EventsStream {
 
         counter!(
             ETL_STATUS_UPDATES_TOTAL,
-            PIPELINE_ID_LABEL => pipeline_id.to_string(),
             FORCED_LABEL => force.to_string(),
             STATUS_UPDATE_TYPE_LABEL => status_update_type.to_string(),
         )
@@ -276,7 +285,7 @@ impl EventsStream {
         *this.last_write_lsn = Some(write_lsn);
         *this.last_flush_lsn = Some(flush_lsn);
 
-        Ok(())
+        Ok(StatusUpdateResult::Sent)
     }
 }
 

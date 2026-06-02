@@ -13,6 +13,7 @@ use tokio::{
 use tokio_postgres::types::PgLsn;
 
 use crate::{
+    concurrency::TaskSet,
     conversions::arrow::record_batch_to_table_rows,
     destination::{
         Destination, PipelineDestination,
@@ -23,16 +24,13 @@ use crate::{
     },
     error::EtlResult,
     test_utils::{
-        event::{
-            EventCondition as CountEventCondition, check_all_events_count, check_events_count,
-            deduplicate_events,
-        },
+        event::{EventCondition, check_all_events_count, check_events_count, deduplicate_events},
         notify::TimedNotify,
     },
     types::{
-        ChangeKind, DeleteEvent, Event, EventType, InsertEvent, OldTableRow, RowImage, StreamBatch,
-        TableArrowBatch, TableChangeSet, TableName, TableRow, TableSchema, TruncateBatch,
-        UpdateEvent, UpdatedTableRow,
+        ChangeKind, DeleteEvent, Event, EventType, InsertEvent, OldTableRow, RelationEvent,
+        RowImage, StreamBatch, TableArrowBatch, TableChangeSet, TableName, TableRow, TableSchema,
+        TruncateBatch, UpdateEvent, UpdatedTableRow,
     },
 };
 
@@ -45,7 +43,35 @@ fn snapshot_batch_to_table_rows(batch: &TableArrowBatch) -> Vec<TableRow> {
     record_batch_to_table_rows(&batch.batch)
 }
 
-fn table_change_set_to_events(change_set: &TableChangeSet) -> Vec<Event> {
+fn maybe_push_relation_event(
+    events: &mut Vec<Event>,
+    relation_table_schemas: &mut HashMap<TableId, Arc<TableSchema>>,
+    table_schema: &Arc<TableSchema>,
+    commit_lsn: PgLsn,
+    tx_ordinal: u64,
+) {
+    let table_id = table_schema.id;
+    let schema_changed = relation_table_schemas
+        .get(&table_id)
+        .is_none_or(|known_schema| known_schema.as_ref() != table_schema.as_ref());
+
+    if !schema_changed {
+        return;
+    }
+
+    relation_table_schemas.insert(table_id, Arc::clone(table_schema));
+    events.push(Event::Relation(RelationEvent {
+        start_lsn: commit_lsn,
+        commit_lsn,
+        tx_ordinal,
+        replicated_table_schema: ReplicatedTableSchema::all(Arc::clone(table_schema)),
+    }));
+}
+
+fn table_change_set_to_events(
+    change_set: &TableChangeSet,
+    relation_table_schemas: &mut HashMap<TableId, Arc<TableSchema>>,
+) -> Vec<Event> {
     let mut events = Vec::new();
     let mut index = 0;
 
@@ -55,6 +81,16 @@ fn table_change_set_to_events(change_set: &TableChangeSet) -> Vec<Event> {
 
         match (group.change, group.row_image) {
             (ChangeKind::Insert, RowImage::New) => {
+                if group.rows.row_count() > 0 {
+                    maybe_push_relation_event(
+                        &mut events,
+                        relation_table_schemas,
+                        &group.rows.table_schema,
+                        PgLsn::from(group.commit_lsns.values()[0]),
+                        group.tx_ordinals.values()[0],
+                    );
+                }
+
                 let replicated_table_schema =
                     ReplicatedTableSchema::all(Arc::clone(&group.rows.table_schema));
                 for (row_index, row) in rows.into_iter().enumerate() {
@@ -75,6 +111,16 @@ fn table_change_set_to_events(change_set: &TableChangeSet) -> Vec<Event> {
                     && next_group.change == ChangeKind::Update
                     && next_group.row_image == RowImage::New
                 {
+                    if next_group.rows.row_count() > 0 {
+                        maybe_push_relation_event(
+                            &mut events,
+                            relation_table_schemas,
+                            &next_group.rows.table_schema,
+                            PgLsn::from(next_group.commit_lsns.values()[0]),
+                            next_group.tx_ordinals.values()[0],
+                        );
+                    }
+
                     let new_rows = record_batch_to_table_rows(&next_group.rows.batch);
                     assert_eq!(
                         rows.len(),
@@ -123,6 +169,16 @@ fn table_change_set_to_events(change_set: &TableChangeSet) -> Vec<Event> {
                 }
             }
             (ChangeKind::Update, RowImage::New) => {
+                if group.rows.row_count() > 0 {
+                    maybe_push_relation_event(
+                        &mut events,
+                        relation_table_schemas,
+                        &group.rows.table_schema,
+                        PgLsn::from(group.commit_lsns.values()[0]),
+                        group.tx_ordinals.values()[0],
+                    );
+                }
+
                 let replicated_table_schema =
                     ReplicatedTableSchema::all(Arc::clone(&group.rows.table_schema));
                 for (row_index, row) in rows.into_iter().enumerate() {
@@ -140,6 +196,16 @@ fn table_change_set_to_events(change_set: &TableChangeSet) -> Vec<Event> {
                 index += 1;
             }
             (ChangeKind::Delete, RowImage::Old { key_only }) => {
+                if group.rows.row_count() > 0 && !key_only {
+                    maybe_push_relation_event(
+                        &mut events,
+                        relation_table_schemas,
+                        &group.rows.table_schema,
+                        PgLsn::from(group.commit_lsns.values()[0]),
+                        group.tx_ordinals.values()[0],
+                    );
+                }
+
                 let replicated_table_schema =
                     ReplicatedTableSchema::all(Arc::clone(&group.rows.table_schema));
                 for (row_index, row) in rows.into_iter().enumerate() {
@@ -173,13 +239,16 @@ fn table_id_to_replicated_table_schema(table_id: TableId) -> ReplicatedTableSche
     ReplicatedTableSchema::all(Arc::new(table_schema))
 }
 
-fn stream_batches_to_events(batches: &[StreamBatch]) -> Vec<Event> {
+fn stream_batches_to_events(
+    batches: &[StreamBatch],
+    relation_table_schemas: &mut HashMap<TableId, Arc<TableSchema>>,
+) -> Vec<Event> {
     let mut events = Vec::new();
 
     for batch in batches {
         match batch {
             StreamBatch::Changes(change_set) => {
-                events.extend(table_change_set_to_events(change_set));
+                events.extend(table_change_set_to_events(change_set, relation_table_schemas));
             }
             StreamBatch::Truncate(TruncateBatch { rel_ids, commit_lsn, tx_ordinal, options }) => {
                 events.push(Event::Truncate(crate::types::TruncateEvent {
@@ -203,6 +272,7 @@ fn stream_batches_to_events(batches: &[StreamBatch]) -> Vec<Event> {
 struct Inner<D> {
     wrapped_destination: D,
     events: Vec<Event>,
+    relation_table_schemas: HashMap<TableId, Arc<TableSchema>>,
     table_rows: HashMap<TableId, Vec<TableRow>>,
     tables_dropped_for_copy: HashSet<TableId>,
     event_conditions: Vec<(EventPredicate, Arc<Notify>)>,
@@ -259,6 +329,7 @@ impl<D> Inner<D> {
 #[derive(Clone)]
 pub struct TestDestinationWrapper<D> {
     inner: Arc<RwLock<Inner<D>>>,
+    tasks: TaskSet,
 }
 
 impl<D: fmt::Debug> fmt::Debug for TestDestinationWrapper<D> {
@@ -283,6 +354,7 @@ impl<D> TestDestinationWrapper<D> {
         let inner = Inner {
             wrapped_destination: destination,
             events: Vec::new(),
+            relation_table_schemas: HashMap::new(),
             table_rows: HashMap::new(),
             tables_dropped_for_copy: HashSet::new(),
             event_conditions: Vec::new(),
@@ -292,7 +364,7 @@ impl<D> TestDestinationWrapper<D> {
             shutdown_called: false,
         };
 
-        Self { inner: Arc::new(RwLock::new(inner)) }
+        Self { inner: Arc::new(RwLock::new(inner)), tasks: TaskSet::new() }
     }
 
     /// Get all table rows that have been written
@@ -372,17 +444,12 @@ impl<D> TestDestinationWrapper<D> {
     /// Returns a [`TimedNotify`] that will automatically timeout after 30
     /// seconds if the expected count is not reached. This prevents tests
     /// from hanging indefinitely.
-    pub async fn wait_for_all_events(&self, conditions: Vec<(EventType, u64)>) -> TimedNotify {
+    pub async fn wait_for_all_events(&self, conditions: Vec<EventCondition>) -> TimedNotify {
         let notify = Arc::new(Notify::new());
         let mut inner = self.inner.write().await;
 
         let condition: CombinedCondition = Box::new(move |events, table_rows| {
-            let conditions = conditions
-                .clone()
-                .into_iter()
-                .map(|(event_type, count)| CountEventCondition::Any(event_type, count))
-                .collect();
-            check_all_events_count(events, table_rows, conditions)
+            check_all_events_count(events, table_rows, conditions.clone())
         });
 
         inner.combined_conditions.push((condition, Arc::clone(&notify)));
@@ -513,11 +580,19 @@ where
         batches: Vec<StreamBatch>,
         async_result: WriteStreamBatchesResult<()>,
     ) -> EtlResult<()> {
+        self.tasks.try_reap().await?;
+
         let destination = {
             let inner = self.inner.read().await;
             inner.wrapped_destination.clone()
         };
-        let events = stream_batches_to_events(&batches);
+        let (events, relation_table_schemas) = {
+            let inner = self.inner.read().await;
+            let mut relation_table_schemas = inner.relation_table_schemas.clone();
+            let events = stream_batches_to_events(&batches, &mut relation_table_schemas);
+
+            (events, relation_table_schemas)
+        };
 
         let (wrapped_flush_result, pending_result) =
             WriteStreamBatchesResult::new(ApplyLoopAsyncResultMetadata {
@@ -539,20 +614,23 @@ where
         // the method, so it's not needed to simulate asynchronous work to make
         // the code continue and do something else in the meanwhile.
         let inner = Arc::clone(&self.inner);
-        tokio::spawn(async move {
-            let result = pending_result.await.into_result();
+        self.tasks
+            .spawn(async move {
+                let result = pending_result.await.into_result();
 
-            {
-                let mut inner = inner.write().await;
-                if result.is_ok() {
-                    inner.events.extend(events);
+                {
+                    let mut inner = inner.write().await;
+                    if result.is_ok() {
+                        inner.relation_table_schemas = relation_table_schemas;
+                        inner.events.extend(events);
+                    }
+
+                    inner.check_conditions();
                 }
 
-                inner.check_conditions();
-            }
-
-            async_result.send(result);
-        });
+                async_result.send(result);
+            })
+            .await;
 
         Ok(())
     }
@@ -563,13 +641,20 @@ where
             inner.wrapped_destination.clone()
         };
 
-        let result = destination.shutdown().await;
+        let mut errors = Vec::new();
+        if let Err(error) = destination.shutdown().await {
+            errors.push(error);
+        }
+
+        if let Err(error) = self.tasks.drain().await {
+            errors.push(error);
+        }
 
         {
             let mut inner = self.inner.write().await;
             inner.shutdown_called = true;
         }
 
-        result
+        if errors.is_empty() { Ok(()) } else { Err(errors.into()) }
     }
 }
