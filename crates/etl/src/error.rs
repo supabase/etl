@@ -357,6 +357,16 @@ fn write_error_tree(
             {
                 write!(f, ": {}", detail.lines().collect::<Vec<_>>().join(" "))?;
             }
+
+            if let Some(source) = &payload.source {
+                let source_prefix = if is_root {
+                    String::new()
+                } else {
+                    format!("{prefix}{}", if is_last { "   " } else { "│  " })
+                };
+                write_source_chain(source.as_ref(), f, &source_prefix)?;
+            }
+
             Ok(())
         }
         ErrorRepr::Many { errors, .. } => {
@@ -379,6 +389,61 @@ fn write_error_tree(
             }
 
             Ok(())
+        }
+    }
+}
+
+/// Writes the source chain below an error in a compact, readable form.
+fn write_source_chain(
+    source: &(dyn error::Error + 'static),
+    f: &mut fmt::Formatter<'_>,
+    prefix: &str,
+) -> fmt::Result {
+    writeln!(f)?;
+    write!(f, "{prefix}caused by:")?;
+
+    let mut current = Some(source);
+    let mut index = 1;
+
+    while let Some(error) = current {
+        writeln!(f)?;
+        write!(f, "{prefix}  {index}. ")?;
+        write_source_error_head(error, f)?;
+        current = error.source();
+        index += 1;
+    }
+
+    Ok(())
+}
+
+/// Writes one source entry without recursively rendering its own source chain.
+fn write_source_error_head(
+    error: &(dyn error::Error + 'static),
+    f: &mut fmt::Formatter<'_>,
+) -> fmt::Result {
+    if let Some(error) = error.downcast_ref::<EtlError>() {
+        write_etl_error_head(error, f)
+    } else {
+        write!(f, "{}", error.to_string().lines().collect::<Vec<_>>().join(" "))
+    }
+}
+
+/// Writes the headline for an [`EtlError`] without its source chain.
+fn write_etl_error_head(error: &EtlError, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match &error.repr {
+        ErrorRepr::Single(payload) => {
+            write!(f, "[{:?}] {}", payload.kind, payload.description)?;
+
+            if let Some(detail) = &payload.detail
+                && !detail.trim().is_empty()
+            {
+                write!(f, ": {}", detail.lines().collect::<Vec<_>>().join(" "))?;
+            }
+
+            Ok(())
+        }
+        ErrorRepr::Many { errors } => {
+            write!(f, "{} error{} occurred", errors.len(), if errors.len() == 1 { "" } else { "s" },)
         }
     }
 }
@@ -437,12 +502,11 @@ where
 /// Converts [`std::io::Error`] to [`EtlError`] with [`ErrorKind::IoError`].
 impl From<std::io::Error> for EtlError {
     fn from(err: std::io::Error) -> EtlError {
-        let detail = err.to_string();
         let source = Arc::new(err);
         EtlError::from_components(
             ErrorKind::IoError,
             Cow::Borrowed("I/O operation failed"),
-            Some(Cow::Owned(detail)),
+            None,
             Some(source),
         )
     }
@@ -465,14 +529,8 @@ impl From<serde_json::Error> for EtlError {
             }
         };
 
-        let detail = err.to_string();
         let source = Arc::new(err);
-        EtlError::from_components(
-            kind,
-            Cow::Borrowed(description),
-            Some(Cow::Owned(detail)),
-            Some(source),
-        )
+        EtlError::from_components(kind, Cow::Borrowed(description), None, Some(source))
     }
 }
 
@@ -480,12 +538,11 @@ impl From<serde_json::Error> for EtlError {
 /// [`ErrorKind::ConversionError`].
 impl From<std::str::Utf8Error> for EtlError {
     fn from(err: std::str::Utf8Error) -> EtlError {
-        let detail = err.to_string();
         let source = Arc::new(err);
         EtlError::from_components(
             ErrorKind::ConversionError,
             Cow::Borrowed("UTF-8 conversion failed"),
-            Some(Cow::Owned(detail)),
+            None,
             Some(source),
         )
     }
@@ -495,12 +552,11 @@ impl From<std::str::Utf8Error> for EtlError {
 /// [`ErrorKind::ConversionError`].
 impl From<std::string::FromUtf8Error> for EtlError {
     fn from(err: std::string::FromUtf8Error) -> EtlError {
-        let detail = err.to_string();
         let source = Arc::new(err);
         EtlError::from_components(
             ErrorKind::ConversionError,
             Cow::Borrowed("UTF-8 string conversion failed"),
-            Some(Cow::Owned(detail)),
+            None,
             Some(source),
         )
     }
@@ -510,12 +566,11 @@ impl From<std::string::FromUtf8Error> for EtlError {
 /// [`ErrorKind::ConversionError`].
 impl From<std::num::ParseIntError> for EtlError {
     fn from(err: std::num::ParseIntError) -> EtlError {
-        let detail = err.to_string();
         let source = Arc::new(err);
         EtlError::from_components(
             ErrorKind::ConversionError,
             Cow::Borrowed("Integer parsing failed"),
-            Some(Cow::Owned(detail)),
+            None,
             Some(source),
         )
     }
@@ -525,12 +580,11 @@ impl From<std::num::ParseIntError> for EtlError {
 /// [`ErrorKind::ConversionError`].
 impl From<std::num::ParseFloatError> for EtlError {
     fn from(err: std::num::ParseFloatError) -> EtlError {
-        let detail = err.to_string();
         let source = Arc::new(err);
         EtlError::from_components(
             ErrorKind::ConversionError,
             Cow::Borrowed("Float parsing failed"),
-            Some(Cow::Owned(detail)),
+            None,
             Some(source),
         )
     }
@@ -819,14 +873,8 @@ impl From<tokio_postgres::Error> for EtlError {
             None => (ErrorKind::SourceConnectionFailed, "PostgreSQL connection failed"),
         };
 
-        let detail = err.to_string();
         let source = Arc::new(err);
-        EtlError::from_components(
-            kind,
-            Cow::Borrowed(description),
-            Some(Cow::Owned(detail)),
-            Some(source),
-        )
+        EtlError::from_components(kind, Cow::Borrowed(description), None, Some(source))
     }
 }
 
@@ -834,12 +882,11 @@ impl From<tokio_postgres::Error> for EtlError {
 /// [`ErrorKind::EncryptionError`].
 impl From<rustls::Error> for EtlError {
     fn from(err: rustls::Error) -> EtlError {
-        let detail = err.to_string();
         let source = Arc::new(err);
         EtlError::from_components(
             ErrorKind::EncryptionError,
             Cow::Borrowed("TLS configuration failed"),
-            Some(Cow::Owned(detail)),
+            None,
             Some(source),
         )
     }
@@ -849,12 +896,11 @@ impl From<rustls::Error> for EtlError {
 /// [`ErrorKind::ConfigError`].
 impl From<rustls::pki_types::pem::Error> for EtlError {
     fn from(err: rustls::pki_types::pem::Error) -> EtlError {
-        let detail = err.to_string();
         let source = Arc::new(err);
         EtlError::from_components(
             ErrorKind::ConfigError,
             Cow::Borrowed("PEM parsing failed"),
-            Some(Cow::Owned(detail)),
+            None,
             Some(source),
         )
     }
@@ -863,12 +909,11 @@ impl From<rustls::pki_types::pem::Error> for EtlError {
 /// Converts [`uuid::Error`] to [`EtlError`] with [`ErrorKind::InvalidData`].
 impl From<uuid::Error> for EtlError {
     fn from(err: uuid::Error) -> EtlError {
-        let detail = err.to_string();
         let source = Arc::new(err);
         EtlError::from_components(
             ErrorKind::InvalidData,
             Cow::Borrowed("UUID parsing failed"),
-            Some(Cow::Owned(detail)),
+            None,
             Some(source),
         )
     }
@@ -878,12 +923,11 @@ impl From<uuid::Error> for EtlError {
 /// [`ErrorKind::ConversionError`].
 impl From<chrono::ParseError> for EtlError {
     fn from(err: chrono::ParseError) -> EtlError {
-        let detail = err.to_string();
         let source = Arc::new(err);
         EtlError::from_components(
             ErrorKind::ConversionError,
             Cow::Borrowed("Datetime parsing failed"),
-            Some(Cow::Owned(detail)),
+            None,
             Some(source),
         )
     }
@@ -893,12 +937,11 @@ impl From<chrono::ParseError> for EtlError {
 /// [`ErrorKind::ConversionError`].
 impl From<ParseNumericError> for EtlError {
     fn from(err: ParseNumericError) -> EtlError {
-        let detail = err.to_string();
         let source = Arc::new(err);
         EtlError::from_components(
             ErrorKind::ConversionError,
             Cow::Borrowed("Numeric parsing failed"),
-            Some(Cow::Owned(detail)),
+            None,
             Some(source),
         )
     }
@@ -920,12 +963,11 @@ impl From<sqlx::Error> for EtlError {
             _ => ErrorKind::SourceQueryFailed,
         };
 
-        let detail = err.to_string();
         let source = Arc::new(err);
         EtlError::from_components(
             kind,
             Cow::Borrowed("Database operation failed"),
-            Some(Cow::Owned(detail)),
+            None,
             Some(source),
         )
     }
@@ -1087,6 +1129,74 @@ mod tests {
     }
 
     #[test]
+    fn source_error_conversions_do_not_duplicate_source_as_detail() {
+        let err = EtlError::from(std::io::Error::other("Disk unavailable"));
+
+        assert_eq!(err.detail(), None);
+        assert_eq!(
+            err.to_string(),
+            "[IoError] I/O operation failed\ncaused by:\n  1. Disk unavailable"
+        );
+    }
+
+    #[test]
+    fn display_includes_source_chain() {
+        let err = etl_error!(
+            ErrorKind::DestinationError,
+            "BigQuery invalid argument",
+            source: std::io::Error::other(
+                "Data decompression failed with decompression status: RESOURCE_EXHAUSTED"
+            )
+        );
+
+        assert_eq!(
+            err.to_string(),
+            "[DestinationError] BigQuery invalid argument\ncaused by:\n  1. Data decompression \
+             failed with decompression status: RESOURCE_EXHAUSTED"
+        );
+    }
+
+    #[test]
+    fn display_indents_source_chain_for_aggregated_errors() {
+        let err = etl_error!(
+            ErrorKind::DestinationError,
+            "BigQuery invalid argument",
+            source: std::io::Error::other("Maximum length exceeded: 10485760")
+        );
+        let multi_err = EtlError::from(vec![
+            err,
+            EtlError::from((ErrorKind::ValidationError, "Invalid schema")),
+        ]);
+
+        assert_eq!(
+            multi_err.to_string(),
+            "2 errors occurred\n├─ [DestinationError] BigQuery invalid argument\n│  caused \
+             by:\n│    1. Maximum length exceeded: 10485760\n└─ [ValidationError] Invalid schema"
+        );
+    }
+
+    #[test]
+    fn display_flattens_chained_etl_error_sources_without_embedded_causes() {
+        let inner = etl_error!(ErrorKind::DestinationError, "BigQuery invalid argument");
+        let middle = etl_error!(
+            ErrorKind::DestinationError,
+            "BigQuery invalid argument",
+            source: inner
+        );
+        let outer = etl_error!(
+            ErrorKind::DestinationError,
+            "BigQuery invalid argument",
+            source: middle
+        );
+
+        assert_eq!(
+            outer.to_string(),
+            "[DestinationError] BigQuery invalid argument\ncaused by:\n  1. [DestinationError] \
+             BigQuery invalid argument\n  2. [DestinationError] BigQuery invalid argument"
+        );
+    }
+
+    #[test]
     fn many_forwards_source() {
         let inner = EtlError::from(std::io::Error::other("Inner failure"));
         let outer: EtlError = vec![inner.clone(), EtlError::from((ErrorKind::Unknown, "X"))].into();
@@ -1197,13 +1307,15 @@ mod tests {
         let json_err = serde_json::from_str::<serde_json::Value>("invalid json").unwrap_err();
         let etl_err = EtlError::from(json_err);
         assert_eq!(etl_err.kind(), ErrorKind::DeserializationError);
-        assert!(etl_err.detail().unwrap().contains("expected"));
+        assert_eq!(etl_err.detail(), None);
+        assert!(etl_err.source().unwrap().to_string().contains("expected"));
 
         // Test data error during deserialization
         let json_err = serde_json::from_str::<bool>("\"not_a_bool\"").unwrap_err();
         let etl_err = EtlError::from(json_err);
         assert_eq!(etl_err.kind(), ErrorKind::DeserializationError);
-        assert!(etl_err.detail().is_some());
+        assert_eq!(etl_err.detail(), None);
+        assert!(etl_err.source().is_some());
     }
 
     #[test]

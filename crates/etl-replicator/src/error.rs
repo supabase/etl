@@ -76,7 +76,7 @@ impl ReplicatorError {
         out.push_str(&format!("Category: {}\n", self.category()));
         out.push_str(&format!("Error: {self}\n"));
 
-        if !matches!(self, ReplicatorError::Etl(err) if err.errors().is_some()) {
+        if !matches!(self, ReplicatorError::Etl(_)) {
             let mut source = Error::source(self);
             let mut idx = 1usize;
             while let Some(err) = source {
