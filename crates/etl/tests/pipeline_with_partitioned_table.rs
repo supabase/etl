@@ -26,6 +26,7 @@ fn quoted_qualified_table_name(schema: &str, table: &str) -> String {
 enum PublishedPartitionTarget {
     Top,
     Middle,
+    Leaf,
 }
 
 async fn assert_nested_partition_pipeline_case(
@@ -53,6 +54,9 @@ async fn assert_nested_partition_pipeline_case(
     let publication_table_name = match published_partition_target {
         PublishedPartitionTarget::Top => hierarchy.root_table_name.clone(),
         PublishedPartitionTarget::Middle => hierarchy.p_2026_table_name.clone(),
+        PublishedPartitionTarget::Leaf => {
+            crate::support::partition::partition_table_name(&hierarchy.p_2026_table_name, "01")
+        }
     };
     let publication_name = format!("pub_{test_name}");
     database
@@ -76,6 +80,7 @@ async fn assert_nested_partition_pipeline_case(
         (PublishedPartitionTarget::Middle, false) => {
             vec![(hierarchy.p_2026_01_table_id, 1), (hierarchy.p_2026_02_table_id, 1)]
         }
+        (PublishedPartitionTarget::Leaf, _) => vec![(hierarchy.p_2026_01_table_id, 1)],
     };
     let expected_cdc_counts = expected_copy_counts.clone();
     let expected_cdc_total = expected_cdc_counts.iter().map(|(_, count)| count).sum::<usize>();
@@ -127,6 +132,7 @@ async fn assert_nested_partition_pipeline_case(
              ('new_2026_02', 2026, 2)"
         }
         PublishedPartitionTarget::Middle => "('new_2026_01', 2026, 1), ('new_2026_02', 2026, 2)",
+        PublishedPartitionTarget::Leaf => "('new_2026_01', 2026, 1)",
     };
     database
         .run_sql(&format!(
@@ -1202,6 +1208,26 @@ async fn nested_pipeline_middle_root_without_partition_root() {
     assert_nested_partition_pipeline_case(
         "nested_pipeline_middle_root_false",
         PublishedPartitionTarget::Middle,
+        false,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn nested_pipeline_leaf_with_partition_root() {
+    assert_nested_partition_pipeline_case(
+        "nested_pipeline_leaf_true",
+        PublishedPartitionTarget::Leaf,
+        true,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn nested_pipeline_leaf_without_partition_root() {
+    assert_nested_partition_pipeline_case(
+        "nested_pipeline_leaf_false",
+        PublishedPartitionTarget::Leaf,
         false,
     )
     .await;
