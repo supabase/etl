@@ -1,4 +1,4 @@
-#[cfg(any(feature = "bigquery", feature = "snowflake"))]
+#[cfg(any(feature = "bigquery", feature = "clickhouse", feature = "snowflake"))]
 use std::sync::Once;
 use std::{
     fs,
@@ -30,6 +30,10 @@ use etl_config::{
 };
 #[cfg(feature = "bigquery")]
 use etl_destinations::bigquery::BigQueryDestination;
+#[cfg(feature = "clickhouse")]
+use etl_destinations::clickhouse::{
+    ClickHouseClientConfig, ClickHouseDestination, ClickHouseInserterConfig,
+};
 #[cfg(feature = "snowflake")]
 use etl_destinations::snowflake::{
     AuthManager, Client as SnowflakeClient, Config as SnowflakeConfig,
@@ -43,12 +47,14 @@ use sqlx::{
 };
 use tokio::sync::Notify;
 use tracing::info;
+#[cfg(feature = "clickhouse")]
+use url::Url;
 
 /// Default batch fill time for benchmark runs.
 pub const BENCHMARK_DEFAULT_BATCH_MAX_FILL_MS: u64 = 1_000;
 
 /// Ensures crypto provider is only initialized once.
-#[cfg(any(feature = "bigquery", feature = "snowflake"))]
+#[cfg(any(feature = "bigquery", feature = "clickhouse", feature = "snowflake"))]
 static INIT_CRYPTO: Once = Once::new();
 
 /// Where benchmark logs should be written.
@@ -79,6 +85,9 @@ pub enum DestinationType {
     /// Use BigQuery as the destination.
     #[value(name = "bigquery")]
     BigQuery,
+    /// Use ClickHouse as the destination.
+    #[value(name = "clickhouse")]
+    ClickHouse,
     /// Use Snowflake as the destination.
     #[value(name = "snowflake")]
     Snowflake,
@@ -169,6 +178,18 @@ pub struct DestinationArgs {
     /// BigQuery connection pool size.
     #[arg(long, default_value_t = 32)]
     pub bq_connection_pool_size: usize,
+    /// ClickHouse HTTP URL (for example, `http://localhost:8123`).
+    #[arg(long)]
+    pub clickhouse_url: Option<String>,
+    /// ClickHouse username.
+    #[arg(long)]
+    pub clickhouse_user: Option<String>,
+    /// ClickHouse password.
+    #[arg(long)]
+    pub clickhouse_password: Option<String>,
+    /// ClickHouse database. Must already exist.
+    #[arg(long)]
+    pub clickhouse_database: Option<String>,
     /// Snowflake account identifier.
     #[arg(long)]
     pub sf_account: Option<String>,
@@ -457,7 +478,10 @@ impl Destination for NullDestination {
 }
 
 /// Benchmark destination variants.
-#[cfg_attr(any(feature = "bigquery", feature = "snowflake"), expect(clippy::large_enum_variant))]
+#[cfg_attr(
+    any(feature = "bigquery", feature = "clickhouse", feature = "snowflake"),
+    expect(clippy::large_enum_variant)
+)]
 #[derive(Clone)]
 pub enum BenchDestination {
     /// Null destination variant.
@@ -465,6 +489,9 @@ pub enum BenchDestination {
     /// BigQuery destination variant.
     #[cfg(feature = "bigquery")]
     BigQuery(CountingDestination<BigQueryDestination<NotifyingStore>>),
+    /// ClickHouse destination variant.
+    #[cfg(feature = "clickhouse")]
+    ClickHouse(CountingDestination<ClickHouseDestination<NotifyingStore>>),
     /// Snowflake destination variant.
     #[cfg(feature = "snowflake")]
     Snowflake(CountingDestination<SnowflakeDestination<NotifyingStore>>),
@@ -472,15 +499,19 @@ pub enum BenchDestination {
 
 impl BenchDestination {
     /// Creates a benchmark destination from CLI arguments.
-    #[cfg_attr(not(any(feature = "bigquery", feature = "snowflake")), expect(clippy::unused_async))]
+    #[cfg_attr(
+        not(any(feature = "bigquery", feature = "clickhouse", feature = "snowflake")),
+        expect(clippy::unused_async)
+    )]
+    #[allow(
+        unused_variables,
+        reason = "pipeline_id and store are consumed only by feature-gated arms"
+    )]
     pub async fn new(
         destination_args: &DestinationArgs,
         pipeline_id: u64,
         store: NotifyingStore,
     ) -> Result<Self> {
-        #[cfg(not(any(feature = "bigquery", feature = "snowflake")))]
-        let _ = (pipeline_id, &store);
-
         match destination_args.destination {
             DestinationType::Null => Ok(Self::Null(CountingDestination::new(NullDestination))),
             #[cfg(feature = "bigquery")]
@@ -519,6 +550,46 @@ impl BenchDestination {
             #[cfg(not(feature = "bigquery"))]
             DestinationType::BigQuery => {
                 bail!("BigQuery benchmarks require the etl-benchmarks bigquery feature")
+            }
+            #[cfg(feature = "clickhouse")]
+            DestinationType::ClickHouse => {
+                install_crypto_provider();
+
+                let url = destination_args
+                    .clickhouse_url
+                    .clone()
+                    .filter(|u| !u.trim().is_empty())
+                    .context("ClickHouse URL is required for ClickHouse benchmarks")?;
+                let url = Url::parse(&url).context("invalid ClickHouse URL")?;
+                let user = destination_args
+                    .clickhouse_user
+                    .clone()
+                    .filter(|u| !u.trim().is_empty())
+                    .context("ClickHouse user is required for ClickHouse benchmarks")?;
+                let database = destination_args
+                    .clickhouse_database
+                    .clone()
+                    .filter(|d| !d.trim().is_empty())
+                    .context("ClickHouse database is required for ClickHouse benchmarks")?;
+                let password =
+                    destination_args.clickhouse_password.clone().filter(|p| !p.is_empty());
+
+                let destination = ClickHouseDestination::new(
+                    url,
+                    user,
+                    password,
+                    database,
+                    ClickHouseInserterConfig::default(),
+                    ClickHouseClientConfig::default(),
+                    store,
+                )?;
+                destination.validate_engine_support().await?;
+
+                Ok(Self::ClickHouse(CountingDestination::new(destination)))
+            }
+            #[cfg(not(feature = "clickhouse"))]
+            DestinationType::ClickHouse => {
+                bail!("ClickHouse benchmarks require the etl-benchmarks clickhouse feature")
             }
             #[cfg(feature = "snowflake")]
             DestinationType::Snowflake => {
@@ -576,6 +647,8 @@ impl BenchDestination {
             Self::Null(destination) => destination.stats(),
             #[cfg(feature = "bigquery")]
             Self::BigQuery(destination) => destination.stats(),
+            #[cfg(feature = "clickhouse")]
+            Self::ClickHouse(destination) => destination.stats(),
             #[cfg(feature = "snowflake")]
             Self::Snowflake(destination) => destination.stats(),
         }
@@ -587,6 +660,8 @@ impl BenchDestination {
             Self::Null(destination) => destination.reset_cdc_stats(),
             #[cfg(feature = "bigquery")]
             Self::BigQuery(destination) => destination.reset_cdc_stats(),
+            #[cfg(feature = "clickhouse")]
+            Self::ClickHouse(destination) => destination.reset_cdc_stats(),
             #[cfg(feature = "snowflake")]
             Self::Snowflake(destination) => destination.reset_cdc_stats(),
         }
@@ -598,6 +673,8 @@ impl BenchDestination {
             Self::Null(destination) => destination.set_cdc_target(target),
             #[cfg(feature = "bigquery")]
             Self::BigQuery(destination) => destination.set_cdc_target(target),
+            #[cfg(feature = "clickhouse")]
+            Self::ClickHouse(destination) => destination.set_cdc_target(target),
             #[cfg(feature = "snowflake")]
             Self::Snowflake(destination) => destination.set_cdc_target(target),
         }
@@ -609,6 +686,8 @@ impl BenchDestination {
             Self::Null(destination) => destination.wait_for_cdc_target().await,
             #[cfg(feature = "bigquery")]
             Self::BigQuery(destination) => destination.wait_for_cdc_target().await,
+            #[cfg(feature = "clickhouse")]
+            Self::ClickHouse(destination) => destination.wait_for_cdc_target().await,
             #[cfg(feature = "snowflake")]
             Self::Snowflake(destination) => destination.wait_for_cdc_target().await,
         }
@@ -625,6 +704,8 @@ impl Destination for BenchDestination {
             Self::Null(destination) => destination.shutdown().await,
             #[cfg(feature = "bigquery")]
             Self::BigQuery(destination) => destination.shutdown().await,
+            #[cfg(feature = "clickhouse")]
+            Self::ClickHouse(destination) => destination.shutdown().await,
             #[cfg(feature = "snowflake")]
             Self::Snowflake(destination) => destination.shutdown().await,
         }
@@ -641,6 +722,10 @@ impl Destination for BenchDestination {
             }
             #[cfg(feature = "bigquery")]
             Self::BigQuery(destination) => {
+                destination.drop_table_for_copy(replicated_table_schema, async_result).await
+            }
+            #[cfg(feature = "clickhouse")]
+            Self::ClickHouse(destination) => {
                 destination.drop_table_for_copy(replicated_table_schema, async_result).await
             }
             #[cfg(feature = "snowflake")]
@@ -668,6 +753,12 @@ impl Destination for BenchDestination {
                     .write_table_rows(replicated_table_schema, table_rows, async_result)
                     .await
             }
+            #[cfg(feature = "clickhouse")]
+            Self::ClickHouse(destination) => {
+                destination
+                    .write_table_rows(replicated_table_schema, table_rows, async_result)
+                    .await
+            }
             #[cfg(feature = "snowflake")]
             Self::Snowflake(destination) => {
                 destination
@@ -686,6 +777,8 @@ impl Destination for BenchDestination {
             Self::Null(destination) => destination.write_events(events, async_result).await,
             #[cfg(feature = "bigquery")]
             Self::BigQuery(destination) => destination.write_events(events, async_result).await,
+            #[cfg(feature = "clickhouse")]
+            Self::ClickHouse(destination) => destination.write_events(events, async_result).await,
             #[cfg(feature = "snowflake")]
             Self::Snowflake(destination) => destination.write_events(events, async_result).await,
         }
@@ -990,7 +1083,7 @@ async fn drop_replication_slot(pool: &PgPool, slot_name: &str) {
     .await;
 }
 
-#[cfg(any(feature = "bigquery", feature = "snowflake"))]
+#[cfg(any(feature = "bigquery", feature = "clickhouse", feature = "snowflake"))]
 fn install_crypto_provider() {
     INIT_CRYPTO.call_once(|| {
         rustls::crypto::aws_lc_rs::default_provider()

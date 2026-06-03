@@ -15,6 +15,7 @@ doctest = false
 [features]
 default = []
 bigquery = ["dep:etl-destinations", "etl-destinations/bigquery"]
+clickhouse = ["dep:etl-destinations", "etl-destinations/clickhouse", "dep:url"]
 snowflake = ["dep:etl-destinations", "etl-destinations/snowflake"]
 
 [dependencies]
@@ -31,6 +32,7 @@ serde_json = { workspace = true }
 sqlx = { workspace = true, features = ["runtime-tokio", "tls-rustls", "postgres", "migrate"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "signal"] }
 tracing = { workspace = true, default-features = true }
+url = { workspace = true, optional = true }
 
 [lints]
 workspace = true
