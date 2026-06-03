@@ -122,7 +122,6 @@ impl Validator for DestinationValidator {
                 s3_url_style,
                 s3_use_ssl,
                 metadata_schema,
-                duckdb_memory_cache_limit,
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
                 maintenance_mode: _,
@@ -140,7 +139,6 @@ impl Validator for DestinationValidator {
                     s3_url_style.clone(),
                     *s3_use_ssl,
                     metadata_schema.clone(),
-                    duckdb_memory_cache_limit.clone(),
                     maintenance_target_file_size.clone(),
                     expire_snapshots_older_than.clone(),
                 );

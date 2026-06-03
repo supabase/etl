@@ -77,7 +77,7 @@ pub struct DuckLakeMaintenanceConfig {
     #[serde(default = "default_ducklake_maintenance_min_inlined_bytes")]
     pub min_inlined_bytes: u64,
     /// Maximum number of adjacent files compacted by one merge operation.
-    #[schema(example = 32)]
+    #[schema(example = 40)]
     #[serde(default = "default_ducklake_maintenance_max_compacted_files")]
     pub max_compacted_files: u32,
     /// Maximum number of tables processed by each operation in one run.
@@ -85,7 +85,7 @@ pub struct DuckLakeMaintenanceConfig {
     #[serde(default = "default_ducklake_maintenance_max_tables_per_run")]
     pub max_tables_per_run: u32,
     /// DuckLake target file size used for compaction.
-    #[schema(example = "10MB")]
+    #[schema(example = "500MB")]
     #[serde(default = "default_ducklake_maintenance_target_file_size")]
     pub target_file_size: String,
     /// Deleted-row fraction that triggers data file rewrite.
@@ -334,7 +334,7 @@ fn default_ducklake_maintenance_min_inlined_bytes() -> u64 {
 }
 
 fn default_ducklake_maintenance_max_compacted_files() -> u32 {
-    32
+    40
 }
 
 fn default_ducklake_maintenance_max_tables_per_run() -> u32 {
@@ -342,7 +342,7 @@ fn default_ducklake_maintenance_max_tables_per_run() -> u32 {
 }
 
 fn default_ducklake_maintenance_target_file_size() -> String {
-    "10MB".to_owned()
+    "500MB".to_owned()
 }
 
 fn default_ducklake_maintenance_delete_threshold() -> f64 {

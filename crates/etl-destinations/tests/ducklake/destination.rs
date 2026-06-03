@@ -188,7 +188,6 @@ async fn new_test_destination(
         None,
         None,
         None,
-        None,
         store,
     )
     .await
@@ -331,7 +330,6 @@ async fn write_table_rows_basic() {
         None,
         None,
         None,
-        None,
         store,
     )
     .await
@@ -390,7 +388,6 @@ async fn write_table_rows_small_batch_stays_inlined_after_return() {
         None,
         None,
         None,
-        None,
         store,
     )
     .await
@@ -434,7 +431,6 @@ async fn ducklake_rejects_zero_pool_size() {
         None,
         None,
         None,
-        None,
         MemoryStore::new(),
     )
     .await
@@ -469,7 +465,6 @@ async fn ducklake_rejects_non_postgres_catalog_url() {
         None,
         None,
         None,
-        None,
         MemoryStore::new(),
     )
     .await
@@ -489,7 +484,6 @@ async fn ducklake_rejects_invalid_expire_snapshots_retention() {
         lake.catalog_url.clone(),
         lake.data_url.clone(),
         1,
-        None,
         None,
         None,
         None,
@@ -529,7 +523,6 @@ async fn write_table_rows_reuses_warm_pooled_connection() {
         catalog_url.clone(),
         data_url.clone(),
         1,
-        None,
         None,
         None,
         None,
@@ -587,7 +580,6 @@ async fn write_table_rows_replaces_broken_pooled_connection_after_retry() {
         catalog_url.clone(),
         data_url.clone(),
         1,
-        None,
         None,
         None,
         None,
@@ -651,7 +643,6 @@ async fn write_table_rows_retry_after_post_commit_failure_is_idempotent() {
         None,
         None,
         None,
-        None,
         store,
     )
     .await
@@ -698,7 +689,6 @@ async fn concurrent_same_table_copy_batches_complete() {
             catalog_url.clone(),
             data_url.clone(),
             1,
-            None,
             None,
             None,
             None,
@@ -828,7 +818,6 @@ async fn write_table_rows_empty_creates_table() {
         None,
         None,
         None,
-        None,
         store,
     )
     .await
@@ -861,7 +850,6 @@ async fn truncate_clears_rows() {
         catalog_url.clone(),
         data_url.clone(),
         1,
-        None,
         None,
         None,
         None,
@@ -926,7 +914,6 @@ async fn truncate_clears_copy_markers_for_recopy() {
         None,
         None,
         None,
-        None,
         store,
     )
     .await
@@ -967,7 +954,6 @@ async fn write_events() {
         catalog_url.clone(),
         data_url.clone(),
         1,
-        None,
         None,
         None,
         None,
@@ -1065,7 +1051,6 @@ async fn write_events_splits_same_table_batch_by_replicated_schema() {
         None,
         None,
         None,
-        None,
         store,
     )
     .await
@@ -1153,7 +1138,6 @@ async fn write_events_recovers_applying_metadata_before_relation_event() {
         catalog_url.clone(),
         data_url.clone(),
         1,
-        None,
         None,
         None,
         None,
@@ -1274,7 +1258,6 @@ async fn write_events_reconciles_missing_columns_after_applied_metadata() {
         catalog_url.clone(),
         data_url.clone(),
         1,
-        None,
         None,
         None,
         None,
@@ -1991,7 +1974,6 @@ async fn write_events_small_batch_stays_inlined_after_return() {
         None,
         None,
         None,
-        None,
         store,
     )
     .await
@@ -2040,7 +2022,6 @@ async fn write_events_with_old_row_update() {
         catalog_url.clone(),
         data_url.clone(),
         1,
-        None,
         None,
         None,
         None,
@@ -2117,7 +2098,6 @@ async fn write_events_with_partial_updates() {
         catalog_url.clone(),
         data_url.clone(),
         1,
-        None,
         None,
         None,
         None,
@@ -2214,7 +2194,6 @@ async fn write_events_without_replica_identity_rejects_mutations() {
         None,
         None,
         None,
-        None,
         store,
     )
     .await
@@ -2298,7 +2277,6 @@ async fn write_events_replay_is_idempotent() {
         catalog_url.clone(),
         data_url.clone(),
         1,
-        None,
         None,
         None,
         None,
@@ -2398,7 +2376,6 @@ async fn write_events_same_commit_lsn_higher_tx_ordinal_still_applies() {
         None,
         None,
         None,
-        None,
         store,
     )
     .await
@@ -2476,7 +2453,6 @@ async fn write_events_restart_overlap_rebatches_only_pending_suffix() {
         None,
         None,
         None,
-        None,
         store.clone(),
     )
     .await
@@ -2514,7 +2490,6 @@ async fn write_events_restart_overlap_rebatches_only_pending_suffix() {
         catalog_url.clone(),
         data_url.clone(),
         1,
-        None,
         None,
         None,
         None,
@@ -2591,7 +2566,6 @@ async fn write_events_reuses_one_staging_table_per_atomic_batch() {
         catalog_url.clone(),
         data_url.clone(),
         1,
-        None,
         None,
         None,
         None,
@@ -2682,7 +2656,6 @@ async fn applied_batches_table_uses_data_inlining() {
         None,
         None,
         None,
-        None,
         store,
     )
     .await
@@ -2728,7 +2701,6 @@ async fn write_events_mixed_multi_table_batches() {
         catalog_url.clone(),
         data_url.clone(),
         1,
-        None,
         None,
         None,
         None,
@@ -2865,7 +2837,6 @@ async fn write_events_truncate_retry_after_post_commit_failure_is_idempotent() {
         None,
         None,
         None,
-        None,
         store,
     )
     .await
@@ -2956,7 +2927,6 @@ async fn write_events_retry_after_post_commit_failure_is_idempotent() {
         catalog_url.clone(),
         data_url.clone(),
         1,
-        None,
         None,
         None,
         None,
@@ -3064,7 +3034,6 @@ async fn concurrent_writes_with_single_slot_complete() {
             None,
             None,
             None,
-            None,
             store,
         )
         .await
@@ -3125,7 +3094,6 @@ async fn type_mapping_round_trip() {
         catalog_url.clone(),
         data_url.clone(),
         1,
-        None,
         None,
         None,
         None,

@@ -42,12 +42,12 @@ const DUCKLAKE_EXTENSION_FILE: &str = "ducklake.duckdb_extension";
 const HTTPFS_EXTENSION_FILE: &str = "httpfs.duckdb_extension";
 const POSTGRES_SCANNER_EXTENSION_FILE: &str = "postgres_scanner.duckdb_extension";
 const TARGET_FILE_SIZE_OPTION_NAME: &str = "target_file_size";
-const MAINTENANCE_TARGET_FILE_SIZE: &str = "10MB";
+const MAINTENANCE_TARGET_FILE_SIZE: &str = "500MB";
 const CLEANUP_OLD_FILES_OLDER_THAN: &str = "1 day";
 const PARQUET_COMPRESSION_OPTION_NAME: &str = "parquet_compression";
 const PARQUET_COMPRESSION_OPTION_VALUE: &str = "zstd";
 const PARQUET_ROW_GROUP_SIZE_BYTES_OPTION_NAME: &str = "parquet_row_group_size_bytes";
-const PARQUET_ROW_GROUP_SIZE_BYTES_OPTION_VALUE: &str = "10MB";
+const PARQUET_ROW_GROUP_SIZE_BYTES_OPTION_VALUE: &str = "20MB";
 const PARQUET_VERSION_OPTION_NAME: &str = "parquet_version";
 const PARQUET_VERSION_OPTION_VALUE: u8 = 2;
 const PRESERVE_INSERTION_ORDER_OPTION_NAME: &str = "preserve_insertion_order";
@@ -1437,8 +1437,6 @@ pub struct DuckLakeMaintenanceConfig {
     pub s3: Option<S3Config>,
     /// Optional DuckLake metadata schema.
     pub metadata_schema: Option<String>,
-    /// Optional DuckDB memory cache limit retained for config compatibility.
-    pub duckdb_memory_cache_limit: Option<String>,
     /// DuckLake `target_file_size` used by compaction.
     pub maintenance_target_file_size: Option<String>,
     /// Inline flush operation config.

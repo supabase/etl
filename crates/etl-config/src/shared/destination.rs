@@ -142,8 +142,6 @@ pub enum DestinationConfig {
         s3_use_ssl: Option<bool>,
         /// Optional metadata schema for DuckLake metadata tables.
         metadata_schema: Option<String>,
-        /// Optional DuckDB memory limit for each DuckLake connection.
-        duckdb_memory_cache_limit: Option<String>,
         /// Optional DuckLake maintenance target file size.
         maintenance_target_file_size: Option<String>,
         /// Optional DuckLake snapshot-retention interval.
@@ -354,8 +352,6 @@ pub enum DestinationConfigWithoutSecrets {
         s3_use_ssl: Option<bool>,
         /// Optional metadata schema for DuckLake metadata tables.
         metadata_schema: Option<String>,
-        /// Optional DuckDB memory limit for each DuckLake connection.
-        duckdb_memory_cache_limit: Option<String>,
         /// Optional DuckLake maintenance target file size.
         maintenance_target_file_size: Option<String>,
         /// Optional DuckLake snapshot-retention interval.
@@ -411,7 +407,6 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
                 s3_url_style,
                 s3_use_ssl,
                 metadata_schema,
-                duckdb_memory_cache_limit,
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
                 maintenance_mode,
@@ -423,7 +418,6 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
                 s3_url_style,
                 s3_use_ssl,
                 metadata_schema,
-                duckdb_memory_cache_limit,
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
                 maintenance_mode,
@@ -464,7 +458,6 @@ mod tests {
             s3_url_style: None,
             s3_use_ssl: None,
             metadata_schema: None,
-            duckdb_memory_cache_limit: None,
             maintenance_target_file_size: None,
             expire_snapshots_older_than: None,
             maintenance_mode: DuckLakeMaintenanceMode::Kubernetes,
