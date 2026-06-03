@@ -689,12 +689,11 @@ where
             // have been recorded during write_table_rows before any Relation event.
             bail!(
                 ErrorKind::CorruptedTableSchema,
-                "Missing destination table metadata",
+                "Destination metadata missing for BigQuery schema change",
                 format!(
-                    "No destination table metadata found for table {} when processing schema \
-                     change. This indicates a broken invariant, the metadata should have been \
-                     recorded during initial table synchronization.",
-                    table_id
+                    "Table {} received schema snapshot {}, but destination metadata from initial \
+                     synchronization was not found.",
+                    table_id, new_snapshot_id
                 )
             );
         };
@@ -731,10 +730,11 @@ where
                 || {
                     etl_error!(
                         ErrorKind::InvalidState,
-                        "Old schema not found",
+                        "Stored schema snapshot missing for BigQuery schema change",
                         format!(
-                            "Could not find schema for table {} at snapshot_id {}",
-                            table_id, current_snapshot_id
+                            "Table {} needs stored schema snapshot {} to compare with incoming \
+                             snapshot {}, but it was not found.",
+                            table_id, current_snapshot_id, new_snapshot_id
                         )
                     )
                 },

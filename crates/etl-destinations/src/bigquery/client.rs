@@ -10,7 +10,9 @@ use gcp_bigquery_client::{
     client_builder::ClientBuilder,
     error::BQError,
     google::{
-        cloud::bigquery::storage::v1::{RowError, StorageError, storage_error::StorageErrorCode},
+        cloud::bigquery::storage::v1::{
+            RowError, StorageError, row_error::RowErrorCode, storage_error::StorageErrorCode,
+        },
         rpc::Status as GoogleRpcStatus,
     },
     model::{
@@ -285,7 +287,19 @@ fn storage_write_metadata_lag_timeout_error(detail: &str) -> EtlError {
 
 /// Converts BigQuery row errors to ETL destination errors.
 fn row_error_to_etl_error(err: RowError) -> EtlError {
-    etl_error!(ErrorKind::DestinationError, "BigQuery row error", format!("{err:?}"))
+    let code = RowErrorCode::try_from(err.code)
+        .map(|code| code.as_str_name())
+        .unwrap_or("UNKNOWN_ROW_ERROR_CODE");
+
+    etl_error!(
+        ErrorKind::DestinationError,
+        "BigQuery rejected a row in the append request",
+        format!(
+            "BigQuery rejected row {} with code {}. The detailed BigQuery message was omitted to \
+             avoid exposing source row values.",
+            err.index, code
+        )
+    )
 }
 
 /// Converts a request-level append error into a [`BatchProcessResult`].
@@ -1464,6 +1478,25 @@ mod tests {
                 append_rows_response::AppendResult { offset: None },
             )),
         }
+    }
+
+    #[test]
+    fn row_error_omits_provider_message() {
+        let error = row_error_to_etl_error(RowError {
+            index: 7,
+            code: RowErrorCode::FieldsError as i32,
+            message: "invalid value: customer@example.com".to_owned(),
+        });
+
+        assert_eq!(error.description(), Some("BigQuery rejected a row in the append request"));
+        assert_eq!(
+            error.detail(),
+            Some(
+                "BigQuery rejected row 7 with code FIELDS_ERROR. The detailed BigQuery message \
+                 was omitted to avoid exposing source row values."
+            )
+        );
+        assert!(!error.to_string().contains("customer@example.com"));
     }
 
     /// Creates a test column schema with common defaults.
