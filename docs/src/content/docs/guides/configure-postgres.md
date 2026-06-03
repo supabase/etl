@@ -240,6 +240,9 @@ CREATE PUBLICATION my_publication FOR TABLE users, orders;
 -- Create publication for all tables (use with caution)
 CREATE PUBLICATION all_tables FOR ALL TABLES;
 
+-- Create publication for all tables in selected schemas
+CREATE PUBLICATION schema_tables FOR TABLES IN SCHEMA public, analytics;
+
 -- Include only specific operations
 CREATE PUBLICATION inserts_only FOR TABLE users WITH (publish = 'insert');
 ```
@@ -259,8 +262,8 @@ replication messages.
 | `FOR TABLE orders_2026` where `orders_2026` is a partitioned subtree | `true` | `orders_2026` | `orders_2026` |
 | `FOR TABLE orders_2026` where `orders_2026` is a partitioned subtree | `false` | Leaf partitions under `orders_2026` | The leaf partitions under `orders_2026` |
 | `FOR TABLE orders_2026_01` where `orders_2026_01` is a leaf partition | Either | `orders_2026_01` | `orders_2026_01` |
-| `FOR ALL TABLES` or `FOR TABLES IN SCHEMA ...` | `true` | Partition roots plus regular tables | Partition roots plus regular tables |
-| `FOR ALL TABLES` or `FOR TABLES IN SCHEMA ...` | `false` | Leaf partitions plus regular tables | Leaf partitions plus regular tables |
+| `FOR ALL TABLES` for the whole database, or `FOR TABLES IN SCHEMA ...` for selected schemas | `true` | Partition roots plus regular tables | Partition roots plus regular tables |
+| `FOR ALL TABLES` for the whole database, or `FOR TABLES IN SCHEMA ...` for selected schemas | `false` | Leaf partitions plus regular tables | Leaf partitions plus regular tables |
 
 For example, with this hierarchy:
 
