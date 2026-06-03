@@ -7,7 +7,7 @@ use etl::{
         event::group_events_by_type_and_table_id,
         memory_destination::MemoryDestination,
         notifying_store::NotifyingStore,
-        pipeline::create_pipeline,
+        pipeline::{PipelineBuilder, create_pipeline},
         test_destination_wrapper::TestDestinationWrapper,
         test_schema::create_partitioned_table,
     },
@@ -30,6 +30,21 @@ enum PublishedPartitionTarget {
     Top,
     Middle,
     Leaf,
+}
+
+#[derive(Clone, Copy)]
+enum TableCopyMode {
+    Serial,
+    Parallel,
+}
+
+impl TableCopyMode {
+    fn max_copy_connections_per_table(self) -> u16 {
+        match self {
+            TableCopyMode::Serial => 1,
+            TableCopyMode::Parallel => 2,
+        }
+    }
 }
 
 fn assert_table_row_counts(
@@ -170,6 +185,7 @@ async fn assert_nested_partition_pipeline_case(
 async fn assert_nested_partition_pipeline_row_filter_case(
     test_name: &str,
     published_partition_target: PublishedPartitionTarget,
+    table_copy_mode: TableCopyMode,
 ) {
     init_test_tracing();
     let database = spawn_source_database().await;
@@ -225,13 +241,15 @@ async fn assert_nested_partition_pipeline_row_filter_case(
     }
 
     let pipeline_id: PipelineId = random();
-    let mut pipeline = create_pipeline(
-        &database.config,
+    let mut pipeline = PipelineBuilder::new(
+        database.config.clone(),
         pipeline_id,
         publication_name,
         state_store,
         destination.clone(),
-    );
+    )
+    .with_max_copy_connections_per_table(table_copy_mode.max_copy_connections_per_table())
+    .build();
 
     pipeline.start().await.unwrap();
     for notify in &ready_notifies {
@@ -1324,28 +1342,62 @@ async fn nested_pipeline_leaf_without_partition_root() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn nested_pipeline_top_root_with_partition_root_respects_row_filter_during_copy() {
+async fn nested_pipeline_top_root_with_partition_root_respects_row_filter_during_parallel_copy() {
     assert_nested_partition_pipeline_row_filter_case(
-        "nested_pipeline_top_root_row_filter",
+        "nested_pipeline_top_root_row_filter_parallel",
         PublishedPartitionTarget::Top,
+        TableCopyMode::Parallel,
     )
     .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn nested_pipeline_middle_root_with_partition_root_respects_row_filter_during_copy() {
+async fn nested_pipeline_top_root_with_partition_root_respects_row_filter_during_serial_copy() {
     assert_nested_partition_pipeline_row_filter_case(
-        "nested_pipeline_middle_root_row_filter",
+        "nested_pipeline_top_root_row_filter_serial",
+        PublishedPartitionTarget::Top,
+        TableCopyMode::Serial,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn nested_pipeline_middle_root_with_partition_root_respects_row_filter_during_parallel_copy()
+{
+    assert_nested_partition_pipeline_row_filter_case(
+        "nested_pipeline_middle_root_row_filter_parallel",
         PublishedPartitionTarget::Middle,
+        TableCopyMode::Parallel,
     )
     .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn nested_pipeline_leaf_with_partition_root_respects_row_filter_during_copy() {
+async fn nested_pipeline_middle_root_with_partition_root_respects_row_filter_during_serial_copy() {
     assert_nested_partition_pipeline_row_filter_case(
-        "nested_pipeline_leaf_row_filter",
+        "nested_pipeline_middle_root_row_filter_serial",
+        PublishedPartitionTarget::Middle,
+        TableCopyMode::Serial,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn nested_pipeline_leaf_with_partition_root_respects_row_filter_during_parallel_copy() {
+    assert_nested_partition_pipeline_row_filter_case(
+        "nested_pipeline_leaf_row_filter_parallel",
         PublishedPartitionTarget::Leaf,
+        TableCopyMode::Parallel,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn nested_pipeline_leaf_with_partition_root_respects_row_filter_during_serial_copy() {
+    assert_nested_partition_pipeline_row_filter_case(
+        "nested_pipeline_leaf_row_filter_serial",
+        PublishedPartitionTarget::Leaf,
+        TableCopyMode::Serial,
     )
     .await;
 }
