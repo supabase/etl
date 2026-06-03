@@ -33,6 +33,8 @@ use crate::{
     table_name::try_stringify_table_name,
 };
 
+const MAX_ERROR_COLUMN_NAMES: usize = 12;
+
 /// Postgres CDC operation kind. Written to the `cdc_operation` column as the
 /// matching uppercase string (`"INSERT"`, `"UPDATE"`, `"DELETE"`) so downstream
 /// consumers (ReplacingMergeTree dedup, materialized views, etc.) can filter
@@ -128,6 +130,19 @@ fn expected_clickhouse_column_names(
         .collect()
 }
 
+/// Formats column names for error details without overwhelming wide tables.
+fn summarize_column_names<'a>(column_names: impl IntoIterator<Item = &'a str>) -> String {
+    let column_names = column_names.into_iter().collect::<Vec<_>>();
+    let shown = column_names.iter().take(MAX_ERROR_COLUMN_NAMES).copied().collect::<Vec<_>>();
+    let mut summary = shown.join(", ");
+
+    if column_names.len() > MAX_ERROR_COLUMN_NAMES {
+        summary.push_str(&format!(", ... ({} more)", column_names.len() - MAX_ERROR_COLUMN_NAMES));
+    }
+
+    summary
+}
+
 /// Derives RowBinary nullable flags from the actual ClickHouse table schema.
 ///
 /// RowBinary requires a leading null-marker byte before each `Nullable(T)`
@@ -149,12 +164,15 @@ fn nullable_flags_from_clickhouse_columns(
     if actual_columns.len() != expected_column_names.len() {
         return Err(etl_error!(
             ErrorKind::CorruptedTableSchema,
-            "ClickHouse table schema does not match replicated schema",
+            "ClickHouse destination table columns do not match the stored replication schema",
             format!(
-                "table '{}' has {} columns, but {} were expected",
+                "Destination table '{}' has {} columns, but the stored replication schema expects \
+                 {}. Expected columns: {}. Actual columns: {}.",
                 clickhouse_table_name,
                 actual_columns.len(),
-                expected_column_names.len()
+                expected_column_names.len(),
+                summarize_column_names(expected_column_names.iter().map(String::as_str)),
+                summarize_column_names(actual_columns.iter().map(|column| column.name.as_str()))
             )
         ));
     }
@@ -166,13 +184,18 @@ fn nullable_flags_from_clickhouse_columns(
         if actual_column.name != *expected_name {
             return Err(etl_error!(
                 ErrorKind::CorruptedTableSchema,
-                "ClickHouse table schema does not match replicated schema",
+                "ClickHouse destination table columns do not match the stored replication schema",
                 format!(
-                    "table '{}' column {} is named '{}', but '{}' was expected",
+                    "Destination table '{}' has column '{}' at position {}, but the stored \
+                     replication schema expects '{}'. Expected columns: {}. Actual columns: {}.",
                     clickhouse_table_name,
-                    index + 1,
                     actual_column.name,
-                    expected_name
+                    index + 1,
+                    expected_name,
+                    summarize_column_names(expected_column_names.iter().map(String::as_str)),
+                    summarize_column_names(
+                        actual_columns.iter().map(|column| column.name.as_str())
+                    )
                 )
             ));
         }
@@ -576,9 +599,10 @@ where
                         || {
                             etl_error!(
                                 ErrorKind::InvalidState,
-                                "Old schema not found for recovery",
+                                "Stored schema snapshot missing for ClickHouse schema recovery",
                                 format!(
-                                    "Cannot find schema for table {} at snapshot_id {}",
+                                    "Table {} needs stored schema snapshot {} to recover the \
+                                     destination table, but it was not found.",
                                     table_id, prev_snapshot_id
                                 )
                             )
@@ -669,12 +693,11 @@ where
                 || {
                     etl_error!(
                         ErrorKind::CorruptedTableSchema,
-                        "Missing destination table metadata",
+                        "Destination metadata missing for ClickHouse schema change",
                         format!(
-                            "No destination table metadata found for table {} when processing \
-                             schema change. The metadata should have been recorded during initial \
-                             table synchronization.",
-                            table_id
+                            "Table {} received schema snapshot {}, but destination metadata from \
+                             initial synchronization was not found.",
+                            table_id, new_snapshot_id
                         )
                     )
                 },
@@ -701,10 +724,11 @@ where
                 || {
                     etl_error!(
                         ErrorKind::InvalidState,
-                        "Old schema not found",
+                        "Stored schema snapshot missing for ClickHouse schema change",
                         format!(
-                            "Could not find schema for table {} at snapshot_id {}",
-                            table_id, current_snapshot_id
+                            "Table {} needs stored schema snapshot {} to compare with incoming \
+                             snapshot {}, but it was not found.",
+                            table_id, current_snapshot_id, new_snapshot_id
                         )
                     )
                 },
@@ -1614,7 +1638,17 @@ mod tests {
                 .unwrap_err();
 
         assert_eq!(err.kind(), ErrorKind::CorruptedTableSchema);
-        assert_eq!(err.detail(), Some("table 'test_table' has 1 columns, but 2 were expected"));
+        assert_eq!(
+            err.description(),
+            Some("ClickHouse destination table columns do not match the stored replication schema")
+        );
+        assert_eq!(
+            err.detail(),
+            Some(
+                "Destination table 'test_table' has 1 columns, but the stored replication schema \
+                 expects 2. Expected columns: id, cdc_operation. Actual columns: id."
+            )
+        );
     }
 
     #[test]
@@ -1629,8 +1663,16 @@ mod tests {
 
         assert_eq!(err.kind(), ErrorKind::CorruptedTableSchema);
         assert_eq!(
+            err.description(),
+            Some("ClickHouse destination table columns do not match the stored replication schema")
+        );
+        assert_eq!(
             err.detail(),
-            Some("table 'test_table' column 1 is named 'name', but 'id' was expected")
+            Some(
+                "Destination table 'test_table' has column 'name' at position 1, but the stored \
+                 replication schema expects 'id'. Expected columns: id, name. Actual columns: \
+                 name, id."
+            )
         );
     }
 }

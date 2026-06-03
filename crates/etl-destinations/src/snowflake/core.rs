@@ -333,10 +333,10 @@ where
         else {
             bail!(
                 ErrorKind::CorruptedTableSchema,
-                "Missing destination table metadata",
+                "Destination metadata missing for Snowflake schema change",
                 format!(
-                    "No destination table metadata found for table {table_id} when processing \
-                     schema change"
+                    "Table {table_id} received schema snapshot {new_snapshot_id}, but destination \
+                     metadata from initial synchronization was not found."
                 )
             );
         };
@@ -357,19 +357,20 @@ where
             "schema change detected: snapshot_id {current_snapshot_id} -> {new_snapshot_id}"
         );
 
-        let current_table_schema =
-            self.store.get_table_schema(&table_id, current_snapshot_id).await?.ok_or_else(
-                || {
-                    etl_error!(
-                        ErrorKind::InvalidState,
-                        "Old schema not found",
-                        format!(
-                            "Could not find schema for table {table_id} at snapshot_id \
-                             {current_snapshot_id}"
-                        )
+        let current_table_schema = self
+            .store
+            .get_table_schema(&table_id, current_snapshot_id)
+            .await?
+            .ok_or_else(|| {
+                etl_error!(
+                    ErrorKind::InvalidState,
+                    "Stored schema snapshot missing for Snowflake schema change",
+                    format!(
+                        "Table {table_id} needs stored schema snapshot {current_snapshot_id} to \
+                         compare with incoming snapshot {new_snapshot_id}, but it was not found."
                     )
-                },
-            )?;
+                )
+            })?;
 
         let current_schema = ReplicatedTableSchema::from_mask(
             current_table_schema,

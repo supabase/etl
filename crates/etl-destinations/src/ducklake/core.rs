@@ -1317,12 +1317,11 @@ where
             self.store.get_destination_table_metadata(table_id).await?.ok_or_else(|| {
                 etl_error!(
                     ErrorKind::CorruptedTableSchema,
-                    "Missing destination table metadata",
+                    "Destination metadata missing for DuckLake schema change",
                     format!(
-                        "No destination table metadata found for table {} when processing schema \
-                         change. The metadata should have been recorded during initial table \
-                         synchronization.",
-                        table_id
+                        "Table {} received schema snapshot {}, but destination metadata from \
+                         initial synchronization was not found.",
+                        table_id, new_snapshot_id
                     )
                 )
             })?;
@@ -1365,7 +1364,11 @@ where
         );
 
         let current_table_schema = self
-            .load_exact_table_schema(table_id, current_snapshot_id, "Old schema not found")
+            .load_exact_table_schema(
+                table_id,
+                current_snapshot_id,
+                "Stored schema snapshot missing for DuckLake schema change",
+            )
             .await?;
         let current_schema = ReplicatedTableSchema::from_mask(
             current_table_schema,
@@ -2042,7 +2045,7 @@ where
                     ErrorKind::InvalidState,
                     missing_schema_description,
                     format!(
-                        "Could not find schema for table {} at snapshot_id {}",
+                        "Table {} needs stored schema snapshot {}, but it was not found.",
                         table_id, snapshot_id
                     )
                 )
@@ -2053,8 +2056,7 @@ where
                 ErrorKind::InvalidState,
                 missing_schema_description,
                 format!(
-                    "Could not find exact schema for table {} at snapshot_id {}; found nearest \
-                     schema at snapshot_id {}",
+                    "Table {} needs exact schema snapshot {}, but only snapshot {} was found.",
                     table_id, snapshot_id, table_schema.snapshot_id
                 )
             ));
@@ -2076,7 +2078,8 @@ where
                         ErrorKind::InvalidState,
                         "DuckLake schema recovery previous schema not found",
                         format!(
-                            "Could not find schema for table {} at or before snapshot_id {}",
+                            "Table {} needs stored schema snapshot {} to recover the destination \
+                             table, but it was not found.",
                             table_id, previous_snapshot_id
                         )
                     )
