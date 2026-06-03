@@ -124,7 +124,7 @@ impl<G: GenericClient> PgDatabase<G> {
         let quoted_publication_name = quote_identifier(publication_name);
 
         if requires_version!(self.server_version, POSTGRES_15) {
-            // PostgreSQL 15+ supports FOR ALL TABLES IN SCHEMA syntax
+            // PostgreSQL 15+ supports FOR TABLES IN SCHEMA syntax.
             let create_publication_query = match schema {
                 Some(schema_name) => format!(
                     "create publication {quoted_publication_name} for tables in schema {} with \

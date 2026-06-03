@@ -12,7 +12,7 @@ This guide covers the essential **Postgres settings, slots, publications, and ve
 ## Prerequisites
 
 - **PostgreSQL 14, 15, 16, 17, or 18** (officially supported and tested versions)
-  - PostgreSQL 15+ recommended for advanced publication filtering (column-level, row-level, `FOR ALL TABLES IN SCHEMA`)
+  - PostgreSQL 15+ recommended for advanced publication filtering (column-level, row-level, `FOR TABLES IN SCHEMA`)
   - PostgreSQL 16+ required when logical replication is read from a physical read replica
   - PostgreSQL 14 supported with table-level filtering only
 - Superuser access to the Postgres server
@@ -252,24 +252,6 @@ ETL reads the effective table list from `pg_publication_tables`, so it tracks
 the same relation identities and schemas PostgreSQL uses for logical
 replication messages.
 
-For the easiest destination shape, prefer `publish_via_partition_root = true`.
-This tells PostgreSQL to publish changes using the schema and identity of the
-[topmost partitioned table included in the publication](https://www.postgresql.org/docs/current/sql-createpublication.html#SQL-CREATEPUBLICATION-PARAMS-WITH-PUBLISH-VIA-PARTITION-ROOT).
-If you publish a subtree such as `orders_2026`, changes under that subtree are
-published as `orders_2026`, not as the absolute root table:
-
-```sql
--- Publish the selected partitioned tables as logical root tables
-CREATE PUBLICATION my_publication FOR TABLE users, orders WITH (publish_via_partition_root = true);
-
--- For all tables including partitioned tables
-CREATE PUBLICATION all_tables FOR ALL TABLES WITH (publish_via_partition_root = true);
-```
-
-When publications are created through the ETL API, ETL uses
-`publish_via_partition_root = true` by default. Manually-created publications
-can use either setting.
-
 | Publication shape | `publish_via_partition_root` | PostgreSQL publishes as | ETL tracks |
 | --- | --- | --- | --- |
 | `FOR TABLE orders` where `orders` is the top partitioned table | `true` | `orders` | `orders` |
@@ -356,7 +338,7 @@ CREATE PUBLICATION active_users FOR TABLE users WHERE (status = 'active');
 
 ```sql
 -- Replicate all tables in a schema
-CREATE PUBLICATION schema_pub FOR ALL TABLES IN SCHEMA public;
+CREATE PUBLICATION schema_pub FOR TABLES IN SCHEMA public;
 ```
 
 ### PostgreSQL 14 Limitations
@@ -370,7 +352,7 @@ PostgreSQL 14 supports table-level publication filtering only. Column-level and 
 | Table-level publication | Yes | Yes | Yes |
 | Column-level filtering | No | Yes | Yes |
 | Row-level filtering | No | Yes | Yes |
-| `FOR ALL TABLES IN SCHEMA` | No | Yes | Yes |
+| `FOR TABLES IN SCHEMA` | No | Yes | Yes |
 | Partitioned table support | Yes | Yes | Yes |
 | Logical decoding on physical read replicas | No | No | Yes |
 

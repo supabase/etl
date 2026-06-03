@@ -1,6 +1,9 @@
 use etl_api::validation::{FailureType, ValidationContext, validate_pipeline, validate_source};
 use etl_config::Environment;
-use etl_postgres::sqlx::test_utils::drop_pg_database;
+use etl_postgres::{
+    below_version, replication::extract_server_version, sqlx::test_utils::drop_pg_database,
+    version::POSTGRES_15,
+};
 use sqlx::Executor;
 
 use super::{create_pipeline_config, create_validation_context_with_source};
@@ -124,6 +127,13 @@ async fn validate_pipeline_rejects_all_tables_publication() {
 #[tokio::test]
 async fn validate_pipeline_rejects_etl_schema_publication() {
     let (ctx, pool, config) = create_validation_context_with_source().await;
+
+    let server_version =
+        sqlx::query_scalar::<_, String>("show server_version").fetch_one(&pool).await.unwrap();
+    if below_version!(extract_server_version(server_version), POSTGRES_15) {
+        drop_pg_database(&config).await;
+        return;
+    }
 
     pool.execute("create schema etl").await.unwrap();
     pool.execute("create publication etl_schema_pub for tables in schema etl").await.unwrap();
