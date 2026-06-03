@@ -1,5 +1,4 @@
 use etl::{
-    error::ErrorKind,
     state::TableStateType,
     test_utils::{
         database::{spawn_source_database, test_table_name},
@@ -15,10 +14,259 @@ use etl::{
 use etl_postgres::{below_version, types::TableName, version::POSTGRES_15};
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
-use tokio_postgres::types::Type;
+use tokio_postgres::{Client, types::Type};
 
 fn quoted_qualified_table_name(schema: &str, table: &str) -> String {
     TableName::new(schema.to_owned(), table.to_owned()).as_quoted_identifier()
+}
+
+#[derive(Debug)]
+struct NestedPartitionHierarchy {
+    root_table_name: TableName,
+    p_2026_table_name: TableName,
+    root_table_id: TableId,
+    p_2025_01_table_id: TableId,
+    p_2025_02_table_id: TableId,
+    p_2026_table_id: TableId,
+    p_2026_01_table_id: TableId,
+    p_2026_02_table_id: TableId,
+}
+
+async fn get_table_id(
+    database: &etl_postgres::tokio::test_utils::PgDatabase<Client>,
+    table_name: &TableName,
+) -> TableId {
+    let row = database
+        .client
+        .as_ref()
+        .unwrap()
+        .query_one(
+            "select c.oid from pg_class c join pg_namespace n on n.oid = c.relnamespace
+             where n.nspname = $1 and c.relname = $2",
+            &[&table_name.schema, &table_name.name],
+        )
+        .await
+        .unwrap();
+
+    row.get(0)
+}
+
+async fn create_nested_partition_hierarchy(
+    database: &etl_postgres::tokio::test_utils::PgDatabase<Client>,
+    table_name: TableName,
+) -> NestedPartitionHierarchy {
+    database
+        .run_sql(&format!(
+            "create table {} (
+                id bigserial,
+                data text not null,
+                partition_year integer not null,
+                partition_month integer not null,
+                primary key (id, partition_year, partition_month)
+            ) partition by range (partition_year)",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    let p_2025_table_name =
+        TableName::new(table_name.schema.clone(), format!("{}_2025", table_name.name));
+    database
+        .run_sql(&format!(
+            "create table {} partition of {} for values from (2025) to (2026)
+             partition by range (partition_month)",
+            p_2025_table_name.as_quoted_identifier(),
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    let p_2025_01_table_name =
+        TableName::new(table_name.schema.clone(), format!("{}_01", p_2025_table_name.name));
+    database
+        .run_sql(&format!(
+            "create table {} partition of {} for values from (1) to (2)",
+            p_2025_01_table_name.as_quoted_identifier(),
+            p_2025_table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    let p_2025_02_table_name =
+        TableName::new(table_name.schema.clone(), format!("{}_02", p_2025_table_name.name));
+    database
+        .run_sql(&format!(
+            "create table {} partition of {} for values from (2) to (3)",
+            p_2025_02_table_name.as_quoted_identifier(),
+            p_2025_table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    let p_2026_table_name =
+        TableName::new(table_name.schema.clone(), format!("{}_2026", table_name.name));
+    database
+        .run_sql(&format!(
+            "create table {} partition of {} for values from (2026) to (2027)
+             partition by range (partition_month)",
+            p_2026_table_name.as_quoted_identifier(),
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    let p_2026_01_table_name =
+        TableName::new(table_name.schema.clone(), format!("{}_01", p_2026_table_name.name));
+    database
+        .run_sql(&format!(
+            "create table {} partition of {} for values from (1) to (2)",
+            p_2026_01_table_name.as_quoted_identifier(),
+            p_2026_table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    let p_2026_02_table_name =
+        TableName::new(table_name.schema.clone(), format!("{}_02", p_2026_table_name.name));
+    database
+        .run_sql(&format!(
+            "create table {} partition of {} for values from (2) to (3)",
+            p_2026_02_table_name.as_quoted_identifier(),
+            p_2026_table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    NestedPartitionHierarchy {
+        root_table_id: get_table_id(database, &table_name).await,
+        p_2025_01_table_id: get_table_id(database, &p_2025_01_table_name).await,
+        p_2025_02_table_id: get_table_id(database, &p_2025_02_table_name).await,
+        p_2026_table_id: get_table_id(database, &p_2026_table_name).await,
+        p_2026_01_table_id: get_table_id(database, &p_2026_01_table_name).await,
+        p_2026_02_table_id: get_table_id(database, &p_2026_02_table_name).await,
+        root_table_name: table_name,
+        p_2026_table_name,
+    }
+}
+
+async fn assert_nested_partition_pipeline_case(
+    test_name: &str,
+    publish_middle_root: bool,
+    publish_via_partition_root: bool,
+) {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let hierarchy = create_nested_partition_hierarchy(&database, test_table_name(test_name)).await;
+
+    database
+        .run_sql(&format!(
+            "insert into {} (data, partition_year, partition_month) values
+             ('initial_2025_01', 2025, 1),
+             ('initial_2025_02', 2025, 2),
+             ('initial_2026_01', 2026, 1),
+             ('initial_2026_02', 2026, 2)",
+            hierarchy.root_table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    let publication_table_name = if publish_middle_root {
+        hierarchy.p_2026_table_name.clone()
+    } else {
+        hierarchy.root_table_name.clone()
+    };
+    let publication_name = format!("pub_{test_name}");
+    database
+        .create_publication_with_config(
+            &publication_name,
+            std::slice::from_ref(&publication_table_name),
+            publish_via_partition_root,
+        )
+        .await
+        .unwrap();
+
+    let expected_copy_counts = match (publish_middle_root, publish_via_partition_root) {
+        (false, true) => vec![(hierarchy.root_table_id, 4)],
+        (false, false) => vec![
+            (hierarchy.p_2025_01_table_id, 1),
+            (hierarchy.p_2025_02_table_id, 1),
+            (hierarchy.p_2026_01_table_id, 1),
+            (hierarchy.p_2026_02_table_id, 1),
+        ],
+        (true, true) => vec![(hierarchy.p_2026_table_id, 2)],
+        (true, false) => {
+            vec![(hierarchy.p_2026_01_table_id, 1), (hierarchy.p_2026_02_table_id, 1)]
+        }
+    };
+    let expected_cdc_counts = expected_copy_counts.clone();
+    let expected_cdc_total = expected_cdc_counts.iter().map(|(_, count)| count).sum::<usize>();
+
+    let state_store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
+
+    let mut ready_notifies = Vec::new();
+    for (table_id, _) in &expected_copy_counts {
+        ready_notifies
+            .push(state_store.notify_on_table_state_type(*table_id, TableStateType::Ready).await);
+    }
+
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name,
+        state_store.clone(),
+        destination.clone(),
+    );
+
+    pipeline.start().await.unwrap();
+    for notify in &ready_notifies {
+        notify.notified().await;
+    }
+
+    let table_states = state_store.get_table_states().await;
+    assert_eq!(table_states.len(), expected_copy_counts.len());
+    for (table_id, _) in &expected_copy_counts {
+        assert!(table_states.contains_key(table_id));
+    }
+
+    let table_rows = destination.get_table_rows().await;
+    assert_eq!(table_rows.len(), expected_copy_counts.len());
+    for (table_id, expected_count) in &expected_copy_counts {
+        assert_eq!(table_rows.get(table_id).map_or(0, Vec::len), *expected_count);
+    }
+
+    let inserts_notify = destination
+        .wait_for_events_count(vec![(EventType::Insert, expected_cdc_total as u64)])
+        .await;
+
+    let cdc_insert_values = if publish_middle_root {
+        "('new_2026_01', 2026, 1), ('new_2026_02', 2026, 2)"
+    } else {
+        "('new_2025_01', 2025, 1),
+         ('new_2025_02', 2025, 2),
+         ('new_2026_01', 2026, 1),
+         ('new_2026_02', 2026, 2)"
+    };
+    database
+        .run_sql(&format!(
+            "insert into {} (data, partition_year, partition_month) values {cdc_insert_values}",
+            hierarchy.root_table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    inserts_notify.notified().await;
+
+    let _ = pipeline.shutdown_and_wait().await;
+
+    let events = destination.get_events().await;
+    let grouped = group_events_by_type_and_table_id(&events);
+    for (table_id, expected_count) in expected_cdc_counts {
+        let inserts = grouped.get(&(EventType::Insert, table_id)).cloned().unwrap_or_default();
+        assert_eq!(inserts.len(), expected_count);
+    }
 }
 
 /// Tests that initial COPY replicates all rows from a partitioned table.
@@ -1040,363 +1288,22 @@ async fn partition_detach_with_schema_publication_does_replicate_detached_insert
     assert_eq!(detached_rows, 2);
 }
 
-/// Tests that nested partitions (sub-partitioned tables) work correctly.
-/// Creates a two-level partition hierarchy where one partition is itself
-/// partitioned, and verifies that both initial COPY and CDC streaming work
-/// correctly. Only the top-level parent table should be tracked in the pipeline
-/// state.
 #[tokio::test(flavor = "multi_thread")]
-async fn nested_partitioned_table_copy_and_cdc() {
-    init_test_tracing();
-    let database = spawn_source_database().await;
-
-    let table_name = test_table_name("nested_partitioned_events");
-
-    // Create the parent partitioned table (Level 1).
-    // Primary key must include all partitioning columns used at any level.
-    database
-        .run_sql(&format!(
-            "create table {} (
-                id bigserial,
-                data text NOT NULL,
-                partition_key integer NOT NULL,
-                sub_partition_key integer NOT NULL,
-                primary key (id, partition_key, sub_partition_key)
-            ) partition by range (partition_key)",
-            table_name.as_quoted_identifier()
-        ))
-        .await
-        .unwrap();
-
-    // Get parent table ID.
-    let parent_row = database
-        .client
-        .as_ref()
-        .unwrap()
-        .query_one(
-            "select c.oid from pg_class c join pg_namespace n on n.oid = c.relnamespace
-             where n.nspname = $1 and c.relname = $2",
-            &[&table_name.schema, &table_name.name],
-        )
-        .await
-        .unwrap();
-    let parent_table_id: TableId = parent_row.get(0);
-
-    // Create first partition (simple leaf partition) (Level 2a).
-    let p1_name = format!("{}_{}", table_name.name, "p1");
-    let p1_qualified = quoted_qualified_table_name(&table_name.schema, &p1_name);
-    database
-        .run_sql(&format!(
-            "create table {} partition of {} for values from (1) to (100)",
-            p1_qualified,
-            table_name.as_quoted_identifier()
-        ))
-        .await
-        .unwrap();
-
-    // Create second partition that is itself partitioned (Level 2b).
-    let p2_name = format!("{}_{}", table_name.name, "p2");
-    let p2_qualified = quoted_qualified_table_name(&table_name.schema, &p2_name);
-    database
-        .run_sql(&format!(
-            "create table {} partition of {} for values from (100) to (200) partition by range \
-             (sub_partition_key)",
-            p2_qualified,
-            table_name.as_quoted_identifier()
-        ))
-        .await
-        .unwrap();
-
-    // Create sub-partitions of p2 (Level 3).
-    let p2_sub1_name = format!("{}_{}", p2_name, "sub1");
-    let p2_sub1_qualified = quoted_qualified_table_name(&table_name.schema, &p2_sub1_name);
-    database
-        .run_sql(&format!(
-            "create table {p2_sub1_qualified} partition of {p2_qualified} for values from (1) to \
-             (50)"
-        ))
-        .await
-        .unwrap();
-
-    let p2_sub2_name = format!("{}_{}", p2_name, "sub2");
-    let p2_sub2_qualified = quoted_qualified_table_name(&table_name.schema, &p2_sub2_name);
-    database
-        .run_sql(&format!(
-            "create table {p2_sub2_qualified} partition of {p2_qualified} for values from (50) to \
-             (100)"
-        ))
-        .await
-        .unwrap();
-
-    // Create third partition that is itself partitioned (Level 2c).
-    let p3_name = format!("{}_{}", table_name.name, "p3");
-    let p3_qualified = quoted_qualified_table_name(&table_name.schema, &p3_name);
-    database
-        .run_sql(&format!(
-            "create table {} partition of {} for values from (200) to (300) partition by range \
-             (sub_partition_key)",
-            p3_qualified,
-            table_name.as_quoted_identifier()
-        ))
-        .await
-        .unwrap();
-
-    // Create sub-partitions of p3 (Level 3).
-    let p3_sub1_name = format!("{}_{}", p3_name, "sub1");
-    let p3_sub1_qualified = quoted_qualified_table_name(&table_name.schema, &p3_sub1_name);
-    database
-        .run_sql(&format!(
-            "create table {p3_sub1_qualified} partition of {p3_qualified} for values from (1) to \
-             (50)"
-        ))
-        .await
-        .unwrap();
-
-    let p3_sub2_name = format!("{}_{}", p3_name, "sub2");
-    let p3_sub2_qualified = quoted_qualified_table_name(&table_name.schema, &p3_sub2_name);
-    database
-        .run_sql(&format!(
-            "create table {p3_sub2_qualified} partition of {p3_qualified} for values from (50) to \
-             (100)"
-        ))
-        .await
-        .unwrap();
-
-    // Create fourth partition (simple leaf partition) (Level 2d).
-    let p4_name = format!("{}_{}", table_name.name, "p4");
-    let p4_qualified = quoted_qualified_table_name(&table_name.schema, &p4_name);
-    database
-        .run_sql(&format!(
-            "create table {} partition of {} for values from (300) to (400)",
-            p4_qualified,
-            table_name.as_quoted_identifier()
-        ))
-        .await
-        .unwrap();
-
-    // Insert initial data into all 6 leaf partitions:
-    // - p1: partition_key=50
-    // - p2_sub1: partition_key=150, sub_partition_key=25
-    // - p2_sub2: partition_key=150, sub_partition_key=75
-    // - p3_sub1: partition_key=250, sub_partition_key=25
-    // - p3_sub2: partition_key=250, sub_partition_key=75
-    // - p4: partition_key=350
-    database
-        .run_sql(&format!(
-            "insert into {} (data, partition_key, sub_partition_key) values
-             ('event_p1', 50, 25),
-             ('event_p2_sub1', 150, 25),
-             ('event_p2_sub2', 150, 75),
-             ('event_p3_sub1', 250, 25),
-             ('event_p3_sub2', 250, 75),
-             ('event_p4', 350, 25)",
-            table_name.as_quoted_identifier()
-        ))
-        .await
-        .unwrap();
-
-    let publication_name = "test_nested_partitioned_pub".to_owned();
-    database
-        .create_publication(&publication_name, std::slice::from_ref(&table_name))
-        .await
-        .unwrap();
-
-    let state_store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
-
-    // Register notification for initial copy completion.
-    let parent_ready_notify =
-        state_store.notify_on_table_state_type(parent_table_id, TableStateType::Ready).await;
-
-    let pipeline_id: PipelineId = random();
-    let mut pipeline = create_pipeline(
-        &database.config,
-        pipeline_id,
-        publication_name,
-        state_store.clone(),
-        destination.clone(),
-    );
-
-    pipeline.start().await.unwrap();
-
-    parent_ready_notify.notified().await;
-
-    // Verify table schema was discovered correctly for nested partitioned table.
-    let table_schemas = state_store.get_latest_table_schemas().await;
-    assert!(table_schemas.contains_key(&parent_table_id));
-
-    let parent_schema = &table_schemas[&parent_table_id];
-    assert_eq!(parent_schema.id, parent_table_id);
-    assert_eq!(parent_schema.name, table_name);
-
-    // Verify columns are correctly discovered (includes sub_partition_key).
-    assert_eq!(parent_schema.column_schemas.len(), 4);
-
-    // Check id column (added by default).
-    let id_column = &parent_schema.column_schemas[0];
-    assert_eq!(id_column.name, "id");
-    assert_eq!(id_column.typ, Type::INT8);
-    assert!(!id_column.nullable);
-    assert!(id_column.primary_key());
-
-    // Check data column.
-    let data_column = &parent_schema.column_schemas[1];
-    assert_eq!(data_column.name, "data");
-    assert_eq!(data_column.typ, Type::TEXT);
-    assert!(!data_column.nullable);
-    assert!(!data_column.primary_key());
-
-    // Check partition_key column (part of primary key).
-    let partition_key_column = &parent_schema.column_schemas[2];
-    assert_eq!(partition_key_column.name, "partition_key");
-    assert_eq!(partition_key_column.typ, Type::INT4);
-    assert!(!partition_key_column.nullable);
-    assert!(partition_key_column.primary_key());
-
-    // Check sub_partition_key column (part of primary key for nested partitioning).
-    let sub_partition_key_column = &parent_schema.column_schemas[3];
-    assert_eq!(sub_partition_key_column.name, "sub_partition_key");
-    assert_eq!(sub_partition_key_column.typ, Type::INT4);
-    assert!(!sub_partition_key_column.nullable);
-    assert!(sub_partition_key_column.primary_key());
-
-    // Verify initial COPY replicated all 6 rows (one per leaf partition).
-    let table_rows = destination.get_table_rows().await;
-    let total_rows: usize = table_rows.values().map(Vec::len).sum();
-    assert_eq!(total_rows, 6);
-
-    // Verify only the parent table is tracked (not intermediate or leaf
-    // partitions).
-    let table_states = state_store.get_table_states().await;
-    assert!(table_states.contains_key(&parent_table_id));
-    assert_eq!(table_states.len(), 1);
-
-    // Verify all rows are attributed to the parent table.
-    let parent_table_rows = table_rows
-        .iter()
-        .filter(|(table_id, _)| **table_id == parent_table_id)
-        .map(|(_, rows)| rows.len())
-        .sum::<usize>();
-    assert_eq!(parent_table_rows, 6);
-
-    // Insert new rows into all 6 leaf partitions via CDC.
-    let inserts_notify = destination.wait_for_events_count(vec![(EventType::Insert, 6)]).await;
-
-    database
-        .run_sql(&format!(
-            "insert into {} (data, partition_key, sub_partition_key) values
-             ('new_event_p1', 75, 30),
-             ('new_event_p2_sub1', 125, 40),
-             ('new_event_p2_sub2', 175, 60),
-             ('new_event_p3_sub1', 225, 40),
-             ('new_event_p3_sub2', 275, 60),
-             ('new_event_p4', 350, 30)",
-            table_name.as_quoted_identifier()
-        ))
-        .await
-        .unwrap();
-
-    inserts_notify.notified().await;
-
-    let _ = pipeline.shutdown_and_wait().await;
-
-    // Verify that CDC events were captured for all 6 leaf partitions.
-    let events = destination.get_events().await;
-    let grouped = group_events_by_type_and_table_id(&events);
-    let parent_inserts =
-        grouped.get(&(EventType::Insert, parent_table_id)).cloned().unwrap_or_default();
-    assert_eq!(parent_inserts.len(), 6);
+async fn nested_pipeline_top_root_with_partition_root() {
+    assert_nested_partition_pipeline_case("nested_pipeline_top_root_true", false, true).await;
 }
 
-/// Tests that the pipeline throws an error during startup when
-/// `publish_via_partition_root` is set to `false` and the publication contains
-/// partitioned tables.
-///
-/// When `publish_via_partition_root = false`, logical replication messages
-/// contain child partition OIDs instead of parent table OIDs. Since the
-/// pipeline's schema cache only tracks parent table IDs, this configuration
-/// would cause pipeline failures when relation messages arrive with unknown
-/// child OIDs.
-///
-/// The pipeline validates this configuration at startup and rejects it with a
-/// clear error message instructing the user to enable
-/// `publish_via_partition_root`.
 #[tokio::test(flavor = "multi_thread")]
-async fn partitioned_table_with_publish_via_partition_root_false_and_partitioned_tables() {
-    init_test_tracing();
-    let database = spawn_source_database().await;
-
-    let table_name = test_table_name("partitioned_events");
-    let partition_specs = [("p1", "from (1) to (100)"), ("p2", "from (100) to (200)")];
-
-    let (_parent_table_id, _partition_table_ids) =
-        create_partitioned_table(&database, table_name.clone(), &partition_specs).await.unwrap();
-
-    database
-        .run_sql(&format!(
-            "insert into {} (data, partition_key) values ('event1', 50), ('event2', 150)",
-            table_name.as_quoted_identifier()
-        ))
-        .await
-        .unwrap();
-
-    let publication_name = "test_partitioned_pub".to_owned();
-    database
-        .create_publication_with_config(&publication_name, std::slice::from_ref(&table_name), false)
-        .await
-        .unwrap();
-
-    let state_store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
-
-    let pipeline_id: PipelineId = random();
-    let mut pipeline = create_pipeline(
-        &database.config,
-        pipeline_id,
-        publication_name.clone(),
-        state_store.clone(),
-        destination.clone(),
-    );
-
-    // The pipeline should fail to start due to invalid configuration.
-    let err = pipeline.start().await.err().unwrap();
-    assert_eq!(err.kind(), ErrorKind::ConfigError);
+async fn nested_pipeline_top_root_without_partition_root() {
+    assert_nested_partition_pipeline_case("nested_pipeline_top_root_false", false, false).await;
 }
 
-/// Tests that the pipeline doesn't throw an error when
-/// `publish_via_partition_root=false` and there are no partitioned tables in
-/// the tables of the publication.
 #[tokio::test(flavor = "multi_thread")]
-async fn partitioned_table_with_publish_via_partition_root_false_and_no_partitioned_tables() {
-    init_test_tracing();
-    let database = spawn_source_database().await;
+async fn nested_pipeline_middle_root_with_partition_root() {
+    assert_nested_partition_pipeline_case("nested_pipeline_middle_root_true", true, true).await;
+}
 
-    let table_name = test_table_name("non_partitioned_events");
-    database
-        .create_table(table_name.clone(), true, &[("description", "text not null")])
-        .await
-        .unwrap();
-
-    let publication_name = "test_non_partitioned_pub".to_owned();
-    database
-        .create_publication_with_config(&publication_name, std::slice::from_ref(&table_name), false)
-        .await
-        .unwrap();
-
-    let state_store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
-
-    let pipeline_id: PipelineId = random();
-    let mut pipeline = create_pipeline(
-        &database.config,
-        pipeline_id,
-        publication_name.clone(),
-        state_store.clone(),
-        destination.clone(),
-    );
-
-    // The pipeline should start and stop successfully.
-    pipeline.start().await.unwrap();
-    let result = pipeline.shutdown_and_wait().await;
-    assert!(result.is_ok());
+#[tokio::test(flavor = "multi_thread")]
+async fn nested_pipeline_middle_root_without_partition_root() {
+    assert_nested_partition_pipeline_case("nested_pipeline_middle_root_false", true, false).await;
 }

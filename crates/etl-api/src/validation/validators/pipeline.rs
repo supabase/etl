@@ -244,12 +244,34 @@ impl Validator for PublicationExcludesEtlTablesValidator {
         let source_pool =
             ctx.source_pool.as_ref().expect("source pool required for publication validation");
 
-        let Some(puballtables) = sqlx::query_scalar::<_, bool>(
-            "select puballtables from pg_publication where pubname = $1",
-        )
-        .bind(&self.publication_name)
-        .fetch_optional(source_pool)
-        .await?
+        let Some((puballtables, server_version_num, published_etl_tables)) =
+            sqlx::query_as::<_, (bool, i32, Vec<String>)>(
+                r#"
+                select
+                    p.puballtables,
+                    current_setting('server_version_num')::int,
+                    coalesce(
+                        (
+                            select array_agg(t.table_name order by t.table_name)
+                            from (
+                                select pt.schemaname || '.' || pt.tablename as table_name
+                                from pg_publication_tables pt
+                                where pt.pubname = p.pubname
+                                  and pt.schemaname = $2
+                                order by pt.tablename
+                                limit 100
+                            ) t
+                        ),
+                        array[]::text[]
+                    )
+                from pg_publication p
+                where p.pubname = $1
+                "#,
+            )
+            .bind(&self.publication_name)
+            .bind(ETL_SCHEMA_NAME)
+            .fetch_optional(source_pool)
+            .await?
         else {
             // If publication doesn't exist, skip this check. The existence
             // validator reports the actionable failure.
@@ -269,21 +291,6 @@ impl Validator for PublicationExcludesEtlTablesValidator {
             )]);
         }
 
-        let published_etl_tables: Vec<String> = sqlx::query_scalar(
-            r#"
-            select pt.schemaname || '.' || pt.tablename
-            from pg_publication_tables pt
-            where pt.pubname = $1
-              and pt.schemaname = $2
-            order by pt.tablename
-            limit 100
-            "#,
-        )
-        .bind(&self.publication_name)
-        .bind(ETL_SCHEMA_NAME)
-        .fetch_all(source_pool)
-        .await?;
-
         if !published_etl_tables.is_empty() {
             return Ok(vec![ValidationFailure::critical(
                 "Publication Includes ETL Tables",
@@ -297,11 +304,6 @@ impl Validator for PublicationExcludesEtlTablesValidator {
                 ),
             )]);
         }
-
-        let server_version_num: i32 =
-            sqlx::query_scalar("select current_setting('server_version_num')::int")
-                .fetch_one(source_pool)
-                .await?;
 
         if server_version_num >= 15_00_00 {
             let publishes_etl_schema: bool = sqlx::query_scalar(

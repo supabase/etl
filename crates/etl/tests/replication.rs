@@ -9,11 +9,12 @@ use etl::{
         schema::assert_table_schema_columns,
         test_schema::create_partitioned_table,
     },
+    types::TableId,
 };
 use etl_postgres::{
     below_version,
-    tokio::test_utils::{TableModification, id_column_schema},
-    types::{ColumnSchema, convert_type_oid_to_type},
+    tokio::test_utils::{PgDatabase, TableModification, id_column_schema},
+    types::{ColumnSchema, TableName, convert_type_oid_to_type},
     version::POSTGRES_15,
 };
 use etl_telemetry::tracing::init_test_tracing;
@@ -76,6 +77,283 @@ fn column_schemas_from_ddl_message(message: &JsonValue) -> Vec<ColumnSchema> {
     columns.sort_by_key(|column| column.ordinal_position);
 
     columns
+}
+
+async fn get_table_id(
+    database: &PgDatabase<tokio_postgres::Client>,
+    table_name: &TableName,
+) -> TableId {
+    let row = database
+        .client
+        .as_ref()
+        .unwrap()
+        .query_one(
+            "select c.oid
+             from pg_class c
+             join pg_namespace n on n.oid = c.relnamespace
+             where n.nspname = $1 and c.relname = $2",
+            &[&table_name.schema, &table_name.name],
+        )
+        .await
+        .unwrap();
+
+    TableId::new(row.get(0))
+}
+
+fn partition_table_name(table_name: &TableName, partition_name: &str) -> TableName {
+    TableName::new(table_name.schema.clone(), format!("{}_{}", table_name.name, partition_name))
+}
+
+#[derive(Clone, Copy)]
+enum PublishedPartitionRoot {
+    Top,
+    Middle,
+}
+
+#[derive(Clone, Copy)]
+enum PublicationExpansion {
+    AllTables,
+    Schema,
+}
+
+struct NestedPublicationHierarchy {
+    root_table_name: TableName,
+    p_2026_table_name: TableName,
+    root_table_id: TableId,
+    p_2025_01_table_id: TableId,
+    p_2025_02_table_id: TableId,
+    p_2026_table_id: TableId,
+    p_2026_01_table_id: TableId,
+    p_2026_02_table_id: TableId,
+}
+
+async fn create_nested_publication_hierarchy(
+    database: &PgDatabase<tokio_postgres::Client>,
+    table_name: TableName,
+) -> NestedPublicationHierarchy {
+    database
+        .run_sql(&format!(
+            "create table {} (
+                id integer not null,
+                partition_year integer not null,
+                partition_month integer not null,
+                primary key (id, partition_year, partition_month)
+            ) partition by range (partition_year)",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    let p_2025_table_name =
+        TableName::new(table_name.schema.clone(), format!("{}_2025", table_name.name));
+    database
+        .run_sql(&format!(
+            "create table {} partition of {} for values from (2025) to (2026)
+             partition by range (partition_month)",
+            p_2025_table_name.as_quoted_identifier(),
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    let p_2025_01_table_name =
+        TableName::new(table_name.schema.clone(), format!("{}_01", p_2025_table_name.name));
+    database
+        .run_sql(&format!(
+            "create table {} partition of {} for values from (1) to (2)",
+            p_2025_01_table_name.as_quoted_identifier(),
+            p_2025_table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    let p_2025_02_table_name =
+        TableName::new(table_name.schema.clone(), format!("{}_02", p_2025_table_name.name));
+    database
+        .run_sql(&format!(
+            "create table {} partition of {} for values from (2) to (3)",
+            p_2025_02_table_name.as_quoted_identifier(),
+            p_2025_table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    let p_2026_table_name =
+        TableName::new(table_name.schema.clone(), format!("{}_2026", table_name.name));
+    database
+        .run_sql(&format!(
+            "create table {} partition of {} for values from (2026) to (2027)
+             partition by range (partition_month)",
+            p_2026_table_name.as_quoted_identifier(),
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    let p_2026_01_table_name =
+        TableName::new(table_name.schema.clone(), format!("{}_01", p_2026_table_name.name));
+    database
+        .run_sql(&format!(
+            "create table {} partition of {} for values from (1) to (2)",
+            p_2026_01_table_name.as_quoted_identifier(),
+            p_2026_table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    let p_2026_02_table_name =
+        TableName::new(table_name.schema.clone(), format!("{}_02", p_2026_table_name.name));
+    database
+        .run_sql(&format!(
+            "create table {} partition of {} for values from (2) to (3)",
+            p_2026_02_table_name.as_quoted_identifier(),
+            p_2026_table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    NestedPublicationHierarchy {
+        root_table_id: get_table_id(database, &table_name).await,
+        p_2025_01_table_id: get_table_id(database, &p_2025_01_table_name).await,
+        p_2025_02_table_id: get_table_id(database, &p_2025_02_table_name).await,
+        p_2026_table_id: get_table_id(database, &p_2026_table_name).await,
+        p_2026_01_table_id: get_table_id(database, &p_2026_01_table_name).await,
+        p_2026_02_table_id: get_table_id(database, &p_2026_02_table_name).await,
+        root_table_name: table_name,
+        p_2026_table_name,
+    }
+}
+
+async fn assert_publication_table_ids_for_partition_hierarchy(
+    test_name: &str,
+    published_partition_root: PublishedPartitionRoot,
+    publish_via_partition_root: bool,
+) {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+    let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let hierarchy =
+        create_nested_publication_hierarchy(&database, test_table_name(test_name)).await;
+
+    let publication_table_name = match published_partition_root {
+        PublishedPartitionRoot::Top => hierarchy.root_table_name.clone(),
+        PublishedPartitionRoot::Middle => hierarchy.p_2026_table_name.clone(),
+    };
+    let publication_name = format!("pub_{test_name}");
+    database
+        .create_publication_with_config(
+            &publication_name,
+            std::slice::from_ref(&publication_table_name),
+            publish_via_partition_root,
+        )
+        .await
+        .unwrap();
+
+    let expected_table_ids = match (published_partition_root, publish_via_partition_root) {
+        (PublishedPartitionRoot::Top, true) => HashSet::from([hierarchy.root_table_id]),
+        (PublishedPartitionRoot::Top, false) => HashSet::from([
+            hierarchy.p_2025_01_table_id,
+            hierarchy.p_2025_02_table_id,
+            hierarchy.p_2026_01_table_id,
+            hierarchy.p_2026_02_table_id,
+        ]),
+        (PublishedPartitionRoot::Middle, true) => HashSet::from([hierarchy.p_2026_table_id]),
+        (PublishedPartitionRoot::Middle, false) => {
+            HashSet::from([hierarchy.p_2026_01_table_id, hierarchy.p_2026_02_table_id])
+        }
+    };
+    let table_ids = client
+        .get_publication_table_ids(&publication_name)
+        .await
+        .unwrap()
+        .into_iter()
+        .collect::<HashSet<_>>();
+
+    assert_eq!(table_ids, expected_table_ids);
+}
+
+async fn assert_publication_table_ids_for_expanded_publication(
+    test_name: &str,
+    expansion: PublicationExpansion,
+    publish_via_partition_root: bool,
+) {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    if matches!(expansion, PublicationExpansion::Schema)
+        && below_version!(database.server_version(), POSTGRES_15)
+    {
+        return;
+    }
+
+    let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let table_name = test_table_name(test_name);
+    let (parent_table_id, partition_table_ids) = create_partitioned_table(
+        &database,
+        table_name.clone(),
+        &[("p1", "from (1) to (100)"), ("p2", "from (100) to (200)")],
+    )
+    .await
+    .unwrap();
+    let regular_table_id = database
+        .create_table(test_table_name(&format!("{test_name}_regular")), true, &[("age", "integer")])
+        .await
+        .unwrap();
+
+    let publication_name = format!("pub_{test_name}");
+    match expansion {
+        PublicationExpansion::AllTables => {
+            database
+                .run_sql(&format!(
+                    "create publication {} for all tables with (publish_via_partition_root = {})",
+                    quote_identifier(&publication_name),
+                    publish_via_partition_root
+                ))
+                .await
+                .unwrap();
+        }
+        PublicationExpansion::Schema => {
+            database
+                .run_sql(&format!(
+                    "create publication {} for tables in schema {} with \
+                     (publish_via_partition_root = {})",
+                    quote_identifier(&publication_name),
+                    quote_identifier(&table_name.schema),
+                    publish_via_partition_root
+                ))
+                .await
+                .unwrap();
+        }
+    }
+
+    let table_ids = client
+        .get_publication_table_ids(&publication_name)
+        .await
+        .unwrap()
+        .into_iter()
+        .collect::<HashSet<_>>();
+    let expected_table_ids = if publish_via_partition_root {
+        HashSet::from([parent_table_id, regular_table_id])
+    } else {
+        let mut expected_table_ids = partition_table_ids.iter().copied().collect::<HashSet<_>>();
+        expected_table_ids.insert(regular_table_id);
+        expected_table_ids
+    };
+
+    match expansion {
+        PublicationExpansion::AllTables => {
+            assert!(expected_table_ids.iter().all(|table_id| table_ids.contains(table_id)));
+        }
+        PublicationExpansion::Schema => {
+            assert_eq!(table_ids, expected_table_ids);
+        }
+    }
+
+    if publish_via_partition_root {
+        assert!(partition_table_ids.iter().all(|table_id| !table_ids.contains(table_id)));
+    } else {
+        assert!(!table_ids.contains(&parent_table_id));
+    }
 }
 
 async fn count_stream_rows(stream: CopyOutStream) -> u64 {
@@ -1350,28 +1628,125 @@ async fn publication_creation_and_check() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn publication_table_ids_collapse_partitioned_root() {
+    assert_publication_table_ids_for_partition_hierarchy(
+        "part_parent",
+        PublishedPartitionRoot::Top,
+        true,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn publication_table_ids_use_leaf_partitions_without_partition_root() {
+    assert_publication_table_ids_for_partition_hierarchy(
+        "part_parent_without_root",
+        PublishedPartitionRoot::Top,
+        false,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn publication_table_ids_use_explicit_leaf_for_both_partition_root_settings() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
     let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
 
-    // We create a partitioned parent with two child partitions.
-    let table_name = test_table_name("part_parent");
-    let (parent_table_id, _children) = create_partitioned_table(
+    let table_name = test_table_name("explicit_leaf_parent");
+    let (_parent_table_id, partition_table_ids) = create_partitioned_table(
         &database,
         table_name.clone(),
         &[("p1", "from (1) to (100)"), ("p2", "from (100) to (200)")],
     )
     .await
     .unwrap();
+    let leaf_table_name = partition_table_name(&table_name, "p1");
+    let leaf_table_id = partition_table_ids[0];
 
-    let publication_name = "pub_part_root";
-    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
+    let publication_name = "pub_explicit_leaf_root";
+    database
+        .create_publication_with_config(
+            publication_name,
+            std::slice::from_ref(&leaf_table_name),
+            true,
+        )
+        .await
+        .unwrap();
+    let table_ids = client.get_publication_table_ids(publication_name).await.unwrap();
+    assert_eq!(table_ids, vec![leaf_table_id]);
 
-    let id = client.get_publication_table_ids(publication_name).await.unwrap();
+    let publication_name = "pub_explicit_leaf_no_root";
+    database
+        .create_publication_with_config(
+            publication_name,
+            std::slice::from_ref(&leaf_table_name),
+            false,
+        )
+        .await
+        .unwrap();
+    let table_ids = client.get_publication_table_ids(publication_name).await.unwrap();
+    assert_eq!(table_ids, vec![leaf_table_id]);
+}
 
-    // We expect to get only the parent table id.
-    assert_eq!(id, vec![parent_table_id]);
+#[tokio::test(flavor = "multi_thread")]
+async fn publication_table_ids_use_published_partition_ancestor() {
+    assert_publication_table_ids_for_partition_hierarchy(
+        "nested_part_root",
+        PublishedPartitionRoot::Middle,
+        true,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn publication_table_ids_use_leaf_partitions_for_published_subtree_without_partition_root() {
+    assert_publication_table_ids_for_partition_hierarchy(
+        "nested_leaf_root",
+        PublishedPartitionRoot::Middle,
+        false,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn publication_table_ids_for_all_tables_use_partition_roots() {
+    assert_publication_table_ids_for_expanded_publication(
+        "all_tables_part_parent",
+        PublicationExpansion::AllTables,
+        true,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn publication_table_ids_for_all_tables_use_leaf_partitions_without_partition_root() {
+    assert_publication_table_ids_for_expanded_publication(
+        "all_tables_leaf_parent",
+        PublicationExpansion::AllTables,
+        false,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn publication_table_ids_for_schema_use_partition_roots() {
+    assert_publication_table_ids_for_expanded_publication(
+        "schema_part_parent",
+        PublicationExpansion::Schema,
+        true,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn publication_table_ids_for_schema_use_leaf_partitions_without_partition_root() {
+    assert_publication_table_ids_for_expanded_publication(
+        "schema_leaf_parent",
+        PublicationExpansion::Schema,
+        false,
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

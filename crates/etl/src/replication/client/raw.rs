@@ -488,39 +488,6 @@ impl PgReplicationClient {
         Ok(false)
     }
 
-    /// Retrieves the `publish_via_partition_root` setting for a publication.
-    ///
-    /// Returns `true` if the publication is configured to send replication
-    /// messages using the parent table OID, or `false` if it sends them
-    /// using child partition OIDs.
-    pub async fn get_publish_via_partition_root(&self, publication_name: &str) -> EtlResult<bool> {
-        let query = format!(
-            "select pubviaroot from pg_publication where pubname = {};",
-            quote_literal(publication_name)
-        );
-
-        for msg in self.client.simple_query(&query).await? {
-            if let SimpleQueryMessage::Row(row) = msg {
-                let pubviaroot = get_row_value::<String>(&row, "pubviaroot", "pg_publication")?;
-                return Ok(pubviaroot == "t");
-            }
-        }
-
-        bail!(
-            ErrorKind::ConfigError,
-            "Publication not found",
-            format!("Publication '{}' not found in database", publication_name)
-        );
-    }
-
-    /// Checks if any of the provided table IDs are partitioned tables.
-    ///
-    /// A partitioned table is one where `relkind = 'p'` in `pg_class`.
-    /// Returns `true` if at least one table is partitioned, `false` otherwise.
-    pub(crate) async fn has_partitioned_tables(&self, table_ids: &[TableId]) -> EtlResult<bool> {
-        self.target().has_partitioned_tables(table_ids).await
-    }
-
     /// Retrieves the names of all tables included in a publication.
     pub async fn get_publication_table_names(
         &self,
@@ -546,10 +513,12 @@ impl PgReplicationClient {
 
     /// Retrieves the OIDs of all tables included in a publication.
     ///
-    /// For partitioned tables with `publish_via_partition_root=true`, this
-    /// returns only the parent table OID. The query uses a recursive CTE to
-    /// walk up the partition inheritance hierarchy and identify root tables
-    /// that have no parent themselves.
+    /// This follows [`pg_publication_tables`], which applies PostgreSQL's
+    /// logical replication identity rules for partitioned tables. With
+    /// `publish_via_partition_root=true`, PostgreSQL returns the topmost
+    /// published ancestor used for relation messages. With
+    /// `publish_via_partition_root=false`, it returns the leaf relations whose
+    /// schemas are used for replication.
     ///
     /// # Errors
     ///
@@ -562,45 +531,26 @@ impl PgReplicationClient {
     ) -> EtlResult<Vec<TableId>> {
         let query = format!(
             r#"
-            with recursive pub_tables as (
-                -- Get all tables from publication (pg_publication_tables includes explicit tables,
-                -- ALL TABLES publications, and FOR TABLES IN SCHEMA publications)
-                select c.oid
-                from pg_publication_tables pt
-                join pg_class c on c.relname = pt.tablename
-                join pg_namespace n on n.oid = c.relnamespace and n.nspname = pt.schemaname
-                where pt.pubname = {pub}
-            ),
-            hierarchy(relid) as (
-                -- Start with published tables
-                select oid from pub_tables
-
-                union
-
-                -- Recursively find parent tables in inheritance hierarchy
-                select i.inhparent
-                from pg_inherits i
-                join hierarchy h on h.relid = i.inhrelid
-            )
-            -- Return only root tables (those without a parent)
-            select distinct relid as oid
-            from hierarchy
-            where not exists (
-                select 1 from pg_inherits i where i.inhrelid = hierarchy.relid
-            );
+            select distinct c.oid
+            from pg_publication_tables pt
+            join pg_class c on c.relname = pt.tablename
+            join pg_namespace n on n.oid = c.relnamespace
+             and n.nspname = pt.schemaname
+            where pt.pubname = {pub}
+            order by c.oid;
             "#,
             pub = quote_literal(publication_name)
         );
 
-        let mut root_tables = vec![];
+        let mut table_ids = vec![];
         for row in self.client.simple_query(&query).await? {
             if let SimpleQueryMessage::Row(row) = row {
                 let table_id = get_row_value::<TableId>(&row, "oid", "pg_class")?;
-                root_tables.push(table_id);
+                table_ids.push(table_id);
             }
         }
 
-        if root_tables.is_empty() {
+        if table_ids.is_empty() {
             bail!(
                 ErrorKind::ConfigError,
                 "Publication has no tables",
@@ -613,7 +563,7 @@ impl PgReplicationClient {
             );
         }
 
-        Ok(root_tables)
+        Ok(table_ids)
     }
 
     /// Starts a logical replication stream from the specified publication and

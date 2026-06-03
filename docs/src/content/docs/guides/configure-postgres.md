@@ -246,17 +246,58 @@ CREATE PUBLICATION inserts_only FOR TABLE users WITH (publish = 'insert');
 
 #### Partitioned Tables
 
-To replicate partitioned tables, use `publish_via_partition_root = true`. This tells Postgres to treat the [partitioned table as a single table](https://www.postgresql.org/docs/current/sql-createpublication.html#SQL-CREATEPUBLICATION-PARAMS-WITH-PUBLISH-VIA-PARTITION-ROOT) for replication purposes. **All changes to any partition are published as changes to the parent table**:
+ETL supports PostgreSQL partition publications with either
+`publish_via_partition_root = true` or `publish_via_partition_root = false`.
+ETL reads the effective table list from `pg_publication_tables`, so it tracks
+the same relation identities and schemas PostgreSQL uses for logical
+replication messages.
+
+For the easiest destination shape, prefer `publish_via_partition_root = true`.
+This tells PostgreSQL to publish changes using the schema and identity of the
+[topmost partitioned table included in the publication](https://www.postgresql.org/docs/current/sql-createpublication.html#SQL-CREATEPUBLICATION-PARAMS-WITH-PUBLISH-VIA-PARTITION-ROOT).
+If you publish a subtree such as `orders_2026`, changes under that subtree are
+published as `orders_2026`, not as the absolute root table:
 
 ```sql
--- Create publication with partitioned table support
+-- Publish the selected partitioned tables as logical root tables
 CREATE PUBLICATION my_publication FOR TABLE users, orders WITH (publish_via_partition_root = true);
 
 -- For all tables including partitioned tables
 CREATE PUBLICATION all_tables FOR ALL TABLES WITH (publish_via_partition_root = true);
 ```
 
-**Limitation:** With this option enabled, `TRUNCATE` operations on individual partitions are not replicated. Execute truncates on the parent table instead:
+When publications are created through the ETL API, ETL uses
+`publish_via_partition_root = true` by default. Manually-created publications
+can use either setting.
+
+| Publication shape | `publish_via_partition_root` | PostgreSQL publishes as | ETL tracks |
+| --- | --- | --- | --- |
+| `FOR TABLE orders` where `orders` is the top partitioned table | `true` | `orders` | `orders` |
+| `FOR TABLE orders` where `orders` is the top partitioned table | `false` | Leaf partitions under `orders` | The leaf partitions |
+| `FOR TABLE orders_2026` where `orders_2026` is a partitioned subtree | `true` | `orders_2026` | `orders_2026` |
+| `FOR TABLE orders_2026` where `orders_2026` is a partitioned subtree | `false` | Leaf partitions under `orders_2026` | The leaf partitions under `orders_2026` |
+| `FOR TABLE orders_2026_01` where `orders_2026_01` is a leaf partition | Either | `orders_2026_01` | `orders_2026_01` |
+| `FOR ALL TABLES` or `FOR TABLES IN SCHEMA ...` | `true` | Partition roots plus regular tables | Partition roots plus regular tables |
+| `FOR ALL TABLES` or `FOR TABLES IN SCHEMA ...` | `false` | Leaf partitions plus regular tables | Leaf partitions plus regular tables |
+
+For example, with this hierarchy:
+
+```text
+orders
+  ├── orders_2025
+  │   ├── orders_2025_01
+  │   └── orders_2025_02
+  └── orders_2026
+      ├── orders_2026_01
+      └── orders_2026_02
+```
+
+`FOR TABLE orders_2026 WITH (publish_via_partition_root = true)` replicates the
+2026 subtree as `orders_2026`. `FOR TABLE orders_2026 WITH
+(publish_via_partition_root = false)` replicates `orders_2026_01` and
+`orders_2026_02` as separate leaf tables.
+
+**Limitation:** With `publish_via_partition_root = true`, `TRUNCATE` operations on individual partitions are not replicated. Execute truncates on the published partition root table instead:
 
 ```sql
 -- This will NOT be replicated
