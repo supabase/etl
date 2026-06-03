@@ -15,6 +15,8 @@ use std::{
 
 use crate::conversions::ParseNumericError;
 
+const MAX_SCHEMA_ERROR_COLUMN_NAMES: usize = 12;
+
 /// Convenient result type for ETL operations using [`EtlError`] as the error
 /// type.
 ///
@@ -1008,15 +1010,9 @@ impl From<crate::types::SchemaError> for EtlError {
                 EtlError::from_components(
                     ErrorKind::CorruptedTableSchema,
                     Cow::Borrowed(
-                        "Received columns during replication that are not in the stored table \
-                         schema",
+                        "Replication stream contains columns missing from the stored table schema",
                     ),
-                    Some(Cow::Owned(format!(
-                        "Unknown columns: {columns:?}\n\nCause: The pipeline crashed after a \
-                         schema change but before reporting progress back to Postgres. On \
-                         restart, event streaming resumed from past events with an outdated \
-                         schema."
-                    ))),
+                    Some(Cow::Owned(unknown_replicated_columns_detail(&columns))),
                     None,
                 )
             }
@@ -1028,6 +1024,41 @@ impl From<crate::types::SchemaError> for EtlError {
             ),
         }
     }
+}
+
+/// Builds a readable detail for unknown replicated columns.
+fn unknown_replicated_columns_detail(columns: &[String]) -> String {
+    if columns.is_empty() {
+        return "The replication stream included columns that are not present in the stored \
+                schema snapshot. This may indicate the stored schema state is stale or corrupted."
+            .to_owned();
+    }
+
+    format!(
+        "The replication stream included {} unknown column{}. Unknown columns: {}. This may \
+         indicate the stored schema state is stale or corrupted.",
+        columns.len(),
+        if columns.len() == 1 { "" } else { "s" },
+        summarize_schema_error_columns(columns)
+    )
+}
+
+/// Formats column names for schema error details without overwhelming wide
+/// tables.
+fn summarize_schema_error_columns(columns: &[String]) -> String {
+    let mut summary = columns
+        .iter()
+        .take(MAX_SCHEMA_ERROR_COLUMN_NAMES)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    if columns.len() > MAX_SCHEMA_ERROR_COLUMN_NAMES {
+        summary
+            .push_str(&format!(", ... ({} more)", columns.len() - MAX_SCHEMA_ERROR_COLUMN_NAMES));
+    }
+
+    summary
 }
 
 #[cfg(test)]
@@ -1055,6 +1086,44 @@ mod tests {
         assert_eq!(err.kind(), ErrorKind::SourceQueryFailed);
         assert_eq!(err.detail(), Some("Table 'users' doesn't exist"));
         assert_eq!(err.kinds(), vec![ErrorKind::SourceQueryFailed]);
+    }
+
+    #[test]
+    fn unknown_replicated_columns_error_is_readable() {
+        let err = EtlError::from(crate::types::SchemaError::UnknownReplicatedColumns(vec![
+            "extra_id".to_owned(),
+            "extra_name".to_owned(),
+        ]));
+
+        assert_eq!(err.kind(), ErrorKind::CorruptedTableSchema);
+        assert_eq!(
+            err.description(),
+            Some("Replication stream contains columns missing from the stored table schema")
+        );
+        assert_eq!(
+            err.detail(),
+            Some(
+                "The replication stream included 2 unknown columns. Unknown columns: extra_id, \
+                 extra_name. This may indicate the stored schema state is stale or corrupted."
+            )
+        );
+    }
+
+    #[test]
+    fn unknown_replicated_columns_error_caps_long_column_lists() {
+        let columns = (1..=13).map(|index| format!("column_{index}")).collect();
+
+        let err = EtlError::from(crate::types::SchemaError::UnknownReplicatedColumns(columns));
+
+        assert_eq!(
+            err.detail(),
+            Some(
+                "The replication stream included 13 unknown columns. Unknown columns: column_1, \
+                 column_2, column_3, column_4, column_5, column_6, column_7, column_8, column_9, \
+                 column_10, column_11, column_12, ... (1 more). This may indicate the stored \
+                 schema state is stale or corrupted."
+            )
+        );
     }
 
     #[test]

@@ -231,12 +231,13 @@ pub(crate) fn register_metrics() {
             ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_PAUSE_DURATION_SECONDS,
             Unit::Seconds,
             "Duration that DuckLake foreground ingestion was paused for an external maintenance \
-             run, labeled by outcome."
+             run, labeled by operation and outcome."
         );
         describe_gauge!(
             ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_PAUSE_ACTIVE,
             Unit::Count,
-            "External DuckLake maintenance foreground-ingestion pause current state (0 or 1)."
+            "External DuckLake maintenance foreground-ingestion pause current state (0 or 1), \
+             labeled by operation."
         );
         describe_counter!(
             ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_TRIGGERED_TOTAL,
