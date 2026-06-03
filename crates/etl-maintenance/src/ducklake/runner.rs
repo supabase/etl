@@ -43,6 +43,7 @@ const HTTPFS_EXTENSION_FILE: &str = "httpfs.duckdb_extension";
 const POSTGRES_SCANNER_EXTENSION_FILE: &str = "postgres_scanner.duckdb_extension";
 const TARGET_FILE_SIZE_OPTION_NAME: &str = "target_file_size";
 const MAINTENANCE_TARGET_FILE_SIZE: &str = "10MB";
+const CLEANUP_OLD_FILES_OLDER_THAN: &str = "1 day";
 const PARQUET_COMPRESSION_OPTION_NAME: &str = "parquet_compression";
 const PARQUET_COMPRESSION_OPTION_VALUE: &str = "zstd";
 const PARQUET_ROW_GROUP_SIZE_BYTES_OPTION_NAME: &str = "parquet_row_group_size_bytes";
@@ -1924,10 +1925,13 @@ async fn run_cleanup_old_files(
     duckdb: &DuckDbMaintenanceExecutor,
     outcome: &mut DuckLakeMaintenanceOutcome,
 ) -> EtlResult<()> {
-    info!("ducklake cleanup-old-files executing");
+    info!(older_than = CLEANUP_OLD_FILES_OLDER_THAN, "ducklake cleanup-old-files executing");
     let cleaned_up_files = duckdb.run(cleanup_old_files).await?;
     outcome.cleaned_up_files = outcome.cleaned_up_files.saturating_add(cleaned_up_files);
-    info!(cleaned_up_files, "ducklake cleanup-old-files completed");
+    info!(
+        older_than = CLEANUP_OLD_FILES_OLDER_THAN,
+        cleaned_up_files, "ducklake cleanup-old-files completed"
+    );
     Ok(())
 }
 
@@ -2129,8 +2133,10 @@ fn cleanup_old_files(conn: &duckdb::Connection) -> EtlResult<u64> {
 /// Builds DuckLake old-file cleanup SQL.
 fn cleanup_old_files_sql() -> String {
     format!(
-        "CALL ducklake_cleanup_old_files({}, cleanup_all => true);",
-        quote_literal(LAKE_CATALOG)
+        "CALL ducklake_cleanup_old_files({}, older_than => CAST(now() AS TIMESTAMP) - CAST({} AS \
+         INTERVAL));",
+        quote_literal(LAKE_CATALOG),
+        quote_literal(CLEANUP_OLD_FILES_OLDER_THAN),
     )
 }
 
@@ -2497,10 +2503,11 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_old_files_sql_uses_cleanup_all() {
+    fn cleanup_old_files_sql_uses_one_day_retention() {
         assert_eq!(
             cleanup_old_files_sql(),
-            "CALL ducklake_cleanup_old_files('lake', cleanup_all => true);"
+            "CALL ducklake_cleanup_old_files('lake', older_than => CAST(now() AS TIMESTAMP) - \
+             CAST('1 day' AS INTERVAL));"
         );
     }
 
