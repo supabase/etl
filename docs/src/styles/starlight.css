@@ -386,7 +386,7 @@ mobile-starlight-toc summary {
 
 .expressive-code pre[data-language] {
   display: flex;
-  padding: 1.45rem 0 0.75rem;
+  padding: 2.65rem 1rem 0.95rem;
   border: var(--ec-brdWd, 1px) solid
     var(--ec-brdCol, color-mix(in srgb, var(--sl-color-hairline) 75%, transparent));
   border-radius: var(--ec-brdRad);
@@ -400,13 +400,13 @@ mobile-starlight-toc summary {
 
 .sl-markdown-content > pre[data-language-label] {
   position: relative;
-  padding-top: 1.45rem;
+  padding: 2.65rem 1rem 0.95rem;
 }
 
 .expressive-code figure::before {
   position: absolute;
-  top: 0.55rem;
-  left: 0.75rem;
+  top: 0.7rem;
+  left: 1rem;
   z-index: 1;
   padding: 0.12rem 0.45rem;
   border: 1px solid color-mix(in srgb, var(--sl-color-hairline) 70%, transparent);
@@ -422,8 +422,8 @@ mobile-starlight-toc summary {
 
 .sl-markdown-content > pre[data-language-label]::before {
   position: absolute;
-  top: 0.55rem;
-  left: 0.75rem;
+  top: 0.7rem;
+  left: 1rem;
   z-index: 1;
   padding: 0.12rem 0.45rem;
   border: 1px solid color-mix(in srgb, var(--sl-color-hairline) 70%, transparent);
@@ -443,8 +443,8 @@ mobile-starlight-toc summary {
 
 .expressive-code .copy {
   position: absolute;
-  top: 0.45rem;
-  right: 0.45rem;
+  top: 0.55rem;
+  right: 0.65rem;
   z-index: 2;
   display: flex;
   opacity: 0;
