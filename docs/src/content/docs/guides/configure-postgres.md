@@ -12,7 +12,7 @@ This guide covers the essential **Postgres settings, slots, publications, and ve
 ## Prerequisites
 
 - **PostgreSQL 14, 15, 16, 17, or 18** (officially supported and tested versions)
-  - PostgreSQL 15+ recommended for advanced publication filtering (column-level, row-level, `FOR ALL TABLES IN SCHEMA`)
+  - PostgreSQL 15+ recommended for advanced publication filtering (column-level, row-level, `FOR TABLES IN SCHEMA`)
   - PostgreSQL 16+ required when logical replication is read from a physical read replica
   - PostgreSQL 14 supported with table-level filtering only
 - Superuser access to the Postgres server
@@ -240,30 +240,68 @@ CREATE PUBLICATION my_publication FOR TABLE users, orders;
 -- Create publication for all tables (use with caution)
 CREATE PUBLICATION all_tables FOR ALL TABLES;
 
+-- Create publication for all tables in selected schemas
+CREATE PUBLICATION schema_tables FOR TABLES IN SCHEMA public, analytics;
+
 -- Include only specific operations
 CREATE PUBLICATION inserts_only FOR TABLE users WITH (publish = 'insert');
 ```
 
+Avoid publishing ETL-owned tables. If the source database is also used as the
+ETL state store, the `etl` schema contains ETL internal tables. Do not include
+that schema in the publication. In that setup, `FOR ALL TABLES` also includes
+ETL-owned tables, so use explicit table lists or `FOR TABLES IN SCHEMA ...` for
+customer-owned schemas instead.
+
 #### Partitioned Tables
 
-To replicate partitioned tables, use `publish_via_partition_root = true`. This tells Postgres to treat the [partitioned table as a single table](https://www.postgresql.org/docs/current/sql-createpublication.html#SQL-CREATEPUBLICATION-PARAMS-WITH-PUBLISH-VIA-PARTITION-ROOT) for replication purposes. **All changes to any partition are published as changes to the parent table**:
+ETL supports PostgreSQL partition publications with either
+`publish_via_partition_root = true` or `publish_via_partition_root = false`.
+ETL reads the effective table list from `pg_publication_tables`, so it tracks
+the same relation identities and schemas PostgreSQL uses for logical
+replication messages.
 
-```sql
--- Create publication with partitioned table support
-CREATE PUBLICATION my_publication FOR TABLE users, orders WITH (publish_via_partition_root = true);
+| Publication shape | `publish_via_partition_root` | PostgreSQL publishes as | ETL tracks |
+| --- | --- | --- | --- |
+| `FOR TABLE orders` where `orders` is the top partitioned table | `true` | `orders` | `orders` |
+| `FOR TABLE orders` where `orders` is the top partitioned table | `false` | Leaf partitions under `orders` | The leaf partitions |
+| `FOR TABLE orders_2026` where `orders_2026` is a partitioned subtree | `true` | `orders_2026` | `orders_2026` |
+| `FOR TABLE orders_2026` where `orders_2026` is a partitioned subtree | `false` | Leaf partitions under `orders_2026` | The leaf partitions under `orders_2026` |
+| `FOR TABLE orders_2026_01` where `orders_2026_01` is a leaf partition | Either | `orders_2026_01` | `orders_2026_01` |
+| `FOR ALL TABLES` for the whole database, or `FOR TABLES IN SCHEMA ...` for selected schemas. Do not include ETL-owned tables. | `true` | Partition roots plus regular tables | Partition roots plus regular tables |
+| `FOR ALL TABLES` for the whole database, or `FOR TABLES IN SCHEMA ...` for selected schemas. Do not include ETL-owned tables. | `false` | Leaf partitions plus regular tables | Leaf partitions plus regular tables |
 
--- For all tables including partitioned tables
-CREATE PUBLICATION all_tables FOR ALL TABLES WITH (publish_via_partition_root = true);
+For example, with this hierarchy:
+
+```text
+orders
+  ├── orders_2025
+  │   ├── orders_2025_01
+  │   └── orders_2025_02
+  └── orders_2026
+      ├── orders_2026_01
+      └── orders_2026_02
 ```
 
-**Limitation:** With this option enabled, `TRUNCATE` operations on individual partitions are not replicated. Execute truncates on the parent table instead:
+`FOR TABLE orders_2026 WITH (publish_via_partition_root = true)` replicates the
+2026 subtree as `orders_2026`. `FOR TABLE orders_2026 WITH
+(publish_via_partition_root = false)` replicates `orders_2026_01` and
+`orders_2026_02` as separate leaf tables.
+
+On PostgreSQL 15+, row filters on partition publications are applied during
+both the initial copy and CDC. ETL uses the row filter attached to the effective
+publication table entry: the published root or subtree when
+`publish_via_partition_root = true`, and the published leaf relation when
+`publish_via_partition_root = false`.
+
+**Limitation:** With `publish_via_partition_root = true`, `TRUNCATE` operations on individual partitions are not replicated. Execute truncates on the published partition table instead. For a top-level publication, that is the top root; for a subtree publication, that is the published subtree root.
 
 ```sql
 -- This will NOT be replicated
-TRUNCATE TABLE orders_2024_q1;
+TRUNCATE TABLE orders_2026_01;
 
 -- This WILL be replicated
-TRUNCATE TABLE orders;
+TRUNCATE TABLE orders_2026;
 ```
 
 ### Managing Publications
@@ -315,7 +353,7 @@ CREATE PUBLICATION active_users FOR TABLE users WHERE (status = 'active');
 
 ```sql
 -- Replicate all tables in a schema
-CREATE PUBLICATION schema_pub FOR ALL TABLES IN SCHEMA public;
+CREATE PUBLICATION schema_pub FOR TABLES IN SCHEMA public;
 ```
 
 ### PostgreSQL 14 Limitations
@@ -329,7 +367,7 @@ PostgreSQL 14 supports table-level publication filtering only. Column-level and 
 | Table-level publication | Yes | Yes | Yes |
 | Column-level filtering | No | Yes | Yes |
 | Row-level filtering | No | Yes | Yes |
-| `FOR ALL TABLES IN SCHEMA` | No | Yes | Yes |
+| `FOR TABLES IN SCHEMA` | No | Yes | Yes |
 | Partitioned table support | Yes | Yes | Yes |
 | Logical decoding on physical read replicas | No | No | Yes |
 

@@ -1,12 +1,6 @@
 use sqlx::PgExecutor;
 
-/// Fully-qualified table names required by ETL.
-pub const ETL_TABLE_NAMES: [&str; 4] = [
-    "etl.replication_state",
-    "etl.destination_tables_metadata",
-    "etl.table_schemas",
-    "etl.table_columns",
-];
+use super::catalog::{ETL_CORE_STATE_TABLES, EtlTable};
 
 /// Returns true if all required ETL tables exist in the source database.
 ///
@@ -20,7 +14,8 @@ where
     E: PgExecutor<'c>,
 {
     // Perform a single query checking all required relations via unnest
-    let table_names: Vec<String> = ETL_TABLE_NAMES.iter().map(ToString::to_string).collect();
+    let table_names: Vec<String> =
+        ETL_CORE_STATE_TABLES.iter().map(EtlTable::qualified_name).collect();
     let present: bool = sqlx::query_scalar(
         r#"
         select coalesce(bool_and(to_regclass(t) is not null), false)

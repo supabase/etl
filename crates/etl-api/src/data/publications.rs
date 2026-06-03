@@ -44,8 +44,7 @@ pub async fn create_publication(
         }
     }
 
-    // Ensure partitioned tables publish via ancestor/root schema for logical
-    // replication
+    // Default API-created publications to logical partition root semantics.
     query.push_str(" with (publish_via_partition_root = true)");
 
     sqlx::query(AssertSqlSafe(query)).execute(pool).await?;
