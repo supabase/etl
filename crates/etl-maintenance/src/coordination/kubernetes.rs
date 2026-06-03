@@ -218,6 +218,9 @@ fn active_run(resource: &DynamicObject) -> Option<ExternalMaintenanceRun> {
     Some(ExternalMaintenanceRun {
         run_id: active_run.get("runId")?.as_str()?.to_owned(),
         started_at: parse_rfc3339_value(active_run.get("startedAt")),
+        operations: active_run
+            .get("operations")
+            .map_or_else(|| operations_from_value(active_run), operations_from_value),
     })
 }
 
@@ -228,13 +231,7 @@ fn operation_request(resource: &DynamicObject) -> Option<ExternalMaintenanceOper
     }
 
     Some(ExternalMaintenanceOperationRequest {
-        operations: ExternalMaintenanceOperations {
-            inline_flush: bool_value(requests, "inlineFlush", false),
-            merge_adjacent_files: bool_value(requests, "mergeAdjacentFiles", false),
-            rewrite_data_files: bool_value(requests, "rewriteDataFiles", false),
-            expire_snapshots: bool_value(requests, "expireSnapshots", false),
-            cleanup_old_files: bool_value(requests, "cleanupOldFiles", false),
-        },
+        operations: operations_from_value(requests),
         inline_flush_min_inlined_bytes: requests
             .get("inlineFlushMinInlinedBytes")
             .and_then(Value::as_u64),
@@ -243,6 +240,16 @@ fn operation_request(resource: &DynamicObject) -> Option<ExternalMaintenanceOper
             .and_then(Value::as_i64),
         requested_at: parse_rfc3339_value(requests.get("requestedAt"))?,
     })
+}
+
+fn operations_from_value(value: &Value) -> ExternalMaintenanceOperations {
+    ExternalMaintenanceOperations {
+        inline_flush: bool_value(value, "inlineFlush", false),
+        merge_adjacent_files: bool_value(value, "mergeAdjacentFiles", false),
+        rewrite_data_files: bool_value(value, "rewriteDataFiles", false),
+        expire_snapshots: bool_value(value, "expireSnapshots", false),
+        cleanup_old_files: bool_value(value, "cleanupOldFiles", false),
+    }
 }
 
 fn replicator_status(resource: &DynamicObject) -> Option<ExternalMaintenanceReplicatorStatus> {
@@ -361,5 +368,34 @@ mod tests {
         assert!(policy.inline_flush_enabled);
         assert!(policy.rewrite_data_files_enabled);
         assert!(policy.expire_snapshots_enabled);
+    }
+
+    #[test]
+    fn active_run_reads_nested_operations() {
+        let resource: DynamicObject = serde_json::from_value(json!({
+            "apiVersion": "etl.supabase.com/v1alpha1",
+            "kind": "DuckLakeMaintenance",
+            "metadata": {
+                "name": "pipeline-maintenance"
+            },
+            "status": {
+                "activeRun": {
+                    "runId": "run-1",
+                    "startedAt": "2026-05-12T12:00:00Z",
+                    "operations": {
+                        "inlineFlush": true,
+                        "expireSnapshots": true
+                    }
+                }
+            }
+        }))
+        .unwrap();
+
+        let run = active_run(&resource).expect("expected active run");
+
+        assert_eq!(run.run_id, "run-1");
+        assert!(run.operations.inline_flush);
+        assert!(run.operations.expire_snapshots);
+        assert!(!run.operations.rewrite_data_files);
     }
 }
