@@ -513,7 +513,7 @@ impl PgReplicationClient {
 
     /// Retrieves the OIDs of all tables included in a publication.
     ///
-    /// This follows [`pg_publication_tables`], which applies PostgreSQL's
+    /// This follows `pg_publication_tables`, which applies PostgreSQL's
     /// logical replication identity rules for partitioned tables. With
     /// `publish_via_partition_root=true`, PostgreSQL returns the topmost
     /// published ancestor used for relation messages. With
