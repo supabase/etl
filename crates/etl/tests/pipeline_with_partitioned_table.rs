@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use etl::{
     state::TableStateType,
     test_utils::{
@@ -9,14 +11,14 @@ use etl::{
         test_destination_wrapper::TestDestinationWrapper,
         test_schema::create_partitioned_table,
     },
-    types::{EventType, PipelineId},
+    types::{EventType, PipelineId, TableId, TableRow},
 };
 use etl_postgres::{below_version, types::TableName, version::POSTGRES_15};
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
 use tokio_postgres::types::Type;
 
-use crate::support::partition::create_nested_partition_hierarchy;
+use crate::support::partition::{create_nested_partition_hierarchy, partition_table_name};
 
 fn quoted_qualified_table_name(schema: &str, table: &str) -> String {
     TableName::new(schema.to_owned(), table.to_owned()).as_quoted_identifier()
@@ -27,6 +29,16 @@ enum PublishedPartitionTarget {
     Top,
     Middle,
     Leaf,
+}
+
+fn assert_table_row_counts(
+    table_rows: &HashMap<TableId, Vec<TableRow>>,
+    expected_counts: &[(TableId, usize)],
+) {
+    assert_eq!(table_rows.len(), expected_counts.len());
+    for (table_id, expected_count) in expected_counts {
+        assert_eq!(table_rows.get(table_id).map_or(0, Vec::len), *expected_count);
+    }
 }
 
 async fn assert_nested_partition_pipeline_case(
@@ -54,9 +66,7 @@ async fn assert_nested_partition_pipeline_case(
     let publication_table_name = match published_partition_target {
         PublishedPartitionTarget::Top => hierarchy.root_table_name.clone(),
         PublishedPartitionTarget::Middle => hierarchy.p_2026_table_name.clone(),
-        PublishedPartitionTarget::Leaf => {
-            crate::support::partition::partition_table_name(&hierarchy.p_2026_table_name, "01")
-        }
+        PublishedPartitionTarget::Leaf => partition_table_name(&hierarchy.p_2026_table_name, "01"),
     };
     let publication_name = format!("pub_{test_name}");
     database
@@ -104,6 +114,7 @@ async fn assert_nested_partition_pipeline_case(
     );
 
     pipeline.start().await.unwrap();
+
     for notify in &ready_notifies {
         notify.notified().await;
     }
@@ -115,10 +126,7 @@ async fn assert_nested_partition_pipeline_case(
     }
 
     let table_rows = destination.get_table_rows().await;
-    assert_eq!(table_rows.len(), expected_copy_counts.len());
-    for (table_id, expected_count) in &expected_copy_counts {
-        assert_eq!(table_rows.get(table_id).map_or(0, Vec::len), *expected_count);
-    }
+    assert_table_row_counts(&table_rows, &expected_copy_counts);
 
     let inserts_notify = destination
         .wait_for_events_count(vec![(EventType::Insert, expected_cdc_total as u64)])
@@ -152,6 +160,10 @@ async fn assert_nested_partition_pipeline_case(
         let inserts = grouped.get(&(EventType::Insert, table_id)).cloned().unwrap_or_default();
         assert_eq!(inserts.len(), expected_count);
     }
+
+    // We check the table rows again just to validate that no new ones were added.
+    let table_rows = destination.get_table_rows().await;
+    assert_table_row_counts(&table_rows, &expected_copy_counts);
 }
 
 /// Tests that initial COPY replicates all rows from a partitioned table.
