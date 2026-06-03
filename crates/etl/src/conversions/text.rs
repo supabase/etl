@@ -1,6 +1,6 @@
 use core::str;
 
-use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime};
+use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use etl_postgres::types::{
     DATE_FORMAT, TIME_FORMAT, TIMESTAMP_FORMAT, TIMESTAMPTZ_FORMAT_HH_MM, TIMESTAMPTZ_FORMAT_HHMM,
     is_array_type,
@@ -12,8 +12,87 @@ use crate::{
     bail,
     conversions::{bool::parse_bool, hex},
     error::{ErrorKind, EtlResult},
+    etl_error,
     types::{ArrayCell, Cell},
 };
+
+/// Parses a PostgreSQL `timestamptz` text value into microseconds since epoch.
+pub(crate) fn parse_postgres_timestamptz_micros(value: &str) -> EtlResult<i64> {
+    if let Some(micros) = parse_utc_postgres_timestamptz_micros(value) {
+        return Ok(micros);
+    }
+
+    let value = match DateTime::<FixedOffset>::parse_from_str(value, TIMESTAMPTZ_FORMAT_HHMM) {
+        Ok(value) => value,
+        Err(_) => DateTime::<FixedOffset>::parse_from_str(value, TIMESTAMPTZ_FORMAT_HH_MM)?,
+    };
+
+    Ok(value.timestamp_micros())
+}
+
+fn parse_utc_postgres_timestamptz_micros(value: &str) -> Option<i64> {
+    let value = value.strip_suffix("+00:00").or_else(|| value.strip_suffix("+00"))?;
+    parse_postgres_timestamp_body_micros(value)
+}
+
+fn parse_postgres_timestamp_body_micros(value: &str) -> Option<i64> {
+    let bytes = value.as_bytes();
+    if bytes.len() < 19
+        || bytes.get(4) != Some(&b'-')
+        || bytes.get(7) != Some(&b'-')
+        || bytes.get(10) != Some(&b' ')
+        || bytes.get(13) != Some(&b':')
+        || bytes.get(16) != Some(&b':')
+    {
+        return None;
+    }
+
+    let year = parse_ascii_digits(bytes, 0, 4)? as i32;
+    let month = parse_ascii_digits(bytes, 5, 7)?;
+    let day = parse_ascii_digits(bytes, 8, 10)?;
+    let hour = parse_ascii_digits(bytes, 11, 13)?;
+    let minute = parse_ascii_digits(bytes, 14, 16)?;
+    let second = parse_ascii_digits(bytes, 17, 19)?;
+    let micros = match bytes.get(19) {
+        None => 0,
+        Some(b'.') => parse_fraction_micros(bytes, 20)?,
+        Some(_) => return None,
+    };
+
+    let date = NaiveDate::from_ymd_opt(year, month, day)?;
+    let timestamp = date.and_hms_micro_opt(hour, minute, second, micros)?;
+    Some(timestamp.and_utc().timestamp_micros())
+}
+
+fn parse_ascii_digits(bytes: &[u8], start: usize, end: usize) -> Option<u32> {
+    bytes.get(start..end)?.iter().try_fold(0_u32, |value, byte| {
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+
+        Some(value * 10 + u32::from(*byte - b'0'))
+    })
+}
+
+fn parse_fraction_micros(bytes: &[u8], start: usize) -> Option<u32> {
+    let fraction = bytes.get(start..)?;
+    if fraction.is_empty() || fraction.len() > 6 {
+        return None;
+    }
+
+    let mut micros = parse_ascii_digits(bytes, start, bytes.len())?;
+    for _ in fraction.len()..6 {
+        micros *= 10;
+    }
+
+    Some(micros)
+}
+
+fn datetime_utc_from_micros(micros: i64) -> EtlResult<DateTime<Utc>> {
+    DateTime::<Utc>::from_timestamp_micros(micros).ok_or_else(|| {
+        etl_error!(ErrorKind::ConversionError, "Timestamp value is out of microsecond range")
+    })
+}
 
 /// Converts a Postgres text-format string to a typed [`Cell`] value.
 ///
@@ -106,38 +185,14 @@ pub(crate) fn parse_cell_from_postgres_text(typ: &Type, str: &str) -> EtlResult<
             ArrayCell::Timestamp,
         ),
         Type::TIMESTAMPTZ => {
-            // PostgreSQL can render UTC offsets either as `+00` or `+00:00`,
-            // so we accept both text formats here.
-            let val = match DateTime::<FixedOffset>::parse_from_str(str, TIMESTAMPTZ_FORMAT_HHMM) {
-                Ok(val) => val,
-                Err(_) => DateTime::<FixedOffset>::parse_from_str(str, TIMESTAMPTZ_FORMAT_HH_MM)?,
-            };
-            Ok(Cell::TimestampTz(val.into()))
+            let val = parse_postgres_timestamptz_micros(str)?;
+            Ok(Cell::TimestampTzMicros(val))
         }
-        Type::TIMESTAMPTZ_ARRAY => {
-            match parse_cell_from_postgres_text_array(
-                str,
-                |str| {
-                    Ok(Some(
-                        DateTime::<FixedOffset>::parse_from_str(str, TIMESTAMPTZ_FORMAT_HHMM)?
-                            .into(),
-                    ))
-                },
-                ArrayCell::TimestampTz,
-            ) {
-                Ok(val) => Ok(val),
-                Err(_) => parse_cell_from_postgres_text_array(
-                    str,
-                    |str| {
-                        Ok(Some(
-                            DateTime::<FixedOffset>::parse_from_str(str, TIMESTAMPTZ_FORMAT_HH_MM)?
-                                .into(),
-                        ))
-                    },
-                    ArrayCell::TimestampTz,
-                ),
-            }
-        }
+        Type::TIMESTAMPTZ_ARRAY => parse_cell_from_postgres_text_array(
+            str,
+            |str| Ok(Some(datetime_utc_from_micros(parse_postgres_timestamptz_micros(str)?)?)),
+            ArrayCell::TimestampTz,
+        ),
         Type::UUID => {
             let val = Uuid::parse_str(str)?;
             Ok(Cell::Uuid(val))
@@ -579,16 +634,47 @@ mod tests {
         let cell =
             parse_cell_from_postgres_text(&Type::TIMESTAMPTZ, "2023-12-25 14:30:45.123+00:00")
                 .unwrap();
-        if let Cell::TimestampTz(ts) = cell {
+        if let Cell::TimestampTzMicros(micros) = cell {
+            let ts = datetime_utc_from_micros(micros).unwrap();
             assert_eq!(ts.year(), 2023);
+            assert_eq!(ts.timestamp_subsec_micros(), 123000);
         } else {
-            panic!("Expected TimeStampTz cell");
+            panic!("Expected TimeStampTzMicros cell");
         }
 
         // Test fallback format
         let cell = parse_cell_from_postgres_text(&Type::TIMESTAMPTZ, "2023-12-25 14:30:45.123+00")
             .unwrap();
-        assert!(matches!(cell, Cell::TimestampTz(_)));
+        assert!(matches!(cell, Cell::TimestampTzMicros(_)));
+    }
+
+    #[test]
+    fn parse_postgres_timestamptz_micros_accepts_utc_offset_forms() {
+        let expected = DateTime::<FixedOffset>::parse_from_str(
+            "2023-12-25 14:30:45.123456+00:00",
+            TIMESTAMPTZ_FORMAT_HH_MM,
+        )
+        .unwrap()
+        .timestamp_micros();
+
+        assert_eq!(
+            parse_postgres_timestamptz_micros("2023-12-25 14:30:45.123456+00").unwrap(),
+            expected
+        );
+        assert_eq!(
+            parse_postgres_timestamptz_micros("2023-12-25 14:30:45.123456+00:00").unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn parse_postgres_timestamptz_micros_falls_back_for_non_utc_offsets() {
+        let value = "2023-12-25 14:30:45.123456+02:30";
+        let expected = DateTime::<FixedOffset>::parse_from_str(value, TIMESTAMPTZ_FORMAT_HH_MM)
+            .unwrap()
+            .timestamp_micros();
+
+        assert_eq!(parse_postgres_timestamptz_micros(value).unwrap(), expected);
     }
 
     #[test]

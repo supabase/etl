@@ -1,9 +1,11 @@
 use std::future::Future;
 
 use crate::{
-    destination::async_result::{DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult},
+    destination::async_result::{
+        DropTableForCopyResult, WriteSnapshotBatchResult, WriteStreamBatchesResult,
+    },
     error::EtlResult,
-    types::{Event, ReplicatedTableSchema, TableRow},
+    types::{ReplicatedTableSchema, StreamBatch, TableArrowBatch},
 };
 
 /// Trait for systems that can receive replicated data from ETL pipelines.
@@ -46,36 +48,37 @@ pub trait Destination {
         async { Ok(()) }
     }
 
-    /// Drops destination objects before restarting a table copy.
+    /// Drops destination state for a table before running a fresh copy.
     ///
-    /// This operation is called when table synchronization intentionally
-    /// restarts from scratch. Implementations should remove the destination
-    /// object and any destination-private replay markers for the table so the
-    /// next copy can recreate it from the fresh source schema.
+    /// This operation is called during initial table synchronization when a
+    /// table is being copied from scratch after a previous copy or ready table
+    /// existed. Dropping, rather than truncating, lets destinations reset any
+    /// destination-private state tied to the table object, such as views,
+    /// versioned tables, ingestion offsets, or streaming channels.
     ///
-    /// The supplied schema describes the previously known destination table and
-    /// exists only so the destination can locate what should be removed. ETL
-    /// clears its own destination metadata and stored schemas only after this
-    /// result completes successfully.
+    /// Implementations complete `async_result` when cleanup is actually
+    /// done. ETL still waits for that result immediately before continuing.
+    /// The asynchronous result exists mainly to keep the destination
+    /// interface uniform across methods, not to let ETL overlap more work
+    /// with copy cleanup.
     fn drop_table_for_copy(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
         async_result: DropTableForCopyResult<()>,
     ) -> impl Future<Output = EtlResult<()>> + Send;
 
-    /// Writes a batch of table rows to the destination.
+    /// Writes a snapshot batch to the destination.
     ///
     /// This method is used during initial table synchronization to bulk load
-    /// existing data. Rows are provided as [`TableRow`] instances with
-    /// typed cell values. ETL may call this method multiple times with
+    /// existing data. ETL may call this method multiple times with
     /// different batches, including in parallel with other destination
     /// work.
     ///
     /// This method is called even if the source table has no data, so the
     /// destination can prepare its initial state before streaming begins.
-    /// ETL does not impose a meaningful ordering requirement on these row
-    /// batches; it just provides the data that should be written for the
-    /// initial snapshot.
+    /// ETL does not impose a meaningful ordering requirement on these Arrow
+    /// batches; it just provides the data that should be written for
+    /// the initial snapshot.
     ///
     /// Implementations report asynchronous completion through `async_result`.
     /// The method return value is reserved for immediate dispatch/setup
@@ -91,26 +94,18 @@ pub trait Destination {
     ///
     /// This immediate waiting is intentional: it preserves backpressure and
     /// avoids accumulating too many in-flight row batches in memory.
-    fn write_table_rows(
+    fn write_snapshot_batch(
         &self,
-        replicated_table_schema: &ReplicatedTableSchema,
-        table_rows: Vec<TableRow>,
-        async_result: WriteTableRowsResult<()>,
+        batch: TableArrowBatch,
+        async_result: WriteSnapshotBatchResult<()>,
     ) -> impl Future<Output = EtlResult<()>> + Send;
 
-    /// Writes streaming replication events to the destination.
+    /// Writes normalized streaming batches to the destination.
     ///
     /// This method handles real-time changes from the Postgres replication
-    /// stream. Events include inserts, updates, deletes, and transaction
-    /// boundaries. ETL may call this method multiple times with different
-    /// streaming batches.
-    ///
-    /// Streaming batches are built from size and time limits, not schema
-    /// change boundaries. A single call may contain zero, one, or many
-    /// [`Event::Relation`] events, including multiple schema changes for the
-    /// same table. Implementations that apply destination DDL should process
-    /// events in order and update their active table schema each time a
-    /// relation event appears.
+    /// stream after ETL has normalized them into per-table Arrow batches
+    /// and truncate control items. ETL may call this method multiple times
+    /// with different streaming batches.
     ///
     /// The main ordering guarantee is per table: ETL preserves the required
     /// order for streaming operations on the same table.
@@ -132,21 +127,16 @@ pub trait Destination {
     /// the apply loop has already gone away, sending the result will fail
     /// and may be treated as an implicit cancellation.
     ///
-    /// During the initial copy stage, transaction boundaries are not a stable
+    /// During the initial copy phase, transaction boundaries are not a stable
     /// global invariant across all tables. A source transaction may be
     /// split across multiple streaming deliveries as some tables are
     /// already ready for streaming and others are still being copied. In
-    /// practice, destinations should rely on per-table event ordering and
-    /// not assume that `begin`/`commit` boundaries always describe a
-    /// complete all-tables transaction until initial copy has fully
-    /// finished.
-    ///
-    /// Each data-bearing [`Event`] also carries its own
-    /// [`ReplicatedTableSchema`], so destinations can react to the correct
-    /// schema version for that specific change.
-    fn write_events(
+    /// practice, destinations should rely on per-table batch ordering
+    /// rather than assume complete all-tables transaction boundaries until
+    /// initial copy has fully finished.
+    fn write_stream_batches(
         &self,
-        events: Vec<Event>,
-        async_result: WriteEventsResult<()>,
+        batches: Vec<StreamBatch>,
+        async_result: WriteStreamBatchesResult<()>,
     ) -> impl Future<Output = EtlResult<()>> + Send;
 }

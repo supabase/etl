@@ -12,16 +12,19 @@ use etl::{
     concurrency::TaskSet,
     destination::{
         Destination,
-        async_result::{DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult},
+        async_result::{
+            DropTableForCopyResult, WriteSnapshotBatchResult, WriteStreamBatchesResult,
+        },
     },
     error::{ErrorKind, EtlResult},
-    etl_error,
+    etl_error, record_batch_to_table_rows_with_schema,
     state::destination_table_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus},
     store::DestinationStore,
     types::{
-        ColumnSchema, Event, EventSequenceKey, OldTableRow, PartialTableRow, ReplicatedTableSchema,
-        ReplicationMask, SchemaDiff, SnapshotId, TableId, TableName, TableRow, TableSchema,
-        UpdatedTableRow,
+        ChangeArrowBatch, ChangeKind, ColumnSchema, DeleteEvent, Event, EventSequenceKey,
+        InsertEvent, OldTableRow, PartialTableRow, ReplicatedTableSchema, ReplicationMask,
+        RowImage, SchemaDiff, SnapshotId, StreamBatch, TableArrowBatch, TableChangeSet, TableId,
+        TableName, TableRow, TableSchema, TruncateEvent, UpdateEvent, UpdatedTableRow,
     },
 };
 use metrics::gauge;
@@ -289,29 +292,33 @@ where
         Ok(())
     }
 
-    async fn write_table_rows(
+    async fn write_snapshot_batch(
         &self,
-        replicated_table_schema: &ReplicatedTableSchema,
-        table_rows: Vec<TableRow>,
-        async_result: WriteTableRowsResult<()>,
+        batch: TableArrowBatch,
+        async_result: WriteSnapshotBatchResult<()>,
     ) -> EtlResult<()> {
-        let result = self.write_table_rows(replicated_table_schema, table_rows).await;
+        let replicated_table_schema = batch.replicated_table_schema;
+        let result = match record_batch_to_table_rows_with_schema(&batch.batch, &batch.table_schema)
+        {
+            Ok(table_rows) => self.write_table_rows(&replicated_table_schema, table_rows).await,
+            Err(error) => Err(error),
+        };
         async_result.send(result);
 
         Ok(())
     }
 
-    async fn write_events(
+    async fn write_stream_batches(
         &self,
-        events: Vec<Event>,
-        async_result: WriteEventsResult<()>,
+        batches: Vec<StreamBatch>,
+        async_result: WriteStreamBatchesResult<()>,
     ) -> EtlResult<()> {
         self.tasks.try_reap().await?;
 
         let destination = self.clone();
         self.tasks
             .spawn(async move {
-                let result = destination.write_events(events).await;
+                let result = destination.write_stream_batches_inner(batches).await;
                 async_result.send(result);
             })
             .await;
@@ -718,6 +725,21 @@ impl<S> DuckLakeDestination<S>
 where
     S: DestinationStore,
 {
+    /// Builds an update row image from an Arrow group.
+    fn updated_table_row_from_arrow_group(
+        group: &ChangeArrowBatch,
+        row: TableRow,
+    ) -> UpdatedTableRow {
+        match group.partial_update_missing_column_indexes.as_ref() {
+            Some(missing_column_indexes) => UpdatedTableRow::Partial(PartialTableRow::new(
+                group.rows.replicated_table_schema.column_schemas().len(),
+                row,
+                missing_column_indexes.to_vec(),
+            )),
+            None => UpdatedTableRow::Full(row),
+        }
+    }
+
     /// Builds a key-only row from a partial update row when PostgreSQL omits
     /// the old key image because the replica identity did not change.
     fn key_row_from_updated_partial_row(
@@ -847,6 +869,239 @@ where
         wait_if_streaming_write_paused_for_tests().await;
 
         self.write_events_inner(events).await
+    }
+
+    /// Writes normalized Arrow CDC batches through the existing row-event path.
+    async fn write_stream_batches_inner(&self, batches: Vec<StreamBatch>) -> EtlResult<()> {
+        let events = self.stream_batches_to_events(batches).await?;
+        self.write_events(events).await
+    }
+
+    /// Converts destination-facing Arrow CDC batches back to DuckLake row
+    /// events.
+    async fn stream_batches_to_events(&self, batches: Vec<StreamBatch>) -> EtlResult<Vec<Event>> {
+        let mut events = Vec::with_capacity(batches.len());
+
+        for batch in batches {
+            match batch {
+                StreamBatch::Changes(change_set) => {
+                    self.append_change_set_events(change_set, &mut events)?;
+                }
+                StreamBatch::Truncate(truncate) => {
+                    let mut truncated_tables = Vec::with_capacity(truncate.rel_ids.len());
+                    for table_id in truncate.rel_ids {
+                        truncated_tables
+                            .push(self.replicated_table_schema_for_stream_table(table_id).await?);
+                    }
+
+                    events.push(Event::Truncate(TruncateEvent {
+                        start_lsn: truncate.commit_lsn,
+                        commit_lsn: truncate.commit_lsn,
+                        tx_ordinal: truncate.tx_ordinal,
+                        options: truncate.options,
+                        truncated_tables,
+                    }));
+                }
+            }
+        }
+
+        Ok(events)
+    }
+
+    /// Appends row events for one table-local Arrow change set.
+    fn append_change_set_events(
+        &self,
+        change_set: TableChangeSet,
+        events: &mut Vec<Event>,
+    ) -> EtlResult<()> {
+        let mut groups = change_set.groups.into_iter().peekable();
+        while let Some(group) = groups.next() {
+            let replicated_table_schema = group.rows.replicated_table_schema.clone();
+            let rows = record_batch_to_table_rows_with_schema(
+                &group.rows.batch,
+                &group.rows.table_schema,
+            )?;
+            if rows.len() != group.commit_lsns.values().len()
+                || rows.len() != group.tx_ordinals.values().len()
+            {
+                return Err(etl_error!(
+                    ErrorKind::ConversionError,
+                    "Arrow change batch metadata length mismatch",
+                    format!(
+                        "Table {} has {} row values, {} commit LSNs, and {} transaction ordinals",
+                        change_set.table_id,
+                        rows.len(),
+                        group.commit_lsns.values().len(),
+                        group.tx_ordinals.values().len()
+                    )
+                ));
+            }
+
+            match (group.change, group.row_image) {
+                (ChangeKind::Insert, RowImage::New) => {
+                    for (row_idx, table_row) in rows.into_iter().enumerate() {
+                        let commit_lsn = group.commit_lsns.value(row_idx).into();
+                        let tx_ordinal = group.tx_ordinals.value(row_idx);
+                        events.push(Event::Insert(InsertEvent {
+                            start_lsn: commit_lsn,
+                            commit_lsn,
+                            tx_ordinal,
+                            replicated_table_schema: replicated_table_schema.clone(),
+                            table_row,
+                        }));
+                    }
+                }
+                (ChangeKind::Update, RowImage::Old { key_only }) => {
+                    if groups.peek().is_some_and(|next_group| {
+                        next_group.change == ChangeKind::Update
+                            && next_group.row_image == RowImage::New
+                    }) {
+                        let new_group = groups.next().expect("peeked update new group exists");
+                        let new_rows = record_batch_to_table_rows_with_schema(
+                            &new_group.rows.batch,
+                            &new_group.rows.table_schema,
+                        )?;
+                        if rows.len() != new_rows.len()
+                            || rows.len() != new_group.commit_lsns.values().len()
+                            || rows.len() != new_group.tx_ordinals.values().len()
+                        {
+                            return Err(etl_error!(
+                                ErrorKind::ConversionError,
+                                "Arrow update row image length mismatch",
+                                format!(
+                                    "Table {} has {} old rows, {} new rows, {} new commit LSNs, \
+                                     and {} new transaction ordinals",
+                                    change_set.table_id,
+                                    rows.len(),
+                                    new_rows.len(),
+                                    new_group.commit_lsns.values().len(),
+                                    new_group.tx_ordinals.values().len()
+                                )
+                            ));
+                        }
+
+                        let replicated_table_schema =
+                            new_group.rows.replicated_table_schema.clone();
+                        for (row_idx, (old_row, new_row)) in
+                            rows.into_iter().zip(new_rows).enumerate()
+                        {
+                            let commit_lsn = group.commit_lsns.value(row_idx).into();
+                            let tx_ordinal = group.tx_ordinals.value(row_idx);
+                            let old_table_row = if key_only {
+                                OldTableRow::Key(old_row)
+                            } else {
+                                OldTableRow::Full(old_row)
+                            };
+                            events.push(Event::Update(UpdateEvent {
+                                start_lsn: commit_lsn,
+                                commit_lsn,
+                                tx_ordinal,
+                                replicated_table_schema: replicated_table_schema.clone(),
+                                updated_table_row: Self::updated_table_row_from_arrow_group(
+                                    &new_group, new_row,
+                                ),
+                                old_table_row: Some(old_table_row),
+                            }));
+                        }
+                    } else {
+                        for (row_idx, table_row) in rows.into_iter().enumerate() {
+                            let commit_lsn = group.commit_lsns.value(row_idx).into();
+                            let tx_ordinal = group.tx_ordinals.value(row_idx);
+                            let old_table_row = if key_only {
+                                OldTableRow::Key(table_row)
+                            } else {
+                                OldTableRow::Full(table_row)
+                            };
+                            events.push(Event::Delete(DeleteEvent {
+                                start_lsn: commit_lsn,
+                                commit_lsn,
+                                tx_ordinal,
+                                replicated_table_schema: replicated_table_schema.clone(),
+                                old_table_row: Some(old_table_row),
+                            }));
+                        }
+                    }
+                }
+                (ChangeKind::Update, RowImage::New) => {
+                    for (row_idx, table_row) in rows.into_iter().enumerate() {
+                        let commit_lsn = group.commit_lsns.value(row_idx).into();
+                        let tx_ordinal = group.tx_ordinals.value(row_idx);
+                        events.push(Event::Update(UpdateEvent {
+                            start_lsn: commit_lsn,
+                            commit_lsn,
+                            tx_ordinal,
+                            replicated_table_schema: replicated_table_schema.clone(),
+                            updated_table_row: Self::updated_table_row_from_arrow_group(
+                                &group, table_row,
+                            ),
+                            old_table_row: None,
+                        }));
+                    }
+                }
+                (ChangeKind::Delete, RowImage::Old { key_only }) => {
+                    for (row_idx, table_row) in rows.into_iter().enumerate() {
+                        let commit_lsn = group.commit_lsns.value(row_idx).into();
+                        let tx_ordinal = group.tx_ordinals.value(row_idx);
+                        let old_table_row = if key_only {
+                            OldTableRow::Key(table_row)
+                        } else {
+                            OldTableRow::Full(table_row)
+                        };
+                        events.push(Event::Delete(DeleteEvent {
+                            start_lsn: commit_lsn,
+                            commit_lsn,
+                            tx_ordinal,
+                            replicated_table_schema: replicated_table_schema.clone(),
+                            old_table_row: Some(old_table_row),
+                        }));
+                    }
+                }
+                (ChangeKind::Delete, RowImage::New)
+                | (ChangeKind::Insert, RowImage::Old { .. }) => {
+                    warn!(
+                        table_id = change_set.table_id.0,
+                        "skipping unsupported ducklake change batch row image"
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Returns the replicated schema currently recorded for streaming writes.
+    async fn replicated_table_schema_for_stream_table(
+        &self,
+        table_id: TableId,
+    ) -> EtlResult<ReplicatedTableSchema> {
+        let metadata =
+            self.store.get_destination_table_metadata(table_id).await?.ok_or_else(|| {
+                etl_error!(
+                    ErrorKind::CorruptedTableSchema,
+                    "Missing destination table metadata",
+                    format!(
+                        "No destination table metadata found for table {} when processing Arrow \
+                         stream batches",
+                        table_id
+                    )
+                )
+            })?;
+        let table_schema =
+            self.store.get_table_schema(&table_id, metadata.snapshot_id).await?.ok_or_else(
+                || {
+                    etl_error!(
+                        ErrorKind::MissingTableSchema,
+                        "Table not found in the schema store",
+                        format!(
+                            "The table schema for table {table_id} at snapshot {} was not found \
+                             in the schema store",
+                            metadata.snapshot_id
+                        )
+                    )
+                },
+            )?;
+
+        Ok(ReplicatedTableSchema::from_mask(table_schema, metadata.replication_mask))
     }
 
     /// Creates a new DuckLake destination.

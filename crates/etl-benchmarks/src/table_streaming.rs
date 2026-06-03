@@ -5,20 +5,25 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use etl::{pipeline::Pipeline, state::TableStateType, test_utils::notifying_store::NotifyingStore};
 use etl_config::shared::TableSyncCopyConfig;
 use etl_postgres::types::TableId;
 use serde::Serialize;
+use sqlx::AssertSqlSafe;
 use tokio::task::JoinSet;
 use tracing::info;
 
 use crate::common::{
     BenchDestination, DestinationArgs, DestinationStatsSnapshot, DestinationType, LogTarget,
     PgConnectionArgs, PipelineTuningArgs, bytes_to_mib, cleanup_replication_slots, duration_millis,
-    format_decimal, format_duration_ms, format_integer, mib_per_second, per_second,
+    format_decimal, format_duration_ms, format_integer, mib_per_second, per_second, pg_pool,
     pipeline_config, run_etl_migrations, write_report,
 };
+
+const DEFAULT_SYNTHETIC_TABLE: &str = "etl_benchmark_synthetic";
+const DEFAULT_SYNTHETIC_EVENTS: u64 = 100_000;
+const DEFAULT_SYNTHETIC_BATCH_ROWS: u64 = 1_000;
 
 /// Command-line arguments for the table-streaming benchmark.
 #[derive(Parser, Debug)]
@@ -35,6 +40,12 @@ pub struct Args {
 enum Commands {
     /// Run the table-streaming benchmark.
     Run(RunArgs),
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug)]
+enum StreamingWorkload {
+    Tpcc,
+    Synthetic,
 }
 
 /// Table-streaming benchmark options.
@@ -58,6 +69,9 @@ pub struct RunArgs {
     /// Source table IDs to stream.
     #[arg(long, value_delimiter = ',')]
     table_ids: Vec<u32>,
+    /// Source workload used to generate CDC events.
+    #[arg(long, value_enum, default_value = "tpcc")]
+    workload: StreamingWorkload,
     /// Run the TPC-C workload for this many seconds.
     #[arg(long)]
     duration_seconds: Option<u64>,
@@ -67,6 +81,15 @@ pub struct RunArgs {
     /// TPC-C workload thread concurrency.
     #[arg(long, default_value_t = 1)]
     tpcc_threads: u16,
+    /// Synthetic table to update when --workload synthetic is selected.
+    #[arg(long, default_value = DEFAULT_SYNTHETIC_TABLE)]
+    synthetic_table: String,
+    /// Number of synthetic CDC row updates to generate.
+    #[arg(long, default_value_t = DEFAULT_SYNTHETIC_EVENTS)]
+    synthetic_events: u64,
+    /// Rows updated per synthetic producer statement.
+    #[arg(long, default_value_t = DEFAULT_SYNTHETIC_BATCH_ROWS)]
+    synthetic_batch_rows: u64,
     /// Time with no new CDC events before the TPC-C stream is considered
     /// drained.
     #[arg(long, default_value_t = 2_000)]
@@ -90,6 +113,9 @@ struct TableStreamingReport {
     table_ids: Vec<u32>,
     table_count: usize,
     duration_seconds: u64,
+    synthetic_table: Option<String>,
+    synthetic_events: Option<u64>,
+    synthetic_batch_rows: Option<u64>,
     produced_events: u64,
     produced_events_source: &'static str,
     throughput_events: u64,
@@ -168,11 +194,21 @@ async fn run(args: RunArgs) -> Result<()> {
     let ready_wait_ms = duration_millis(ready_started.elapsed());
 
     destination.reset_cdc_stats();
+    if let Some(target) = args.expected_cdc_events() {
+        destination.set_cdc_target(target);
+    }
 
     let end_to_end_started = Instant::now();
     let producer_started = Instant::now();
-    run_tpcc_workload(&args).await?;
+    let producer_reported_events = match args.workload {
+        StreamingWorkload::Tpcc => run_tpcc_workload(&args).await?,
+        StreamingWorkload::Synthetic => run_synthetic_workload(&args).await?,
+    };
     let producer_duration = producer_started.elapsed();
+
+    if args.expected_cdc_events().is_some() {
+        destination.wait_for_cdc_target().await;
+    }
 
     let drain_started = Instant::now();
     wait_for_cdc_quiescence(
@@ -193,24 +229,33 @@ async fn run(args: RunArgs) -> Result<()> {
 
     let destination_stats = destination.stats();
     if destination_stats.cdc_data_events == 0 {
-        bail!("TPC-C streaming workload completed without observed CDC row events");
+        bail!("streaming workload completed without observed CDC row events");
     }
 
-    let produced_events = destination_stats.cdc_data_events;
+    let produced_events = match args.workload {
+        StreamingWorkload::Tpcc => destination_stats.cdc_data_events,
+        StreamingWorkload::Synthetic => producer_reported_events,
+    };
     let throughput_events = produced_events;
-    let duration_seconds = args.duration_seconds.context("TPC-C duration was not configured")?;
+    let duration_seconds = args.duration_seconds.unwrap_or_default();
 
     let report = TableStreamingReport {
         benchmark: "table_streaming",
-        workload: "tpcc",
+        workload: args.workload.as_arg(),
         destination: args.destination.destination,
         pipeline_id: args.pipeline_id,
         publication_name: args.publication_name,
         table_count: table_ids.len(),
         table_ids,
         duration_seconds,
+        synthetic_table: matches!(args.workload, StreamingWorkload::Synthetic)
+            .then_some(args.synthetic_table),
+        synthetic_events: matches!(args.workload, StreamingWorkload::Synthetic)
+            .then_some(args.synthetic_events),
+        synthetic_batch_rows: matches!(args.workload, StreamingWorkload::Synthetic)
+            .then_some(args.synthetic_batch_rows),
         produced_events,
-        produced_events_source: "destination_observed",
+        produced_events_source: args.workload.produced_events_source(),
         throughput_events,
         observed_cdc_events: destination_stats.cdc_data_events,
         estimated_cdc_payload_bytes: destination_stats.cdc_data_event_bytes,
@@ -270,10 +315,14 @@ fn print_summary(report: &TableStreamingReport) {
     println!("  Destination   {}", destination_label(report.destination));
     println!("  Workload      {}", report.workload);
     println!("  Publication   {}", report.publication_name);
-    println!("  Source tables  {} TPC-C tables", format_integer(report.table_count as u128));
+    println!("  Source tables  {}", format_integer(report.table_count as u128));
     println!();
     println!("  CDC");
-    println!("    Produced       inferred from observed CDC");
+    println!(
+        "    Produced       {} events ({})",
+        format_integer(u128::from(report.produced_events)),
+        report.produced_events_source
+    );
     println!(
         "    Observed       {} events",
         format_integer(u128::from(report.observed_cdc_events))
@@ -346,8 +395,20 @@ fn validate_args(args: &RunArgs) -> Result<()> {
         bail!("--duration-seconds must be greater than 0");
     }
 
-    if args.duration_seconds.is_none() {
-        bail!("--duration-seconds is required");
+    if matches!(args.workload, StreamingWorkload::Tpcc) && args.duration_seconds.is_none() {
+        bail!("--duration-seconds is required for --workload tpcc");
+    }
+
+    if args.synthetic_table.trim().is_empty() {
+        bail!("--synthetic-table cannot be empty");
+    }
+
+    if args.synthetic_events == 0 {
+        bail!("--synthetic-events must be greater than 0");
+    }
+
+    if args.synthetic_batch_rows == 0 {
+        bail!("--synthetic-batch-rows must be greater than 0");
     }
 
     if args.table_ids.is_empty() {
@@ -355,6 +416,31 @@ fn validate_args(args: &RunArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+impl RunArgs {
+    fn expected_cdc_events(&self) -> Option<u64> {
+        match self.workload {
+            StreamingWorkload::Tpcc => None,
+            StreamingWorkload::Synthetic => Some(self.synthetic_events),
+        }
+    }
+}
+
+impl StreamingWorkload {
+    fn as_arg(self) -> &'static str {
+        match self {
+            Self::Tpcc => "tpcc",
+            Self::Synthetic => "synthetic",
+        }
+    }
+
+    fn produced_events_source(self) -> &'static str {
+        match self {
+            Self::Tpcc => "destination_observed",
+            Self::Synthetic => "producer_affected_rows",
+        }
+    }
 }
 
 struct TableReadyNotifications {
@@ -437,6 +523,84 @@ async fn run_tpcc_workload(args: &RunArgs) -> Result<u64> {
     }
 
     Ok(0)
+}
+
+async fn run_synthetic_workload(args: &RunArgs) -> Result<u64> {
+    let pool = pg_pool(&args.pg).await?;
+    let table = quote_table_name(&args.synthetic_table)?;
+    let row_count: i64 = sqlx::query_scalar(AssertSqlSafe(format!("select count(*) from {table}")))
+        .fetch_one(&pool)
+        .await
+        .context("failed to count synthetic benchmark rows")?;
+    if row_count <= 0 {
+        bail!("synthetic benchmark table has no rows");
+    }
+
+    let mut produced_events = 0;
+    let mut lower_bound = 0_i64;
+
+    while produced_events < args.synthetic_events {
+        let rows_until_wrap = u64::try_from(row_count - lower_bound)
+            .context("synthetic benchmark row offset became invalid")?;
+        let requested_rows = args
+            .synthetic_batch_rows
+            .min(args.synthetic_events - produced_events)
+            .min(rows_until_wrap);
+        let upper_bound = lower_bound
+            .checked_add(i64::try_from(requested_rows)?)
+            .context("synthetic benchmark update bound overflowed")?;
+        let revision = i64::try_from(produced_events.saturating_add(1))?;
+
+        let result = sqlx::query(AssertSqlSafe(format!(
+            "update {table}
+             set quantity = quantity + 1,
+                 active = not active,
+                 amount = ((amount + 0.01)::numeric(18,2)),
+                 created_at = created_at + interval '1 microsecond',
+                 payload = jsonb_build_object('id', id, 'bucket', id % 128, 'revision', \
+             $1::bigint),
+                 notes = repeat(md5((id + $1::bigint)::text), 2)
+             where id > $2 and id <= $3"
+        )))
+        .bind(revision)
+        .bind(lower_bound)
+        .bind(upper_bound)
+        .execute(&pool)
+        .await
+        .context("failed to run synthetic CDC update batch")?;
+
+        let affected_rows = result.rows_affected();
+        if affected_rows == 0 {
+            bail!("synthetic CDC update affected no rows");
+        }
+
+        produced_events = produced_events
+            .checked_add(affected_rows)
+            .context("synthetic CDC event count overflowed")?;
+        lower_bound = if upper_bound >= row_count { 0 } else { upper_bound };
+    }
+
+    pool.close().await;
+    Ok(produced_events)
+}
+
+fn quote_table_name(table_name: &str) -> Result<String> {
+    let parts = table_name.split('.').collect::<Vec<_>>();
+    match parts.as_slice() {
+        [table] => quote_identifier(table),
+        [schema, table] => {
+            Ok(format!("{}.{}", quote_identifier(schema)?, quote_identifier(table)?))
+        }
+        _ => bail!("table name must be either table or schema.table"),
+    }
+}
+
+fn quote_identifier(identifier: &str) -> Result<String> {
+    if identifier.is_empty() || identifier.contains('\0') {
+        bail!("identifier cannot be empty or contain NUL bytes");
+    }
+
+    Ok(format!("\"{}\"", identifier.replace('"', "\"\"")))
 }
 
 async fn wait_for_cdc_quiescence(

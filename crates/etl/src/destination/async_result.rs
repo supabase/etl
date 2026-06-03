@@ -7,64 +7,66 @@ use std::{
 
 use pin_project_lite::pin_project;
 use tokio::sync::oneshot;
+use tokio_postgres::types::PgLsn;
 use tracing::warn;
 
 use crate::{
     error::{ErrorKind, EtlResult},
     etl_error,
-    types::PgLsn,
 };
 
 /// Async completion handle used for
-/// [`crate::destination::Destination::write_table_rows`].
+/// [`crate::destination::Destination::write_snapshot_batch`].
 ///
 /// ETL waits for this result before requesting the next row batch for the same
 /// copy partition. The handle exists mostly to keep the destination API aligned
-/// with [`WriteEventsResult`], so destinations may still choose to structure
-/// their internal write paths in a similar way.
-pub type WriteTableRowsResult<T = ()> = AsyncResult<T>;
+/// with [`WriteStreamBatchesResult`], so destinations may still choose to
+/// structure their internal write paths in a similar way.
+pub type WriteSnapshotBatchResult<T = ()> = AsyncResult<T>;
 
 /// Async completion handle used for
 /// [`crate::destination::Destination::drop_table_for_copy`].
 ///
-/// ETL waits for this result immediately before clearing stored table-copy
-/// metadata and starting a fresh copy.
+/// ETL waits for this result immediately. It is primarily an API consistency
+/// hook rather than a mechanism for overlapping more ETL work with copy
+/// cleanup.
 pub type DropTableForCopyResult<T = ()> = AsyncResult<T>;
 
 /// Async completion handle used for
-/// [`crate::destination::Destination::write_events`].
+/// [`crate::destination::Destination::write_stream_batches`].
 ///
 /// This is the path where asynchronous completion changes ETL behavior the
 /// most: once dispatch succeeds, the apply loop may continue other work while
 /// the destination finishes the batch.
-pub type WriteEventsResult<T = ()> = AsyncResult<T>;
-/// Pending async completion used for `Destination::write_events`.
-pub(crate) type PendingWriteEventsResult<T = ()> =
+pub type WriteStreamBatchesResult<T = ()> = AsyncResult<T>;
+/// Pending async completion used for `Destination::write_stream_batches`.
+pub(crate) type PendingWriteStreamBatchesResult<T = ()> =
     PendingAsyncResult<T, ApplyLoopAsyncResultMetadata>;
-/// Completed async completion used for `Destination::write_events`.
-pub(crate) type CompletedWriteEventsResult<T = ()> =
+/// Completed async completion used for `Destination::write_stream_batches`.
+pub(crate) type CompletedWriteStreamBatchesResult<T = ()> =
     CompletedAsyncResult<T, ApplyLoopAsyncResultMetadata>;
+
+/// Compatibility alias for callers migrating from row-based copy batches.
+pub type WriteTableRowsResult<T = ()> = WriteSnapshotBatchResult<T>;
+/// Compatibility alias for callers migrating from raw event batches.
+pub type WriteEventsResult<T = ()> = WriteStreamBatchesResult<T>;
 
 /// Dispatch-time metrics carried through an asynchronous completion result.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct DispatchMetrics {
     /// Number of items in the dispatched batch.
-    pub items_count: usize,
+    pub(crate) items_count: usize,
     /// Instant at which the batch was handed off to the destination.
-    pub dispatched_at: Instant,
+    pub(crate) dispatched_at: Instant,
 }
 
 /// Metadata carried by apply-loop event write completions.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ApplyLoopAsyncResultMetadata {
     /// Commit end LSN associated with the dispatched batch, if any.
-    ///
-    /// After the destination acknowledges the batch, this becomes the durable
-    /// progress boundary that status updates report as both `flush_lsn` and
-    /// `apply_lsn`.
-    pub commit_end_lsn: Option<PgLsn>,
+    pub(crate) commit_end_lsn: Option<PgLsn>,
     /// Dispatch-time metrics for the batch.
-    pub metrics: DispatchMetrics,
+    pub(crate) metrics: DispatchMetrics,
 }
 
 /// Sender half of a typed asynchronous completion result.
@@ -133,11 +135,18 @@ impl<T, M> Future for PendingAsyncResult<T, M> {
         let this = self.project();
 
         match this.rx.poll(cx) {
-            Poll::Ready(Ok(result)) => {
-                Poll::Ready(CompletedAsyncResult { metadata: this.metadata.take(), result })
-            }
+            Poll::Ready(Ok(result)) => Poll::Ready(CompletedAsyncResult {
+                metadata: this
+                    .metadata
+                    .take()
+                    .expect("pending async result metadata must be present on completion"),
+                result,
+            }),
             Poll::Ready(Err(_)) => Poll::Ready(CompletedAsyncResult {
-                metadata: this.metadata.take(),
+                metadata: this
+                    .metadata
+                    .take()
+                    .expect("pending async result metadata must be present on completion"),
                 result: Err(etl_error!(
                     ErrorKind::DestinationError,
                     "Async result channel closed before sending"
@@ -151,7 +160,7 @@ impl<T, M> Future for PendingAsyncResult<T, M> {
 /// Completed typed asynchronous result.
 #[derive(Debug)]
 pub(crate) struct CompletedAsyncResult<T, M> {
-    metadata: Option<M>,
+    metadata: M,
     result: EtlResult<T>,
 }
 
@@ -162,7 +171,7 @@ impl<T, M> CompletedAsyncResult<T, M> {
     }
 
     /// Returns the metadata and final result.
-    pub(crate) fn into_parts(self) -> (Option<M>, EtlResult<T>) {
+    pub(crate) fn into_parts(self) -> (M, EtlResult<T>) {
         (self.metadata, self.result)
     }
 }
@@ -177,40 +186,24 @@ mod tests {
             commit_end_lsn: Some(PgLsn::from(42)),
             metrics: DispatchMetrics { items_count: 1, dispatched_at: Instant::now() },
         };
-        let (result_tx, pending_result) = WriteEventsResult::new(metadata);
+        let (result_tx, pending_result) = WriteStreamBatchesResult::new(metadata);
 
         result_tx.send(Ok(7_u64));
 
         let completed = pending_result.await;
         let (metadata, result) = completed.into_parts();
 
-        let metadata = metadata.expect("metadata should be present");
         assert_eq!(metadata.commit_end_lsn, Some(PgLsn::from(42)));
         assert_eq!(result.unwrap(), 7);
     }
 
     #[tokio::test]
     async fn dropping_async_result_surfaces_error() {
-        let (result_tx, pending_result) = WriteTableRowsResult::<()>::new(());
+        let (result_tx, pending_result) = WriteSnapshotBatchResult::<()>::new(());
         drop(result_tx);
 
         let err = pending_result.await.into_result().unwrap_err();
         assert_eq!(err.kind(), ErrorKind::DestinationError);
         assert_eq!(err.description(), Some("Async result dropped without sending"));
-    }
-
-    #[tokio::test]
-    async fn completed_async_result_can_surface_missing_metadata_without_panicking() {
-        let (result_tx, rx) = oneshot::channel();
-        let mut pending_result =
-            PendingAsyncResult::<u64, ApplyLoopAsyncResultMetadata> { metadata: None, rx };
-
-        result_tx.send(Ok(7)).unwrap();
-
-        let completed = std::future::poll_fn(|cx| Pin::new(&mut pending_result).poll(cx)).await;
-        let (metadata, result) = completed.into_parts();
-
-        assert!(metadata.is_none());
-        assert_eq!(result.unwrap(), 7);
     }
 }

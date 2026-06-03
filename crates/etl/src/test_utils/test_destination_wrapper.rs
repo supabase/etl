@@ -10,44 +10,301 @@ use tokio::{
     runtime::Handle,
     sync::{Notify, RwLock},
 };
+use tokio_postgres::types::PgLsn;
 
 use crate::{
     concurrency::TaskSet,
+    conversions::arrow::record_batch_to_table_rows_with_schema,
     destination::{
         Destination, PipelineDestination,
         async_result::{
             ApplyLoopAsyncResultMetadata, DispatchMetrics, DropTableForCopyResult,
-            WriteEventsResult, WriteTableRowsResult,
+            WriteSnapshotBatchResult, WriteStreamBatchesResult,
         },
     },
     error::EtlResult,
     test_utils::{
-        event::{EventCondition, check_all_events_count, group_events_by_type},
+        event::{EventCondition, check_all_events_count, check_events_count, deduplicate_events},
         notify::TimedNotify,
     },
-    types::{Event, EventType, TableRow},
+    types::{
+        ChangeArrowBatch, ChangeKind, DeleteEvent, Event, EventType, InsertEvent, OldTableRow,
+        PartialTableRow, RelationEvent, RowImage, StreamBatch, TableArrowBatch, TableChangeSet,
+        TableName, TableRow, TableSchema, TruncateBatch, UpdateEvent, UpdatedTableRow,
+    },
 };
 
-type EventCheckFn = Box<dyn Fn(&[Event]) -> bool + Send + Sync>;
-type TableRowCheckFn = Box<dyn Fn(&HashMap<TableId, Vec<TableRow>>) -> bool + Send + Sync>;
-type CombinedCheckFn =
+type EventPredicate = Box<dyn Fn(&[Event]) -> bool + Send + Sync>;
+type TableRowCondition = Box<dyn Fn(&HashMap<TableId, Vec<TableRow>>) -> bool + Send + Sync>;
+type CombinedCondition =
     Box<dyn Fn(&[Event], &HashMap<TableId, Vec<TableRow>>) -> bool + Send + Sync>;
+
+fn snapshot_batch_to_table_rows(batch: &TableArrowBatch) -> EtlResult<Vec<TableRow>> {
+    record_batch_to_table_rows_with_schema(&batch.batch, &batch.table_schema)
+}
+
+fn replicated_table_schemas_match(
+    left: &ReplicatedTableSchema,
+    right: &ReplicatedTableSchema,
+) -> bool {
+    left.inner().snapshot_id == right.inner().snapshot_id
+        && left.inner().column_schemas == right.inner().column_schemas
+        && left.replication_mask().as_slice() == right.replication_mask().as_slice()
+        && left.identity_mask().as_slice() == right.identity_mask().as_slice()
+}
+
+fn maybe_push_relation_event(
+    events: &mut Vec<Event>,
+    relation_table_schemas: &mut HashMap<TableId, ReplicatedTableSchema>,
+    replicated_table_schema: &ReplicatedTableSchema,
+    commit_lsn: PgLsn,
+    tx_ordinal: u64,
+) {
+    let table_id = replicated_table_schema.id();
+    let schema_changed = relation_table_schemas.get(&table_id).is_none_or(|known_schema| {
+        !replicated_table_schemas_match(known_schema, replicated_table_schema)
+    });
+
+    if !schema_changed {
+        return;
+    }
+
+    relation_table_schemas.insert(table_id, replicated_table_schema.clone());
+    events.push(Event::Relation(RelationEvent {
+        start_lsn: commit_lsn,
+        commit_lsn,
+        tx_ordinal,
+        replicated_table_schema: replicated_table_schema.clone(),
+    }));
+}
+
+fn table_change_set_to_events(
+    change_set: &TableChangeSet,
+    relation_table_schemas: &mut HashMap<TableId, ReplicatedTableSchema>,
+) -> EtlResult<Vec<Event>> {
+    let mut events = Vec::new();
+    let mut index = 0;
+
+    while index < change_set.groups.len() {
+        let group = &change_set.groups[index];
+        let rows =
+            record_batch_to_table_rows_with_schema(&group.rows.batch, &group.rows.table_schema)?;
+
+        match (group.change, group.row_image) {
+            (ChangeKind::Insert, RowImage::New) => {
+                if group.rows.row_count() > 0 {
+                    maybe_push_relation_event(
+                        &mut events,
+                        relation_table_schemas,
+                        &group.rows.replicated_table_schema,
+                        PgLsn::from(group.commit_lsns.values()[0]),
+                        group.tx_ordinals.values()[0],
+                    );
+                }
+
+                let replicated_table_schema = group.rows.replicated_table_schema.clone();
+                for (row_index, row) in rows.into_iter().enumerate() {
+                    let commit_lsn = PgLsn::from(group.commit_lsns.values()[row_index]);
+                    let tx_ordinal = group.tx_ordinals.values()[row_index];
+                    events.push(Event::Insert(InsertEvent {
+                        start_lsn: commit_lsn,
+                        commit_lsn,
+                        tx_ordinal,
+                        replicated_table_schema: replicated_table_schema.clone(),
+                        table_row: row,
+                    }));
+                }
+                index += 1;
+            }
+            (ChangeKind::Update, RowImage::Old { key_only }) => {
+                if let Some(next_group) = change_set.groups.get(index + 1)
+                    && next_group.change == ChangeKind::Update
+                    && next_group.row_image == RowImage::New
+                {
+                    if next_group.rows.row_count() > 0 {
+                        maybe_push_relation_event(
+                            &mut events,
+                            relation_table_schemas,
+                            &next_group.rows.replicated_table_schema,
+                            PgLsn::from(next_group.commit_lsns.values()[0]),
+                            next_group.tx_ordinals.values()[0],
+                        );
+                    }
+
+                    let new_rows = record_batch_to_table_rows_with_schema(
+                        &next_group.rows.batch,
+                        &next_group.rows.table_schema,
+                    )?;
+                    assert_eq!(
+                        rows.len(),
+                        new_rows.len(),
+                        "old and new update row image batches must have matching lengths"
+                    );
+                    let replicated_table_schema = next_group.rows.replicated_table_schema.clone();
+                    for (row_index, (old_row, new_row)) in
+                        rows.into_iter().zip(new_rows).enumerate()
+                    {
+                        let commit_lsn = PgLsn::from(group.commit_lsns.values()[row_index]);
+                        let tx_ordinal = group.tx_ordinals.values()[row_index];
+                        let old_table_row = if key_only {
+                            OldTableRow::Key(old_row)
+                        } else {
+                            OldTableRow::Full(old_row)
+                        };
+                        events.push(Event::Update(UpdateEvent {
+                            start_lsn: commit_lsn,
+                            commit_lsn,
+                            tx_ordinal,
+                            replicated_table_schema: replicated_table_schema.clone(),
+                            updated_table_row: updated_table_row_from_group(next_group, new_row),
+                            old_table_row: Some(old_table_row),
+                        }));
+                    }
+                    index += 2;
+                } else {
+                    let replicated_table_schema = group.rows.replicated_table_schema.clone();
+                    for (row_index, row) in rows.into_iter().enumerate() {
+                        let commit_lsn = PgLsn::from(group.commit_lsns.values()[row_index]);
+                        let tx_ordinal = group.tx_ordinals.values()[row_index];
+                        let old_table_row =
+                            if key_only { OldTableRow::Key(row) } else { OldTableRow::Full(row) };
+                        events.push(Event::Delete(DeleteEvent {
+                            start_lsn: commit_lsn,
+                            commit_lsn,
+                            tx_ordinal,
+                            replicated_table_schema: replicated_table_schema.clone(),
+                            old_table_row: Some(old_table_row),
+                        }));
+                    }
+                    index += 1;
+                }
+            }
+            (ChangeKind::Update, RowImage::New) => {
+                if group.rows.row_count() > 0 {
+                    maybe_push_relation_event(
+                        &mut events,
+                        relation_table_schemas,
+                        &group.rows.replicated_table_schema,
+                        PgLsn::from(group.commit_lsns.values()[0]),
+                        group.tx_ordinals.values()[0],
+                    );
+                }
+
+                let replicated_table_schema = group.rows.replicated_table_schema.clone();
+                for (row_index, row) in rows.into_iter().enumerate() {
+                    let commit_lsn = PgLsn::from(group.commit_lsns.values()[row_index]);
+                    let tx_ordinal = group.tx_ordinals.values()[row_index];
+                    events.push(Event::Update(UpdateEvent {
+                        start_lsn: commit_lsn,
+                        commit_lsn,
+                        tx_ordinal,
+                        replicated_table_schema: replicated_table_schema.clone(),
+                        updated_table_row: updated_table_row_from_group(group, row),
+                        old_table_row: None,
+                    }));
+                }
+                index += 1;
+            }
+            (ChangeKind::Delete, RowImage::Old { key_only }) => {
+                if group.rows.row_count() > 0 && !key_only {
+                    maybe_push_relation_event(
+                        &mut events,
+                        relation_table_schemas,
+                        &group.rows.replicated_table_schema,
+                        PgLsn::from(group.commit_lsns.values()[0]),
+                        group.tx_ordinals.values()[0],
+                    );
+                }
+
+                let replicated_table_schema = group.rows.replicated_table_schema.clone();
+                for (row_index, row) in rows.into_iter().enumerate() {
+                    let commit_lsn = PgLsn::from(group.commit_lsns.values()[row_index]);
+                    let tx_ordinal = group.tx_ordinals.values()[row_index];
+                    let old_table_row =
+                        if key_only { OldTableRow::Key(row) } else { OldTableRow::Full(row) };
+                    events.push(Event::Delete(DeleteEvent {
+                        start_lsn: commit_lsn,
+                        commit_lsn,
+                        tx_ordinal,
+                        replicated_table_schema: replicated_table_schema.clone(),
+                        old_table_row: Some(old_table_row),
+                    }));
+                }
+                index += 1;
+            }
+            (ChangeKind::Delete, RowImage::New) | (ChangeKind::Insert, RowImage::Old { .. }) => {
+                index += 1;
+            }
+        }
+    }
+
+    Ok(events)
+}
+
+fn table_id_to_replicated_table_schema(table_id: TableId) -> ReplicatedTableSchema {
+    let table_schema =
+        TableSchema::new(table_id, TableName::new(String::new(), String::new()), Vec::new());
+
+    ReplicatedTableSchema::all(Arc::new(table_schema))
+}
+
+fn updated_table_row_from_group(group: &ChangeArrowBatch, row: TableRow) -> UpdatedTableRow {
+    match group.partial_update_missing_column_indexes.as_ref() {
+        Some(missing_column_indexes) => UpdatedTableRow::Partial(PartialTableRow::new(
+            group.rows.replicated_table_schema.column_schemas().len(),
+            row,
+            missing_column_indexes.to_vec(),
+        )),
+        None => UpdatedTableRow::Full(row),
+    }
+}
+
+fn stream_batches_to_events(
+    batches: &[StreamBatch],
+    relation_table_schemas: &mut HashMap<TableId, ReplicatedTableSchema>,
+) -> EtlResult<Vec<Event>> {
+    let mut events = Vec::new();
+
+    for batch in batches {
+        match batch {
+            StreamBatch::Changes(change_set) => {
+                events.extend(table_change_set_to_events(change_set, relation_table_schemas)?);
+            }
+            StreamBatch::Truncate(TruncateBatch { rel_ids, commit_lsn, tx_ordinal, options }) => {
+                events.push(Event::Truncate(crate::types::TruncateEvent {
+                    start_lsn: *commit_lsn,
+                    commit_lsn: *commit_lsn,
+                    tx_ordinal: *tx_ordinal,
+                    options: *options,
+                    truncated_tables: rel_ids
+                        .iter()
+                        .copied()
+                        .map(table_id_to_replicated_table_schema)
+                        .collect(),
+                }));
+            }
+        }
+    }
+
+    Ok(events)
+}
 
 struct Inner<D> {
     wrapped_destination: D,
     events: Vec<Event>,
+    relation_table_schemas: HashMap<TableId, ReplicatedTableSchema>,
     table_rows: HashMap<TableId, Vec<TableRow>>,
     tables_dropped_for_copy: HashSet<TableId>,
-    event_conditions: Vec<(EventCheckFn, Arc<Notify>)>,
-    table_row_conditions: Vec<(TableRowCheckFn, Arc<Notify>)>,
-    combined_conditions: Vec<(CombinedCheckFn, Arc<Notify>)>,
+    event_conditions: Vec<(EventPredicate, Arc<Notify>)>,
+    table_row_conditions: Vec<(TableRowCondition, Arc<Notify>)>,
+    combined_conditions: Vec<(CombinedCondition, Arc<Notify>)>,
     write_table_rows_called: u64,
     shutdown_called: bool,
 }
 
 impl<D> Inner<D> {
     fn check_conditions(&mut self) {
-        // Check event conditions.
+        // Check event conditions
         let events = self.events.clone();
         self.event_conditions.retain(|(condition, notify)| {
             let should_retain = !condition(&events);
@@ -57,7 +314,7 @@ impl<D> Inner<D> {
             should_retain
         });
 
-        // Check table row conditions.
+        // Check table row conditions
         let table_rows = self.table_rows.clone();
         self.table_row_conditions.retain(|(condition, notify)| {
             let should_retain = !condition(&table_rows);
@@ -67,7 +324,7 @@ impl<D> Inner<D> {
             should_retain
         });
 
-        // Check combined conditions.
+        // Check combined conditions
         let events = self.events.clone();
         let table_rows = self.table_rows.clone();
         self.combined_conditions.retain(|(condition, notify)| {
@@ -83,13 +340,12 @@ impl<D> Inner<D> {
 /// Test wrapper for [`Destination`] implementations that tracks all operations.
 ///
 /// [`TestDestinationWrapper`] wraps any destination implementation and records
-/// all rows, events, truncations, and shutdown calls flowing through it. This
-/// enables test assertions on pipeline behavior without requiring complex
-/// destination setup.
+/// all method calls and data flowing through it. This enables test assertions
+/// on the behavior of ETL pipelines without requiring complex destination
+/// setup.
 ///
-/// Notification helpers only observe writes that happen after registration.
-/// Register the returned [`TimedNotify`] before starting the producer that is
-/// expected to satisfy it.
+/// The wrapper supports waiting for specific conditions to be met, making it
+/// ideal for testing asynchronous ETL operations with deterministic assertions.
 #[derive(Clone)]
 pub struct TestDestinationWrapper<D> {
     inner: Arc<RwLock<Inner<D>>>,
@@ -112,12 +368,13 @@ impl<D: fmt::Debug> fmt::Debug for TestDestinationWrapper<D> {
 impl<D> TestDestinationWrapper<D> {
     /// Creates a new test wrapper around any destination implementation.
     ///
-    /// The wrapper forwards every operation to the wrapped destination and
-    /// keeps an in-memory history for assertions.
+    /// The wrapper will track all method calls and data operations performed
+    /// on the destination, enabling comprehensive testing and verification.
     pub fn wrap(destination: D) -> Self {
         let inner = Inner {
             wrapped_destination: destination,
             events: Vec::new(),
+            relation_table_schemas: HashMap::new(),
             table_rows: HashMap::new(),
             tables_dropped_for_copy: HashSet::new(),
             event_conditions: Vec::new(),
@@ -130,22 +387,29 @@ impl<D> TestDestinationWrapper<D> {
         Self { inner: Arc::new(RwLock::new(inner)), tasks: TaskSet::new() }
     }
 
-    /// Returns all table rows written through the wrapper.
+    /// Get all table rows that have been written
     pub async fn get_table_rows(&self) -> HashMap<TableId, Vec<TableRow>> {
         self.inner.read().await.table_rows.clone()
     }
 
-    /// Returns all events written through the wrapper.
+    /// Get all events that have been written
     pub async fn get_events(&self) -> Vec<Event> {
         self.inner.read().await.events.clone()
     }
 
-    /// Registers a notification that fires when future events match a
+    /// Get all events that have been written, de-duplicated by full event
+    /// equality.
+    pub async fn get_events_deduped(&self) -> Vec<Event> {
+        let events = self.inner.read().await.events.clone();
+        deduplicate_events(&events)
+    }
+
+    /// Registers a notification that fires when events match a specific
     /// condition.
     ///
-    /// Returns a [`TimedNotify`] that will automatically timeout after the
-    /// specified timeout if the condition is not met. This prevents tests
-    /// from hanging indefinitely.
+    /// Returns a [`TimedNotify`] that will automatically timeout after 30
+    /// seconds if the condition is not met. This prevents tests from
+    /// hanging indefinitely.
     pub async fn notify_on_events<F>(&self, condition: F) -> TimedNotify
     where
         F: Fn(&[Event]) -> bool + Send + Sync + 'static,
@@ -154,61 +418,77 @@ impl<D> TestDestinationWrapper<D> {
         let mut inner = self.inner.write().await;
         inner.event_conditions.push((Box::new(condition), Arc::clone(&notify)));
 
+        // Check conditions immediately in case they're already satisfied
+        inner.check_conditions();
+
         TimedNotify::new(notify)
     }
 
-    /// Registers a notification that fires when future events exactly match the
-    /// requested per-type counts.
+    /// Registers a notification that fires when a specific number of events of
+    /// given types are received.
     ///
-    /// Returns a [`TimedNotify`] that will automatically timeout after the
-    /// specified timeout if the expected event count is not reached. This
-    /// prevents tests from hanging indefinitely.
+    /// Returns a [`TimedNotify`] that will automatically timeout after 30
+    /// seconds if the expected event count is not reached. This prevents
+    /// tests from hanging indefinitely.
     pub async fn wait_for_events_count(&self, conditions: Vec<(EventType, u64)>) -> TimedNotify {
-        self.notify_on_events(move |events| {
-            let grouped_events = group_events_by_type(events);
+        self.notify_on_events(move |events| check_events_count(events, conditions.clone())).await
+    }
 
-            conditions.iter().all(|(event_type, count)| {
-                grouped_events.get(event_type).is_some_and(|inner| inner.len() == *count as usize)
-            })
+    /// Registers a notification that fires when a specific number of events of
+    /// given types are received after de-duplicating.
+    ///
+    /// Returns a [`TimedNotify`] that will automatically timeout after 30
+    /// seconds if the expected event count is not reached. This prevents
+    /// tests from hanging indefinitely.
+    pub async fn wait_for_events_count_deduped(
+        &self,
+        conditions: Vec<(EventType, u64)>,
+    ) -> TimedNotify {
+        self.notify_on_events(move |events| {
+            let deduped = deduplicate_events(events);
+            check_events_count(&deduped, conditions.clone())
         })
         .await
     }
 
-    /// Registers a notification that fires when future events and table rows
-    /// satisfy all requested conditions.
+    /// Registers a notification that fires when a specific number of events are
+    /// received, counting both insert events from streaming and table rows
+    /// from the initial copy phase.
     ///
-    /// Supports two condition types:
-    /// - [`EventCondition::Any`]: counts events across all tables
-    /// - [`EventCondition::Table`]: counts events for a specific table only
+    /// This is useful for tests that need to verify all data was captured
+    /// regardless of whether it arrived during table copy or streaming
+    /// replication.
     ///
-    /// For insert events, both streaming events and table copy rows are
-    /// counted.
+    /// Counts are aggregated across all tables for the specified event types.
     ///
-    /// Returns a [`TimedNotify`] that will automatically timeout after the
-    /// specified timeout if the expected count is not reached.
+    /// Returns a [`TimedNotify`] that will automatically timeout after 30
+    /// seconds if the expected count is not reached. This prevents tests
+    /// from hanging indefinitely.
     pub async fn wait_for_all_events(&self, conditions: Vec<EventCondition>) -> TimedNotify {
         let notify = Arc::new(Notify::new());
         let mut inner = self.inner.write().await;
 
-        let condition: CombinedCheckFn = Box::new(move |events, table_rows| {
+        let condition: CombinedCondition = Box::new(move |events, table_rows| {
             check_all_events_count(events, table_rows, conditions.clone())
         });
 
         inner.combined_conditions.push((condition, Arc::clone(&notify)));
 
+        // Check conditions immediately in case they're already satisfied.
+        inner.check_conditions();
+
         TimedNotify::new(notify)
     }
 
-    /// Clears the recorded table rows without touching the wrapped destination.
     pub async fn clear_table_rows(&self) {
         let mut inner = self.inner.write().await;
         inner.table_rows.clear();
     }
 
-    /// Clears the recorded events without touching the wrapped destination.
     pub async fn clear_events(&self) {
         let mut inner = self.inner.write().await;
         inner.events.clear();
+        inner.relation_table_schemas.clear();
     }
 
     /// Returns whether the table was dropped for a fresh copy through the
@@ -217,7 +497,6 @@ impl<D> TestDestinationWrapper<D> {
         self.inner.read().await.tables_dropped_for_copy.contains(&table_id)
     }
 
-    /// Returns how many times [`Destination::write_table_rows`] was called.
     pub async fn write_table_rows_called(&self) -> u64 {
         self.inner.read().await.write_table_rows_called
     }
@@ -245,29 +524,33 @@ where
             let inner = self.inner.read().await;
             inner.wrapped_destination.clone()
         };
+        let table_id = replicated_table_schema.id();
 
-        let (wrapped_drop_result, pending_drop_result) = DropTableForCopyResult::new(());
+        let (wrapped_drop_result, pending_result) = DropTableForCopyResult::new(());
         destination.drop_table_for_copy(replicated_table_schema, wrapped_drop_result).await?;
 
-        // We send the result back before doing the internal checks for this utility, to
-        // avoid checking before the apply loop received the result.
-        let result = pending_drop_result.await.into_result();
+        let result = pending_result.await.into_result();
         let should_record_drop = result.is_ok();
         async_result.send(result);
 
         let mut inner = self.inner.write().await;
 
-        let table_id = replicated_table_schema.id();
         if should_record_drop {
             inner.tables_dropped_for_copy.insert(table_id);
             inner.table_rows.remove(&table_id);
             inner.events.retain_mut(|event| {
                 let has_table_id = event.has_table_id(&table_id);
-                if let Event::Truncate(truncate_event) = event
+                if let Event::Truncate(event) = event
                     && has_table_id
                 {
-                    truncate_event.truncated_tables.retain(|s| s.id() != table_id);
-                    if truncate_event.truncated_tables.is_empty() {
+                    let Some(index) =
+                        event.truncated_tables.iter().position(|schema| schema.id() == table_id)
+                    else {
+                        return true;
+                    };
+
+                    event.truncated_tables.remove(index);
+                    if event.truncated_tables.is_empty() {
                         return false;
                     }
 
@@ -281,46 +564,48 @@ where
         Ok(())
     }
 
-    async fn write_table_rows(
+    async fn write_snapshot_batch(
         &self,
-        replicated_table_schema: &ReplicatedTableSchema,
-        table_rows: Vec<TableRow>,
-        async_result: WriteTableRowsResult<()>,
+        batch: TableArrowBatch,
+        async_result: WriteSnapshotBatchResult<()>,
     ) -> EtlResult<()> {
         let destination = {
             let mut inner = self.inner.write().await;
             inner.write_table_rows_called += 1;
             inner.wrapped_destination.clone()
         };
+        let table_id = batch.table_id;
+        let table_rows = match snapshot_batch_to_table_rows(&batch) {
+            Ok(table_rows) => table_rows,
+            Err(error) => {
+                async_result.send(Err(error));
+                return Ok(());
+            }
+        };
 
-        let (wrapped_flush_result, pending_flush_result) = WriteTableRowsResult::new(());
-        destination
-            .write_table_rows(replicated_table_schema, table_rows.clone(), wrapped_flush_result)
-            .await?;
+        let (wrapped_flush_result, pending_result) = WriteSnapshotBatchResult::new(());
+        destination.write_snapshot_batch(batch, wrapped_flush_result).await?;
 
-        // We send the result back before doing the internal checks for this utility, to
-        // avoid checking before the apply loop received the result.
-        let result = pending_flush_result.await.into_result();
-        let should_record_table_rows = result.is_ok();
-        async_result.send(result);
+        let result = pending_result.await.into_result();
 
         {
-            let table_id = replicated_table_schema.id();
             let mut inner = self.inner.write().await;
-            if should_record_table_rows {
+            if result.is_ok() {
                 inner.table_rows.entry(table_id).or_default().extend(table_rows);
             }
 
             inner.check_conditions();
         }
 
+        async_result.send(result);
+
         Ok(())
     }
 
-    async fn write_events(
+    async fn write_stream_batches(
         &self,
-        events: Vec<Event>,
-        async_result: WriteEventsResult<()>,
+        batches: Vec<StreamBatch>,
+        async_result: WriteStreamBatchesResult<()>,
     ) -> EtlResult<()> {
         self.tasks.try_reap().await?;
 
@@ -328,16 +613,29 @@ where
             let inner = self.inner.read().await;
             inner.wrapped_destination.clone()
         };
+        let (events, relation_table_schemas) = {
+            let inner = self.inner.read().await;
+            let mut relation_table_schemas = inner.relation_table_schemas.clone();
+            let events = match stream_batches_to_events(&batches, &mut relation_table_schemas) {
+                Ok(events) => events,
+                Err(error) => {
+                    async_result.send(Err(error));
+                    return Ok(());
+                }
+            };
 
-        let (wrapped_flush_result, pending_flush_result) =
-            WriteEventsResult::new(ApplyLoopAsyncResultMetadata {
+            (events, relation_table_schemas)
+        };
+
+        let (wrapped_flush_result, pending_result) =
+            WriteStreamBatchesResult::new(ApplyLoopAsyncResultMetadata {
                 commit_end_lsn: None,
                 metrics: DispatchMetrics {
                     items_count: events.len(),
                     dispatched_at: Instant::now(),
                 },
             });
-        destination.write_events(events.clone(), wrapped_flush_result).await?;
+        destination.write_stream_batches(batches, wrapped_flush_result).await?;
 
         // We spawn a task to handle the result, this way the wrapper behaves like a
         // transparent layer that doesn't block on the result of the inner
@@ -351,20 +649,19 @@ where
         let inner = Arc::clone(&self.inner);
         self.tasks
             .spawn(async move {
-                // We send the result back before doing the internal checks for this utility, to
-                // avoid checking before the apply loop received the result.
-                let result = pending_flush_result.await.into_result();
-                let should_record_events = result.is_ok();
-                async_result.send(result);
+                let result = pending_result.await.into_result();
 
                 {
                     let mut inner = inner.write().await;
-                    if should_record_events {
+                    if result.is_ok() {
+                        inner.relation_table_schemas = relation_table_schemas;
                         inner.events.extend(events);
                     }
 
                     inner.check_conditions();
                 }
+
+                async_result.send(result);
             })
             .await;
 
@@ -378,12 +675,12 @@ where
         };
 
         let mut errors = Vec::new();
-        if let Err(err) = destination.shutdown().await {
-            errors.push(err);
+        if let Err(error) = destination.shutdown().await {
+            errors.push(error);
         }
 
-        if let Err(err) = self.tasks.drain().await {
-            errors.push(err);
+        if let Err(error) = self.tasks.drain().await {
+            errors.push(error);
         }
 
         {

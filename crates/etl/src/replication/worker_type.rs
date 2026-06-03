@@ -16,12 +16,10 @@ pub enum WorkerType {
 
 impl WorkerType {
     /// Builds an [`EtlReplicationSlot`] for this worker type.
-    pub(crate) fn build_etl_replication_slot(&self, pipeline_id: u64) -> EtlReplicationSlot {
+    pub(crate) fn build_etl_replication_slot(self, pipeline_id: u64) -> EtlReplicationSlot {
         match self {
             Self::Apply => EtlReplicationSlot::Apply { pipeline_id },
-            Self::TableSync { table_id } => {
-                EtlReplicationSlot::TableSync { pipeline_id, table_id: *table_id }
-            }
+            Self::TableSync { table_id } => EtlReplicationSlot::TableSync { pipeline_id, table_id },
         }
     }
 

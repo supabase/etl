@@ -3,7 +3,9 @@ use etl::{
     etl_error,
 };
 
-use crate::bigquery::client::{BigQueryDatasetId, BigQueryProjectId, BigQueryTableId};
+#[cfg(test)]
+use crate::bigquery::client::BigQueryTableId;
+use crate::bigquery::client::{BigQueryDatasetId, BigQueryProjectId};
 
 /// Escapes a BigQuery identifier using GoogleSQL quoted-identifier escape
 /// sequences.
@@ -43,6 +45,7 @@ fn escape_identifier(identifier: &str, context: &str) -> EtlResult<String> {
 }
 
 /// Quotes one BigQuery SQL identifier with backticks.
+#[cfg(test)]
 pub(super) fn quote_identifier(identifier: &str, context: &str) -> EtlResult<String> {
     Ok(format!("`{}`", escape_identifier(identifier, context)?))
 }
@@ -53,6 +56,7 @@ pub(super) fn quote_identifier(identifier: &str, context: &str) -> EtlResult<Str
 /// BigQuery treats backtick-quoted table paths as dotted path expressions, so
 /// the project, dataset, and table parts are escaped separately and then joined
 /// inside one quoted path.
+#[cfg(test)]
 pub(super) fn quote_table_path(
     project_id: &BigQueryProjectId,
     dataset_id: &BigQueryDatasetId,

@@ -1,16 +1,19 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use etl::{
     bail,
     concurrency::TaskSet,
-    destination::async_result::{DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult},
+    destination::async_result::{
+        DropTableForCopyResult, WriteSnapshotBatchResult, WriteStreamBatchesResult,
+    },
     error::{ErrorKind, EtlError, EtlResult},
-    etl_error,
+    etl_error, record_batch_to_table_rows_with_schema,
     state::destination_table_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus},
     store::DestinationStore,
     types::{
-        ColumnSchema, DeleteEvent, Event, InsertEvent, OldTableRow, ReplicatedTableSchema, TableId,
-        TableRow, UpdateEvent, UpdatedTableRow,
+        ChangeKind, ColumnSchema, DeleteEvent, Event, InsertEvent, OldTableRow,
+        ReplicatedTableSchema, ReplicationMask, RowImage, SnapshotId, StreamBatch, TableArrowBatch,
+        TableId, TableRow, UpdateEvent, UpdatedTableRow,
     },
 };
 use tracing::{info, warn};
@@ -140,9 +143,142 @@ where
         Ok(())
     }
 
+    /// Processes destination-facing Arrow CDC batches.
+    pub async fn process_stream_batches(&self, batches: Vec<StreamBatch>) -> EtlResult<()> {
+        let mut batch_iter = batches.into_iter().peekable();
+
+        while batch_iter.peek().is_some() {
+            let mut builders: HashMap<TableId, RowBatchBuilder> = HashMap::new();
+
+            while let Some(batch) = batch_iter.peek() {
+                if matches!(batch, StreamBatch::Truncate(_)) {
+                    break;
+                }
+
+                let StreamBatch::Changes(change_set) =
+                    batch_iter.next().expect("peeked batch must be present")
+                else {
+                    unreachable!("truncate batches are handled separately");
+                };
+                let table_schema =
+                    self.replicated_table_schema_for_stream_batch(change_set.table_id).await?;
+                self.prepare_table_for_streaming(&table_schema).await?;
+
+                for group in change_set.groups {
+                    let columns = group.rows.table_schema.column_schemas.clone();
+                    let rows = record_batch_to_table_rows_with_schema(
+                        &group.rows.batch,
+                        &group.rows.table_schema,
+                    )?;
+
+                    for (row_idx, table_row) in rows.into_iter().enumerate() {
+                        let offset = OffsetToken::new(
+                            group.commit_lsns.value(row_idx).into(),
+                            group.tx_ordinals.value(row_idx),
+                        );
+                        let operation = match (group.change, group.row_image) {
+                            (ChangeKind::Insert, RowImage::New) => CdcOperation::Insert,
+                            (ChangeKind::Update, RowImage::New) => CdcOperation::Update,
+                            (ChangeKind::Delete, RowImage::Old { .. }) => CdcOperation::Delete,
+                            (ChangeKind::Update, RowImage::Old { .. }) => continue,
+                            (ChangeKind::Delete, RowImage::New)
+                            | (ChangeKind::Insert, RowImage::Old { .. }) => {
+                                warn!(
+                                    table_id = ?change_set.table_id,
+                                    "skipping unsupported snowflake change batch row image"
+                                );
+                                continue;
+                            }
+                        };
+
+                        builders
+                            .entry(change_set.table_id)
+                            .or_default()
+                            .push_row(
+                                &columns,
+                                &table_row,
+                                CdcMeta::new(operation, offset.as_ref()),
+                                &offset,
+                            )
+                            .map_err(EtlError::from)?;
+                    }
+                }
+            }
+
+            self.flush_batches(builders).await?;
+
+            let mut truncated = HashMap::new();
+            while let Some(StreamBatch::Truncate(_)) = batch_iter.peek() {
+                if let Some(StreamBatch::Truncate(truncate)) = batch_iter.next() {
+                    for table_id in truncate.rel_ids {
+                        truncated.entry(table_id).or_insert(());
+                    }
+                }
+            }
+
+            for table_id in truncated.into_keys() {
+                self.truncate_table_by_id(table_id).await?;
+            }
+        }
+
+        Ok(())
+    }
+
     /// Last offset committed by Snowflake for this table's channel.
     pub async fn committed_offset(&self, table_id: TableId) -> EtlResult<Option<OffsetToken>> {
         self.client.committed_offset(table_id).await.map_err(EtlError::from)
+    }
+
+    async fn truncate_table_by_id(&self, table_id: TableId) -> EtlResult<()> {
+        let Some(metadata) = self.store.get_applied_destination_table_metadata(table_id).await?
+        else {
+            info!(table_id = ?table_id, "truncate skipped because destination table metadata is missing");
+            return Ok(());
+        };
+
+        self.client
+            .truncate_table(table_id, &metadata.destination_table_id)
+            .await
+            .map_err(EtlError::from)
+    }
+
+    async fn replicated_table_schema_for_stream_batch(
+        &self,
+        table_id: TableId,
+    ) -> EtlResult<ReplicatedTableSchema> {
+        if let Some(metadata) = self.store.get_applied_destination_table_metadata(table_id).await? {
+            let table_schema =
+                self.store.get_table_schema(&table_id, metadata.snapshot_id).await?.ok_or_else(
+                    || {
+                        etl_error!(
+                            ErrorKind::MissingTableSchema,
+                            "Table not found in the schema store",
+                            format!(
+                                "The table schema for table {table_id} at snapshot {} was not \
+                                 found in the schema store",
+                                metadata.snapshot_id
+                            )
+                        )
+                    },
+                )?;
+
+            return Ok(ReplicatedTableSchema::from_mask(table_schema, metadata.replication_mask));
+        }
+
+        let table_schema =
+            self.store.get_table_schema(&table_id, SnapshotId::max()).await?.ok_or_else(|| {
+                etl_error!(
+                    ErrorKind::MissingTableSchema,
+                    "Table not found in the schema store",
+                    format!(
+                        "The table schema for table {table_id} was not found in the schema store"
+                    )
+                )
+            })?;
+        Ok(ReplicatedTableSchema::from_mask(
+            Arc::clone(&table_schema),
+            ReplicationMask::all(&table_schema),
+        ))
     }
 
     async fn accumulate_data_events(
@@ -447,28 +583,32 @@ where
         Ok(())
     }
 
-    async fn write_table_rows(
+    async fn write_snapshot_batch(
         &self,
-        replicated_table_schema: &ReplicatedTableSchema,
-        table_rows: Vec<TableRow>,
-        async_result: WriteTableRowsResult<()>,
+        batch: TableArrowBatch,
+        async_result: WriteSnapshotBatchResult<()>,
     ) -> EtlResult<()> {
-        let result = self.write_table_rows(replicated_table_schema, table_rows).await;
+        let table_schema = batch.replicated_table_schema;
+        let result = match record_batch_to_table_rows_with_schema(&batch.batch, &batch.table_schema)
+        {
+            Ok(table_rows) => self.write_table_rows(&table_schema, table_rows).await,
+            Err(error) => Err(error),
+        };
         async_result.send(result);
         Ok(())
     }
 
-    async fn write_events(
+    async fn write_stream_batches(
         &self,
-        events: Vec<Event>,
-        async_result: WriteEventsResult<()>,
+        batches: Vec<StreamBatch>,
+        async_result: WriteStreamBatchesResult<()>,
     ) -> EtlResult<()> {
         self.tasks.try_reap().await?;
 
         let destination = self.clone();
         self.tasks
             .spawn(async move {
-                let result = destination.process_events(events).await;
+                let result = destination.process_stream_batches(batches).await;
                 async_result.send(result);
             })
             .await;

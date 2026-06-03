@@ -1,5 +1,6 @@
 use std::{fmt, io::Write};
 
+use chrono::{DateTime, Utc};
 use etl::types::{
     ArrayCell, Cell, ColumnSchema, DATE_FORMAT, PgNumeric, TIME_FORMAT, TIMESTAMP_FORMAT,
     TIMESTAMPTZ_FORMAT_HH_MM, TableRow,
@@ -114,6 +115,11 @@ impl Serialize for CellSerializer<'_> {
             Cell::Time(t) => ser.collect_str(&t.format(TIME_FORMAT)),
             Cell::Timestamp(dt) => ser.collect_str(&dt.format(TIMESTAMP_FORMAT)),
             Cell::TimestampTz(dt) => ser.collect_str(&dt.format(TIMESTAMPTZ_FORMAT_HH_MM)),
+            Cell::TimestampTzMicros(micros) => {
+                let dt = DateTime::<Utc>::from_timestamp_micros(*micros)
+                    .ok_or_else(|| serde::ser::Error::custom("timestamptz value out of range"))?;
+                ser.collect_str(&dt.format(TIMESTAMPTZ_FORMAT_HH_MM))
+            }
             Cell::Uuid(u) => ser.collect_str(u),
             Cell::Json(v) => v.serialize(ser),
             Cell::Bytes(b) => ser.collect_str(&HexDisplay(b)),

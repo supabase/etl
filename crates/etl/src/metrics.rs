@@ -37,6 +37,10 @@ pub const ETL_IDEAL_BATCH_SIZE_BYTES: &str = "etl_ideal_batch_size_bytes";
 
 /// Label key for table state (used by table state metrics).
 pub const STATE_LABEL: &str = "state";
+/// Label key for the ETL pipeline id.
+pub const PIPELINE_ID_LABEL: &str = "pipeline_id";
+/// Label key for the destination implementation.
+pub const DESTINATION_LABEL: &str = "destination";
 /// Label key for the ETL worker type ("table_sync" or "apply").
 pub const WORKER_TYPE_LABEL: &str = "worker_type";
 /// Label key for the action performed by the worker ("table_copy" or

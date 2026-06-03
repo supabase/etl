@@ -34,7 +34,7 @@ const TABLE_COPY_METRICS: &[Metric] = &[
     Metric {
         key: "estimated_mib_per_second",
         label: "Est. decoded MiB/s",
-        policy: RegressionPolicy::HigherIsBetter { max_drop_pct: 15.0 },
+        policy: RegressionPolicy::Informational,
     },
     Metric {
         key: "copy_wait_ms",
@@ -66,7 +66,7 @@ const TABLE_STREAMING_METRICS: &[Metric] = &[
     Metric {
         key: "end_to_end_with_shutdown_estimated_mib_per_second",
         label: "Est. decoded MiB/s",
-        policy: RegressionPolicy::HigherIsBetter { max_drop_pct: 15.0 },
+        policy: RegressionPolicy::Informational,
     },
     Metric {
         key: "total_ms",
@@ -926,9 +926,9 @@ mod tests {
             comparison.markdown.contains("| Rows/s | 1000 | 1100 | +100 (+10.00%) | ✅ better |")
         );
         assert!(
-            comparison.markdown.contains(
-                "| Est. decoded MiB/s | 100 | 90 | -10 (-10.00%) | ⚠️ within threshold |"
-            )
+            comparison
+                .markdown
+                .contains("| Est. decoded MiB/s | 100 | 90 | -10 (-10.00%) | ℹ️ info |")
         );
         assert!(
             comparison

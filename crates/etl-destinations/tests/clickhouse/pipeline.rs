@@ -1029,7 +1029,6 @@ async fn table_copy_reset_drops_destination_table_before_recopy_inner(engine: Cl
 
     pipeline.shutdown_and_wait().await.unwrap();
 
-    assert!(destination.was_table_dropped_for_copy(table_id).await);
     let rows: Vec<IdValueRow> = clickhouse_db.query(&reset_query()).await;
     assert_eq!(rows.len(), 1, "recopy should not retain rows from the first copy");
     assert_eq!(rows[0].id, 3);

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use etl_postgres::types::{ReplicatedTableSchema, TableId};
 
@@ -95,4 +95,26 @@ pub fn check_all_events_count(
             event_count + table_row_count >= *expected_count
         }
     })
+}
+
+/// Checks if the event count meets the expected counts.
+pub fn check_events_count(events: &[Event], conditions: Vec<(EventType, u64)>) -> bool {
+    let conditions =
+        conditions.into_iter().map(|(event_type, count)| EventCondition::Any(event_type, count));
+
+    check_all_events_count(events, &HashMap::new(), conditions.collect())
+}
+
+/// Deduplicates events by their debug representation.
+pub fn deduplicate_events(events: &[Event]) -> Vec<Event> {
+    let mut seen = HashSet::new();
+    let mut deduped = Vec::with_capacity(events.len());
+
+    for event in events {
+        if seen.insert(format!("{event:?}")) {
+            deduped.push(event.clone());
+        }
+    }
+
+    deduped
 }

@@ -1,12 +1,14 @@
 #![allow(dead_code)]
 #![cfg(all(feature = "iceberg", feature = "test-utils"))]
 
-use arrow::{
-    array::{ArrayRef, RecordBatch},
-    datatypes::TimeUnit,
-};
 use etl::types::{ArrayCell, Cell, TableRow};
-use etl_destinations::iceberg::{IcebergClient, UNIX_EPOCH};
+use etl_destinations::iceberg::{
+    IcebergClient, UNIX_EPOCH,
+    test_arrow::{
+        array::{ArrayRef, RecordBatch},
+        datatypes::TimeUnit,
+    },
+};
 use futures::StreamExt;
 
 /// Converts a RecordBatch back to a vector of TableRows.
@@ -30,7 +32,7 @@ pub(crate) fn record_batch_to_table_rows(batch: &RecordBatch) -> Vec<TableRow> {
 
 /// Converts an Arrow array value at a specific index to a Cell.
 fn arrow_value_to_cell(array: &ArrayRef, row_idx: usize) -> Cell {
-    use arrow::{array::*, datatypes::DataType};
+    use etl_destinations::iceberg::test_arrow::{array::*, datatypes::DataType};
 
     if array.is_null(row_idx) {
         return Cell::Null;

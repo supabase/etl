@@ -40,7 +40,10 @@ impl MemorySnapshot {
 
         match system.cgroup_limits() {
             Some(cgroup) => MemorySnapshot { used: cgroup.rss, total: cgroup.total_memory },
-            None => MemorySnapshot { used: system.used_memory(), total: system.total_memory() },
+            None => MemorySnapshot {
+                used: system.total_memory().saturating_sub(system.available_memory()),
+                total: system.total_memory(),
+            },
         }
     }
 

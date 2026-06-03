@@ -1,7 +1,7 @@
 use std::{pin::Pin, sync::Arc, time::Instant};
 
 use etl_config::shared::BatchConfig;
-use etl_postgres::types::TableId;
+use etl_postgres::types::{ReplicatedTableSchema, TableId, TableSchema};
 use futures::{Stream, StreamExt};
 use metrics::{counter, histogram};
 use tokio::{
@@ -18,7 +18,8 @@ use crate::{
         BatchBudgetController, MemoryMonitor, ShutdownResult, ShutdownRx,
         TryBatchBackpressureStream, table_sync_worker_copy_stream_id,
     },
-    destination::{Destination, async_result::WriteTableRowsResult},
+    conversions::arrow::postgres_copy_rows_to_arrow_batch,
+    destination::{Destination, async_result::WriteSnapshotBatchResult},
     error::{ErrorKind, EtlResult},
     etl_error,
     metrics::{
@@ -27,13 +28,12 @@ use crate::{
         ETL_TABLE_COPY_ROWS, PARTITIONING_LABEL, WORKER_TYPE_LABEL,
     },
     replication::{
-        TableCopyStream,
+        RawTableCopyStream, TableCopyRowBytes,
         client::{
             CtidPartition, PgChildReplicationTransaction, PgReplicationTransaction,
             PostgresConnectionUpdate,
         },
     },
-    types::{ReplicatedTableSchema, TableRow},
 };
 
 /// Calculates Load Imbalance Factor (LIF) for a set of values.
@@ -81,13 +81,14 @@ async fn copy_table_rows_from_stream<D, S>(
     mut table_copy_stream: Pin<&mut S>,
     mut shutdown_rx: ShutdownRx,
     mut connection_updates_rx: watch::Receiver<PostgresConnectionUpdate>,
+    table_schema: Arc<TableSchema>,
     replicated_table_schema: ReplicatedTableSchema,
     partitioning: &'static str,
     destination: D,
 ) -> EtlResult<ShutdownResult<u64, u64>>
 where
     D: Destination + Clone + Send + 'static,
-    S: Stream<Item = EtlResult<Vec<TableRow>>>,
+    S: Stream<Item = EtlResult<Vec<TableCopyRowBytes>>>,
 {
     let mut total_rows: u64 = 0;
 
@@ -133,19 +134,22 @@ where
             // PRIORITY 3: Consume batched COPY rows.
             // This is the normal copy path and runs when no higher-priority branch is pending.
             maybe_batch = table_copy_stream.next() => {
-                let Some(table_rows) = maybe_batch else {
+                let Some(copy_rows) = maybe_batch else {
                     return Ok(ShutdownResult::Ok(total_rows));
                 };
 
-                let table_rows = table_rows?;
-                let batch_size = table_rows.len() as u64;
+                let copy_rows = copy_rows?;
+                let batch_size = copy_rows.len() as u64;
                 total_rows += batch_size;
 
                 let before_sending = Instant::now();
-                let (flush_result, pending_flush_result) = WriteTableRowsResult::new(());
+                let snapshot_batch =
+                    postgres_copy_rows_to_arrow_batch(Arc::clone(&table_schema), &copy_rows)?
+                        .with_replicated_table_schema(replicated_table_schema.clone());
+                let (flush_result, pending_flush_result) = WriteSnapshotBatchResult::new(());
 
                 destination
-                    .write_table_rows(&replicated_table_schema, table_rows, flush_result)
+                    .write_snapshot_batch(snapshot_batch, flush_result)
                     .await?;
                 pending_flush_result.await.into_result()?;
 
@@ -195,8 +199,9 @@ enum CopyPartition {
 /// child connections that share the same exported snapshot.
 #[expect(clippy::too_many_arguments)]
 pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
-    replication_transaction: &PgReplicationTransaction<'_>,
+    transaction: &PgReplicationTransaction<'_>,
     table_id: TableId,
+    table_schema: Arc<TableSchema>,
     replicated_table_schema: ReplicatedTableSchema,
     publication_name: Option<&str>,
     max_copy_connections: u16,
@@ -208,8 +213,9 @@ pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
 ) -> EtlResult<TableCopyResult> {
     if max_copy_connections > 1 {
         parallel_table_copy(
-            replication_transaction,
+            transaction,
             table_id,
+            table_schema,
             replicated_table_schema,
             publication_name,
             max_copy_connections,
@@ -222,8 +228,9 @@ pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
         .await
     } else {
         serial_table_copy(
-            replication_transaction,
+            transaction,
             table_id,
+            table_schema,
             replicated_table_schema,
             publication_name,
             batch_config,
@@ -240,8 +247,9 @@ pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
 /// transaction.
 #[expect(clippy::too_many_arguments)]
 async fn serial_table_copy<D: Destination + Clone + Send + 'static>(
-    replication_transaction: &PgReplicationTransaction<'_>,
+    transaction: &PgReplicationTransaction<'_>,
     table_id: TableId,
+    table_schema: Arc<TableSchema>,
     replicated_table_schema: ReplicatedTableSchema,
     publication_name: Option<&str>,
     batch_config: BatchConfig,
@@ -252,20 +260,16 @@ async fn serial_table_copy<D: Destination + Clone + Send + 'static>(
 ) -> EtlResult<TableCopyResult> {
     let start_time = Instant::now();
 
-    let replicated_column_schemas =
-        replicated_table_schema.column_schemas().cloned().collect::<Vec<_>>();
-    let table_copy_stream = replication_transaction
-        .get_table_copy_stream(table_id, &replicated_column_schemas, publication_name)
+    let table_copy_stream = transaction
+        .get_table_copy_stream(table_id, &table_schema.column_schemas, publication_name)
         .await?;
-    let table_copy_stream =
-        TableCopyStream::wrap(table_copy_stream, replicated_column_schemas.iter());
-    let connection_updates_rx = replication_transaction.connection_updates_rx();
+    let table_copy_stream = RawTableCopyStream::wrap(table_copy_stream);
+    let connection_updates_rx = transaction.connection_updates_rx();
     let _table_copy_stream_guard = batch_budget.register_stream_load(1);
     let cached_batch_budget = batch_budget.cached();
-    let stream_id = table_sync_worker_copy_stream_id(table_id);
     let table_copy_stream = TryBatchBackpressureStream::wrap(
         table_copy_stream,
-        stream_id,
+        table_sync_worker_copy_stream_id(table_id),
         batch_config,
         memory_monitor.subscribe(),
         cached_batch_budget,
@@ -278,6 +282,7 @@ async fn serial_table_copy<D: Destination + Clone + Send + 'static>(
         table_copy_stream.as_mut(),
         shutdown_rx,
         connection_updates_rx,
+        Arc::clone(&table_schema),
         replicated_table_schema,
         "false",
         destination,
@@ -313,8 +318,9 @@ async fn serial_table_copy<D: Destination + Clone + Send + 'static>(
 /// `max_copy_connections`.
 #[expect(clippy::too_many_arguments)]
 async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
-    replication_transaction: &PgReplicationTransaction<'_>,
+    transaction: &PgReplicationTransaction<'_>,
     table_id: TableId,
+    table_schema: Arc<TableSchema>,
     replicated_table_schema: ReplicatedTableSchema,
     publication_name: Option<&str>,
     max_copy_connections: u16,
@@ -332,9 +338,9 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
     // for partitioned tables. Ctid-based partitioning cannot be used with
     // partitioned tables because each child partition has its own ctid space,
     // which causes duplicate rows.
-    let is_partitioned = replication_transaction.is_partitioned_table(table_id).await?;
+    let is_partitioned = transaction.is_partitioned_table(table_id).await?;
     let copy_partitions: Vec<CopyPartition> = if is_partitioned {
-        let leave_table_ids = replication_transaction.get_leaf_partitions(table_id).await?;
+        let leave_table_ids = transaction.get_leaf_partitions(table_id).await?;
 
         info!(
             table_id = table_id.0,
@@ -348,7 +354,7 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
             .collect()
     } else {
         let ctid_partitions =
-            replication_transaction.plan_ctid_partitions(table_id, max_copy_connections).await?;
+            transaction.plan_ctid_partitions(table_id, max_copy_connections).await?;
 
         info!(
             table_id = table_id.0,
@@ -369,7 +375,7 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
     // connections can import it via SET TRANSACTION SNAPSHOT. The main
     // transaction must stay open for the entire duration of the parallel copy
     // to keep the snapshot valid.
-    let snapshot_id = replication_transaction.export_snapshot().await?;
+    let snapshot_id = transaction.export_snapshot().await?;
 
     let semaphore = Arc::new(Semaphore::new(max_copy_connections as usize));
     let mut join_set = JoinSet::new();
@@ -386,8 +392,9 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
             )
         })?;
 
-        let child_replication_client = replication_transaction.fork_child().await?;
+        let child_replication_client = transaction.fork_child().await?;
         let snapshot_id = snapshot_id.clone();
+        let table_schema = Arc::clone(&table_schema);
         let replicated_table_schema = replicated_table_schema.clone();
         let publication_name = publication_name.clone();
         let batch_config = batch_config.clone();
@@ -398,12 +405,13 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
 
         join_set.spawn(async move {
             let mut child_replication_client = child_replication_client;
-            let child_replication_transaction =
+            let child_transaction =
                 child_replication_client.begin_transaction(&snapshot_id).await?;
 
             let result = copy_partition(
-                child_replication_transaction,
+                child_transaction,
                 table_id,
+                table_schema,
                 replicated_table_schema,
                 publication_name,
                 partition,
@@ -496,8 +504,9 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
 /// an entire leaf partition. All rows are written under the parent `table_id`.
 #[expect(clippy::too_many_arguments)]
 async fn copy_partition<D>(
-    child_replication_transaction: PgChildReplicationTransaction<'_>,
+    child_transaction: PgChildReplicationTransaction<'_>,
     table_id: TableId,
+    table_schema: Arc<TableSchema>,
     replicated_table_schema: ReplicatedTableSchema,
     publication_name: Option<Arc<str>>,
     partition: CopyPartition,
@@ -511,8 +520,6 @@ where
     D: Destination + Clone + Send + 'static,
 {
     let start_time = Instant::now();
-    let replicated_column_schemas =
-        replicated_table_schema.column_schemas().cloned().collect::<Vec<_>>();
 
     match &partition {
         CopyPartition::CtidRange(ctid) => match ctid {
@@ -550,34 +557,33 @@ where
 
     let copy_stream = match &partition {
         CopyPartition::CtidRange(ctid) => {
-            child_replication_transaction
+            child_transaction
                 .get_table_copy_stream_with_ctid_partition(
                     table_id,
-                    &replicated_column_schemas,
+                    &table_schema.column_schemas,
                     publication_name.as_ref().map(Arc::as_ref),
                     ctid,
                 )
                 .await?
         }
         CopyPartition::LeafPartition { leaf_table_id } => {
-            child_replication_transaction
+            child_transaction
                 .get_table_copy_stream(
                     *leaf_table_id,
-                    &replicated_column_schemas,
+                    &table_schema.column_schemas,
                     publication_name.as_ref().map(Arc::as_ref),
                 )
                 .await?
         }
     };
 
-    let table_copy_stream = TableCopyStream::wrap(copy_stream, replicated_column_schemas.iter());
-    let connection_updates_rx = child_replication_transaction.connection_updates_rx();
+    let table_copy_stream = RawTableCopyStream::wrap(copy_stream);
+    let connection_updates_rx = child_transaction.connection_updates_rx();
     let _table_copy_stream_guard = batch_budget.register_stream_load(1);
     let cached_batch_budget = batch_budget.cached();
-    let stream_id = table_sync_worker_copy_stream_id(table_id);
     let table_copy_stream = TryBatchBackpressureStream::wrap(
         table_copy_stream,
-        stream_id,
+        table_sync_worker_copy_stream_id(table_id),
         batch_config,
         memory_monitor.subscribe(),
         cached_batch_budget,
@@ -588,6 +594,7 @@ where
         table_copy_stream.as_mut(),
         shutdown_rx,
         connection_updates_rx,
+        Arc::clone(&table_schema),
         replicated_table_schema,
         "true",
         destination,
@@ -607,7 +614,7 @@ where
 
     // We commit the transaction for the same reason as the rollback, to let
     // Postgres immediately free up things related to in-progress transactions.
-    child_replication_transaction.commit().await?;
+    child_transaction.commit().await?;
 
     histogram!(
         ETL_TABLE_COPY_ROWS,

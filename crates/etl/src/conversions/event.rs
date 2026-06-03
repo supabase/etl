@@ -21,7 +21,7 @@ use crate::{
     metrics::{ETL_BYTES_PROCESSED_TOTAL, ETL_ROW_SIZE_BYTES, EVENT_TYPE_LABEL},
     types::{
         BeginEvent, Cell, CommitEvent, DeleteEvent, InsertEvent, OldTableRow, PartialTableRow,
-        TableRow, TruncateEvent, UpdateEvent, UpdatedTableRow,
+        TableRow, TruncateEvent, Type, UpdateEvent, UpdatedTableRow,
     },
 };
 
@@ -48,8 +48,8 @@ pub(crate) struct SchemaChangeMessage {
     /// The table OID from `pg_class.oid`.
     ///
     /// PostgreSQL table OIDs are `u32` values, but JSON serialization from the
-    /// event trigger uses `bigint` (i64) for transmission. The cast back to
-    /// `u32` in [`into_table_schema`] is safe because PostgreSQL OIDs are
+    /// event trigger uses `bigint` (`i64`) for transmission. The cast back to
+    /// `u32` in [`Self::into_table_schema`] is safe because PostgreSQL OIDs are
     /// always within the `u32` range.
     pub(crate) oid: i64,
     /// The identity metadata emitted by Postgres for this table snapshot.
@@ -68,8 +68,7 @@ impl SchemaChangeMessage {
     /// snapshot ID.
     ///
     /// This is used to update the stored table schema when a DDL change is
-    /// detected. The snapshot_id should be the start_lsn of the DDL
-    /// message.
+    /// detected. The snapshot ID should be the start LSN of the DDL message.
     pub(crate) fn into_table_schema(self, snapshot_id: SnapshotId) -> TableSchema {
         let table_id = self.table_id();
         build_table_schema(
@@ -86,11 +85,11 @@ impl FromStr for SchemaChangeMessage {
     type Err = EtlError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        serde_json::from_str(s).map_err(|e| {
+        serde_json::from_str(s).map_err(|error| {
             etl_error!(
                 ErrorKind::ConversionError,
                 "Failed to parse schema change message",
-                format!("Invalid JSON in schema change message: {}", e)
+                format!("Invalid JSON in schema change message: {error}")
             )
         })
     }
@@ -257,7 +256,7 @@ pub(crate) fn build_table_schema(
 ///
 /// This is used only for coarse event-size metrics, so `NULL` and
 /// `UnchangedToast` fields contribute zero bytes.
-fn calculate_tuple_bytes(tuple_data: &[protocol::TupleData]) -> u64 {
+pub(crate) fn calculate_tuple_bytes(tuple_data: &[protocol::TupleData]) -> u64 {
     tuple_data
         .iter()
         .map(|data| match data {
@@ -267,6 +266,11 @@ fn calculate_tuple_bytes(tuple_data: &[protocol::TupleData]) -> u64 {
             }
         })
         .sum()
+}
+
+/// Converts a tuple byte count into a row payload size hint.
+pub(crate) fn tuple_bytes_to_size_hint(tuple_bytes: u64) -> usize {
+    usize::try_from(tuple_bytes).unwrap_or(usize::MAX)
 }
 
 /// Creates a [`BeginEvent`] from Postgres protocol data.
@@ -387,7 +391,11 @@ pub(crate) fn parse_event_from_insert_message(
 
     histogram!(ETL_ROW_SIZE_BYTES, EVENT_TYPE_LABEL => "insert").record(row_size_bytes as f64);
 
-    let table_row = convert_tuple_to_row(replicated_table_schema.column_schemas(), tuple_data)?;
+    let table_row = convert_tuple_to_row_with_payload_size_hint(
+        replicated_table_schema.column_schemas(),
+        tuple_data,
+        tuple_bytes_to_size_hint(row_size_bytes),
+    )?;
 
     Ok(InsertEvent { start_lsn, commit_lsn, tx_ordinal, replicated_table_schema, table_row })
 }
@@ -431,20 +439,24 @@ pub(crate) fn parse_event_from_update_message(
 
     // Calculate total bytes from both old and new tuple data.
     let new_tuple_data = update_body.new_tuple().tuple_data();
-    let mut total_bytes = calculate_tuple_bytes(new_tuple_data);
-    if let Some(identity) = &old_tuple {
-        total_bytes += calculate_tuple_bytes(identity.tuple_data());
-    }
+    let new_tuple_bytes = calculate_tuple_bytes(new_tuple_data);
+    let old_tuple_bytes =
+        old_tuple.as_ref().map(|identity| calculate_tuple_bytes(identity.tuple_data()));
+    let total_bytes = new_tuple_bytes + old_tuple_bytes.unwrap_or_default();
     counter!(ETL_BYTES_PROCESSED_TOTAL, EVENT_TYPE_LABEL => "update").increment(total_bytes);
 
     let old_table_row = match old_tuple {
-        Some(identity) if is_key => Some(OldTableRow::Key(normalize_key_tuple_to_row(
-            &replicated_table_schema,
-            identity.tuple_data(),
-        )?)),
-        Some(identity) => Some(OldTableRow::Full(convert_tuple_to_row(
+        Some(identity) if is_key => {
+            Some(OldTableRow::Key(normalize_key_tuple_to_row_with_payload_size_hint(
+                &replicated_table_schema,
+                identity.tuple_data(),
+                tuple_bytes_to_size_hint(old_tuple_bytes.unwrap_or_default()),
+            )?))
+        }
+        Some(identity) => Some(OldTableRow::Full(convert_tuple_to_row_with_payload_size_hint(
             replicated_table_schema.column_schemas(),
             identity.tuple_data(),
+            tuple_bytes_to_size_hint(old_tuple_bytes.unwrap_or_default()),
         )?)),
         None => None,
     };
@@ -453,10 +465,11 @@ pub(crate) fn parse_event_from_update_message(
     // - full rows can recover any unchanged column by index.
     // - key rows can recover only unchanged key columns, consuming key values in
     //   replicated table order as we walk the schema below.
-    let table_row = convert_update_tuple_to_updated_table_row(
+    let table_row = convert_update_tuple_to_updated_table_row_with_payload_size_hint(
         &replicated_table_schema,
         new_tuple_data,
         old_table_row.as_ref(),
+        tuple_bytes_to_size_hint(new_tuple_bytes),
     )?;
 
     histogram!(ETL_ROW_SIZE_BYTES, EVENT_TYPE_LABEL => "update").record(total_bytes as f64);
@@ -499,22 +512,27 @@ pub(crate) fn parse_event_from_delete_message(
     let is_key = delete_body.old_tuple().is_none();
     let old_tuple = delete_body.old_tuple().or(delete_body.key_tuple());
 
-    if let Some(identity) = &old_tuple {
-        let row_size_bytes = calculate_tuple_bytes(identity.tuple_data());
+    let old_tuple_bytes =
+        old_tuple.as_ref().map(|identity| calculate_tuple_bytes(identity.tuple_data()));
 
+    if let Some(row_size_bytes) = old_tuple_bytes {
         counter!(ETL_BYTES_PROCESSED_TOTAL, EVENT_TYPE_LABEL => "delete").increment(row_size_bytes);
 
         histogram!(ETL_ROW_SIZE_BYTES, EVENT_TYPE_LABEL => "delete").record(row_size_bytes as f64);
     }
 
     let old_table_row = match old_tuple {
-        Some(identity) if is_key => Some(OldTableRow::Key(normalize_key_tuple_to_row(
-            &replicated_table_schema,
-            identity.tuple_data(),
-        )?)),
-        Some(identity) => Some(OldTableRow::Full(convert_tuple_to_row(
+        Some(identity) if is_key => {
+            Some(OldTableRow::Key(normalize_key_tuple_to_row_with_payload_size_hint(
+                &replicated_table_schema,
+                identity.tuple_data(),
+                tuple_bytes_to_size_hint(old_tuple_bytes.unwrap_or_default()),
+            )?))
+        }
+        Some(identity) => Some(OldTableRow::Full(convert_tuple_to_row_with_payload_size_hint(
             replicated_table_schema.column_schemas(),
             identity.tuple_data(),
+            tuple_bytes_to_size_hint(old_tuple_bytes.unwrap_or_default()),
         )?)),
         None => None,
     };
@@ -547,9 +565,28 @@ pub(crate) fn parse_event_from_truncate_message(
 /// The tuple width must exactly match the number of provided column schemas.
 /// Every field must decode to a concrete [`Cell`]; `UnchangedToast` is
 /// therefore rejected here because full row images must be self-contained.
+#[cfg(test)]
 fn convert_tuple_to_row<'a>(
     column_schemas: impl ExactSizeIterator<Item = &'a ColumnSchema>,
     tuple_data: &[protocol::TupleData],
+) -> EtlResult<TableRow> {
+    convert_tuple_to_row_inner(column_schemas, tuple_data, None)
+}
+
+/// Converts a full tuple image using a precomputed row payload estimate.
+fn convert_tuple_to_row_with_payload_size_hint<'a>(
+    column_schemas: impl ExactSizeIterator<Item = &'a ColumnSchema>,
+    tuple_data: &[protocol::TupleData],
+    payload_size_hint_bytes: usize,
+) -> EtlResult<TableRow> {
+    convert_tuple_to_row_inner(column_schemas, tuple_data, Some(payload_size_hint_bytes))
+}
+
+/// Converts a full tuple image into a dense [`TableRow`].
+fn convert_tuple_to_row_inner<'a>(
+    column_schemas: impl ExactSizeIterator<Item = &'a ColumnSchema>,
+    tuple_data: &[protocol::TupleData],
+    payload_size_hint_bytes: Option<usize>,
 ) -> EtlResult<TableRow> {
     let column_count = column_schemas.len();
     if tuple_data.len() != column_count {
@@ -579,7 +616,12 @@ fn convert_tuple_to_row<'a>(
         values.push(value);
     }
 
-    Ok(TableRow::new(values))
+    Ok(match payload_size_hint_bytes {
+        Some(payload_size_hint_bytes) => {
+            TableRow::new_with_payload_size_hint(values, payload_size_hint_bytes)
+        }
+        None => TableRow::new(values),
+    })
 }
 
 /// Converts a Postgres update tuple into a full or partial new row image.
@@ -598,10 +640,41 @@ fn convert_tuple_to_row<'a>(
 /// When PostgreSQL emits `UnchangedToast` for a column that cannot be resolved
 /// from the available old-row image, the column position is marked missing and
 /// the result becomes [`UpdatedTableRow::Partial`].
+#[cfg(test)]
 fn convert_update_tuple_to_updated_table_row(
     replicated_table_schema: &ReplicatedTableSchema,
     tuple_data: &[protocol::TupleData],
     old_table_row: Option<&OldTableRow>,
+) -> EtlResult<UpdatedTableRow> {
+    convert_update_tuple_to_updated_table_row_inner(
+        replicated_table_schema,
+        tuple_data,
+        old_table_row,
+        None,
+    )
+}
+
+/// Converts an update new-tuple using a precomputed row payload estimate.
+fn convert_update_tuple_to_updated_table_row_with_payload_size_hint(
+    replicated_table_schema: &ReplicatedTableSchema,
+    tuple_data: &[protocol::TupleData],
+    old_table_row: Option<&OldTableRow>,
+    payload_size_hint_bytes: usize,
+) -> EtlResult<UpdatedTableRow> {
+    convert_update_tuple_to_updated_table_row_inner(
+        replicated_table_schema,
+        tuple_data,
+        old_table_row,
+        Some(payload_size_hint_bytes),
+    )
+}
+
+/// Converts a Postgres update tuple into a full or partial new row image.
+fn convert_update_tuple_to_updated_table_row_inner(
+    replicated_table_schema: &ReplicatedTableSchema,
+    tuple_data: &[protocol::TupleData],
+    old_table_row: Option<&OldTableRow>,
+    payload_size_hint_bytes: Option<usize>,
 ) -> EtlResult<UpdatedTableRow> {
     let column_count = replicated_table_schema.column_schemas().len();
     if tuple_data.len() != column_count {
@@ -609,6 +682,23 @@ fn convert_update_tuple_to_updated_table_row(
             ErrorKind::ConversionError,
             "Tuple data field count does not match schema",
             format!("Expected {} tuple values, got {}", column_count, tuple_data.len())
+        );
+    }
+
+    if !tuple_contains_unchanged_toast(tuple_data) {
+        return convert_tuple_to_row_inner(
+            replicated_table_schema.column_schemas(),
+            tuple_data,
+            payload_size_hint_bytes,
+        )
+        .map(UpdatedTableRow::Full);
+    }
+
+    if old_table_row.is_none() {
+        return convert_update_tuple_without_old_row(
+            replicated_table_schema,
+            tuple_data,
+            payload_size_hint_bytes,
         );
     }
 
@@ -662,11 +752,77 @@ fn convert_update_tuple_to_updated_table_row(
     if partial_row {
         Ok(UpdatedTableRow::Partial(PartialTableRow::new(
             column_count,
-            TableRow::new(present_values),
+            table_row_with_optional_payload_size_hint(present_values, payload_size_hint_bytes),
             missing_column_indexes,
         )))
     } else {
-        Ok(UpdatedTableRow::Full(TableRow::new(full_values)))
+        Ok(UpdatedTableRow::Full(table_row_with_optional_payload_size_hint(
+            full_values,
+            payload_size_hint_bytes,
+        )))
+    }
+}
+
+/// Returns whether a tuple contains unresolved TOAST placeholders.
+fn tuple_contains_unchanged_toast(tuple_data: &[protocol::TupleData]) -> bool {
+    tuple_data.iter().any(|field| matches!(field, protocol::TupleData::UnchangedToast))
+}
+
+/// Converts an update new-tuple when there is no old-side row image.
+fn convert_update_tuple_without_old_row(
+    replicated_table_schema: &ReplicatedTableSchema,
+    tuple_data: &[protocol::TupleData],
+    payload_size_hint_bytes: Option<usize>,
+) -> EtlResult<UpdatedTableRow> {
+    let column_count = replicated_table_schema.column_schemas().len();
+    let mut full_values = Vec::with_capacity(column_count);
+    let mut present_values = Vec::new();
+    let mut missing_column_indexes = Vec::new();
+    let mut partial_row = false;
+
+    for (index, (column_schema, tuple_data)) in
+        replicated_table_schema.column_schemas().zip(tuple_data.iter()).enumerate()
+    {
+        match convert_tuple_data_to_cell(index, column_schema, tuple_data, None)? {
+            ConvertedTupleCell::Present(value) if partial_row => {
+                present_values.push(value);
+            }
+            ConvertedTupleCell::Present(value) => full_values.push(value),
+            ConvertedTupleCell::Missing => {
+                if !partial_row {
+                    present_values.reserve(column_count.saturating_sub(index));
+                    present_values.append(&mut full_values);
+                    partial_row = true;
+                }
+                missing_column_indexes.push(index);
+            }
+        }
+    }
+
+    if partial_row {
+        Ok(UpdatedTableRow::Partial(PartialTableRow::new(
+            column_count,
+            table_row_with_optional_payload_size_hint(present_values, payload_size_hint_bytes),
+            missing_column_indexes,
+        )))
+    } else {
+        Ok(UpdatedTableRow::Full(table_row_with_optional_payload_size_hint(
+            full_values,
+            payload_size_hint_bytes,
+        )))
+    }
+}
+
+/// Creates a row using the provided payload size hint when one is available.
+fn table_row_with_optional_payload_size_hint(
+    values: Vec<Cell>,
+    payload_size_hint_bytes: Option<usize>,
+) -> TableRow {
+    match payload_size_hint_bytes {
+        Some(payload_size_hint_bytes) => {
+            TableRow::new_with_payload_size_hint(values, payload_size_hint_bytes)
+        }
+        None => TableRow::new(values),
     }
 }
 
@@ -791,6 +947,7 @@ impl<'a> OldRowResolver<'a> {
 fn convert_dense_key_tuple_to_row(
     identity_column_schemas: &[&ColumnSchema],
     tuple_data: &[protocol::TupleData],
+    payload_size_hint_bytes: Option<usize>,
 ) -> EtlResult<TableRow> {
     let mut values = Vec::with_capacity(identity_column_schemas.len());
 
@@ -812,7 +969,7 @@ fn convert_dense_key_tuple_to_row(
         values.push(value);
     }
 
-    Ok(TableRow::new(values))
+    Ok(table_row_with_optional_payload_size_hint(values, payload_size_hint_bytes))
 }
 
 /// Converts a full-width key-image tuple into a dense row containing only
@@ -821,6 +978,7 @@ fn convert_full_width_key_tuple_to_row(
     identity_column_schemas: &[&ColumnSchema],
     replicated_column_schemas: &[&ColumnSchema],
     tuple_data: &[protocol::TupleData],
+    payload_size_hint_bytes: Option<usize>,
 ) -> EtlResult<TableRow> {
     let mut values = Vec::with_capacity(identity_column_schemas.len());
     let mut identity_columns = identity_column_schemas.iter().peekable();
@@ -856,7 +1014,7 @@ fn convert_full_width_key_tuple_to_row(
         values.push(value);
     }
 
-    Ok(TableRow::new(values))
+    Ok(table_row_with_optional_payload_size_hint(values, payload_size_hint_bytes))
 }
 
 /// Normalizes a key-image tuple into a dense row containing only
@@ -876,9 +1034,32 @@ fn convert_full_width_key_tuple_to_row(
 /// In both cases this function normalizes the result to the internal dense
 /// key-row shape so downstream code does not need to reason about the wire
 /// layout it came from.
+#[cfg(test)]
 fn normalize_key_tuple_to_row(
     replicated_table_schema: &ReplicatedTableSchema,
     tuple_data: &[protocol::TupleData],
+) -> EtlResult<TableRow> {
+    normalize_key_tuple_to_row_inner(replicated_table_schema, tuple_data, None)
+}
+
+/// Normalizes a key-image tuple using a precomputed row payload estimate.
+fn normalize_key_tuple_to_row_with_payload_size_hint(
+    replicated_table_schema: &ReplicatedTableSchema,
+    tuple_data: &[protocol::TupleData],
+    payload_size_hint_bytes: usize,
+) -> EtlResult<TableRow> {
+    normalize_key_tuple_to_row_inner(
+        replicated_table_schema,
+        tuple_data,
+        Some(payload_size_hint_bytes),
+    )
+}
+
+/// Normalizes a key-image tuple into a dense key row.
+fn normalize_key_tuple_to_row_inner(
+    replicated_table_schema: &ReplicatedTableSchema,
+    tuple_data: &[protocol::TupleData],
+    payload_size_hint_bytes: Option<usize>,
 ) -> EtlResult<TableRow> {
     let identity_column_schemas: Vec<_> =
         replicated_table_schema.identity_column_schemas().collect();
@@ -895,13 +1076,16 @@ fn normalize_key_tuple_to_row(
     }
 
     match tuple_data.len() {
-        len if len == identity_column_count => {
-            convert_dense_key_tuple_to_row(&identity_column_schemas, tuple_data)
-        }
+        len if len == identity_column_count => convert_dense_key_tuple_to_row(
+            &identity_column_schemas,
+            tuple_data,
+            payload_size_hint_bytes,
+        ),
         len if len == replicated_column_count => convert_full_width_key_tuple_to_row(
             &identity_column_schemas,
             &replicated_column_schemas,
             tuple_data,
+            payload_size_hint_bytes,
         ),
         _ => {
             bail!(
@@ -969,12 +1153,23 @@ fn convert_tuple_data_to_cell(
             }
         }
         protocol::TupleData::Text(bytes) => {
-            let str = str::from_utf8(&bytes[..])?;
-            parse_cell_from_postgres_text(&column_schema.typ, str).map(ConvertedTupleCell::Present)
+            parse_replication_text_cell(column_schema, bytes).map(ConvertedTupleCell::Present)
         }
         protocol::TupleData::Binary(_) => {
             bail!(ErrorKind::ConversionError, "Binary format not supported in tuple data");
         }
+    }
+}
+
+/// Parses a text tuple field into the representation used for Arrow batches.
+fn parse_replication_text_cell(
+    column_schema: &ColumnSchema,
+    value: &bytes::Bytes,
+) -> EtlResult<Cell> {
+    let value = str::from_utf8(value.as_ref())?;
+    match column_schema.typ {
+        Type::NUMERIC | Type::JSON | Type::JSONB => Ok(Cell::String(value.to_owned())),
+        _ => parse_cell_from_postgres_text(&column_schema.typ, value),
     }
 }
 

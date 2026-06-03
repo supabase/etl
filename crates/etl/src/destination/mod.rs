@@ -8,7 +8,11 @@
 pub mod async_result;
 mod base;
 pub mod capabilities;
+pub mod task_set;
 
-pub use async_result::{DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult};
+pub use async_result::{
+    DropTableForCopyResult, WriteEventsResult, WriteSnapshotBatchResult, WriteStreamBatchesResult,
+    WriteTableRowsResult,
+};
 pub use base::Destination;
 pub use capabilities::PipelineDestination;

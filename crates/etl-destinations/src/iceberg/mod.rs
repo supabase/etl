@@ -11,6 +11,10 @@ pub mod test_utils;
 pub use core::table_name_to_iceberg_table_name;
 pub use core::{DestinationNamespace, IcebergDestination, IcebergOperationType};
 
+pub(crate) use arrow57 as arrow;
+#[cfg(feature = "test-utils")]
+pub use arrow57 as test_arrow;
 pub use client::IcebergClient;
 pub use encoding::UNIX_EPOCH;
 pub use iceberg::io::{S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_SECRET_ACCESS_KEY};
+pub(crate) use parquet57 as parquet;

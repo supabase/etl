@@ -1,6 +1,5 @@
 use std::{collections::HashMap, sync::Arc};
 
-use arrow::array::RecordBatch;
 use etl::{
     error::EtlResult,
     types::{ColumnSchema, TableRow},
@@ -25,13 +24,14 @@ use iceberg::{
 use iceberg_catalog_rest::{
     REST_CATALOG_PROP_URI, REST_CATALOG_PROP_WAREHOUSE, RestCatalogBuilder,
 };
-use parquet::{basic::Compression, file::properties::WriterProperties};
 use tracing::debug;
 
 use crate::iceberg::{
+    arrow::array::RecordBatch,
     catalog::{SupabaseCatalog, SupabaseClient},
     encoding::rows_to_record_batch,
     error::{arrow_error_to_etl_error, iceberg_error_to_etl_error},
+    parquet::{basic::Compression, file::properties::WriterProperties},
     schema::postgres_to_iceberg_schema,
 };
 

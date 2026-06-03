@@ -1,12 +1,16 @@
 use core::str;
 
 use etl_postgres::types::ColumnSchema;
+#[cfg(test)]
 use tracing::error;
 
 use crate::{
     bail,
-    conversions::text::parse_cell_from_postgres_text,
     error::{ErrorKind, EtlResult},
+};
+#[cfg(test)]
+use crate::{
+    conversions::text::parse_cell_from_postgres_text,
     types::{Cell, TableRow},
 };
 
@@ -22,146 +26,195 @@ use crate::{
 /// Returns an error if the row data is not valid UTF-8, the column count
 /// doesn't match the schema, the row is not properly terminated, or a cell
 /// value cannot be parsed according to its column type.
+#[cfg(test)]
 pub(crate) fn parse_table_row_from_postgres_copy_bytes<'a>(
     row: &[u8],
-    mut column_schemas: impl ExactSizeIterator<Item = &'a ColumnSchema>,
+    column_schemas: impl ExactSizeIterator<Item = &'a ColumnSchema>,
 ) -> EtlResult<TableRow> {
-    let expected_column_count = column_schemas.len();
     let mut values = Vec::with_capacity(column_schemas.len());
 
+    parse_postgres_copy_row_fields(row, column_schemas, |_, column_schema, value| {
+        let value = match value {
+            Some(value) => match parse_cell_from_postgres_text(&column_schema.typ, value) {
+                Ok(value) => value,
+                Err(e) => {
+                    // Avoid logging source row values, which may contain customer data.
+                    error!(
+                        column_name = %column_schema.name,
+                        column_type = %column_schema.typ,
+                        value_length = value.len(),
+                        "error parsing column from postgres text",
+                    );
+                    return Err(e);
+                }
+            },
+            None => Cell::Null,
+        };
+
+        values.push(value);
+
+        Ok(())
+    })?;
+
+    Ok(TableRow::new(values))
+}
+
+/// Visits raw Postgres COPY text fields after applying COPY escaping rules.
+///
+/// The visitor receives `None` for the unescaped `\N` NULL marker and `Some`
+/// for every non-null field.
+pub(crate) fn parse_postgres_copy_row_fields<'a, F>(
+    row: &[u8],
+    mut column_schemas: impl ExactSizeIterator<Item = &'a ColumnSchema>,
+    mut visit: F,
+) -> EtlResult<()>
+where
+    F: FnMut(usize, &'a ColumnSchema, Option<&str>) -> EtlResult<()>,
+{
+    let expected_column_count = column_schemas.len();
+    let mut field_idx = 0;
+
     let row_str = str::from_utf8(row)?;
-    let mut chars = row_str.chars();
-    let mut val_str = String::with_capacity(10);
-    let mut in_escape = false;
+    let row = row_str.as_bytes();
+    let mut field_start = 0;
+    let mut escaped_value: Option<String> = None;
     let mut row_terminated = false;
-    let mut done = false;
+    let mut pos = 0;
 
-    // Main parsing loop - continues until all characters are processed
-    while !done {
-        // Inner loop parses a single field value until tab, newline, or end of input
-        loop {
-            match chars.next() {
-                Some(c) => match c {
-                    // Handle escaped characters - previous character was backslash
-                    c if in_escape => {
-                        // Special case: \N when escaped becomes literal \N (not NULL)
-                        if c == 'N' {
-                            val_str.push('\\');
-                            val_str.push(c);
-                        }
-                        // Standard Postgres escape sequences
-                        else if c == 'b' {
-                            val_str.push(8 as char); // backspace
-                        } else if c == 'f' {
-                            val_str.push(12 as char); // form feed
-                        } else if c == 'n' {
-                            val_str.push('\n'); // newline
-                        } else if c == 'r' {
-                            val_str.push('\r'); // carriage return
-                        } else if c == 't' {
-                            val_str.push('\t'); // tab
-                        } else if c == 'v' {
-                            val_str.push(11 as char); // vertical tab
-                        }
-                        // Any other character: strip backslash, keep character
-                        else {
-                            val_str.push(c);
-                        }
+    while pos < row.len() {
+        match row[pos] {
+            b'\\' => {
+                let value = if let Some(value) = escaped_value.as_mut() {
+                    value.push_str(
+                        str::from_utf8(&row[field_start..pos])
+                            .expect("field boundaries are valid utf-8"),
+                    );
+                    value
+                } else {
+                    let mut value = String::with_capacity(16);
+                    value.push_str(
+                        str::from_utf8(&row[field_start..pos])
+                            .expect("field boundaries are valid utf-8"),
+                    );
+                    escaped_value.insert(value)
+                };
 
-                        in_escape = false;
-                    }
-                    // Field separator - end current field parsing
-                    '\t' => {
-                        break;
-                    }
-                    // Row terminator - end current field and mark row complete
-                    '\n' => {
-                        row_terminated = true;
-                        break;
-                    }
-                    // Escape character - next character will be escaped
-                    '\\' => in_escape = true,
-                    // Regular character - add to current field value
-                    c => {
-                        val_str.push(c);
-                    }
-                },
-                // End of input reached
-                None => {
-                    // Validate that row was properly terminated with newline
-                    if !row_terminated {
-                        bail!(ErrorKind::ConversionError, "Row data not properly terminated");
-                    }
-                    done = true;
+                pos += 1;
+                if pos >= row.len() {
+                    bail!(ErrorKind::ConversionError, "Row data not properly terminated");
+                }
 
+                match row[pos] {
+                    b'N' => {
+                        value.push('\\');
+                        value.push('N');
+                        pos += 1;
+                    }
+                    b'b' => {
+                        value.push(8 as char);
+                        pos += 1;
+                    }
+                    b'f' => {
+                        value.push(12 as char);
+                        pos += 1;
+                    }
+                    b'n' => {
+                        value.push('\n');
+                        pos += 1;
+                    }
+                    b'r' => {
+                        value.push('\r');
+                        pos += 1;
+                    }
+                    b't' => {
+                        value.push('\t');
+                        pos += 1;
+                    }
+                    b'v' => {
+                        value.push(11 as char);
+                        pos += 1;
+                    }
+                    byte if byte.is_ascii() => {
+                        value.push(byte as char);
+                        pos += 1;
+                    }
+                    _ => {
+                        let escaped_char = row_str[pos..]
+                            .chars()
+                            .next()
+                            .expect("position points to a utf-8 character");
+                        value.push(escaped_char);
+                        pos += escaped_char.len_utf8();
+                    }
+                }
+
+                field_start = pos;
+            }
+            b'\t' | b'\n' => {
+                let is_row_terminator = row[pos] == b'\n';
+                let Some(column_schema) = column_schemas.next() else {
+                    let actual_column_count = field_idx + 1;
+                    bail!(
+                        ErrorKind::ConversionError,
+                        "Column count mismatch between schema and row",
+                        format!(
+                            "Expected {} columns but row contains at least {} columns",
+                            expected_column_count, actual_column_count
+                        )
+                    );
+                };
+
+                if let Some(value) = escaped_value.as_mut() {
+                    value.push_str(
+                        str::from_utf8(&row[field_start..pos])
+                            .expect("field boundaries are valid utf-8"),
+                    );
+                }
+
+                let value = match escaped_value.as_deref() {
+                    Some(value) => value,
+                    None => str::from_utf8(&row[field_start..pos])
+                        .expect("field boundaries are valid utf-8"),
+                };
+                let value = if value == "\\N" { None } else { Some(value) };
+
+                visit(field_idx, column_schema, value)?;
+
+                field_idx += 1;
+                escaped_value = None;
+                pos += 1;
+                field_start = pos;
+
+                if is_row_terminator {
+                    row_terminated = true;
                     break;
                 }
             }
+            _ => {
+                pos += 1;
+            }
         }
+    }
 
-        // Process the parsed field value if we're not done with the entire row
-        if !done {
-            // Get the next column schema - error if we have more fields than expected
-            let Some(column_schema) = column_schemas.next() else {
-                let actual_column_count = values.len() + 1;
-                bail!(
-                    ErrorKind::ConversionError,
-                    "Column count mismatch between schema and row",
-                    format!(
-                        "Expected {} columns but row contains at least {} columns",
-                        expected_column_count, actual_column_count
-                    )
-                );
-            };
-
-            // Convert the parsed string value to appropriate Cell type
-            let value = if val_str == "\\N" {
-                // Postgres NULL marker: \N represents a NULL value
-                // We preserve this as Cell::Null rather than converting to a typed null
-                // so that downstream code can handle null semantics appropriately
-                Cell::Null
-            } else {
-                // Convert non-null field value to appropriate Cell type based on column schema
-                // This delegates to TextFormatConverter which handles Postgres text format
-                // parsing for all supported data types (integers, floats, strings, booleans,
-                // etc.)
-                match parse_cell_from_postgres_text(&column_schema.typ, &val_str) {
-                    Ok(value) => value,
-                    Err(e) => {
-                        // Avoid logging source row values, which may contain customer data.
-                        error!(
-                            column_name = %column_schema.name,
-                            column_type = %column_schema.typ,
-                            value_length = val_str.len(),
-                            "error parsing column from postgres text",
-                        );
-                        return Err(e);
-                    }
-                }
-            };
-
-            // Add the converted value to the row and prepare for next field
-            values.push(value);
-            val_str.clear(); // Reset string buffer for next field
-        }
+    if !row_terminated {
+        bail!(ErrorKind::ConversionError, "Row data not properly terminated");
     }
 
     // Validate that all expected columns were present in the row
     // If there are still columns left in the schema iterator, it means the row
     // had fewer fields than expected, which is an error
     if column_schemas.next().is_some() {
-        let actual_column_count = values.len();
         bail!(
             ErrorKind::ConversionError,
             "Column count mismatch between schema and row",
             format!(
                 "Expected {} columns but row contains {} columns",
-                expected_column_count, actual_column_count
+                expected_column_count, field_idx
             )
         );
     }
 
-    Ok(TableRow::new(values))
+    Ok(())
 }
 
 #[cfg(test)]

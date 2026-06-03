@@ -68,6 +68,7 @@ pub(crate) fn cell_to_clickhouse_value(cell: Cell) -> EtlResult<ClickHouseValue>
         Cell::Time(t) => ClickHouseValue::String(t.to_string()),
         Cell::Timestamp(dt) => ClickHouseValue::DateTime64(dt.and_utc().timestamp_micros()),
         Cell::TimestampTz(dt) => ClickHouseValue::DateTime64(dt.timestamp_micros()),
+        Cell::TimestampTzMicros(micros) => ClickHouseValue::DateTime64(micros),
         Cell::Uuid(u) => ClickHouseValue::Uuid(*u.as_bytes()),
         Cell::Json(j) => ClickHouseValue::String(j.to_string()),
         Cell::Bytes(b) => ClickHouseValue::String(bytes_to_hex(&b)),

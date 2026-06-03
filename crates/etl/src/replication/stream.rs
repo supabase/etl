@@ -1,11 +1,13 @@
 use std::{
     fmt::{Display, Formatter},
+    mem::size_of,
     pin::Pin,
     task::{Context, Poll},
     time::{Duration, Instant},
 };
 
-use etl_postgres::types::{ColumnSchema, POSTGRES_EPOCH};
+use bytes::Bytes;
+use etl_postgres::types::POSTGRES_EPOCH;
 use futures::{Stream, ready};
 use metrics::{counter, histogram};
 use pin_project_lite::pin_project;
@@ -21,62 +23,67 @@ use tracing::warn;
 #[cfg(feature = "failpoints")]
 use crate::failpoints::{SEND_STATUS_UPDATE_FP, etl_fail_point_active};
 use crate::{
-    conversions::parse_table_row_from_postgres_copy_bytes,
     error::{ErrorKind, EtlResult},
     etl_error,
     metrics::{
         ETL_BYTES_PROCESSED_TOTAL, ETL_ROW_SIZE_BYTES, ETL_STATUS_UPDATES_SKIPPED_TOTAL,
         ETL_STATUS_UPDATES_TOTAL, EVENT_TYPE_LABEL, FORCED_LABEL, STATUS_UPDATE_TYPE_LABEL,
     },
-    types::TableRow,
+    types::SizeHint,
 };
 
 /// The amount of milliseconds between two consecutive status updates in case no
 /// forced update is requested.
 const STATUS_UPDATE_INTERVAL: Duration = Duration::from_millis(100);
 
+/// Raw row bytes from a Postgres COPY operation.
+#[derive(Debug)]
+pub(crate) struct TableCopyRowBytes {
+    bytes: Bytes,
+}
+
+impl TableCopyRowBytes {
+    /// Creates raw COPY row bytes.
+    fn new(bytes: Bytes) -> Self {
+        Self { bytes }
+    }
+}
+
+impl AsRef<[u8]> for TableCopyRowBytes {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+impl SizeHint for TableCopyRowBytes {
+    fn size_hint(&self) -> usize {
+        size_of::<Self>() + self.bytes.len()
+    }
+}
+
 pin_project! {
-    /// A stream that yields rows from a Postgres COPY operation.
-    ///
-    /// This stream wraps a [`CopyOutStream`] and converts each row into a [`TableRow`]
-    /// using the provided column schemas. The conversion process handles both text and
-    /// binary format data.
+    /// A stream that yields raw rows from a Postgres COPY operation.
     #[must_use = "streams do nothing unless polled"]
-    pub(crate) struct TableCopyStream<I> {
+    pub(crate) struct RawTableCopyStream {
         #[pin]
         stream: CopyOutStream,
-        column_schemas: I,
     }
 }
 
-impl<I> TableCopyStream<I> {
-    /// Creates a new [`TableCopyStream`] from a [`CopyOutStream`] and column
-    /// schemas.
-    ///
-    /// The column schemas are used to convert the raw Postgres data into
-    /// [`TableRow`]s.
-    pub(crate) fn wrap(stream: CopyOutStream, column_schemas: I) -> Self {
-        Self { stream, column_schemas }
+impl RawTableCopyStream {
+    /// Creates a new [`RawTableCopyStream`] from a [`CopyOutStream`].
+    pub(crate) fn wrap(stream: CopyOutStream) -> Self {
+        Self { stream }
     }
 }
 
-impl<'a, I> Stream for TableCopyStream<I>
-where
-    I: ExactSizeIterator<Item = &'a ColumnSchema> + Clone,
-{
-    type Item = EtlResult<TableRow>;
+impl Stream for RawTableCopyStream {
+    type Item = EtlResult<TableCopyRowBytes>;
 
-    /// Polls the stream for the next converted table row with comprehensive
-    /// error handling.
-    ///
-    /// This method handles the complex process of converting raw Postgres COPY
-    /// data into structured [`TableRow`] objects, with detailed error
-    /// reporting for various failure modes.
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.project();
 
         match ready!(this.stream.poll_next(cx)) {
-            // Row copy received.
             Some(Ok(row)) => {
                 let row_size_bytes = row.len() as u64;
 
@@ -86,16 +93,9 @@ where
                 histogram!(ETL_ROW_SIZE_BYTES, EVENT_TYPE_LABEL => "copy")
                     .record(row_size_bytes as f64);
 
-                // Conversion step: transform raw bytes into structured TableRow.
-                // This is where most errors occur due to data format or type issues
-                match parse_table_row_from_postgres_copy_bytes(&row, this.column_schemas.clone()) {
-                    Ok(row) => Poll::Ready(Some(Ok(row))),
-                    Err(err) => Poll::Ready(Some(Err(err))),
-                }
+                Poll::Ready(Some(Ok(TableCopyRowBytes::new(row))))
             }
-            // Postgres connection or protocol-level failure.
             Some(Err(err)) => Poll::Ready(Some(Err(err.into()))),
-            // Normal completion, no more rows available.
             None => Poll::Ready(None),
         }
     }
@@ -110,8 +110,8 @@ pub(crate) enum StatusUpdateType {
     /// Represents a periodic heartbeat sent while the apply loop is otherwise
     /// idle.
     PeriodicKeepAlive,
-    /// Represents an update before shutdown that requests an immediate reply
-    /// from Postgres.
+    /// Represents an update before shutdown that requires acknowledgement from
+    /// Postgres.
     ShutdownFlush,
 }
 
@@ -149,7 +149,7 @@ impl Display for StatusUpdateType {
 pin_project! {
     /// A stream that yields replication events from a Postgres logical replication stream and keeps
     /// track of last sent status updates.
-pub(crate) struct EventsStream {
+    pub(crate) struct EventsStream {
         #[pin]
         stream: LogicalReplicationStream,
         last_update: Option<Instant>,
@@ -188,6 +188,7 @@ impl EventsStream {
         }
 
         let this = self.project();
+
         // If the new write lsn is less than the last one, we can safely ignore it,
         // since we only want to report monotonically increasing values.
         if let Some(last_write_lsn) = this.last_write_lsn

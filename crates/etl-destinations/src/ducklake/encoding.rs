@@ -72,6 +72,9 @@ fn cell_to_sql_literal(cell: Cell) -> String {
         Cell::TimestampTz(dt) => {
             format!("TIMESTAMPTZ '{}'", dt.format("%Y-%m-%d %H:%M:%S%.6f%:z"))
         }
+        Cell::TimestampTzMicros(micros) => {
+            format!("TIMESTAMPTZ '1970-01-01 00:00:00+00' + INTERVAL '{micros} microseconds'")
+        }
         Cell::Uuid(u) => format!("CAST({} AS UUID)", quote_literal(&u.to_string())),
         Cell::Json(j) => format!("CAST({} AS JSON)", quote_literal(&j.to_string())),
         Cell::Bytes(b) => format!("from_hex('{}')", encode_hex(&b)),
@@ -96,6 +99,7 @@ fn cell_to_owned(cell: &Cell) -> Cell {
         Cell::Time(value) => Cell::Time(*value),
         Cell::Timestamp(value) => Cell::Timestamp(*value),
         Cell::TimestampTz(value) => Cell::TimestampTz(*value),
+        Cell::TimestampTzMicros(value) => Cell::TimestampTzMicros(*value),
         Cell::Uuid(value) => Cell::Uuid(*value),
         Cell::Json(value) => Cell::Json(value.clone()),
         Cell::Bytes(value) => Cell::Bytes(value.clone()),
@@ -298,6 +302,7 @@ fn cell_to_value(cell: Cell) -> Value {
             Value::Timestamp(TimeUnit::Microsecond, dt.and_utc().timestamp_micros())
         }
         Cell::TimestampTz(dt) => Value::Timestamp(TimeUnit::Microsecond, dt.timestamp_micros()),
+        Cell::TimestampTzMicros(micros) => Value::Timestamp(TimeUnit::Microsecond, micros),
         // UUID stored as text; DuckDB casts VARCHAR → UUID automatically.
         Cell::Uuid(u) => Value::Text(u.to_string()),
         // JSON serialised as text.
