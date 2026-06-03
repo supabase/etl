@@ -561,8 +561,9 @@ where
         }
         CopyPartition::LeafPartition { leaf_table_id } => {
             child_replication_transaction
-                .get_table_copy_stream(
+                .get_table_copy_stream_with_filter_table(
                     *leaf_table_id,
+                    table_id,
                     &replicated_column_schemas,
                     publication_name.as_ref().map(Arc::as_ref),
                 )

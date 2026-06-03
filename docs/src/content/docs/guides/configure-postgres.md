@@ -247,6 +247,12 @@ CREATE PUBLICATION schema_tables FOR TABLES IN SCHEMA public, analytics;
 CREATE PUBLICATION inserts_only FOR TABLE users WITH (publish = 'insert');
 ```
 
+Avoid publishing ETL-owned tables. If the source database is also used as the
+ETL state store, the `etl` schema contains ETL internal tables. Do not include
+that schema in the publication. In that setup, `FOR ALL TABLES` also includes
+ETL-owned tables, so use explicit table lists or `FOR TABLES IN SCHEMA ...` for
+customer-owned schemas instead.
+
 #### Partitioned Tables
 
 ETL supports PostgreSQL partition publications with either
@@ -262,8 +268,8 @@ replication messages.
 | `FOR TABLE orders_2026` where `orders_2026` is a partitioned subtree | `true` | `orders_2026` | `orders_2026` |
 | `FOR TABLE orders_2026` where `orders_2026` is a partitioned subtree | `false` | Leaf partitions under `orders_2026` | The leaf partitions under `orders_2026` |
 | `FOR TABLE orders_2026_01` where `orders_2026_01` is a leaf partition | Either | `orders_2026_01` | `orders_2026_01` |
-| `FOR ALL TABLES` for the whole database, or `FOR TABLES IN SCHEMA ...` for selected schemas | `true` | Partition roots plus regular tables | Partition roots plus regular tables |
-| `FOR ALL TABLES` for the whole database, or `FOR TABLES IN SCHEMA ...` for selected schemas | `false` | Leaf partitions plus regular tables | Leaf partitions plus regular tables |
+| `FOR ALL TABLES` for the whole database, or `FOR TABLES IN SCHEMA ...` for selected schemas. Do not include ETL-owned tables. | `true` | Partition roots plus regular tables | Partition roots plus regular tables |
+| `FOR ALL TABLES` for the whole database, or `FOR TABLES IN SCHEMA ...` for selected schemas. Do not include ETL-owned tables. | `false` | Leaf partitions plus regular tables | Leaf partitions plus regular tables |
 
 For example, with this hierarchy:
 

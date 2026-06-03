@@ -15,6 +15,7 @@ use etl::{
 };
 use etl_postgres::{below_version, types::TableName, version::POSTGRES_15};
 use etl_telemetry::tracing::init_test_tracing;
+use pg_escape::quote_identifier;
 use rand::random;
 use tokio_postgres::types::Type;
 
@@ -162,6 +163,83 @@ async fn assert_nested_partition_pipeline_case(
     }
 
     // We check the table rows again just to validate that no new ones were added.
+    let table_rows = destination.get_table_rows().await;
+    assert_table_row_counts(&table_rows, &expected_copy_counts);
+}
+
+async fn assert_nested_partition_pipeline_row_filter_case(
+    test_name: &str,
+    published_partition_target: PublishedPartitionTarget,
+) {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    if below_version!(database.server_version(), POSTGRES_15) {
+        return;
+    }
+
+    let hierarchy = create_nested_partition_hierarchy(&database, test_table_name(test_name)).await;
+
+    database
+        .run_sql(&format!(
+            "insert into {} (data, partition_year, partition_month) values
+             ('initial_2025_01', 2025, 1),
+             ('initial_2025_02', 2025, 2),
+             ('initial_2026_01', 2026, 1),
+             ('initial_2026_02', 2026, 2)",
+            hierarchy.root_table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    let (publication_table_name, expected_copy_counts) = match published_partition_target {
+        PublishedPartitionTarget::Top => {
+            (hierarchy.root_table_name.clone(), vec![(hierarchy.root_table_id, 2)])
+        }
+        PublishedPartitionTarget::Middle => {
+            (hierarchy.p_2026_table_name.clone(), vec![(hierarchy.p_2026_table_id, 1)])
+        }
+        PublishedPartitionTarget::Leaf => (
+            partition_table_name(&hierarchy.p_2026_table_name, "01"),
+            vec![(hierarchy.p_2026_01_table_id, 1)],
+        ),
+    };
+    let publication_name = format!("pub_{test_name}");
+    database
+        .run_sql(&format!(
+            "create publication {} for table {} where (partition_month = 1) with \
+             (publish_via_partition_root = true)",
+            quote_identifier(&publication_name),
+            publication_table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    let state_store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
+
+    let mut ready_notifies = Vec::new();
+    for (table_id, _) in &expected_copy_counts {
+        ready_notifies
+            .push(state_store.notify_on_table_state_type(*table_id, TableStateType::Ready).await);
+    }
+
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name,
+        state_store,
+        destination.clone(),
+    );
+
+    pipeline.start().await.unwrap();
+    for notify in &ready_notifies {
+        notify.notified().await;
+    }
+
+    let _ = pipeline.shutdown_and_wait().await;
+
     let table_rows = destination.get_table_rows().await;
     assert_table_row_counts(&table_rows, &expected_copy_counts);
 }
@@ -1241,6 +1319,33 @@ async fn nested_pipeline_leaf_without_partition_root() {
         "nested_pipeline_leaf_false",
         PublishedPartitionTarget::Leaf,
         false,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn nested_pipeline_top_root_with_partition_root_respects_row_filter_during_copy() {
+    assert_nested_partition_pipeline_row_filter_case(
+        "nested_pipeline_top_root_row_filter",
+        PublishedPartitionTarget::Top,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn nested_pipeline_middle_root_with_partition_root_respects_row_filter_during_copy() {
+    assert_nested_partition_pipeline_row_filter_case(
+        "nested_pipeline_middle_root_row_filter",
+        PublishedPartitionTarget::Middle,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn nested_pipeline_leaf_with_partition_root_respects_row_filter_during_copy() {
+    assert_nested_partition_pipeline_row_filter_case(
+        "nested_pipeline_leaf_row_filter",
+        PublishedPartitionTarget::Leaf,
     )
     .await;
 }

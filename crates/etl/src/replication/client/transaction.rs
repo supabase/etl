@@ -196,6 +196,24 @@ impl<'a> PgReplicationTransactionCore<'a> {
         column_schemas: &[ColumnSchema],
         publication_name: Option<&str>,
     ) -> EtlResult<CopyOutStream> {
+        self.get_table_copy_stream_with_filter_table(
+            table_id,
+            table_id,
+            column_schemas,
+            publication_name,
+        )
+        .await
+    }
+
+    /// Creates a COPY stream for reading data from the specified table, using
+    /// another table to resolve publication row filters.
+    async fn get_table_copy_stream_with_filter_table(
+        &self,
+        table_id: TableId,
+        filter_table_id: TableId,
+        column_schemas: &[ColumnSchema],
+        publication_name: Option<&str>,
+    ) -> EtlResult<CopyOutStream> {
         let column_list = column_schemas
             .iter()
             .map(|col| quote_identifier(&col.name))
@@ -203,7 +221,7 @@ impl<'a> PgReplicationTransactionCore<'a> {
             .join(", ");
 
         let table_name = self.get_table_name(table_id).await?;
-        let row_filter = self.get_row_filter(table_id, publication_name).await?;
+        let row_filter = self.get_row_filter(filter_table_id, publication_name).await?;
 
         let copy_query = if let Some(row_filter) = row_filter {
             format!(
@@ -737,17 +755,23 @@ impl<'a> PgChildReplicationTransaction<'a> {
         Self { core }
     }
 
-    /// Creates a COPY stream for reading all data from the specified table.
-    ///
-    /// Resolves the table name and row filter internally. Used for copying leaf
-    /// partitions of a partitioned table.
-    pub(crate) async fn get_table_copy_stream(
+    /// Creates a COPY stream for reading data from the specified table, using
+    /// another table to resolve publication row filters.
+    pub(crate) async fn get_table_copy_stream_with_filter_table(
         &self,
         table_id: TableId,
+        filter_table_id: TableId,
         column_schemas: &[ColumnSchema],
         publication_name: Option<&str>,
     ) -> EtlResult<CopyOutStream> {
-        self.core.get_table_copy_stream(table_id, column_schemas, publication_name).await
+        self.core
+            .get_table_copy_stream_with_filter_table(
+                table_id,
+                filter_table_id,
+                column_schemas,
+                publication_name,
+            )
+            .await
     }
 
     /// Creates a COPY stream for a ctid partition range of the specified table.
