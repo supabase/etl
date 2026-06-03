@@ -515,8 +515,8 @@ impl PgReplicationClient {
     ///
     /// This follows `pg_publication_tables`, which applies PostgreSQL's
     /// logical replication identity rules for partitioned tables. With
-    /// `publish_via_partition_root=true`, PostgreSQL returns the topmost
-    /// published ancestor used for relation messages. With
+    /// `publish_via_partition_root=true`, PostgreSQL returns the published
+    /// partition root or subtree root used for relation messages. With
     /// `publish_via_partition_root=false`, it returns the leaf relations whose
     /// schemas are used for replication.
     ///

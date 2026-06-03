@@ -205,8 +205,12 @@ impl<'a> PgReplicationTransactionCore<'a> {
         .await
     }
 
-    /// Creates a COPY stream for reading data from the specified table, using
-    /// another table to resolve publication row filters.
+    /// Creates a COPY stream for reading data from `table_id`, using
+    /// `filter_table_id` to resolve publication row filters.
+    ///
+    /// Serial copy passes the same table ID for both values. Parallel copy of a
+    /// partitioned table can pass a leaf partition as the physical copy source
+    /// while resolving row filters from the tracked published root or subtree.
     async fn get_table_copy_stream_with_filter_table(
         &self,
         table_id: TableId,
@@ -755,8 +759,12 @@ impl<'a> PgChildReplicationTransaction<'a> {
         Self { core }
     }
 
-    /// Creates a COPY stream for reading data from the specified table, using
-    /// another table to resolve publication row filters.
+    /// Creates a COPY stream for reading data from `table_id`, using
+    /// `filter_table_id` to resolve publication row filters.
+    ///
+    /// This is used when parallel partition copy reads a leaf partition while
+    /// applying the row filter attached to the tracked published root or
+    /// subtree.
     pub(crate) async fn get_table_copy_stream_with_filter_table(
         &self,
         table_id: TableId,

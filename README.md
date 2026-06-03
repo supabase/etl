@@ -87,7 +87,7 @@ ETL officially supports and tests against **PostgreSQL 14, 15, 16, 17, and
 - **PostgreSQL 15+** is recommended for advanced publication features:
   - Column-level filtering
   - Row-level filtering with `WHERE` clauses
-  - `FOR ALL TABLES IN SCHEMA` syntax
+  - `FOR TABLES IN SCHEMA` syntax
 - **PostgreSQL 16+** is required when the ETL replication connection points at
   a physical read replica. Earlier versions support logical decoding only on
   the primary.

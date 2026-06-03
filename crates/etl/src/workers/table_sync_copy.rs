@@ -238,6 +238,9 @@ pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
 
 /// Copies a table serially using a single COPY stream from the slot
 /// transaction.
+///
+/// The tracked table is both the physical copy source and the publication
+/// row-filter lookup table.
 #[expect(clippy::too_many_arguments)]
 async fn serial_table_copy<D: Destination + Clone + Send + 'static>(
     replication_transaction: &PgReplicationTransaction<'_>,
@@ -493,7 +496,8 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
 ///
 /// The child transaction is already pinned to the exported snapshot. Depending
 /// on the [`CopyPartition`] variant, streams rows from either a ctid range or
-/// an entire leaf partition. All rows are written under the parent `table_id`.
+/// an entire leaf partition. All rows are written under the tracked
+/// `table_id`.
 #[expect(clippy::too_many_arguments)]
 async fn copy_partition<D>(
     child_replication_transaction: PgChildReplicationTransaction<'_>,

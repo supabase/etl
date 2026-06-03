@@ -288,14 +288,20 @@ orders
 (publish_via_partition_root = false)` replicates `orders_2026_01` and
 `orders_2026_02` as separate leaf tables.
 
-**Limitation:** With `publish_via_partition_root = true`, `TRUNCATE` operations on individual partitions are not replicated. Execute truncates on the published partition root table instead:
+On PostgreSQL 15+, row filters on partition publications are applied during
+both the initial copy and CDC. ETL uses the row filter attached to the effective
+publication table entry: the published root or subtree when
+`publish_via_partition_root = true`, and the published leaf relation when
+`publish_via_partition_root = false`.
+
+**Limitation:** With `publish_via_partition_root = true`, `TRUNCATE` operations on individual partitions are not replicated. Execute truncates on the published partition table instead. For a top-level publication, that is the top root; for a subtree publication, that is the published subtree root.
 
 ```sql
 -- This will NOT be replicated
-TRUNCATE TABLE orders_2024_q1;
+TRUNCATE TABLE orders_2026_01;
 
 -- This WILL be replicated
-TRUNCATE TABLE orders;
+TRUNCATE TABLE orders_2026;
 ```
 
 ### Managing Publications

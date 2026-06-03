@@ -1497,7 +1497,7 @@ async fn publication_creation_and_check() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn publication_table_ids_collapse_partitioned_root() {
+async fn publication_table_ids_use_published_partition_root() {
     assert_publication_table_ids_for_partition_hierarchy(
         "part_parent",
         PublishedPartitionTarget::Top,
