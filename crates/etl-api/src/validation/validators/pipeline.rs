@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use etl_postgres::replication::catalog::ETL_SCHEMA_NAME;
 
 use super::super::{ValidationContext, ValidationError, ValidationFailure, Validator};
 
@@ -219,6 +220,121 @@ impl Validator for PublicationHasTablesValidator {
                 ),
             )])
         }
+    }
+}
+
+/// Validates that a publication does not include ETL-owned tables.
+#[derive(Debug)]
+pub(super) struct PublicationExcludesEtlTablesValidator {
+    publication_name: String,
+}
+
+impl PublicationExcludesEtlTablesValidator {
+    pub(super) fn new(publication_name: String) -> Self {
+        Self { publication_name }
+    }
+}
+
+#[async_trait]
+impl Validator for PublicationExcludesEtlTablesValidator {
+    async fn validate(
+        &self,
+        ctx: &ValidationContext,
+    ) -> Result<Vec<ValidationFailure>, ValidationError> {
+        let source_pool =
+            ctx.source_pool.as_ref().expect("source pool required for publication validation");
+
+        let Some(puballtables) = sqlx::query_scalar::<_, bool>(
+            "select puballtables from pg_publication where pubname = $1",
+        )
+        .bind(&self.publication_name)
+        .fetch_optional(source_pool)
+        .await?
+        else {
+            // If publication doesn't exist, skip this check. The existence
+            // validator reports the actionable failure.
+            return Ok(vec![]);
+        };
+
+        if puballtables {
+            return Ok(vec![ValidationFailure::critical(
+                "Publication Includes ETL Tables",
+                format!(
+                    "Publication '{}' is defined FOR ALL TABLES, which also publishes ETL's \
+                     internal schema tables when they exist. Use an explicit table list or FOR \
+                     TABLES IN SCHEMA for customer-owned schemas, excluding the \
+                     '{ETL_SCHEMA_NAME}' schema.",
+                    self.publication_name
+                ),
+            )]);
+        }
+
+        let published_etl_tables: Vec<String> = sqlx::query_scalar(
+            r#"
+            select pt.schemaname || '.' || pt.tablename
+            from pg_publication_tables pt
+            where pt.pubname = $1
+              and pt.schemaname = $2
+            order by pt.tablename
+            limit 100
+            "#,
+        )
+        .bind(&self.publication_name)
+        .bind(ETL_SCHEMA_NAME)
+        .fetch_all(source_pool)
+        .await?;
+
+        if !published_etl_tables.is_empty() {
+            return Ok(vec![ValidationFailure::critical(
+                "Publication Includes ETL Tables",
+                format!(
+                    "Publication '{}' includes ETL internal tables: {}.\n\nRemove the \
+                     '{ETL_SCHEMA_NAME}' schema from the publication before starting this \
+                     pipeline. ETL state tables are implementation details and must not be \
+                     replicated.",
+                    self.publication_name,
+                    published_etl_tables.join(", ")
+                ),
+            )]);
+        }
+
+        let server_version_num: i32 =
+            sqlx::query_scalar("select current_setting('server_version_num')::int")
+                .fetch_one(source_pool)
+                .await?;
+
+        if server_version_num >= 15_00_00 {
+            let publishes_etl_schema: bool = sqlx::query_scalar(
+                r#"
+                select exists (
+                    select 1
+                    from pg_publication_namespace pn
+                    join pg_publication p on p.oid = pn.pnpubid
+                    join pg_namespace n on n.oid = pn.pnnspid
+                    where p.pubname = $1
+                      and n.nspname = $2
+                )
+                "#,
+            )
+            .bind(&self.publication_name)
+            .bind(ETL_SCHEMA_NAME)
+            .fetch_one(source_pool)
+            .await?;
+
+            if publishes_etl_schema {
+                return Ok(vec![ValidationFailure::critical(
+                    "Publication Includes ETL Tables",
+                    format!(
+                        "Publication '{}' includes the '{ETL_SCHEMA_NAME}' schema. Remove that \
+                         schema from the publication and publish only customer-owned schemas or \
+                         explicit customer tables.",
+                        self.publication_name
+                    ),
+                )]);
+            }
+        }
+
+        Ok(vec![])
     }
 }
 

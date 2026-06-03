@@ -1,3 +1,4 @@
+pub mod catalog;
 mod db;
 pub mod destination_table_metadata;
 pub mod health;
