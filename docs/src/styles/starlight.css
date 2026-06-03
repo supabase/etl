@@ -366,25 +366,36 @@ mobile-starlight-toc summary {
   --ec-codeLineHt: 1.55;
   margin-block: 1.25rem;
   max-width: 100%;
-  overflow-x: auto;
 }
 
 .expressive-code figure {
   position: relative;
+  max-width: 100%;
+  overflow: hidden;
+  border-radius: var(--ec-brdRad);
 }
 
 .expressive-code figure.frame.is-terminal > figcaption.header {
   display: none;
 }
 
-.expressive-code figure,
 .expressive-code pre {
   max-width: 100%;
   overflow-x: auto;
 }
 
 .expressive-code pre[data-language] {
-  padding-top: 1.45rem;
+  display: flex;
+  padding: 1.45rem 0 0.75rem;
+  border: var(--ec-brdWd, 1px) solid
+    var(--ec-brdCol, color-mix(in srgb, var(--sl-color-hairline) 75%, transparent));
+  border-radius: var(--ec-brdRad);
+  background: var(--ec-codeBg, color-mix(in srgb, var(--sl-color-bg-sidebar) 72%, transparent));
+  color: var(--ec-codeFg, var(--sl-color-gray-2));
+}
+
+.expressive-code pre[data-language] code {
+  min-width: 100%;
 }
 
 .sl-markdown-content > pre[data-language-label] {
@@ -428,6 +439,64 @@ mobile-starlight-toc summary {
 
 .expressive-code figure:not([data-language-label])::before {
   display: none;
+}
+
+.expressive-code .copy {
+  position: absolute;
+  top: 0.45rem;
+  right: 0.45rem;
+  z-index: 2;
+  display: flex;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+}
+
+.expressive-code figure:hover .copy,
+.expressive-code figure:focus-within .copy {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.expressive-code .copy button {
+  position: relative;
+  display: grid;
+  width: 1.8rem;
+  height: 1.8rem;
+  place-items: center;
+  padding: 0;
+  border: 1px solid color-mix(in srgb, var(--sl-color-hairline) 80%, transparent);
+  border-radius: 6px;
+  appearance: none;
+  background: color-mix(in srgb, var(--sl-color-bg) 88%, transparent);
+  color: var(--sl-color-gray-3);
+  cursor: pointer;
+}
+
+.expressive-code .copy button:hover,
+.expressive-code .copy button:focus-visible {
+  border-color: color-mix(in srgb, var(--sl-color-accent) 46%, var(--sl-color-hairline));
+  color: var(--sl-color-accent-high);
+}
+
+.expressive-code .copy button > div {
+  position: relative;
+  width: 0.72rem;
+  height: 0.82rem;
+  border: 1.5px solid currentColor;
+  border-radius: 2px;
+}
+
+.expressive-code .copy button > div::before {
+  position: absolute;
+  top: -0.25rem;
+  left: 0.2rem;
+  width: 0.72rem;
+  height: 0.82rem;
+  border: 1.5px solid currentColor;
+  border-radius: 2px;
+  background: inherit;
+  content: '';
 }
 
 .hero {

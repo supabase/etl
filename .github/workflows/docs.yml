@@ -32,6 +32,7 @@ jobs:
       - name: Build Docs
         run: npm run build
       - name: Smoke Test Docs
+        timeout-minutes: 5
         run: npm run smoke:docs
       - name: Upload Pages Artifact
         if: github.event_name != 'pull_request'
