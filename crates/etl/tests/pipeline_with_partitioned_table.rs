@@ -9,149 +9,28 @@ use etl::{
         test_destination_wrapper::TestDestinationWrapper,
         test_schema::create_partitioned_table,
     },
-    types::{EventType, PipelineId, TableId},
+    types::{EventType, PipelineId},
 };
 use etl_postgres::{below_version, types::TableName, version::POSTGRES_15};
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
-use tokio_postgres::{Client, types::Type};
+use tokio_postgres::types::Type;
+
+use crate::support::partition::create_nested_partition_hierarchy;
 
 fn quoted_qualified_table_name(schema: &str, table: &str) -> String {
     TableName::new(schema.to_owned(), table.to_owned()).as_quoted_identifier()
 }
 
-#[derive(Debug)]
-struct NestedPartitionHierarchy {
-    root_table_name: TableName,
-    p_2026_table_name: TableName,
-    root_table_id: TableId,
-    p_2025_01_table_id: TableId,
-    p_2025_02_table_id: TableId,
-    p_2026_table_id: TableId,
-    p_2026_01_table_id: TableId,
-    p_2026_02_table_id: TableId,
-}
-
-async fn get_table_id(
-    database: &etl_postgres::tokio::test_utils::PgDatabase<Client>,
-    table_name: &TableName,
-) -> TableId {
-    let row = database
-        .client
-        .as_ref()
-        .unwrap()
-        .query_one(
-            "select c.oid from pg_class c join pg_namespace n on n.oid = c.relnamespace
-             where n.nspname = $1 and c.relname = $2",
-            &[&table_name.schema, &table_name.name],
-        )
-        .await
-        .unwrap();
-
-    row.get(0)
-}
-
-async fn create_nested_partition_hierarchy(
-    database: &etl_postgres::tokio::test_utils::PgDatabase<Client>,
-    table_name: TableName,
-) -> NestedPartitionHierarchy {
-    database
-        .run_sql(&format!(
-            "create table {} (
-                id bigserial,
-                data text not null,
-                partition_year integer not null,
-                partition_month integer not null,
-                primary key (id, partition_year, partition_month)
-            ) partition by range (partition_year)",
-            table_name.as_quoted_identifier()
-        ))
-        .await
-        .unwrap();
-
-    let p_2025_table_name =
-        TableName::new(table_name.schema.clone(), format!("{}_2025", table_name.name));
-    database
-        .run_sql(&format!(
-            "create table {} partition of {} for values from (2025) to (2026)
-             partition by range (partition_month)",
-            p_2025_table_name.as_quoted_identifier(),
-            table_name.as_quoted_identifier()
-        ))
-        .await
-        .unwrap();
-
-    let p_2025_01_table_name =
-        TableName::new(table_name.schema.clone(), format!("{}_01", p_2025_table_name.name));
-    database
-        .run_sql(&format!(
-            "create table {} partition of {} for values from (1) to (2)",
-            p_2025_01_table_name.as_quoted_identifier(),
-            p_2025_table_name.as_quoted_identifier()
-        ))
-        .await
-        .unwrap();
-
-    let p_2025_02_table_name =
-        TableName::new(table_name.schema.clone(), format!("{}_02", p_2025_table_name.name));
-    database
-        .run_sql(&format!(
-            "create table {} partition of {} for values from (2) to (3)",
-            p_2025_02_table_name.as_quoted_identifier(),
-            p_2025_table_name.as_quoted_identifier()
-        ))
-        .await
-        .unwrap();
-
-    let p_2026_table_name =
-        TableName::new(table_name.schema.clone(), format!("{}_2026", table_name.name));
-    database
-        .run_sql(&format!(
-            "create table {} partition of {} for values from (2026) to (2027)
-             partition by range (partition_month)",
-            p_2026_table_name.as_quoted_identifier(),
-            table_name.as_quoted_identifier()
-        ))
-        .await
-        .unwrap();
-
-    let p_2026_01_table_name =
-        TableName::new(table_name.schema.clone(), format!("{}_01", p_2026_table_name.name));
-    database
-        .run_sql(&format!(
-            "create table {} partition of {} for values from (1) to (2)",
-            p_2026_01_table_name.as_quoted_identifier(),
-            p_2026_table_name.as_quoted_identifier()
-        ))
-        .await
-        .unwrap();
-
-    let p_2026_02_table_name =
-        TableName::new(table_name.schema.clone(), format!("{}_02", p_2026_table_name.name));
-    database
-        .run_sql(&format!(
-            "create table {} partition of {} for values from (2) to (3)",
-            p_2026_02_table_name.as_quoted_identifier(),
-            p_2026_table_name.as_quoted_identifier()
-        ))
-        .await
-        .unwrap();
-
-    NestedPartitionHierarchy {
-        root_table_id: get_table_id(database, &table_name).await,
-        p_2025_01_table_id: get_table_id(database, &p_2025_01_table_name).await,
-        p_2025_02_table_id: get_table_id(database, &p_2025_02_table_name).await,
-        p_2026_table_id: get_table_id(database, &p_2026_table_name).await,
-        p_2026_01_table_id: get_table_id(database, &p_2026_01_table_name).await,
-        p_2026_02_table_id: get_table_id(database, &p_2026_02_table_name).await,
-        root_table_name: table_name,
-        p_2026_table_name,
-    }
+#[derive(Clone, Copy)]
+enum PublishedPartitionTarget {
+    Top,
+    Middle,
 }
 
 async fn assert_nested_partition_pipeline_case(
     test_name: &str,
-    publish_middle_root: bool,
+    published_partition_target: PublishedPartitionTarget,
     publish_via_partition_root: bool,
 ) {
     init_test_tracing();
@@ -171,10 +50,9 @@ async fn assert_nested_partition_pipeline_case(
         .await
         .unwrap();
 
-    let publication_table_name = if publish_middle_root {
-        hierarchy.p_2026_table_name.clone()
-    } else {
-        hierarchy.root_table_name.clone()
+    let publication_table_name = match published_partition_target {
+        PublishedPartitionTarget::Top => hierarchy.root_table_name.clone(),
+        PublishedPartitionTarget::Middle => hierarchy.p_2026_table_name.clone(),
     };
     let publication_name = format!("pub_{test_name}");
     database
@@ -186,16 +64,16 @@ async fn assert_nested_partition_pipeline_case(
         .await
         .unwrap();
 
-    let expected_copy_counts = match (publish_middle_root, publish_via_partition_root) {
-        (false, true) => vec![(hierarchy.root_table_id, 4)],
-        (false, false) => vec![
+    let expected_copy_counts = match (published_partition_target, publish_via_partition_root) {
+        (PublishedPartitionTarget::Top, true) => vec![(hierarchy.root_table_id, 4)],
+        (PublishedPartitionTarget::Top, false) => vec![
             (hierarchy.p_2025_01_table_id, 1),
             (hierarchy.p_2025_02_table_id, 1),
             (hierarchy.p_2026_01_table_id, 1),
             (hierarchy.p_2026_02_table_id, 1),
         ],
-        (true, true) => vec![(hierarchy.p_2026_table_id, 2)],
-        (true, false) => {
+        (PublishedPartitionTarget::Middle, true) => vec![(hierarchy.p_2026_table_id, 2)],
+        (PublishedPartitionTarget::Middle, false) => {
             vec![(hierarchy.p_2026_01_table_id, 1), (hierarchy.p_2026_02_table_id, 1)]
         }
     };
@@ -241,13 +119,14 @@ async fn assert_nested_partition_pipeline_case(
         .wait_for_events_count(vec![(EventType::Insert, expected_cdc_total as u64)])
         .await;
 
-    let cdc_insert_values = if publish_middle_root {
-        "('new_2026_01', 2026, 1), ('new_2026_02', 2026, 2)"
-    } else {
-        "('new_2025_01', 2025, 1),
-         ('new_2025_02', 2025, 2),
-         ('new_2026_01', 2026, 1),
-         ('new_2026_02', 2026, 2)"
+    let cdc_insert_values = match published_partition_target {
+        PublishedPartitionTarget::Top => {
+            "('new_2025_01', 2025, 1),
+             ('new_2025_02', 2025, 2),
+             ('new_2026_01', 2026, 1),
+             ('new_2026_02', 2026, 2)"
+        }
+        PublishedPartitionTarget::Middle => "('new_2026_01', 2026, 1), ('new_2026_02', 2026, 2)",
     };
     database
         .run_sql(&format!(
@@ -1290,20 +1169,40 @@ async fn partition_detach_with_schema_publication_does_replicate_detached_insert
 
 #[tokio::test(flavor = "multi_thread")]
 async fn nested_pipeline_top_root_with_partition_root() {
-    assert_nested_partition_pipeline_case("nested_pipeline_top_root_true", false, true).await;
+    assert_nested_partition_pipeline_case(
+        "nested_pipeline_top_root_true",
+        PublishedPartitionTarget::Top,
+        true,
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn nested_pipeline_top_root_without_partition_root() {
-    assert_nested_partition_pipeline_case("nested_pipeline_top_root_false", false, false).await;
+    assert_nested_partition_pipeline_case(
+        "nested_pipeline_top_root_false",
+        PublishedPartitionTarget::Top,
+        false,
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn nested_pipeline_middle_root_with_partition_root() {
-    assert_nested_partition_pipeline_case("nested_pipeline_middle_root_true", true, true).await;
+    assert_nested_partition_pipeline_case(
+        "nested_pipeline_middle_root_true",
+        PublishedPartitionTarget::Middle,
+        true,
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn nested_pipeline_middle_root_without_partition_root() {
-    assert_nested_partition_pipeline_case("nested_pipeline_middle_root_false", true, false).await;
+    assert_nested_partition_pipeline_case(
+        "nested_pipeline_middle_root_false",
+        PublishedPartitionTarget::Middle,
+        false,
+    )
+    .await;
 }
