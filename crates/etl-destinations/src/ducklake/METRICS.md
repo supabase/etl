@@ -84,15 +84,18 @@ replicator when a Kubernetes-driven external maintenance pause ends. It measures
 only the time after the destination has drained foreground mutations and reported
 `Quiesced`; time spent queued by the controller is intentionally excluded.
 
-It carries one label:
+It carries these labels:
 
+- `operation`: `flush_inlined_data`, `merge_adjacent_files`,
+  `rewrite_data_files`, `expire_snapshots`, `cleanup_old_files`, or `unknown`
 - `outcome`: `cleared`, `expired`, `replaced`, or `state_missing`
 
 `etl_ducklake_external_maintenance_pause_active` is a 0/1 gauge emitted by the
 replicator while foreground ingestion is blocked or draining for an external
 maintenance pause. A value of `1` means ingestion is paused for external
 maintenance; `0` means the replicator is not currently paused by external
-maintenance.
+maintenance. It carries the same `operation` label as
+`etl_ducklake_external_maintenance_pause_duration_seconds`.
 
 `etl_ducklake_external_maintenance_triggered_total` counts external maintenance
 operation requests emitted by the replicator after it samples DuckLake catalog
@@ -102,9 +105,10 @@ waits in the controller queue.
 
 It carries these labels:
 
-- `operation`: `flush_inlined_data` or `rewrite_data_files`
-- `reason`: `pending_inlined_data_bytes_threshold` or
-  `active_data_files_threshold`
+- `operation`: `flush_inlined_data`, `rewrite_data_files`, or
+  `expire_snapshots`
+- `reason`: `pending_inlined_data_bytes_threshold`,
+  `active_data_files_threshold`, or `snapshot_retention_threshold`
 
 ### Table-health sampling metrics
 
