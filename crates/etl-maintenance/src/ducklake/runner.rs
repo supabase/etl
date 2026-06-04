@@ -2596,9 +2596,15 @@ mod tests {
     async fn maintenance_executor_timeout_releases_resources_for_follow_up_queries() {
         let executor = make_maintenance_test_executor();
 
+        // Run a long DuckDB query so the watchdog's interrupt handle aborts it
+        // at the deadline. This avoids racing `thread::sleep` against the
+        // watchdog's scheduler time, which was flaky under CI load.
         let error = executor
-            .run_with_timeout(Duration::from_millis(50), |_conn| -> EtlResult<()> {
-                std::thread::sleep(Duration::from_millis(100));
+            .run_with_timeout(Duration::from_millis(50), |conn| -> EtlResult<()> {
+                let _ =
+                    conn.query_row("SELECT COUNT(*) FROM range(0, 10_000_000_000)", [], |row| {
+                        row.get::<_, i64>(0)
+                    });
                 Ok(())
             })
             .await

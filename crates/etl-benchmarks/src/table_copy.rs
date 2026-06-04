@@ -231,6 +231,7 @@ fn destination_label(destination: DestinationType) -> &'static str {
     match destination {
         DestinationType::Null => "null",
         DestinationType::BigQuery => "bigquery",
+        DestinationType::ClickHouse => "clickhouse",
         DestinationType::Snowflake => "snowflake",
     }
 }
