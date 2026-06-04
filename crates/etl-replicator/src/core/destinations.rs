@@ -79,8 +79,8 @@ pub(super) async fn start(
     not(feature = "iceberg"),
     not(feature = "snowflake")
 ))]
-fn disabled_destination_error(kind: DestinationKind) -> ReplicatorError {
-    ReplicatorError::config(std::io::Error::other(format!(
+fn disabled_destination_error(kind: DestinationKind) -> crate::error::ReplicatorError {
+    crate::error::ReplicatorError::config(std::io::Error::other(format!(
         "Destination `{}` support is not compiled into this binary.",
         kind.as_str()
     )))
