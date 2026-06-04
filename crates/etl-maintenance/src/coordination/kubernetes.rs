@@ -17,9 +17,9 @@ use tracing::info;
 use super::{
     ExternalMaintenanceOperationHistory, ExternalMaintenanceOperationPolicy,
     ExternalMaintenanceOperationRequest, ExternalMaintenanceOperationRun,
-    ExternalMaintenanceOperations, ExternalMaintenancePause, ExternalMaintenanceReplicatorStatus,
-    ExternalMaintenanceRequestOutcome, ExternalMaintenanceRun, ExternalMaintenanceState,
-    ExternalMaintenanceStore,
+    ExternalMaintenanceOperations, ExternalMaintenancePause, ExternalMaintenancePausePolicy,
+    ExternalMaintenanceReplicatorStatus, ExternalMaintenanceRequestOutcome, ExternalMaintenanceRun,
+    ExternalMaintenanceState, ExternalMaintenanceStore,
 };
 
 const CR_NAME_ENV: &str = "ETL_DUCKLAKE_MAINTENANCE_CR_NAME";
@@ -192,6 +192,7 @@ fn state_from_ducklake_maintenance_cr(resource: &DynamicObject) -> ExternalMaint
     state.replicator = replicator_status(resource);
     state.last_successful_operations = operation_history(resource);
     state.last_completed_at = last_completed_at(resource);
+    state.pause_policy = pause_policy(resource);
     state.operation_policy = operation_policy(resource);
     state
 }
@@ -320,6 +321,20 @@ fn operation_policy(resource: &DynamicObject) -> ExternalMaintenanceOperationPol
     }
 }
 
+/// Reads the trusted pause policy from the DuckLake maintenance spec.
+fn pause_policy(resource: &DynamicObject) -> ExternalMaintenancePausePolicy {
+    let max_duration_seconds = resource
+        .data
+        .get("spec")
+        .and_then(|spec| spec.get("pause"))
+        .and_then(|pause| pause.get("maxDurationSeconds"))
+        .and_then(Value::as_u64)
+        .filter(|seconds| *seconds > 0)
+        .unwrap_or_else(|| ExternalMaintenancePausePolicy::default().max_duration_seconds);
+
+    ExternalMaintenancePausePolicy { max_duration_seconds }
+}
+
 fn enabled_value(value: Option<&Value>, default: bool) -> bool {
     value.and_then(|value| value.get("enabled")).and_then(Value::as_bool).unwrap_or(default)
 }
@@ -368,6 +383,25 @@ mod tests {
         assert!(policy.inline_flush_enabled);
         assert!(policy.rewrite_data_files_enabled);
         assert!(policy.expire_snapshots_enabled);
+    }
+
+    #[test]
+    fn pause_policy_reads_spec_max_duration_seconds() {
+        let resource: DynamicObject = serde_json::from_value(json!({
+            "apiVersion": "etl.supabase.com/v1alpha1",
+            "kind": "DuckLakeMaintenance",
+            "metadata": {
+                "name": "pipeline-maintenance"
+            },
+            "spec": {
+                "pause": {
+                    "maxDurationSeconds": 900
+                }
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(pause_policy(&resource).max_duration_seconds, 900);
     }
 
     #[test]

@@ -27,6 +27,8 @@ const POSTGRES_SCANNER_EXTENSION_FILE: &str = "postgres_scanner.duckdb_extension
 pub(super) const TARGET_FILE_SIZE_OPTION_NAME: &str = "target_file_size";
 pub(super) const MAINTENANCE_TARGET_FILE_SIZE: &str = "500MB";
 pub(super) const EXPIRE_SNAPSHOTS_OLDER_THAN: &str = "7 days";
+/// Minimum snapshot-retention interval accepted for DuckLake maintenance.
+pub(super) const MIN_EXPIRE_SNAPSHOTS_OLDER_THAN: &str = "1 day";
 const PARQUET_COMPRESSION_OPTION_NAME: &str = "parquet_compression";
 const PARQUET_COMPRESSION_OPTION_VALUE: &str = "zstd";
 const PARQUET_ROW_GROUP_SIZE_BYTES_OPTION_NAME: &str = "parquet_row_group_size_bytes";
@@ -85,8 +87,9 @@ pub(super) fn validate_expire_snapshots_older_than_sql(
     expire_snapshots_older_than: &str,
 ) -> String {
     format!(
-        "SELECT CAST(now() AS TIMESTAMP) - CAST({} AS INTERVAL);",
-        quote_literal(expire_snapshots_older_than)
+        "SELECT CAST({} AS INTERVAL) >= CAST({} AS INTERVAL);",
+        quote_literal(expire_snapshots_older_than),
+        quote_literal(MIN_EXPIRE_SNAPSHOTS_OLDER_THAN),
     )
 }
 
@@ -1210,12 +1213,15 @@ mod tests {
     }
 
     #[test]
-    fn validate_expire_snapshots_older_than_sql_casts_interval() {
+    fn validate_expire_snapshots_older_than_sql_checks_minimum_retention() {
         let sql = validate_expire_snapshots_older_than_sql("2 days");
         let quoted_interval = quote_literal("2 days");
+        let quoted_minimum = quote_literal(MIN_EXPIRE_SNAPSHOTS_OLDER_THAN);
 
-        assert!(sql.contains("SELECT CAST(now() AS TIMESTAMP) - CAST("));
+        assert!(sql.contains("SELECT CAST("));
         assert!(sql.contains(&quoted_interval));
+        assert!(sql.contains(">="));
+        assert!(sql.contains(&quoted_minimum));
         assert!(sql.contains(" AS INTERVAL);"));
     }
 

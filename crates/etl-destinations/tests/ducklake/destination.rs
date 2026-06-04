@@ -501,6 +501,35 @@ async fn ducklake_rejects_invalid_expire_snapshots_retention() {
     );
 }
 
+/// Destructive snapshot-retention intervals should fail during destination
+/// initialization.
+#[tokio::test(flavor = "multi_thread")]
+async fn ducklake_rejects_destructive_expire_snapshots_retention() {
+    let lake = create_test_lake("ducklake_rejects_destructive_expire_snapshots_retention").await;
+
+    for retention in ["0 seconds", "-1 day", "23 hours"] {
+        let err = DuckLakeDestination::new(
+            lake.catalog_url.clone(),
+            lake.data_url.clone(),
+            1,
+            None,
+            None,
+            None,
+            Some(retention.to_owned()),
+            MemoryStore::new(),
+        )
+        .await
+        .err()
+        .expect("destructive expire_snapshots_older_than should fail");
+
+        assert_eq!(err.kind(), ErrorKind::ConfigError);
+        assert_eq!(
+            err.description(),
+            Some("DuckLake expire_snapshots_older_than configuration failed")
+        );
+    }
+}
+
 /// Repeated writes should reuse the warm pooled DuckDB connection.
 #[cfg(feature = "test-utils")]
 #[tokio::test(flavor = "multi_thread")]

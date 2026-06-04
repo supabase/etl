@@ -43,6 +43,9 @@ const HTTPFS_EXTENSION_FILE: &str = "httpfs.duckdb_extension";
 const POSTGRES_SCANNER_EXTENSION_FILE: &str = "postgres_scanner.duckdb_extension";
 const TARGET_FILE_SIZE_OPTION_NAME: &str = "target_file_size";
 const MAINTENANCE_TARGET_FILE_SIZE: &str = "500MB";
+/// Minimum snapshot-retention interval accepted by the maintenance runner.
+const MIN_EXPIRE_SNAPSHOTS_OLDER_THAN: &str = "1 day";
+/// Minimum old-file cleanup grace window used by DuckLake cleanup.
 const CLEANUP_OLD_FILES_OLDER_THAN: &str = "1 day";
 const PARQUET_COMPRESSION_OPTION_NAME: &str = "parquet_compression";
 const PARQUET_COMPRESSION_OPTION_VALUE: &str = "zstd";
@@ -1561,6 +1564,9 @@ pub async fn run_maintenance_once(
     );
 
     let duckdb = open_maintenance_executor(&config).await?;
+    if config.expire_snapshots.enabled {
+        validate_expire_snapshots_older_than(&duckdb, &config.expire_snapshots.older_than).await?;
+    }
     let metadata_schema = match config.metadata_schema.clone() {
         Some(metadata_schema) => metadata_schema,
         None => resolve_metadata_schema(&duckdb).await?,
@@ -1652,6 +1658,44 @@ fn validate_config(config: &DuckLakeMaintenanceConfig) -> EtlResult<()> {
         ));
     }
     Ok(())
+}
+
+/// Validates the configured snapshot-retention interval on DuckDB.
+async fn validate_expire_snapshots_older_than(
+    duckdb: &DuckDbMaintenanceExecutor,
+    older_than: &str,
+) -> EtlResult<()> {
+    let sql = format!(
+        "SELECT CAST({} AS INTERVAL) >= CAST({} AS INTERVAL);",
+        quote_literal(older_than),
+        quote_literal(MIN_EXPIRE_SNAPSHOTS_OLDER_THAN),
+    );
+    let older_than_for_error = older_than.to_owned();
+    let retention_is_safe = duckdb
+        .run(move |conn| -> EtlResult<bool> {
+            conn.query_row(&sql, [], |row| row.get(0)).map_err(|source| {
+                etl_error!(
+                    ErrorKind::ConfigError,
+                    "DuckLake expire_snapshots_older_than configuration failed",
+                    format!("Invalid expire_snapshots_older_than value `{older_than_for_error}`"),
+                    source: source
+                )
+            })
+        })
+        .await?;
+
+    if retention_is_safe {
+        return Ok(());
+    }
+
+    Err(etl_error!(
+        ErrorKind::ConfigError,
+        "DuckLake expire_snapshots_older_than configuration failed",
+        format!(
+            "Snapshot retention must be at least {}, got `{}`",
+            MIN_EXPIRE_SNAPSHOTS_OLDER_THAN, older_than
+        )
+    ))
 }
 
 /// Opens initialized DuckDB connections for maintenance.
@@ -2590,6 +2634,26 @@ mod tests {
             "CALL ducklake_cleanup_old_files('lake', older_than => CAST(now() AS TIMESTAMP) - \
              CAST('1 day' AS INTERVAL));"
         );
+    }
+
+    #[tokio::test]
+    async fn validate_expire_snapshots_older_than_enforces_minimum_retention() {
+        let executor = make_maintenance_test_executor();
+
+        validate_expire_snapshots_older_than(&executor, "1 day").await.unwrap();
+        validate_expire_snapshots_older_than(&executor, "7 days").await.unwrap();
+
+        for older_than in ["0 seconds", "-1 day", "23 hours"] {
+            let error = validate_expire_snapshots_older_than(&executor, older_than)
+                .await
+                .expect_err("unsafe retention should fail");
+
+            assert_eq!(error.kind(), ErrorKind::ConfigError);
+            assert_eq!(
+                error.description(),
+                Some("DuckLake expire_snapshots_older_than configuration failed")
+            );
+        }
     }
 
     #[tokio::test]
