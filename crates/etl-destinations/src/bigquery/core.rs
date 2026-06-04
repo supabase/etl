@@ -1286,7 +1286,7 @@ where
     S: DestinationStore,
 {
     fn name() -> &'static str {
-        "bigquery"
+        etl_config::shared::DestinationKind::BigQuery.as_str()
     }
 
     async fn shutdown(&self) -> EtlResult<()> {
