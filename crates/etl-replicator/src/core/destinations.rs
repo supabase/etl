@@ -3,7 +3,7 @@
 use etl_config::shared::{DestinationKind, ReplicatorConfig};
 
 use super::ReplicatorStore;
-use crate::error::{ReplicatorError, ReplicatorResult};
+use crate::error::ReplicatorResult;
 
 /// Starts the configured destination pipeline.
 pub(super) async fn start(
