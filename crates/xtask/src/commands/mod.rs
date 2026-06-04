@@ -15,6 +15,7 @@ mod rotate_encryption_key;
 mod seed;
 mod test;
 mod test_clickhouse;
+mod test_snowflake;
 mod vendor_duckdb;
 
 pub(crate) use benchmark::BenchmarkArgs;
@@ -34,4 +35,5 @@ pub(crate) use rotate_encryption_key::RotateEncryptionKeyArgs;
 pub(crate) use seed::SeedArgs;
 pub(crate) use test::TestArgs;
 pub(crate) use test_clickhouse::TestClickhouseArgs;
+pub(crate) use test_snowflake::TestSnowflakeArgs;
 pub(crate) use vendor_duckdb::VendorDuckdbArgs;

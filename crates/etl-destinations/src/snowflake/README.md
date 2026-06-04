@@ -2,27 +2,23 @@
 
 ## Running Integration Tests
 
-Snowflake integration tests are marked `#[ignore]` because they require a real Snowflake account.
-
-To run them:
-
-1. Copy the example env file and fill in your Snowflake credentials (see variables below):
+The easiest way to run the full Snowflake test suite (API tests, validator integration, and
+destination integration) is a single xtask command:
 
 ```bash
-cp .env.example .env
-# edit .env with your values
+cargo x test-snowflake
 ```
 
-2. Source the file and run tests:
+This requires local Postgres to already be running. Run `cargo x init` first if the local
+development stack is not up. The command runs API-level Snowflake tests that do not require
+credentials, then runs the credentialed integration tiers when `TESTS_SNOWFLAKE_ACCOUNT`,
+`TESTS_SNOWFLAKE_USER`, and `TESTS_SNOWFLAKE_PRIVATE_KEY_PATH` are set. See `.env.example` for
+setup instructions. Use `--no-credentials` to run only the non-credentialed tier.
+
+To run a specific destination test directly:
 
 ```bash
 source .env
-cargo test -p etl-destinations --features snowflake,test-utils -- --ignored
-```
-
-To run a specific test:
-
-```bash
 cargo test -p etl-destinations --features snowflake,test-utils -- --ignored authenticate_against_snowflake
 ```
 
