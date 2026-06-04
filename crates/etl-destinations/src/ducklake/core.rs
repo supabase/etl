@@ -259,7 +259,7 @@ where
     S: DestinationStore,
 {
     fn name() -> &'static str {
-        "ducklake"
+        etl_config::shared::DestinationKind::Ducklake.as_str()
     }
 
     async fn shutdown(&self) -> EtlResult<()> {

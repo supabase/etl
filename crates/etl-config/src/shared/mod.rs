@@ -14,8 +14,8 @@ pub use connection::{
     TcpKeepaliveConfig, TlsConfig,
 };
 pub use destination::{
-    ClickHouseEngine, DestinationConfig, DestinationConfigWithoutSecrets, DuckLakeMaintenanceMode,
-    IcebergConfig, IcebergConfigWithoutSecrets,
+    ClickHouseEngine, DestinationConfig, DestinationConfigWithoutSecrets, DestinationKind,
+    DuckLakeMaintenanceMode, IcebergConfig, IcebergConfigWithoutSecrets,
 };
 pub use pipeline::{
     BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PipelineConfig,

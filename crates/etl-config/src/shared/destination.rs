@@ -62,6 +62,34 @@ pub enum DuckLakeMaintenanceMode {
     Postgres,
 }
 
+/// Supported product destination kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DestinationKind {
+    /// Google BigQuery destination.
+    BigQuery,
+    /// ClickHouse destination.
+    ClickHouse,
+    /// DuckLake destination.
+    Ducklake,
+    /// Iceberg destination.
+    Iceberg,
+    /// Snowflake destination.
+    Snowflake,
+}
+
+impl DestinationKind {
+    /// Returns the stable destination name used in metrics and tags.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            DestinationKind::BigQuery => "bigquery",
+            DestinationKind::ClickHouse => "clickhouse",
+            DestinationKind::Ducklake => "ducklake",
+            DestinationKind::Iceberg => "iceberg",
+            DestinationKind::Snowflake => "snowflake",
+        }
+    }
+}
+
 /// Configuration for supported ETL data destinations.
 ///
 /// Specifies the destination type and its associated configuration parameters.
@@ -173,6 +201,17 @@ impl DestinationConfig {
     pub const DEFAULT_CONNECTION_POOL_SIZE: usize = 4;
     /// Default connection pool size for DuckLake destinations.
     pub const DEFAULT_DUCKLAKE_POOL_SIZE: u32 = 4;
+
+    /// Returns the destination kind represented by this config.
+    pub fn kind(&self) -> DestinationKind {
+        match self {
+            DestinationConfig::BigQuery { .. } => DestinationKind::BigQuery,
+            DestinationConfig::ClickHouse { .. } => DestinationKind::ClickHouse,
+            DestinationConfig::Iceberg { .. } => DestinationKind::Iceberg,
+            DestinationConfig::Ducklake { .. } => DestinationKind::Ducklake,
+            DestinationConfig::Snowflake { .. } => DestinationKind::Snowflake,
+        }
+    }
 }
 
 /// Configuration for the iceberg destination with two variants
@@ -469,5 +508,14 @@ mod tests {
 
         assert!(!serialized.contains("catalog_url"));
         assert!(!serialized.contains("user:pass"));
+    }
+
+    #[test]
+    fn destination_kind_names_match_metrics_labels() {
+        assert_eq!(DestinationKind::BigQuery.as_str(), "bigquery");
+        assert_eq!(DestinationKind::ClickHouse.as_str(), "clickhouse");
+        assert_eq!(DestinationKind::Ducklake.as_str(), "ducklake");
+        assert_eq!(DestinationKind::Iceberg.as_str(), "iceberg");
+        assert_eq!(DestinationKind::Snowflake.as_str(), "snowflake");
     }
 }

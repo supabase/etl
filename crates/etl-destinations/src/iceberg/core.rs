@@ -620,7 +620,7 @@ where
 {
     /// Returns the identifier name for this destination type.
     fn name() -> &'static str {
-        "iceberg"
+        etl_config::shared::DestinationKind::Iceberg.as_str()
     }
 
     async fn shutdown(&self) -> EtlResult<()> {

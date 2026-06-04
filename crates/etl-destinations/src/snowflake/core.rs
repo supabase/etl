@@ -423,7 +423,7 @@ where
     C: StreamClient,
 {
     fn name() -> &'static str {
-        "snowflake"
+        etl_config::shared::DestinationKind::Snowflake.as_str()
     }
 
     async fn shutdown(&self) -> EtlResult<()> {
