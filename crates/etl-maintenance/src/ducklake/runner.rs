@@ -42,12 +42,12 @@ const DUCKLAKE_EXTENSION_FILE: &str = "ducklake.duckdb_extension";
 const HTTPFS_EXTENSION_FILE: &str = "httpfs.duckdb_extension";
 const POSTGRES_SCANNER_EXTENSION_FILE: &str = "postgres_scanner.duckdb_extension";
 const TARGET_FILE_SIZE_OPTION_NAME: &str = "target_file_size";
-const MAINTENANCE_TARGET_FILE_SIZE: &str = "10MB";
+const MAINTENANCE_TARGET_FILE_SIZE: &str = "500MB";
 const CLEANUP_OLD_FILES_OLDER_THAN: &str = "1 day";
 const PARQUET_COMPRESSION_OPTION_NAME: &str = "parquet_compression";
 const PARQUET_COMPRESSION_OPTION_VALUE: &str = "zstd";
 const PARQUET_ROW_GROUP_SIZE_BYTES_OPTION_NAME: &str = "parquet_row_group_size_bytes";
-const PARQUET_ROW_GROUP_SIZE_BYTES_OPTION_VALUE: &str = "10MB";
+const PARQUET_ROW_GROUP_SIZE_BYTES_OPTION_VALUE: &str = "20MB";
 const PARQUET_VERSION_OPTION_NAME: &str = "parquet_version";
 const PARQUET_VERSION_OPTION_VALUE: u8 = 2;
 const PRESERVE_INSERTION_ORDER_OPTION_NAME: &str = "preserve_insertion_order";
@@ -1437,8 +1437,6 @@ pub struct DuckLakeMaintenanceConfig {
     pub s3: Option<S3Config>,
     /// Optional DuckLake metadata schema.
     pub metadata_schema: Option<String>,
-    /// Optional DuckDB memory cache limit retained for config compatibility.
-    pub duckdb_memory_cache_limit: Option<String>,
     /// DuckLake `target_file_size` used by compaction.
     pub maintenance_target_file_size: Option<String>,
     /// Inline flush operation config.
@@ -1789,13 +1787,23 @@ async fn run_merge_adjacent_files(
     info!(
         max_compacted_files = config.max_compacted_files,
         max_tables_per_run = config.max_tables_per_run,
+        target_file_size = %config.target_file_size,
         table_count = table_names.len(),
         "ducklake merge-adjacent-files evaluation started"
     );
+    let target_file_size_bytes = parse_size_bytes(&config.target_file_size);
+    if target_file_size_bytes.is_none() {
+        warn!(
+            target_file_size = %config.target_file_size,
+            "ducklake merge-adjacent-files target file size could not be parsed for selection; \
+             falling back to small-file ratio"
+        );
+    }
     let selected = select_merge_tables(
         metadata_pg_pool,
         metadata_schema,
         table_names,
+        target_file_size_bytes,
         config.max_tables_per_run,
     )
     .await?;
@@ -1940,6 +1948,7 @@ async fn select_merge_tables(
     metadata_pg_pool: &PgPool,
     metadata_schema: &str,
     table_names: &[String],
+    target_file_size_bytes: Option<i64>,
     max_tables_per_run: u32,
 ) -> EtlResult<Vec<String>> {
     let mut selected = Vec::new();
@@ -1954,11 +1963,13 @@ async fn select_merge_tables(
 
         let metrics =
             query_table_storage_metrics(metadata_pg_pool, metadata_schema, table_name).await?;
-        if metrics.active_data_files > 1 && metrics.small_file_ratio() > 0.0 {
+        if should_merge(&metrics, target_file_size_bytes) {
             info!(
                 table = %table_name,
                 active_data_files = metrics.active_data_files,
+                active_data_file_avg_size_bytes = metrics.average_data_file_size_bytes(),
                 small_file_ratio = metrics.small_file_ratio(),
+                target_file_size_bytes,
                 "ducklake merge-adjacent-files table selected"
             );
             selected.push(table_name.clone());
@@ -1966,7 +1977,9 @@ async fn select_merge_tables(
             info!(
                 table = %table_name,
                 active_data_files = metrics.active_data_files,
+                active_data_file_avg_size_bytes = metrics.average_data_file_size_bytes(),
                 small_file_ratio = metrics.small_file_ratio(),
+                target_file_size_bytes,
                 "ducklake merge-adjacent-files table skipped"
             );
         }
@@ -1975,6 +1988,23 @@ async fn select_merge_tables(
         }
     }
     Ok(selected)
+}
+
+fn should_merge(
+    metrics: &DuckLakeTableStorageMetrics,
+    target_file_size_bytes: Option<i64>,
+) -> bool {
+    if metrics.active_data_files <= 1 {
+        return false;
+    }
+
+    if metrics.small_file_ratio() > 0.0 {
+        return true;
+    }
+
+    target_file_size_bytes.is_some_and(|target_file_size_bytes| {
+        metrics.average_data_file_size_bytes() < target_file_size_bytes as f64
+    })
 }
 
 /// Selects tables with delete pressure for rewrite-data-files.
@@ -2292,6 +2322,7 @@ fn pending_inline_data_bytes_query(metadata_schema: &str) -> String {
 #[derive(Clone, Debug)]
 struct DuckLakeTableStorageMetrics {
     active_data_files: i64,
+    active_data_bytes: i64,
     small_data_files: i64,
     active_data_rows: i64,
     active_delete_files: i64,
@@ -2299,6 +2330,14 @@ struct DuckLakeTableStorageMetrics {
 }
 
 impl DuckLakeTableStorageMetrics {
+    fn average_data_file_size_bytes(&self) -> f64 {
+        if self.active_data_files > 0 {
+            self.active_data_bytes.max(0) as f64 / self.active_data_files as f64
+        } else {
+            0.0
+        }
+    }
+
     fn small_file_ratio(&self) -> f64 {
         if self.active_data_files > 0 {
             self.small_data_files.max(0) as f64 / self.active_data_files as f64
@@ -2324,7 +2363,7 @@ async fn query_table_storage_metrics(
     let sql = table_storage_metrics_query(metadata_schema);
     let (
         active_data_files,
-        _active_data_bytes,
+        active_data_bytes,
         small_data_files,
         active_data_rows,
         active_delete_files,
@@ -2345,11 +2384,19 @@ async fn query_table_storage_metrics(
 
     Ok(DuckLakeTableStorageMetrics {
         active_data_files,
+        active_data_bytes,
         small_data_files,
         active_data_rows,
         active_delete_files,
         deleted_rows,
     })
+}
+
+fn parse_size_bytes(value: &str) -> Option<i64> {
+    parse_size::parse_size(value)
+        .ok()
+        .filter(|bytes| *bytes > 0)
+        .and_then(|bytes| i64::try_from(bytes).ok())
 }
 
 fn table_storage_metrics_query(metadata_schema: &str) -> String {
@@ -2435,10 +2482,26 @@ mod tests {
     ) -> DuckLakeTableStorageMetrics {
         DuckLakeTableStorageMetrics {
             active_data_files,
+            active_data_bytes: active_data_files.saturating_mul(10 * 1024 * 1024),
             small_data_files: 0,
             active_data_rows: 100,
             active_delete_files,
             deleted_rows,
+        }
+    }
+
+    fn merge_metrics(
+        active_data_files: i64,
+        active_data_bytes: i64,
+        small_data_files: i64,
+    ) -> DuckLakeTableStorageMetrics {
+        DuckLakeTableStorageMetrics {
+            active_data_files,
+            active_data_bytes,
+            small_data_files,
+            active_data_rows: 100,
+            active_delete_files: 0,
+            deleted_rows: 0,
         }
     }
 
@@ -2467,6 +2530,24 @@ mod tests {
         assert!(!should_rewrite(&metrics(39, 1, 50), 40));
         assert!(!should_rewrite(&metrics(40, 1, 50), 40));
         assert!(should_rewrite(&metrics(41, 0, 0), 40));
+    }
+
+    #[test]
+    fn should_merge_uses_small_file_pressure_or_target_size() {
+        assert!(should_merge(&merge_metrics(2, 1_000_000_000, 1), Some(500_000_000)));
+        assert!(should_merge(&merge_metrics(2, 800_000_000, 0), Some(500_000_000)));
+        assert!(!should_merge(&merge_metrics(2, 1_000_000_000, 0), Some(500_000_000)));
+        assert!(!should_merge(&merge_metrics(2, 800_000_000, 0), None));
+        assert!(!should_merge(&merge_metrics(1, 100_000_000, 1), Some(500_000_000)));
+    }
+
+    #[test]
+    fn parse_size_bytes_supports_common_duckdb_size_units() {
+        assert_eq!(parse_size_bytes("500MB"), Some(500_000_000));
+        assert_eq!(parse_size_bytes("20 MiB"), Some(20 * 1024 * 1024));
+        assert_eq!(parse_size_bytes("0.5GB"), Some(500_000_000));
+        assert_eq!(parse_size_bytes("4096"), Some(4096));
+        assert_eq!(parse_size_bytes("not-a-size"), None);
     }
 
     #[test]

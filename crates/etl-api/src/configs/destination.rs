@@ -124,14 +124,7 @@ pub enum FullApiDestinationConfig {
             deserialize_with = "crate::utils::trim_option_string"
         )]
         metadata_schema: Option<String>,
-        #[schema(example = "150MB")]
-        #[serde(
-            default,
-            skip_serializing_if = "Option::is_none",
-            deserialize_with = "crate::utils::trim_option_string"
-        )]
-        duckdb_memory_cache_limit: Option<String>,
-        #[schema(example = "10MB")]
+        #[schema(example = "500MB")]
         #[serde(
             default,
             skip_serializing_if = "Option::is_none",
@@ -244,7 +237,6 @@ impl From<StoredDestinationConfig> for FullApiDestinationConfig {
                 s3_url_style,
                 s3_use_ssl,
                 metadata_schema,
-                duckdb_memory_cache_limit,
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
                 maintenance_mode,
@@ -259,7 +251,6 @@ impl From<StoredDestinationConfig> for FullApiDestinationConfig {
                 s3_url_style,
                 s3_use_ssl,
                 metadata_schema,
-                duckdb_memory_cache_limit,
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
                 maintenance_mode,
@@ -315,7 +306,6 @@ pub enum StoredDestinationConfig {
         s3_url_style: Option<String>,
         s3_use_ssl: Option<bool>,
         metadata_schema: Option<String>,
-        duckdb_memory_cache_limit: Option<String>,
         maintenance_target_file_size: Option<String>,
         expire_snapshots_older_than: Option<String>,
         maintenance_mode: DuckLakeMaintenanceMode,
@@ -405,7 +395,6 @@ impl StoredDestinationConfig {
                 s3_url_style,
                 s3_use_ssl,
                 metadata_schema,
-                duckdb_memory_cache_limit,
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
                 maintenance_mode,
@@ -420,7 +409,6 @@ impl StoredDestinationConfig {
                 s3_url_style,
                 s3_use_ssl,
                 metadata_schema,
-                duckdb_memory_cache_limit,
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
                 maintenance_mode,
@@ -515,7 +503,6 @@ impl From<FullApiDestinationConfig> for StoredDestinationConfig {
                 s3_url_style,
                 s3_use_ssl,
                 metadata_schema,
-                duckdb_memory_cache_limit,
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
                 maintenance_mode,
@@ -530,7 +517,6 @@ impl From<FullApiDestinationConfig> for StoredDestinationConfig {
                 s3_url_style,
                 s3_use_ssl,
                 metadata_schema,
-                duckdb_memory_cache_limit,
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
                 maintenance_mode,
@@ -660,7 +646,6 @@ impl Encrypt<EncryptedStoredDestinationConfig> for StoredDestinationConfig {
                 s3_url_style,
                 s3_use_ssl,
                 metadata_schema,
-                duckdb_memory_cache_limit,
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
                 maintenance_mode,
@@ -685,7 +670,6 @@ impl Encrypt<EncryptedStoredDestinationConfig> for StoredDestinationConfig {
                     s3_url_style,
                     s3_use_ssl,
                     metadata_schema,
-                    duckdb_memory_cache_limit,
                     maintenance_target_file_size,
                     expire_snapshots_older_than,
                     maintenance_mode,
@@ -805,7 +789,6 @@ pub enum EncryptedStoredDestinationConfig {
         s3_url_style: Option<String>,
         s3_use_ssl: Option<bool>,
         metadata_schema: Option<String>,
-        duckdb_memory_cache_limit: Option<String>,
         maintenance_target_file_size: Option<String>,
         expire_snapshots_older_than: Option<String>,
         #[serde(default)]
@@ -942,7 +925,6 @@ impl Decrypt<StoredDestinationConfig> for EncryptedStoredDestinationConfig {
                 s3_url_style,
                 s3_use_ssl,
                 metadata_schema,
-                duckdb_memory_cache_limit,
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
                 maintenance_mode,
@@ -965,7 +947,6 @@ impl Decrypt<StoredDestinationConfig> for EncryptedStoredDestinationConfig {
                 s3_url_style,
                 s3_use_ssl,
                 metadata_schema,
-                duckdb_memory_cache_limit,
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
                 maintenance_mode,
@@ -1668,7 +1649,6 @@ mod tests {
             s3_url_style: Some("path".to_owned()),
             s3_use_ssl: Some(false),
             metadata_schema: Some("ducklake".to_owned()),
-            duckdb_memory_cache_limit: Some("50MB".to_owned()),
             maintenance_target_file_size: Some("10MB".to_owned()),
             expire_snapshots_older_than: Some("7 days".to_owned()),
             maintenance_mode: DuckLakeMaintenanceMode::Kubernetes,
@@ -1695,7 +1675,6 @@ mod tests {
                     s3_url_style: u1,
                     s3_use_ssl: ssl1,
                     metadata_schema: m1,
-                    duckdb_memory_cache_limit: memory1,
                     maintenance_target_file_size: target1,
                     expire_snapshots_older_than: expire1,
                     maintenance_mode: mode1,
@@ -1711,7 +1690,6 @@ mod tests {
                     s3_url_style: u2,
                     s3_use_ssl: ssl2,
                     metadata_schema: m2,
-                    duckdb_memory_cache_limit: memory2,
                     maintenance_target_file_size: target2,
                     expire_snapshots_older_than: expire2,
                     maintenance_mode: mode2,
@@ -1733,7 +1711,6 @@ mod tests {
                 assert_eq!(u1, u2);
                 assert_eq!(ssl1, ssl2);
                 assert_eq!(m1, m2);
-                assert_eq!(memory1, memory2);
                 assert_eq!(target1, target2);
                 assert_eq!(expire1, expire2);
                 assert_eq!(mode1, mode2);
@@ -1822,7 +1799,6 @@ mod tests {
             s3_url_style: None,
             s3_use_ssl: None,
             metadata_schema: Some("ducklake".to_owned()),
-            duckdb_memory_cache_limit: None,
             maintenance_target_file_size: None,
             expire_snapshots_older_than: None,
             maintenance_mode: DuckLakeMaintenanceMode::Kubernetes,
@@ -1838,7 +1814,6 @@ mod tests {
                     data_path: d1,
                     pool_size: p1,
                     metadata_schema: m1,
-                    duckdb_memory_cache_limit: memory1,
                     maintenance_target_file_size: target1,
                     expire_snapshots_older_than: expire1,
                     ..
@@ -1848,7 +1823,6 @@ mod tests {
                     data_path: d2,
                     pool_size: p2,
                     metadata_schema: m2,
-                    duckdb_memory_cache_limit: memory2,
                     maintenance_target_file_size: target2,
                     expire_snapshots_older_than: expire2,
                     ..
@@ -1859,7 +1833,6 @@ mod tests {
                 assert_eq!(p1, None);
                 assert_eq!(p2, Some(DestinationConfig::DEFAULT_DUCKLAKE_POOL_SIZE));
                 assert_eq!(m1, m2);
-                assert_eq!(memory1, memory2);
                 assert_eq!(target1, target2);
                 assert_eq!(expire1, expire2);
             }
@@ -1882,7 +1855,6 @@ mod tests {
             s3_url_style: Some("path".to_owned()),
             s3_use_ssl: Some(false),
             metadata_schema: Some("ducklake".to_owned()),
-            duckdb_memory_cache_limit: Some("50MB".to_owned()),
             maintenance_target_file_size: Some("10MB".to_owned()),
             expire_snapshots_older_than: Some("7 days".to_owned()),
             maintenance_mode: DuckLakeMaintenanceMode::Kubernetes,
@@ -1905,7 +1877,6 @@ mod tests {
                     s3_url_style: u1,
                     s3_use_ssl: ssl1,
                     metadata_schema: m1,
-                    duckdb_memory_cache_limit: memory1,
                     maintenance_target_file_size: target1,
                     expire_snapshots_older_than: expire1,
                     maintenance_mode: mode1,
@@ -1921,7 +1892,6 @@ mod tests {
                     s3_url_style: u2,
                     s3_use_ssl: ssl2,
                     metadata_schema: m2,
-                    duckdb_memory_cache_limit: memory2,
                     maintenance_target_file_size: target2,
                     expire_snapshots_older_than: expire2,
                     maintenance_mode: mode2,
@@ -1943,7 +1913,6 @@ mod tests {
                 assert_eq!(u1, &u2);
                 assert_eq!(ssl1, &ssl2);
                 assert_eq!(m1, &m2);
-                assert_eq!(memory1, &memory2);
                 assert_eq!(target1, &target2);
                 assert_eq!(expire1, &expire2);
                 assert_eq!(mode1, &mode2);

@@ -52,7 +52,6 @@ async fn run(config: ReplicatorConfig) -> MaintenanceResult<()> {
         s3_url_style,
         s3_use_ssl,
         metadata_schema,
-        duckdb_memory_cache_limit,
         maintenance_target_file_size,
         expire_snapshots_older_than,
         ..
@@ -84,7 +83,6 @@ async fn run(config: ReplicatorConfig) -> MaintenanceResult<()> {
         pool_size,
         s3,
         metadata_schema,
-        duckdb_memory_cache_limit,
         maintenance_target_file_size,
         inline_flush: InlineFlushMaintenanceConfig {
             enabled: env_bool("ETL_DUCKLAKE_MAINTENANCE__INLINE_FLUSH__ENABLED", true),
@@ -97,7 +95,7 @@ async fn run(config: ReplicatorConfig) -> MaintenanceResult<()> {
             enabled: env_bool("ETL_DUCKLAKE_MAINTENANCE__MERGE_ADJACENT_FILES__ENABLED", true),
             max_compacted_files: env_u32(
                 "ETL_DUCKLAKE_MAINTENANCE__MERGE_ADJACENT_FILES__MAX_COMPACTED_FILES",
-                32,
+                40,
             )?,
             max_tables_per_run: env_u32(
                 "ETL_DUCKLAKE_MAINTENANCE__MERGE_ADJACENT_FILES__MAX_TABLES_PER_RUN",
@@ -106,7 +104,7 @@ async fn run(config: ReplicatorConfig) -> MaintenanceResult<()> {
             target_file_size: env::var(
                 "ETL_DUCKLAKE_MAINTENANCE__MERGE_ADJACENT_FILES__TARGET_FILE_SIZE",
             )
-            .unwrap_or_else(|_| "10MB".to_owned()),
+            .unwrap_or_else(|_| "500MB".to_owned()),
         },
         rewrite_data_files: RewriteDataFilesMaintenanceConfig {
             enabled: env_bool("ETL_DUCKLAKE_MAINTENANCE__REWRITE_DATA_FILES__ENABLED", true),

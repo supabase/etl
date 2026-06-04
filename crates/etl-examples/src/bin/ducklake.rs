@@ -229,7 +229,6 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         args.ducklake_args.metadata_schema,
         None,
         None,
-        None,
         store.clone(),
     )
     .await?;

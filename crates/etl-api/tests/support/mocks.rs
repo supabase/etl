@@ -86,7 +86,6 @@ pub(crate) mod destinations {
             s3_url_style: Some("path".to_owned()),
             s3_use_ssl: Some(false),
             metadata_schema: Some("ducklake".to_owned()),
-            duckdb_memory_cache_limit: None,
             maintenance_target_file_size: Some("10MB".to_owned()),
             expire_snapshots_older_than: Some("7 days".to_owned()),
             maintenance_mode: DuckLakeMaintenanceMode::Kubernetes,

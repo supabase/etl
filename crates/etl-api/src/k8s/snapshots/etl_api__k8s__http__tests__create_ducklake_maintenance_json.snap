@@ -35,9 +35,9 @@ expression: "serde_json::to_string_pretty(&ducklake_maintenance_json).unwrap()"
       },
       "mergeAdjacentFiles": {
         "enabled": true,
-        "maxCompactedFiles": 32,
+        "maxCompactedFiles": 40,
         "maxTablesPerRun": 8,
-        "targetFileSize": "10MB"
+        "targetFileSize": "500MB"
       },
       "rewriteDataFiles": {
         "deleteThreshold": 0.5,
