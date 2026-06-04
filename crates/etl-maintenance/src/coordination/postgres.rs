@@ -179,6 +179,7 @@ impl ExternalMaintenanceStore for PostgresExternalMaintenanceStore {
             last_completed_at: row.try_get("last_completed_at").map_err(|error| {
                 sqlx_error(error, "Failed to decode external maintenance completed timestamp")
             })?,
+            pause_policy: Default::default(),
             operation_policy: row
                 .try_get::<Json<ExternalMaintenanceOperationPolicy>, _>("operation_policy")
                 .map_err(|error| {

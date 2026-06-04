@@ -1,14 +1,15 @@
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeDelta, Utc};
 use etl::{error::EtlResult, store::DestinationStore};
 pub use etl_maintenance::{
     ExternalMaintenanceOperationHistory, ExternalMaintenanceOperationPolicy,
     ExternalMaintenanceOperationRequest, ExternalMaintenanceOperationRun,
-    ExternalMaintenanceOperations, ExternalMaintenancePause, ExternalMaintenanceReplicatorState,
-    ExternalMaintenanceReplicatorStatus, ExternalMaintenanceRequestOutcome, ExternalMaintenanceRun,
-    ExternalMaintenanceState, ExternalMaintenanceStore, ExternalMaintenanceWatcherConfig,
-    KubernetesExternalMaintenanceStore, PostgresExternalMaintenanceStore,
+    ExternalMaintenanceOperations, ExternalMaintenancePause, ExternalMaintenancePausePolicy,
+    ExternalMaintenanceReplicatorState, ExternalMaintenanceReplicatorStatus,
+    ExternalMaintenanceRequestOutcome, ExternalMaintenanceRun, ExternalMaintenanceState,
+    ExternalMaintenanceStore, ExternalMaintenanceWatcherConfig, KubernetesExternalMaintenanceStore,
+    PostgresExternalMaintenanceStore,
 };
 use metrics::{counter, gauge, histogram};
 use sqlx::PgPool;
@@ -198,7 +199,7 @@ async fn reconcile_pause<S, M>(
     S: DestinationStore,
     M: ExternalMaintenanceStore,
 {
-    let active_pause = state.pause_request.clone().filter(|pause| pause.expires_at > Utc::now());
+    let active_pause = bounded_active_pause_request(state, Utc::now());
     let Some(pause) = active_pause else {
         if let Some(held) = held_pause.take() {
             info!(
@@ -374,6 +375,27 @@ fn active_pause_operations(
         .operation_request
         .as_ref()
         .map_or(ExternalMaintenanceOperations::default(), |request| request.operations)
+}
+
+/// Returns a pause request whose expiry is bounded by trusted policy.
+fn bounded_active_pause_request(
+    state: &ExternalMaintenanceState,
+    now: DateTime<Utc>,
+) -> Option<ExternalMaintenancePause> {
+    let mut pause = state.pause_request.clone()?;
+    let requested_at = pause.requested_at?;
+    if requested_at > now {
+        return None;
+    }
+
+    let max_pause_seconds = i64::try_from(state.pause_policy.max_duration_seconds).ok()?;
+    let max_pause_duration = TimeDelta::try_seconds(max_pause_seconds)?;
+    let max_expires_at = requested_at.checked_add_signed(max_pause_duration)?;
+    if pause.expires_at > max_expires_at {
+        pause.expires_at = max_expires_at;
+    }
+
+    (pause.expires_at > now).then_some(pause)
 }
 
 fn operation_label_values(operations: ExternalMaintenanceOperations) -> Vec<&'static str> {
@@ -737,9 +759,10 @@ mod tests {
     use super::{
         ExpireSnapshotsRequestGate, ExternalMaintenanceOperationRequest,
         ExternalMaintenanceOperationRun, ExternalMaintenanceOperations, ExternalMaintenancePause,
-        ExternalMaintenanceRun, ExternalMaintenanceState, OPERATION_EXPIRE_SNAPSHOTS,
-        OPERATION_INLINE_FLUSH, OPERATION_REWRITE_DATA_FILES, OPERATION_UNKNOWN,
-        active_pause_operations, record_external_maintenance_pause_active,
+        ExternalMaintenancePausePolicy, ExternalMaintenanceRun, ExternalMaintenanceState,
+        OPERATION_EXPIRE_SNAPSHOTS, OPERATION_INLINE_FLUSH, OPERATION_REWRITE_DATA_FILES,
+        OPERATION_UNKNOWN, active_pause_operations, bounded_active_pause_request,
+        record_external_maintenance_pause_active,
     };
     use crate::ducklake::metrics::{
         ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_PAUSE_ACTIVE, register_metrics,
@@ -882,5 +905,65 @@ mod tests {
         };
 
         assert_eq!(active_pause_operations(&state, &pause), request_operations);
+    }
+
+    #[test]
+    fn bounded_active_pause_request_clamps_status_expiry_to_policy() {
+        let requested_at = Utc.with_ymd_and_hms(2026, 5, 12, 12, 0, 0).unwrap();
+        let now = requested_at + chrono::Duration::minutes(10);
+        let state = ExternalMaintenanceState {
+            pause_request: Some(ExternalMaintenancePause {
+                run_id: "run-1".to_owned(),
+                requested_at: Some(requested_at),
+                expires_at: requested_at + chrono::Duration::hours(12),
+            }),
+            pause_policy: ExternalMaintenancePausePolicy { max_duration_seconds: 2700 },
+            ..ExternalMaintenanceState::present()
+        };
+
+        let pause = bounded_active_pause_request(&state, now).expect("pause should be active");
+
+        assert_eq!(pause.expires_at, requested_at + chrono::Duration::seconds(2700));
+    }
+
+    #[test]
+    fn bounded_active_pause_request_rejects_unbounded_status() {
+        let requested_at = Utc.with_ymd_and_hms(2026, 5, 12, 12, 0, 0).unwrap();
+        let now = requested_at + chrono::Duration::hours(1);
+        let state = ExternalMaintenanceState {
+            pause_request: Some(ExternalMaintenancePause {
+                run_id: "run-1".to_owned(),
+                requested_at: Some(requested_at),
+                expires_at: requested_at + chrono::Duration::hours(12),
+            }),
+            pause_policy: ExternalMaintenancePausePolicy { max_duration_seconds: 2700 },
+            ..ExternalMaintenanceState::present()
+        };
+
+        assert!(bounded_active_pause_request(&state, now).is_none());
+    }
+
+    #[test]
+    fn bounded_active_pause_request_rejects_missing_or_future_requested_at() {
+        let now = Utc.with_ymd_and_hms(2026, 5, 12, 12, 0, 0).unwrap();
+        let missing_requested_at = ExternalMaintenanceState {
+            pause_request: Some(ExternalMaintenancePause {
+                run_id: "run-1".to_owned(),
+                requested_at: None,
+                expires_at: now + chrono::Duration::hours(12),
+            }),
+            ..ExternalMaintenanceState::present()
+        };
+        let future_requested_at = ExternalMaintenanceState {
+            pause_request: Some(ExternalMaintenancePause {
+                run_id: "run-1".to_owned(),
+                requested_at: Some(now + chrono::Duration::minutes(1)),
+                expires_at: now + chrono::Duration::hours(12),
+            }),
+            ..ExternalMaintenanceState::present()
+        };
+
+        assert!(bounded_active_pause_request(&missing_requested_at, now).is_none());
+        assert!(bounded_active_pause_request(&future_requested_at, now).is_none());
     }
 }

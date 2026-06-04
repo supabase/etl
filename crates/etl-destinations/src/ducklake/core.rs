@@ -59,9 +59,9 @@ use crate::{
             format_query_error_detail, run_duckdb_blocking,
         },
         config::{
-            MAINTENANCE_TARGET_FILE_SIZE, build_setup_plan, current_duckdb_extension_strategy,
-            maintenance_target_file_size_sql, resolve_expire_snapshots_older_than,
-            validate_expire_snapshots_older_than_sql,
+            MAINTENANCE_TARGET_FILE_SIZE, MIN_EXPIRE_SNAPSHOTS_OLDER_THAN, build_setup_plan,
+            current_duckdb_extension_strategy, maintenance_target_file_size_sql,
+            resolve_expire_snapshots_older_than, validate_expire_snapshots_older_than_sql,
         },
         external_maintenance::ExternalMaintenanceOperations,
         inline_size::DuckLakePendingInlineSizeSampler,
@@ -994,19 +994,29 @@ where
             Arc::clone(&pool),
             Arc::clone(&blocking_slots),
             move |conn| -> EtlResult<()> {
-                conn.query_row(&expire_snapshots_validation_sql, [], |_row| Ok(())).map_err(
-                    |source| {
+                let retention_is_safe: bool = conn
+                    .query_row(&expire_snapshots_validation_sql, [], |row| row.get(0))
+                    .map_err(|source| {
                         etl_error!(
                             ErrorKind::ConfigError,
                             "DuckLake expire_snapshots_older_than configuration failed",
                             format!(
-                                "invalid expire_snapshots_older_than value `{}`",
+                                "Invalid expire_snapshots_older_than value `{}`",
                                 expire_snapshots_older_than_for_error
                             ),
                             source: source
                         )
-                    },
-                )?;
+                    })?;
+                if !retention_is_safe {
+                    return Err(etl_error!(
+                        ErrorKind::ConfigError,
+                        "DuckLake expire_snapshots_older_than configuration failed",
+                        format!(
+                            "Snapshot retention must be at least {}, got `{}`",
+                            MIN_EXPIRE_SNAPSHOTS_OLDER_THAN, expire_snapshots_older_than_for_error
+                        )
+                    ));
+                }
                 Ok(())
             },
         )
