@@ -1,6 +1,9 @@
+#[cfg(feature = "bigquery")]
 mod bigquery;
+#[cfg(feature = "iceberg")]
 mod iceberg;
 mod pipeline;
+#[cfg(feature = "snowflake")]
 mod snowflake;
 
 use etl_api::{configs::pipeline::FullApiPipelineConfig, validation::ValidationContext};
@@ -9,6 +12,7 @@ use etl_postgres::sqlx::test_utils::create_pg_database;
 
 use crate::support::database::get_test_db_config;
 
+#[cfg(any(feature = "bigquery", feature = "iceberg", feature = "snowflake"))]
 pub(super) fn create_validation_context() -> ValidationContext {
     let environment = Environment::load().expect("Failed to load environment");
     ValidationContext::builder(environment).build()
