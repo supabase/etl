@@ -23,6 +23,7 @@ Both benchmarks support:
   decoding, batching, and pipeline overhead without destination write cost.
 - `bigquery`: writes to BigQuery. Use this for end-to-end destination throughput.
 - `snowflake`: writes to Snowflake. Use this for end-to-end destination throughput.
+- `clickhouse`: writes to ClickHouse. Use this for end-to-end destination throughput.
 
 Both benchmarks print a human-readable summary. When `--report-path` is set, they
 also persist a pretty JSON report for automation. `xtask` always sets
@@ -238,6 +239,40 @@ Optional:
 
 - `BENCH_SNOWFLAKE_ROLE`: Snowflake role to assume.
 
+## ClickHouse Runs
+
+Start the local ClickHouse server from `scripts/docker-compose.yaml`:
+
+```bash
+docker compose -f scripts/docker-compose.yaml up -d clickhouse
+```
+
+The defaults in `.env.example` (`BENCH_CLICKHOUSE_URL=http://localhost:8123`,
+`BENCH_CLICKHOUSE_USER=etl`, `BENCH_CLICKHOUSE_PASSWORD=etl`,
+`BENCH_CLICKHOUSE_DATABASE=default`) match the compose service. Override them
+to point at any other ClickHouse 23.5 or newer (required by the default
+`ReplacingMergeTree` engine).
+
+Run the benchmark:
+
+```bash
+cargo xtask benchmark \
+  --destination clickhouse \
+  --warehouses 1 \
+  --streaming-duration-seconds 10
+```
+
+Required environment variables (or their `--clickhouse-*` CLI equivalents):
+
+- `BENCH_CLICKHOUSE_URL`: ClickHouse HTTP URL.
+- `BENCH_CLICKHOUSE_USER`: ClickHouse user.
+- `BENCH_CLICKHOUSE_DATABASE`: target database. Must already exist; the
+  destination creates tables but not databases.
+
+Optional:
+
+- `BENCH_CLICKHOUSE_PASSWORD`: ClickHouse password. Omit if the user has none.
+
 ## GitHub Actions
 
 The `Benchmark` workflow is manual and runs through `workflow_dispatch`.
@@ -275,7 +310,7 @@ Important workflow inputs:
   bytes. Defaults to `0.2`.
 - `enable_memory_backpressure`: opt into ETL memory backpressure. Defaults to
   `false` for benchmark runs.
-- `destination`: `null`, `bigquery`, or `snowflake`.
+- `destination`: `null`, `bigquery`, `clickhouse`, or `snowflake`.
 - `force_prepare`: drop and regenerate TPC-C tables before running.
 - `skip_table_copy`: skip table copy.
 - `skip_table_streaming`: skip table streaming.
@@ -288,6 +323,10 @@ For Snowflake workflow runs, set two repository secrets and pass `destination=sn
 
 - `BENCH_SNOWFLAKE_CONNECTION`: colon-separated `account:user:database:schema`.
 - `BENCH_SNOWFLAKE_PRIVATE_KEY`: full PEM contents of the RSA private key.
+
+For ClickHouse workflow runs, pass `destination=clickhouse`. The workflow
+starts the `clickhouse` service from `scripts/docker-compose.yaml` and points
+the benchmark at it (user `etl`, database `default`); no secrets are needed.
 
 The workflow starts only source Postgres, installs pinned `go-tpc`, runs
 `cargo xtask benchmark` with three measured samples plus one warmup sample,

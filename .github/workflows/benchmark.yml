@@ -56,6 +56,7 @@ on:
         options:
           - "null"
           - bigquery
+          - clickhouse
           - snowflake
         default: "null"
       bq_project_id:
@@ -91,6 +92,10 @@ env:
   POSTGRES_HOST: localhost
   BENCHMARK_SAMPLES: 3
   BENCHMARK_WARMUP_SAMPLES: 1
+  BENCH_CLICKHOUSE_URL: http://localhost:8123
+  BENCH_CLICKHOUSE_USER: etl
+  BENCH_CLICKHOUSE_PASSWORD: etl
+  BENCH_CLICKHOUSE_DATABASE: default
 
 permissions:
   actions: read
@@ -153,6 +158,10 @@ jobs:
             exit 1
           fi
           printf '%s' "${BQ_SA_KEY_JSON}" > "$RUNNER_TEMP/bigquery-key.json"
+
+      - name: Start ClickHouse
+        if: inputs.destination == 'clickhouse'
+        run: docker compose -f scripts/docker-compose.yaml up -d --wait clickhouse
 
       - name: Prepare Snowflake credentials
         if: inputs.destination == 'snowflake'
