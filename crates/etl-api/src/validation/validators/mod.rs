@@ -12,9 +12,9 @@ use clickhouse::ClickHouseValidator;
 use ducklake::DucklakeValidator;
 use iceberg::IcebergValidator;
 use pipeline::{
-    GeneratedColumnsValidator, PrimaryKeysValidator, PublicationExistsValidator,
-    PublicationHasTablesValidator, ReplicationPermissionsValidator, ReplicationSlotsValidator,
-    WalLevelValidator,
+    GeneratedColumnsValidator, PrimaryKeysValidator, PublicationExcludesEtlTablesValidator,
+    PublicationExistsValidator, PublicationHasTablesValidator, ReplicationPermissionsValidator,
+    ReplicationSlotsValidator, WalLevelValidator,
 };
 use secrecy::ExposeSecret;
 use snowflake::SnowflakeValidator;
@@ -43,6 +43,7 @@ impl PipelineValidator {
             Box::new(ReplicationPermissionsValidator),
             Box::new(PublicationExistsValidator::new(publication_name.clone())),
             Box::new(PublicationHasTablesValidator::new(publication_name.clone())),
+            Box::new(PublicationExcludesEtlTablesValidator::new(publication_name.clone())),
             Box::new(PrimaryKeysValidator::new(publication_name.clone())),
             Box::new(GeneratedColumnsValidator::new(publication_name)),
             Box::new(ReplicationSlotsValidator::new(max_table_sync_workers)),
@@ -128,7 +129,7 @@ impl Validator for DestinationValidator {
                 maintenance_mode: _,
             } => {
                 let validator = DucklakeValidator::new(
-                    catalog_url.clone(),
+                    catalog_url.expose_secret().to_owned(),
                     data_path.clone(),
                     pool_size.unwrap_or(
                         etl_config::shared::DestinationConfig::DEFAULT_DUCKLAKE_POOL_SIZE,

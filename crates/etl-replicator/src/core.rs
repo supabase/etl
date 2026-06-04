@@ -8,7 +8,7 @@ use etl::{
     types::PipelineId,
 };
 use etl_config::{
-    Environment, parse_ducklake_url,
+    Environment, parse_ducklake_s3_data_path, parse_ducklake_url,
     shared::{
         DestinationConfig, DuckLakeMaintenanceMode as ConfigDuckLakeMaintenanceMode,
         PgConnectionConfig, ReplicatorConfig,
@@ -185,8 +185,8 @@ pub(crate) async fn start_replicator_with_config(
                 DuckLakeExternalMaintenanceConfig { mode: maintenance_mode, pipeline_id };
 
             let destination = DuckLakeDestination::new_with_external_maintenance(
-                parse_ducklake_url(catalog_url).map_err(ReplicatorError::config)?,
-                parse_ducklake_url(data_path).map_err(ReplicatorError::config)?,
+                parse_ducklake_url(catalog_url.expose_secret()).map_err(ReplicatorError::config)?,
+                parse_ducklake_s3_data_path(data_path).map_err(ReplicatorError::config)?,
                 *pool_size,
                 s3_config,
                 metadata_schema.clone(),
@@ -225,7 +225,8 @@ pub(crate) async fn start_replicator_with_config(
             schema,
             role,
         } => {
-            let mut config = snowflake::Config::new(account_id, user, database, schema);
+            let mut config = snowflake::Config::new(account_id, user, database, schema)
+                .map_err(ReplicatorError::config)?;
             if let Some(r) = role {
                 config = config.with_role(r);
             }
@@ -235,7 +236,7 @@ pub(crate) async fn start_replicator_with_config(
                     private_key.expose_secret(),
                     private_key_passphrase.as_ref(),
                 )
-                .map_err(|e| ReplicatorError::config(std::io::Error::other(e.to_string())))?,
+                .map_err(ReplicatorError::config)?,
             );
             let client = snowflake::Client::new(config, auth, pipeline_id);
             let destination = snowflake::Destination::new(client, store.clone());

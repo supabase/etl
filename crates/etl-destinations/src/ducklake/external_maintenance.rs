@@ -27,8 +27,19 @@ use crate::ducklake::{
 
 const EXPIRE_SNAPSHOTS_MIN_INTERVAL_SECONDS: i64 = 24 * 60 * 60;
 const OPERATION_INLINE_FLUSH: &str = "flush_inlined_data";
+const OPERATION_MERGE_ADJACENT_FILES: &str = "merge_adjacent_files";
 const OPERATION_REWRITE_DATA_FILES: &str = "rewrite_data_files";
 const OPERATION_EXPIRE_SNAPSHOTS: &str = "expire_snapshots";
+const OPERATION_CLEANUP_OLD_FILES: &str = "cleanup_old_files";
+const OPERATION_UNKNOWN: &str = "unknown";
+const ALL_PAUSE_OPERATION_LABELS: [&str; 6] = [
+    OPERATION_INLINE_FLUSH,
+    OPERATION_MERGE_ADJACENT_FILES,
+    OPERATION_REWRITE_DATA_FILES,
+    OPERATION_EXPIRE_SNAPSHOTS,
+    OPERATION_CLEANUP_OLD_FILES,
+    OPERATION_UNKNOWN,
+];
 const REASON_PENDING_INLINED_DATA_BYTES_THRESHOLD: &str = "pending_inlined_data_bytes_threshold";
 const REASON_ACTIVE_DATA_FILES_THRESHOLD: &str = "active_data_files_threshold";
 const REASON_SNAPSHOT_RETENTION_THRESHOLD: &str = "snapshot_retention_threshold";
@@ -36,6 +47,7 @@ const REASON_SNAPSHOT_RETENTION_THRESHOLD: &str = "snapshot_retention_threshold"
 struct HeldPause {
     run_id: String,
     expires_at: DateTime<Utc>,
+    operations: ExternalMaintenanceOperations,
     quiesced_at: DateTime<Utc>,
     quiesced_reported: bool,
     _pause: DuckLakeExternalMaintenancePause,
@@ -97,7 +109,7 @@ where
 {
     let mut held_pause: Option<HeldPause> = None;
     let mut expire_snapshots_gate = ExpireSnapshotsRequestGate::default();
-    record_external_maintenance_pause_active(false);
+    record_external_maintenance_pause_active(ExternalMaintenanceOperations::default(), false);
 
     info!(
         poll_interval_ms = config.poll_interval.as_millis() as u64,
@@ -204,6 +216,12 @@ async fn reconcile_pause<S, M>(
     if let Some(held) = held_pause.as_mut()
         && held.run_id == pause.run_id
     {
+        let operations = active_pause_operations(state, &pause);
+        if !operations.is_empty() && held.operations != operations {
+            record_external_maintenance_pause_active(held.operations, false);
+            held.operations = operations;
+            record_external_maintenance_pause_active(held.operations, true);
+        }
         if !held.quiesced_reported
             && report_quiesced(store, &held.run_id, held.quiesced_at, config.store_timeout).await
         {
@@ -234,7 +252,8 @@ async fn reconcile_pause<S, M>(
         pause.expires_at.to_rfc3339()
     );
     report_pausing(store, &pause.run_id, config.store_timeout).await;
-    record_external_maintenance_pause_active(true);
+    let operations = active_pause_operations(state, &pause);
+    record_external_maintenance_pause_active(operations, true);
 
     let external_pause = destination.acquire_external_maintenance_pause().await;
     if pause.expires_at <= Utc::now() {
@@ -250,6 +269,7 @@ async fn reconcile_pause<S, M>(
             HeldPause {
                 run_id: pause.run_id,
                 expires_at: pause.expires_at,
+                operations,
                 quiesced_at: Utc::now(),
                 quiesced_reported: false,
                 _pause: external_pause,
@@ -289,6 +309,7 @@ async fn reconcile_pause<S, M>(
     *held_pause = Some(HeldPause {
         run_id: pause.run_id,
         expires_at: pause.expires_at,
+        operations,
         quiesced_at,
         quiesced_reported,
         _pause: external_pause,
@@ -323,7 +344,7 @@ fn release_held_pause(held: HeldPause, outcome: &'static str) {
     let held_ms =
         Utc::now().signed_duration_since(held.quiesced_at).num_milliseconds().max(0) as u64;
     record_external_maintenance_pause_duration(&held, outcome);
-    record_external_maintenance_pause_active(false);
+    record_external_maintenance_pause_active(held.operations, false);
     info!(
         run_id = %held.run_id,
         outcome,
@@ -335,19 +356,76 @@ fn release_held_pause(held: HeldPause, outcome: &'static str) {
     );
 }
 
-fn record_external_maintenance_pause_active(active: bool) {
-    gauge!(ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_PAUSE_ACTIVE).set(if active { 1.0 } else { 0.0 });
+fn active_pause_operations(
+    state: &ExternalMaintenanceState,
+    pause: &ExternalMaintenancePause,
+) -> ExternalMaintenanceOperations {
+    if let Some(operations) = state
+        .active_run
+        .as_ref()
+        .filter(|run| run.run_id == pause.run_id)
+        .map(|run| run.operations)
+        .filter(|operations| !operations.is_empty())
+    {
+        return operations;
+    }
+
+    state
+        .operation_request
+        .as_ref()
+        .map_or(ExternalMaintenanceOperations::default(), |request| request.operations)
+}
+
+fn operation_label_values(operations: ExternalMaintenanceOperations) -> Vec<&'static str> {
+    let mut labels = Vec::with_capacity(ALL_PAUSE_OPERATION_LABELS.len());
+    if operations.inline_flush {
+        labels.push(OPERATION_INLINE_FLUSH);
+    }
+    if operations.merge_adjacent_files {
+        labels.push(OPERATION_MERGE_ADJACENT_FILES);
+    }
+    if operations.rewrite_data_files {
+        labels.push(OPERATION_REWRITE_DATA_FILES);
+    }
+    if operations.expire_snapshots {
+        labels.push(OPERATION_EXPIRE_SNAPSHOTS);
+    }
+    if operations.cleanup_old_files {
+        labels.push(OPERATION_CLEANUP_OLD_FILES);
+    }
+    if labels.is_empty() {
+        labels.push(OPERATION_UNKNOWN);
+    }
+    labels
+}
+
+fn record_external_maintenance_pause_active(
+    operations: ExternalMaintenanceOperations,
+    active: bool,
+) {
+    let active_operations = operation_label_values(operations);
+    for operation in ALL_PAUSE_OPERATION_LABELS {
+        let value = if active && active_operations.contains(&operation) { 1.0 } else { 0.0 };
+        gauge!(
+            ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_PAUSE_ACTIVE,
+            MAINTENANCE_OPERATION_LABEL => operation,
+        )
+        .set(value);
+    }
 }
 
 fn record_external_maintenance_pause_duration(held: &HeldPause, outcome: &'static str) {
     let duration_seconds =
         Utc::now().signed_duration_since(held.quiesced_at).num_milliseconds().max(0) as f64
             / 1_000.0;
-    histogram!(
-        ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_PAUSE_DURATION_SECONDS,
-        MAINTENANCE_OUTCOME_LABEL => outcome,
-    )
-    .record(duration_seconds);
+    for operation in operation_label_values(held.operations) {
+        histogram!(
+            ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_PAUSE_DURATION_SECONDS,
+            MAINTENANCE_OPERATION_LABEL => operation,
+            MAINTENANCE_OUTCOME_LABEL => outcome,
+        )
+        .record(duration_seconds);
+    }
 }
 
 impl ExpireSnapshotsRequestGate {
@@ -657,8 +735,11 @@ mod tests {
     use etl_telemetry::metrics::init_metrics_handle;
 
     use super::{
-        ExpireSnapshotsRequestGate, ExternalMaintenanceOperationRun, ExternalMaintenanceState,
-        record_external_maintenance_pause_active,
+        ExpireSnapshotsRequestGate, ExternalMaintenanceOperationRequest,
+        ExternalMaintenanceOperationRun, ExternalMaintenanceOperations, ExternalMaintenancePause,
+        ExternalMaintenanceRun, ExternalMaintenanceState, OPERATION_EXPIRE_SNAPSHOTS,
+        OPERATION_INLINE_FLUSH, OPERATION_REWRITE_DATA_FILES, OPERATION_UNKNOWN,
+        active_pause_operations, record_external_maintenance_pause_active,
     };
     use crate::ducklake::metrics::{
         ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_PAUSE_ACTIVE, register_metrics,
@@ -675,9 +756,23 @@ mod tests {
         state
     }
 
-    fn pause_active_gauge_value(rendered: &str) -> Option<f64> {
+    fn operation_request(
+        operations: ExternalMaintenanceOperations,
+    ) -> ExternalMaintenanceOperationRequest {
+        ExternalMaintenanceOperationRequest {
+            operations,
+            inline_flush_min_inlined_bytes: Some(10_000_000),
+            rewrite_data_files_min_active_data_files: Some(40),
+            requested_at: Utc::now(),
+        }
+    }
+
+    fn pause_active_gauge_value(rendered: &str, operation: &str) -> Option<f64> {
+        let label = format!("operation=\"{operation}\"");
         rendered.lines().find_map(|line| {
-            if line.starts_with(ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_PAUSE_ACTIVE) {
+            if line.starts_with(ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_PAUSE_ACTIVE)
+                && line.contains(&label)
+            {
                 line.split_whitespace().last()?.parse::<f64>().ok()
             } else {
                 None
@@ -716,12 +811,76 @@ mod tests {
         let handle = init_metrics_handle().expect("failed to initialize prometheus handle");
         register_metrics();
 
-        record_external_maintenance_pause_active(true);
+        let operations = ExternalMaintenanceOperations {
+            inline_flush: true,
+            expire_snapshots: true,
+            ..ExternalMaintenanceOperations::default()
+        };
+        record_external_maintenance_pause_active(operations, true);
         let rendered = handle.render();
-        assert_eq!(pause_active_gauge_value(&rendered), Some(1.0));
+        assert_eq!(pause_active_gauge_value(&rendered, OPERATION_INLINE_FLUSH), Some(1.0));
+        assert_eq!(pause_active_gauge_value(&rendered, OPERATION_EXPIRE_SNAPSHOTS), Some(1.0));
+        assert_eq!(pause_active_gauge_value(&rendered, OPERATION_REWRITE_DATA_FILES), Some(0.0));
+        assert_eq!(pause_active_gauge_value(&rendered, OPERATION_UNKNOWN), Some(0.0));
 
-        record_external_maintenance_pause_active(false);
+        record_external_maintenance_pause_active(operations, false);
         let rendered = handle.render();
-        assert_eq!(pause_active_gauge_value(&rendered), Some(0.0));
+        assert_eq!(pause_active_gauge_value(&rendered, OPERATION_INLINE_FLUSH), Some(0.0));
+        assert_eq!(pause_active_gauge_value(&rendered, OPERATION_EXPIRE_SNAPSHOTS), Some(0.0));
+    }
+
+    #[test]
+    fn active_pause_operations_prefers_matching_active_run() {
+        let active_operations = ExternalMaintenanceOperations {
+            expire_snapshots: true,
+            ..ExternalMaintenanceOperations::default()
+        };
+        let request_operations = ExternalMaintenanceOperations {
+            inline_flush: true,
+            ..ExternalMaintenanceOperations::default()
+        };
+        let pause = ExternalMaintenancePause {
+            run_id: "run-1".to_owned(),
+            requested_at: None,
+            expires_at: Utc::now() + chrono::Duration::minutes(1),
+        };
+        let state = ExternalMaintenanceState {
+            exists: true,
+            active_run: Some(ExternalMaintenanceRun {
+                run_id: "run-1".to_owned(),
+                started_at: None,
+                operations: active_operations,
+            }),
+            operation_request: Some(operation_request(request_operations)),
+            ..ExternalMaintenanceState::default()
+        };
+
+        assert_eq!(active_pause_operations(&state, &pause), active_operations);
+    }
+
+    #[test]
+    fn active_pause_operations_uses_pending_request_when_active_run_has_no_operations() {
+        let request_operations = ExternalMaintenanceOperations {
+            inline_flush: true,
+            rewrite_data_files: true,
+            ..ExternalMaintenanceOperations::default()
+        };
+        let pause = ExternalMaintenancePause {
+            run_id: "run-1".to_owned(),
+            requested_at: None,
+            expires_at: Utc::now() + chrono::Duration::minutes(1),
+        };
+        let state = ExternalMaintenanceState {
+            exists: true,
+            active_run: Some(ExternalMaintenanceRun {
+                run_id: "run-1".to_owned(),
+                started_at: None,
+                operations: ExternalMaintenanceOperations::default(),
+            }),
+            operation_request: Some(operation_request(request_operations)),
+            ..ExternalMaintenanceState::default()
+        };
+
+        assert_eq!(active_pause_operations(&state, &pause), request_operations);
     }
 }

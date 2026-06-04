@@ -6,6 +6,7 @@ const host = '127.0.0.1';
 const port = 4329;
 const origin = `http://${host}:${port}`;
 const baseUrl = `${origin}/etl`;
+const cleanupTimeoutMs = 5000;
 
 function assert(condition, message) {
   if (!condition) {
@@ -71,6 +72,7 @@ const preview = spawn(
   'npm',
   ['run', 'preview', '--', '--host', host, '--port', String(port)],
   {
+    detached: process.platform !== 'win32',
     stdio: ['ignore', 'pipe', 'pipe'],
   },
 );
@@ -79,6 +81,49 @@ preview.stdout.on('data', (chunk) => process.stdout.write(chunk));
 preview.stderr.on('data', (chunk) => process.stderr.write(chunk));
 
 let browser;
+
+function signalPreview(signal) {
+  if (preview.exitCode !== null || preview.signalCode !== null) {
+    return;
+  }
+
+  try {
+    if (process.platform === 'win32') {
+      preview.kill(signal);
+    } else {
+      process.kill(-preview.pid, signal);
+    }
+  } catch (error) {
+    if (error.code !== 'ESRCH') {
+      throw error;
+    }
+  }
+}
+
+async function stopPreview() {
+  if (preview.exitCode !== null || preview.signalCode !== null) {
+    return;
+  }
+
+  const closed = new Promise((resolve) => preview.once('close', resolve));
+  signalPreview('SIGTERM');
+
+  const stopped = await Promise.race([closed.then(() => true), delay(cleanupTimeoutMs).then(() => false)]);
+  if (stopped) {
+    return;
+  }
+
+  signalPreview('SIGKILL');
+  await Promise.race([closed, delay(cleanupTimeoutMs)]);
+}
+
+async function closeBrowser() {
+  if (!browser) {
+    return;
+  }
+
+  await Promise.race([browser.close(), delay(cleanupTimeoutMs)]);
+}
 
 try {
   await waitForPreview();
@@ -90,6 +135,6 @@ try {
 
   console.log('Docs smoke checks passed.');
 } finally {
-  await browser?.close();
-  preview.kill('SIGTERM');
+  await closeBrowser();
+  await stopPreview();
 }

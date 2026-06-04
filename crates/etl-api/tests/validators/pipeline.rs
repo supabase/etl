@@ -1,6 +1,9 @@
 use etl_api::validation::{FailureType, ValidationContext, validate_pipeline, validate_source};
 use etl_config::Environment;
-use etl_postgres::sqlx::test_utils::drop_pg_database;
+use etl_postgres::{
+    below_version, replication::extract_server_version, sqlx::test_utils::drop_pg_database,
+    version::POSTGRES_15,
+};
 use sqlx::Executor;
 
 use super::{create_pipeline_config, create_validation_context_with_source};
@@ -67,6 +70,84 @@ async fn validate_pipeline_publication_empty() {
     let empty_failure = failures.iter().find(|f| f.name == "Publication Empty");
     assert!(empty_failure.is_some(), "Should fail for empty publication");
     assert_eq!(empty_failure.unwrap().failure_type, FailureType::Critical);
+
+    drop_pg_database(&config).await;
+}
+
+#[tokio::test]
+async fn validate_pipeline_rejects_explicit_etl_tables() {
+    let (ctx, pool, config) = create_validation_context_with_source().await;
+
+    pool.execute("create schema etl").await.unwrap();
+    pool.execute(
+        "create table etl.table_columns (
+            id serial primary key,
+            ordinal_position integer not null
+        )",
+    )
+    .await
+    .unwrap();
+    pool.execute("create publication etl_table_pub for table etl.table_columns").await.unwrap();
+
+    let pipeline_config = create_pipeline_config("etl_table_pub");
+    let failures = validate_pipeline(&ctx, &pipeline_config).await.unwrap();
+
+    let etl_failure = failures.iter().find(|f| f.name == "Publication Includes ETL Tables");
+    assert!(etl_failure.is_some(), "Should reject publications containing ETL tables");
+    assert_eq!(etl_failure.unwrap().failure_type, FailureType::Critical);
+    assert!(
+        etl_failure.unwrap().reason.contains("etl.table_columns"),
+        "Failure reason should mention the ETL table"
+    );
+
+    drop_pg_database(&config).await;
+}
+
+#[tokio::test]
+async fn validate_pipeline_rejects_all_tables_publication() {
+    let (ctx, pool, config) = create_validation_context_with_source().await;
+
+    pool.execute("create table customer_table (id serial primary key)").await.unwrap();
+    pool.execute("create publication all_tables_pub for all tables").await.unwrap();
+
+    let pipeline_config = create_pipeline_config("all_tables_pub");
+    let failures = validate_pipeline(&ctx, &pipeline_config).await.unwrap();
+
+    let etl_failure = failures.iter().find(|f| f.name == "Publication Includes ETL Tables");
+    assert!(etl_failure.is_some(), "Should reject FOR ALL TABLES publications");
+    assert_eq!(etl_failure.unwrap().failure_type, FailureType::Critical);
+    assert!(
+        etl_failure.unwrap().reason.contains("FOR ALL TABLES"),
+        "Failure reason should explain the publication mode"
+    );
+
+    drop_pg_database(&config).await;
+}
+
+#[tokio::test]
+async fn validate_pipeline_rejects_etl_schema_publication() {
+    let (ctx, pool, config) = create_validation_context_with_source().await;
+
+    let server_version =
+        sqlx::query_scalar::<_, String>("show server_version").fetch_one(&pool).await.unwrap();
+    if below_version!(extract_server_version(server_version), POSTGRES_15) {
+        drop_pg_database(&config).await;
+        return;
+    }
+
+    pool.execute("create schema etl").await.unwrap();
+    pool.execute("create publication etl_schema_pub for tables in schema etl").await.unwrap();
+
+    let pipeline_config = create_pipeline_config("etl_schema_pub");
+    let failures = validate_pipeline(&ctx, &pipeline_config).await.unwrap();
+
+    let etl_failure = failures.iter().find(|f| f.name == "Publication Includes ETL Tables");
+    assert!(etl_failure.is_some(), "Should reject publications containing the ETL schema");
+    assert_eq!(etl_failure.unwrap().failure_type, FailureType::Critical);
+    assert!(
+        etl_failure.unwrap().reason.contains("'etl' schema"),
+        "Failure reason should mention the ETL schema"
+    );
 
     drop_pg_database(&config).await;
 }

@@ -91,7 +91,11 @@ pub enum DestinationType {
     /// DuckLake destination.
     Ducklake,
     /// Snowflake destination.
-    Snowflake,
+    Snowflake {
+        /// Whether the StatefulSet must reference the Snowflake passphrase
+        /// secret entry.
+        passphrase_secret_required: bool,
+    },
 }
 
 impl From<&StoredDestinationConfig> for DestinationType {
@@ -104,7 +108,11 @@ impl From<&StoredDestinationConfig> for DestinationType {
                 DestinationType::ClickHouse { password_secret_required: password.is_some() }
             }
             StoredDestinationConfig::Ducklake { .. } => DestinationType::Ducklake,
-            StoredDestinationConfig::Snowflake { .. } => DestinationType::Snowflake,
+            StoredDestinationConfig::Snowflake { private_key_passphrase, .. } => {
+                DestinationType::Snowflake {
+                    passphrase_secret_required: private_key_passphrase.is_some(),
+                }
+            }
         }
     }
 }
@@ -209,12 +217,13 @@ pub trait K8sClient: Send + Sync {
         s3_secret_access_key: &str,
     ) -> Result<(), K8sError>;
 
-    /// Creates or updates the DuckLake S3 credentials secret for a replicator.
+    /// Creates or updates the DuckLake credentials secret for a replicator.
     ///
-    /// The secret contains the S3 access key ID and S3 secret access key.
+    /// The secret contains the catalog URL and S3 credentials.
     async fn create_or_update_ducklake_secret(
         &self,
         prefix: &str,
+        catalog_url: &str,
         s3_access_key_id: &str,
         s3_secret_access_key: &str,
     ) -> Result<(), K8sError>;

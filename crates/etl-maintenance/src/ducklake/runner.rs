@@ -43,6 +43,7 @@ const HTTPFS_EXTENSION_FILE: &str = "httpfs.duckdb_extension";
 const POSTGRES_SCANNER_EXTENSION_FILE: &str = "postgres_scanner.duckdb_extension";
 const TARGET_FILE_SIZE_OPTION_NAME: &str = "target_file_size";
 const MAINTENANCE_TARGET_FILE_SIZE: &str = "10MB";
+const CLEANUP_OLD_FILES_OLDER_THAN: &str = "1 day";
 const PARQUET_COMPRESSION_OPTION_NAME: &str = "parquet_compression";
 const PARQUET_COMPRESSION_OPTION_VALUE: &str = "zstd";
 const PARQUET_ROW_GROUP_SIZE_BYTES_OPTION_NAME: &str = "parquet_row_group_size_bytes";
@@ -1499,8 +1500,6 @@ pub struct ExpireSnapshotsMaintenanceConfig {
 pub struct CleanupOldFilesMaintenanceConfig {
     /// Whether old-file cleanup is enabled.
     pub enabled: bool,
-    /// Retention window passed to DuckLake.
-    pub older_than: String,
 }
 
 /// Structured outcome for one external maintenance run.
@@ -1560,7 +1559,6 @@ pub async fn run_maintenance_once(
         expire_snapshots_older_than = %config.expire_snapshots.older_than,
         cleanup_old_files_enabled,
         cleanup_old_files_explicitly_enabled = config.cleanup_old_files.enabled,
-        cleanup_old_files_older_than = %config.cleanup_old_files.older_than,
         "ducklake external maintenance runner configured"
     );
 
@@ -1633,7 +1631,7 @@ pub async fn run_maintenance_once(
     }
 
     if cleanup_old_files_enabled {
-        run_cleanup_old_files(&duckdb, &config.cleanup_old_files, &mut outcome).await?;
+        run_cleanup_old_files(&duckdb, &mut outcome).await?;
     }
 
     info!(outcome = ?outcome, applied = outcome.applied(), "ducklake external maintenance completed");
@@ -1925,20 +1923,14 @@ async fn run_expire_snapshots(
 /// Runs DuckLake old-file cleanup.
 async fn run_cleanup_old_files(
     duckdb: &DuckDbMaintenanceExecutor,
-    config: &CleanupOldFilesMaintenanceConfig,
     outcome: &mut DuckLakeMaintenanceOutcome,
 ) -> EtlResult<()> {
-    info!(
-        older_than = %config.older_than,
-        "ducklake cleanup-old-files executing"
-    );
-    let older_than = config.older_than.clone();
-    let cleaned_up_files = duckdb.run(move |conn| cleanup_old_files(conn, &older_than)).await?;
+    info!(older_than = CLEANUP_OLD_FILES_OLDER_THAN, "ducklake cleanup-old-files executing");
+    let cleaned_up_files = duckdb.run(cleanup_old_files).await?;
     outcome.cleaned_up_files = outcome.cleaned_up_files.saturating_add(cleaned_up_files);
     info!(
-        older_than = %config.older_than,
-        cleaned_up_files,
-        "ducklake cleanup-old-files completed"
+        older_than = CLEANUP_OLD_FILES_OLDER_THAN,
+        cleaned_up_files, "ducklake cleanup-old-files completed"
     );
     Ok(())
 }
@@ -2133,14 +2125,19 @@ fn expire_snapshots(conn: &duckdb::Connection, older_than: &str) -> EtlResult<u6
 }
 
 /// Calls DuckLake old-file cleanup.
-fn cleanup_old_files(conn: &duckdb::Connection, older_than: &str) -> EtlResult<u64> {
-    let sql = format!(
+fn cleanup_old_files(conn: &duckdb::Connection) -> EtlResult<u64> {
+    let sql = cleanup_old_files_sql();
+    count_maintenance_rows(conn, &sql, "DuckLake cleanup old files failed")
+}
+
+/// Builds DuckLake old-file cleanup SQL.
+fn cleanup_old_files_sql() -> String {
+    format!(
         "CALL ducklake_cleanup_old_files({}, older_than => CAST(now() AS TIMESTAMP) - CAST({} AS \
          INTERVAL));",
         quote_literal(LAKE_CATALOG),
-        quote_literal(older_than),
-    );
-    count_maintenance_rows(conn, &sql, "DuckLake cleanup old files failed")
+        quote_literal(CLEANUP_OLD_FILES_OLDER_THAN),
+    )
 }
 
 /// Counts rows returned by one DuckLake maintenance call.
@@ -2502,6 +2499,15 @@ mod tests {
                 ..DuckLakeMaintenanceOutcome::default()
             }
             .applied()
+        );
+    }
+
+    #[test]
+    fn cleanup_old_files_sql_uses_one_day_retention() {
+        assert_eq!(
+            cleanup_old_files_sql(),
+            "CALL ducklake_cleanup_old_files('lake', older_than => CAST(now() AS TIMESTAMP) - \
+             CAST('1 day' AS INTERVAL));"
         );
     }
 

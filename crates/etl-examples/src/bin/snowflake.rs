@@ -214,7 +214,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         &args.sf_args.snowflake_user,
         &args.sf_args.snowflake_database,
         &args.sf_args.snowflake_schema,
-    );
+    )?;
     if let Some(ref role) = args.sf_args.snowflake_role {
         sf_config = sf_config.with_role(role);
     }

@@ -196,6 +196,28 @@ impl<'a> PgReplicationTransactionCore<'a> {
         column_schemas: &[ColumnSchema],
         publication_name: Option<&str>,
     ) -> EtlResult<CopyOutStream> {
+        self.get_table_copy_stream_with_filter_table(
+            table_id,
+            table_id,
+            column_schemas,
+            publication_name,
+        )
+        .await
+    }
+
+    /// Creates a COPY stream for reading data from `table_id`, using
+    /// `filter_table_id` to resolve publication row filters.
+    ///
+    /// Serial copy passes the same table ID for both values. Parallel copy of a
+    /// partitioned table can pass a leaf partition as the physical copy source
+    /// while resolving row filters from the tracked published root or subtree.
+    async fn get_table_copy_stream_with_filter_table(
+        &self,
+        table_id: TableId,
+        filter_table_id: TableId,
+        column_schemas: &[ColumnSchema],
+        publication_name: Option<&str>,
+    ) -> EtlResult<CopyOutStream> {
         let column_list = column_schemas
             .iter()
             .map(|col| quote_identifier(&col.name))
@@ -203,7 +225,7 @@ impl<'a> PgReplicationTransactionCore<'a> {
             .join(", ");
 
         let table_name = self.get_table_name(table_id).await?;
-        let row_filter = self.get_row_filter(table_id, publication_name).await?;
+        let row_filter = self.get_row_filter(filter_table_id, publication_name).await?;
 
         let copy_query = if let Some(row_filter) = row_filter {
             format!(
@@ -737,17 +759,27 @@ impl<'a> PgChildReplicationTransaction<'a> {
         Self { core }
     }
 
-    /// Creates a COPY stream for reading all data from the specified table.
+    /// Creates a COPY stream for reading data from `table_id`, using
+    /// `filter_table_id` to resolve publication row filters.
     ///
-    /// Resolves the table name and row filter internally. Used for copying leaf
-    /// partitions of a partitioned table.
-    pub(crate) async fn get_table_copy_stream(
+    /// This is used when parallel partition copy reads a leaf partition while
+    /// applying the row filter attached to the tracked published root or
+    /// subtree.
+    pub(crate) async fn get_table_copy_stream_with_filter_table(
         &self,
         table_id: TableId,
+        filter_table_id: TableId,
         column_schemas: &[ColumnSchema],
         publication_name: Option<&str>,
     ) -> EtlResult<CopyOutStream> {
-        self.core.get_table_copy_stream(table_id, column_schemas, publication_name).await
+        self.core
+            .get_table_copy_stream_with_filter_table(
+                table_id,
+                filter_table_id,
+                column_schemas,
+                publication_name,
+            )
+            .await
     }
 
     /// Creates a COPY stream for a ctid partition range of the specified table.

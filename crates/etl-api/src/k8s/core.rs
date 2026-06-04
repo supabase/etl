@@ -44,6 +44,9 @@ pub enum K8sCoreError {
     #[error("Could not load app environment")]
     MissingEnvironment,
 
+    #[error("DuckLake S3 credentials are required")]
+    MissingDucklakeS3Credentials,
+
     #[error("Maintenance materialization failed: {0}")]
     MaintenanceMaterialization(#[from] MaintenanceMaterializationError),
 }
@@ -85,10 +88,12 @@ pub enum Secrets {
     Ducklake {
         /// PostgreSQL source database password.
         postgres_password: String,
+        /// DuckLake catalog URL.
+        catalog_url: String,
         /// S3-compatible access key ID.
-        s3_access_key_id: Option<String>,
+        s3_access_key_id: String,
         /// S3-compatible secret access key.
-        s3_secret_access_key: Option<String>,
+        s3_secret_access_key: String,
     },
     /// Credentials for Snowflake destinations.
     Snowflake {
@@ -121,7 +126,7 @@ pub async fn create_or_update_pipeline_resources_in_k8s(
 ) -> Result<(), K8sCoreError> {
     let prefix = create_k8s_object_prefix(tenant_id, replicator.id);
 
-    let secrets = build_secrets_from_configs(&source.config, &destination.config);
+    let secrets = build_secrets_from_configs(&source.config, &destination.config)?;
 
     let environment = Environment::load().map_err(|_| K8sCoreError::MissingEnvironment)?;
 
@@ -285,11 +290,11 @@ pub async fn first_active_pipeline_id(
 fn build_secrets_from_configs(
     source_config: &StoredSourceConfig,
     destination_config: &StoredDestinationConfig,
-) -> Secrets {
+) -> Result<Secrets, K8sCoreError> {
     let postgres_password =
         source_config.password.as_ref().map(|p| p.expose_secret().to_owned()).unwrap_or_default();
 
-    match destination_config {
+    let secrets = match destination_config {
         StoredDestinationConfig::BigQuery { service_account_key, .. } => Secrets::BigQuery {
             postgres_password,
             big_query_service_account_key: service_account_key.expose_secret().to_owned(),
@@ -315,15 +320,28 @@ fn build_secrets_from_configs(
             postgres_password,
             password: password.as_ref().map(|p| p.expose_secret().to_owned()),
         },
-        StoredDestinationConfig::Ducklake { s3_access_key_id, s3_secret_access_key, .. } => {
+        StoredDestinationConfig::Ducklake {
+            catalog_url,
+            s3_access_key_id,
+            s3_secret_access_key,
+            ..
+        } => {
+            let Some(s3_access_key_id) =
+                s3_access_key_id.as_ref().map(|value| value.expose_secret().to_owned())
+            else {
+                return Err(K8sCoreError::MissingDucklakeS3Credentials);
+            };
+            let Some(s3_secret_access_key) =
+                s3_secret_access_key.as_ref().map(|value| value.expose_secret().to_owned())
+            else {
+                return Err(K8sCoreError::MissingDucklakeS3Credentials);
+            };
+
             Secrets::Ducklake {
                 postgres_password,
-                s3_access_key_id: s3_access_key_id
-                    .as_ref()
-                    .map(|value| value.expose_secret().to_owned()),
-                s3_secret_access_key: s3_secret_access_key
-                    .as_ref()
-                    .map(|value| value.expose_secret().to_owned()),
+                catalog_url: catalog_url.expose_secret().to_owned(),
+                s3_access_key_id,
+                s3_secret_access_key,
             }
         }
         StoredDestinationConfig::Snowflake { private_key, private_key_passphrase, .. } => {
@@ -335,7 +353,9 @@ fn build_secrets_from_configs(
                     .map(|p| p.expose_secret().to_owned()),
             }
         }
-    }
+    };
+
+    Ok(secrets)
 }
 
 /// Builds a replicator configuration with credentials omitted.
@@ -412,21 +432,21 @@ async fn create_or_update_dynamic_replicator_secrets(
                 k8s_client.delete_clickhouse_secret(prefix).await?;
             }
         }
-        Secrets::Ducklake { postgres_password, s3_access_key_id, s3_secret_access_key } => {
+        Secrets::Ducklake {
+            postgres_password,
+            catalog_url,
+            s3_access_key_id,
+            s3_secret_access_key,
+        } => {
             k8s_client.create_or_update_postgres_secret(prefix, &postgres_password).await?;
-            if let (Some(s3_access_key_id), Some(s3_secret_access_key)) =
-                (s3_access_key_id, s3_secret_access_key)
-            {
-                k8s_client
-                    .create_or_update_ducklake_secret(
-                        prefix,
-                        &s3_access_key_id,
-                        &s3_secret_access_key,
-                    )
-                    .await?;
-            } else {
-                k8s_client.delete_ducklake_secret(prefix).await?;
-            }
+            k8s_client
+                .create_or_update_ducklake_secret(
+                    prefix,
+                    &catalog_url,
+                    &s3_access_key_id,
+                    &s3_secret_access_key,
+                )
+                .await?;
         }
         Secrets::Snowflake { postgres_password, private_key, private_key_passphrase } => {
             k8s_client.create_or_update_postgres_secret(prefix, &postgres_password).await?;
@@ -623,6 +643,22 @@ mod tests {
         }
     }
 
+    fn snowflake_destination_config(passphrase: Option<&str>) -> StoredDestinationConfig {
+        StoredDestinationConfig::Snowflake {
+            account_id: "myorg-myaccount".to_owned(),
+            user: "etl_user".to_owned(),
+            private_key: SerializableSecretString::from(
+                "-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----".to_owned(),
+            ),
+            private_key_passphrase: passphrase
+                .map(ToOwned::to_owned)
+                .map(SerializableSecretString::from),
+            database: "my_database".to_owned(),
+            schema: "public".to_owned(),
+            role: Some("etl_role".to_owned()),
+        }
+    }
+
     #[async_trait]
     impl K8sClient for RecordingK8sClient {
         async fn create_or_update_postgres_secret(
@@ -667,13 +703,13 @@ mod tests {
         async fn create_or_update_ducklake_secret(
             &self,
             prefix: &str,
+            catalog_url: &str,
             s3_access_key_id: &str,
             s3_secret_access_key: &str,
         ) -> Result<(), K8sError> {
-            self.calls
-                .lock()
-                .unwrap()
-                .push(format!("ducklake:{prefix}:{s3_access_key_id}:{s3_secret_access_key}"));
+            self.calls.lock().unwrap().push(format!(
+                "ducklake:{prefix}:{catalog_url}:{s3_access_key_id}:{s3_secret_access_key}"
+            ));
             Ok(())
         }
 
@@ -855,7 +891,7 @@ mod tests {
         let source_config = source_config_with_password();
         let destination_config = clickhouse_destination_config(Some("clickhouse-password"));
 
-        let secrets = build_secrets_from_configs(&source_config, &destination_config);
+        let secrets = build_secrets_from_configs(&source_config, &destination_config).unwrap();
         let client = RecordingK8sClient::default();
 
         create_or_update_dynamic_replicator_secrets(&client, "tenant-42", secrets).await.unwrap();
@@ -874,7 +910,7 @@ mod tests {
         let source_config = source_config_with_password();
         let destination_config = clickhouse_destination_config(None);
 
-        let secrets = build_secrets_from_configs(&source_config, &destination_config);
+        let secrets = build_secrets_from_configs(&source_config, &destination_config).unwrap();
         let client = RecordingK8sClient::default();
 
         create_or_update_dynamic_replicator_secrets(&client, "tenant-42", secrets).await.unwrap();
@@ -889,6 +925,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn snowflake_creates_postgres_and_snowflake_secrets() {
+        let source_config = source_config_with_password();
+        let destination_config = snowflake_destination_config(Some("passphrase123"));
+
+        let secrets = build_secrets_from_configs(&source_config, &destination_config).unwrap();
+        let client = RecordingK8sClient::default();
+
+        create_or_update_dynamic_replicator_secrets(&client, "tenant-42", secrets).await.unwrap();
+
+        assert_eq!(
+            client.calls(),
+            vec!["postgres:tenant-42:password".to_owned(), "snowflake:tenant-42".to_owned(),]
+        );
+    }
+
+    #[tokio::test]
     async fn ducklake_creates_postgres_and_s3_secrets() {
         let source_config = StoredSourceConfig {
             host: "localhost".to_owned(),
@@ -899,7 +951,7 @@ mod tests {
             password: Some(SerializableSecretString::from("password".to_owned())),
         };
         let destination_config = StoredDestinationConfig::Ducklake {
-            catalog_url: "postgres://catalog".to_owned(),
+            catalog_url: SerializableSecretString::from("postgres://catalog".to_owned()),
             data_path: "s3://bucket/path".to_owned(),
             pool_size: 4,
             s3_access_key_id: Some(SerializableSecretString::from("key-id".to_owned())),
@@ -915,7 +967,7 @@ mod tests {
             maintenance_mode: DuckLakeMaintenanceMode::Kubernetes,
         };
 
-        let secrets = build_secrets_from_configs(&source_config, &destination_config);
+        let secrets = build_secrets_from_configs(&source_config, &destination_config).unwrap();
         let client = RecordingK8sClient::default();
 
         create_or_update_dynamic_replicator_secrets(&client, "tenant-42", secrets).await.unwrap();
@@ -924,13 +976,13 @@ mod tests {
             client.calls(),
             vec![
                 "postgres:tenant-42:password".to_owned(),
-                "ducklake:tenant-42:key-id:secret-key".to_owned(),
+                "ducklake:tenant-42:postgres://catalog:key-id:secret-key".to_owned(),
             ]
         );
     }
 
     #[tokio::test]
-    async fn ducklake_without_s3_still_creates_postgres_secret() {
+    async fn ducklake_without_s3_returns_error() {
         let source_config = StoredSourceConfig {
             host: "localhost".to_owned(),
             hostaddr: None,
@@ -940,8 +992,8 @@ mod tests {
             password: Some(SerializableSecretString::from("password".to_owned())),
         };
         let destination_config = StoredDestinationConfig::Ducklake {
-            catalog_url: "postgres://catalog".to_owned(),
-            data_path: "file:///tmp/lake".to_owned(),
+            catalog_url: SerializableSecretString::from("postgres://catalog".to_owned()),
+            data_path: "s3://bucket/path".to_owned(),
             pool_size: 4,
             s3_access_key_id: None,
             s3_secret_access_key: None,
@@ -956,14 +1008,8 @@ mod tests {
             maintenance_mode: DuckLakeMaintenanceMode::Kubernetes,
         };
 
-        let secrets = build_secrets_from_configs(&source_config, &destination_config);
-        let client = RecordingK8sClient::default();
+        let error = build_secrets_from_configs(&source_config, &destination_config).unwrap_err();
 
-        create_or_update_dynamic_replicator_secrets(&client, "tenant-42", secrets).await.unwrap();
-
-        assert_eq!(
-            client.calls(),
-            vec!["postgres:tenant-42:password".to_owned(), "delete-ducklake:tenant-42".to_owned(),]
-        );
+        assert!(matches!(error, K8sCoreError::MissingDucklakeS3Credentials));
     }
 }

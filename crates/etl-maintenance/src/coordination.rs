@@ -48,6 +48,9 @@ pub struct ExternalMaintenanceRun {
     pub run_id: String,
     /// Run start timestamp.
     pub started_at: Option<DateTime<Utc>>,
+    /// Operations selected for this active run.
+    #[serde(default)]
+    pub operations: ExternalMaintenanceOperations,
 }
 
 /// Backend-neutral operation request flags.
@@ -228,7 +231,7 @@ impl Default for ExternalMaintenanceOperationPolicy {
             inline_flush_enabled: true,
             merge_adjacent_files_enabled: true,
             rewrite_data_files_enabled: true,
-            expire_snapshots_enabled: false,
+            expire_snapshots_enabled: true,
             cleanup_old_files_enabled: true,
         }
     }
@@ -573,6 +576,7 @@ mod tests {
             active_run: Some(ExternalMaintenanceRun {
                 run_id: "run-1".to_owned(),
                 started_at: Some(Utc::now()),
+                operations: ExternalMaintenanceOperations::default(),
             }),
             ..ExternalMaintenanceState::default()
         });

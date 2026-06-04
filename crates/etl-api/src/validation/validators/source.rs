@@ -1,9 +1,8 @@
 use async_trait::async_trait;
+use etl_postgres::replication::catalog::ETL_SCHEMA_NAME;
 use sqlx::FromRow;
 
 use super::super::{ValidationContext, ValidationError, ValidationFailure, Validator};
-
-const ETL_SCHEMA_NAME: &str = "etl";
 
 /// Validates the connected source role profile for ETL.
 #[derive(Debug)]

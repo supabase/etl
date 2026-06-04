@@ -122,7 +122,7 @@ pub enum DestinationConfig {
     },
     Ducklake {
         /// DuckLake catalog URL.
-        catalog_url: String,
+        catalog_url: SecretString,
         /// DuckLake data path.
         data_path: String,
         /// Size of the DuckDB connection pool.
@@ -339,8 +339,6 @@ pub enum DestinationConfigWithoutSecrets {
         config: IcebergConfigWithoutSecrets,
     },
     Ducklake {
-        /// DuckLake catalog URL.
-        catalog_url: String,
         /// DuckLake data path.
         data_path: String,
         /// Size of the DuckDB connection pool.
@@ -403,7 +401,7 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
                 DestinationConfigWithoutSecrets::Iceberg { config: config.into() }
             }
             DestinationConfig::Ducklake {
-                catalog_url,
+                catalog_url: _,
                 data_path,
                 pool_size,
                 s3_access_key_id: _,
@@ -418,7 +416,6 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
                 expire_snapshots_older_than,
                 maintenance_mode,
             } => DestinationConfigWithoutSecrets::Ducklake {
-                catalog_url,
                 data_path,
                 pool_size,
                 s3_region,
@@ -447,5 +444,37 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
                 role,
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ducklake_without_secrets_omits_catalog_url() {
+        let config = DestinationConfig::Ducklake {
+            catalog_url: "postgres://user:pass@localhost:5432/ducklake_catalog".to_owned().into(),
+            data_path: "s3://bucket/path".to_owned(),
+            pool_size: 4,
+            s3_access_key_id: None,
+            s3_secret_access_key: None,
+            s3_region: None,
+            s3_endpoint: None,
+            s3_url_style: None,
+            s3_use_ssl: None,
+            metadata_schema: None,
+            duckdb_memory_cache_limit: None,
+            maintenance_target_file_size: None,
+            expire_snapshots_older_than: None,
+            maintenance_mode: DuckLakeMaintenanceMode::Kubernetes,
+        };
+
+        let without_secrets = DestinationConfigWithoutSecrets::from(config);
+        let json = serde_json::to_value(without_secrets).unwrap();
+        let serialized = json.to_string();
+
+        assert!(!serialized.contains("catalog_url"));
+        assert!(!serialized.contains("user:pass"));
     }
 }

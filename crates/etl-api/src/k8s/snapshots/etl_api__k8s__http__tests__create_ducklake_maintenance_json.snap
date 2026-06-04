@@ -27,7 +27,7 @@ expression: "serde_json::to_string_pretty(&ducklake_maintenance_json).unwrap()"
         "enabled": true
       },
       "expireSnapshots": {
-        "enabled": false
+        "enabled": true
       },
       "inlineFlush": {
         "enabled": true,
