@@ -1285,7 +1285,7 @@ where
     S: StateStore + SchemaStore + Send + Sync,
 {
     fn name() -> &'static str {
-        "clickhouse"
+        etl_config::shared::DestinationKind::ClickHouse.as_str()
     }
 
     // The trait methods below intentionally do not use `?` on the inner work.
