@@ -13,7 +13,6 @@ mod nextest;
 mod postgres;
 mod rotate_encryption_key;
 mod seed;
-mod shared;
 mod test_clickhouse;
 mod vendor_duckdb;
 

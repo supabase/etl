@@ -7,6 +7,8 @@ use std::{
 use anyhow::{Context, Result, bail};
 use clap::{Args, ValueEnum};
 
+use crate::utils::{DEFAULT_BASE_PORT, DEFAULT_PG_SHARD_COUNT, READ_REPLICA_PORT_OFFSET};
+
 /// Nextest filter expression that selects tests requiring a Postgres cluster.
 ///
 /// This must stay in sync with the `shared-pg` test group in
@@ -16,8 +18,6 @@ const SHARED_PG_FILTER: &str = "\
                                 test(/^(bigquery|clickhouse|ducklake|iceberg|snowflake)::/)) | \
                                 (binary_id(etl-destinations) & \
                                 test(/ducklake::core::tests::postgres_backed::/))";
-
-use super::shared::{DEFAULT_BASE_PORT, DEFAULT_PG_SHARD_COUNT, READ_REPLICA_PORT_OFFSET};
 
 #[derive(Clone, Copy, ValueEnum)]
 pub(crate) enum Mode {

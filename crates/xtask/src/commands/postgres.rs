@@ -9,7 +9,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
 
-use super::shared::{DEFAULT_BASE_PORT, DEFAULT_PG_SHARD_COUNT, READ_REPLICA_PORT_OFFSET};
+use crate::utils::{DEFAULT_BASE_PORT, DEFAULT_PG_SHARD_COUNT, READ_REPLICA_PORT_OFFSET};
 
 const COMPOSE_FILE: &str = "./scripts/docker-compose.yaml";
 
