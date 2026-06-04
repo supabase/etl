@@ -17,6 +17,14 @@ doctest = false
 path = "src/main.rs"
 name = "etl-api"
 
+[features]
+default = ["bigquery", "clickhouse", "ducklake", "iceberg", "snowflake"]
+bigquery = ["etl-destinations/bigquery"]
+clickhouse = ["etl-destinations/clickhouse"]
+ducklake = ["etl-destinations/ducklake"]
+iceberg = ["etl-destinations/iceberg"]
+snowflake = ["etl-destinations/snowflake"]
+
 [dependencies]
 
 anyhow = { workspace = true, features = ["std"] }
@@ -29,22 +37,16 @@ configcat = { workspace = true }
 constant_time_eq = { workspace = true }
 etl = { workspace = true }
 etl-config = { workspace = true, features = ["utoipa", "supabase"] }
-etl-destinations = { workspace = true, features = [
-  "bigquery",
-  "clickhouse",
-  "ducklake",
-  "iceberg",
-  "snowflake",
-] }
+etl-destinations = { workspace = true }
 etl-maintenance = { workspace = true }
 etl-postgres = { workspace = true, features = ["replication"] }
 etl-telemetry = { workspace = true }
 k8s-openapi = { workspace = true, features = ["latest"] }
 kube = { workspace = true, features = [
-  "runtime",
-  "derive",
-  "client",
-  "rustls-tls",
+    "runtime",
+    "derive",
+    "client",
+    "rustls-tls",
 ] }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true, features = ["http-listener"] }
@@ -56,12 +58,12 @@ sentry = { workspace = true, features = ["tower-http", "tower-axum-matched-path"
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true, features = ["std"] }
 sqlx = { workspace = true, features = [
-  "runtime-tokio",
-  "tls-rustls",
-  "macros",
-  "postgres",
-  "json",
-  "migrate",
+    "runtime-tokio",
+    "tls-rustls",
+    "macros",
+    "postgres",
+    "json",
+    "migrate",
 ] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
@@ -73,14 +75,7 @@ utoipa = { workspace = true, features = ["axum_extras"] }
 utoipa-swagger-ui = { workspace = true, features = ["axum"] }
 
 [dev-dependencies]
-etl-destinations = { workspace = true, features = [
-  "test-utils",
-  "bigquery",
-  "clickhouse",
-  "ducklake",
-  "iceberg",
-  "snowflake",
-] }
+etl-destinations = { workspace = true, features = ["test-utils"] }
 etl-postgres = { workspace = true, features = ["test-utils", "sqlx"] }
 
 insta = { workspace = true, features = ["json", "redactions"] }
