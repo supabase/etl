@@ -1564,7 +1564,9 @@ pub async fn run_maintenance_once(
     );
 
     let duckdb = open_maintenance_executor(&config).await?;
-    validate_expire_snapshots_older_than(&duckdb, &config.expire_snapshots.older_than).await?;
+    if config.expire_snapshots.enabled {
+        validate_expire_snapshots_older_than(&duckdb, &config.expire_snapshots.older_than).await?;
+    }
     let metadata_schema = match config.metadata_schema.clone() {
         Some(metadata_schema) => metadata_schema,
         None => resolve_metadata_schema(&duckdb).await?,

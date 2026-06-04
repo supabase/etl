@@ -89,7 +89,12 @@ where
     let config = ExternalMaintenanceWatcherConfig::from_env();
     let store = PostgresExternalMaintenanceStore::new(pipeline_id, pool);
     store.ensure_schema().await?;
-    store.ensure_pipeline_state_if_missing(ExternalMaintenanceOperationPolicy::default()).await?;
+    store
+        .ensure_pipeline_state_if_missing(
+            ExternalMaintenancePausePolicy::default(),
+            ExternalMaintenanceOperationPolicy::default(),
+        )
+        .await?;
 
     info!(
         pipeline_id,
