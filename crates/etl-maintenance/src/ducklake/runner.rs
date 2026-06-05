@@ -46,7 +46,7 @@ const MAINTENANCE_TARGET_FILE_SIZE: &str = "500MB";
 /// Minimum snapshot-retention interval accepted by the maintenance runner.
 const MIN_EXPIRE_SNAPSHOTS_OLDER_THAN: &str = "1 day";
 /// Minimum old-file cleanup grace window used by DuckLake cleanup.
-const CLEANUP_OLD_FILES_OLDER_THAN: &str = "1 day";
+const CLEANUP_OLD_FILES_OLDER_THAN: &str = "1 hour";
 const PARQUET_COMPRESSION_OPTION_NAME: &str = "parquet_compression";
 const PARQUET_COMPRESSION_OPTION_VALUE: &str = "zstd";
 const PARQUET_ROW_GROUP_SIZE_BYTES_OPTION_NAME: &str = "parquet_row_group_size_bytes";
@@ -2628,11 +2628,11 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_old_files_sql_uses_one_day_retention() {
+    fn cleanup_old_files_sql_uses_one_hour_retention() {
         assert_eq!(
             cleanup_old_files_sql(),
             "CALL ducklake_cleanup_old_files('lake', older_than => CAST(now() AS TIMESTAMP) - \
-             CAST('1 day' AS INTERVAL));"
+             CAST('1 hour' AS INTERVAL));"
         );
     }
 
