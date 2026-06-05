@@ -2,9 +2,12 @@ use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
-use xshell::{Shell, cmd};
+use xshell::{Cmd, Shell, cmd};
 
-use crate::utils::{DEFAULT_BASE_PORT, maybe_with_sccache};
+use crate::utils::{
+    CargoFeatureSelection, DEFAULT_BASE_PORT, DefaultFeatureBehavior, DestinationPreset,
+    maybe_with_sccache,
+};
 
 const GREEN: &str = "\x1b[32m";
 const YELLOW: &str = "\x1b[33m";
@@ -26,20 +29,17 @@ impl TestSnowflakeArgs {
         let sh = Shell::new()?;
 
         let sccache = self.sccache;
-        let db_host = env_or("TESTS_DATABASE_HOST", "localhost");
-        let db_port = env_or("TESTS_DATABASE_PORT", &DEFAULT_BASE_PORT.to_string());
-        let db_user = env_or("TESTS_DATABASE_USERNAME", "postgres");
-        let db_pass = env_or("TESTS_DATABASE_PASSWORD", "postgres");
+        let pg_env = PgEnv::from_env();
 
-        check_postgres_ready(&db_host, &db_port, &db_user)?;
+        check_postgres_ready(&pg_env.host, &pg_env.port, &pg_env.username)?;
 
-        eprintln!("{GREEN}🧪 running Snowflake API tests (no credentials needed).{RESET}");
-        maybe_with_sccache(cmd!(sh, "cargo test -p etl-api -- snowflake"), sccache)
-            .env("TESTS_DATABASE_HOST", &db_host)
-            .env("TESTS_DATABASE_PORT", &db_port)
-            .env("TESTS_DATABASE_USERNAME", &db_user)
-            .env("TESTS_DATABASE_PASSWORD", &db_pass)
-            .run()?;
+        eprintln!(
+            "{GREEN}🧪 running Snowflake destination preset tests (no credentials needed).{RESET}"
+        );
+        let tests = CargoFeatureSelection::for_destination(Some(DestinationPreset::Snowflake))
+            .apply_to(cmd!(sh, "cargo nextest run --no-fail-fast"), DefaultFeatureBehavior::All)
+            .arg("snowflake");
+        with_pg_env(maybe_with_sccache(tests, sccache), &pg_env).run()?;
 
         if self.no_credentials {
             eprintln!("{YELLOW}⏭ skipping Snowflake credentialed tests (--no-credentials).{RESET}");
@@ -71,35 +71,67 @@ impl TestSnowflakeArgs {
             );
         }
 
-        eprintln!("{GREEN}🔑 running Snowflake API validator integration tests.{RESET}");
-        maybe_with_sccache(
-            cmd!(sh, "cargo test -p etl-api -- snowflake --ignored --nocapture --test-threads=1"),
-            sccache,
+        eprintln!(
+            "{GREEN}🔑 running Snowflake API validator integration tests sequentially.{RESET}"
+        );
+        let tests = CargoFeatureSelection::new(
+            true,
+            vec!["snowflake".to_owned()],
+            vec!["etl-api".to_owned()],
         )
-        .env("TESTS_DATABASE_HOST", &db_host)
-        .env("TESTS_DATABASE_PORT", &db_port)
-        .env("TESTS_DATABASE_USERNAME", &db_user)
-        .env("TESTS_DATABASE_PASSWORD", &db_pass)
-        .run()?;
+        .apply_to(
+            cmd!(sh, "cargo nextest run --no-fail-fast --run-ignored only --test-threads 1"),
+            DefaultFeatureBehavior::CargoDefault,
+        )
+        .arg("snowflake");
+        with_pg_env(maybe_with_sccache(tests, sccache), &pg_env).run()?;
 
-        eprintln!("{GREEN}❄️  running Snowflake destination integration tests.{RESET}");
-        maybe_with_sccache(
-            cmd!(sh, "cargo test -p etl-destinations --features snowflake,test-utils --test main"),
-            sccache,
+        eprintln!(
+            "{GREEN}❄️  running Snowflake destination integration tests sequentially.{RESET}"
+        );
+        let tests = CargoFeatureSelection::new(
+            true,
+            vec!["snowflake".to_owned(), "test-utils".to_owned()],
+            vec!["etl-destinations".to_owned()],
         )
-        .args(["--", "snowflake", "--ignored", "--nocapture", "--test-threads=1"])
-        .env("TESTS_DATABASE_HOST", &db_host)
-        .env("TESTS_DATABASE_PORT", &db_port)
-        .env("TESTS_DATABASE_USERNAME", &db_user)
-        .env("TESTS_DATABASE_PASSWORD", &db_pass)
-        .run()?;
+        .apply_to(
+            cmd!(sh, "cargo nextest run --no-fail-fast --run-ignored only --test-threads 1"),
+            DefaultFeatureBehavior::CargoDefault,
+        )
+        .arg("snowflake");
+        with_pg_env(maybe_with_sccache(tests, sccache), &pg_env).run()?;
 
         Ok(())
     }
 }
 
+struct PgEnv {
+    host: String,
+    port: String,
+    username: String,
+    password: String,
+}
+
+impl PgEnv {
+    fn from_env() -> Self {
+        Self {
+            host: env_or("TESTS_DATABASE_HOST", "localhost"),
+            port: env_or("TESTS_DATABASE_PORT", &DEFAULT_BASE_PORT.to_string()),
+            username: env_or("TESTS_DATABASE_USERNAME", "postgres"),
+            password: env_or("TESTS_DATABASE_PASSWORD", "postgres"),
+        }
+    }
+}
+
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_owned())
+}
+
+fn with_pg_env<'a>(cmd: Cmd<'a>, pg_env: &PgEnv) -> Cmd<'a> {
+    cmd.env("TESTS_DATABASE_HOST", &pg_env.host)
+        .env("TESTS_DATABASE_PORT", &pg_env.port)
+        .env("TESTS_DATABASE_USERNAME", &pg_env.username)
+        .env("TESTS_DATABASE_PASSWORD", &pg_env.password)
 }
 
 fn check_postgres_ready(host: &str, port: &str, user: &str) -> Result<()> {

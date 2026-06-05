@@ -10,8 +10,8 @@ cargo x test-snowflake
 ```
 
 This requires local Postgres to already be running. Run `cargo x init` first if the local
-development stack is not up. The command runs API-level Snowflake tests that do not require
-credentials, then runs the credentialed integration tiers when `TESTS_SNOWFLAKE_ACCOUNT`,
+development stack is not up. The command first runs the non-credentialed Snowflake destination
+preset, then runs the credentialed integration tiers when `TESTS_SNOWFLAKE_ACCOUNT`,
 `TESTS_SNOWFLAKE_USER`, and `TESTS_SNOWFLAKE_PRIVATE_KEY_PATH` are set. See `.env.example` for
 setup instructions. Use `--no-credentials` to run only the non-credentialed tier.
 
@@ -19,7 +19,7 @@ To run a specific destination test directly:
 
 ```bash
 source .env
-cargo test -p etl-destinations --features snowflake,test-utils -- --ignored authenticate_against_snowflake
+cargo test -p etl-destinations --no-default-features --features snowflake,test-utils -- --ignored authenticate_against_snowflake
 ```
 
 ### Environment Variables
