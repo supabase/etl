@@ -71,31 +71,27 @@ impl TestSnowflakeArgs {
             );
         }
 
-        eprintln!(
-            "{GREEN}🔑 running Snowflake API validator integration tests sequentially.{RESET}"
-        );
+        eprintln!("{GREEN}🔑 running Snowflake API validator integration tests.{RESET}");
         let tests = CargoFeatureSelection::new(
             true,
             vec!["snowflake".to_owned()],
             vec!["etl-api".to_owned()],
         )
         .apply_to(
-            cmd!(sh, "cargo nextest run --no-fail-fast --run-ignored only --test-threads 1"),
+            cmd!(sh, "cargo nextest run --no-fail-fast --run-ignored only"),
             DefaultFeatureBehavior::CargoDefault,
         )
         .arg("snowflake");
         with_pg_env(maybe_with_sccache(tests, sccache), &pg_env).run()?;
 
-        eprintln!(
-            "{GREEN}❄️  running Snowflake destination integration tests sequentially.{RESET}"
-        );
+        eprintln!("{GREEN}❄️  running Snowflake destination integration tests.{RESET}");
         let tests = CargoFeatureSelection::new(
             true,
             vec!["snowflake".to_owned(), "test-utils".to_owned()],
             vec!["etl-destinations".to_owned()],
         )
         .apply_to(
-            cmd!(sh, "cargo nextest run --no-fail-fast --run-ignored only --test-threads 1"),
+            cmd!(sh, "cargo nextest run --no-fail-fast --run-ignored only"),
             DefaultFeatureBehavior::CargoDefault,
         )
         .arg("snowflake");
