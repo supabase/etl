@@ -2,7 +2,7 @@ use anyhow::Result;
 use clap::Args;
 use xshell::{Shell, cmd};
 
-use super::shared::NIGHTLY_TOOLCHAIN;
+use crate::utils::NIGHTLY_TOOLCHAIN;
 
 #[derive(Args)]
 pub(crate) struct FmtArgs {

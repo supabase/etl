@@ -2,7 +2,10 @@ use anyhow::Result;
 use clap::Args;
 use xshell::{Shell, cmd};
 
-use super::shared::{NIGHTLY_TOOLCHAIN, maybe_with_sccache};
+use crate::utils::{
+    CargoFeatureSelection, DefaultFeatureBehavior, DestinationPreset, NIGHTLY_TOOLCHAIN,
+    maybe_with_sccache,
+};
 
 #[derive(Args)]
 pub(crate) struct CheckArgs {
@@ -10,6 +13,10 @@ pub(crate) struct CheckArgs {
     /// Also enabled via `ETL_SCCACHE=1`.
     #[arg(long)]
     sccache: bool,
+
+    /// Destination preset for the clippy check pass.
+    #[arg(long, value_enum)]
+    destination: Option<DestinationPreset>,
 }
 
 impl CheckArgs {
@@ -26,11 +33,11 @@ impl CheckArgs {
         cmd!(sh, "cargo sort --workspace --grouped --check").run()?;
 
         println!("[clippy]");
-        maybe_with_sccache(
-            cmd!(sh, "cargo clippy --all-targets --all-features --no-deps"),
-            self.sccache,
-        )
-        .run()?;
+        let CheckArgs { sccache, destination } = self;
+        let clippy = CargoFeatureSelection::for_destination(destination)
+            .apply_to(cmd!(sh, "cargo clippy --all-targets"), DefaultFeatureBehavior::All)
+            .arg("--no-deps");
+        maybe_with_sccache(clippy, sccache).run()?;
 
         Ok(())
     }
