@@ -6,7 +6,7 @@ use clap::{Parser, Subcommand};
 use commands::{
     BenchmarkArgs, BenchmarkCompareArgs, ChaosArgs, CheckArgs, DeployLocalArgs, ExampleArgs,
     FixArgs, FmtArgs, InitArgs, MigrateArgs, MsrvArgs, NextestArgs, PostgresArgs,
-    RotateEncryptionKeyArgs, SeedArgs, TestClickhouseArgs, VendorDuckdbArgs,
+    RotateEncryptionKeyArgs, SeedArgs, TestArgs, TestClickhouseArgs, VendorDuckdbArgs,
 };
 
 #[derive(Parser)]
@@ -54,6 +54,8 @@ enum Command {
     /// Seed a Postgres database with test tables and data for destination
     /// examples.
     Seed(SeedArgs),
+    /// Run local tests via nextest.
+    Test(TestArgs),
     /// Run ClickHouse integration tests with a local Docker setup.
     #[command(name = "test-clickhouse")]
     TestClickhouse(TestClickhouseArgs),
@@ -81,6 +83,7 @@ async fn main() -> Result<()> {
         Command::Postgres(cmd) => cmd.run(),
         Command::RotateEncryptionKey(cmd) => cmd.run().await,
         Command::Seed(cmd) => cmd.run(),
+        Command::Test(cmd) => cmd.run(),
         Command::TestClickhouse(cmd) => cmd.run(),
         Command::VendorDuckdb(cmd) => cmd.run(),
     }

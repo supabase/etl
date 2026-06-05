@@ -13,6 +13,7 @@ mod nextest;
 mod postgres;
 mod rotate_encryption_key;
 mod seed;
+mod test;
 mod test_clickhouse;
 mod vendor_duckdb;
 
@@ -31,5 +32,6 @@ pub(crate) use nextest::NextestArgs;
 pub(crate) use postgres::PostgresArgs;
 pub(crate) use rotate_encryption_key::RotateEncryptionKeyArgs;
 pub(crate) use seed::SeedArgs;
+pub(crate) use test::TestArgs;
 pub(crate) use test_clickhouse::TestClickhouseArgs;
 pub(crate) use vendor_duckdb::VendorDuckdbArgs;
