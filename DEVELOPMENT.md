@@ -56,6 +56,7 @@ cargo x init             # set up local dev environment
 cargo x migrate          # run database migrations
 cargo x deploy-local     # deploy replicator to local OrbStack k8s
 cargo x test-clickhouse  # run ClickHouse integration tests
+cargo x test-snowflake   # run Snowflake tests
 cargo x vendor-duckdb    # download and vendor DuckDB extensions
 ```
 

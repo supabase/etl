@@ -6,7 +6,8 @@ use clap::{Parser, Subcommand};
 use commands::{
     BenchmarkArgs, BenchmarkCompareArgs, ChaosArgs, CheckArgs, DeployLocalArgs, ExampleArgs,
     FixArgs, FmtArgs, InitArgs, MigrateArgs, MsrvArgs, NextestArgs, PostgresArgs,
-    RotateEncryptionKeyArgs, SeedArgs, TestArgs, TestClickhouseArgs, VendorDuckdbArgs,
+    RotateEncryptionKeyArgs, SeedArgs, TestArgs, TestClickhouseArgs, TestSnowflakeArgs,
+    VendorDuckdbArgs,
 };
 
 #[derive(Parser)]
@@ -59,6 +60,10 @@ enum Command {
     /// Run ClickHouse integration tests with a local Docker setup.
     #[command(name = "test-clickhouse")]
     TestClickhouse(TestClickhouseArgs),
+    /// Run Snowflake tests, including integration tests (requiring credentials)
+    /// when configured.
+    #[command(name = "test-snowflake")]
+    TestSnowflake(TestSnowflakeArgs),
     /// Download and vendor DuckDB extensions.
     #[command(name = "vendor-duckdb")]
     VendorDuckdb(VendorDuckdbArgs),
@@ -85,6 +90,7 @@ async fn main() -> Result<()> {
         Command::Seed(cmd) => cmd.run(),
         Command::Test(cmd) => cmd.run(),
         Command::TestClickhouse(cmd) => cmd.run(),
+        Command::TestSnowflake(cmd) => cmd.run(),
         Command::VendorDuckdb(cmd) => cmd.run(),
     }
 }
