@@ -96,10 +96,7 @@ where
         )
         .await?;
 
-    info!(
-        pipeline_id,
-        "ducklake Postgres external maintenance watcher configured: pipeline_id={}", pipeline_id
-    );
+    info!(pipeline_id, "ducklake Postgres external maintenance watcher configured");
 
     run_external_maintenance_watcher(destination, store, config).await
 }
@@ -121,11 +118,7 @@ where
         poll_interval_ms = config.poll_interval.as_millis() as u64,
         request_cooldown_ms = config.request_cooldown.as_millis() as u64,
         store_timeout_ms = config.store_timeout.as_millis() as u64,
-        "ducklake external maintenance watcher started: poll_interval_ms={}, \
-         request_cooldown_ms={}, store_timeout_ms={}",
-        config.poll_interval.as_millis(),
-        config.request_cooldown.as_millis(),
-        config.store_timeout.as_millis()
+        "ducklake external maintenance watcher started"
     );
 
     loop {
@@ -152,17 +145,14 @@ where
                 warn!(
                     error = %error,
                     timeout_ms = config.store_timeout.as_millis() as u64,
-                    "failed to read ducklake external maintenance state: timeout_ms={}, error={}",
-                    config.store_timeout.as_millis(),
-                    error
+                    "failed to read ducklake external maintenance state"
                 );
                 release_expired_pause_if_needed(&store, &config, &mut held_pause).await;
             }
             Err(_) => {
                 warn!(
                     timeout_ms = config.store_timeout.as_millis() as u64,
-                    "timed out reading ducklake external maintenance state: timeout_ms={}",
-                    config.store_timeout.as_millis()
+                    "timed out reading ducklake external maintenance state"
                 );
                 release_expired_pause_if_needed(&store, &config, &mut held_pause).await;
             }
@@ -179,16 +169,13 @@ where
     if let Some(held) = held_pause.take() {
         info!(
             run_id = %held.run_id,
-            "ducklake maintenance state disappeared, resuming foreground mutations: run_id={}",
-            held.run_id
+            "ducklake maintenance state disappeared, resuming foreground mutations"
         );
         release_held_pause(held, "state_missing");
         if let Err(error) = store.clear_replicator_status().await {
             warn!(
                 error = %error,
-                "failed to clear ducklake maintenance replicator status after state disappeared: \
-                 error={}",
-                error
+                "failed to clear ducklake maintenance replicator status after state disappeared"
             );
         }
     }
@@ -209,9 +196,7 @@ async fn reconcile_pause<S, M>(
         if let Some(held) = held_pause.take() {
             info!(
                 run_id = %held.run_id,
-                "ducklake external maintenance pause cleared, resuming foreground mutations: \
-                 run_id={}",
-                held.run_id
+                "ducklake external maintenance pause cleared, resuming foreground mutations"
             );
             release_held_pause(held, "cleared");
             report_running(store, config.store_timeout).await;
@@ -240,10 +225,7 @@ async fn reconcile_pause<S, M>(
         info!(
             previous_run_id = %held.run_id,
             next_run_id = %pause.run_id,
-            "ducklake external maintenance pause replaced, resuming previous run before pausing again: \
-             previous_run_id={}, next_run_id={}",
-            held.run_id,
-            pause.run_id
+            "ducklake external maintenance pause replaced, resuming previous run before pausing again"
         );
         release_held_pause(held, "replaced");
         report_running(store, config.store_timeout).await;
@@ -252,10 +234,7 @@ async fn reconcile_pause<S, M>(
     info!(
         run_id = %pause.run_id,
         expires_at = %pause.expires_at.to_rfc3339(),
-        "ducklake external maintenance pause requested, waiting for foreground mutations to drain: \
-         run_id={}, expires_at={}",
-        pause.run_id,
-        pause.expires_at.to_rfc3339()
+        "ducklake external maintenance pause requested, waiting for foreground mutations to drain"
     );
     report_pausing(store, &pause.run_id, config.store_timeout).await;
     let operations = active_pause_operations(state, &pause);
@@ -267,9 +246,7 @@ async fn reconcile_pause<S, M>(
             run_id = %pause.run_id,
             expires_at = %pause.expires_at.to_rfc3339(),
             "ducklake external maintenance pause expired before quiescence, resuming foreground \
-             mutations: run_id={}, expires_at={}",
-            pause.run_id,
-            pause.expires_at.to_rfc3339()
+             mutations"
         );
         release_held_pause(
             HeldPause {
@@ -292,11 +269,7 @@ async fn reconcile_pause<S, M>(
         run_id = %pause.run_id,
         quiesced_at = %quiesced_at.to_rfc3339(),
         expires_at = %pause.expires_at.to_rfc3339(),
-        "ducklake external maintenance quiesced, foreground mutations are paused: run_id={}, \
-         quiesced_at={}, expires_at={}",
-        pause.run_id,
-        quiesced_at.to_rfc3339(),
-        pause.expires_at.to_rfc3339()
+        "ducklake external maintenance quiesced, foreground mutations are paused"
     );
     let quiesced_reported =
         report_quiesced(store, &pause.run_id, quiesced_at, config.store_timeout).await;
@@ -305,10 +278,7 @@ async fn reconcile_pause<S, M>(
             run_id = %pause.run_id,
             timeout_ms = config.store_timeout.as_millis() as u64,
             "ducklake external maintenance quiesced status was not confirmed; keeping foreground \
-             mutations paused until the status patch succeeds or the pause expires: run_id={}, \
-             timeout_ms={}",
-            pause.run_id,
-            config.store_timeout.as_millis()
+             mutations paused until the status patch succeeds or the pause expires"
         );
     }
 
@@ -338,9 +308,7 @@ async fn release_expired_pause_if_needed<M>(
     };
     warn!(
         run_id = %expired.run_id,
-        "ducklake maintenance pause expired while external maintenance store was unavailable: \
-         run_id={}",
-        expired.run_id
+        "ducklake maintenance pause expired while external maintenance store was unavailable"
     );
     release_held_pause(expired, "expired");
     report_running(store, config.store_timeout).await;
@@ -355,10 +323,7 @@ fn release_held_pause(held: HeldPause, outcome: &'static str) {
         run_id = %held.run_id,
         outcome,
         held_ms,
-        "ducklake external maintenance pause guard released: run_id={}, outcome={}, held_ms={}",
-        held.run_id,
-        outcome,
-        held_ms
+        "ducklake external maintenance pause guard released"
     );
 }
 
@@ -477,10 +442,7 @@ impl ExpireSnapshotsRequestGate {
         debug!(
             completed_at = %completed_at,
             next_request_after = ?self.next_request_after,
-            "ducklake expire-snapshots request gate initialized from maintenance state: \
-             completed_at={}, next_request_after={:?}",
-            completed_at,
-            self.next_request_after
+            "ducklake expire-snapshots request gate initialized from maintenance state"
         );
     }
 
@@ -533,8 +495,7 @@ async fn maybe_request_operations<S, M>(
         Err(error) => {
             warn!(
                 error = %error,
-                "failed to sample ducklake external maintenance operations: error={}",
-                error
+                "failed to sample ducklake external maintenance operations"
             );
             return;
         }
@@ -609,15 +570,13 @@ async fn maybe_request_operations<S, M>(
         Ok(Err(error)) => {
             warn!(
                 error = %error,
-                "failed to request ducklake external maintenance operations: error={}",
-                error
+                "failed to request ducklake external maintenance operations"
             );
         }
         Err(_) => {
             warn!(
                 timeout_ms = config.store_timeout.as_millis() as u64,
-                "timed out requesting ducklake external maintenance operations: timeout_ms={}",
-                config.store_timeout.as_millis()
+                "timed out requesting ducklake external maintenance operations"
             );
         }
     }
@@ -691,9 +650,7 @@ where
             warn!(
                 error = %error,
                 state = ?state,
-                "failed to report ducklake maintenance replicator status: state={:?}, error={}",
-                state,
-                error
+                "failed to report ducklake maintenance replicator status"
             );
             false
         }
@@ -701,10 +658,7 @@ where
             warn!(
                 state = ?state,
                 timeout_ms = timeout.as_millis() as u64,
-                "timed out reporting ducklake maintenance replicator status: state={:?}, \
-                 timeout_ms={}",
-                state,
-                timeout.as_millis()
+                "timed out reporting ducklake maintenance replicator status"
             );
             false
         }
