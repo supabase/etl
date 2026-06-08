@@ -324,8 +324,8 @@ where
     /// Also detects tables for which we have stored state but are no longer
     /// part of the publication, performs a best-effort cleanup of their table
     /// sync replication slots, and deletes their stored state (replication
-    /// state, destination table metadata, and table schemas) without touching
-    /// the actual destination tables.
+    /// state, destination table metadata, table schemas, and durable
+    /// table-sync progress) without touching the actual destination tables.
     async fn initialize_table_states(
         &self,
         replication_client: &PgReplicationClient,
@@ -415,6 +415,12 @@ where
                     EtlReplicationSlot::for_table_sync_worker(self.config.id, table_id)
                         .try_into()?;
                 replication_client.delete_slot_if_exists(&slot_name).await?;
+
+                info!(
+                    table_id = table_id.0,
+                    slot_name,
+                    "purged stored state and table sync slot for table removed from publication"
+                );
             }
         }
 

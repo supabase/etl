@@ -833,7 +833,7 @@ async fn state_transitions_and_history() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn delete_table_pipeline_state_deletes_state_schema_and_metadata_for_table() {
+async fn delete_table_pipeline_state_deletes_state_schema_metadata_and_progress_for_table() {
     init_test_tracing();
 
     let database = spawn_source_database().await;
@@ -871,11 +871,32 @@ async fn delete_table_pipeline_state_deletes_state_schema_and_metadata_for_table
 
     store.store_destination_table_metadata(table_1_id, metadata1).await.unwrap();
     store.store_destination_table_metadata(table_2_id, metadata2).await.unwrap();
+    store
+        .upsert_replication_progress(
+            WorkerType::TableSync { table_id: table_1_id },
+            PgLsn::from(200u64),
+        )
+        .await
+        .unwrap();
+    store
+        .upsert_replication_progress(
+            WorkerType::TableSync { table_id: table_2_id },
+            PgLsn::from(300u64),
+        )
+        .await
+        .unwrap();
 
     // Sanity check before deleting state.
     assert!(store.get_table_state(table_1_id).await.unwrap().is_some());
     assert!(store.get_table_schema(&table_1_id, SnapshotId::max()).await.unwrap().is_some());
     assert!(store.get_applied_destination_table_metadata(table_1_id).await.unwrap().is_some());
+    assert!(
+        store
+            .get_replication_progress(WorkerType::TableSync { table_id: table_1_id })
+            .await
+            .unwrap()
+            .is_some()
+    );
 
     // Delete pipeline state for table 1.
     store.delete_table_pipeline_state(table_1_id).await.unwrap();
@@ -884,11 +905,25 @@ async fn delete_table_pipeline_state_deletes_state_schema_and_metadata_for_table
     assert!(store.get_table_state(table_1_id).await.unwrap().is_none());
     assert!(store.get_table_schema(&table_1_id, SnapshotId::max()).await.unwrap().is_none());
     assert!(store.get_applied_destination_table_metadata(table_1_id).await.unwrap().is_none());
+    assert!(
+        store
+            .get_replication_progress(WorkerType::TableSync { table_id: table_1_id })
+            .await
+            .unwrap()
+            .is_none()
+    );
 
     // Verify other table is unaffected.
     assert!(store.get_table_state(table_2_id).await.unwrap().is_some());
     assert!(store.get_table_schema(&table_2_id, SnapshotId::max()).await.unwrap().is_some());
     assert!(store.get_applied_destination_table_metadata(table_2_id).await.unwrap().is_some());
+    assert!(
+        store
+            .get_replication_progress(WorkerType::TableSync { table_id: table_2_id })
+            .await
+            .unwrap()
+            .is_some()
+    );
 
     // Create a new store instance and load from DB to ensure persistence.
     let new_store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
@@ -900,11 +935,25 @@ async fn delete_table_pipeline_state_deletes_state_schema_and_metadata_for_table
     assert!(new_store.get_table_state(table_1_id).await.unwrap().is_none());
     assert!(new_store.get_table_schema(&table_1_id, SnapshotId::max()).await.unwrap().is_none());
     assert!(new_store.get_applied_destination_table_metadata(table_1_id).await.unwrap().is_none());
+    assert!(
+        new_store
+            .get_replication_progress(WorkerType::TableSync { table_id: table_1_id })
+            .await
+            .unwrap()
+            .is_none()
+    );
 
     // Table 2 should still be present.
     assert!(new_store.get_table_state(table_2_id).await.unwrap().is_some());
     assert!(new_store.get_table_schema(&table_2_id, SnapshotId::max()).await.unwrap().is_some());
     assert!(new_store.get_applied_destination_table_metadata(table_2_id).await.unwrap().is_some());
+    assert!(
+        new_store
+            .get_replication_progress(WorkerType::TableSync { table_id: table_2_id })
+            .await
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -984,6 +1033,106 @@ async fn clear_table_copy_state_keeps_replication_state_and_deletes_schema_metad
     );
     assert!(
         new_store.get_applied_destination_table_metadata(other_table_id).await.unwrap().is_some()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reset_table_states_for_resync_resets_states_and_apply_progress_only() {
+    init_test_tracing();
+
+    let database = spawn_source_database().await;
+    let pipeline_id = 1;
+
+    let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
+
+    let table_1_schema = create_sample_table_schema();
+    let table_1_id = table_1_schema.id;
+    let table_2_schema = create_another_table_schema();
+    let table_2_id = table_2_schema.id;
+
+    store.update_table_state(table_1_id, TableState::Ready).await.unwrap();
+    store.update_table_state(table_2_id, TableState::DataSync).await.unwrap();
+    store.store_table_schema(table_1_schema).await.unwrap();
+    store.store_table_schema(table_2_schema).await.unwrap();
+
+    let metadata1 = DestinationTableMetadata::new_applied(
+        "dest_table_1".to_owned(),
+        SnapshotId::initial(),
+        ReplicationMask::from_bytes(vec![1, 1, 1]),
+    );
+    let metadata2 = DestinationTableMetadata::new_applied(
+        "dest_table_2".to_owned(),
+        SnapshotId::initial(),
+        ReplicationMask::from_bytes(vec![1, 1]),
+    );
+    store.store_destination_table_metadata(table_1_id, metadata1).await.unwrap();
+    store.store_destination_table_metadata(table_2_id, metadata2).await.unwrap();
+    store.upsert_replication_progress(WorkerType::Apply, PgLsn::from(500u64)).await.unwrap();
+    store
+        .upsert_replication_progress(
+            WorkerType::TableSync { table_id: table_1_id },
+            PgLsn::from(200u64),
+        )
+        .await
+        .unwrap();
+    store
+        .upsert_replication_progress(
+            WorkerType::TableSync { table_id: table_2_id },
+            PgLsn::from(300u64),
+        )
+        .await
+        .unwrap();
+
+    let reset_count = store.reset_table_states_for_resync().await.unwrap();
+
+    assert_eq!(reset_count, 2);
+    assert_eq!(store.get_table_state(table_1_id).await.unwrap(), Some(TableState::Init));
+    assert_eq!(store.get_table_state(table_2_id).await.unwrap(), Some(TableState::Init));
+    assert!(store.get_table_schema(&table_1_id, SnapshotId::max()).await.unwrap().is_some());
+    assert!(store.get_table_schema(&table_2_id, SnapshotId::max()).await.unwrap().is_some());
+    assert!(store.get_applied_destination_table_metadata(table_1_id).await.unwrap().is_some());
+    assert!(store.get_applied_destination_table_metadata(table_2_id).await.unwrap().is_some());
+    assert!(store.get_replication_progress(WorkerType::Apply).await.unwrap().is_none());
+    assert!(
+        store
+            .get_replication_progress(WorkerType::TableSync { table_id: table_1_id })
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        store
+            .get_replication_progress(WorkerType::TableSync { table_id: table_2_id })
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    let new_store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
+    new_store.load_table_states().await.unwrap();
+    new_store.load_table_schemas().await.unwrap();
+    new_store.load_destination_tables_metadata().await.unwrap();
+
+    assert_eq!(new_store.get_table_state(table_1_id).await.unwrap(), Some(TableState::Init));
+    assert_eq!(new_store.get_table_state(table_2_id).await.unwrap(), Some(TableState::Init));
+    assert!(new_store.get_table_schema(&table_1_id, SnapshotId::max()).await.unwrap().is_some());
+    assert!(new_store.get_table_schema(&table_2_id, SnapshotId::max()).await.unwrap().is_some());
+    assert!(new_store.get_applied_destination_table_metadata(table_1_id).await.unwrap().is_some());
+    assert!(new_store.get_applied_destination_table_metadata(table_2_id).await.unwrap().is_some());
+    assert!(new_store.get_replication_progress(WorkerType::Apply).await.unwrap().is_none());
+    assert!(
+        new_store
+            .get_replication_progress(WorkerType::TableSync { table_id: table_1_id })
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        new_store
+            .get_replication_progress(WorkerType::TableSync { table_id: table_2_id })
+            .await
+            .unwrap()
+            .is_some()
     );
 }
 
