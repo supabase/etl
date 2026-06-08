@@ -8,7 +8,7 @@ use etl::{
         destination_table_metadata::{AppliedDestinationTableMetadata, DestinationTableMetadata},
     },
     store::{
-        lifecycle::TableLifecycleStore,
+        lifecycle::{TableLifecycleCleanup, TableLifecycleStore},
         schema::{SchemaStore, TableSchemaRetention},
         state::{StateStore, TableStates},
     },
@@ -190,6 +190,10 @@ impl<S> TableLifecycleStore for ErrorReportingStateStore<S>
 where
     S: TableLifecycleStore + Send + Sync,
 {
+    async fn cleanup_lifecycle_state(&self, cleanup: TableLifecycleCleanup) -> EtlResult<usize> {
+        self.inner.cleanup_lifecycle_state(cleanup).await
+    }
+
     async fn clear_table_copy_state(&self, table_id: TableId) -> EtlResult<()> {
         self.inner.clear_table_copy_state(table_id).await
     }
