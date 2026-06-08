@@ -322,10 +322,10 @@ where
     /// initialized to [`TableState::Init`].
     ///
     /// Also detects tables for which we have stored state but are no longer
-    /// part of the publication, performs a best-effort cleanup of their table
-    /// sync replication slots, and deletes their stored state (replication
-    /// state, destination table metadata, table schemas, and durable
-    /// table-sync progress) without touching the actual destination tables.
+    /// part of the publication, deletes their stored state (replication state,
+    /// destination table metadata, table schemas, and durable table-sync
+    /// progress), and performs best-effort cleanup of their table sync
+    /// replication slots without touching the actual destination tables.
     async fn initialize_table_states(
         &self,
         replication_client: &PgReplicationClient,
@@ -408,7 +408,7 @@ where
 
                 // We delete all table state before removing the slot, so that we don't
                 // incur in the case where we have a slot tied to an invalid state.
-                self.store.delete_table_pipeline_state(table_id).await?;
+                self.store.delete_table_state(table_id).await?;
 
                 // We try to delete the replication slot.
                 let slot_name: String =

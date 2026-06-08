@@ -22,7 +22,7 @@ use crate::{
         client::{GetOrCreateSlotResult, PgReplicationClient, SlotState},
     },
     state::TableStateType,
-    store::{PipelineStore, lifecycle::TableLifecycleStore, state::StateStore},
+    store::{PipelineStore, lifecycle::TableStateLifecycleStore, state::StateStore},
     types::PipelineId,
     workers::{
         TableSyncWorkerPool,
@@ -354,7 +354,7 @@ where
 /// Init state. If any table is not in Init state when creating a new slot, it
 /// indicates that data was synchronized based on a different apply worker
 /// lineage, which would break replication correctness.
-async fn get_start_lsn<S: StateStore + TableLifecycleStore>(
+async fn get_start_lsn<S: StateStore + TableStateLifecycleStore>(
     pipeline_id: PipelineId,
     replication_client: &PgReplicationClient,
     store: &S,
@@ -473,9 +473,9 @@ async fn get_start_lsn<S: StateStore + TableLifecycleStore>(
 /// - [`InvalidatedSlotBehavior::Error`]: Returns an error with details about
 ///   the invalidation
 /// - [`InvalidatedSlotBehavior::Recreate`]: Deletes the slot, resets all table
-///   states to Init, clears stale apply progress, and creates a new slot,
+///   states to Init, deletes stale apply progress, and creates a new slot,
 ///   returning its consistent point LSN
-async fn handle_invalidated_slot<S: TableLifecycleStore>(
+async fn handle_invalidated_slot<S: TableStateLifecycleStore>(
     pipeline_id: PipelineId,
     replication_client: &PgReplicationClient,
     store: &S,

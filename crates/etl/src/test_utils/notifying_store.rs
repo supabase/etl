@@ -16,7 +16,7 @@ use crate::{
         destination_table_metadata::{AppliedDestinationTableMetadata, DestinationTableMetadata},
     },
     store::{
-        lifecycle::{TableLifecycleCleanup, TableLifecycleStore},
+        lifecycle::{TableStateLifecycleStore, TableStateOperation},
         schema::{SchemaStore, TableSchemaRetention, TableSchemaSnapshots},
         state::{DestinationTablesMetadata, StateStore, TableStates},
     },
@@ -441,10 +441,13 @@ impl SchemaStore for NotifyingStore {
     }
 }
 
-impl TableLifecycleStore for NotifyingStore {
-    async fn cleanup_lifecycle_state(&self, cleanup: TableLifecycleCleanup) -> EtlResult<usize> {
-        match cleanup {
-            TableLifecycleCleanup::TableCopyRestart { table_id } => {
+impl TableStateLifecycleStore for NotifyingStore {
+    async fn apply_table_state_operation(
+        &self,
+        operation: TableStateOperation,
+    ) -> EtlResult<usize> {
+        match operation {
+            TableStateOperation::PrepareForCopy { table_id } => {
                 let mut inner = self.inner.write().await;
                 Arc::make_mut(&mut inner.table_schemas).remove_table(table_id);
                 Arc::make_mut(&mut inner.destination_tables_metadata).remove(&table_id);
@@ -453,7 +456,7 @@ impl TableLifecycleStore for NotifyingStore {
 
                 Ok(0)
             }
-            TableLifecycleCleanup::PipelineResync => {
+            TableStateOperation::ResetForResync => {
                 let mut guard = self.inner.write().await;
                 let inner = &mut *guard;
 
@@ -478,7 +481,7 @@ impl TableLifecycleStore for NotifyingStore {
 
                 Ok(reset_count)
             }
-            TableLifecycleCleanup::TableRemoval { table_id } => {
+            TableStateOperation::Delete { table_id } => {
                 let mut inner = self.inner.write().await;
                 let affected_table_count = usize::from(inner.table_states.contains_key(&table_id));
 

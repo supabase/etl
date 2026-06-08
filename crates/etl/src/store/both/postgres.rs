@@ -26,7 +26,7 @@ use crate::{
         TableState, TableStateType,
     },
     store::{
-        lifecycle::{TableLifecycleCleanup, TableLifecycleStore},
+        lifecycle::{TableStateLifecycleStore, TableStateOperation},
         schema::{SchemaStore, TableSchemaRetention, TableSchemaSnapshots},
         state::{DestinationTablesMetadata, StateStore, TableStates},
     },
@@ -628,10 +628,13 @@ impl SchemaStore for PostgresStore {
     }
 }
 
-impl TableLifecycleStore for PostgresStore {
-    async fn cleanup_lifecycle_state(&self, cleanup: TableLifecycleCleanup) -> EtlResult<usize> {
-        match cleanup {
-            TableLifecycleCleanup::TableCopyRestart { table_id } => {
+impl TableStateLifecycleStore for PostgresStore {
+    async fn apply_table_state_operation(
+        &self,
+        operation: TableStateOperation,
+    ) -> EtlResult<usize> {
+        match operation {
+            TableStateOperation::PrepareForCopy { table_id } => {
                 let mut inner = self.inner.lock().await;
                 let mut tx = self.pool.begin().await?;
 
@@ -680,7 +683,7 @@ impl TableLifecycleStore for PostgresStore {
 
                 Ok(0)
             }
-            TableLifecycleCleanup::PipelineResync => {
+            TableStateOperation::ResetForResync => {
                 let (state_type, metadata) = TableState::Init.to_storage_format()?;
                 let mut inner = self.inner.lock().await;
                 let table_ids = inner.table_states.keys().copied().collect::<Vec<_>>();
@@ -722,7 +725,7 @@ impl TableLifecycleStore for PostgresStore {
 
                 Ok(reset_count)
             }
-            TableLifecycleCleanup::TableRemoval { table_id } => {
+            TableStateOperation::Delete { table_id } => {
                 let mut inner = self.inner.lock().await;
                 let affected_table_count = usize::from(inner.table_states.contains_key(&table_id));
                 let mut tx = self.pool.begin().await?;

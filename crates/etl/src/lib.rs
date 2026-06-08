@@ -47,8 +47,9 @@
 //! single interface for all state-related storage operations.
 //!
 //! The [`store::schema::SchemaStore`] trait handles versioned table schemas,
-//! and [`store::TableLifecycleStore`] handles table-scoped reset and removal
-//! operations that must update state, schema, and metadata consistently.
+//! and [`store::TableStateLifecycleStore`] handles table-scoped preparation,
+//! reset, and deletion operations that must update state, schema, and metadata
+//! consistently.
 //! [`store::SharedStateStore`], [`store::DestinationStore`], and
 //! [`store::PipelineStore`] are facade traits for code that needs common
 //! combinations of these capabilities.

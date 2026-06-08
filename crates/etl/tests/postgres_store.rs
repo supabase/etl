@@ -8,7 +8,7 @@ use etl::{
     replication::WorkerType,
     state::{TableRetryPolicy, TableState, destination_table_metadata::DestinationTableMetadata},
     store::{
-        TableLifecycleStore,
+        TableStateLifecycleStore,
         both::postgres::PostgresStore,
         schema::{SchemaStore, TableSchemaRetention},
         state::StateStore,
@@ -833,7 +833,7 @@ async fn state_transitions_and_history() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn delete_table_pipeline_state_deletes_state_schema_metadata_and_progress_for_table() {
+async fn delete_table_state_deletes_state_schema_metadata_and_progress_for_table() {
     init_test_tracing();
 
     let database = spawn_source_database().await;
@@ -843,7 +843,7 @@ async fn delete_table_pipeline_state_deletes_state_schema_metadata_and_progress_
 
     // Test idempotency: deleting state for a non-existent table should succeed.
     let nonexistent_table_id = TableId::new(99999);
-    store.delete_table_pipeline_state(nonexistent_table_id).await.unwrap();
+    store.delete_table_state(nonexistent_table_id).await.unwrap();
 
     // Prepare two tables: one we will delete, one we will keep.
     let table_1_schema = create_sample_table_schema();
@@ -898,8 +898,8 @@ async fn delete_table_pipeline_state_deletes_state_schema_metadata_and_progress_
             .is_some()
     );
 
-    // Delete pipeline state for table 1.
-    store.delete_table_pipeline_state(table_1_id).await.unwrap();
+    // Delete table state for table 1.
+    store.delete_table_state(table_1_id).await.unwrap();
 
     // Verify in-memory cache for table 1 has been deleted.
     assert!(store.get_table_state(table_1_id).await.unwrap().is_none());
@@ -957,7 +957,7 @@ async fn delete_table_pipeline_state_deletes_state_schema_metadata_and_progress_
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn clear_table_copy_state_keeps_replication_state_and_deletes_schema_metadata_and_progress() {
+async fn prepare_table_state_for_copy_preserves_table_state() {
     init_test_tracing();
 
     let database = spawn_source_database().await;
@@ -965,10 +965,10 @@ async fn clear_table_copy_state_keeps_replication_state_and_deletes_schema_metad
 
     let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
 
-    // Test idempotency: clearing copy state for a non-existent table should
+    // Test idempotency: preparing copy state for a non-existent table should
     // succeed.
     let nonexistent_table_id = TableId::new(99999);
-    store.clear_table_copy_state(nonexistent_table_id).await.unwrap();
+    store.prepare_table_state_for_copy(nonexistent_table_id).await.unwrap();
 
     let mut table_schema = create_sample_table_schema();
     let table_id = table_schema.id;
@@ -1001,7 +1001,7 @@ async fn clear_table_copy_state_keeps_replication_state_and_deletes_schema_metad
         .await
         .unwrap();
 
-    store.clear_table_copy_state(table_id).await.unwrap();
+    store.prepare_table_state_for_copy(table_id).await.unwrap();
 
     assert_eq!(store.get_table_state(table_id).await.unwrap(), Some(TableState::DataSync));
     assert!(store.get_table_schema(&table_id, SnapshotId::max()).await.unwrap().is_none());
