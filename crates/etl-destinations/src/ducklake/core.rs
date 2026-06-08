@@ -59,9 +59,9 @@ use crate::{
             format_query_error_detail, run_duckdb_blocking,
         },
         config::{
-            MAINTENANCE_TARGET_FILE_SIZE, build_setup_plan, current_duckdb_extension_strategy,
-            maintenance_target_file_size_sql, resolve_expire_snapshots_older_than,
-            validate_expire_snapshots_older_than_sql,
+            MAINTENANCE_TARGET_FILE_SIZE, MIN_EXPIRE_SNAPSHOTS_OLDER_THAN, build_setup_plan,
+            current_duckdb_extension_strategy, maintenance_target_file_size_sql,
+            resolve_expire_snapshots_older_than, validate_expire_snapshots_older_than_sql,
         },
         external_maintenance::ExternalMaintenanceOperations,
         inline_size::DuckLakePendingInlineSizeSampler,
@@ -259,7 +259,7 @@ where
     S: DestinationStore,
 {
     fn name() -> &'static str {
-        "ducklake"
+        etl_config::shared::DestinationKind::Ducklake.as_str()
     }
 
     async fn shutdown(&self) -> EtlResult<()> {
@@ -863,10 +863,8 @@ where
     /// - `metadata_schema`: Optional Postgres schema for DuckLake metadata
     ///   tables (e.g. `"ducklake"`). Uses the catalog default schema when not
     ///   set.
-    /// - `duckdb_memory_cache_limit`: Optional DuckDB `memory_limit` value
-    ///   (e.g. `"150MB"`). Defaults to `150MB`.
     /// - `maintenance_target_file_size`: Optional DuckLake maintenance
-    ///   `target_file_size` value (e.g. `"10MB"`). Defaults to `10MB`.
+    ///   `target_file_size` value (e.g. `"500MB"`). Defaults to `500MB`.
     /// - `expire_snapshots_older_than`: Optional DuckLake snapshot-retention
     ///   interval (e.g. `"7 days"`). Defaults to `7 days`.
     /// - `duckdb_log`: Optional DuckDB log storage and shutdown dump paths.
@@ -886,7 +884,6 @@ where
         pool_size: u32,
         s3: Option<S3Config>,
         metadata_schema: Option<String>,
-        duckdb_memory_cache_limit: Option<String>,
         maintenance_target_file_size: Option<String>,
         expire_snapshots_older_than: Option<String>,
         store: S,
@@ -897,7 +894,6 @@ where
             pool_size,
             s3,
             metadata_schema,
-            duckdb_memory_cache_limit,
             maintenance_target_file_size,
             expire_snapshots_older_than,
             DuckLakeExternalMaintenanceConfig::default(),
@@ -915,7 +911,6 @@ where
         pool_size: u32,
         s3: Option<S3Config>,
         metadata_schema: Option<String>,
-        duckdb_memory_cache_limit: Option<String>,
         maintenance_target_file_size: Option<String>,
         expire_snapshots_older_than: Option<String>,
         external_maintenance: DuckLakeExternalMaintenanceConfig,
@@ -957,7 +952,6 @@ where
             &data_path,
             s3.as_ref(),
             metadata_schema.as_deref(),
-            duckdb_memory_cache_limit.as_deref(),
         )?);
 
         let manager = Arc::new(DuckLakeConnectionManager {
@@ -1000,19 +994,29 @@ where
             Arc::clone(&pool),
             Arc::clone(&blocking_slots),
             move |conn| -> EtlResult<()> {
-                conn.query_row(&expire_snapshots_validation_sql, [], |_row| Ok(())).map_err(
-                    |source| {
+                let retention_is_safe: bool = conn
+                    .query_row(&expire_snapshots_validation_sql, [], |row| row.get(0))
+                    .map_err(|source| {
                         etl_error!(
                             ErrorKind::ConfigError,
                             "DuckLake expire_snapshots_older_than configuration failed",
                             format!(
-                                "invalid expire_snapshots_older_than value `{}`",
+                                "Invalid expire_snapshots_older_than value `{}`",
                                 expire_snapshots_older_than_for_error
                             ),
                             source: source
                         )
-                    },
-                )?;
+                    })?;
+                if !retention_is_safe {
+                    return Err(etl_error!(
+                        ErrorKind::ConfigError,
+                        "DuckLake expire_snapshots_older_than configuration failed",
+                        format!(
+                            "Snapshot retention must be at least {}, got `{}`",
+                            MIN_EXPIRE_SNAPSHOTS_OLDER_THAN, expire_snapshots_older_than_for_error
+                        )
+                    ));
+                }
                 Ok(())
             },
         )
@@ -3268,7 +3272,6 @@ mod tests {
                 None,
                 None,
                 None,
-                None,
                 store,
             )
             .await
@@ -3334,7 +3337,6 @@ mod tests {
                 None,
                 None,
                 None,
-                None,
                 store,
             )
             .await
@@ -3393,7 +3395,6 @@ mod tests {
                 catalog.clone(),
                 data.clone(),
                 1,
-                None,
                 None,
                 None,
                 None,

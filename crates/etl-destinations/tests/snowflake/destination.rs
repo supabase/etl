@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use etl::{
     state::destination_table_metadata::DestinationTableMetadata,
@@ -17,6 +17,9 @@ use etl_destinations::snowflake::{
 };
 
 use super::common::{build_auth, poll_destination_offset, with_table_cleanup};
+
+const DESTINATION_OFFSET_POLL_INTERVAL: Duration = Duration::from_secs(1);
+const DESTINATION_OFFSET_MAX_ATTEMPTS: usize = 90;
 
 struct TestHarness {
     destination: Destination<
@@ -60,8 +63,8 @@ async fn poll_and_query_rows(
         &harness.destination,
         table_id,
         expected_offset,
-        std::time::Duration::from_secs(5),
-        18,
+        DESTINATION_OFFSET_POLL_INTERVAL,
+        DESTINATION_OFFSET_MAX_ATTEMPTS,
     )
     .await;
     assert_eq!(
@@ -341,8 +344,8 @@ async fn schema_evolution_add_column() {
             &harness.destination,
             table_id,
             &zero,
-            std::time::Duration::from_secs(5),
-            18,
+            DESTINATION_OFFSET_POLL_INTERVAL,
+            DESTINATION_OFFSET_MAX_ATTEMPTS,
         )
         .await;
         assert!(committed.is_some(), "initial data should commit before DDL");
@@ -386,8 +389,8 @@ async fn schema_evolution_add_column() {
             &harness.destination,
             table_id,
             &expected_offset,
-            std::time::Duration::from_secs(5),
-            18,
+            DESTINATION_OFFSET_POLL_INTERVAL,
+            DESTINATION_OFFSET_MAX_ATTEMPTS,
         )
         .await;
         assert_eq!(committed, Some(expected_offset), "data should commit within 90s");
@@ -464,8 +467,8 @@ async fn schema_evolution_rename_column() {
             &harness.destination,
             table_id,
             &zero,
-            std::time::Duration::from_secs(5),
-            18,
+            DESTINATION_OFFSET_POLL_INTERVAL,
+            DESTINATION_OFFSET_MAX_ATTEMPTS,
         )
         .await;
         assert!(committed.is_some(), "initial data should commit before DDL");
@@ -505,8 +508,8 @@ async fn schema_evolution_rename_column() {
             &harness.destination,
             table_id,
             &expected_offset,
-            std::time::Duration::from_secs(5),
-            18,
+            DESTINATION_OFFSET_POLL_INTERVAL,
+            DESTINATION_OFFSET_MAX_ATTEMPTS,
         )
         .await;
         assert_eq!(committed, Some(expected_offset), "data should commit within 90s");
@@ -596,8 +599,8 @@ async fn schema_evolution_drop_column() {
             &harness.destination,
             table_id,
             &zero,
-            std::time::Duration::from_secs(5),
-            18,
+            DESTINATION_OFFSET_POLL_INTERVAL,
+            DESTINATION_OFFSET_MAX_ATTEMPTS,
         )
         .await;
         assert!(committed.is_some(), "initial data should commit before DDL");
@@ -637,8 +640,8 @@ async fn schema_evolution_drop_column() {
             &harness.destination,
             table_id,
             &expected_offset,
-            std::time::Duration::from_secs(5),
-            18,
+            DESTINATION_OFFSET_POLL_INTERVAL,
+            DESTINATION_OFFSET_MAX_ATTEMPTS,
         )
         .await;
         assert_eq!(committed, Some(expected_offset), "data should commit within 90s");
@@ -735,8 +738,8 @@ async fn schema_evolution_interleaved_ddl_dml() {
                 &harness.destination,
                 table_id,
                 &expected,
-                std::time::Duration::from_secs(5),
-                18,
+                DESTINATION_OFFSET_POLL_INTERVAL,
+                DESTINATION_OFFSET_MAX_ATTEMPTS,
             )
             .await;
             assert_eq!(committed, Some(expected), "data should commit before next DDL");
@@ -760,8 +763,8 @@ async fn schema_evolution_interleaved_ddl_dml() {
             &harness.destination,
             table_id,
             &zero,
-            std::time::Duration::from_secs(5),
-            18,
+            DESTINATION_OFFSET_POLL_INTERVAL,
+            DESTINATION_OFFSET_MAX_ATTEMPTS,
         )
         .await;
         assert!(committed.is_some(), "initial data should commit before DDL");

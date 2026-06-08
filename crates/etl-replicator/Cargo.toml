@@ -7,8 +7,19 @@ rust-version.workspace = true
 repository.workspace = true
 homepage.workspace = true
 
+[[bin]]
+name = "etl-ducklake-maintenance"
+path = "src/bin/etl-ducklake-maintenance.rs"
+required-features = ["ducklake"]
+
 [features]
-default = []
+default = ["bigquery", "clickhouse", "ducklake", "iceberg", "snowflake"]
+any-destination = []
+bigquery = ["any-destination", "etl-destinations/bigquery"]
+clickhouse = ["any-destination", "etl-destinations/clickhouse"]
+ducklake = ["any-destination", "etl-destinations/ducklake", "etl-maintenance/ducklake"]
+iceberg = ["any-destination", "etl-destinations/iceberg"]
+snowflake = ["any-destination", "etl-destinations/snowflake"]
 egress = ["etl/egress", "etl-destinations/egress"]
 
 [dependencies]
@@ -16,8 +27,8 @@ egress = ["etl/egress", "etl-destinations/egress"]
 configcat = { workspace = true }
 etl = { workspace = true }
 etl-config = { workspace = true, features = ["supabase"] }
-etl-destinations = { workspace = true, features = ["bigquery", "clickhouse", "ducklake", "iceberg", "snowflake"] }
-etl-maintenance = { workspace = true, features = ["ducklake"] }
+etl-destinations = { workspace = true }
+etl-maintenance = { workspace = true }
 etl-telemetry = { workspace = true }
 k8s-openapi = { workspace = true, features = ["latest"] }
 metrics = { workspace = true }

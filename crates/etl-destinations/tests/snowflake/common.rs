@@ -49,8 +49,11 @@ where
     T: etl_destinations::snowflake::TokenProvider + 'static,
     C: StreamClient,
 {
-    for _ in 0..max_attempts {
-        tokio::time::sleep(interval).await;
+    for attempt in 0..max_attempts {
+        if attempt > 0 {
+            tokio::time::sleep(interval).await;
+        }
+
         if let Ok(Some(offset)) = destination.committed_offset(table_id).await
             && &offset == expected
         {

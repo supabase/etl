@@ -334,7 +334,6 @@ async fn build_destination(
         None,
         None,
         None,
-        None,
         store,
     )
     .await

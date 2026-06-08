@@ -10,6 +10,7 @@ const DEFAULT_INLINE_FLUSH_MIN_INLINED_BYTES: u64 = 10_000_000;
 const DEFAULT_REWRITE_DATA_FILES_MIN_ACTIVE_DATA_FILES: i64 = 40;
 const DEFAULT_REQUEST_COOLDOWN_SECONDS: u64 = 300;
 const DEFAULT_STORE_TIMEOUT_SECONDS: u64 = 10;
+const DEFAULT_MAX_PAUSE_SECONDS: u64 = 2700;
 
 /// Backend-neutral runtime state for external maintenance.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -29,6 +30,9 @@ pub struct ExternalMaintenanceState {
     pub last_successful_operations: ExternalMaintenanceOperationHistory,
     /// Last completed run timestamp, regardless of outcome.
     pub last_completed_at: Option<DateTime<Utc>>,
+    /// Backend-neutral pause policy.
+    #[serde(default)]
+    pub pause_policy: ExternalMaintenancePausePolicy,
     /// Backend-neutral operation enablement policy.
     pub operation_policy: ExternalMaintenanceOperationPolicy,
 }
@@ -110,6 +114,20 @@ pub struct ExternalMaintenancePause {
     pub requested_at: Option<DateTime<Utc>>,
     /// Pause expiry timestamp.
     pub expires_at: DateTime<Utc>,
+}
+
+/// Backend-neutral pause policy.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalMaintenancePausePolicy {
+    /// Maximum pause duration trusted by the replicator, in seconds.
+    pub max_duration_seconds: u64,
+}
+
+impl Default for ExternalMaintenancePausePolicy {
+    fn default() -> Self {
+        Self { max_duration_seconds: DEFAULT_MAX_PAUSE_SECONDS }
+    }
 }
 
 /// Replicator-owned request for a future maintenance run.

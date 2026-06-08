@@ -5,7 +5,10 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use thiserror::Error;
 
-use crate::coordination::{ExternalMaintenanceOperationPolicy, PostgresExternalMaintenanceStore};
+use crate::coordination::{
+    ExternalMaintenanceOperationPolicy, ExternalMaintenancePausePolicy,
+    PostgresExternalMaintenanceStore,
+};
 
 /// DuckLake maintenance policy independent of the coordination backend.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -44,9 +47,9 @@ impl Default for DuckLakeMaintenancePolicy {
             min_interval_seconds: 3600,
             max_pause_seconds: 2700,
             min_inlined_bytes: 10_000_000,
-            max_compacted_files: 32,
+            max_compacted_files: 40,
             max_tables_per_run: 8,
-            target_file_size: "10MB".to_owned(),
+            target_file_size: "500MB".to_owned(),
             delete_threshold: 0.5,
             min_active_data_files: 40,
             cpu_request_millicores: 1000,
@@ -187,7 +190,12 @@ impl MaintenanceMaterializer for PostgresMaintenanceMaterializer {
         let store = self.store(input.identity.pipeline_id);
         store.ensure_schema().await.map_err(MaintenanceMaterializationError::postgres)?;
         store
-            .ensure_pipeline_state(input.policy.operation_policy)
+            .ensure_pipeline_state(
+                ExternalMaintenancePausePolicy {
+                    max_duration_seconds: input.policy.max_pause_seconds,
+                },
+                input.policy.operation_policy,
+            )
             .await
             .map_err(MaintenanceMaterializationError::postgres)?;
 

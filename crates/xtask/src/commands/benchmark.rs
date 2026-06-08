@@ -76,6 +76,18 @@ pub(crate) struct BenchmarkArgs {
     /// BigQuery service account key file.
     #[arg(long, env = "BQ_SA_KEY_FILE")]
     bq_sa_key_file: Option<PathBuf>,
+    /// ClickHouse HTTP URL (for example, `http://localhost:8123`).
+    #[arg(long, env = "BENCH_CLICKHOUSE_URL")]
+    clickhouse_url: Option<String>,
+    /// ClickHouse username.
+    #[arg(long, env = "BENCH_CLICKHOUSE_USER")]
+    clickhouse_user: Option<String>,
+    /// ClickHouse password.
+    #[arg(long, env = "BENCH_CLICKHOUSE_PASSWORD")]
+    clickhouse_password: Option<String>,
+    /// ClickHouse database. Must already exist.
+    #[arg(long, env = "BENCH_CLICKHOUSE_DATABASE")]
+    clickhouse_database: Option<String>,
     /// Snowflake account identifier.
     #[arg(long, env = "BENCH_SNOWFLAKE_ACCOUNT")]
     sf_account: Option<String>,
@@ -134,6 +146,8 @@ enum Destination {
     Null,
     #[value(name = "bigquery")]
     BigQuery,
+    #[value(name = "clickhouse")]
+    ClickHouse,
     #[value(name = "snowflake")]
     Snowflake,
 }
@@ -271,6 +285,20 @@ impl BenchmarkArgs {
                     "BigQuery service account key file does not exist: {}",
                     sa_key_file.display()
                 );
+            }
+        }
+
+        if matches!(self.destination, Destination::ClickHouse) {
+            if self.clickhouse_url.as_deref().is_none_or(|u| u.trim().is_empty()) {
+                bail!("--clickhouse-url is required for --destination clickhouse");
+            }
+
+            if self.clickhouse_user.as_deref().is_none_or(|u| u.trim().is_empty()) {
+                bail!("--clickhouse-user is required for --destination clickhouse");
+            }
+
+            if self.clickhouse_database.as_deref().is_none_or(|d| d.trim().is_empty()) {
+                bail!("--clickhouse-database is required for --destination clickhouse");
             }
         }
 
@@ -711,6 +739,23 @@ impl BenchmarkArgs {
                     args.extend(["--bq-sa-key-file".to_owned(), sa_key_file.display().to_string()]);
                 }
             }
+            Destination::ClickHouse => {
+                if let Some(url) = &self.clickhouse_url {
+                    args.extend(["--clickhouse-url".to_owned(), url.clone()]);
+                }
+
+                if let Some(user) = &self.clickhouse_user {
+                    args.extend(["--clickhouse-user".to_owned(), user.clone()]);
+                }
+
+                if let Some(password) = &self.clickhouse_password {
+                    args.extend(["--clickhouse-password".to_owned(), password.clone()]);
+                }
+
+                if let Some(database) = &self.clickhouse_database {
+                    args.extend(["--clickhouse-database".to_owned(), database.clone()]);
+                }
+            }
             Destination::Snowflake => {
                 if let Some(account) = &self.sf_account {
                     args.extend(["--sf-account".to_owned(), account.clone()]);
@@ -795,6 +840,7 @@ impl Destination {
         match self {
             Self::Null => "null",
             Self::BigQuery => "bigquery",
+            Self::ClickHouse => "clickhouse",
             Self::Snowflake => "snowflake",
         }
     }
@@ -1148,11 +1194,8 @@ fn run_benchmark_binary(
 ) -> Result<Value> {
     let mut command = Command::new("cargo");
     command.args(["run", "--quiet", "-p", "etl-benchmarks", "--release"]);
-    if matches!(destination, Destination::BigQuery) {
-        command.args(["--features", "bigquery"]);
-    }
-    if matches!(destination, Destination::Snowflake) {
-        command.args(["--features", "snowflake"]);
+    if !matches!(destination, Destination::Null) {
+        command.args(["--features", destination.as_arg()]);
     }
     command.args(["--bin", binary_name, "--"]).args(binary_args);
 

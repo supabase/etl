@@ -18,7 +18,6 @@ pub(super) struct DucklakeValidator {
     s3_url_style: Option<String>,
     s3_use_ssl: Option<bool>,
     metadata_schema: Option<String>,
-    duckdb_memory_cache_limit: Option<String>,
     maintenance_target_file_size: Option<String>,
     expire_snapshots_older_than: Option<String>,
 }
@@ -36,7 +35,6 @@ impl DucklakeValidator {
         s3_url_style: Option<String>,
         s3_use_ssl: Option<bool>,
         metadata_schema: Option<String>,
-        duckdb_memory_cache_limit: Option<String>,
         maintenance_target_file_size: Option<String>,
         expire_snapshots_older_than: Option<String>,
     ) -> Self {
@@ -51,7 +49,6 @@ impl DucklakeValidator {
             s3_url_style,
             s3_use_ssl,
             metadata_schema,
-            duckdb_memory_cache_limit,
             maintenance_target_file_size,
             expire_snapshots_older_than,
         }
@@ -119,7 +116,6 @@ impl Validator for DucklakeValidator {
             self.pool_size,
             s3_config,
             self.metadata_schema.clone(),
-            self.duckdb_memory_cache_limit.clone(),
             self.maintenance_target_file_size.clone(),
             self.expire_snapshots_older_than.clone(),
             MemoryStore::new(),
@@ -156,7 +152,6 @@ mod tests {
             None,
             Some("path".to_owned()),
             Some(false),
-            None,
             None,
             None,
             None,
