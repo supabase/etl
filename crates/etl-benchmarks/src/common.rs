@@ -777,7 +777,9 @@ impl Destination for BenchDestination {
         match self {
             Self::Null(destination) => destination.write_events(events, async_result).await,
             #[cfg(feature = "bigquery")]
-            Self::BigQuery(destination) => destination.write_events(events, async_result).await,
+            Self::BigQuery(destination) => {
+                Box::pin(destination.write_events(events, async_result)).await
+            }
             #[cfg(feature = "clickhouse")]
             Self::ClickHouse(destination) => destination.write_events(events, async_result).await,
             #[cfg(feature = "snowflake")]
