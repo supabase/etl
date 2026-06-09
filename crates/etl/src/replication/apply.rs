@@ -1642,7 +1642,7 @@ where
 
         let (events_batch, events_batch_bytes) = self.state.take_events_batch();
         let events_batch_size = events_batch.len();
-        info!(
+        debug!(
             worker_type = %self.worker_context.worker_type(),
             batch_size = events_batch_size,
             batch_size_bytes = events_batch_bytes,
@@ -1808,7 +1808,7 @@ where
         // If the prefix is unknown, we don't want to process it.
         let prefix = message.prefix()?;
         if prefix != DDL_MESSAGE_PREFIX {
-            info!(
+            warn!(
                 prefix = %prefix,
                 "received logical message with unknown prefix, discarding"
             );
@@ -2303,7 +2303,7 @@ where
         self.state.replication_progress.update_last_flush_lsn(durable_flush_lsn);
 
         let current_lsn = self.state.replication_progress.last_flush_lsn;
-        info!(
+        debug!(
             worker_type = %self.worker_context.worker_type(),
             %current_lsn,
             "processing syncing tables after durable batch flush"
