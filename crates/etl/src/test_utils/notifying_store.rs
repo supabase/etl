@@ -16,7 +16,7 @@ use crate::{
         destination_table_metadata::{AppliedDestinationTableMetadata, DestinationTableMetadata},
     },
     store::{
-        lifecycle::TableLifecycleStore,
+        lifecycle::{TableStateLifecycleStore, TableStateOperation},
         schema::{SchemaStore, TableSchemaRetention, TableSchemaSnapshots},
         state::{DestinationTablesMetadata, StateStore, TableStates},
     },
@@ -105,15 +105,6 @@ impl Inner {
 #[derive(Clone)]
 pub struct NotifyingStore {
     inner: Arc<RwLock<Inner>>,
-}
-
-/// Scope of table-scoped state removal.
-#[derive(Debug, Clone, Copy)]
-enum TableStateCleanupScope {
-    /// Clear state that belongs to the previous table copy.
-    CopyRestart,
-    /// Delete all ETL state for a table removed from the publication.
-    PipelineRemoval,
 }
 
 impl NotifyingStore {
@@ -246,27 +237,6 @@ impl NotifyingStore {
         let states = Arc::make_mut(&mut inner.table_states);
         states.remove(&table_id);
         states.insert(table_id, TableState::Init);
-
-        Ok(())
-    }
-
-    /// Deletes table-scoped state according to the requested scope.
-    async fn delete_table_state_for_scope(
-        &self,
-        table_id: TableId,
-        scope: TableStateCleanupScope,
-    ) -> EtlResult<()> {
-        let mut inner = self.inner.write().await;
-
-        if matches!(scope, TableStateCleanupScope::PipelineRemoval) {
-            Arc::make_mut(&mut inner.table_states).remove(&table_id);
-            inner.table_state_history.remove(&table_id);
-        }
-
-        Arc::make_mut(&mut inner.table_schemas).remove_table(table_id);
-        Arc::make_mut(&mut inner.destination_tables_metadata).remove(&table_id);
-        inner.replication_progress.remove(&WorkerType::TableSync { table_id });
-        inner.check_conditions();
 
         Ok(())
     }
@@ -471,13 +441,60 @@ impl SchemaStore for NotifyingStore {
     }
 }
 
-impl TableLifecycleStore for NotifyingStore {
-    async fn clear_table_copy_state(&self, table_id: TableId) -> EtlResult<()> {
-        self.delete_table_state_for_scope(table_id, TableStateCleanupScope::CopyRestart).await
-    }
+impl TableStateLifecycleStore for NotifyingStore {
+    async fn apply_table_state_operation(
+        &self,
+        operation: TableStateOperation,
+    ) -> EtlResult<usize> {
+        match operation {
+            TableStateOperation::PrepareForCopy { table_id } => {
+                let mut inner = self.inner.write().await;
+                Arc::make_mut(&mut inner.table_schemas).remove_table(table_id);
+                Arc::make_mut(&mut inner.destination_tables_metadata).remove(&table_id);
+                inner.replication_progress.remove(&WorkerType::TableSync { table_id });
+                inner.check_conditions();
 
-    async fn delete_table_pipeline_state(&self, table_id: TableId) -> EtlResult<()> {
-        self.delete_table_state_for_scope(table_id, TableStateCleanupScope::PipelineRemoval).await
+                Ok(0)
+            }
+            TableStateOperation::ResetForResync => {
+                let mut guard = self.inner.write().await;
+                let inner = &mut *guard;
+
+                let states = Arc::make_mut(&mut inner.table_states);
+                let table_ids = states.keys().copied().collect::<Vec<_>>();
+                let reset_count = table_ids.len();
+
+                for table_id in table_ids {
+                    if let Some(current_state) = states.get(&table_id).cloned() {
+                        inner
+                            .table_state_history
+                            .entry(table_id)
+                            .or_insert_with(Vec::new)
+                            .push(current_state);
+                    }
+
+                    states.insert(table_id, TableState::Init);
+                }
+
+                inner.replication_progress.remove(&WorkerType::Apply);
+                inner.check_conditions();
+
+                Ok(reset_count)
+            }
+            TableStateOperation::Delete { table_id } => {
+                let mut inner = self.inner.write().await;
+                let affected_table_count = usize::from(inner.table_states.contains_key(&table_id));
+
+                Arc::make_mut(&mut inner.table_states).remove(&table_id);
+                inner.table_state_history.remove(&table_id);
+                Arc::make_mut(&mut inner.table_schemas).remove_table(table_id);
+                Arc::make_mut(&mut inner.destination_tables_metadata).remove(&table_id);
+                inner.replication_progress.remove(&WorkerType::TableSync { table_id });
+                inner.check_conditions();
+
+                Ok(affected_table_count)
+            }
+        }
     }
 }
 

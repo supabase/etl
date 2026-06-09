@@ -21,8 +21,8 @@ use crate::{
         WorkerType,
         client::{GetOrCreateSlotResult, PgReplicationClient, SlotState},
     },
-    state::{TableState, TableStateType},
-    store::{PipelineStore, state::StateStore},
+    state::TableStateType,
+    store::{PipelineStore, lifecycle::TableStateLifecycleStore, state::StateStore},
     types::PipelineId,
     workers::{
         TableSyncWorkerPool,
@@ -348,13 +348,13 @@ where
 /// - [`InvalidatedSlotBehavior::Error`]: Returns an error requiring manual
 ///   intervention
 /// - [`InvalidatedSlotBehavior::Recreate`]: Deletes the slot, resets all tables
-///   to Init, and creates a new slot
+///   to Init, clears stale apply progress, and creates a new slot
 ///
 /// When creating a new slot, this function validates that all tables are in the
 /// Init state. If any table is not in Init state when creating a new slot, it
 /// indicates that data was synchronized based on a different apply worker
 /// lineage, which would break replication correctness.
-async fn get_start_lsn<S: StateStore>(
+async fn get_start_lsn<S: StateStore + TableStateLifecycleStore>(
     pipeline_id: PipelineId,
     replication_client: &PgReplicationClient,
     store: &S,
@@ -473,8 +473,9 @@ async fn get_start_lsn<S: StateStore>(
 /// - [`InvalidatedSlotBehavior::Error`]: Returns an error with details about
 ///   the invalidation
 /// - [`InvalidatedSlotBehavior::Recreate`]: Deletes the slot, resets all table
-///   states to Init, and creates a new slot, returning its consistent point LSN
-async fn handle_invalidated_slot<S: StateStore>(
+///   states to Init, deletes stale apply progress, and creates a new slot,
+///   returning its consistent point LSN
+async fn handle_invalidated_slot<S: TableStateLifecycleStore>(
     pipeline_id: PipelineId,
     replication_client: &PgReplicationClient,
     store: &S,
@@ -504,21 +505,13 @@ async fn handle_invalidated_slot<S: StateStore>(
                 "replication slot is invalidated, resetting all table states and recreating slot"
             );
 
-            // We update all tables to Init to reset their state, but no slots are deleted
-            // for table sync workers since the deletion will be handled by the
-            // worker itself when starting up again.
-            let table_state_updates: Vec<_> = store
-                .get_table_states()
-                .await?
-                .keys()
-                .map(|table_id| (*table_id, TableState::Init))
-                .collect();
-            let reset_count = table_state_updates.len();
-            store.update_table_states(table_state_updates).await?;
+            let reset_count = store.reset_table_states_for_resync().await?;
 
-            info!(reset_count, "reset table states to init for resync");
-
-            store.delete_replication_progress(WorkerType::Apply).await?;
+            info!(
+                reset_count,
+                "reset table states to init and deleted apply worker durable progress for \
+                 invalidated slot recovery"
+            );
 
             // We delete and recreate the main apply worker slot.
             replication_client.delete_slot_if_exists(slot_name).await?;

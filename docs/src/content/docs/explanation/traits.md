@@ -150,21 +150,40 @@ Tables progress through these states:
 | `Ready` | Yes | Streaming changes via apply worker |
 | `Errored { reason, solution, retry_policy }` | Yes | Error occurred, excluded until rollback |
 
-## TableLifecycleStore
+## TableStateLifecycleStore
 
-Removes ETL metadata for **table-copy restarts** and **publication removals**.
+Coordinates ETL table-state lifecycle operations across state, schema,
+destination metadata, durable progress, and any store caches.
 
 ```rust
-pub trait TableLifecycleStore {
-    fn clear_table_copy_state(&self, table_id: TableId) -> impl Future<Output = EtlResult<()>> + Send;
-    fn delete_table_pipeline_state(&self, table_id: TableId) -> impl Future<Output = EtlResult<()>> + Send;
+pub trait TableStateLifecycleStore {
+    fn apply_table_state_operation(
+        &self,
+        operation: TableStateOperation,
+    ) -> impl Future<Output = EtlResult<usize>> + Send;
+
+    fn prepare_table_state_for_copy(
+        &self,
+        table_id: TableId,
+    ) -> impl Future<Output = EtlResult<()>> + Send;
+
+    fn reset_table_states_for_resync(
+        &self,
+    ) -> impl Future<Output = EtlResult<usize>> + Send;
+
+    fn delete_table_state(
+        &self,
+        table_id: TableId,
+    ) -> impl Future<Output = EtlResult<()>> + Send;
 }
 ```
 
 | Method | Purpose |
 |--------|---------|
-| `clear_table_copy_state()` | Clears destination metadata, schema versions, and durable table-sync progress while preserving the table state. This is called only after the destination object was dropped for a fresh copy |
-| `delete_table_pipeline_state()` | Deletes all stored state for a table removed from the publication. Does not modify destination tables |
+| `apply_table_state_operation()` | Single implementation point for [`TableStateOperation`]. Custom stores implement the prepare, reset, and delete semantics here |
+| `prepare_table_state_for_copy()` | Deletes destination metadata, schema versions, and durable table-sync progress while preserving the table state. This is called only after the destination object was dropped for a fresh copy |
+| `reset_table_states_for_resync()` | Resets all current table states to `Init` and deletes durable apply-worker progress while preserving destination metadata, schema versions, and durable table-sync progress |
+| `delete_table_state()` | Deletes all stored ETL-owned state for a table removed from the publication. Does not modify destination tables |
 
 ## Combining Traits
 
@@ -175,7 +194,7 @@ pub struct MyStore { /* ... */ }
 
 impl SchemaStore for MyStore { /* ... */ }
 impl StateStore for MyStore { /* ... */ }
-impl TableLifecycleStore for MyStore { /* ... */ }
+impl TableStateLifecycleStore for MyStore { /* ... */ }
 ```
 
 `PipelineStore` is a blanket-implemented facade for stores that satisfy the

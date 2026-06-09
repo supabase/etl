@@ -2,10 +2,10 @@
 //!
 //! These facade traits collect repeated bounds behind names that describe how
 //! the store is used. Code that only needs one capability should continue to
-//! depend on [`StateStore`], [`SchemaStore`], or [`TableLifecycleStore`]
+//! depend on [`StateStore`], [`SchemaStore`], or [`TableStateLifecycleStore`]
 //! directly.
 
-use crate::store::{lifecycle::TableLifecycleStore, schema::SchemaStore, state::StateStore};
+use crate::store::{lifecycle::TableStateLifecycleStore, schema::SchemaStore, state::StateStore};
 
 /// Store capabilities required by state-only worker code.
 pub trait SharedStateStore: StateStore + Clone + Send + Sync + 'static {}
@@ -26,11 +26,11 @@ impl<S> DestinationStore for S where S: StateStore + SchemaStore + Clone + Send 
 /// table state, versioned schemas, table lifecycle operations, and the
 /// concurrency bounds required by worker tasks.
 pub trait PipelineStore:
-    StateStore + SchemaStore + TableLifecycleStore + Clone + Send + Sync + 'static
+    StateStore + SchemaStore + TableStateLifecycleStore + Clone + Send + Sync + 'static
 {
 }
 
 impl<S> PipelineStore for S where
-    S: StateStore + SchemaStore + TableLifecycleStore + Clone + Send + Sync + 'static
+    S: StateStore + SchemaStore + TableStateLifecycleStore + Clone + Send + Sync + 'static
 {
 }
