@@ -1808,7 +1808,7 @@ where
         // If the prefix is unknown, we don't want to process it.
         let prefix = message.prefix()?;
         if prefix != DDL_MESSAGE_PREFIX {
-            info!(
+            warn!(
                 prefix = %prefix,
                 "received logical message with unknown prefix, discarding"
             );
