@@ -3,7 +3,7 @@
 //! Provides a database wrapper for managing BigQuery datasets and constants for
 //! connecting to Google Cloud BigQuery in test environments.
 
-use std::{fmt, path::Path, str::FromStr, time::Duration};
+use std::{fmt, future::Future, path::Path, str::FromStr, time::Duration};
 
 use etl::{
     store::DestinationStore,
@@ -33,9 +33,8 @@ const BIGQUERY_QUERY_RETRY_DELAY_MS: u64 = 500;
 /// status code.
 const TRANSIENT_BIGQUERY_RESPONSE_REASONS: &[&str] = &["backendError", "jobBackendError"];
 
-/// Retry policy for BigQuery test setup operations (client creation, dataset
-/// creation).
-const SETUP_RETRY_POLICY: RetryPolicy = RetryPolicy {
+/// Retry policy for raw BigQuery operations in tests.
+const BIGQUERY_TEST_RETRY_POLICY: RetryPolicy = RetryPolicy {
     max_retries: 4,
     initial_delay: Duration::from_secs(1),
     max_delay: Duration::from_secs(4),
@@ -57,6 +56,32 @@ fn is_transient_bq_error(err: &BQError) -> RetryDecision {
         }
         _ => RetryDecision::Stop,
     }
+}
+
+/// Runs a raw BigQuery test operation with transient-error retries.
+async fn retry_bigquery_test_operation<T, AttemptFn, AttemptFut>(
+    operation: &'static str,
+    attempt_fn: AttemptFn,
+) -> Result<T, BQError>
+where
+    AttemptFn: FnMut() -> AttemptFut,
+    AttemptFut: Future<Output = Result<T, BQError>>,
+{
+    retry_with_backoff(
+        BIGQUERY_TEST_RETRY_POLICY,
+        is_transient_bq_error,
+        |delay| delay,
+        |attempt| {
+            eprintln!(
+                "bigquery {operation} failed with transient error (attempt {}/{}), retrying in \
+                 {:?}: {}",
+                attempt.retry_index, attempt.max_retries, attempt.sleep_delay, attempt.error,
+            );
+        },
+        attempt_fn,
+    )
+    .await
+    .map_err(|failure| failure.last_error)
 }
 
 /// Environment variable name for the BigQuery project ID.
@@ -163,10 +188,11 @@ impl BigQueryDatabase {
     /// set or if client creation fails.
     pub async fn new(sa_key_path: &str) -> Self {
         let project_id = get_project_id();
-        let client = ClientBuilder::new()
-            .build_from_service_account_key_file(sa_key_path)
-            .await
-            .expect("Failed to create BigQuery client");
+        let client = retry_bigquery_test_operation("client creation", || async {
+            ClientBuilder::new().build_from_service_account_key_file(sa_key_path).await
+        })
+        .await
+        .expect("Failed to create BigQuery client");
         let dataset_id = random_dataset_id();
 
         Self { client, project_id, sa_key_path: sa_key_path.to_owned(), dataset_id }
@@ -174,35 +200,22 @@ impl BigQueryDatabase {
 
     /// Creates the dataset in BigQuery, retrying on transient errors.
     pub async fn create_dataset(&self) {
-        retry_with_backoff(
-            SETUP_RETRY_POLICY,
-            is_transient_bq_error,
-            |delay| delay,
-            |attempt| {
-                eprintln!(
-                    "bigquery dataset creation failed (attempt {}/{}): {}",
-                    attempt.retry_index, attempt.max_retries, attempt.error,
-                );
-            },
-            || async {
-                let dataset = Dataset::new(&self.project_id, &self.dataset_id);
-                self.client.dataset().create(dataset).await.map(|_| ())
-            },
-        )
+        retry_bigquery_test_operation("dataset creation", || async {
+            let dataset = Dataset::new(&self.project_id, &self.dataset_id);
+            self.client.dataset().create(dataset).await.map(|_| ())
+        })
         .await
-        .unwrap_or_else(|failure| {
-            panic!(
-                "Failed to create BigQuery dataset after {} attempts: {}",
-                failure.total_attempts, failure.last_error,
-            )
-        });
+        .unwrap_or_else(|error| panic!("Failed to create BigQuery dataset: {error}"));
     }
 
     /// Drops the dataset and all its contents.
     ///
     /// This function will not panic on errors - it logs them and continues.
     pub async fn drop_dataset(&self) {
-        if let Err(e) = self.client.dataset().delete(&self.project_id, &self.dataset_id, true).await
+        if let Err(e) = retry_bigquery_test_operation("dataset deletion", || async {
+            self.client.dataset().delete(&self.project_id, &self.dataset_id, true).await
+        })
+        .await
         {
             eprintln!("warning: failed to delete BigQuery dataset {}: {e}", self.dataset_id);
         }
@@ -248,22 +261,14 @@ impl BigQueryDatabase {
         let mut attempts_remaining = BIGQUERY_QUERY_MAX_ATTEMPTS;
 
         loop {
-            let rows = match self
-                .client
-                .job()
-                .query(&self.project_id, QueryRequest::new(query.clone()))
-                .await
+            let rows = match retry_bigquery_test_operation("table query", || {
+                let request = QueryRequest::new(query.clone());
+                async { self.client.job().query(&self.project_id, request).await }
+            })
+            .await
             {
                 Ok(response) => response.rows,
                 Err(BQError::ResponseError { error }) if error.error.code == 404 => return None,
-                Err(err)
-                    if attempts_remaining > 1
-                        && matches!(is_transient_bq_error(&err), RetryDecision::Retry) =>
-                {
-                    attempts_remaining -= 1;
-                    sleep(Duration::from_millis(BIGQUERY_QUERY_RETRY_DELAY_MS)).await;
-                    continue;
-                }
                 Err(err) => panic!("Failed to query BigQuery table: {err:?}"),
             };
 
@@ -298,22 +303,16 @@ impl BigQueryDatabase {
         let mut attempts_remaining = BIGQUERY_QUERY_MAX_ATTEMPTS;
 
         loop {
-            let rows =
-                match self.client.job().query(project_id, QueryRequest::new(query.clone())).await {
-                    Ok(response) => response.rows,
-                    Err(BQError::ResponseError { error }) if error.error.code == 404 => {
-                        return None;
-                    }
-                    Err(err)
-                        if attempts_remaining > 1
-                            && matches!(is_transient_bq_error(&err), RetryDecision::Retry) =>
-                    {
-                        attempts_remaining -= 1;
-                        sleep(Duration::from_millis(BIGQUERY_QUERY_RETRY_DELAY_MS)).await;
-                        continue;
-                    }
-                    Err(err) => panic!("Failed to query BigQuery table schema: {err:?}"),
-                };
+            let rows = match retry_bigquery_test_operation("table schema query", || {
+                let request = QueryRequest::new(query.clone());
+                async { self.client.job().query(project_id, request).await }
+            })
+            .await
+            {
+                Ok(response) => response.rows,
+                Err(BQError::ResponseError { error }) if error.error.code == 404 => return None,
+                Err(err) => panic!("Failed to query BigQuery table schema: {err:?}"),
+            };
 
             if rows.is_some() || attempts_remaining == 1 {
                 return rows.map(|r| BigQueryTableSchema::new(parse_bigquery_table_rows(r)));
@@ -333,13 +332,15 @@ impl BigQueryDatabase {
 
     /// Gets a table or view schema from the BigQuery table metadata API.
     pub async fn get_table_schema_by_id(&self, table_id: &str) -> Option<BigQueryTableSchema> {
-        let table =
-            match self.client.table().get(&self.project_id, &self.dataset_id, table_id, None).await
-            {
-                Ok(table) => table,
-                Err(BQError::ResponseError { error }) if error.error.code == 404 => return None,
-                Err(err) => panic!("Failed to get BigQuery table metadata: {err:?}"),
-            };
+        let table = match retry_bigquery_test_operation("table metadata query", || async {
+            self.client.table().get(&self.project_id, &self.dataset_id, table_id, None).await
+        })
+        .await
+        {
+            Ok(table) => table,
+            Err(BQError::ResponseError { error }) if error.error.code == 404 => return None,
+            Err(err) => panic!("Failed to get BigQuery table metadata: {err:?}"),
+        };
 
         Some(BigQueryTableSchema::from_table_fields(table.schema.fields.unwrap_or_default()))
     }
@@ -361,7 +362,12 @@ impl BigQueryDatabase {
             column_definitions.join(", ")
         );
 
-        self.client.job().query(&self.project_id, QueryRequest::new(ddl)).await.unwrap();
+        retry_bigquery_test_operation("manual table creation", || {
+            let request = QueryRequest::new(ddl.clone());
+            async { self.client.job().query(&self.project_id, request).await.map(|_| ()) }
+        })
+        .await
+        .expect("Failed to create BigQuery table");
     }
 
     /// Creates a [`BigQueryDestination`] configured for this database instance.
@@ -398,8 +404,10 @@ impl Drop for BigQueryDatabase {
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             tokio::task::block_in_place(|| {
                 Handle::current().block_on(async {
-                    if let Err(e) =
+                    if let Err(e) = retry_bigquery_test_operation("dataset deletion", || async {
                         self.client.dataset().delete(&project_id, &dataset_id, true).await
+                    })
+                    .await
                     {
                         eprintln!("warning: failed to delete BigQuery dataset {dataset_id}: {e}");
                     }

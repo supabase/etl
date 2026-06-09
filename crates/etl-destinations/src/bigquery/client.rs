@@ -33,12 +33,15 @@ use tokio::time::{Duration, Instant, sleep};
 use tonic::Code;
 use tracing::{debug, error, info, warn};
 
-use crate::bigquery::{
-    encoding::BigQueryTableRow,
-    metrics::{
-        ETL_BQ_APPEND_BATCHES_BATCH_ERRORS_TOTAL, ETL_BQ_APPEND_BATCHES_BATCH_ROW_ERRORS_TOTAL,
+use crate::{
+    bigquery::{
+        encoding::BigQueryTableRow,
+        metrics::{
+            ETL_BQ_APPEND_BATCHES_BATCH_ERRORS_TOTAL, ETL_BQ_APPEND_BATCHES_BATCH_ROW_ERRORS_TOTAL,
+        },
+        sql::{quote_identifier, quote_information_schema_tables_path, quote_table_path},
     },
-    sql::{quote_identifier, quote_information_schema_tables_path, quote_table_path},
+    retry::{RetryDecision, RetryPolicy, retry_with_backoff},
 };
 
 /// Multiplier for calculating max inflight requests from pool size.
@@ -62,6 +65,15 @@ const STORAGE_WRITE_METADATA_LAG_RETRY_TIMEOUT: Duration = Duration::from_secs(1
 const STORAGE_WRITE_METADATA_LAG_RETRY_DELAY: Duration = Duration::from_secs(1);
 /// Maximum backoff when retrying writes during storage write metadata lag.
 const STORAGE_WRITE_METADATA_LAG_MAX_RETRY_DELAY: Duration = Duration::from_secs(15);
+/// Retry policy for transient BigQuery query job failures.
+const QUERY_RETRY_POLICY: RetryPolicy = RetryPolicy {
+    max_retries: 4,
+    initial_delay: Duration::from_secs(1),
+    max_delay: Duration::from_secs(8),
+};
+/// BigQuery response reasons that are transient even when surfaced with a 4xx
+/// status code.
+const TRANSIENT_BIGQUERY_QUERY_REASONS: &[&str] = &["backendError", "jobBackendError"];
 /// Protobuf type name for BigQuery storage errors embedded in gRPC status
 /// details.
 const BIGQUERY_STORAGE_ERROR_TYPE_NAME: &str = "google.cloud.bigquery.storage.v1.StorageError";
@@ -265,6 +277,35 @@ fn append_processing_result_from_request_error(
     } else {
         AppendProcessingResult::Error(bq_error_to_etl_error(error))
     }
+}
+
+/// Returns whether a BigQuery query error is transient.
+fn is_transient_query_error(error: &BQError) -> RetryDecision {
+    match error {
+        BQError::RequestError(_) => RetryDecision::Retry,
+        BQError::ResponseError { error } if error.error.code >= 500 => RetryDecision::Retry,
+        BQError::ResponseError { error }
+            if error.error.errors.iter().any(|nested_error| {
+                nested_error.get("reason").is_some_and(|reason| {
+                    TRANSIENT_BIGQUERY_QUERY_REASONS.contains(&reason.as_str())
+                })
+            }) =>
+        {
+            RetryDecision::Retry
+        }
+        _ => RetryDecision::Stop,
+    }
+}
+
+/// Logs a transient BigQuery query retry.
+fn log_query_retry(attempt: crate::retry::RetryAttempt<'_, BQError>) {
+    warn!(
+        retry_index = attempt.retry_index,
+        max_retries = attempt.max_retries,
+        sleep_ms = attempt.sleep_delay.as_millis(),
+        error = %attempt.error,
+        "retrying transient BigQuery query error"
+    );
 }
 
 /// Builds the error returned when local Storage Write metadata lag retries are
@@ -1227,12 +1268,18 @@ impl BigQueryClient {
 
     /// Executes a BigQuery SQL query and returns the result set.
     pub async fn query(&self, request: QueryRequest) -> EtlResult<ResultSet> {
-        let query_response = self
-            .client
-            .job()
-            .query(&self.project_id, request)
-            .await
-            .map_err(bq_error_to_etl_error)?;
+        let query_response = retry_with_backoff(
+            QUERY_RETRY_POLICY,
+            is_transient_query_error,
+            |delay| delay,
+            log_query_retry,
+            || {
+                let request = request.clone();
+                async move { self.client.job().query(&self.project_id, request).await }
+            },
+        )
+        .await
+        .map_err(|failure| bq_error_to_etl_error(failure.last_error))?;
 
         Ok(ResultSet::new_from_query_response(query_response))
     }
