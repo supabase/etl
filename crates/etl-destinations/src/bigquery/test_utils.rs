@@ -29,6 +29,9 @@ use crate::{
 const BIGQUERY_QUERY_MAX_ATTEMPTS: u32 = 30;
 /// Delay in milliseconds between verification attempts when querying BigQuery.
 const BIGQUERY_QUERY_RETRY_DELAY_MS: u64 = 500;
+/// BigQuery response reasons that are transient even when surfaced with a 4xx
+/// status code.
+const TRANSIENT_BIGQUERY_RESPONSE_REASONS: &[&str] = &["backendError", "jobBackendError"];
 
 /// Retry policy for BigQuery test setup operations (client creation, dataset
 /// creation).
@@ -43,6 +46,15 @@ fn is_transient_bq_error(err: &BQError) -> RetryDecision {
     match err {
         BQError::RequestError(_) => RetryDecision::Retry,
         BQError::ResponseError { error } if error.error.code >= 500 => RetryDecision::Retry,
+        BQError::ResponseError { error }
+            if error.error.errors.iter().any(|nested_error| {
+                nested_error.get("reason").is_some_and(|reason| {
+                    TRANSIENT_BIGQUERY_RESPONSE_REASONS.contains(&reason.as_str())
+                })
+            }) =>
+        {
+            RetryDecision::Retry
+        }
         _ => RetryDecision::Stop,
     }
 }
@@ -244,6 +256,14 @@ impl BigQueryDatabase {
             {
                 Ok(response) => response.rows,
                 Err(BQError::ResponseError { error }) if error.error.code == 404 => return None,
+                Err(err)
+                    if attempts_remaining > 1
+                        && matches!(is_transient_bq_error(&err), RetryDecision::Retry) =>
+                {
+                    attempts_remaining -= 1;
+                    sleep(Duration::from_millis(BIGQUERY_QUERY_RETRY_DELAY_MS)).await;
+                    continue;
+                }
                 Err(err) => panic!("Failed to query BigQuery table: {err:?}"),
             };
 
@@ -278,13 +298,22 @@ impl BigQueryDatabase {
         let mut attempts_remaining = BIGQUERY_QUERY_MAX_ATTEMPTS;
 
         loop {
-            let rows = self
-                .client
-                .job()
-                .query(project_id, QueryRequest::new(query.clone()))
-                .await
-                .unwrap()
-                .rows;
+            let rows =
+                match self.client.job().query(project_id, QueryRequest::new(query.clone())).await {
+                    Ok(response) => response.rows,
+                    Err(BQError::ResponseError { error }) if error.error.code == 404 => {
+                        return None;
+                    }
+                    Err(err)
+                        if attempts_remaining > 1
+                            && matches!(is_transient_bq_error(&err), RetryDecision::Retry) =>
+                    {
+                        attempts_remaining -= 1;
+                        sleep(Duration::from_millis(BIGQUERY_QUERY_RETRY_DELAY_MS)).await;
+                        continue;
+                    }
+                    Err(err) => panic!("Failed to query BigQuery table schema: {err:?}"),
+                };
 
             if rows.is_some() || attempts_remaining == 1 {
                 return rows.map(|r| BigQueryTableSchema::new(parse_bigquery_table_rows(r)));
