@@ -23,6 +23,6 @@ pub mod state;
 
 pub use both::{memory::MemoryStore, postgres::PostgresStore};
 pub use capabilities::{DestinationStore, PipelineStore, SharedStateStore};
-pub use lifecycle::TableLifecycleStore;
+pub use lifecycle::{TableStateLifecycleStore, TableStateOperation};
 pub use schema::SchemaStore;
 pub use state::{StateStore, TableStates};

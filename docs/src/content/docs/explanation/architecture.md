@@ -106,7 +106,7 @@ Persists pipeline state so replication can resume after restarts. **Three traits
 
 - **StateStore**: Tracks table state, durable replication progress, and destination table metadata
 - **SchemaStore**: Stores versioned table schema information (columns, types, primary keys, snapshot IDs) and prunes obsolete schema versions after acknowledged progress while preserving the retained boundary schema and newer versions
-- **TableLifecycleStore**: Clears copy-scoped state before a table copy restart and removes all stored state when a table leaves the publication
+- **TableStateLifecycleStore**: Prepares table-copy state, resets table states for resync, and deletes all ETL-owned state when a table leaves the publication
 
 `StateStore` and `SchemaStore` use a cache-first pattern: normal reads hit an in-memory cache, startup loaders hydrate that cache from persistent storage, and writes go to both the cache and persistent storage. `get_table_schema()` may load a missing version from persistent storage, while `get_table_schemas()` returns cached schemas only. Schema pruning follows the same rule for implementations with durable storage: obsolete versions are removed from both the cache and the persistent store.
 

@@ -60,7 +60,7 @@ Create `src/custom_store.rs`. A store must implement **three traits** (see [Exte
 
 - `SchemaStore` - Versioned table schema storage, retrieval, and pruning
 - `StateStore` - Table state, durable replication progress, and destination table metadata tracking
-- `TableLifecycleStore` - Store lifecycle operations for table-copy restarts and publication changes
+- `TableStateLifecycleStore` - Store lifecycle operations for table-copy preparation, resync resets, and publication changes
 
 `SharedStateStore`, `DestinationStore`, and `PipelineStore` are
 blanket-implemented facades over these traits plus the required
@@ -75,7 +75,9 @@ use tracing::info;
 use etl::error::EtlResult;
 use etl::replication::WorkerType;
 use etl::state::{AppliedDestinationTableMetadata, DestinationTableMetadata, TableState};
-use etl::store::{SchemaStore, StateStore, TableLifecycleStore, TableStates};
+use etl::store::{
+    SchemaStore, StateStore, TableStateLifecycleStore, TableStateOperation, TableStates,
+};
 use etl::store::schema::TableSchemaRetention;
 use etl::types::{PgLsn, SnapshotId, TableId, TableSchema};
 
@@ -281,24 +283,40 @@ impl StateStore for CustomStore {
     }
 }
 
-impl TableLifecycleStore for CustomStore {
-    async fn clear_table_copy_state(&self, table_id: TableId) -> EtlResult<()> {
-        let mut tables = self.tables.lock().await;
-        if let Some(entry) = tables.get_mut(&table_id) {
-            entry.schemas.clear();
-            entry.destination_metadata = None;
+impl TableStateLifecycleStore for CustomStore {
+    async fn apply_table_state_operation(
+        &self,
+        operation: TableStateOperation,
+    ) -> EtlResult<usize> {
+        match operation {
+            TableStateOperation::PrepareForCopy { table_id } => {
+                let mut tables = self.tables.lock().await;
+                if let Some(entry) = tables.get_mut(&table_id) {
+                    entry.schemas.clear();
+                    entry.destination_metadata = None;
+                }
+                let mut progress = self.progress.lock().await;
+                progress.remove(&WorkerType::TableSync { table_id });
+                Ok(0)
+            }
+            TableStateOperation::ResetForResync => {
+                let mut tables = self.tables.lock().await;
+                let reset_count = tables.len();
+                for entry in tables.values_mut() {
+                    entry.state = Some(TableState::Init);
+                }
+                let mut progress = self.progress.lock().await;
+                progress.remove(&WorkerType::Apply);
+                Ok(reset_count)
+            }
+            TableStateOperation::Delete { table_id } => {
+                let mut tables = self.tables.lock().await;
+                let removed = usize::from(tables.remove(&table_id).is_some());
+                let mut progress = self.progress.lock().await;
+                progress.remove(&WorkerType::TableSync { table_id });
+                Ok(removed)
+            }
         }
-        let mut progress = self.progress.lock().await;
-        progress.remove(&WorkerType::TableSync { table_id });
-        Ok(())
-    }
-
-    async fn delete_table_pipeline_state(&self, table_id: TableId) -> EtlResult<()> {
-        let mut tables = self.tables.lock().await;
-        tables.remove(&table_id);
-        let mut progress = self.progress.lock().await;
-        progress.remove(&WorkerType::TableSync { table_id });
-        Ok(())
     }
 }
 ```
@@ -530,7 +548,7 @@ The pipeline will connect to Postgres and start replicating. You'll see your cus
 
 ## What You Built
 
-- **Custom Store** - In-memory implementation of `SchemaStore`, `StateStore`, and `TableLifecycleStore`
+- **Custom Store** - In-memory implementation of `SchemaStore`, `StateStore`, and `TableStateLifecycleStore`
 - **HTTP Destination** - Forwards replicated data via HTTP POST with retry logic
 - **Working Pipeline** - Connects your custom components to the ETL core
 
