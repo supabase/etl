@@ -957,7 +957,7 @@ async fn delete_table_state_deletes_state_schema_metadata_and_progress_for_table
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn prepare_table_state_for_copy_preserves_table_state() {
+async fn prepare_table_state_for_copy_preserves_state_and_deletes_copy_data() {
     init_test_tracing();
 
     let database = spawn_source_database().await;
