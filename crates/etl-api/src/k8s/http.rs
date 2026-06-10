@@ -9,7 +9,7 @@ use etl_maintenance::DuckLakeMaintenancePolicy;
 use k8s_openapi::{
     api::{
         apps::v1::StatefulSet,
-        core::v1::{ConfigMap, Pod, Secret},
+        core::v1::{ConfigMap, Namespace, Pod, Secret, ServiceAccount},
     },
     apimachinery::pkg::apis::meta::v1::ObjectMeta,
 };
@@ -19,7 +19,8 @@ use kube::{
     core::{ApiResource, DynamicObject, GroupVersionKind},
 };
 use serde_json::json;
-use tracing::debug;
+use thiserror::Error;
+use tracing::{debug, warn};
 
 use crate::{
     config::K8sConfig,
@@ -229,6 +230,8 @@ impl ReplicatorResourceConfig {
 /// apply to keep resources in sync.
 #[derive(Debug)]
 pub struct HttpK8sClient {
+    namespaces_api: Api<Namespace>,
+    service_accounts_api: Api<ServiceAccount>,
     secrets_api: Api<Secret>,
     config_maps_api: Api<ConfigMap>,
     stateful_sets_api: Api<StatefulSet>,
@@ -243,6 +246,9 @@ impl HttpK8sClient {
     /// Prefers in-cluster configuration and falls back to the local kubeconfig
     /// when running outside the cluster.
     pub fn new(client: Client, k8s_config: K8sConfig) -> Result<HttpK8sClient, K8sError> {
+        let namespaces_api: Api<Namespace> = Api::all(client.clone());
+        let service_accounts_api: Api<ServiceAccount> =
+            Api::namespaced(client.clone(), DATA_PLANE_NAMESPACE);
         let secrets_api: Api<Secret> = Api::namespaced(client.clone(), DATA_PLANE_NAMESPACE);
         let config_maps_api: Api<ConfigMap> = Api::namespaced(client.clone(), DATA_PLANE_NAMESPACE);
         let stateful_sets_api: Api<StatefulSet> =
@@ -255,6 +261,8 @@ impl HttpK8sClient {
         );
 
         Ok(HttpK8sClient {
+            namespaces_api,
+            service_accounts_api,
             secrets_api,
             config_maps_api,
             stateful_sets_api,
@@ -264,6 +272,65 @@ impl HttpK8sClient {
         })
     }
 
+    /// Validates shared Kubernetes prerequisites required by replicators.
+    ///
+    /// This only checks resources owned outside per-pipeline reconciliation. It
+    /// does not create or mutate cluster resources.
+    pub async fn preflight(&self, source_tls_enabled: bool) -> Result<(), K8sPreflightError> {
+        self.ensure_data_plane_namespace().await?;
+        self.ensure_replicator_service_account().await?;
+        self.ensure_trusted_root_certs_config_map(source_tls_enabled).await?;
+
+        Ok(())
+    }
+
+    /// Ensures the data-plane namespace exists before namespaced APIs are used.
+    async fn ensure_data_plane_namespace(&self) -> Result<(), K8sPreflightError> {
+        match self.namespaces_api.get(DATA_PLANE_NAMESPACE).await {
+            Ok(_) => Ok(()),
+            Err(kube::Error::Api(err)) if err.code == 404 => {
+                Err(K8sPreflightError::MissingDataPlaneNamespace)
+            }
+            Err(source) => Err(K8sPreflightError::DataPlaneNamespaceCheck { source }),
+        }
+    }
+
+    /// Ensures replicator pods can be admitted with their configured identity.
+    async fn ensure_replicator_service_account(&self) -> Result<(), K8sPreflightError> {
+        match self.service_accounts_api.get(REPLICATOR_SERVICE_ACCOUNT_NAME).await {
+            Ok(_) => Ok(()),
+            Err(kube::Error::Api(err)) if err.code == 404 => {
+                Err(K8sPreflightError::MissingReplicatorServiceAccount)
+            }
+            Err(source) => Err(K8sPreflightError::ReplicatorServiceAccountCheck { source }),
+        }
+    }
+
+    /// Ensures trusted root certificates are available when source TLS needs
+    /// them.
+    async fn ensure_trusted_root_certs_config_map(
+        &self,
+        source_tls_enabled: bool,
+    ) -> Result<(), K8sPreflightError> {
+        match self.config_maps_api.get(TRUSTED_ROOT_CERT_CONFIG_MAP_NAME).await {
+            Ok(config_map) if trusted_root_certs_config_map_is_valid(&config_map) => Ok(()),
+            Ok(_) => handle_trusted_root_certs_preflight_failure(
+                source_tls_enabled,
+                K8sPreflightError::InvalidTrustedRootCertsConfigMap,
+            ),
+            Err(kube::Error::Api(err)) if err.code == 404 => {
+                handle_trusted_root_certs_preflight_failure(
+                    source_tls_enabled,
+                    K8sPreflightError::MissingTrustedRootCertsConfigMap,
+                )
+            }
+            Err(source) => handle_trusted_root_certs_preflight_failure(
+                source_tls_enabled,
+                K8sPreflightError::TrustedRootCertsConfigMapCheck { source },
+            ),
+        }
+    }
+
     /// Helper function to handle delete operations that should ignore 404
     /// errors but propagate other errors.
     fn handle_delete_with_404_ignore<T>(
@@ -271,7 +338,7 @@ impl HttpK8sClient {
     ) -> Result<(), K8sError> {
         match delete_result {
             Ok(_) => Ok(()),
-            Err(kube::Error::Api(er)) if er.code == 404 => Ok(()),
+            Err(kube::Error::Api(err)) if err.code == 404 => Ok(()),
             Err(e) => Err(e.into()),
         }
     }
@@ -325,6 +392,87 @@ impl HttpK8sClient {
         }
 
         false
+    }
+}
+
+/// Errors found while checking Kubernetes prerequisites at startup.
+#[derive(Debug, Error)]
+pub enum K8sPreflightError {
+    /// The namespace used for data-plane resources does not exist.
+    #[error(
+        "Kubernetes data-plane namespace `etl-data-plane` is missing. Create it before starting \
+         etl-api."
+    )]
+    MissingDataPlaneNamespace,
+    /// Checking the namespace failed.
+    #[error("Failed to check Kubernetes data-plane namespace `etl-data-plane`")]
+    DataPlaneNamespaceCheck {
+        /// Kubernetes API error.
+        #[source]
+        source: kube::Error,
+    },
+    /// The ServiceAccount used by replicator pods does not exist.
+    #[error(
+        "Kubernetes ServiceAccount `etl-replicator` is missing in namespace `etl-data-plane`. \
+         Create it before starting etl-api so replicator pods can be admitted."
+    )]
+    MissingReplicatorServiceAccount,
+    /// Checking the ServiceAccount failed.
+    #[error(
+        "Failed to check Kubernetes ServiceAccount `etl-replicator` in namespace `etl-data-plane`"
+    )]
+    ReplicatorServiceAccountCheck {
+        /// Kubernetes API error.
+        #[source]
+        source: kube::Error,
+    },
+    /// The trusted root certificates ConfigMap is missing.
+    #[error(
+        "Kubernetes ConfigMap `trusted-root-certs-config` is missing in namespace \
+         `etl-data-plane`. Create it with key `trusted_root_certs` or disable source TLS."
+    )]
+    MissingTrustedRootCertsConfigMap,
+    /// The trusted root certificates ConfigMap is present but unusable.
+    #[error(
+        "Kubernetes ConfigMap `trusted-root-certs-config` in namespace `etl-data-plane` must \
+         contain non-empty key `trusted_root_certs` or source TLS must be disabled."
+    )]
+    InvalidTrustedRootCertsConfigMap,
+    /// Checking the trusted root certificates ConfigMap failed.
+    #[error(
+        "Failed to check Kubernetes ConfigMap `trusted-root-certs-config` in namespace \
+         `etl-data-plane`"
+    )]
+    TrustedRootCertsConfigMapCheck {
+        /// Kubernetes API error.
+        #[source]
+        source: kube::Error,
+    },
+}
+
+/// Returns whether the trusted root certificates ConfigMap has usable content.
+fn trusted_root_certs_config_map_is_valid(config_map: &ConfigMap) -> bool {
+    config_map
+        .data
+        .as_ref()
+        .and_then(|data| data.get(TRUSTED_ROOT_CERT_KEY_NAME))
+        .is_some_and(|certs| !certs.trim().is_empty())
+}
+
+/// Handles a trusted cert preflight failure according to source TLS settings.
+fn handle_trusted_root_certs_preflight_failure(
+    source_tls_enabled: bool,
+    error: K8sPreflightError,
+) -> Result<(), K8sPreflightError> {
+    if source_tls_enabled {
+        Err(error)
+    } else {
+        warn!(
+            error = %error,
+            "source tls is disabled; ignoring trusted root certificates preflight failure"
+        );
+
+        Ok(())
     }
 }
 
@@ -705,7 +853,7 @@ impl K8sClient for HttpK8sClient {
         for stateful_set_name in stateful_set_names_for_lookup(prefix) {
             match self.stateful_sets_api.get(&stateful_set_name).await {
                 Ok(_) => return Ok(true),
-                Err(kube::Error::Api(er)) if er.code == 404 => {}
+                Err(kube::Error::Api(err)) if err.code == 404 => {}
                 Err(e) => return Err(e.into()),
             }
         }
@@ -752,7 +900,7 @@ impl K8sClient for HttpK8sClient {
                     pod = Some(found_pod);
                     break;
                 }
-                Err(kube::Error::Api(er)) if er.code == 404 => {}
+                Err(kube::Error::Api(err)) if err.code == 404 => {}
                 Err(e) => return Err(e.into()),
             }
         }
@@ -1696,6 +1844,49 @@ mod tests {
         container_environment
             .iter()
             .any(|entry| entry.get("name").and_then(serde_json::Value::as_str) == Some(name))
+    }
+
+    fn trusted_root_certs_preflight_error() -> K8sPreflightError {
+        K8sPreflightError::MissingTrustedRootCertsConfigMap
+    }
+
+    #[test]
+    fn trusted_root_certs_config_map_validates_non_empty_key() {
+        let mut data = BTreeMap::new();
+        data.insert(TRUSTED_ROOT_CERT_KEY_NAME.to_owned(), "root-cert".to_owned());
+        let config_map = ConfigMap { data: Some(data), ..ConfigMap::default() };
+
+        assert!(trusted_root_certs_config_map_is_valid(&config_map));
+    }
+
+    #[test]
+    fn trusted_root_certs_config_map_rejects_missing_or_empty_key() {
+        assert!(!trusted_root_certs_config_map_is_valid(&ConfigMap::default()));
+
+        let mut data = BTreeMap::new();
+        data.insert(TRUSTED_ROOT_CERT_KEY_NAME.to_owned(), "   ".to_owned());
+        let config_map = ConfigMap { data: Some(data), ..ConfigMap::default() };
+
+        assert!(!trusted_root_certs_config_map_is_valid(&config_map));
+    }
+
+    #[test]
+    fn trusted_root_certs_preflight_failure_warns_when_source_tls_is_disabled() {
+        let result = handle_trusted_root_certs_preflight_failure(
+            false,
+            trusted_root_certs_preflight_error(),
+        );
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn trusted_root_certs_preflight_failure_errors_when_source_tls_is_enabled() {
+        let error =
+            handle_trusted_root_certs_preflight_failure(true, trusted_root_certs_preflight_error())
+                .expect_err("source tls requires trusted root certs");
+
+        assert!(error.to_string().contains(TRUSTED_ROOT_CERT_CONFIG_MAP_NAME));
     }
 
     fn collect_kubernetes_label_values(
