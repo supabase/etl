@@ -373,9 +373,46 @@ pub struct TableStatus {
     pub table_sync_lag: Option<SlotLagMetricsResponse>,
 }
 
+/// WAL availability status reported by Postgres for a replication slot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum SlotWalStatusResponse {
+    /// Required WAL is still within normal retention.
+    Reserved,
+    /// Required WAL exceeds `max_wal_size`, but is still retained.
+    Extended,
+    /// Required WAL is no longer fully reserved and can be removed at the next
+    /// checkpoint.
+    Unreserved,
+    /// Required WAL has been removed and the slot is no longer usable.
+    Lost,
+    /// A WAL status value not known by this API version.
+    Unknown,
+}
+
+impl From<lag::SlotWalStatus> for SlotWalStatusResponse {
+    fn from(status: lag::SlotWalStatus) -> Self {
+        match status {
+            lag::SlotWalStatus::Reserved => Self::Reserved,
+            lag::SlotWalStatus::Extended => Self::Extended,
+            lag::SlotWalStatus::Unreserved => Self::Unreserved,
+            lag::SlotWalStatus::Lost => Self::Lost,
+            lag::SlotWalStatus::Unknown => Self::Unknown,
+        }
+    }
+}
+
 /// Lag metrics reported for replication slots.
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct SlotLagMetricsResponse {
+    /// Whether the slot currently has an active replication connection.
+    pub active: bool,
+    /// The WAL availability status reported by Postgres for the slot. Known
+    /// values are `reserved`, `extended`, `unreserved`, and `lost`; unknown
+    /// future values are returned as `unknown`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = true)]
+    pub wal_status: Option<SlotWalStatusResponse>,
     /// Bytes between the current WAL location and the slot restart LSN.
     #[schema(example = 1024)]
     pub restart_lsn_bytes: i64,
@@ -383,9 +420,10 @@ pub struct SlotLagMetricsResponse {
     #[schema(example = 2048)]
     pub confirmed_flush_lsn_bytes: i64,
     /// How many bytes of WAL are still safe to build up before the limit of the
-    /// slot is reached.
-    #[schema(example = 8192)]
-    pub safe_wal_size_bytes: i64,
+    /// slot is reached. `None` means Postgres reports unlimited slot WAL
+    /// retention.
+    #[schema(example = 8192, nullable = true)]
+    pub safe_wal_size_bytes: Option<i64>,
     /// Write lag expressed in milliseconds.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(example = 1500, nullable = true)]
@@ -394,16 +432,24 @@ pub struct SlotLagMetricsResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(example = 1200, nullable = true)]
     pub flush_lag: Option<i64>,
+    /// Milliseconds elapsed since the walsender last received client feedback.
+    /// This can be present even when write and flush lag are unavailable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = 5000, nullable = true)]
+    pub reply_time_lag: Option<i64>,
 }
 
 impl From<lag::SlotLagMetrics> for SlotLagMetricsResponse {
     fn from(metrics: lag::SlotLagMetrics) -> Self {
         Self {
+            active: metrics.active,
+            wal_status: metrics.wal_status.map(Into::into),
             restart_lsn_bytes: metrics.restart_lsn_bytes,
             confirmed_flush_lsn_bytes: metrics.confirmed_flush_lsn_bytes,
             safe_wal_size_bytes: metrics.safe_wal_size_bytes,
             write_lag: metrics.write_lag_ms,
             flush_lag: metrics.flush_lag_ms,
+            reply_time_lag: metrics.reply_time_lag_ms,
         }
     }
 }
