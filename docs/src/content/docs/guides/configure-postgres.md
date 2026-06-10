@@ -142,11 +142,13 @@ If a slot is terminated due to exceeding this limit, ETL will restart the table 
 ### Monitoring WAL Usage
 
 ```sql
--- Check replication slot lag (how far behind each slot is)
+-- Check replication slot WAL usage.
 SELECT slot_name,
-       pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn) AS lag_bytes,
-       pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)) AS lag_pretty,
-       active
+       active,
+       wal_status,
+       pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn) AS retained_wal_bytes,
+       pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn) AS confirmed_flush_lag_bytes,
+       safe_wal_size
 FROM pg_replication_slots;
 
 -- Check total WAL directory size
@@ -154,10 +156,24 @@ SELECT pg_size_pretty(sum(size)) AS wal_size
 FROM pg_ls_waldir();
 ```
 
+`wal_status` reports whether the WAL required by a replication slot is still
+available:
+
+- `reserved`: required WAL is within normal retention.
+- `extended`: required WAL exceeds `max_wal_size`, but Postgres is still retaining it.
+- `unreserved`: required WAL is no longer fully reserved and may be removed at the next checkpoint.
+- `lost`: required WAL was removed and the slot is no longer usable.
+- `NULL`: the slot has not reserved WAL yet, usually because `restart_lsn` is `NULL`.
+
+ETL API responses return unknown future Postgres `wal_status` values as `unknown`.
+
 ### Recommendations
 
 - Set `max_slot_wal_keep_size` to a reasonable limit based on available disk space
-- Monitor replication slot lag and alert when it exceeds acceptable thresholds
+- Monitor `confirmed_flush_lag_bytes` for logical replication lag
+- Monitor `retained_wal_bytes`, `safe_wal_size`, and `wal_status` for WAL retention risk
+- Treat `safe_wal_size IS NULL` as unlimited slot WAL retention, and `safe_wal_size = 0` as no remaining headroom
+- Alert when slots fall behind acceptable thresholds
 - Address errored tables promptly to prevent indefinite WAL accumulation
 - Size initial sync workers appropriately (`max_table_sync_workers`) to balance parallelism with resource usage
 
