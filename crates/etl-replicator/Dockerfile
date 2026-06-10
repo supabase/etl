@@ -14,14 +14,14 @@ RUN apt-get update && \
     curl \
     gzip && \
     rm -rf /var/lib/apt/lists/*
-COPY scripts/vendor_duckdb_extensions.sh /usr/local/bin/vendor_duckdb_extensions.sh
-RUN chmod +x /usr/local/bin/vendor_duckdb_extensions.sh && \
+COPY scripts/vendor-duckdb-extensions.sh /usr/local/bin/vendor-duckdb-extensions.sh
+RUN chmod +x /usr/local/bin/vendor-duckdb-extensions.sh && \
     case "$TARGETPLATFORM" in \
       "linux/amd64") DUCKDB_PLATFORM="linux_amd64" ;; \
       "linux/arm64") DUCKDB_PLATFORM="linux_arm64" ;; \
       *) echo "unsupported duckdb extension platform: $TARGETPLATFORM" >&2; exit 1 ;; \
     esac && \
-    /usr/local/bin/vendor_duckdb_extensions.sh \
+    /usr/local/bin/vendor-duckdb-extensions.sh \
       --output-root /duckdb_extensions \
       --platform "$DUCKDB_PLATFORM"
 

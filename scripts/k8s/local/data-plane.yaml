@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: etl-data-plane
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: etl-replicator
+  namespace: etl-data-plane

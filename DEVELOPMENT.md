@@ -360,13 +360,13 @@ The etl-api manages replicator deployments on Kubernetes by dynamically creating
 The etl-api expects these resources to exist before it can deploy replicators:
 
 1. **Namespace**: `etl-data-plane` - Where all replicator pods and related resources are created
-2. **ConfigMap**: `trusted-root-certs-config` - Provides trusted root certificates for TLS connections
+2. **ServiceAccount**: `etl-replicator` - Used by replicator pods created by the etl-api
+3. **ConfigMap**: `trusted-root-certs-config` - Provides trusted root certificates for TLS connections
 
-These are defined in `scripts/` and should be applied before running the API:
+These are defined in `scripts/k8s/local/` and should be applied before running the API:
 
 ```bash
-kubectl --context orbstack apply -f scripts/etl-data-plane.yaml
-kubectl --context orbstack apply -f scripts/trusted-root-certs-config.yaml
+kubectl --context orbstack apply -f scripts/k8s/local
 ```
 
 **Note:** For the complete list of expected Kubernetes resources and their specifications, refer to the constants and resource creation logic in `crates/etl-api/src/k8s/http.rs`.

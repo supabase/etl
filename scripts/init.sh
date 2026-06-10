@@ -134,7 +134,7 @@ fi
 # Run database migrations
 echo "🔄 Running database migrations..."
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-bash "${SCRIPT_DIR}/run_migrations.sh"
+bash "${SCRIPT_DIR}/run-migrations.sh"
 
 # Seed default replicator image (idempotent).
 echo "🖼️ Seeding default replicator image..."
@@ -149,7 +149,6 @@ if ! kubectl config get-contexts -o name | grep -qx "orbstack"; then
 fi
 
 echo "☸️ Configuring Kubernetes environment..."
-kubectl --context orbstack apply -f "${SCRIPT_DIR}/etl-data-plane.yaml"
-kubectl --context orbstack apply -f "${SCRIPT_DIR}/trusted-root-certs-config.yaml"
+kubectl --context orbstack apply -f "${SCRIPT_DIR}/k8s/local"
 
 echo "✨ Complete development environment setup finished! Ready to go!"

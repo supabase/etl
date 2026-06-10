@@ -8,10 +8,10 @@ New development commands should be added as xtask commands in `crates/xtask/src/
 
 | Script                                | xtask command             |
 | ------------------------------------- | ------------------------- |
-| `fmt` / `fmt-check`                   | `cargo x fmt [--check]`   |
-| `check_msrv_sync.sh`                  | `cargo x msrv`            |
+| `fmt.sh` / `fmt-check.sh`             | `cargo x fmt [--check]`   |
+| `check-msrv-sync.sh`                  | `cargo x msrv`            |
 | `init.sh`                             | `cargo x init`            |
-| `run_migrations.sh`                   | `cargo x migrate`         |
+| `run-migrations.sh`                   | `cargo x migrate`         |
 | `deploy-local-replicator-orbstack.sh` | `cargo x deploy-local`    |
 | `test-clickhouse.sh`                  | `cargo x test-clickhouse` |
-| `vendor_duckdb_extensions.sh`         | `cargo x vendor-duckdb`   |
+| `vendor-duckdb-extensions.sh`         | `cargo x vendor-duckdb`   |

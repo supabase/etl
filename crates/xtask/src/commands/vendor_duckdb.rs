@@ -10,11 +10,11 @@ pub(crate) struct VendorDuckdbArgs {
 }
 
 impl VendorDuckdbArgs {
-    // TODO: port scripts/vendor_duckdb_extensions.sh to native Rust
+    // TODO: port scripts/vendor-duckdb-extensions.sh to native Rust
     pub(crate) fn run(self) -> Result<()> {
         let sh = Shell::new()?;
         let args = &self.args;
-        cmd!(sh, "./scripts/vendor_duckdb_extensions.sh {args...}").run()?;
+        cmd!(sh, "./scripts/vendor-duckdb-extensions.sh {args...}").run()?;
         Ok(())
     }
 }
