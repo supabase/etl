@@ -17,7 +17,8 @@
 //! wal_sender_timeout = 10s
 //! ```
 //!
-//! See `scripts/docker-compose.yaml` for the test database configuration.
+//! See `scripts/docker/docker-compose.yaml` for the test database
+//! configuration.
 
 use etl_config::shared::{PgConnectionConfig, TcpKeepaliveConfig};
 use etl_postgres::{

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-COMPOSE_FILE="${COMPOSE_FILE:-./scripts/docker-compose.yaml}"
+COMPOSE_FILE="${COMPOSE_FILE:-./scripts/docker/docker-compose.yaml}"
 DOCKER_COMPOSE_BIN="${DOCKER_COMPOSE_BIN:-docker-compose}"
 POSTGRES_SERVICE="${POSTGRES_SERVICE:-source-postgres}"
 CLICKHOUSE_SERVICE="${CLICKHOUSE_SERVICE:-clickhouse}"

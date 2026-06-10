@@ -135,7 +135,13 @@ impl Application {
 
         let k8s_client = match kube_client_result {
             Some(client) => match HttpK8sClient::new(client, config.k8s.clone()) {
-                Ok(client) => Some(Arc::new(client) as Arc<dyn K8sClient>),
+                Ok(client) => {
+                    client
+                        .preflight(config.source.tls_enabled)
+                        .await
+                        .context("Checking Kubernetes prerequisites")?;
+                    Some(Arc::new(client) as Arc<dyn K8sClient>)
+                }
                 Err(e) => {
                     warn!(
                         error = %e,

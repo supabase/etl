@@ -85,7 +85,7 @@ jobs:
           tool: cargo-msrv
 
       - name: Check MSRV Sync
-        run: ./scripts/check_msrv_sync.sh
+        run: ./scripts/bin/check-msrv-sync.sh
 
       - name: Verify MSRV
         run: |
@@ -122,7 +122,7 @@ jobs:
 
       - name: Run Cargo Fmt
         if: matrix.check == 'fmt'
-        run: ./scripts/fmt-check
+        run: ./scripts/bin/fmt-check.sh
 
       - name: Run Cargo Clippy
         if: matrix.check == 'clippy'
@@ -212,7 +212,7 @@ jobs:
             aarch64) duckdb_platform=linux_arm64 ;;
             *) echo "unsupported runner architecture: $(uname -m)" >&2; exit 1 ;;
           esac
-          ./scripts/vendor_duckdb_extensions.sh --platform "${duckdb_platform}"
+          ./scripts/bin/vendor-duckdb-extensions.sh --platform "${duckdb_platform}"
 
       - name: Install sqlx-cli
         run: |
@@ -225,7 +225,7 @@ jobs:
       - name: Migrate Database
         run: |
           sudo apt-get install libpq-dev -y
-          ./scripts/run_migrations.sh etl-api
+          ./scripts/bin/run-migrations.sh etl-api
 
       - name: Set up BigQuery Credentials
         # Conditional: fork PRs never receive secrets, BigQuery tests skipped gracefully.
