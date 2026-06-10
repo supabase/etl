@@ -10,11 +10,11 @@ pub(crate) struct MigrateArgs {
 }
 
 impl MigrateArgs {
-    // TODO: port scripts/run-migrations.sh to native Rust
+    // TODO: port scripts/bin/run-migrations.sh to native Rust
     pub(crate) fn run(self) -> Result<()> {
         let sh = Shell::new()?;
         let args = &self.args;
-        cmd!(sh, "./scripts/run-migrations.sh {args...}").run()?;
+        cmd!(sh, "./scripts/bin/run-migrations.sh {args...}").run()?;
         Ok(())
     }
 }

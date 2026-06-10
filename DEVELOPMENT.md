@@ -593,7 +593,7 @@ If you encounter connection issues:
 
 1. Verify PostgreSQL is running:
    ```bash
-   docker-compose -f scripts/docker-compose.yaml ps
+   docker-compose -f scripts/docker/docker-compose.yaml ps
    ```
 
 2. Check the connection:

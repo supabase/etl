@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 CONTEXT="${K8S_CONTEXT:-orbstack}"
 NAMESPACE="${K8S_NAMESPACE:-etl-data-plane}"
@@ -23,7 +23,7 @@ SKIP_WAIT=0
 
 usage() {
   cat <<'EOF'
-usage: scripts/deploy-local-replicator-orbstack.sh [options]
+usage: scripts/bin/deploy-local-replicator-orbstack.sh [options]
 
 builds etl-replicator image and deploys a single-replica statefulset to local orbstack kubernetes.
 

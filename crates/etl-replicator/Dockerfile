@@ -14,7 +14,7 @@ RUN apt-get update && \
     curl \
     gzip && \
     rm -rf /var/lib/apt/lists/*
-COPY scripts/vendor-duckdb-extensions.sh /usr/local/bin/vendor-duckdb-extensions.sh
+COPY scripts/bin/vendor-duckdb-extensions.sh /usr/local/bin/vendor-duckdb-extensions.sh
 RUN chmod +x /usr/local/bin/vendor-duckdb-extensions.sh && \
     case "$TARGETPLATFORM" in \
       "linux/amd64") DUCKDB_PLATFORM="linux_amd64" ;; \

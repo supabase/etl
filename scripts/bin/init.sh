@@ -20,6 +20,11 @@ if ! [ -x "$(command -v kubectl)" ]; then
   exit 1
 fi
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+COMPOSE_FILE="${REPO_ROOT}/scripts/docker/docker-compose.yaml"
+LOCAL_K8S_DIR="${REPO_ROOT}/scripts/k8s/local"
+
 # Database configuration
 echo "🔧 Configuring database settings..."
 DB_USER="${POSTGRES_USER:=postgres}"
@@ -78,10 +83,10 @@ then
 
   # Pull latest images before starting services
   echo "📥 Pulling latest images..."
-  docker-compose -f ./scripts/docker-compose.yaml pull
+  docker-compose -f "${COMPOSE_FILE}" pull
 
   # Start all services using docker-compose
-  docker-compose -f ./scripts/docker-compose.yaml up -d
+  docker-compose -f "${COMPOSE_FILE}" up -d
   echo "✅ All services started"
 fi
 
@@ -91,7 +96,7 @@ export DATABASE_URL=postgres://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/$
 # Wait for Postgres to be ready
 if [[ "${USING_DOCKER_COMPOSE}" == "1" ]]; then
   echo "⏳ Waiting for Postgres to be ready..."
-  until docker-compose -f ./scripts/docker-compose.yaml exec -T source-postgres pg_isready -U postgres > /dev/null 2>&1; do
+  until docker-compose -f "${COMPOSE_FILE}" exec -T source-postgres pg_isready -U postgres > /dev/null 2>&1; do
     echo "Waiting for Postgres..."
     sleep 1
   done
@@ -99,7 +104,7 @@ if [[ "${USING_DOCKER_COMPOSE}" == "1" ]]; then
   echo "✅ Postgres is up and running on port ${DB_PORT}"
 
   echo "⏳ Waiting for Postgres read replica to be ready..."
-  until docker-compose -f ./scripts/docker-compose.yaml exec -T source-postgres-read-replica pg_isready -U postgres > /dev/null 2>&1; do
+  until docker-compose -f "${COMPOSE_FILE}" exec -T source-postgres-read-replica pg_isready -U postgres > /dev/null 2>&1; do
     echo "Waiting for Postgres read replica..."
     sleep 1
   done
@@ -107,7 +112,7 @@ if [[ "${USING_DOCKER_COMPOSE}" == "1" ]]; then
   echo "✅ Postgres read replica is up and running on port ${DB_REPLICA_PORT}"
 
   echo "⏳ Waiting for ClickHouse to be ready..."
-  until docker-compose -f ./scripts/docker-compose.yaml exec -T clickhouse clickhouse-client --user "$CLICKHOUSE_USER" --password "$CLICKHOUSE_PASSWORD" --query "SELECT 1" > /dev/null 2>&1; do
+  until docker-compose -f "${COMPOSE_FILE}" exec -T clickhouse clickhouse-client --user "$CLICKHOUSE_USER" --password "$CLICKHOUSE_PASSWORD" --query "SELECT 1" > /dev/null 2>&1; do
     echo "Waiting for ClickHouse..."
     sleep 1
   done
@@ -133,7 +138,6 @@ fi
 
 # Run database migrations
 echo "🔄 Running database migrations..."
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 bash "${SCRIPT_DIR}/run-migrations.sh"
 
 # Seed default replicator image (idempotent).
@@ -149,6 +153,6 @@ if ! kubectl config get-contexts -o name | grep -qx "orbstack"; then
 fi
 
 echo "☸️ Configuring Kubernetes environment..."
-kubectl --context orbstack apply -f "${SCRIPT_DIR}/k8s/local"
+kubectl --context orbstack apply -f "${LOCAL_K8S_DIR}"
 
 echo "✨ Complete development environment setup finished! Ready to go!"

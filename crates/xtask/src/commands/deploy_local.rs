@@ -10,11 +10,11 @@ pub(crate) struct DeployLocalArgs {
 }
 
 impl DeployLocalArgs {
-    // TODO: port scripts/deploy-local-replicator-orbstack.sh to native Rust
+    // TODO: port scripts/bin/deploy-local-replicator-orbstack.sh to native Rust
     pub(crate) fn run(self) -> Result<()> {
         let sh = Shell::new()?;
         let args = &self.args;
-        cmd!(sh, "./scripts/deploy-local-replicator-orbstack.sh {args...}").run()?;
+        cmd!(sh, "./scripts/bin/deploy-local-replicator-orbstack.sh {args...}").run()?;
         Ok(())
     }
 }

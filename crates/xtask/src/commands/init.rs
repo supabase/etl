@@ -6,10 +6,10 @@ use xshell::{Shell, cmd};
 pub(crate) struct InitArgs {}
 
 impl InitArgs {
-    // TODO: port scripts/init.sh to native Rust
+    // TODO: port scripts/bin/init.sh to native Rust
     pub(crate) fn run(self) -> Result<()> {
         let sh = Shell::new()?;
-        cmd!(sh, "./scripts/init.sh").run()?;
+        cmd!(sh, "./scripts/bin/init.sh").run()?;
         Ok(())
     }
 }

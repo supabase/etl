@@ -11,7 +11,7 @@ use clap::{Args, Subcommand};
 
 use crate::utils::{DEFAULT_BASE_PORT, DEFAULT_PG_SHARD_COUNT, READ_REPLICA_PORT_OFFSET};
 
-const COMPOSE_FILE: &str = "./scripts/docker-compose.yaml";
+const COMPOSE_FILE: &str = "./scripts/docker/docker-compose.yaml";
 
 /// Returns the program and initial args for docker compose.
 /// Prefers `docker compose` (v2 plugin) and falls back to `docker-compose`

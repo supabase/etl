@@ -241,10 +241,10 @@ Optional:
 
 ## ClickHouse Runs
 
-Start the local ClickHouse server from `scripts/docker-compose.yaml`:
+Start the local ClickHouse server from `scripts/docker/docker-compose.yaml`:
 
 ```bash
-docker compose -f scripts/docker-compose.yaml up -d clickhouse
+docker compose -f scripts/docker/docker-compose.yaml up -d clickhouse
 ```
 
 The defaults in `.env.example` (`BENCH_CLICKHOUSE_URL=http://localhost:8123`,
@@ -325,7 +325,7 @@ For Snowflake workflow runs, set two repository secrets and pass `destination=sn
 - `BENCH_SNOWFLAKE_PRIVATE_KEY`: full PEM contents of the RSA private key.
 
 For ClickHouse workflow runs, pass `destination=clickhouse`. The workflow
-starts the `clickhouse` service from `scripts/docker-compose.yaml` and points
+starts the `clickhouse` service from `scripts/docker/docker-compose.yaml` and points
 the benchmark at it (user `etl`, database `default`); no secrets are needed.
 
 The workflow starts only source Postgres, installs pinned `go-tpc`, runs

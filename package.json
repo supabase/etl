@@ -7,7 +7,7 @@
     "dev": "astro dev",
     "build": "astro build",
     "preview": "astro preview",
-    "smoke:docs": "node scripts/docs-smoke.mjs"
+    "smoke:docs": "node scripts/docs/docs-smoke.mjs"
   },
   "devDependencies": {
     "@astrojs/starlight": "0.39.2",

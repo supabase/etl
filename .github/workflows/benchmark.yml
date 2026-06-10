@@ -161,7 +161,7 @@ jobs:
 
       - name: Start ClickHouse
         if: inputs.destination == 'clickhouse'
-        run: docker compose -f scripts/docker-compose.yaml up -d --wait clickhouse
+        run: docker compose -f scripts/docker/docker-compose.yaml up -d --wait clickhouse
 
       - name: Prepare Snowflake credentials
         if: inputs.destination == 'snowflake'
