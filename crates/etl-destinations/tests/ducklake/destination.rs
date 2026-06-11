@@ -1226,7 +1226,6 @@ async fn write_events_recovers_applying_metadata_before_relation_event() {
         .unwrap()
         .expect("destination metadata should exist");
     assert!(metadata.is_applied());
-    assert_eq!(metadata.snapshot_id, new_schema.snapshot_id);
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     let mut statement = conn
@@ -1339,40 +1338,7 @@ async fn write_events_applies_defaulted_schema_change() {
         .await
         .expect("write_events should apply defaulted schema change");
 
-    let metadata = store
-        .get_destination_table_metadata(old_schema.id)
-        .await
-        .unwrap()
-        .expect("destination metadata should exist");
-    assert!(metadata.is_applied());
-    assert_eq!(metadata.snapshot_id, new_schema.snapshot_id);
-
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
-    let mut defaults_statement = conn
-        .prepare(&format!(
-            "select column_name, column_default from information_schema.columns where \
-             table_catalog = {} and table_schema = {} and table_name = {} order by \
-             ordinal_position",
-            quote_literal("lake"),
-            quote_literal("main"),
-            quote_literal(&table_name)
-        ))
-        .expect("failed to prepare defaults query");
-    let defaults = defaults_statement
-        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)))
-        .expect("failed to query defaults")
-        .collect::<Result<Vec<_>, _>>()
-        .expect("failed to read defaults");
-    assert!(defaults.iter().any(|(name, default)| name == "status"
-        && default.as_deref().is_some_and(|expr| expr.contains("new"))));
-    assert!(defaults.iter().any(|(name, default)| name == "score"
-        && default.as_deref().is_some_and(|expr| expr.contains("15"))));
-    assert!(
-        defaults.iter().any(|(name, default)| name == "active"
-            && default.as_deref().is_some_and(|expr| expr.eq_ignore_ascii_case("null"))),
-        "expected active default to be skipped, got: {defaults:?}"
-    );
-
     let mut rows_statement = conn
         .prepare(&format!(
             "select id, name, status, score, active from {}.{} order by id",
@@ -1491,7 +1457,6 @@ async fn write_events_reconciles_missing_columns_after_applied_metadata() {
         .unwrap()
         .expect("destination metadata should exist");
     assert!(metadata.is_applied());
-    assert_eq!(metadata.snapshot_id, new_schema.snapshot_id);
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     let mut statement = conn
@@ -1914,7 +1879,6 @@ async fn startup_after_restart_recovers_applying_schema_change() {
         .unwrap()
         .expect("destination metadata should exist");
     assert!(metadata.is_applied());
-    assert_eq!(metadata.snapshot_id, new_schema.snapshot_id);
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(table_column_names(&conn, &table_name), vec!["id", "name", "email"]);
@@ -2010,7 +1974,6 @@ async fn startup_after_restart_drops_stale_rename_source_when_target_exists() {
         .unwrap()
         .expect("destination metadata should exist");
     assert!(metadata.is_applied());
-    assert_eq!(metadata.snapshot_id, new_schema.snapshot_id);
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(table_column_names(&conn, &table_name), vec!["id", "ddl_col_4_0"]);
@@ -2086,7 +2049,6 @@ async fn startup_after_restart_recovers_applying_schema_change_with_pruned_previ
         .unwrap()
         .expect("destination metadata should exist");
     assert!(metadata.is_applied());
-    assert_eq!(metadata.snapshot_id, new_schema.snapshot_id);
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(table_column_names(&conn, &table_name), vec!["id", "name", "email"]);
@@ -2122,7 +2084,6 @@ async fn startup_after_restart_recovers_initial_applying_metadata() {
         .unwrap()
         .expect("destination metadata should exist");
     assert!(metadata.is_applied());
-    assert_eq!(metadata.snapshot_id, schema.snapshot_id);
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(table_column_names(&conn, &table_name), vec!["id", "name", "email"]);

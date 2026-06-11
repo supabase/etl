@@ -76,7 +76,8 @@ const QUERY_RETRY_POLICY: RetryPolicy = RetryPolicy {
 };
 /// BigQuery response reasons that are transient even when surfaced with a 4xx
 /// status code.
-const TRANSIENT_BIGQUERY_QUERY_REASONS: &[&str] = &["backendError", "jobBackendError"];
+const TRANSIENT_BIGQUERY_QUERY_REASONS: &[&str] =
+    &["backendError", "jobBackendError", "jobRateLimitExceeded", "rateLimitExceeded"];
 /// Protobuf type name for BigQuery storage errors embedded in gRPC status
 /// details.
 const BIGQUERY_STORAGE_ERROR_TYPE_NAME: &str = "google.cloud.bigquery.storage.v1.StorageError";
@@ -961,8 +962,8 @@ impl BigQueryClient {
         info!("adding column {column_name} ({column_type}) to table {full_table_name} in BigQuery");
 
         // BigQuery requires new columns to be nullable (no NOT NULL constraint
-        // allowed). Also, we wouldn't be able to add it nonetheless since we
-        // don't have a way to set a default value for past columns.
+        // allowed). Defaults must be applied through a separate ALTER COLUMN
+        // statement because BigQuery rejects ADD COLUMN with a default value.
         let query = format!("alter table {full_table_name} add column {column_name} {column_type}");
 
         let _ = self.query(QueryRequest::new(query)).await?;
@@ -1635,8 +1636,9 @@ mod tests {
     use std::{collections::HashSet, sync::Arc};
 
     use etl::types::{IdentityMask, ReplicationMask, TableId, TableName, TableSchema};
-    use gcp_bigquery_client::google::cloud::bigquery::storage::v1::{
-        AppendRowsResponse, append_rows_response,
+    use gcp_bigquery_client::{
+        error::{NestedResponseError, ResponseError},
+        google::cloud::bigquery::storage::v1::{AppendRowsResponse, append_rows_response},
     };
 
     use super::*;
@@ -1794,6 +1796,26 @@ mod tests {
         let spec = BigQueryClient::column_spec(&column_schema).expect("column spec generation");
 
         assert_eq!(spec, "`status` string default 'pending'");
+    }
+
+    #[test]
+    fn query_retry_classifies_bigquery_table_update_rate_limit_as_transient() {
+        let error = BQError::ResponseError {
+            error: ResponseError {
+                error: NestedResponseError {
+                    code: 400,
+                    errors: vec![
+                        [("reason".to_owned(), "jobRateLimitExceeded".to_owned())]
+                            .into_iter()
+                            .collect(),
+                    ],
+                    message: "Job exceeded rate limits".to_owned(),
+                    status: "INVALID_ARGUMENT".to_owned(),
+                },
+            },
+        };
+
+        assert_eq!(is_transient_query_error(&error), RetryDecision::Retry);
     }
 
     #[test]

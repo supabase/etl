@@ -82,6 +82,27 @@ impl From<TableRow> for BigQueryDefaultsRow {
 }
 
 #[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub(crate) struct BigQuerySchemaChangeRow {
+    pub(crate) id: i32,
+    pub(crate) full_name: String,
+    pub(crate) age: i32,
+    pub(crate) email: Option<String>,
+}
+
+impl From<TableRow> for BigQuerySchemaChangeRow {
+    fn from(value: TableRow) -> Self {
+        let columns = value.columns.unwrap();
+
+        BigQuerySchemaChangeRow {
+            id: parse_table_cell(columns[0].clone()).unwrap(),
+            full_name: parse_table_cell(columns[1].clone()).unwrap(),
+            age: parse_table_cell(columns[2].clone()).unwrap(),
+            email: parse_table_cell(columns[3].clone()),
+        }
+    }
+}
+
+#[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub(crate) struct BigQueryReplicaIdentityRow {
     id: i32,
     name: String,

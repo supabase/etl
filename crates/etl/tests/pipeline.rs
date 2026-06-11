@@ -492,17 +492,18 @@ async fn table_schema_copy_survives_pipeline_restarts() {
 
     pipeline.shutdown_and_wait().await.unwrap();
 
+    let mut expected_users_schema = database_schema.users_schema();
+    expected_users_schema.column_schemas[0].default_expression =
+        Some("nextval('test.users_id_seq'::regclass)".to_owned());
+    let mut expected_orders_schema = database_schema.orders_schema();
+    expected_orders_schema.column_schemas[0].default_expression =
+        Some("nextval('test.orders_id_seq'::regclass)".to_owned());
+
     // We check that the table schemas have been stored.
     let table_schemas = store.get_latest_table_schemas().await;
     assert_eq!(table_schemas.len(), 2);
-    assert_eq!(
-        *table_schemas.get(&database_schema.users_schema().id).unwrap(),
-        database_schema.users_schema()
-    );
-    assert_eq!(
-        *table_schemas.get(&database_schema.orders_schema().id).unwrap(),
-        database_schema.orders_schema()
-    );
+    assert_eq!(*table_schemas.get(&expected_users_schema.id).unwrap(), expected_users_schema);
+    assert_eq!(*table_schemas.get(&expected_orders_schema.id).unwrap(), expected_orders_schema);
 
     // We recreate a pipeline, assuming the other one was stopped, using the same
     // state and destination.

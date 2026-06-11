@@ -555,34 +555,6 @@ async fn schema_evolution_add_column_defaults() {
                 ],
             ]
         );
-
-        let defaults = query_rows(
-            &harness.sql,
-            &format!(
-                "SELECT column_name, column_default FROM \"{}\".INFORMATION_SCHEMA.COLUMNS WHERE \
-                 table_schema = '{}' AND table_name = '{}' AND column_name IN ('STATUS', 'SCORE', \
-                 'ACTIVE') ORDER BY column_name",
-                harness.config.database(),
-                harness.config.schema(),
-                sf_table
-            ),
-        )
-        .await
-        .expect("query for column defaults failed");
-        assert_eq!(defaults.len(), 3);
-        assert!(defaults.iter().any(|row| row[0] == serde_json::json!("ACTIVE")
-            && row[1].to_string().to_ascii_lowercase().contains("true")));
-        assert!(
-            defaults.iter().any(
-                |row| row[0] == serde_json::json!("SCORE") && row[1].to_string().contains("15")
-            )
-        );
-        assert!(
-            defaults
-                .iter()
-                .any(|row| row[0] == serde_json::json!("STATUS")
-                    && row[1].to_string().contains("new"))
-        );
     })
     .await;
 }

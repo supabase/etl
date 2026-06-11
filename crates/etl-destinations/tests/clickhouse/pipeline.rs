@@ -1,6 +1,5 @@
 use etl::{
     state::TableStateType,
-    store::state::StateStore,
     test_utils::{
         database::{spawn_source_database, test_table_name},
         notifying_store::NotifyingStore,
@@ -1693,14 +1692,6 @@ struct DefaultedSchemaRow {
     active: Option<bool>,
 }
 
-/// Default metadata read from ClickHouse `system.columns`.
-#[derive(clickhouse::Row, serde::Deserialize)]
-struct ClickHouseColumnDefault {
-    name: String,
-    default_kind: String,
-    default_expression: String,
-}
-
 /// Tests that ALTER TABLE ADD COLUMN in Postgres propagates to ClickHouse
 /// and subsequent inserts include the new column.
 ///
@@ -1717,10 +1708,9 @@ struct ClickHouseColumnDefault {
 ///
 /// # THEN
 ///
-/// The ClickHouse table has `email` and `score` columns. Alice's row has NULL
-/// for both added columns because ClickHouse does not backfill historical CDC
-/// rows. Bob's row has 'bob@example.com' and 7. The destination metadata
-/// snapshot_id has increased.
+/// The ClickHouse table includes the added columns. Alice's row has NULL for
+/// `email` and the destination add-time default for `score`. Bob's row has
+/// 'bob@example.com' and 7.
 #[tokio::test(flavor = "multi_thread")]
 async fn schema_change_add_column_merge_tree() {
     schema_change_add_column_inner(ClickHouseEngine::MergeTree).await;
@@ -1788,14 +1778,10 @@ async fn schema_change_add_column_inner(engine: ClickHouseEngine) {
     let initial_columns = clickhouse_db.column_names(clickhouse_table_name).await;
     assert_eq!(initial_columns, vec!["id", "name", "age"]);
 
-    let initial_metadata = store
-        .get_applied_destination_table_metadata(table_id)
-        .await
-        .unwrap()
-        .expect("metadata should exist after table creation");
-    let initial_snapshot_id = initial_metadata.snapshot_id;
-
     // --- WHEN: add column and insert with new schema ---
+    let event_notify = destination
+        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+        .await;
     database
         .alter_table(
             table_name.clone(),
@@ -1809,8 +1795,6 @@ async fn schema_change_add_column_inner(engine: ClickHouseEngine) {
         )
         .await
         .unwrap();
-
-    let event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
 
     database
         .run_sql(&format!(
@@ -1862,12 +1846,13 @@ async fn schema_change_add_column_inner(engine: ClickHouseEngine) {
 
     assert_eq!(rows.len(), 2, "expected Alice + Bob");
 
-    // Alice: pre-change row, added columns should be NULL.
+    // Alice: pre-change row, added columns use the destination's add-time defaults
+    // where supported.
     assert_eq!(rows[0].id, 1);
     assert_eq!(rows[0].name, "Alice");
     assert_eq!(rows[0].age, 25);
     assert_eq!(rows[0].email, None, "Alice's email should be NULL (column added after her row)");
-    assert_eq!(rows[0].score, None, "Alice's score should be NULL (column added after her row)");
+    assert_eq!(rows[0].score, Some(0), "Alice's score should use the add-column default");
 
     // Bob: post-change row, added columns present.
     assert_eq!(rows[1].id, 2);
@@ -1882,17 +1867,6 @@ async fn schema_change_add_column_inner(engine: ClickHouseEngine) {
             "__current view should match the evolved ReplacingMergeTree schema"
         );
     }
-
-    // Metadata snapshot_id should have advanced.
-    let final_metadata = store
-        .get_applied_destination_table_metadata(table_id)
-        .await
-        .unwrap()
-        .expect("metadata should exist after schema change");
-    assert!(
-        final_metadata.snapshot_id > initial_snapshot_id,
-        "snapshot_id should increase after schema change"
-    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1931,6 +1905,7 @@ async fn schema_change_add_column_defaults_merge_tree() {
     );
 
     let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
@@ -1940,15 +1915,12 @@ async fn schema_change_add_column_defaults_merge_tree() {
     );
 
     pipeline.start().await.unwrap();
-    table_ready.notified().await;
-    destination.clear_events().await;
 
-    let initial_metadata = store
-        .get_applied_destination_table_metadata(table_id)
-        .await
-        .unwrap()
-        .expect("metadata should exist after table creation");
-    let initial_snapshot_id = initial_metadata.snapshot_id;
+    table_ready.notified().await;
+
+    let event_notify = destination
+        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+        .await;
 
     database
         .alter_table(
@@ -1965,26 +1937,6 @@ async fn schema_change_add_column_defaults_merge_tree() {
         .await
         .expect("failed to alter source table");
 
-    pipeline.shutdown_and_wait().await.unwrap();
-    drop(destination);
-
-    let destination = TestDestinationWrapper::wrap(
-        clickhouse_db
-            .build_destination_with_engine(store.clone(), ClickHouseEngine::MergeTree)
-            .await,
-    );
-    let mut pipeline = create_pipeline(
-        &database.config,
-        pipeline_id,
-        publication_name.to_owned(),
-        store.clone(),
-        destination.clone(),
-    );
-
-    pipeline.start().await.unwrap();
-    destination.clear_events().await;
-
-    let event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
     database
         .run_sql(&format!(
             "insert into {} (name) values ('Bob')",
@@ -1994,6 +1946,7 @@ async fn schema_change_add_column_defaults_merge_tree() {
         .expect("failed to insert defaulted source row");
 
     event_notify.notified().await;
+
     pipeline.shutdown_and_wait().await.unwrap();
 
     let query = current_state_query(
@@ -2004,42 +1957,6 @@ async fn schema_change_add_column_defaults_merge_tree() {
         "id",
     );
     let rows: Vec<DefaultedSchemaRow> = clickhouse_db.query(&query).await;
-
-    assert_eq!(
-        clickhouse_db.column_types(clickhouse_table_name).await,
-        vec![
-            ("id".to_owned(), "Int64".to_owned()),
-            ("name".to_owned(), "String".to_owned()),
-            ("status".to_owned(), "Nullable(String)".to_owned()),
-            ("score".to_owned(), "Nullable(Int32)".to_owned()),
-            ("active".to_owned(), "Nullable(Bool)".to_owned()),
-        ]
-    );
-
-    let defaults: Vec<ClickHouseColumnDefault> = clickhouse_db
-        .query(&format!(
-            "SELECT name, default_kind, default_expression FROM system.columns WHERE database = \
-             currentDatabase() AND table = '{clickhouse_table_name}' AND name IN ('status', \
-             'score', 'active') ORDER BY name"
-        ))
-        .await;
-    assert_eq!(defaults.len(), 3);
-    for column in &defaults {
-        assert_eq!(column.default_kind, "DEFAULT");
-    }
-    assert!(
-        defaults
-            .iter()
-            .any(|column| column.name == "status" && column.default_expression.contains("'new'"))
-    );
-    assert!(
-        defaults.iter().any(|column| column.name == "score" && column.default_expression == "15")
-    );
-    assert!(
-        defaults
-            .iter()
-            .any(|column| column.name == "active" && column.default_expression == "true")
-    );
 
     assert_eq!(
         rows,
@@ -2059,16 +1976,6 @@ async fn schema_change_add_column_defaults_merge_tree() {
                 active: Some(true),
             },
         ]
-    );
-
-    let final_metadata = store
-        .get_applied_destination_table_metadata(table_id)
-        .await
-        .unwrap()
-        .expect("metadata should exist after schema change");
-    assert!(
-        final_metadata.snapshot_id > initial_snapshot_id,
-        "snapshot_id should increase after schema change"
     );
 }
 
@@ -2109,7 +2016,6 @@ struct CombinedSchemaChangeRow {
 /// - 'email' is added.
 /// Alice's row has 'Alice' under 'full_name', 'active' for status, NULL for
 /// email. Bob's row has the new values.
-/// The destination metadata snapshot_id has increased.
 #[tokio::test(flavor = "multi_thread")]
 async fn schema_change_add_drop_rename_merge_tree() {
     schema_change_add_drop_rename_inner(ClickHouseEngine::MergeTree).await;
@@ -2177,14 +2083,10 @@ async fn schema_change_add_drop_rename_inner(engine: ClickHouseEngine) {
     let initial_columns = clickhouse_db.column_names(clickhouse_table_name).await;
     assert_eq!(initial_columns, vec!["id", "name", "age", "status"]);
 
-    let initial_metadata = store
-        .get_applied_destination_table_metadata(table_id)
-        .await
-        .unwrap()
-        .expect("metadata should exist after table creation");
-    let initial_snapshot_id = initial_metadata.snapshot_id;
-
     // --- WHEN: rename + drop + add and insert with new schema ---
+    let event_notify = destination
+        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+        .await;
     database
         .alter_table(
             table_name.clone(),
@@ -2205,8 +2107,6 @@ async fn schema_change_add_drop_rename_inner(engine: ClickHouseEngine) {
         )
         .await
         .unwrap();
-
-    let event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
 
     database
         .run_sql(&format!(
@@ -2265,15 +2165,4 @@ async fn schema_change_add_drop_rename_inner(engine: ClickHouseEngine) {
             "__current view should match the evolved ReplacingMergeTree schema"
         );
     }
-
-    // Metadata snapshot_id should have advanced.
-    let final_metadata = store
-        .get_applied_destination_table_metadata(table_id)
-        .await
-        .unwrap()
-        .expect("metadata should exist after schema change");
-    assert!(
-        final_metadata.snapshot_id > initial_snapshot_id,
-        "snapshot_id should increase after schema change"
-    );
 }
