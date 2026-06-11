@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use utoipa::ToSchema;
 
+use crate::sentry_scrubbing;
+
 pub mod common;
 pub mod destinations;
 pub mod destinations_pipelines;
@@ -87,9 +89,7 @@ where
     let mut response = error_response(status_code, message);
 
     if status_code.is_server_error() {
-        response
-            .extensions_mut()
-            .insert(crate::sentry_scrubbing::ServerErrorReport::from_error(error));
+        response.extensions_mut().insert(sentry_scrubbing::ServerErrorReport::from_error(error));
     }
 
     response
