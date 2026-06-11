@@ -349,6 +349,29 @@ fn skip_string_literal(bytes: &[u8], mut index: usize) -> usize {
     index
 }
 
+/// Returns whether a string starts with an ASCII prefix, ignoring case.
+fn starts_with_ignore_ascii_case(value: &str, prefix: &str) -> bool {
+    value
+        .as_bytes()
+        .get(..prefix.len())
+        .is_some_and(|value| value.eq_ignore_ascii_case(prefix.as_bytes()))
+}
+
+/// Returns whether a string ends with an ASCII suffix, ignoring case.
+fn ends_with_ignore_ascii_case(value: &str, suffix: &str) -> bool {
+    value
+        .as_bytes()
+        .get(value.len().saturating_sub(suffix.len())..)
+        .is_some_and(|value| value.eq_ignore_ascii_case(suffix.as_bytes()))
+}
+
+/// Returns whether a string contains an ASCII needle, ignoring case.
+fn contains_ignore_ascii_case(value: &str, needle: &str) -> bool {
+    let needle = needle.as_bytes();
+    !needle.is_empty()
+        && value.as_bytes().windows(needle.len()).any(|window| window.eq_ignore_ascii_case(needle))
+}
+
 /// Strips one pair of wrapping parentheses around an entire expression.
 fn strip_outer_parens(expression: &str) -> &str {
     let expression = expression.trim();
@@ -356,23 +379,33 @@ fn strip_outer_parens(expression: &str) -> &str {
         return expression;
     }
 
-    let mut depth = 0;
-    let mut in_string = false;
-    for (index, ch) in expression.char_indices() {
-        match ch {
-            '\'' => in_string = !in_string,
-            '(' if !in_string => depth += 1,
-            ')' if !in_string => {
-                depth -= 1;
-                if depth == 0 && index != expression.len() - 1 {
+    let bytes = expression.as_bytes();
+    let mut depth = 0usize;
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\'' => {
+                index = skip_string_literal(bytes, index);
+            }
+            b'(' => {
+                depth += 1;
+                index += 1;
+            }
+            b')' => {
+                let Some(new_depth) = depth.checked_sub(1) else {
+                    return expression;
+                };
+                depth = new_depth;
+                if depth == 0 && index != bytes.len() - 1 {
                     return expression;
                 }
+                index += 1;
             }
-            _ => {}
+            _ => index += 1,
         }
     }
 
-    expression[1..expression.len() - 1].trim()
+    if depth == 0 { expression[1..expression.len() - 1].trim() } else { expression }
 }
 
 /// Returns whether an expression is a SQL string literal.
@@ -409,12 +442,11 @@ fn is_bool_literal(expression: &str) -> bool {
 
 /// Returns whether an expression crosses a known portability boundary.
 fn is_unsupported_portability_boundary(expression: &str) -> bool {
-    let normalized = expression.to_ascii_lowercase();
-    normalized.starts_with("nextval(")
-        || normalized.contains("select ")
-        || normalized.contains("::")
-        || normalized.starts_with("array[")
-        || normalized.starts_with("array ")
+    starts_with_ignore_ascii_case(expression, "nextval(")
+        || contains_ignore_ascii_case(expression, "select ")
+        || expression.contains("::")
+        || starts_with_ignore_ascii_case(expression, "array[")
+        || starts_with_ignore_ascii_case(expression, "array ")
 }
 
 /// Parses string literals, including date/time typed literals.
@@ -432,35 +464,57 @@ fn parse_string_literal(expression: &str, typ: &Type) -> DefaultExpression {
 
 /// Returns whether the expression is a common UUID generator.
 fn is_uuid_expression(expression: &str) -> bool {
-    let normalized = expression.trim().to_ascii_lowercase();
-    matches!(normalized.as_str(), "gen_random_uuid()" | "uuid_generate_v4()")
+    let expression = expression.trim();
+    expression.eq_ignore_ascii_case("gen_random_uuid()")
+        || expression.eq_ignore_ascii_case("uuid_generate_v4()")
 }
 
 /// Returns whether the expression is a current-user expression.
 fn is_current_user_expression(expression: &str) -> bool {
-    let normalized = expression.trim().to_ascii_lowercase();
-    matches!(normalized.as_str(), "current_user" | "current_user()" | "session_user")
+    let expression = expression.trim();
+    expression.eq_ignore_ascii_case("current_user")
+        || expression.eq_ignore_ascii_case("current_user()")
+        || expression.eq_ignore_ascii_case("session_user")
 }
 
 /// Parses common current-time defaults.
 fn parse_current_time_expression(expression: &str, typ: &Type) -> Option<DefaultExpression> {
-    let normalized = expression.trim().to_ascii_lowercase();
-    match normalized.as_str() {
-        "now()" | "transaction_timestamp()" | "current_timestamp" | "current_timestamp()" => {
-            Some(DefaultExpression::CurrentTimestamp)
-        }
-        "current_date" | "current_date()" if *typ == Type::DATE => {
-            Some(DefaultExpression::CurrentDate)
-        }
-        "current_time" | "current_time()" if *typ == Type::TIME => {
-            Some(DefaultExpression::CurrentTime)
-        }
-        "localtimestamp" | "localtimestamp()" => Some(DefaultExpression::LocalTimestamp),
-        expression if expression.starts_with("timezone(") && expression.ends_with("now())") => {
-            Some(DefaultExpression::TimezoneNow)
-        }
-        _ => None,
+    let expression = expression.trim();
+    if expression.eq_ignore_ascii_case("now()")
+        || expression.eq_ignore_ascii_case("transaction_timestamp()")
+        || expression.eq_ignore_ascii_case("current_timestamp")
+        || expression.eq_ignore_ascii_case("current_timestamp()")
+    {
+        return Some(DefaultExpression::CurrentTimestamp);
     }
+
+    if (expression.eq_ignore_ascii_case("current_date")
+        || expression.eq_ignore_ascii_case("current_date()"))
+        && *typ == Type::DATE
+    {
+        return Some(DefaultExpression::CurrentDate);
+    }
+
+    if (expression.eq_ignore_ascii_case("current_time")
+        || expression.eq_ignore_ascii_case("current_time()"))
+        && *typ == Type::TIME
+    {
+        return Some(DefaultExpression::CurrentTime);
+    }
+
+    if expression.eq_ignore_ascii_case("localtimestamp")
+        || expression.eq_ignore_ascii_case("localtimestamp()")
+    {
+        return Some(DefaultExpression::LocalTimestamp);
+    }
+
+    if starts_with_ignore_ascii_case(expression, "timezone(")
+        && ends_with_ignore_ascii_case(expression, "now())")
+    {
+        return Some(DefaultExpression::TimezoneNow);
+    }
+
+    None
 }
 
 /// Parses current-time plus/minus simple interval defaults.
@@ -525,7 +579,7 @@ fn split_top_level_interval_arithmetic(expression: &str) -> Option<(&str, char, 
 /// Parses an `interval 'N unit'` expression.
 fn parse_simple_interval_literal(expression: &str) -> Option<DefaultInterval> {
     let expression = expression.trim();
-    let literal = if expression.to_ascii_lowercase().starts_with("interval ") {
+    let literal = if starts_with_ignore_ascii_case(expression, "interval ") {
         expression[9..].trim()
     } else {
         normalize_postgres_expression(expression)
@@ -547,36 +601,44 @@ fn parse_simple_interval_literal(expression: &str) -> Option<DefaultInterval> {
 
 /// Parses a simple interval unit.
 fn parse_simple_interval_unit(unit: &str) -> Option<DefaultIntervalUnit> {
-    match unit.to_ascii_lowercase().trim_end_matches('s') {
-        "microsecond" => Some(DefaultIntervalUnit::Microsecond),
-        "millisecond" => Some(DefaultIntervalUnit::Millisecond),
-        "second" => Some(DefaultIntervalUnit::Second),
-        "minute" => Some(DefaultIntervalUnit::Minute),
-        "hour" => Some(DefaultIntervalUnit::Hour),
-        "day" => Some(DefaultIntervalUnit::Day),
-        "week" => Some(DefaultIntervalUnit::Week),
-        "month" => Some(DefaultIntervalUnit::Month),
-        "quarter" => Some(DefaultIntervalUnit::Quarter),
-        "year" => Some(DefaultIntervalUnit::Year),
-        _ => None,
+    let unit = unit.trim_end_matches('s');
+    if unit.eq_ignore_ascii_case("microsecond") {
+        Some(DefaultIntervalUnit::Microsecond)
+    } else if unit.eq_ignore_ascii_case("millisecond") {
+        Some(DefaultIntervalUnit::Millisecond)
+    } else if unit.eq_ignore_ascii_case("second") {
+        Some(DefaultIntervalUnit::Second)
+    } else if unit.eq_ignore_ascii_case("minute") {
+        Some(DefaultIntervalUnit::Minute)
+    } else if unit.eq_ignore_ascii_case("hour") {
+        Some(DefaultIntervalUnit::Hour)
+    } else if unit.eq_ignore_ascii_case("day") {
+        Some(DefaultIntervalUnit::Day)
+    } else if unit.eq_ignore_ascii_case("week") {
+        Some(DefaultIntervalUnit::Week)
+    } else if unit.eq_ignore_ascii_case("month") {
+        Some(DefaultIntervalUnit::Month)
+    } else if unit.eq_ignore_ascii_case("quarter") {
+        Some(DefaultIntervalUnit::Quarter)
+    } else if unit.eq_ignore_ascii_case("year") {
+        Some(DefaultIntervalUnit::Year)
+    } else {
+        None
     }
 }
 
 /// Parses simple literal functions that are portable across destinations.
 fn parse_literal_function_expression(expression: &str) -> Option<DefaultExpression> {
     let (function_name, args) = parse_function_call(expression)?;
-    let function = match function_name.to_ascii_lowercase().as_str() {
-        "lower" => DefaultLiteralFunction::Lower,
-        "upper" => DefaultLiteralFunction::Upper,
-        _ => return None,
+    let function = if function_name.eq_ignore_ascii_case("lower") {
+        DefaultLiteralFunction::Lower
+    } else if function_name.eq_ignore_ascii_case("upper") {
+        DefaultLiteralFunction::Upper
+    } else {
+        return None;
     };
 
-    let mut args = split_top_level_args(args);
-    if args.len() != 1 {
-        return None;
-    }
-
-    let arg = normalize_postgres_expression(args.remove(0));
+    let arg = normalize_postgres_expression(parse_single_top_level_arg(args)?);
     if !is_string_literal(arg) {
         return None;
     }
@@ -620,11 +682,9 @@ fn parse_function_call(expression: &str) -> Option<(&str, &str)> {
     if depth == 0 { Some((name, &expression[open + 1..expression.len() - 1])) } else { None }
 }
 
-/// Splits function arguments on top-level commas.
-fn split_top_level_args(args: &str) -> Vec<&str> {
+/// Parses a single function argument and rejects top-level comma separators.
+fn parse_single_top_level_arg(args: &str) -> Option<&str> {
     let bytes = args.as_bytes();
-    let mut result = Vec::new();
-    let mut start = 0;
     let mut index = 0;
     let mut paren_depth: usize = 0;
 
@@ -639,33 +699,85 @@ fn split_top_level_args(args: &str) -> Vec<&str> {
                 paren_depth = paren_depth.saturating_sub(1);
                 index += 1;
             }
-            b',' if paren_depth == 0 => {
-                result.push(args[start..index].trim());
-                start = index + 1;
-                index += 1;
-            }
+            b',' if paren_depth == 0 => return None,
             _ => index += 1,
         }
     }
 
-    result.push(args[start..].trim());
-    result
+    Some(args.trim())
 }
 
 /// Parses simple literal arithmetic expressions that are broadly portable.
 fn parse_numeric_expression(expression: &str) -> Option<String> {
-    let mut has_digit = false;
-    for ch in expression.chars() {
-        if ch.is_ascii_digit() {
-            has_digit = true;
-        } else if !(ch.is_ascii_whitespace()
-            || matches!(ch, '+' | '-' | '*' | '/' | '%' | '.' | '(' | ')'))
-        {
-            return None;
+    if is_valid_numeric_expression(expression) { Some(expression.to_owned()) } else { None }
+}
+
+/// Returns whether a numeric expression uses only simple arithmetic syntax.
+fn is_valid_numeric_expression(expression: &str) -> bool {
+    let bytes = expression.as_bytes();
+    let mut index = 0;
+    let mut paren_depth = 0usize;
+    let mut saw_digit = false;
+    let mut expect_operand = true;
+    let mut unary_sign_allowed = true;
+
+    while index < bytes.len() {
+        match bytes[index] {
+            byte if byte.is_ascii_whitespace() => index += 1,
+            b'+' | b'-' if expect_operand && unary_sign_allowed => {
+                unary_sign_allowed = false;
+                index += 1;
+            }
+            b'(' if expect_operand && unary_sign_allowed => {
+                paren_depth += 1;
+                unary_sign_allowed = true;
+                index += 1;
+            }
+            b'0'..=b'9' | b'.' if expect_operand => {
+                let Some(next_index) = scan_numeric_literal(bytes, index) else {
+                    return false;
+                };
+                saw_digit = true;
+                index = next_index;
+                expect_operand = false;
+                unary_sign_allowed = false;
+            }
+            b'+' | b'-' | b'*' | b'/' | b'%' if !expect_operand => {
+                expect_operand = true;
+                unary_sign_allowed = true;
+                index += 1;
+            }
+            b')' if !expect_operand && paren_depth > 0 => {
+                paren_depth -= 1;
+                index += 1;
+            }
+            _ => return false,
         }
     }
 
-    has_digit.then(|| expression.to_owned())
+    saw_digit && !expect_operand && paren_depth == 0
+}
+
+/// Scans a numeric literal and returns the byte after it.
+fn scan_numeric_literal(bytes: &[u8], mut index: usize) -> Option<usize> {
+    let mut has_digit = false;
+    let mut has_decimal = false;
+
+    while index < bytes.len() {
+        match bytes[index] {
+            b'0'..=b'9' => {
+                has_digit = true;
+                index += 1;
+            }
+            b'.' if !has_decimal => {
+                has_decimal = true;
+                index += 1;
+            }
+            _ => break,
+        }
+    }
+
+    has_digit.then_some(index)
 }
 
 #[cfg(test)]
@@ -677,6 +789,10 @@ mod tests {
         assert_eq!(
             parse_default_expression("'pending'::text", &Type::TEXT),
             Some(DefaultExpression::StringLiteral("'pending'".to_owned()))
+        );
+        assert_eq!(
+            parse_default_expression("('don''t'::text)", &Type::TEXT),
+            Some(DefaultExpression::StringLiteral("'don''t'".to_owned()))
         );
         assert_eq!(
             parse_default_expression("42", &Type::INT4),
@@ -770,6 +886,19 @@ mod tests {
                 argument: "'user'".to_owned(),
             })
         );
+        assert_eq!(parse_default_expression("lower('a', 'b')", &Type::TEXT), None);
+    }
+
+    #[test]
+    fn parses_numeric_expressions_conservatively() {
+        assert_eq!(
+            parse_default_expression("(10 + 5) * 2", &Type::INT4),
+            Some(DefaultExpression::NumericExpression("(10 + 5) * 2".to_owned()))
+        );
+        assert_eq!(parse_default_expression("1 +", &Type::INT4), None);
+        assert_eq!(parse_default_expression("1..2", &Type::INT4), None);
+        assert_eq!(parse_default_expression("(1 + 2", &Type::INT4), None);
+        assert_eq!(parse_default_expression("--1", &Type::INT4), None);
     }
 
     #[test]
