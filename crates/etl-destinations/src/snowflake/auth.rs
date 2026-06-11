@@ -305,6 +305,36 @@ fn decode_token_expiry(token: &str) -> Result<Instant> {
 mod tests {
     use super::*;
 
+    // Non-secret RSA key generated only for hermetic auth unit tests.
+    const TEST_PRIVATE_KEY: &str = r#"-----BEGIN PRIVATE KEY-----
+MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDOiGnVXNdtwyJr
+jOJHno9nS+oVBl7PHU+64VvVL7EHZ5hzyL+ZM6bdM+CDjKmaJ0g8TiCPcHTHXnRY
+fMcuaZKk5VOsR1xi81biezJj/Q/TGb+Vja4TD7f4DnTmxG0xnQXsceya5fzQM8lB
+D9FzIOk0rR4UHw/zIvB4FhpAqaHWxFcgIMDKGv3puYmooXtTOhepgAlATZuKrfBQ
+AqdbaMWDtucGcfQru02GOXqn/JeggDKSQ5xlCguhocUPEVxI9ZwHh+yCVtxurAtc
+6z0gyQ2dlbZHG91KParLCaDU2Ff9Pf8ubE/HVv+8RtLoqYISWOPGE7W1V8pbprQ7
+scg6J9iVAgMBAAECggEAIorcMIw7l6cITbadbd8OGveuad/L4ZYEbLweUNSOJi/k
+ZpEPwn7KDLsNdNME1rx1L2jdtz/WuDWK/fW4loGfviaAzRKOWBpc0LpMHj8H84Wd
+7lRo5dU+LqW0VZhKrv6VLAuNyAZpNyVCJriPjlLVzjKaEkFzuHWChIMl1uTIJZQa
+F88mP4YpbJfpSU3b94eUFwPsYL8dCQCujLpriehMnBN+3qLK39JMbQk4xSzcQ8r6
++L6ZVTcmKaXMWWH6e4Tm08SvX6SgAfxZm/v5LlByEQRlxfergGlLA8+4lYM8JbXi
+eut7EOjMloA/eE+3edJubvPmWmu+30lL0x1Fkcz2QQKBgQDml5T2Xvj/khna6mqy
+HEG42RThWdapXg3OcxjXzcYfxQd9Uke34fwgo7LAsegONJgakmFdqVrvMUiU+sio
+s8Ds4iHw3yqOqDel06PYTkn10J8vWgyP4Z1KT6wuSMdAYqnze4EQr4+36lGFpEll
+QvvX/rjvydqKo2pxtVhOf7S4xQKBgQDlSi5eAn2MZXc7zi+QE/iK8TWdpKkeaDBR
+AhiV7XGKwq0yBWdGYv11cVSKNpjJ9gCNcAYSFOoNNz6532Y/2DQvhAvfvkP4m08D
+jU5HpPw5GEYUtXySbCJ1DkEPrX4lqkXA5Uw4DcMWmmA5YONgJ6BN0bd2zqSSoY2g
+wTn/53d9kQKBgQDWmbvIjhqtvwrQ8djaafHAVkdYcoOUnDO9LuCv9pGsf3G48BpO
+x8Idnjt9mhSdI9Vq5VA4GqTGdtdVzw9v8dpamxl7UjYJDgS8D3ssk6/BVabQKr4G
+KbJ4ti1H5fOJuEjykL5NCRZ301qLRZoI443+NtFmWDVLUUp/CIZmh/NpAQKBgB5g
+7LHB7LZsPxbqY3zYWIa4HJ1tUobX0Qb6mx1KH0/+KQpGkv9NYD1uLYA+aZHgiQQ0
+Qmmk4bmshyADTD3LPGbLPPOA9up6UUasMyHk5xH9eFOIFCAmOY5+u/oCx4LgA2vi
+NW37zMwy2ergPl/gACovTfpsuHtA8k3JLBEOrtMxAoGBAMXOs1j0+p1Y7gm7lppF
+FXYtPt7sn+eROS9ACov4lrhXqIjgiLxBiQbO34dSy8X3sb18W8vIckeRrHE7zcLE
+G/8wosvgIJ5zIqMZSeT3WFS82C9dk7ad2L1LEMbL/AHvXxgIr/sjNuReIBXFmp/t
+P23pIjtEtEPNpGkXj0aB1RDq
+-----END PRIVATE KEY-----"#;
+
     struct TestExchanger;
 
     impl TokenExchanger for TestExchanger {
@@ -327,31 +357,29 @@ mod tests {
         }
     }
 
-    fn load_test_config() -> Config {
-        Config::require_tests_env().unwrap_or_else(|error| panic!("{error}"))
+    fn make_test_config(account_id: &str, username: &str) -> Config {
+        Config::new(account_id, username, "TEST_DB", "PUBLIC")
+            .expect("valid config")
+            .with_private_key(TEST_PRIVATE_KEY, None)
     }
 
     fn make_test_manager() -> AuthManager<TestExchanger> {
-        AuthManager::with_exchanger(load_test_config(), TestExchanger)
-            .expect("AuthManager::with_exchanger")
+        AuthManager::with_exchanger(
+            make_test_config("TESTORG-TESTACCOUNT", "TESTUSER"),
+            TestExchanger,
+        )
+        .expect("AuthManager::with_exchanger")
     }
 
     fn make_test_manager_with_account(
         account_id: &str,
         username: &str,
     ) -> AuthManager<TestExchanger> {
-        let connection = load_test_config();
-        let private_key = connection.private_key().expect("private key").clone();
-        let private_key_passphrase = connection.private_key_passphrase().cloned();
-        let config = Config::new(account_id, username, "TEST_DB", "PUBLIC")
-            .expect("valid config")
-            .with_private_key(private_key, private_key_passphrase);
-
-        AuthManager::with_exchanger(config, TestExchanger).expect("AuthManager::with_exchanger")
+        AuthManager::with_exchanger(make_test_config(account_id, username), TestExchanger)
+            .expect("AuthManager::with_exchanger")
     }
 
     #[test]
-    #[ignore = "requires TESTS_SNOWFLAKE_CONNECTION"]
     fn jwt_claims() {
         let cases = [
             // (input_account, input_user, expected_account, expected_user).
@@ -390,7 +418,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires TESTS_SNOWFLAKE_CONNECTION"]
     fn key_fingerprint_format() {
         let manager = make_test_manager();
 
@@ -416,7 +443,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires TESTS_SNOWFLAKE_CONNECTION"]
     async fn token_cache_hit() {
         let manager = make_test_manager();
         manager.inject_token_for_test("cached-token-123".to_owned(), Duration::from_secs(120));
@@ -427,7 +453,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires TESTS_SNOWFLAKE_CONNECTION"]
     async fn token_cache_expired_triggers_refresh() {
         let manager = make_test_manager();
 
