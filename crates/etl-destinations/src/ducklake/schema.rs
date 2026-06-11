@@ -1,4 +1,5 @@
-use etl::types::{ColumnSchema, Type, is_array_type};
+use etl::types::{ColumnSchema, DefaultExpression, Type, is_array_type, parse_default_expression};
+use tracing::warn;
 
 use crate::ducklake::sql::{qualified_lake_table_name, quote_identifier};
 
@@ -70,8 +71,65 @@ fn postgres_column_type_to_ducklake_sql(typ: &Type) -> &'static str {
 fn ducklake_column_definition(column_schema: &ColumnSchema, include_not_null: bool) -> String {
     let column_name = quote_identifier(&column_schema.name);
     let duckdb_type = postgres_column_type_to_ducklake_sql(&column_schema.typ);
+    let default_clause = ducklake_default_clause(column_schema).unwrap_or_default();
     let nullability = if include_not_null && !column_schema.nullable { " not null" } else { "" };
-    format!("{column_name} {duckdb_type}{nullability}")
+    format!("{column_name} {duckdb_type}{default_clause}{nullability}")
+}
+
+/// Returns the DuckLake default clause for a column, if supported.
+fn ducklake_default_clause(column_schema: &ColumnSchema) -> Option<String> {
+    let default_clause = ducklake_default_expression(column_schema)
+        .map(|expression| format!(" default {expression}"));
+    if default_clause.is_none() && column_schema.default_expression.is_some() {
+        warn!(
+            column_name = %column_schema.name,
+            "skipping unsupported source column default for DuckLake"
+        );
+    }
+
+    default_clause
+}
+
+/// Renders a parsed default expression as DuckLake SQL.
+fn render_ducklake_default_expression(expression: &DefaultExpression) -> Option<String> {
+    match expression {
+        DefaultExpression::StringLiteral(expression)
+        | DefaultExpression::NumericLiteral(expression)
+        | DefaultExpression::BooleanLiteral(expression)
+        | DefaultExpression::DateLiteral(expression)
+        | DefaultExpression::TimeLiteral(expression)
+        | DefaultExpression::TimestampLiteral(expression)
+        | DefaultExpression::JsonLiteral(expression)
+        | DefaultExpression::NumericExpression(expression) => Some(expression.clone()),
+        DefaultExpression::UuidV4 => Some("uuid()".to_owned()),
+        DefaultExpression::CurrentUser => Some("current_user".to_owned()),
+        DefaultExpression::CurrentTimestamp | DefaultExpression::TimezoneNow => {
+            Some("current_timestamp".to_owned())
+        }
+        DefaultExpression::CurrentDate => Some("current_date".to_owned()),
+        DefaultExpression::CurrentTime => Some("current_time".to_owned()),
+        DefaultExpression::LocalTimestamp => Some("localtimestamp".to_owned()),
+        DefaultExpression::IntervalArithmetic { base, operator, interval, .. } => {
+            let base = render_ducklake_default_expression(base)?;
+            Some(format!("{base} {} interval '{}'", operator.as_sql(), interval.literal))
+        }
+        DefaultExpression::LiteralFunction { function, argument } => {
+            Some(format!("{}({argument})", function.as_lower_name()))
+        }
+    }
+}
+
+/// Returns whether a column default can be represented in DuckLake SQL.
+pub(super) fn supports_default_ducklake(column_schema: &ColumnSchema) -> bool {
+    ducklake_default_expression(column_schema).is_some()
+}
+
+/// Returns a rendered DuckLake default expression for a column, if supported.
+fn ducklake_default_expression(column_schema: &ColumnSchema) -> Option<String> {
+    column_schema.default_expression.as_deref().and_then(|expression| {
+        parse_default_expression(expression, &column_schema.typ)
+            .and_then(|expression| render_ducklake_default_expression(&expression))
+    })
 }
 
 /// Builds a `create table if not exists` DDL statement for the given table name
@@ -125,6 +183,42 @@ pub(super) fn build_rename_column_sql_ducklake(
     let new_name = quote_identifier(new_name);
 
     format!("alter table {table_name} rename column {old_name} to {new_name}")
+}
+
+/// Builds a DuckLake `alter table alter column set default` statement.
+pub(super) fn build_set_default_sql_ducklake(
+    table_name: &str,
+    column_schema: &ColumnSchema,
+) -> Option<String> {
+    let expression = ducklake_default_expression(column_schema)?;
+    let table_name = qualified_lake_table_name(table_name);
+    let column_name = quote_identifier(&column_schema.name);
+
+    Some(format!("alter table {table_name} alter column {column_name} set default {expression}"))
+}
+
+/// Builds a DuckLake `alter table alter column drop default` statement.
+pub(super) fn build_drop_default_sql_ducklake(table_name: &str, column_name: &str) -> String {
+    let table_name = qualified_lake_table_name(table_name);
+    let column_name = quote_identifier(column_name);
+
+    format!("alter table {table_name} alter column {column_name} drop default")
+}
+
+/// Builds a DuckLake `alter table alter column set not null` statement.
+pub(super) fn build_set_not_null_sql_ducklake(table_name: &str, column_name: &str) -> String {
+    let table_name = qualified_lake_table_name(table_name);
+    let column_name = quote_identifier(column_name);
+
+    format!("alter table {table_name} alter column {column_name} set not null")
+}
+
+/// Builds a DuckLake `alter table alter column drop not null` statement.
+pub(super) fn build_drop_not_null_sql_ducklake(table_name: &str, column_name: &str) -> String {
+    let table_name = qualified_lake_table_name(table_name);
+    let column_name = quote_identifier(column_name);
+
+    format!("alter table {table_name} alter column {column_name} drop not null")
 }
 
 #[cfg(test)]
@@ -183,6 +277,39 @@ mod tests {
     }
 
     #[test]
+    fn build_add_column_sql_includes_supported_default() {
+        let column = ColumnSchema::new("status".to_owned(), Type::TEXT, -1, 4, None, true)
+            .with_default_expression(Some("'pending'::text".to_owned()));
+        let sql = build_add_column_sql_ducklake("test_table", &column);
+
+        assert_eq!(
+            sql,
+            r#"alter table "lake"."test_table" add column "status" varchar default 'pending'"#
+        );
+    }
+
+    #[test]
+    fn ducklake_default_clause_renders_portable_expressions() {
+        let cases = [
+            (Type::JSONB, "'{}'::jsonb", " default '{}'"),
+            (Type::UUID, "gen_random_uuid()", " default uuid()"),
+            (
+                Type::TIMESTAMPTZ,
+                "now() + interval '30 days'",
+                " default current_timestamp + interval '30 days'",
+            ),
+            (Type::TEXT, "lower('USER'::text)", " default lower('USER')"),
+        ];
+
+        for (typ, expression, expected) in cases {
+            let column = ColumnSchema::new("value".to_owned(), typ, -1, 1, None, true)
+                .with_default_expression(Some(expression.to_owned()));
+
+            assert_eq!(ducklake_default_clause(&column).as_deref(), Some(expected));
+        }
+    }
+
+    #[test]
     fn build_drop_column_sql_quotes_identifiers() {
         let sql = build_drop_column_sql_ducklake("table\"name", "old\"column");
 
@@ -196,6 +323,32 @@ mod tests {
         assert_eq!(
             sql,
             r#"alter table "lake"."table""name" rename column "old""column" to "new""column""#
+        );
+    }
+
+    #[test]
+    fn build_column_update_sql_quotes_identifiers() {
+        let column = ColumnSchema::new("status\"value".to_owned(), Type::TEXT, -1, 4, None, true)
+            .with_default_expression(Some("'pending'::text".to_owned()));
+
+        assert_eq!(
+            build_set_default_sql_ducklake("table\"name", &column),
+            Some(
+                r#"alter table "lake"."table""name" alter column "status""value" set default 'pending'"#
+                    .to_owned()
+            )
+        );
+        assert_eq!(
+            build_drop_default_sql_ducklake("table\"name", "status\"value"),
+            r#"alter table "lake"."table""name" alter column "status""value" drop default"#
+        );
+        assert_eq!(
+            build_set_not_null_sql_ducklake("table\"name", "status\"value"),
+            r#"alter table "lake"."table""name" alter column "status""value" set not null"#
+        );
+        assert_eq!(
+            build_drop_not_null_sql_ducklake("table\"name", "status\"value"),
+            r#"alter table "lake"."table""name" alter column "status""value" drop not null"#
         );
     }
 }

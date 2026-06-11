@@ -73,6 +73,7 @@ fn column_schemas_from_ddl_message(message: &JsonValue) -> Vec<ColumnSchema> {
                 primary_key_positions.get(&(column["attnum"].as_i64().unwrap() as i32)).copied(),
                 !column["attnotnull"].as_bool().unwrap(),
             )
+            .with_default_expression(column["default_expression"].as_str().map(ToOwned::to_owned))
         })
         .collect::<Vec<_>>();
     columns.sort_by_key(|column| column.ordinal_position);
@@ -1813,6 +1814,89 @@ async fn schema_change_messages_emit_enriched_payload_for_multiple_alter_table_v
         replica_identity_columns.iter().any(|column| column["attname"] == "full_name"),
         "replica identity change should keep the current post-ddl schema snapshot"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn schema_change_messages_emit_and_decode_set_and_drop_default() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let table_name = test_table_name("ddl_default_payload");
+    let quoted_table_name = table_name.as_quoted_identifier();
+    let table_id = database
+        .create_table(table_name.clone(), true, &[("status", "text not null default 'pending'")])
+        .await
+        .unwrap();
+
+    let publication_name = "ddl_default_payload_pub";
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
+
+    let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let slot_name = test_slot_name("ddl_default_payload_slot");
+    let slot = client.create_slot(&slot_name).await.unwrap();
+    let stream = client
+        .start_logical_replication(publication_name, &slot_name, slot.consistent_point)
+        .await
+        .unwrap();
+
+    database
+        .run_sql(&format!(
+            "alter table {quoted_table_name} alter column status set default lower('QUEUED'::text)"
+        ))
+        .await
+        .unwrap();
+
+    database
+        .run_sql(&format!("alter table {quoted_table_name} alter column status drop default"))
+        .await
+        .unwrap();
+
+    let messages = collect_ddl_messages(stream, 2).await;
+    let set_default_message = &messages[0];
+    let drop_default_message = &messages[1];
+
+    let set_columns =
+        set_default_message["columns"].as_array().expect("columns should be an array");
+    let set_status_column =
+        set_columns.iter().find(|column| column["attname"] == "status").unwrap();
+    assert_eq!(set_status_column["atthasdef"], true);
+    let set_default_expression = set_status_column["default_expression"]
+        .as_str()
+        .expect("set default expression should be present");
+    assert!(
+        set_default_expression.contains("lower")
+            && set_default_expression.contains("QUEUED")
+            && set_default_expression.contains("text"),
+        "set default expression should include the pg_get_expr output: {set_default_expression}"
+    );
+
+    let set_column_schemas = column_schemas_from_ddl_message(set_default_message);
+    let set_status_schema =
+        set_column_schemas.iter().find(|column| column.name == "status").unwrap();
+    assert_eq!(set_status_schema.default_expression.as_deref(), Some(set_default_expression));
+
+    let drop_columns =
+        drop_default_message["columns"].as_array().expect("columns should be an array");
+    let drop_status_column =
+        drop_columns.iter().find(|column| column["attname"] == "status").unwrap();
+    assert_eq!(drop_status_column["atthasdef"], false);
+    assert_eq!(drop_status_column["default_expression"], serde_json::Value::Null);
+
+    let drop_column_schemas = column_schemas_from_ddl_message(drop_default_message);
+    let drop_status_schema =
+        drop_column_schemas.iter().find(|column| column.name == "status").unwrap();
+    assert_eq!(drop_status_schema.default_expression, None);
+
+    let mut introspection_client =
+        PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let (transaction, _) = introspection_client
+        .create_slot_with_transaction(&test_slot_name("ddl_default_payload_read"))
+        .await
+        .unwrap();
+    let table_schema = transaction.get_table_schema(table_id).await.unwrap();
+    transaction.commit().await.unwrap();
+
+    assert_eq!(drop_column_schemas, table_schema.column_schemas);
 }
 
 #[tokio::test(flavor = "multi_thread")]

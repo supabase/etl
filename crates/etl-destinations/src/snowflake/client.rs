@@ -1,6 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
-use etl::types::{ColumnSchema, PipelineId, SchemaDiff, TableId};
+use etl::types::{ColumnModification, ColumnSchema, PipelineId, SchemaDiff, TableId};
 use reqwest::StatusCode;
 use tokio::sync::{Mutex, RwLock};
 
@@ -186,7 +186,8 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
         Ok(true)
     }
 
-    /// Apply column additions, renames, and removals from a schema diff.
+    /// Apply column additions, renames, updates, and removals from a schema
+    /// diff.
     pub async fn apply_schema_diff(&self, table_name: &str, diff: &SchemaDiff) -> Result<()> {
         if diff.is_empty() {
             return Ok(());
@@ -194,10 +195,63 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
 
         for col in &diff.columns_to_add {
             self.sql_client.add_column(table_name, &col.name, schema::type_name(&col.typ)).await?;
+            if let Some(default_clause) = schema::default_clause(col) {
+                let default_expression = default_clause.trim_start_matches(" DEFAULT ");
+                self.sql_client
+                    .set_column_default(table_name, &col.name, default_expression)
+                    .await?;
+            }
         }
 
-        for rename in &diff.columns_to_rename {
-            self.sql_client.rename_column(table_name, &rename.old_name, &rename.new_name).await?;
+        for change in &diff.columns_to_change {
+            for modification in &change.modifications {
+                let ColumnModification::Rename { old_name, new_name } = modification else {
+                    continue;
+                };
+
+                self.sql_client.rename_column(table_name, old_name, new_name).await?;
+            }
+        }
+
+        for change in &diff.columns_to_change {
+            for modification in &change.modifications {
+                match modification {
+                    ColumnModification::Rename { .. } => {}
+                    ColumnModification::Nullability { old_nullable, new_nullable } => {
+                        if !old_nullable && *new_nullable {
+                            self.sql_client
+                                .drop_column_not_null(table_name, &change.new_column.name)
+                                .await?;
+                        }
+                    }
+                    ColumnModification::Default { old_expression, new_expression } => {
+                        if new_expression.is_some() {
+                            if let Some(default_clause) = schema::default_clause(&change.new_column)
+                            {
+                                let default_expression =
+                                    default_clause.trim_start_matches(" DEFAULT ");
+                                self.sql_client
+                                    .set_column_default(
+                                        table_name,
+                                        &change.new_column.name,
+                                        default_expression,
+                                    )
+                                    .await?;
+                            } else if old_expression.is_some()
+                                && schema::supports_default(&change.old_column)
+                            {
+                                self.sql_client
+                                    .drop_column_default(table_name, &change.new_column.name)
+                                    .await?;
+                            }
+                        } else {
+                            self.sql_client
+                                .drop_column_default(table_name, &change.new_column.name)
+                                .await?;
+                        }
+                    }
+                }
+            }
         }
 
         for col in &diff.columns_to_remove {

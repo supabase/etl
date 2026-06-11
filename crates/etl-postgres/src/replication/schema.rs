@@ -280,8 +280,8 @@ pub async fn store_table_schema(
             r#"
             insert into etl.table_columns
             (table_schema_id, column_name, column_type, type_modifier, nullable,
-             ordinal_position, primary_key_ordinal_position)
-            values ($1, $2, $3, $4, $5, $6, $7)
+             ordinal_position, primary_key_ordinal_position, default_expression)
+            values ($1, $2, $3, $4, $5, $6, $7, $8)
             "#,
         )
         .bind(table_schema_id)
@@ -291,6 +291,7 @@ pub async fn store_table_schema(
         .bind(column_schema.nullable)
         .bind(column_schema.ordinal_position)
         .bind(column_schema.primary_key_ordinal_position)
+        .bind(&column_schema.default_expression)
         .execute(&mut *tx)
         .await?;
     }
@@ -336,7 +337,8 @@ pub async fn load_table_schema_at_snapshot(
             tc.type_modifier,
             tc.nullable,
             tc.ordinal_position,
-            tc.primary_key_ordinal_position
+            tc.primary_key_ordinal_position,
+            tc.default_expression
         from etl.table_schemas ts
         inner join etl.table_columns tc on ts.id = tc.table_schema_id
         where ts.id = (
@@ -418,7 +420,8 @@ pub async fn load_table_schemas_at_snapshot(
             tc.type_modifier,
             tc.nullable,
             tc.ordinal_position,
-            tc.primary_key_ordinal_position
+            tc.primary_key_ordinal_position,
+            tc.default_expression
         from latest_schemas ls
         inner join etl.table_columns tc on ls.id = tc.table_schema_id
         order by ls.table_id, tc.ordinal_position
@@ -573,6 +576,7 @@ fn parse_column_schema(row: &PgRow) -> ColumnSchema {
     let ordinal_position: i32 = row.get("ordinal_position");
     let primary_key_ordinal_position: Option<i32> = row.get("primary_key_ordinal_position");
     let nullable: bool = row.get("nullable");
+    let default_expression: Option<String> = row.get("default_expression");
 
     ColumnSchema::new(
         column_name,
@@ -582,6 +586,7 @@ fn parse_column_schema(row: &PgRow) -> ColumnSchema {
         primary_key_ordinal_position,
         nullable,
     )
+    .with_default_expression(default_expression)
 }
 
 #[cfg(test)]

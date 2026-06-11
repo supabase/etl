@@ -1,9 +1,10 @@
 use etl::{
     error::{ErrorKind, EtlResult},
     etl_error,
-    types::{ColumnSchema, Type, is_array_type},
+    types::{ColumnSchema, DefaultExpression, Type, is_array_type, parse_default_expression},
 };
 use etl_config::shared::ClickHouseEngine;
+use tracing::warn;
 
 use crate::clickhouse::sql::quote_identifier;
 
@@ -92,6 +93,68 @@ pub(super) fn clickhouse_column_type(col: &ColumnSchema, force_nullable: bool) -
     }
 }
 
+/// Returns the ClickHouse default clause for a column, if supported.
+pub(super) fn clickhouse_default_clause(col: &ColumnSchema) -> Option<String> {
+    let default_clause =
+        clickhouse_default_expression(col).map(|expression| format!(" DEFAULT {expression}"));
+    if default_clause.is_none() && col.default_expression.is_some() {
+        warn!(
+            column_name = %col.name,
+            "skipping unsupported source column default for ClickHouse"
+        );
+    }
+
+    default_clause
+}
+
+/// Returns whether a column default can be represented in ClickHouse SQL.
+pub(super) fn supports_clickhouse_default(col: &ColumnSchema) -> bool {
+    clickhouse_default_expression(col).is_some()
+}
+
+/// Returns a rendered ClickHouse default expression for a column, if supported.
+fn clickhouse_default_expression(col: &ColumnSchema) -> Option<String> {
+    col.default_expression.as_deref().and_then(|expression| {
+        parse_default_expression(expression, &col.typ)
+            .and_then(|expression| render_clickhouse_default_expression(&expression))
+    })
+}
+
+/// Renders a parsed default expression as ClickHouse SQL.
+fn render_clickhouse_default_expression(expression: &DefaultExpression) -> Option<String> {
+    match expression {
+        DefaultExpression::StringLiteral(expression)
+        | DefaultExpression::NumericLiteral(expression)
+        | DefaultExpression::BooleanLiteral(expression)
+        | DefaultExpression::TimeLiteral(expression)
+        | DefaultExpression::JsonLiteral(expression)
+        | DefaultExpression::NumericExpression(expression) => Some(expression.clone()),
+        DefaultExpression::DateLiteral(expression) => Some(format!("toDate32({expression})")),
+        DefaultExpression::TimestampLiteral(expression) => {
+            Some(format!("toDateTime64({expression}, 6, 'UTC')"))
+        }
+        DefaultExpression::UuidV4 => Some("generateUUIDv4()".to_owned()),
+        DefaultExpression::CurrentUser => Some("currentUser()".to_owned()),
+        DefaultExpression::CurrentTimestamp
+        | DefaultExpression::LocalTimestamp
+        | DefaultExpression::TimezoneNow => Some("now()".to_owned()),
+        DefaultExpression::CurrentDate => Some("today()".to_owned()),
+        DefaultExpression::CurrentTime => None,
+        DefaultExpression::IntervalArithmetic { base, operator, interval, .. } => {
+            let base = render_clickhouse_default_expression(base)?;
+            Some(format!(
+                "{base} {} INTERVAL {} {}",
+                operator.as_sql(),
+                interval.amount,
+                interval.unit.as_upper_singular()
+            ))
+        }
+        DefaultExpression::LiteralFunction { function, argument } => {
+            Some(format!("{}({argument})", function.as_lower_name()))
+        }
+    }
+}
+
 /// Trailing CDC column names appended to each replicated row, by engine.
 pub(super) fn trailing_cdc_column_names(engine: ClickHouseEngine) -> &'static [&'static str] {
     match engine {
@@ -130,7 +193,8 @@ where
 
     for col in iter {
         let col_type = clickhouse_column_type(col, false);
-        cols.push(format!("  {} {}", quote_identifier(&col.name), col_type));
+        let default_clause = clickhouse_default_clause(col).unwrap_or_default();
+        cols.push(format!("  {} {}{}", quote_identifier(&col.name), col_type, default_clause));
     }
 
     cols.push(format!("  {} String", quote_identifier(CDC_OPERATION_COLUMN_NAME)));
@@ -167,7 +231,13 @@ where
     let mut col_defs: Vec<String> = columns
         .iter()
         .map(|col| {
-            format!("  {} {}", quote_identifier(&col.name), clickhouse_column_type(col, false))
+            let default_clause = clickhouse_default_clause(col).unwrap_or_default();
+            format!(
+                "  {} {}{}",
+                quote_identifier(&col.name),
+                clickhouse_column_type(col, false),
+                default_clause
+            )
         })
         .collect();
     col_defs.push(format!("  {} UInt128", quote_identifier(ETL_VERSION_COLUMN_NAME)));
@@ -255,6 +325,7 @@ mod tests {
             ordinal_position: 1,
             primary_key_ordinal_position: Some(1),
             nullable: false,
+            default_expression: None,
         }];
         // Pre-encoded table name with embedded quotes to verify the SQL
         // builder quotes/escapes the identifier itself.
@@ -321,6 +392,7 @@ mod tests {
                 ordinal_position: 1,
                 primary_key_ordinal_position: Some(1),
                 nullable: false,
+                default_expression: None,
             },
             ColumnSchema {
                 name: "name".to_owned(),
@@ -329,11 +401,48 @@ mod tests {
                 ordinal_position: 2,
                 primary_key_ordinal_position: None,
                 nullable: true,
+                default_expression: None,
             },
         ];
         let sql = create_merge_tree_sql("public_users", &schemas);
         assert!(sql.contains("\"id\" Int32"), "id should be non-nullable Int32");
         assert!(sql.contains("\"name\" Nullable(String)"), "name should be Nullable(String)");
+    }
+
+    #[test]
+    fn create_merge_tree_sql_includes_supported_defaults() {
+        let schemas = vec![
+            ColumnSchema::new("status".to_owned(), Type::TEXT, -1, 1, None, true)
+                .with_default_expression(Some("'pending'::text".to_owned())),
+        ];
+
+        let sql = create_merge_tree_sql("public_t", &schemas);
+
+        assert!(
+            sql.contains("\"status\" Nullable(String) DEFAULT 'pending'"),
+            "default expression should be rendered in column definition: {sql}"
+        );
+    }
+
+    #[test]
+    fn clickhouse_default_clause_renders_portable_expressions() {
+        let cases = [
+            (Type::DATE, "'2026-01-01'::date", " DEFAULT toDate32('2026-01-01')"),
+            (Type::UUID, "gen_random_uuid()", " DEFAULT generateUUIDv4()"),
+            (Type::TIMESTAMPTZ, "now() + interval '30 days'", " DEFAULT now() + INTERVAL 30 DAY"),
+            (Type::TEXT, "upper('user'::text)", " DEFAULT upper('user')"),
+        ];
+
+        for (typ, expression, expected) in cases {
+            let column = ColumnSchema::new("value".to_owned(), typ, -1, 1, None, true)
+                .with_default_expression(Some(expression.to_owned()));
+
+            assert_eq!(clickhouse_default_clause(&column).as_deref(), Some(expected));
+        }
+
+        let unsupported = ColumnSchema::new("value".to_owned(), Type::TIME, -1, 1, None, true)
+            .with_default_expression(Some("current_time".to_owned()));
+        assert_eq!(clickhouse_default_clause(&unsupported), None);
     }
 
     #[test]
@@ -345,6 +454,7 @@ mod tests {
             ordinal_position: 1,
             primary_key_ordinal_position: Some(1),
             nullable: false,
+            default_expression: None,
         }];
         let sql = create_merge_tree_sql("public_t", &schemas);
         assert!(sql.contains("\"cdc_operation\" String"), "cdc_operation should be non-nullable");
@@ -362,6 +472,7 @@ mod tests {
             ordinal_position: 1,
             primary_key_ordinal_position: None,
             nullable: false,
+            default_expression: None,
         }];
         let sql = create_merge_tree_sql("public_t", &schemas);
         assert!(
@@ -381,6 +492,7 @@ mod tests {
                 ordinal_position: 1,
                 primary_key_ordinal_position: Some(1),
                 nullable: false,
+                default_expression: None,
             },
             ColumnSchema {
                 name: "name".to_owned(),
@@ -389,6 +501,7 @@ mod tests {
                 ordinal_position: 2,
                 primary_key_ordinal_position: None,
                 nullable: true,
+                default_expression: None,
             },
         ];
         // --- WHEN: build the ReplacingMergeTree DDL ---
@@ -413,6 +526,7 @@ mod tests {
                 ordinal_position: 1,
                 primary_key_ordinal_position: Some(2),
                 nullable: false,
+                default_expression: None,
             },
             ColumnSchema {
                 name: "name".to_owned(),
@@ -421,6 +535,7 @@ mod tests {
                 ordinal_position: 2,
                 primary_key_ordinal_position: None,
                 nullable: true,
+                default_expression: None,
             },
             ColumnSchema {
                 name: "tenant_id".to_owned(),
@@ -429,6 +544,7 @@ mod tests {
                 ordinal_position: 3,
                 primary_key_ordinal_position: Some(1),
                 nullable: false,
+                default_expression: None,
             },
         ];
         // --- WHEN: build the ReplacingMergeTree DDL ---
@@ -450,6 +566,7 @@ mod tests {
             ordinal_position: 1,
             primary_key_ordinal_position: None,
             nullable: true,
+            default_expression: None,
         }];
         // --- WHEN: build the ReplacingMergeTree DDL ---
         let err = create_replacing_merge_tree_sql("public_events", &schemas).unwrap_err();
@@ -467,6 +584,7 @@ mod tests {
             ordinal_position: 1,
             primary_key_ordinal_position: Some(1),
             nullable: false,
+            default_expression: None,
         }];
         // --- WHEN/THEN: dispatcher selects the matching engine branch ---
         let merge_tree =
@@ -488,6 +606,7 @@ mod tests {
                 ordinal_position: 1,
                 primary_key_ordinal_position: Some(1),
                 nullable: false,
+                default_expression: None,
             },
             ColumnSchema {
                 name: "name".to_owned(),
@@ -496,6 +615,7 @@ mod tests {
                 ordinal_position: 2,
                 primary_key_ordinal_position: None,
                 nullable: true,
+                default_expression: None,
             },
         ];
         // --- WHEN: build the current-state view DDL ---

@@ -17,7 +17,7 @@ use etl::{
     state::destination_table_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus},
     store::DestinationStore,
     types::{
-        Cell, Event, EventSequenceKey, IdentityType, OldTableRow, PipelineId,
+        Cell, ColumnModification, Event, EventSequenceKey, IdentityType, OldTableRow, PipelineId,
         ReplicatedTableSchema, SchemaDiff, TableId, TableName, TableRow, UpdatedTableRow,
     },
 };
@@ -820,11 +820,11 @@ where
         }
 
         info!(
-            "applying schema changes to table {}: {} additions, {} removals, {} renames",
+            "applying schema changes to table {}: {} additions, {} removals, {} column changes",
             sequenced_bigquery_table_id,
             diff.columns_to_add.len(),
             diff.columns_to_remove.len(),
-            diff.columns_to_rename.len()
+            diff.columns_to_change.len()
         );
 
         // Apply column additions first (safest operation).
@@ -832,19 +832,91 @@ where
             self.client
                 .add_column(&self.dataset_id, &sequenced_bigquery_table_id.to_string(), column)
                 .await?;
+            if column.default_expression.is_some() {
+                self.client
+                    .set_column_default(
+                        &self.dataset_id,
+                        &sequenced_bigquery_table_id.to_string(),
+                        column,
+                    )
+                    .await?;
+            }
         }
 
-        // Apply column renames (must be done before removals in case of position
-        // conflicts).
-        for rename in &diff.columns_to_rename {
-            self.client
-                .rename_column(
-                    &self.dataset_id,
-                    &sequenced_bigquery_table_id.to_string(),
-                    &rename.old_name,
-                    &rename.new_name,
-                )
-                .await?;
+        // Apply column renames before other changes so subsequent DDL targets
+        // the new column name.
+        for change in &diff.columns_to_change {
+            for modification in &change.modifications {
+                let ColumnModification::Rename { old_name, new_name } = modification else {
+                    continue;
+                };
+
+                self.client
+                    .rename_column(
+                        &self.dataset_id,
+                        &sequenced_bigquery_table_id.to_string(),
+                        old_name,
+                        new_name,
+                    )
+                    .await?;
+            }
+        }
+
+        for change in &diff.columns_to_change {
+            for modification in &change.modifications {
+                match modification {
+                    ColumnModification::Rename { .. } => {}
+                    ColumnModification::Nullability { old_nullable, new_nullable } => {
+                        if !old_nullable && *new_nullable {
+                            self.client
+                                .drop_column_not_null(
+                                    &self.dataset_id,
+                                    &sequenced_bigquery_table_id.to_string(),
+                                    &change.new_column.name,
+                                )
+                                .await?;
+                        }
+                    }
+                    ColumnModification::Default { old_expression, new_expression } => {
+                        if new_expression.is_some() {
+                            if BigQueryClient::supports_column_default(&change.new_column) {
+                                self.client
+                                    .set_column_default(
+                                        &self.dataset_id,
+                                        &sequenced_bigquery_table_id.to_string(),
+                                        &change.new_column,
+                                    )
+                                    .await?;
+                            } else {
+                                warn!(
+                                    table_id = %table_id,
+                                    column_name = %change.new_column.name,
+                                    "skipping unsupported source column default for BigQuery"
+                                );
+                                if old_expression.is_some()
+                                    && BigQueryClient::supports_column_default(&change.old_column)
+                                {
+                                    self.client
+                                        .drop_column_default(
+                                            &self.dataset_id,
+                                            &sequenced_bigquery_table_id.to_string(),
+                                            &change.new_column.name,
+                                        )
+                                        .await?;
+                                }
+                            }
+                        } else {
+                            self.client
+                                .drop_column_default(
+                                    &self.dataset_id,
+                                    &sequenced_bigquery_table_id.to_string(),
+                                    &change.new_column.name,
+                                )
+                                .await?;
+                        }
+                    }
+                }
+            }
         }
 
         // Apply column removals last.

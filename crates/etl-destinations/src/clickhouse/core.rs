@@ -10,8 +10,8 @@ use etl::{
     state::destination_table_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus},
     store::{schema::SchemaStore, state::StateStore},
     types::{
-        Cell, Event, EventSequenceKey, IdentityType, OldTableRow, PgLsn, ReplicatedTableSchema,
-        SchemaDiff, TableId, TableRow, Type, UpdatedTableRow, is_array_type,
+        Cell, ColumnModification, Event, EventSequenceKey, IdentityType, OldTableRow, PgLsn,
+        ReplicatedTableSchema, SchemaDiff, TableId, TableRow, Type, UpdatedTableRow, is_array_type,
     },
 };
 use etl_config::shared::ClickHouseEngine;
@@ -27,7 +27,7 @@ use crate::{
         metrics::register_metrics,
         schema::{
             create_current_view_sql, create_table_sql, drop_current_view_sql,
-            trailing_cdc_column_names,
+            supports_clickhouse_default, trailing_cdc_column_names,
         },
     },
     table_name::try_stringify_table_name,
@@ -850,10 +850,56 @@ where
             last_user_column = Some(column.name.clone());
         }
 
-        for rename in &diff.columns_to_rename {
-            self.client
-                .rename_column(clickhouse_table_name, &rename.old_name, &rename.new_name)
-                .await?;
+        for change in &diff.columns_to_change {
+            for modification in &change.modifications {
+                let ColumnModification::Rename { old_name, new_name } = modification else {
+                    continue;
+                };
+
+                self.client.rename_column(clickhouse_table_name, old_name, new_name).await?;
+            }
+        }
+
+        for change in &diff.columns_to_change {
+            for modification in &change.modifications {
+                match modification {
+                    ColumnModification::Rename { .. } => {}
+                    ColumnModification::Nullability { .. } => {
+                        self.client
+                            .modify_column(clickhouse_table_name, &change.new_column)
+                            .await?;
+                    }
+                    ColumnModification::Default { old_expression, new_expression } => {
+                        if new_expression.is_some() {
+                            if supports_clickhouse_default(&change.new_column) {
+                                self.client
+                                    .set_column_default(clickhouse_table_name, &change.new_column)
+                                    .await?;
+                            } else {
+                                warn!(
+                                    table_name = %clickhouse_table_name,
+                                    column_name = %change.new_column.name,
+                                    "skipping unsupported source column default for ClickHouse"
+                                );
+                                if old_expression.is_some()
+                                    && supports_clickhouse_default(&change.old_column)
+                                {
+                                    self.client
+                                        .drop_column_default(
+                                            clickhouse_table_name,
+                                            &change.new_column.name,
+                                        )
+                                        .await?;
+                                }
+                            }
+                        } else {
+                            self.client
+                                .drop_column_default(clickhouse_table_name, &change.new_column.name)
+                                .await?;
+                        }
+                    }
+                }
+            }
         }
 
         for column in &diff.columns_to_remove {
@@ -1079,23 +1125,28 @@ fn reject_pk_alters_under_replacing_merge_tree(
         }
     }
 
-    for rename in &diff.columns_to_rename {
-        let was_pk = current_schema
-            .column_schemas()
-            .find(|c| c.name == rename.old_name)
-            .is_some_and(|c| c.primary_key_ordinal_position.is_some());
-        if was_pk {
-            return Err(etl_error!(
-                ErrorKind::SourceSchemaError,
-                "ReplacingMergeTree does not support renaming a primary-key column",
-                format!(
-                    "Table '{clickhouse_table_name}': RENAME COLUMN '{old}' -> '{new}' would \
-                     invalidate the ReplacingMergeTree ORDER BY / dedup key. Switch this table to \
-                     `engine: merge_tree` or revert the rename on the source.",
-                    old = rename.old_name,
-                    new = rename.new_name
-                )
-            ));
+    for change in &diff.columns_to_change {
+        for modification in &change.modifications {
+            let ColumnModification::Rename { old_name, new_name } = modification else {
+                continue;
+            };
+
+            let was_pk = current_schema
+                .column_schemas()
+                .find(|c| c.name == *old_name)
+                .is_some_and(|c| c.primary_key_ordinal_position.is_some());
+            if was_pk {
+                return Err(etl_error!(
+                    ErrorKind::SourceSchemaError,
+                    "ReplacingMergeTree does not support renaming a primary-key column",
+                    format!(
+                        "Table '{clickhouse_table_name}': RENAME COLUMN '{old_name}' -> \
+                         '{new_name}' would invalidate the ReplacingMergeTree ORDER BY / dedup \
+                         key. Switch this table to `engine: merge_tree` or revert the rename on \
+                         the source."
+                    )
+                ));
+            }
         }
     }
 
@@ -1485,6 +1536,36 @@ mod tests {
         ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask)
     }
 
+    fn rename_change(
+        old_name: &str,
+        new_name: &str,
+        ordinal_position: i32,
+    ) -> etl::types::ColumnChange {
+        etl::types::ColumnChange {
+            ordinal_position,
+            old_column: ColumnSchema::new(
+                old_name.to_owned(),
+                Type::TEXT,
+                -1,
+                ordinal_position,
+                None,
+                true,
+            ),
+            new_column: ColumnSchema::new(
+                new_name.to_owned(),
+                Type::TEXT,
+                -1,
+                ordinal_position,
+                None,
+                true,
+            ),
+            modifications: vec![etl::types::ColumnModification::Rename {
+                old_name: old_name.to_owned(),
+                new_name: new_name.to_owned(),
+            }],
+        }
+    }
+
     #[test]
     fn reject_pk_alters_under_replacing_merge_tree_allows_non_pk_drop() {
         // --- GIVEN: a diff that drops the non-PK `value` column ---
@@ -1499,7 +1580,7 @@ mod tests {
                 None,
                 true,
             )],
-            columns_to_rename: Vec::new(),
+            columns_to_change: Vec::new(),
         };
         // --- WHEN/THEN: guard passes ---
         reject_pk_alters_under_replacing_merge_tree(
@@ -1524,7 +1605,7 @@ mod tests {
                 Some(1),
                 false,
             )],
-            columns_to_rename: Vec::new(),
+            columns_to_change: Vec::new(),
         };
         // --- WHEN: validating ---
         let err = reject_pk_alters_under_replacing_merge_tree(
@@ -1545,11 +1626,7 @@ mod tests {
         let diff = SchemaDiff {
             columns_to_add: Vec::new(),
             columns_to_remove: Vec::new(),
-            columns_to_rename: vec![etl::types::ColumnRename {
-                old_name: "value".to_owned(),
-                new_name: "payload".to_owned(),
-                ordinal_position: 3,
-            }],
+            columns_to_change: vec![rename_change("value", "payload", 3)],
         };
         // --- WHEN/THEN: guard passes ---
         reject_pk_alters_under_replacing_merge_tree(
@@ -1567,11 +1644,7 @@ mod tests {
         let diff = SchemaDiff {
             columns_to_add: Vec::new(),
             columns_to_remove: Vec::new(),
-            columns_to_rename: vec![etl::types::ColumnRename {
-                old_name: "id".to_owned(),
-                new_name: "row_id".to_owned(),
-                ordinal_position: 2,
-            }],
+            columns_to_change: vec![rename_change("id", "row_id", 2)],
         };
         // --- WHEN: validating ---
         let err = reject_pk_alters_under_replacing_merge_tree(

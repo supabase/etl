@@ -3,7 +3,11 @@ use std::fmt;
 use etl::{
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
-    types::{Cell, ColumnSchema, PipelineId, ReplicatedTableSchema, Type, is_array_type},
+    types::{
+        Cell, ColumnSchema, DefaultExpression, DefaultInterval, DefaultIntervalOperator,
+        DefaultIntervalUnit, DefaultTemporalType, PipelineId, ReplicatedTableSchema, Type,
+        is_array_type, parse_default_expression,
+    },
 };
 use gcp_bigquery_client::{
     Client,
@@ -77,6 +81,31 @@ const TRANSIENT_BIGQUERY_QUERY_REASONS: &[&str] = &["backendError", "jobBackendE
 /// Protobuf type name for BigQuery storage errors embedded in gRPC status
 /// details.
 const BIGQUERY_STORAGE_ERROR_TYPE_NAME: &str = "google.cloud.bigquery.storage.v1.StorageError";
+
+/// Returns whether BigQuery supports a unit for date interval arithmetic.
+fn is_bigquery_date_interval_unit(unit: DefaultIntervalUnit) -> bool {
+    matches!(
+        unit,
+        DefaultIntervalUnit::Day
+            | DefaultIntervalUnit::Week
+            | DefaultIntervalUnit::Month
+            | DefaultIntervalUnit::Quarter
+            | DefaultIntervalUnit::Year
+    )
+}
+
+/// Returns whether BigQuery supports a unit for timestamp interval arithmetic.
+fn is_bigquery_timestamp_interval_unit(unit: DefaultIntervalUnit) -> bool {
+    matches!(
+        unit,
+        DefaultIntervalUnit::Microsecond
+            | DefaultIntervalUnit::Millisecond
+            | DefaultIntervalUnit::Second
+            | DefaultIntervalUnit::Minute
+            | DefaultIntervalUnit::Hour
+            | DefaultIntervalUnit::Day
+    )
+}
 
 /// Special column name for Change Data Capture operations in BigQuery.
 const BIGQUERY_CDC_SPECIAL_COLUMN: &str = "_CHANGE_TYPE";
@@ -1013,6 +1042,85 @@ impl BigQueryClient {
         Ok(())
     }
 
+    /// Sets a supported default expression on a BigQuery column.
+    pub async fn set_column_default(
+        &self,
+        dataset_id: &BigQueryDatasetId,
+        table_id: &BigQueryTableId,
+        column_schema: &ColumnSchema,
+    ) -> EtlResult<()> {
+        let Some(default_expression) = Self::default_expression(column_schema) else {
+            if column_schema.default_expression.is_some() {
+                warn!(
+                    dataset_id = %dataset_id,
+                    table_id = %table_id,
+                    column_name = %column_schema.name,
+                    "skipping unsupported source column default for BigQuery"
+                );
+            }
+            return Ok(());
+        };
+
+        let full_table_name = self.full_table_name(dataset_id, table_id)?;
+        let column_name = quote_identifier(&column_schema.name, "BigQuery column name")?;
+
+        info!("setting default for column {column_name} in table {full_table_name} in BigQuery");
+
+        let query = format!(
+            "alter table {full_table_name} alter column {column_name} set default \
+             {default_expression}"
+        );
+
+        let _ = self.query(QueryRequest::new(query)).await?;
+
+        Ok(())
+    }
+
+    /// Returns whether a column default can be represented in BigQuery SQL.
+    pub(crate) fn supports_column_default(column_schema: &ColumnSchema) -> bool {
+        Self::default_expression(column_schema).is_some()
+    }
+
+    /// Drops a default expression from a BigQuery column.
+    pub async fn drop_column_default(
+        &self,
+        dataset_id: &BigQueryDatasetId,
+        table_id: &BigQueryTableId,
+        column_name: &str,
+    ) -> EtlResult<()> {
+        let full_table_name = self.full_table_name(dataset_id, table_id)?;
+        let column_name = quote_identifier(column_name, "BigQuery column name")?;
+
+        info!("dropping default for column {column_name} in table {full_table_name} in BigQuery");
+
+        let query =
+            format!("alter table {full_table_name} alter column {column_name} drop default");
+
+        let _ = self.query(QueryRequest::new(query)).await?;
+
+        Ok(())
+    }
+
+    /// Drops a NOT NULL constraint from a BigQuery column.
+    pub async fn drop_column_not_null(
+        &self,
+        dataset_id: &BigQueryDatasetId,
+        table_id: &BigQueryTableId,
+        column_name: &str,
+    ) -> EtlResult<()> {
+        let full_table_name = self.full_table_name(dataset_id, table_id)?;
+        let column_name = quote_identifier(column_name, "BigQuery column name")?;
+
+        info!("dropping not null for column {column_name} in table {full_table_name} in BigQuery");
+
+        let query =
+            format!("alter table {full_table_name} alter column {column_name} drop not null");
+
+        let _ = self.query(QueryRequest::new(query)).await?;
+
+        Ok(())
+    }
+
     /// Checks whether a table exists in the BigQuery dataset.
     ///
     /// Returns `true` if the table exists, `false` otherwise.
@@ -1291,11 +1399,94 @@ impl BigQueryClient {
         let mut column_spec =
             format!("{} {}", column_name, Self::postgres_to_bigquery_type(&column_schema.typ));
 
+        if let Some(default_expression) = Self::default_expression(column_schema) {
+            column_spec.push_str(&format!(" default {default_expression}"));
+        } else if column_schema.default_expression.is_some() {
+            warn!(
+                column_name = %column_schema.name,
+                "skipping unsupported source column default for BigQuery table creation"
+            );
+        }
+
         if !column_schema.nullable && !is_array_type(&column_schema.typ) {
             column_spec.push_str(" not null");
         };
 
         Ok(column_spec)
+    }
+
+    /// Returns a rendered default expression for BigQuery, if supported.
+    fn default_expression(column_schema: &ColumnSchema) -> Option<String> {
+        column_schema.default_expression.as_deref().and_then(|expression| {
+            parse_default_expression(expression, &column_schema.typ)
+                .and_then(|expression| Self::render_default_expression(&expression))
+        })
+    }
+
+    /// Renders a parsed default expression as BigQuery SQL.
+    fn render_default_expression(expression: &DefaultExpression) -> Option<String> {
+        match expression {
+            DefaultExpression::StringLiteral(expression)
+            | DefaultExpression::NumericLiteral(expression)
+            | DefaultExpression::BooleanLiteral(expression)
+            | DefaultExpression::TimeLiteral(expression)
+            | DefaultExpression::NumericExpression(expression) => Some(expression.clone()),
+            DefaultExpression::DateLiteral(expression) => Some(format!("DATE {expression}")),
+            DefaultExpression::TimestampLiteral(expression) => {
+                Some(format!("TIMESTAMP {expression}"))
+            }
+            DefaultExpression::JsonLiteral(expression) => Some(format!("JSON {expression}")),
+            DefaultExpression::UuidV4 => Some("GENERATE_UUID()".to_owned()),
+            DefaultExpression::CurrentUser => Some("SESSION_USER()".to_owned()),
+            DefaultExpression::CurrentTimestamp | DefaultExpression::TimezoneNow => {
+                Some("CURRENT_TIMESTAMP()".to_owned())
+            }
+            DefaultExpression::CurrentDate => Some("CURRENT_DATE()".to_owned()),
+            DefaultExpression::CurrentTime => Some("CURRENT_TIME()".to_owned()),
+            DefaultExpression::LocalTimestamp => Some("CURRENT_DATETIME()".to_owned()),
+            DefaultExpression::IntervalArithmetic { base, operator, interval, temporal_type } => {
+                Self::render_interval_arithmetic(base, *operator, interval, *temporal_type)
+            }
+            DefaultExpression::LiteralFunction { function, argument } => {
+                Some(format!("{}({argument})", function.as_upper_name()))
+            }
+        }
+    }
+
+    /// Renders BigQuery interval arithmetic for supported temporal types.
+    fn render_interval_arithmetic(
+        base: &DefaultExpression,
+        operator: DefaultIntervalOperator,
+        interval: &DefaultInterval,
+        temporal_type: DefaultTemporalType,
+    ) -> Option<String> {
+        let base = Self::render_default_expression(base)?;
+        let unit = interval.unit.as_upper_singular();
+        let function = match (operator, temporal_type) {
+            (DefaultIntervalOperator::Add, DefaultTemporalType::Date)
+                if is_bigquery_date_interval_unit(interval.unit) =>
+            {
+                "DATE_ADD"
+            }
+            (DefaultIntervalOperator::Subtract, DefaultTemporalType::Date)
+                if is_bigquery_date_interval_unit(interval.unit) =>
+            {
+                "DATE_SUB"
+            }
+            (DefaultIntervalOperator::Add, DefaultTemporalType::Timestamp)
+                if is_bigquery_timestamp_interval_unit(interval.unit) =>
+            {
+                "TIMESTAMP_ADD"
+            }
+            (DefaultIntervalOperator::Subtract, DefaultTemporalType::Timestamp)
+                if is_bigquery_timestamp_interval_unit(interval.unit) =>
+            {
+                "TIMESTAMP_SUB"
+            }
+            _ => return None,
+        };
+
+        Some(format!("{function}({base}, INTERVAL {} {unit})", interval.amount))
     }
 
     /// Creates a primary key clause for table creation.
@@ -1659,6 +1850,41 @@ mod tests {
         let array_column = test_column("tags", Type::TEXT_ARRAY, 1, false, None);
         let array_spec = BigQueryClient::column_spec(&array_column).expect("array column spec");
         assert_eq!(array_spec, "`tags` array<string>");
+    }
+
+    #[test]
+    fn column_spec_includes_supported_default() {
+        let column_schema = test_column("status", Type::TEXT, 1, true, None)
+            .with_default_expression(Some("'pending'::text".to_owned()));
+
+        let spec = BigQueryClient::column_spec(&column_schema).expect("column spec generation");
+
+        assert_eq!(spec, "`status` string default 'pending'");
+    }
+
+    #[test]
+    fn default_expression_renders_portable_expressions() {
+        let cases = [
+            (Type::DATE, "'2026-01-01'::date", "DATE '2026-01-01'"),
+            (Type::JSONB, "'{}'::jsonb", "JSON '{}'"),
+            (Type::UUID, "gen_random_uuid()", "GENERATE_UUID()"),
+            (
+                Type::TIMESTAMPTZ,
+                "now() + interval '30 days'",
+                "TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)",
+            ),
+            (Type::TEXT, "lower('USER'::text)", "LOWER('USER')"),
+        ];
+
+        for (typ, expression, expected) in cases {
+            let column_schema = test_column("value", typ, 1, true, None)
+                .with_default_expression(Some(expression.to_owned()));
+
+            assert_eq!(
+                BigQueryClient::default_expression(&column_schema).as_deref(),
+                Some(expected)
+            );
+        }
     }
 
     #[test]

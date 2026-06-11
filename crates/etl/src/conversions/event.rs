@@ -195,6 +195,8 @@ pub(crate) struct ColumnSchemaMessage {
     pub(crate) attnum: i32,
     /// Whether the column is marked `NOT NULL` in `pg_attribute.attnotnull`.
     pub(crate) attnotnull: bool,
+    /// The default expression from `pg_attrdef`, if one exists.
+    pub(crate) default_expression: Option<String>,
 }
 
 /// Builds [`ColumnSchema`] values from PostgreSQL-native schema and identity
@@ -229,6 +231,7 @@ pub(crate) fn build_column_schemas(
                 primary_key_positions.get(&column.attnum).copied(),
                 !column.attnotnull,
             )
+            .with_default_expression(column.default_expression)
         })
         .collect()
 }
