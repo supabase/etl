@@ -75,6 +75,26 @@ pub(crate) fn error_response(status_code: axum::http::StatusCode, message: Strin
     (status_code, Json(ErrorMessage { message })).into_response()
 }
 
+/// Builds a JSON error response and attaches internal details for Sentry.
+pub(crate) fn error_response_with_internal_error<E>(
+    status_code: axum::http::StatusCode,
+    message: String,
+    error: &E,
+) -> Response
+where
+    E: std::error::Error + 'static,
+{
+    let mut response = error_response(status_code, message);
+
+    if status_code.is_server_error() {
+        response
+            .extensions_mut()
+            .insert(crate::sentry_scrubbing::ServerErrorReport::from_error(error));
+    }
+
+    response
+}
+
 /// Returns the inner value from axum extractors used by route handlers.
 pub(crate) trait IntoInner {
     /// The extractor's inner value.

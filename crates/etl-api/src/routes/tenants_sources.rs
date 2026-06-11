@@ -19,7 +19,8 @@ use crate::{
     data::{self, tenants::TenantsDbError, tenants_sources::TenantSourceDbError},
     k8s::TrustedRootCertsCache,
     routes::{
-        ErrorMessage, IntoInner, TenantIdError, common, error_response, utils, validate_tenant_id,
+        ErrorMessage, IntoInner, TenantIdError, common, error_response_with_internal_error, utils,
+        validate_tenant_id,
     },
     validation::ValidationError,
 };
@@ -75,7 +76,7 @@ impl IntoResponse for TenantSourceError {
             TenantSourceError::ValidationFailed(_) => StatusCode::UNPROCESSABLE_ENTITY,
         };
 
-        error_response(status_code, self.to_message())
+        error_response_with_internal_error(status_code, self.to_message(), &self)
     }
 }
 
