@@ -99,31 +99,117 @@ fn ducklake_default_clause(column_schema: &ColumnSchema) -> Option<String> {
 }
 
 /// Renders a parsed default expression as DuckLake SQL.
-fn render_ducklake_default_expression(expression: &DefaultExpression) -> Option<String> {
+fn render_ducklake_default_expression(
+    expression: &DefaultExpression,
+    typ: &Type,
+) -> Option<String> {
     match expression {
-        DefaultExpression::StringLiteral(expression)
-        | DefaultExpression::NumericLiteral(expression)
-        | DefaultExpression::DateLiteral(expression)
-        | DefaultExpression::TimeLiteral(expression)
-        | DefaultExpression::TimestampLiteral(expression)
-        | DefaultExpression::JsonLiteral(expression)
-        | DefaultExpression::NumericExpression(expression) => Some(expression.clone()),
-        DefaultExpression::BooleanLiteral(_) => None,
-        DefaultExpression::UuidV4 => Some("uuid()".to_owned()),
-        DefaultExpression::CurrentUser => Some("current_user".to_owned()),
-        DefaultExpression::CurrentTimestamp | DefaultExpression::TimezoneNow => {
-            Some("current_timestamp".to_owned())
+        DefaultExpression::StringLiteral(expression) => {
+            is_ducklake_string_default_type(typ).then(|| expression.clone())
         }
-        DefaultExpression::CurrentDate => Some("current_date".to_owned()),
-        DefaultExpression::CurrentTime => Some("current_time".to_owned()),
-        DefaultExpression::LocalTimestamp => Some("localtimestamp".to_owned()),
+        DefaultExpression::NumericLiteral(expression) => {
+            if is_ducklake_numeric_default_type(typ) {
+                Some(expression.clone())
+            } else if is_ducklake_numeric_string_default_type(typ) {
+                Some(quote_numeric_literal_as_string(expression))
+            } else {
+                None
+            }
+        }
+        DefaultExpression::NumericExpression(expression) => {
+            is_ducklake_numeric_default_type(typ).then(|| expression.clone())
+        }
+        DefaultExpression::DateLiteral(expression) => {
+            matches!(typ, &Type::DATE).then(|| expression.clone())
+        }
+        DefaultExpression::TimeLiteral(expression) => {
+            matches!(typ, &Type::TIME).then(|| expression.clone())
+        }
+        DefaultExpression::TimestampLiteral(expression) => {
+            is_ducklake_timestamp_default_type(typ).then(|| expression.clone())
+        }
+        DefaultExpression::JsonLiteral(expression) => is_json_type(typ).then(|| expression.clone()),
+        DefaultExpression::BooleanLiteral(_) => None,
+        DefaultExpression::UuidV4 => matches!(typ, &Type::UUID).then(|| "uuid()".to_owned()),
+        DefaultExpression::CurrentUser => {
+            is_ducklake_text_default_type(typ).then(|| "current_user".to_owned())
+        }
+        DefaultExpression::CurrentTimestamp | DefaultExpression::TimezoneNow => {
+            render_ducklake_current_timestamp_default(typ)
+        }
+        DefaultExpression::CurrentDate => {
+            matches!(typ, &Type::DATE).then(|| "current_date".to_owned())
+        }
+        DefaultExpression::CurrentTime => {
+            matches!(typ, &Type::TIME).then(|| "current_time".to_owned())
+        }
+        DefaultExpression::LocalTimestamp => render_ducklake_local_timestamp_default(typ),
         DefaultExpression::IntervalArithmetic { base, operator, interval, .. } => {
-            let base = render_ducklake_default_expression(base)?;
+            let base = render_ducklake_default_expression(base, typ)?;
             Some(format!("{base} {} interval '{}'", operator.as_sql(), interval.literal))
         }
         DefaultExpression::LiteralFunction { function, argument } => {
-            Some(format!("{}({argument})", function.as_lower_name()))
+            is_ducklake_text_default_type(typ)
+                .then(|| format!("{}({argument})", function.as_lower_name()))
         }
+    }
+}
+
+/// Renders timestamp-like Postgres defaults for the destination column type.
+fn render_ducklake_current_timestamp_default(typ: &Type) -> Option<String> {
+    match typ {
+        &Type::DATE => Some("current_date".to_owned()),
+        &Type::TIME => Some("current_time".to_owned()),
+        &Type::TIMESTAMP | &Type::TIMESTAMPTZ => Some("current_timestamp".to_owned()),
+        _ => None,
+    }
+}
+
+/// Returns whether a Postgres type is a DuckLake numeric column.
+fn is_ducklake_numeric_default_type(typ: &Type) -> bool {
+    matches!(
+        typ,
+        &Type::INT2 | &Type::INT4 | &Type::INT8 | &Type::FLOAT4 | &Type::FLOAT8 | &Type::OID
+    )
+}
+
+/// Returns whether a Postgres numeric-like type is stored as DuckLake varchar.
+fn is_ducklake_numeric_string_default_type(typ: &Type) -> bool {
+    matches!(typ, &Type::NUMERIC)
+}
+
+/// Returns whether a Postgres type can safely receive source string literals.
+fn is_ducklake_string_default_type(typ: &Type) -> bool {
+    is_ducklake_text_default_type(typ) || matches!(typ, &Type::NUMERIC | &Type::UUID)
+}
+
+/// Returns whether a Postgres type is a text-like DuckLake varchar column.
+fn is_ducklake_text_default_type(typ: &Type) -> bool {
+    matches!(typ, &Type::CHAR | &Type::BPCHAR | &Type::VARCHAR | &Type::NAME | &Type::TEXT)
+}
+
+/// Returns whether a Postgres type is a DuckLake timestamp column.
+fn is_ducklake_timestamp_default_type(typ: &Type) -> bool {
+    matches!(typ, &Type::TIMESTAMP | &Type::TIMESTAMPTZ)
+}
+
+/// Returns whether a Postgres type is a DuckLake JSON column.
+fn is_json_type(typ: &Type) -> bool {
+    matches!(typ, &Type::JSON | &Type::JSONB)
+}
+
+/// Quotes a parser-validated numeric literal as a SQL string literal.
+fn quote_numeric_literal_as_string(expression: &str) -> String {
+    format!("'{expression}'")
+}
+
+/// Renders local timestamp defaults for the destination column type.
+fn render_ducklake_local_timestamp_default(typ: &Type) -> Option<String> {
+    match typ {
+        &Type::DATE => Some("current_date".to_owned()),
+        &Type::TIME => Some("current_time".to_owned()),
+        &Type::TIMESTAMP | &Type::TIMESTAMPTZ => Some("localtimestamp".to_owned()),
+        _ => None,
     }
 }
 
@@ -135,8 +221,9 @@ pub(super) fn supports_default_ducklake(column_schema: &ColumnSchema) -> bool {
 /// Returns a rendered DuckLake default expression for a column, if supported.
 fn ducklake_default_expression(column_schema: &ColumnSchema) -> Option<String> {
     column_schema.default_expression.as_deref().and_then(|expression| {
-        parse_default_expression(expression, &column_schema.typ)
-            .and_then(|expression| render_ducklake_default_expression(&expression))
+        parse_default_expression(expression, &column_schema.typ).and_then(|expression| {
+            render_ducklake_default_expression(&expression, &column_schema.typ)
+        })
     })
 }
 
@@ -307,8 +394,12 @@ mod tests {
     #[test]
     fn ducklake_default_clause_renders_portable_expressions() {
         let cases = [
+            (Type::TEXT, "true", " default 'true'"),
             (Type::JSONB, "'{}'::jsonb", " default '{}'"),
+            (Type::NUMERIC, "42", " default '42'"),
             (Type::UUID, "gen_random_uuid()", " default uuid()"),
+            (Type::DATE, "now()", " default current_date"),
+            (Type::TIME, "now()", " default current_time"),
             (
                 Type::TIMESTAMPTZ,
                 "now() + interval '30 days'",
@@ -329,6 +420,28 @@ mod tests {
             );
 
             assert_eq!(ducklake_default_clause(&column).as_deref(), Some(expected));
+        }
+
+        let unsupported_cases = [
+            (Type::BOOL, "true"),
+            (Type::BOOL, "'true'::text"),
+            (Type::INT4, "'abc'::text"),
+            (Type::NUMERIC, "10 + 5"),
+            (Type::TEXT, "current_date"),
+            (Type::DATE, "current_time"),
+        ];
+        for (typ, expression) in unsupported_cases {
+            let column = ColumnSchema::new(
+                "value".to_owned(),
+                typ,
+                -1,
+                1,
+                None,
+                true,
+                Some(expression.to_owned()),
+            );
+
+            assert_eq!(ducklake_default_clause(&column), None);
         }
     }
 

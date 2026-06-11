@@ -96,59 +96,165 @@ pub(crate) fn supports_default(column_schema: &ColumnSchema) -> bool {
 /// Returns a rendered Snowflake default expression for a column, if supported.
 fn snowflake_default_expression(column_schema: &ColumnSchema) -> Option<String> {
     column_schema.default_expression.as_deref().and_then(|expression| {
-        parse_default_expression(expression, &column_schema.typ)
-            .and_then(|expression| render_snowflake_default_expression(&expression))
+        parse_default_expression(expression, &column_schema.typ).and_then(|expression| {
+            render_snowflake_default_expression(&expression, &column_schema.typ)
+        })
     })
 }
 
 /// Returns a rendered Snowflake `ADD COLUMN` default expression, if supported.
 fn snowflake_add_column_default_expression(column_schema: &ColumnSchema) -> Option<String> {
     column_schema.default_expression.as_deref().and_then(|expression| {
-        parse_default_expression(expression, &column_schema.typ)
-            .and_then(|expression| render_snowflake_add_column_default_expression(&expression))
+        parse_default_expression(expression, &column_schema.typ).and_then(|expression| {
+            render_snowflake_add_column_default_expression(&expression, &column_schema.typ)
+        })
     })
 }
 
 /// Renders a parsed default expression as Snowflake SQL.
-fn render_snowflake_default_expression(expression: &DefaultExpression) -> Option<String> {
+fn render_snowflake_default_expression(
+    expression: &DefaultExpression,
+    typ: &Type,
+) -> Option<String> {
     match expression {
-        DefaultExpression::StringLiteral(expression)
-        | DefaultExpression::NumericLiteral(expression)
-        | DefaultExpression::BooleanLiteral(expression)
-        | DefaultExpression::DateLiteral(expression)
-        | DefaultExpression::TimeLiteral(expression)
-        | DefaultExpression::TimestampLiteral(expression)
-        | DefaultExpression::NumericExpression(expression) => Some(expression.clone()),
-        DefaultExpression::JsonLiteral(expression) => Some(format!("PARSE_JSON({expression})")),
-        DefaultExpression::UuidV4 => Some("UUID_STRING()".to_owned()),
-        DefaultExpression::CurrentUser => Some("CURRENT_USER()".to_owned()),
+        DefaultExpression::StringLiteral(expression) => {
+            is_snowflake_string_default_type(typ).then(|| expression.clone())
+        }
+        DefaultExpression::NumericLiteral(expression) => {
+            if is_snowflake_numeric_default_type(typ) {
+                Some(expression.clone())
+            } else if is_snowflake_numeric_string_default_type(typ) {
+                Some(quote_numeric_literal_as_string(expression))
+            } else {
+                None
+            }
+        }
+        DefaultExpression::NumericExpression(expression) => {
+            is_snowflake_numeric_default_type(typ).then(|| expression.clone())
+        }
+        DefaultExpression::BooleanLiteral(expression) => {
+            matches!(typ, &Type::BOOL).then(|| expression.clone())
+        }
+        DefaultExpression::DateLiteral(expression) => {
+            matches!(typ, &Type::DATE).then(|| expression.clone())
+        }
+        DefaultExpression::TimeLiteral(expression) => {
+            matches!(typ, &Type::TIME).then(|| expression.clone())
+        }
+        DefaultExpression::TimestampLiteral(expression) => {
+            is_snowflake_timestamp_default_type(typ).then(|| expression.clone())
+        }
+        DefaultExpression::JsonLiteral(expression) => {
+            is_json_type(typ).then(|| format!("PARSE_JSON({expression})"))
+        }
+        DefaultExpression::UuidV4 => {
+            is_snowflake_uuid_default_type(typ).then(|| "UUID_STRING()".to_owned())
+        }
+        DefaultExpression::CurrentUser => {
+            is_snowflake_text_default_type(typ).then(|| "CURRENT_USER()".to_owned())
+        }
         DefaultExpression::CurrentTimestamp
         | DefaultExpression::LocalTimestamp
-        | DefaultExpression::TimezoneNow => Some("CURRENT_TIMESTAMP()".to_owned()),
-        DefaultExpression::CurrentDate => Some("CURRENT_DATE()".to_owned()),
-        DefaultExpression::CurrentTime => Some("CURRENT_TIME()".to_owned()),
+        | DefaultExpression::TimezoneNow => render_snowflake_current_timestamp_default(typ),
+        DefaultExpression::CurrentDate => {
+            matches!(typ, &Type::DATE).then(|| "CURRENT_DATE()".to_owned())
+        }
+        DefaultExpression::CurrentTime => {
+            matches!(typ, &Type::TIME).then(|| "CURRENT_TIME()".to_owned())
+        }
         DefaultExpression::IntervalArithmetic { base, operator, interval, .. } => {
-            let base = render_snowflake_default_expression(base)?;
+            let base = render_snowflake_default_expression(base, typ)?;
             Some(format!("{base} {} INTERVAL '{}'", operator.as_sql(), interval.literal))
         }
         DefaultExpression::LiteralFunction { function, argument } => {
-            Some(format!("{}({argument})", function.as_upper_name()))
+            is_snowflake_text_default_type(typ)
+                .then(|| format!("{}({argument})", function.as_upper_name()))
         }
     }
+}
+
+/// Renders timestamp-like Postgres defaults for the destination column type.
+fn render_snowflake_current_timestamp_default(typ: &Type) -> Option<String> {
+    match typ {
+        &Type::DATE => Some("CURRENT_DATE()".to_owned()),
+        &Type::TIME => Some("CURRENT_TIME()".to_owned()),
+        &Type::TIMESTAMP | &Type::TIMESTAMPTZ => Some("CURRENT_TIMESTAMP()".to_owned()),
+        _ => None,
+    }
+}
+
+/// Returns whether a Postgres type is a Snowflake numeric column.
+fn is_snowflake_numeric_default_type(typ: &Type) -> bool {
+    matches!(
+        typ,
+        &Type::INT2 | &Type::INT4 | &Type::INT8 | &Type::FLOAT4 | &Type::FLOAT8 | &Type::OID
+    )
+}
+
+/// Returns whether a Postgres numeric-like type is stored as Snowflake VARCHAR.
+fn is_snowflake_numeric_string_default_type(typ: &Type) -> bool {
+    matches!(typ, &Type::NUMERIC | &Type::MONEY)
+}
+
+/// Returns whether a Postgres type can safely receive source string literals.
+fn is_snowflake_string_default_type(typ: &Type) -> bool {
+    is_snowflake_text_default_type(typ)
+        || matches!(typ, &Type::NUMERIC | &Type::MONEY | &Type::UUID)
+}
+
+/// Returns whether a Postgres type is a text-like Snowflake VARCHAR column.
+fn is_snowflake_text_default_type(typ: &Type) -> bool {
+    matches!(typ, &Type::CHAR | &Type::BPCHAR | &Type::VARCHAR | &Type::NAME | &Type::TEXT)
+}
+
+/// Returns whether a Postgres type can safely receive UUID-producing defaults.
+fn is_snowflake_uuid_default_type(typ: &Type) -> bool {
+    matches!(
+        typ,
+        &Type::UUID | &Type::CHAR | &Type::BPCHAR | &Type::VARCHAR | &Type::NAME | &Type::TEXT
+    )
+}
+
+/// Returns whether a Postgres type is a Snowflake timestamp column.
+fn is_snowflake_timestamp_default_type(typ: &Type) -> bool {
+    matches!(typ, &Type::TIMESTAMP | &Type::TIMESTAMPTZ)
+}
+
+/// Returns whether a Postgres type is a Snowflake VARIANT JSON column.
+fn is_json_type(typ: &Type) -> bool {
+    matches!(typ, &Type::JSON | &Type::JSONB)
 }
 
 /// Renders a parsed default expression for Snowflake `ADD COLUMN`.
 fn render_snowflake_add_column_default_expression(
     expression: &DefaultExpression,
+    typ: &Type,
 ) -> Option<String> {
     match expression {
-        DefaultExpression::StringLiteral(expression)
-        | DefaultExpression::NumericLiteral(expression)
-        | DefaultExpression::BooleanLiteral(expression)
-        | DefaultExpression::DateLiteral(expression)
-        | DefaultExpression::TimeLiteral(expression)
-        | DefaultExpression::TimestampLiteral(expression)
-        | DefaultExpression::NumericExpression(expression) => Some(expression.clone()),
+        DefaultExpression::StringLiteral(expression) => {
+            is_snowflake_string_default_type(typ).then(|| expression.clone())
+        }
+        DefaultExpression::NumericLiteral(expression) => {
+            if is_snowflake_numeric_default_type(typ) {
+                Some(expression.clone())
+            } else if is_snowflake_numeric_string_default_type(typ) {
+                Some(quote_numeric_literal_as_string(expression))
+            } else {
+                None
+            }
+        }
+        DefaultExpression::BooleanLiteral(expression) => {
+            matches!(typ, &Type::BOOL).then(|| expression.clone())
+        }
+        DefaultExpression::DateLiteral(expression) => {
+            matches!(typ, &Type::DATE).then(|| expression.clone())
+        }
+        DefaultExpression::TimeLiteral(expression) => {
+            matches!(typ, &Type::TIME).then(|| expression.clone())
+        }
+        DefaultExpression::TimestampLiteral(expression) => {
+            is_snowflake_timestamp_default_type(typ).then(|| expression.clone())
+        }
         DefaultExpression::JsonLiteral(_)
         | DefaultExpression::UuidV4
         | DefaultExpression::CurrentUser
@@ -158,8 +264,14 @@ fn render_snowflake_add_column_default_expression(
         | DefaultExpression::CurrentDate
         | DefaultExpression::CurrentTime
         | DefaultExpression::IntervalArithmetic { .. }
+        | DefaultExpression::NumericExpression(_)
         | DefaultExpression::LiteralFunction { .. } => None,
     }
+}
+
+/// Quotes a parser-validated numeric literal as a SQL string literal.
+fn quote_numeric_literal_as_string(expression: &str) -> String {
+    format!("'{expression}'")
 }
 
 #[cfg(test)]
@@ -274,8 +386,13 @@ mod tests {
     #[test]
     fn default_clause_renders_portable_expressions() {
         let cases = [
+            (Type::TEXT, "true", " DEFAULT 'true'"),
+            (Type::BOOL, "'true'::text", " DEFAULT true"),
             (Type::UUID, "gen_random_uuid()", " DEFAULT UUID_STRING()"),
             (Type::TEXT, "CURRENT_USER", " DEFAULT CURRENT_USER()"),
+            (Type::NUMERIC, "42", " DEFAULT '42'"),
+            (Type::DATE, "now()", " DEFAULT CURRENT_DATE()"),
+            (Type::TIME, "now()", " DEFAULT CURRENT_TIME()"),
             (
                 Type::TIMESTAMPTZ,
                 "now() + interval '30 days'",
@@ -296,6 +413,26 @@ mod tests {
             );
 
             assert_eq!(default_clause(&column).as_deref(), Some(expected));
+        }
+
+        let unsupported_cases = [
+            (Type::INT4, "'abc'::text"),
+            (Type::NUMERIC, "10 + 5"),
+            (Type::TEXT, "current_date"),
+            (Type::DATE, "current_time"),
+        ];
+        for (typ, expression) in unsupported_cases {
+            let column = ColumnSchema::new(
+                "value".to_owned(),
+                typ,
+                -1,
+                1,
+                None,
+                true,
+                Some(expression.to_owned()),
+            );
+
+            assert_eq!(default_clause(&column), None);
         }
     }
 
@@ -328,9 +465,19 @@ mod tests {
             true,
             Some("'{}'::jsonb".to_owned()),
         );
+        let unsupported_numeric_expression = ColumnSchema::new(
+            "value".to_owned(),
+            Type::NUMERIC,
+            -1,
+            1,
+            None,
+            true,
+            Some("10 + 5".to_owned()),
+        );
 
         assert_eq!(add_column_default_clause(&supported).as_deref(), Some(" DEFAULT 'pending'"));
         assert_eq!(add_column_default_clause(&unsupported_function), None);
         assert_eq!(add_column_default_clause(&unsupported_json), None);
+        assert_eq!(add_column_default_clause(&unsupported_numeric_expression), None);
     }
 }

@@ -184,7 +184,7 @@ pub fn parse_default_expression(expression: &str, typ: &Type) -> Option<DefaultE
         return Some(DefaultExpression::CurrentUser);
     }
 
-    if let Some(expression) = parse_current_time_expression(expression, typ) {
+    if let Some(expression) = parse_current_time_expression(expression) {
         return Some(expression);
     }
 
@@ -201,15 +201,15 @@ pub fn parse_default_expression(expression: &str, typ: &Type) -> Option<DefaultE
     }
 
     if is_string_literal(expression) {
-        return Some(parse_string_literal(expression, typ));
+        return parse_string_literal(expression, typ);
     }
 
     if is_numeric_literal(expression) {
-        return Some(DefaultExpression::NumericLiteral(expression.to_owned()));
+        return Some(parse_numeric_literal(expression, typ));
     }
 
     if is_bool_literal(expression) {
-        return Some(DefaultExpression::BooleanLiteral(expression.to_owned()));
+        return Some(parse_bool_literal(expression, typ));
     }
 
     parse_numeric_expression(expression).map(DefaultExpression::NumericExpression)
@@ -298,6 +298,35 @@ fn is_cast_type_name(type_name: &str) -> bool {
             ch.is_ascii_alphanumeric()
                 || matches!(ch, '_' | ' ' | '"' | '.' | '[' | ']' | '(' | ')' | ',')
         })
+}
+
+/// Returns whether a Postgres type is text-like.
+fn is_text_type(typ: &Type) -> bool {
+    matches!(typ, &Type::CHAR | &Type::BPCHAR | &Type::VARCHAR | &Type::NAME | &Type::TEXT)
+}
+
+/// Returns whether a Postgres type is numeric-like.
+fn is_numeric_type(typ: &Type) -> bool {
+    matches!(
+        typ,
+        &Type::INT2
+            | &Type::INT4
+            | &Type::INT8
+            | &Type::FLOAT4
+            | &Type::FLOAT8
+            | &Type::NUMERIC
+            | &Type::OID
+    )
+}
+
+/// Returns a SQL string literal for a parser-validated simple literal.
+fn quote_simple_string_literal(expression: &str) -> String {
+    format!("'{expression}'")
+}
+
+/// Unquotes a SQL single-quoted string literal.
+fn unquote_string_literal(expression: &str) -> Option<String> {
+    is_string_literal(expression).then(|| expression[1..expression.len() - 1].replace("''", "'"))
 }
 
 /// Returns whether an expression contains a top-level binary operator.
@@ -413,7 +442,7 @@ fn strip_outer_parens(expression: &str) -> &str {
 
 /// Returns whether an expression is a SQL string literal.
 fn is_string_literal(expression: &str) -> bool {
-    expression.starts_with('\'') && expression.ends_with('\'')
+    expression.len() >= 2 && expression.starts_with('\'') && expression.ends_with('\'')
 }
 
 /// Returns whether an expression is a numeric SQL literal.
@@ -452,16 +481,42 @@ fn is_unsupported_portability_boundary(expression: &str) -> bool {
         || starts_with_ignore_ascii_case(expression, "array ")
 }
 
-/// Parses string literals, including date/time typed literals.
-fn parse_string_literal(expression: &str, typ: &Type) -> DefaultExpression {
+/// Parses string literals, including type-shaped literals.
+fn parse_string_literal(expression: &str, typ: &Type) -> Option<DefaultExpression> {
     match typ {
-        &Type::DATE => DefaultExpression::DateLiteral(expression.to_owned()),
-        &Type::TIME => DefaultExpression::TimeLiteral(expression.to_owned()),
-        &Type::TIMESTAMP | &Type::TIMESTAMPTZ => {
-            DefaultExpression::TimestampLiteral(expression.to_owned())
+        &Type::BOOL => {
+            let expression = unquote_string_literal(expression)?;
+            is_bool_literal(&expression).then_some(DefaultExpression::BooleanLiteral(expression))
         }
-        &Type::JSON | &Type::JSONB => DefaultExpression::JsonLiteral(expression.to_owned()),
-        _ => DefaultExpression::StringLiteral(expression.to_owned()),
+        typ if is_numeric_type(typ) => {
+            let expression = unquote_string_literal(expression)?;
+            is_numeric_literal(&expression).then_some(DefaultExpression::NumericLiteral(expression))
+        }
+        &Type::DATE => Some(DefaultExpression::DateLiteral(expression.to_owned())),
+        &Type::TIME => Some(DefaultExpression::TimeLiteral(expression.to_owned())),
+        &Type::TIMESTAMP | &Type::TIMESTAMPTZ => {
+            Some(DefaultExpression::TimestampLiteral(expression.to_owned()))
+        }
+        &Type::JSON | &Type::JSONB => Some(DefaultExpression::JsonLiteral(expression.to_owned())),
+        _ => Some(DefaultExpression::StringLiteral(expression.to_owned())),
+    }
+}
+
+/// Parses numeric literals, using text-like column types to disambiguate.
+fn parse_numeric_literal(expression: &str, typ: &Type) -> DefaultExpression {
+    if is_text_type(typ) {
+        DefaultExpression::StringLiteral(quote_simple_string_literal(expression))
+    } else {
+        DefaultExpression::NumericLiteral(expression.to_owned())
+    }
+}
+
+/// Parses boolean literals, using text-like column types to disambiguate.
+fn parse_bool_literal(expression: &str, typ: &Type) -> DefaultExpression {
+    if is_text_type(typ) {
+        DefaultExpression::StringLiteral(quote_simple_string_literal(expression))
+    } else {
+        DefaultExpression::BooleanLiteral(expression.to_owned())
     }
 }
 
@@ -483,42 +538,37 @@ fn is_current_user_expression(expression: &str) -> bool {
 }
 
 /// Parses common current-time defaults.
-fn parse_current_time_expression(expression: &str, typ: &Type) -> Option<DefaultExpression> {
+fn parse_current_time_expression(expression: &str) -> Option<DefaultExpression> {
     let expression = expression.trim();
 
-    if (expression.eq_ignore_ascii_case("now()")
+    if expression.eq_ignore_ascii_case("now()")
         || expression.eq_ignore_ascii_case("transaction_timestamp()")
         || expression.eq_ignore_ascii_case("current_timestamp")
-        || expression.eq_ignore_ascii_case("current_timestamp()"))
-        && is_timestamp_type(typ)
+        || expression.eq_ignore_ascii_case("current_timestamp()")
     {
         return Some(DefaultExpression::CurrentTimestamp);
     }
 
-    if (expression.eq_ignore_ascii_case("current_date")
-        || expression.eq_ignore_ascii_case("current_date()"))
-        && *typ == Type::DATE
+    if expression.eq_ignore_ascii_case("current_date")
+        || expression.eq_ignore_ascii_case("current_date()")
     {
         return Some(DefaultExpression::CurrentDate);
     }
 
-    if (expression.eq_ignore_ascii_case("current_time")
-        || expression.eq_ignore_ascii_case("current_time()"))
-        && *typ == Type::TIME
+    if expression.eq_ignore_ascii_case("current_time")
+        || expression.eq_ignore_ascii_case("current_time()")
     {
         return Some(DefaultExpression::CurrentTime);
     }
 
-    if (expression.eq_ignore_ascii_case("localtimestamp")
-        || expression.eq_ignore_ascii_case("localtimestamp()"))
-        && is_timestamp_type(typ)
+    if expression.eq_ignore_ascii_case("localtimestamp")
+        || expression.eq_ignore_ascii_case("localtimestamp()")
     {
         return Some(DefaultExpression::LocalTimestamp);
     }
 
     if starts_with_ignore_ascii_case(expression, "timezone(")
         && ends_with_ignore_ascii_case(expression, "now())")
-        && is_timestamp_type(typ)
     {
         return Some(DefaultExpression::TimezoneNow);
     }
@@ -526,15 +576,10 @@ fn parse_current_time_expression(expression: &str, typ: &Type) -> Option<Default
     None
 }
 
-/// Returns whether a Postgres type maps to a timestamp-like destination type.
-fn is_timestamp_type(typ: &Type) -> bool {
-    matches!(typ, &Type::TIMESTAMP | &Type::TIMESTAMPTZ)
-}
-
 /// Parses current-time plus/minus simple interval defaults.
 fn parse_interval_arithmetic_expression(expression: &str, typ: &Type) -> Option<DefaultExpression> {
     let (left, operator, right) = split_top_level_interval_arithmetic(expression)?;
-    let base = parse_current_time_expression(left, typ)?;
+    let base = parse_current_time_expression(left)?;
     let interval = parse_simple_interval_literal(right)?;
     let temporal_type = temporal_type_for_column_type(typ)?;
     let operator = match operator {
@@ -817,6 +862,31 @@ mod tests {
             parse_default_expression("false", &Type::BOOL),
             Some(DefaultExpression::BooleanLiteral("false".to_owned()))
         );
+        assert_eq!(
+            parse_default_expression("true::text", &Type::TEXT),
+            Some(DefaultExpression::StringLiteral("'true'".to_owned()))
+        );
+        assert_eq!(
+            parse_default_expression("42::text", &Type::TEXT),
+            Some(DefaultExpression::StringLiteral("'42'".to_owned()))
+        );
+        assert_eq!(
+            parse_default_expression("'true'::boolean", &Type::BOOL),
+            Some(DefaultExpression::BooleanLiteral("true".to_owned()))
+        );
+        assert_eq!(
+            parse_default_expression("'42'::integer", &Type::INT4),
+            Some(DefaultExpression::NumericLiteral("42".to_owned()))
+        );
+        assert_eq!(
+            parse_default_expression("'42.10'::numeric(10,2)", &Type::NUMERIC),
+            Some(DefaultExpression::NumericLiteral("42.10".to_owned()))
+        );
+        assert_eq!(
+            parse_default_expression("'1'::integer", &Type::INT4),
+            Some(DefaultExpression::NumericLiteral("1".to_owned()))
+        );
+        assert_eq!(parse_default_expression("'abc'::text", &Type::INT4), None);
     }
 
     #[test]
@@ -825,15 +895,29 @@ mod tests {
             parse_default_expression("now()", &Type::TIMESTAMPTZ),
             Some(DefaultExpression::CurrentTimestamp)
         );
-        assert_eq!(parse_default_expression("now()", &Type::DATE), None);
+        assert_eq!(
+            parse_default_expression("now()", &Type::DATE),
+            Some(DefaultExpression::CurrentTimestamp)
+        );
         assert_eq!(
             parse_default_expression("localtimestamp", &Type::TIMESTAMP),
             Some(DefaultExpression::LocalTimestamp)
         );
-        assert_eq!(parse_default_expression("localtimestamp", &Type::DATE), None);
+        assert_eq!(
+            parse_default_expression("localtimestamp", &Type::DATE),
+            Some(DefaultExpression::LocalTimestamp)
+        );
         assert_eq!(
             parse_default_expression("CURRENT_DATE", &Type::DATE),
             Some(DefaultExpression::CurrentDate)
+        );
+        assert_eq!(
+            parse_default_expression("CURRENT_DATE", &Type::TEXT),
+            Some(DefaultExpression::CurrentDate)
+        );
+        assert_eq!(
+            parse_default_expression("CURRENT_TIME", &Type::TEXT),
+            Some(DefaultExpression::CurrentTime)
         );
     }
 

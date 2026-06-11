@@ -1393,35 +1393,126 @@ impl BigQueryClient {
     /// Returns a rendered default expression for BigQuery, if supported.
     fn default_expression(column_schema: &ColumnSchema) -> Option<String> {
         column_schema.default_expression.as_deref().and_then(|expression| {
-            parse_default_expression(expression, &column_schema.typ)
-                .and_then(|expression| Self::render_default_expression(&expression))
+            parse_default_expression(expression, &column_schema.typ).and_then(|expression| {
+                Self::render_default_expression(&expression, &column_schema.typ)
+            })
         })
     }
 
     /// Renders a parsed default expression as BigQuery SQL.
-    fn render_default_expression(expression: &DefaultExpression) -> Option<String> {
+    fn render_default_expression(expression: &DefaultExpression, typ: &Type) -> Option<String> {
         match expression {
-            DefaultExpression::StringLiteral(expression)
-            | DefaultExpression::NumericLiteral(expression)
-            | DefaultExpression::BooleanLiteral(expression)
-            | DefaultExpression::TimeLiteral(expression) => Some(expression.clone()),
-            DefaultExpression::DateLiteral(expression) => Some(format!("DATE {expression}")),
+            DefaultExpression::StringLiteral(expression) => {
+                Self::is_bigquery_string_default_type(typ).then(|| expression.clone())
+            }
+            DefaultExpression::NumericLiteral(expression) => {
+                if Self::is_bigquery_numeric_default_type(typ) {
+                    Some(expression.clone())
+                } else if Self::is_bigquery_numeric_string_default_type(typ) {
+                    Some(Self::quote_numeric_literal_as_string(expression))
+                } else {
+                    None
+                }
+            }
+            DefaultExpression::BooleanLiteral(expression) => {
+                matches!(typ, &Type::BOOL).then(|| expression.clone())
+            }
+            DefaultExpression::DateLiteral(expression) => {
+                matches!(typ, &Type::DATE).then(|| format!("DATE {expression}"))
+            }
+            DefaultExpression::TimeLiteral(expression) => {
+                matches!(typ, &Type::TIME).then(|| expression.clone())
+            }
             DefaultExpression::TimestampLiteral(expression) => {
-                Some(format!("TIMESTAMP {expression}"))
+                Self::is_bigquery_timestamp_default_type(typ)
+                    .then(|| format!("TIMESTAMP {expression}"))
             }
-            DefaultExpression::JsonLiteral(expression) => Some(format!("JSON {expression}")),
-            DefaultExpression::UuidV4 => Some("GENERATE_UUID()".to_owned()),
-            DefaultExpression::CurrentUser => Some("SESSION_USER()".to_owned()),
-            DefaultExpression::CurrentTimestamp | DefaultExpression::TimezoneNow => {
-                Some("CURRENT_TIMESTAMP()".to_owned())
+            DefaultExpression::JsonLiteral(expression) => {
+                Self::is_json_type(typ).then(|| format!("JSON {expression}"))
             }
-            DefaultExpression::CurrentDate => Some("CURRENT_DATE()".to_owned()),
-            DefaultExpression::CurrentTime => Some("CURRENT_TIME()".to_owned()),
-            DefaultExpression::LocalTimestamp => Some("CURRENT_TIMESTAMP()".to_owned()),
+            DefaultExpression::UuidV4 => {
+                Self::is_bigquery_string_default_type(typ).then(|| "GENERATE_UUID()".to_owned())
+            }
+            DefaultExpression::CurrentUser => {
+                Self::is_bigquery_string_default_type(typ).then(|| "SESSION_USER()".to_owned())
+            }
+            DefaultExpression::CurrentTimestamp
+            | DefaultExpression::LocalTimestamp
+            | DefaultExpression::TimezoneNow => Self::render_current_timestamp_default(typ),
+            DefaultExpression::CurrentDate => {
+                matches!(typ, &Type::DATE).then(|| "CURRENT_DATE()".to_owned())
+            }
+            DefaultExpression::CurrentTime => {
+                matches!(typ, &Type::TIME).then(|| "CURRENT_TIME()".to_owned())
+            }
             DefaultExpression::IntervalArithmetic { .. }
             | DefaultExpression::LiteralFunction { .. }
             | DefaultExpression::NumericExpression(_) => None,
         }
+    }
+
+    /// Renders timestamp-like Postgres defaults for the destination column
+    /// type.
+    fn render_current_timestamp_default(typ: &Type) -> Option<String> {
+        match typ {
+            &Type::DATE => Some("CURRENT_DATE()".to_owned()),
+            &Type::TIME => Some("CURRENT_TIME()".to_owned()),
+            &Type::TIMESTAMP | &Type::TIMESTAMPTZ => Some("CURRENT_TIMESTAMP()".to_owned()),
+            _ => None,
+        }
+    }
+
+    /// Returns whether this Postgres type is created as a BigQuery string
+    /// column and can safely receive string-producing defaults.
+    fn is_bigquery_string_default_type(typ: &Type) -> bool {
+        matches!(
+            typ,
+            &Type::CHAR
+                | &Type::BPCHAR
+                | &Type::VARCHAR
+                | &Type::NAME
+                | &Type::TEXT
+                | &Type::MONEY
+                | &Type::UUID
+        )
+    }
+
+    /// Returns whether this Postgres type is created as a BigQuery numeric
+    /// column and can safely receive numeric defaults.
+    fn is_bigquery_numeric_default_type(typ: &Type) -> bool {
+        matches!(
+            typ,
+            &Type::INT2
+                | &Type::INT4
+                | &Type::INT8
+                | &Type::FLOAT4
+                | &Type::FLOAT8
+                | &Type::NUMERIC
+                | &Type::OID
+        )
+    }
+
+    /// Returns whether this Postgres numeric-like type is created as a
+    /// BigQuery string column.
+    fn is_bigquery_numeric_string_default_type(typ: &Type) -> bool {
+        matches!(typ, &Type::MONEY)
+    }
+
+    /// Returns whether this Postgres type is created as a BigQuery timestamp
+    /// column and can safely receive timestamp defaults.
+    fn is_bigquery_timestamp_default_type(typ: &Type) -> bool {
+        matches!(typ, &Type::TIMESTAMP | &Type::TIMESTAMPTZ)
+    }
+
+    /// Returns whether this Postgres type is created as a BigQuery JSON
+    /// column and can safely receive JSON defaults.
+    fn is_json_type(typ: &Type) -> bool {
+        matches!(typ, &Type::JSON | &Type::JSONB)
+    }
+
+    /// Quotes a parser-validated numeric literal as a SQL string literal.
+    fn quote_numeric_literal_as_string(expression: &str) -> String {
+        format!("'{expression}'")
     }
 
     /// Creates a primary key clause for table creation.
@@ -1836,10 +1927,15 @@ mod tests {
     #[test]
     fn default_expression_renders_portable_expressions() {
         let cases = [
+            (Type::TEXT, "true", "'true'"),
+            (Type::BOOL, "'true'::text", "true"),
+            (Type::MONEY, "42", "'42'"),
             (Type::DATE, "'2026-01-01'::date", "DATE '2026-01-01'"),
             (Type::JSONB, "'{}'::jsonb", "JSON '{}'"),
             (Type::UUID, "gen_random_uuid()", "GENERATE_UUID()"),
             (Type::TIMESTAMPTZ, "now()", "CURRENT_TIMESTAMP()"),
+            (Type::DATE, "now()", "CURRENT_DATE()"),
+            (Type::TIME, "now()", "CURRENT_TIME()"),
             (Type::TIMESTAMP, "localtimestamp", "CURRENT_TIMESTAMP()"),
         ];
 
@@ -1865,7 +1961,10 @@ mod tests {
     fn default_expression_rejects_bigquery_unsupported_expressions() {
         let cases = [
             (Type::INT4, "10 + 5"),
+            (Type::INT4, "'abc'::text"),
             (Type::TIMESTAMPTZ, "now() + interval '30 days'"),
+            (Type::TEXT, "current_date"),
+            (Type::DATE, "current_time"),
             (Type::TEXT, "lower('USER'::text)"),
         ];
 
