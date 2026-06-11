@@ -2108,7 +2108,6 @@ dependencies = [
  "etl-destinations",
  "k8s-openapi",
  "rustls",
- "secrecy",
  "tokio",
  "tracing",
  "tracing-subscriber",

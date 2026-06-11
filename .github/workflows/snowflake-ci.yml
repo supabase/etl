@@ -1,0 +1,190 @@
+name: Snowflake CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  detect_snowflake:
+    name: Detect Snowflake Changes
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    outputs:
+      changed: ${{ steps.detect.outputs.changed }}
+      required: ${{ steps.detect.outputs.required }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Detect Snowflake Requirement
+        id: detect
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          snowflake_paths=(
+            ".github/workflows/snowflake-ci.yml"
+            "crates/etl-api/src/validation/validators/destination.rs"
+            "crates/etl-api/src/validation/validators/snowflake.rs"
+            "crates/etl-api/tests/validators/snowflake.rs"
+            "crates/etl-benchmarks/Cargo.toml"
+            "crates/etl-benchmarks/src"
+            "crates/etl-config/src/shared/destination.rs"
+            "crates/etl-config/src/shared/validators.rs"
+            "crates/etl-destinations/src/snowflake"
+            "crates/etl-destinations/tests/snowflake"
+            "crates/etl-examples/src/bin/snowflake.rs"
+            "crates/etl-replicator/src/core/destinations.rs"
+            "crates/xtask/src/commands/benchmark.rs"
+            "crates/xtask/src/commands/example.rs"
+            "crates/xtask/src/commands/test_snowflake.rs"
+          )
+
+          changed=false
+          if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
+            changed=true
+          else
+            if [[ "${EVENT_NAME}" == "pull_request" ]]; then
+              base_sha="${PR_BASE_SHA}"
+              head_sha="${PR_HEAD_SHA}"
+            else
+              base_sha="${PUSH_BEFORE_SHA}"
+              head_sha="${HEAD_SHA}"
+            fi
+
+            if [[ "${base_sha}" =~ ^0+$ ]]; then
+              changed=true
+            elif [[ -n "$(git diff --name-only "${base_sha}" "${head_sha}" -- "${snowflake_paths[@]}")" ]]; then
+              changed=true
+            fi
+          fi
+
+          required=false
+          if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
+            required=true
+          elif [[ "${EVENT_NAME}" == "push" && "${changed}" == "true" ]]; then
+            required=true
+          elif [[ "${EVENT_NAME}" == "pull_request" && "${changed}" == "true" ]]; then
+            required=true
+          fi
+
+          echo "changed=${changed}" >> "${GITHUB_OUTPUT}"
+          echo "required=${required}" >> "${GITHUB_OUTPUT}"
+
+  snowflake_tests:
+    name: Snowflake Tests
+    needs: detect_snowflake
+    if: >
+      needs.detect_snowflake.outputs.required == 'true' &&
+      (
+        github.event_name != 'pull_request' ||
+        github.event.pull_request.head.repo.full_name == github.repository
+      )
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 60
+    env:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+      POSTGRES_PORT: 5430
+      POSTGRES_REPLICA_PORT: 6430
+      POSTGRES_HOST: localhost
+      TESTS_DATABASE_HOST: localhost
+      TESTS_DATABASE_PORT: 5430
+      TESTS_DATABASE_REPLICA_HOST: localhost
+      TESTS_DATABASE_REPLICA_PORT: 6430
+      TESTS_DATABASE_START_PORT: 5430
+      NUM_LOCAL_DATABASES: 1
+      TESTS_DATABASE_USERNAME: postgres
+      TESTS_DATABASE_PASSWORD: postgres
+      TESTS_DATABASE_TLS_ENABLED: "true"
+      TESTS_DATABASE_TLS_ROOT_CERT: ${{ github.workspace }}/target/postgres-tls/root.crt
+      TESTS_SNOWFLAKE_CONNECTION: ${{ secrets.TESTS_SNOWFLAKE_CONNECTION }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@150fca883cd4034361b621bd4e6a9d34e5143606 # v1.15.4
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: test-snowflake
+
+      - name: Validate Snowflake Secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${TESTS_SNOWFLAKE_CONNECTION}" ]]; then
+            echo "TESTS_SNOWFLAKE_CONNECTION secret is required for Snowflake CI." >&2
+            exit 1
+          fi
+
+      - name: Start Postgres
+        run: |
+          POSTGRES_IMAGE=postgres:18 \
+          POSTGRES_VERSION=18 \
+            cargo xtask postgres start --shards 1 --source-only
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@328a871ad8f62ecac78390391f463ccabc974b72 # v2.69.9
+        with:
+          tool: cargo-nextest
+
+      - name: Run Snowflake Tests
+        run: cargo x test-snowflake --credentials required
+
+  snowflake_gate:
+    name: Snowflake Gate
+    needs: [detect_snowflake, snowflake_tests]
+    if: always()
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - name: Evaluate Snowflake Gate
+        shell: bash
+        env:
+          DETECT_RESULT: ${{ needs.detect_snowflake.result }}
+          REQUIRED: ${{ needs.detect_snowflake.outputs.required }}
+          TEST_RESULT: ${{ needs.snowflake_tests.result }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${DETECT_RESULT}" != "success" ]]; then
+            echo "Snowflake change detection did not succeed: ${DETECT_RESULT}." >&2
+            exit 1
+          fi
+
+          if [[ "${REQUIRED}" != "true" ]]; then
+            echo "Snowflake tests are not required for this change."
+            exit 0
+          fi
+
+          if [[ "${TEST_RESULT}" == "success" ]]; then
+            echo "Snowflake tests passed."
+            exit 0
+          fi
+
+          echo "Snowflake tests are required but finished with result: ${TEST_RESULT}." >&2
+          exit 1

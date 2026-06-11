@@ -1,7 +1,7 @@
 //! Key-pair JWT authentication for the Snowflake SQL and Streaming APIs.
 //!
 //! Flow:
-//!   1. Load RSA private key from disk, derive a public-key fingerprint
+//!   1. Load RSA private key from config, derive a public-key fingerprint
 //!   2. Sign a short-lived JWT (1 h) identifying the account and user
 //!   3. Exchange the JWT at `POST {account_url}/oauth/token` for a bearer token
 //!      (~10 min TTL)
@@ -116,7 +116,7 @@ impl TokenExchanger for HttpExchanger {
 /// Signs a JWT locally, exchanges it for a short-lived scoped token via
 /// Snowflake's OAuth endpoint, and caches the result.
 pub struct AuthManager<E = HttpExchanger> {
-    account_url: String,
+    config: Config,
     account: String,
     user: String,
     encoding_key: EncodingKey,
@@ -126,18 +126,12 @@ pub struct AuthManager<E = HttpExchanger> {
 }
 
 impl AuthManager<HttpExchanger> {
-    /// Build an `AuthManager` from PEM-encoded RSA private key text.
+    /// Build an `AuthManager` from Snowflake configuration.
     ///
     /// Creates its own internal `reqwest::Client` via `HttpExchanger`.
-    pub fn new(
-        config: &Config,
-        private_key_pem: &str,
-        passphrase: Option<&secrecy::SecretString>,
-    ) -> Result<Self> {
+    pub fn new(config: Config) -> Result<Self> {
         Self::with_exchanger(
             config,
-            private_key_pem,
-            passphrase,
             HttpExchanger::new(
                 reqwest::Client::builder()
                     .connect_timeout(HTTP_CONNECT_TIMEOUT)
@@ -150,17 +144,16 @@ impl AuthManager<HttpExchanger> {
 }
 
 impl<E: TokenExchanger> AuthManager<E> {
-    /// Build an `AuthManager` from PEM-encoded RSA private key text.
+    /// Build an `AuthManager` from Snowflake configuration.
     ///
     /// The public-key fingerprint is derived and reused for every JWT.
     /// Accepts PKCS#8 (encrypted or plain) and PKCS#1 PEM formats.
-    pub fn with_exchanger(
-        config: &Config,
-        private_key_pem: &str,
-        passphrase: Option<&secrecy::SecretString>,
-        exchanger: E,
-    ) -> Result<Self> {
-        let (pkcs1_der, key_pair) = decode_and_load_rsa_key(private_key_pem, passphrase)?;
+    pub fn with_exchanger(mut config: Config, exchanger: E) -> Result<Self> {
+        let account = config.account_id.to_uppercase();
+        let user = config.username.to_uppercase();
+        let (private_key, passphrase) = config.take_credentials()?;
+        let (pkcs1_der, key_pair) =
+            decode_and_load_rsa_key(private_key.expose_secret(), passphrase.as_ref())?;
 
         // Snowflake identifies keys by SHA-256(DER-encoded public key).
         let pub_der = key_pair
@@ -176,14 +169,19 @@ impl<E: TokenExchanger> AuthManager<E> {
         let encoding_key = EncodingKey::from_rsa_der(&pkcs1_der);
 
         Ok(Self {
-            account_url: config.account_url().to_owned(),
-            account: config.account_id.to_uppercase(),
-            user: config.username.to_uppercase(),
+            config,
+            account,
+            user,
             encoding_key,
             key_fingerprint,
             cached_token: tokio::sync::Mutex::new(None),
             exchanger,
         })
+    }
+
+    /// Return sanitized Snowflake configuration.
+    pub fn config(&self) -> &Config {
+        &self.config
     }
 
     /// Create a short-lived JWT (1 hour) used to request a scoped OAuth token.
@@ -223,7 +221,7 @@ impl<E: TokenExchanger> TokenProvider for AuthManager<E> {
         tracing::debug!("refreshing Snowflake scoped token");
 
         let jwt = self.generate_jwt()?;
-        let scoped = self.exchanger.exchange(&self.account_url, &jwt).await?;
+        let scoped = self.exchanger.exchange(self.config.account_url(), &jwt).await?;
         let access_token = scoped.access_token.clone();
         *cached = Some(scoped);
 
@@ -329,24 +327,31 @@ mod tests {
         }
     }
 
-    const TEST_KEY_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/test_key.pem");
+    fn load_test_config() -> Config {
+        Config::require_tests_env().unwrap_or_else(|error| panic!("{error}"))
+    }
 
     fn make_test_manager() -> AuthManager<TestExchanger> {
-        make_test_manager_with_account("ORG-ACCT", "USER")
+        AuthManager::with_exchanger(load_test_config(), TestExchanger)
+            .expect("AuthManager::with_exchanger")
     }
 
     fn make_test_manager_with_account(
         account_id: &str,
         username: &str,
     ) -> AuthManager<TestExchanger> {
-        let config = Config::new(account_id, username, "TEST_DB", "PUBLIC").expect("valid config");
-        let pem = std::fs::read_to_string(TEST_KEY_PATH).expect("test key");
+        let connection = load_test_config();
+        let private_key = connection.private_key().expect("private key").clone();
+        let private_key_passphrase = connection.private_key_passphrase().cloned();
+        let config = Config::new(account_id, username, "TEST_DB", "PUBLIC")
+            .expect("valid config")
+            .with_private_key(private_key, private_key_passphrase);
 
-        AuthManager::with_exchanger(&config, &pem, None, TestExchanger)
-            .expect("AuthManager::with_exchanger")
+        AuthManager::with_exchanger(config, TestExchanger).expect("AuthManager::with_exchanger")
     }
 
     #[test]
+    #[ignore = "requires TESTS_SNOWFLAKE_CONNECTION"]
     fn jwt_claims() {
         let cases = [
             // (input_account, input_user, expected_account, expected_user).
@@ -385,8 +390,14 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires TESTS_SNOWFLAKE_CONNECTION"]
     fn key_fingerprint_format() {
         let manager = make_test_manager();
+
+        // Auth sanitized config, by consuming PK and secret passphrase.
+        assert!(manager.config().private_key().is_none());
+        assert!(manager.config().private_key_passphrase().is_none());
+
         let fp = manager.fingerprint();
 
         // Fingerprint must use the SHA256: prefix per Snowflake convention.
@@ -405,6 +416,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires TESTS_SNOWFLAKE_CONNECTION"]
     async fn token_cache_hit() {
         let manager = make_test_manager();
         manager.inject_token_for_test("cached-token-123".to_owned(), Duration::from_secs(120));
@@ -415,6 +427,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires TESTS_SNOWFLAKE_CONNECTION"]
     async fn token_cache_expired_triggers_refresh() {
         let manager = make_test_manager();
 

@@ -6,19 +6,16 @@
 /// 1. Postgres with logical replication enabled (wal_level = logical)
 /// 2. A publication (e.g. `cargo x seed` to create test tables + publication)
 /// 3. Snowflake account with key-pair authentication configured
-/// 4. RSA private key file with the public key registered on the Snowflake user
+/// 4. TESTS_SNOWFLAKE_CONNECTION set with Snowflake key-pair credentials
 ///
 /// Usage:
+///     source .env
 ///     cargo run --bin snowflake -p etl-examples --features snowflake -- \
 ///         --db-host localhost \
 ///         --db-port 5430 \
 ///         --db-name etl_testdata \
 ///         --db-username postgres \
 ///         --db-password postgres \
-///         --snowflake-account myorg-myaccount \
-///         --snowflake-user myuser \
-///         --snowflake-private-key-path /path/to/rsa_key.p8 \
-///         --snowflake-database MY_DATABASE \
 ///         --publication seed_pub
 use std::{error::Error, sync::Arc, sync::Once};
 
@@ -32,7 +29,6 @@ use etl::{
     store::PostgresStore,
 };
 use etl_destinations::snowflake::{AuthManager, Client, Config, Destination};
-use secrecy::SecretString;
 use tokio::signal;
 use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -85,31 +81,9 @@ struct DbArgs {
     db_password: Option<String>,
 }
 
-// Snowflake destination configuration
+// Snowflake pipeline tuning.
 #[derive(Debug, Args)]
 struct SnowflakeArgs {
-    /// Snowflake account identifier (e.g., myorg-myaccount)
-    #[arg(long, env = "TESTS_SNOWFLAKE_ACCOUNT")]
-    snowflake_account: String,
-    /// Snowflake user name configured for key-pair authentication
-    #[arg(long, env = "TESTS_SNOWFLAKE_USER")]
-    snowflake_user: String,
-    /// Path to the RSA private key file (.p8) for key-pair authentication
-    #[arg(long, env = "TESTS_SNOWFLAKE_PRIVATE_KEY_PATH")]
-    snowflake_private_key_path: String,
-    /// Passphrase for the private key file (if the key is encrypted)
-    #[arg(long, env = "TESTS_SNOWFLAKE_PRIVATE_KEY_PASSPHRASE")]
-    snowflake_private_key_passphrase: Option<String>,
-    /// Snowflake database name where tables will be created and data loaded
-    #[arg(long, env = "TESTS_SNOWFLAKE_DATABASE")]
-    snowflake_database: String,
-    /// Snowflake schema name within the database (default: PUBLIC)
-    #[arg(long, env = "TESTS_SNOWFLAKE_SCHEMA", default_value = "PUBLIC")]
-    snowflake_schema: String,
-    /// Snowflake role to use for the session (optional, uses user's default
-    /// role if not specified)
-    #[arg(long, env = "TESTS_SNOWFLAKE_ROLE")]
-    snowflake_role: Option<String>,
     /// Maximum time to wait for a batch to fill in milliseconds (lower values =
     /// lower latency, less throughput)
     #[arg(long, default_value = "5000")]
@@ -208,27 +182,14 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         max_copy_connections_per_table: PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE,
     };
 
-    // Build the Snowflake connection config
-    let mut sf_config = Config::new(
-        &args.sf_args.snowflake_account,
-        &args.sf_args.snowflake_user,
-        &args.sf_args.snowflake_database,
-        &args.sf_args.snowflake_schema,
-    )?;
-    if let Some(ref role) = args.sf_args.snowflake_role {
-        sf_config = sf_config.with_role(role);
-    }
+    let sf_config = Config::require_tests_env()?;
 
     // Build the auth manager using key-pair authentication
-    let passphrase: Option<SecretString> =
-        args.sf_args.snowflake_private_key_passphrase.map(SecretString::from);
-    let private_key_pem = std::fs::read_to_string(&args.sf_args.snowflake_private_key_path)
-        .expect("failed to read private key file");
-    let auth = Arc::new(AuthManager::new(&sf_config, &private_key_pem, passphrase.as_ref())?);
+    let auth = Arc::new(AuthManager::new(sf_config)?);
 
     // Initialize Snowflake destination -- tables will be automatically created
     // to match the Postgres schema
-    let client = Client::new(sf_config, Arc::clone(&auth), pipeline_id);
+    let client = Client::new(Arc::clone(&auth), pipeline_id);
     let destination = Destination::new(client, store.clone());
 
     // Create the pipeline instance with all components

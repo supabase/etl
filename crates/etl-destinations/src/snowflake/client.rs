@@ -44,16 +44,13 @@ impl<T: TokenProvider, C: StreamClient> Clone for Client<T, C> {
 
 /// Convenience constructor for the default client stack.
 impl Client<AuthManager<HttpExchanger>> {
-    pub fn new(
-        config: Config,
-        auth: Arc<AuthManager<HttpExchanger>>,
-        pipeline_id: PipelineId,
-    ) -> Self {
+    pub fn new(auth: Arc<AuthManager<HttpExchanger>>, pipeline_id: PipelineId) -> Self {
         let http = reqwest::Client::builder()
             .connect_timeout(HTTP_CONNECT_TIMEOUT)
             .timeout(HTTP_REQUEST_TIMEOUT)
             .build()
             .expect("failed to build HTTP client");
+        let config = auth.config().clone_without_credentials();
         let database = config.database.clone();
         let schema = config.schema.clone();
         let stream_client = Arc::new(RestStreamClient::new(
@@ -69,15 +66,8 @@ impl Client<AuthManager<HttpExchanger>> {
     ///
     /// Check that credentials are valid and the target database and schema
     /// exist.
-    pub async fn validate_connectivity(
-        config: &Config,
-        private_key_pem: &str,
-        passphrase: Option<&secrecy::SecretString>,
-    ) -> Result<()> {
-        let auth = Arc::new(
-            AuthManager::new(config, private_key_pem, passphrase)
-                .map_err(|e| Error::Auth(e.to_string()))?,
-        );
+    pub async fn validate_connectivity(config: Config) -> Result<()> {
+        let auth = Arc::new(AuthManager::new(config)?);
 
         let http = reqwest::Client::builder()
             .connect_timeout(HTTP_CONNECT_TIMEOUT)
@@ -85,36 +75,34 @@ impl Client<AuthManager<HttpExchanger>> {
             .build()
             .map_err(Error::HttpTransport)?;
 
-        let sql = SqlClient::new(config.clone(), auth, http);
+        let config = auth.config().clone_without_credentials();
+        let database = config.database.clone();
+        let schema = config.schema.clone();
+        let sql = SqlClient::new(config, auth, http);
 
         // `SHOW DATABASES` runs on Cloud Services (no warehouse needed).
-        let db_pattern = quote_string_literal(&config.database);
+        let db_pattern = quote_string_literal(&database);
         let resp = sql.execute_statement(&format!("SHOW DATABASES LIKE {db_pattern}")).await?;
         let db_exists = resp.data.is_some_and(|rows| {
-            rows.iter()
-                .any(|row| row.get(1).and_then(serde_json::Value::as_str) == Some(&config.database))
+            rows.iter().any(|row| row.get(1).and_then(serde_json::Value::as_str) == Some(&database))
         });
         if !db_exists {
-            return Err(Error::DatabaseNotFound(config.database.clone()));
+            return Err(Error::DatabaseNotFound(database));
         }
 
         // `SHOW SCHEMAS` also runs on Cloud Services.
-        let db_ident = quote_identifier(&config.database);
-        let schema_pattern = quote_string_literal(&config.schema);
+        let db_ident = quote_identifier(&database);
+        let schema_pattern = quote_string_literal(&schema);
         let resp = sql
             .execute_statement(&format!(
                 "SHOW SCHEMAS LIKE {schema_pattern} IN DATABASE {db_ident}"
             ))
             .await?;
         let schema_exists = resp.data.is_some_and(|rows| {
-            rows.iter()
-                .any(|row| row.get(1).and_then(serde_json::Value::as_str) == Some(&config.schema))
+            rows.iter().any(|row| row.get(1).and_then(serde_json::Value::as_str) == Some(&schema))
         });
         if !schema_exists {
-            return Err(Error::SchemaNotFound {
-                database: config.database.clone(),
-                schema: config.schema.clone(),
-            });
+            return Err(Error::SchemaNotFound { database, schema });
         }
 
         Ok(())

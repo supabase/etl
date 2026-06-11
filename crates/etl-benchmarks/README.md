@@ -218,7 +218,7 @@ tables and views inside it, but it does not create the dataset.
 
 Snowflake credentials are read from environment variables.
 
-Set them in `.env` (see `.env.example`) or pass them as CLI args:
+Set `BENCH_SNOWFLAKE_CONNECTION` in `.env` (see `crates/etl-destinations/src/snowflake/README.md`):
 
 ```bash
 cargo xtask benchmark \
@@ -227,17 +227,7 @@ cargo xtask benchmark \
   --streaming-duration-seconds 10
 ```
 
-Required environment variables (or their `--sf-*` CLI equivalents):
-
-- `BENCH_SNOWFLAKE_ACCOUNT`: account identifier in `ORG-ACCOUNT` format.
-- `BENCH_SNOWFLAKE_USER`: Snowflake user configured for key-pair auth.
-- `BENCH_SNOWFLAKE_PRIVATE_KEY`: PEM contents or path to the RSA private key file (.p8).
-- `BENCH_SNOWFLAKE_DATABASE`: target database.
-- `BENCH_SNOWFLAKE_SCHEMA`: target schema.
-
-Optional:
-
-- `BENCH_SNOWFLAKE_ROLE`: Snowflake role to assume.
+`BENCH_SNOWFLAKE_CONNECTION` is the only Snowflake benchmark credential input. It is a JSON object with `account`, `user`, `database`, `schema`, optional `role`, optional `private_key_passphrase`, and `private_key`. Snowflake credentials are read from the environment and are not accepted as benchmark CLI arguments.
 
 ## ClickHouse Runs
 
@@ -319,10 +309,7 @@ For BigQuery workflow runs, set the repository secret
 `BENCHMARK_BQ_SA_KEY_JSON`, then pass `destination=bigquery`,
 `bq_project_id`, and an existing `bq_dataset_id`.
 
-For Snowflake workflow runs, set two repository secrets and pass `destination=snowflake`:
-
-- `BENCH_SNOWFLAKE_CONNECTION`: colon-separated `account:user:database:schema`.
-- `BENCH_SNOWFLAKE_PRIVATE_KEY`: full PEM contents of the RSA private key.
+For Snowflake workflow runs, set the `BENCH_SNOWFLAKE_CONNECTION` repository secret and pass `destination=snowflake`.
 
 For ClickHouse workflow runs, pass `destination=clickhouse`. The workflow
 starts the `clickhouse` service from `scripts/docker/docker-compose.yaml` and points

@@ -372,7 +372,6 @@ mod snowflake {
     use etl::pipeline::Pipeline;
     use etl_config::shared::{DestinationConfig, ReplicatorConfig};
     use etl_destinations::snowflake as snowflake_destination;
-    use secrecy::ExposeSecret;
 
     use super::super::{ReplicatorStore, pipeline};
     use crate::error::{ReplicatorError, ReplicatorResult};
@@ -402,15 +401,11 @@ mod snowflake {
         if let Some(r) = role {
             config = config.with_role(r);
         }
+        config = config.with_private_key(private_key.clone(), private_key_passphrase.clone());
         let auth = std::sync::Arc::new(
-            snowflake_destination::AuthManager::new(
-                &config,
-                private_key.expose_secret(),
-                private_key_passphrase.as_ref(),
-            )
-            .map_err(ReplicatorError::config)?,
+            snowflake_destination::AuthManager::new(config).map_err(ReplicatorError::config)?,
         );
-        let client = snowflake_destination::Client::new(config, auth, pipeline_id);
+        let client = snowflake_destination::Client::new(auth, pipeline_id);
         let destination = snowflake_destination::Destination::new(client, store.clone());
 
         let pipeline = Pipeline::new(replicator_config.pipeline, store, destination);
