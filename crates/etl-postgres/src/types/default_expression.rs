@@ -218,11 +218,13 @@ pub fn parse_default_expression(expression: &str, typ: &Type) -> Option<DefaultE
 /// Normalizes PostgreSQL-specific expression wrappers.
 fn normalize_postgres_expression(expression: &str) -> &str {
     let mut expression = expression.trim();
+
     loop {
         let stripped = strip_outer_parens(strip_postgres_cast(expression));
         if stripped == expression {
             return expression;
         }
+
         expression = stripped;
     }
 }
@@ -334,6 +336,7 @@ fn has_top_level_binary_operator(expression: &str) -> bool {
 /// Skips over a SQL single-quoted string literal.
 fn skip_string_literal(bytes: &[u8], mut index: usize) -> usize {
     index += 1;
+
     while index < bytes.len() {
         if bytes[index] == b'\'' {
             if index + 1 < bytes.len() && bytes[index + 1] == b'\'' {
@@ -465,6 +468,7 @@ fn parse_string_literal(expression: &str, typ: &Type) -> DefaultExpression {
 /// Returns whether the expression is a common UUID generator.
 fn is_uuid_expression(expression: &str) -> bool {
     let expression = expression.trim();
+
     expression.eq_ignore_ascii_case("gen_random_uuid()")
         || expression.eq_ignore_ascii_case("uuid_generate_v4()")
 }
@@ -472,6 +476,7 @@ fn is_uuid_expression(expression: &str) -> bool {
 /// Returns whether the expression is a current-user expression.
 fn is_current_user_expression(expression: &str) -> bool {
     let expression = expression.trim();
+
     expression.eq_ignore_ascii_case("current_user")
         || expression.eq_ignore_ascii_case("current_user()")
         || expression.eq_ignore_ascii_case("session_user")
@@ -480,6 +485,7 @@ fn is_current_user_expression(expression: &str) -> bool {
 /// Parses common current-time defaults.
 fn parse_current_time_expression(expression: &str, typ: &Type) -> Option<DefaultExpression> {
     let expression = expression.trim();
+
     if expression.eq_ignore_ascii_case("now()")
         || expression.eq_ignore_ascii_case("transaction_timestamp()")
         || expression.eq_ignore_ascii_case("current_timestamp")
@@ -673,6 +679,7 @@ fn parse_function_call(expression: &str) -> Option<(&str, &str)> {
                 if depth == 0 && index != bytes.len() - 1 {
                     return None;
                 }
+
                 index += 1;
             }
             _ => index += 1,

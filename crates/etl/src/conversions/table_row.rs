@@ -192,6 +192,7 @@ mod tests {
             ordinal_position,
             if primary_key { Some(1) } else { None },
             nullable,
+            None,
         )
     }
 

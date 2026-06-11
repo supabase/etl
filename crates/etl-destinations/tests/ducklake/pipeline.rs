@@ -6,6 +6,7 @@
 use duckdb::Connection;
 use etl::{
     state::TableStateType,
+    store::state::StateStore,
     test_utils::{
         database::{spawn_source_database, test_table_name},
         notifying_store::NotifyingStore,
@@ -879,6 +880,13 @@ async fn schema_change_add_column() {
     pipeline.start().await.unwrap();
     table_ready.notified().await;
 
+    let initial_metadata = store
+        .get_applied_destination_table_metadata(table_id)
+        .await
+        .unwrap()
+        .expect("metadata should exist after table creation");
+    let initial_snapshot_id = initial_metadata.snapshot_id;
+
     let event_notify = destination
         .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
         .await;
@@ -908,6 +916,13 @@ async fn schema_change_add_column() {
     pipeline.shutdown_and_wait().await.unwrap();
     drop(destination);
     checkpoint_lake(&catalog_url, &data_url);
+
+    let final_metadata = store
+        .get_applied_destination_table_metadata(table_id)
+        .await
+        .unwrap()
+        .expect("metadata should exist after schema change");
+    assert!(final_metadata.snapshot_id > initial_snapshot_id);
 
     let conn = open_lake_conn(&catalog_url, &data_url);
     assert_eq!(
@@ -972,6 +987,13 @@ async fn schema_change_is_visible_to_already_open_connection() {
     pipeline.start().await.unwrap();
     table_ready.notified().await;
 
+    let initial_snapshot_id = store
+        .get_applied_destination_table_metadata(table_id)
+        .await
+        .unwrap()
+        .expect("metadata should exist after table creation")
+        .snapshot_id;
+
     checkpoint_lake(&catalog_url, &data_url);
     let conn = open_lake_conn(&catalog_url, &data_url);
     assert_eq!(query_table_columns(&conn, &ducklake_table_name), vec!["id", "name", "age"]);
@@ -1005,6 +1027,14 @@ async fn schema_change_is_visible_to_already_open_connection() {
     pipeline.shutdown_and_wait().await.unwrap();
     drop(destination);
     checkpoint_lake(&catalog_url, &data_url);
+
+    let final_snapshot_id = store
+        .get_applied_destination_table_metadata(table_id)
+        .await
+        .unwrap()
+        .expect("metadata should exist after schema change")
+        .snapshot_id;
+    assert!(final_snapshot_id > initial_snapshot_id);
 
     assert_eq!(
         query_table_columns(&conn, &ducklake_table_name),

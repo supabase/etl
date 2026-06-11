@@ -159,8 +159,8 @@ type TypeModifier = i32;
 /// Represents the schema of a single column in a Postgres table.
 ///
 /// This type contains all metadata about a column including its name, data
-/// type, type modifier, ordinal position, primary key information, and
-/// nullability.
+/// type, type modifier, ordinal position, primary key information, nullability,
+/// and default expression.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct ColumnSchema {
     /// The name of the column.
@@ -189,6 +189,7 @@ impl ColumnSchema {
         ordinal_position: i32,
         primary_key_ordinal_position: Option<i32>,
         nullable: bool,
+        default_expression: Option<String>,
     ) -> ColumnSchema {
         Self {
             name,
@@ -197,14 +198,8 @@ impl ColumnSchema {
             ordinal_position,
             primary_key_ordinal_position,
             nullable,
-            default_expression: None,
+            default_expression,
         }
-    }
-
-    /// Sets the source default expression for this column.
-    pub fn with_default_expression(mut self, default_expression: Option<String>) -> Self {
-        self.default_expression = default_expression;
-        self
     }
 
     /// Returns whether this column is part of the table's primary key.
@@ -1134,9 +1129,9 @@ mod tests {
             TableId::new(123),
             TableName::new("public".to_owned(), "test_table".to_owned()),
             vec![
-                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
-                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true),
-                ColumnSchema::new("age".to_owned(), Type::INT4, -1, 3, None, true),
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false, None),
+                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true, None),
+                ColumnSchema::new("age".to_owned(), Type::INT4, -1, 3, None, true, None),
             ],
         )
     }
@@ -1314,9 +1309,9 @@ mod tests {
             TableId::new(123),
             TableName::new("public".to_owned(), "test_table".to_owned()),
             vec![
-                ColumnSchema::new("tenant_id".to_owned(), Type::INT4, -1, 1, Some(1), false),
-                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 2, Some(2), false),
-                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 3, None, true),
+                ColumnSchema::new("tenant_id".to_owned(), Type::INT4, -1, 1, Some(1), false, None),
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 2, Some(2), false, None),
+                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 3, None, true, None),
             ],
         ));
         let replication_mask = ReplicationMask::from_bytes(vec![0, 1, 1]);
@@ -1336,12 +1331,12 @@ mod tests {
     #[test]
     fn schema_diff_no_changes() {
         let old_schema = create_replicated_schema(vec![
-            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true),
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false, None),
+            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true, None),
         ]);
         let new_schema = create_replicated_schema(vec![
-            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true),
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false, None),
+            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true, None),
         ]);
 
         let diff = old_schema.diff(&new_schema);
@@ -1355,13 +1350,13 @@ mod tests {
     #[test]
     fn schema_diff_column_added() {
         let old_schema = create_replicated_schema(vec![
-            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true),
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false, None),
+            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true, None),
         ]);
         let new_schema = create_replicated_schema(vec![
-            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true),
-            ColumnSchema::new("email".to_owned(), Type::TEXT, -1, 3, None, true),
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false, None),
+            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true, None),
+            ColumnSchema::new("email".to_owned(), Type::TEXT, -1, 3, None, true, None),
         ]);
 
         let diff = old_schema.diff(&new_schema);
@@ -1377,13 +1372,13 @@ mod tests {
     #[test]
     fn schema_diff_column_removed() {
         let old_schema = create_replicated_schema(vec![
-            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true),
-            ColumnSchema::new("age".to_owned(), Type::INT4, -1, 3, None, true),
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false, None),
+            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true, None),
+            ColumnSchema::new("age".to_owned(), Type::INT4, -1, 3, None, true, None),
         ]);
         let new_schema = create_replicated_schema(vec![
-            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true),
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false, None),
+            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true, None),
         ]);
 
         let diff = old_schema.diff(&new_schema);
@@ -1399,12 +1394,12 @@ mod tests {
     #[test]
     fn schema_diff_column_renamed() {
         let old_schema = create_replicated_schema(vec![
-            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true),
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false, None),
+            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true, None),
         ]);
         let new_schema = create_replicated_schema(vec![
-            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("full_name".to_owned(), Type::TEXT, -1, 2, None, true),
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false, None),
+            ColumnSchema::new("full_name".to_owned(), Type::TEXT, -1, 2, None, true, None),
         ]);
 
         let diff = old_schema.diff(&new_schema);
@@ -1426,13 +1421,20 @@ mod tests {
     #[test]
     fn schema_diff_column_default_changed() {
         let old_schema = create_replicated_schema(vec![
-            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("status".to_owned(), Type::TEXT, -1, 2, None, true),
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false, None),
+            ColumnSchema::new("status".to_owned(), Type::TEXT, -1, 2, None, true, None),
         ]);
         let new_schema = create_replicated_schema(vec![
-            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("status".to_owned(), Type::TEXT, -1, 2, None, true)
-                .with_default_expression(Some("'pending'::text".to_owned())),
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false, None),
+            ColumnSchema::new(
+                "status".to_owned(),
+                Type::TEXT,
+                -1,
+                2,
+                None,
+                true,
+                Some("'pending'::text".to_owned()),
+            ),
         ]);
 
         let diff = old_schema.diff(&new_schema);
@@ -1452,14 +1454,46 @@ mod tests {
     }
 
     #[test]
-    fn schema_diff_column_nullability_changed() {
+    fn schema_diff_ignores_unchanged_column_default() {
         let old_schema = create_replicated_schema(vec![
-            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("email".to_owned(), Type::TEXT, -1, 2, None, false),
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false, None),
+            ColumnSchema::new(
+                "status".to_owned(),
+                Type::TEXT,
+                -1,
+                2,
+                None,
+                true,
+                Some("'pending'::text".to_owned()),
+            ),
         ]);
         let new_schema = create_replicated_schema(vec![
-            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("email".to_owned(), Type::TEXT, -1, 2, None, true),
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false, None),
+            ColumnSchema::new(
+                "status".to_owned(),
+                Type::TEXT,
+                -1,
+                2,
+                None,
+                true,
+                Some("'pending'::text".to_owned()),
+            ),
+        ]);
+
+        let diff = old_schema.diff(&new_schema);
+
+        assert!(diff.is_empty());
+    }
+
+    #[test]
+    fn schema_diff_column_nullability_changed() {
+        let old_schema = create_replicated_schema(vec![
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false, None),
+            ColumnSchema::new("email".to_owned(), Type::TEXT, -1, 2, None, false, None),
+        ]);
+        let new_schema = create_replicated_schema(vec![
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false, None),
+            ColumnSchema::new("email".to_owned(), Type::TEXT, -1, 2, None, true, None),
         ]);
 
         let diff = old_schema.diff(&new_schema);
@@ -1478,14 +1512,28 @@ mod tests {
     #[test]
     fn schema_diff_groups_multiple_changes_for_same_column() {
         let old_schema = create_replicated_schema(vec![
-            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("status".to_owned(), Type::TEXT, -1, 2, None, false)
-                .with_default_expression(Some("'pending'::text".to_owned())),
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false, None),
+            ColumnSchema::new(
+                "status".to_owned(),
+                Type::TEXT,
+                -1,
+                2,
+                None,
+                false,
+                Some("'pending'::text".to_owned()),
+            ),
         ]);
         let new_schema = create_replicated_schema(vec![
-            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("state".to_owned(), Type::TEXT, -1, 2, None, true)
-                .with_default_expression(Some("'queued'::text".to_owned())),
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false, None),
+            ColumnSchema::new(
+                "state".to_owned(),
+                Type::TEXT,
+                -1,
+                2,
+                None,
+                true,
+                Some("'queued'::text".to_owned()),
+            ),
         ]);
 
         let diff = old_schema.diff(&new_schema);
@@ -1519,14 +1567,14 @@ mod tests {
         // Expected: age removed (pos 3), name -> full_name renamed (pos 2), email added
         // (pos 4)
         let old_schema = create_replicated_schema(vec![
-            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true),
-            ColumnSchema::new("age".to_owned(), Type::INT4, -1, 3, None, true),
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false, None),
+            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true, None),
+            ColumnSchema::new("age".to_owned(), Type::INT4, -1, 3, None, true, None),
         ]);
         let new_schema = create_replicated_schema(vec![
-            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("full_name".to_owned(), Type::TEXT, -1, 2, None, true),
-            ColumnSchema::new("email".to_owned(), Type::TEXT, -1, 4, None, true),
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false, None),
+            ColumnSchema::new("full_name".to_owned(), Type::TEXT, -1, 2, None, true, None),
+            ColumnSchema::new("email".to_owned(), Type::TEXT, -1, 4, None, true, None),
         ]);
 
         let diff = old_schema.diff(&new_schema);
@@ -1561,11 +1609,12 @@ mod tests {
             1,
             Some(1),
             false,
+            None,
         )]);
         let new_schema = create_replicated_schema(vec![
-            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true),
-            ColumnSchema::new("email".to_owned(), Type::TEXT, -1, 3, None, true),
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false, None),
+            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true, None),
+            ColumnSchema::new("email".to_owned(), Type::TEXT, -1, 3, None, true, None),
         ]);
 
         let diff = old_schema.diff(&new_schema);
@@ -1582,9 +1631,9 @@ mod tests {
     #[test]
     fn schema_diff_multiple_removals() {
         let old_schema = create_replicated_schema(vec![
-            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true),
-            ColumnSchema::new("email".to_owned(), Type::TEXT, -1, 3, None, true),
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false, None),
+            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true, None),
+            ColumnSchema::new("email".to_owned(), Type::TEXT, -1, 3, None, true, None),
         ]);
         let new_schema = create_replicated_schema(vec![ColumnSchema::new(
             "id".to_owned(),
@@ -1593,6 +1642,7 @@ mod tests {
             1,
             Some(1),
             false,
+            None,
         )]);
 
         let diff = old_schema.diff(&new_schema);

@@ -75,8 +75,8 @@ fn make_schema(table_id: u32, schema: &str, table: &str) -> TableSchema {
         TableId::new(table_id),
         TableName::new(schema.to_owned(), table.to_owned()),
         vec![
-            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, None, true),
+            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false, None),
+            ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, None, true, None),
         ],
     )
 }
@@ -86,9 +86,9 @@ fn make_schema_with_email(previous_schema: &TableSchema, snapshot_id: u64) -> Ta
         previous_schema.id,
         previous_schema.name.clone(),
         vec![
-            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, None, true),
-            ColumnSchema::new("email".to_owned(), PgType::TEXT, -1, 3, None, true),
+            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false, None),
+            ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, None, true, None),
+            ColumnSchema::new("email".to_owned(), PgType::TEXT, -1, 3, None, true, None),
         ],
         SnapshotId::from(snapshot_id),
     )
@@ -99,11 +99,11 @@ fn make_rich_schema(table_id: u32) -> TableSchema {
         TableId::new(table_id),
         TableName::new("public".to_owned(), "rich".to_owned()),
         vec![
-            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("label".to_owned(), PgType::VARCHAR, -1, 2, None, true),
-            ColumnSchema::new("score".to_owned(), PgType::FLOAT8, -1, 3, None, true),
-            ColumnSchema::new("active".to_owned(), PgType::BOOL, -1, 4, None, true),
-            ColumnSchema::new("birthday".to_owned(), PgType::DATE, -1, 5, None, true),
+            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false, None),
+            ColumnSchema::new("label".to_owned(), PgType::VARCHAR, -1, 2, None, true, None),
+            ColumnSchema::new("score".to_owned(), PgType::FLOAT8, -1, 3, None, true, None),
+            ColumnSchema::new("active".to_owned(), PgType::BOOL, -1, 4, None, true, None),
+            ColumnSchema::new("birthday".to_owned(), PgType::DATE, -1, 5, None, true, None),
         ],
     )
 }
@@ -1149,9 +1149,9 @@ async fn write_events_recovers_applying_metadata_before_relation_event() {
         old_schema.id,
         old_schema.name.clone(),
         vec![
-            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, None, true),
-            ColumnSchema::new("email".to_owned(), PgType::TEXT, -1, 3, None, true),
+            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false, None),
+            ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, None, true, None),
+            ColumnSchema::new("email".to_owned(), PgType::TEXT, -1, 3, None, true, None),
         ],
         SnapshotId::from(42_u64),
     );
@@ -1226,6 +1226,7 @@ async fn write_events_recovers_applying_metadata_before_relation_event() {
         .unwrap()
         .expect("destination metadata should exist");
     assert!(metadata.is_applied());
+    assert_eq!(metadata.snapshot_id, new_schema.snapshot_id);
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     let mut statement = conn
@@ -1265,14 +1266,35 @@ async fn write_events_applies_defaulted_schema_change() {
         old_schema.id,
         old_schema.name.clone(),
         vec![
-            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, None, true),
-            ColumnSchema::new("status".to_owned(), PgType::TEXT, -1, 3, None, true)
-                .with_default_expression(Some("'new'::text".to_owned())),
-            ColumnSchema::new("score".to_owned(), PgType::INT4, -1, 4, None, true)
-                .with_default_expression(Some("15".to_owned())),
-            ColumnSchema::new("active".to_owned(), PgType::BOOL, -1, 5, None, true)
-                .with_default_expression(Some("true".to_owned())),
+            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false, None),
+            ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, None, true, None),
+            ColumnSchema::new(
+                "status".to_owned(),
+                PgType::TEXT,
+                -1,
+                3,
+                None,
+                true,
+                Some("'new'::text".to_owned()),
+            ),
+            ColumnSchema::new(
+                "score".to_owned(),
+                PgType::INT4,
+                -1,
+                4,
+                None,
+                true,
+                Some("15".to_owned()),
+            ),
+            ColumnSchema::new(
+                "active".to_owned(),
+                PgType::BOOL,
+                -1,
+                5,
+                None,
+                true,
+                Some("true".to_owned()),
+            ),
         ],
         SnapshotId::from(44_u64),
     );
@@ -1385,9 +1407,9 @@ async fn write_events_reconciles_missing_columns_after_applied_metadata() {
         old_schema.id,
         old_schema.name.clone(),
         vec![
-            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, None, true),
-            ColumnSchema::new("email".to_owned(), PgType::TEXT, -1, 3, None, true),
+            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false, None),
+            ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, None, true, None),
+            ColumnSchema::new("email".to_owned(), PgType::TEXT, -1, 3, None, true, None),
         ],
         SnapshotId::from(43_u64),
     );
@@ -1457,6 +1479,7 @@ async fn write_events_reconciles_missing_columns_after_applied_metadata() {
         .unwrap()
         .expect("destination metadata should exist");
     assert!(metadata.is_applied());
+    assert_eq!(metadata.snapshot_id, new_schema.snapshot_id);
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     let mut statement = conn
@@ -1497,18 +1520,18 @@ async fn write_events_supports_drop_and_add_same_column_name() {
         TableId::new(47),
         TableName::new("public".to_owned(), "replace_column_type".to_owned()),
         vec![
-            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, None, true),
-            ColumnSchema::new("status".to_owned(), PgType::TEXT, -1, 3, None, true),
+            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false, None),
+            ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, None, true, None),
+            ColumnSchema::new("status".to_owned(), PgType::TEXT, -1, 3, None, true, None),
         ],
     );
     let new_schema = TableSchema::with_snapshot_id(
         old_schema.id,
         old_schema.name.clone(),
         vec![
-            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, None, true),
-            ColumnSchema::new("status".to_owned(), PgType::INT4, -1, 4, None, true),
+            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false, None),
+            ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, None, true, None),
+            ColumnSchema::new("status".to_owned(), PgType::INT4, -1, 4, None, true, None),
         ],
         SnapshotId::from(48_u64),
     );
@@ -1595,16 +1618,16 @@ async fn write_events_supports_repeated_drop_and_add_same_column_name() {
         TableId::new(49),
         TableName::new("public".to_owned(), "replace_column_twice".to_owned()),
         vec![
-            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("status".to_owned(), PgType::TEXT, -1, 2, None, true),
+            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false, None),
+            ColumnSchema::new("status".to_owned(), PgType::TEXT, -1, 2, None, true, None),
         ],
     );
     let int_schema = TableSchema::with_snapshot_id(
         text_schema.id,
         text_schema.name.clone(),
         vec![
-            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("status".to_owned(), PgType::INT4, -1, 3, None, true),
+            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false, None),
+            ColumnSchema::new("status".to_owned(), PgType::INT4, -1, 3, None, true, None),
         ],
         SnapshotId::from(50_u64),
     );
@@ -1612,8 +1635,8 @@ async fn write_events_supports_repeated_drop_and_add_same_column_name() {
         text_schema.id,
         text_schema.name.clone(),
         vec![
-            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("status".to_owned(), PgType::TEXT, -1, 4, None, true),
+            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false, None),
+            ColumnSchema::new("status".to_owned(), PgType::TEXT, -1, 4, None, true, None),
         ],
         SnapshotId::from(51_u64),
     );
@@ -1710,7 +1733,7 @@ async fn write_table_rows_preserves_active_column_with_tombstone_prefix() {
         TableId::new(52),
         TableName::new("public".to_owned(), "active_tombstone_prefix".to_owned()),
         vec![
-            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false),
+            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false, None),
             ColumnSchema::new(
                 "__etl_ducklake_dropped_business".to_owned(),
                 PgType::TEXT,
@@ -1718,6 +1741,7 @@ async fn write_table_rows_preserves_active_column_with_tombstone_prefix() {
                 2,
                 None,
                 true,
+                None,
             ),
         ],
     );
@@ -1879,6 +1903,7 @@ async fn startup_after_restart_recovers_applying_schema_change() {
         .unwrap()
         .expect("destination metadata should exist");
     assert!(metadata.is_applied());
+    assert_eq!(metadata.snapshot_id, new_schema.snapshot_id);
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(table_column_names(&conn, &table_name), vec!["id", "name", "email"]);
@@ -1898,16 +1923,16 @@ async fn startup_after_restart_drops_stale_rename_source_when_target_exists() {
         TableId::new(53),
         TableName::new("public".to_owned(), "restart_stale_rename_source".to_owned()),
         vec![
-            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("ddl_col_4_1".to_owned(), PgType::TEXT, -1, 4, None, true),
+            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false, None),
+            ColumnSchema::new("ddl_col_4_1".to_owned(), PgType::TEXT, -1, 4, None, true, None),
         ],
     );
     let new_schema = TableSchema::with_snapshot_id(
         old_schema.id,
         old_schema.name.clone(),
         vec![
-            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("ddl_col_4_0".to_owned(), PgType::TEXT, -1, 4, None, true),
+            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false, None),
+            ColumnSchema::new("ddl_col_4_0".to_owned(), PgType::TEXT, -1, 4, None, true, None),
         ],
         SnapshotId::from(54_u64),
     );
@@ -1974,6 +1999,7 @@ async fn startup_after_restart_drops_stale_rename_source_when_target_exists() {
         .unwrap()
         .expect("destination metadata should exist");
     assert!(metadata.is_applied());
+    assert_eq!(metadata.snapshot_id, new_schema.snapshot_id);
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(table_column_names(&conn, &table_name), vec!["id", "ddl_col_4_0"]);
@@ -2049,6 +2075,7 @@ async fn startup_after_restart_recovers_applying_schema_change_with_pruned_previ
         .unwrap()
         .expect("destination metadata should exist");
     assert!(metadata.is_applied());
+    assert_eq!(metadata.snapshot_id, new_schema.snapshot_id);
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(table_column_names(&conn, &table_name), vec!["id", "name", "email"]);
@@ -2084,6 +2111,7 @@ async fn startup_after_restart_recovers_initial_applying_metadata() {
         .unwrap()
         .expect("destination metadata should exist");
     assert!(metadata.is_applied());
+    assert_eq!(metadata.snapshot_id, schema.snapshot_id);
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(table_column_names(&conn, &table_name), vec!["id", "name", "email"]);

@@ -403,7 +403,15 @@ mod tests {
         nullable: bool,
         primary_key_ordinal: Option<i32>,
     ) -> ColumnSchema {
-        ColumnSchema::new(name.to_owned(), typ, -1, ordinal_position, primary_key_ordinal, nullable)
+        ColumnSchema::new(
+            name.to_owned(),
+            typ,
+            -1,
+            ordinal_position,
+            primary_key_ordinal,
+            nullable,
+            None,
+        )
     }
 
     #[test]

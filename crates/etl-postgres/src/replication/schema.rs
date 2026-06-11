@@ -585,8 +585,8 @@ fn parse_column_schema(row: &PgRow) -> ColumnSchema {
         ordinal_position,
         primary_key_ordinal_position,
         nullable,
+        default_expression,
     )
-    .with_default_expression(default_expression)
 }
 
 #[cfg(test)]

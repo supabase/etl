@@ -85,8 +85,8 @@ fn make_table_schema(table_id: u32, schema: &str, table: &str) -> TableSchema {
         TableId::new(table_id),
         TableName::new(schema.to_owned(), table.to_owned()),
         vec![
-            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true),
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false, None),
+            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true, None),
         ],
     )
 }
@@ -302,8 +302,8 @@ async fn schema_evolution_add_column() {
         table_id,
         TableName::new("public".to_owned(), src_table.clone()),
         vec![
-            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true),
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false, None),
+            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true, None),
         ],
     );
     let initial_replicated = ReplicatedTableSchema::all(Arc::new(initial_schema.clone()));
@@ -313,9 +313,9 @@ async fn schema_evolution_add_column() {
         table_id,
         TableName::new("public".to_owned(), src_table.clone()),
         vec![
-            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true),
-            ColumnSchema::new("email".to_owned(), Type::TEXT, -1, 3, None, true),
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false, None),
+            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true, None),
+            ColumnSchema::new("email".to_owned(), Type::TEXT, -1, 3, None, true, None),
         ],
         new_snapshot_id,
     );
@@ -430,8 +430,8 @@ async fn schema_evolution_add_column_defaults() {
         table_id,
         TableName::new("public".to_owned(), src_table.clone()),
         vec![
-            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true),
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false, None),
+            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true, None),
         ],
     );
     let initial_replicated = ReplicatedTableSchema::all(Arc::new(initial_schema.clone()));
@@ -441,14 +441,35 @@ async fn schema_evolution_add_column_defaults() {
         table_id,
         TableName::new("public".to_owned(), src_table.clone()),
         vec![
-            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true),
-            ColumnSchema::new("status".to_owned(), Type::TEXT, -1, 3, None, true)
-                .with_default_expression(Some("'new'::text".to_owned())),
-            ColumnSchema::new("score".to_owned(), Type::INT4, -1, 4, None, true)
-                .with_default_expression(Some("15".to_owned())),
-            ColumnSchema::new("active".to_owned(), Type::BOOL, -1, 5, None, true)
-                .with_default_expression(Some("true".to_owned())),
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false, None),
+            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true, None),
+            ColumnSchema::new(
+                "status".to_owned(),
+                Type::TEXT,
+                -1,
+                3,
+                None,
+                true,
+                Some("'new'::text".to_owned()),
+            ),
+            ColumnSchema::new(
+                "score".to_owned(),
+                Type::INT4,
+                -1,
+                4,
+                None,
+                true,
+                Some("15".to_owned()),
+            ),
+            ColumnSchema::new(
+                "active".to_owned(),
+                Type::BOOL,
+                -1,
+                5,
+                None,
+                true,
+                Some("true".to_owned()),
+            ),
         ],
         new_snapshot_id,
     );
@@ -573,8 +594,8 @@ async fn schema_evolution_rename_column() {
         table_id,
         TableName::new("public".to_owned(), src_table.clone()),
         vec![
-            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true),
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false, None),
+            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true, None),
         ],
     );
     let initial_replicated = ReplicatedTableSchema::all(Arc::new(initial_schema.clone()));
@@ -584,8 +605,8 @@ async fn schema_evolution_rename_column() {
         table_id,
         TableName::new("public".to_owned(), src_table.clone()),
         vec![
-            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("full_name".to_owned(), Type::TEXT, -1, 2, None, true),
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false, None),
+            ColumnSchema::new("full_name".to_owned(), Type::TEXT, -1, 2, None, true, None),
         ],
         new_snapshot_id,
     );
@@ -700,9 +721,9 @@ async fn schema_evolution_drop_column() {
         table_id,
         TableName::new("public".to_owned(), src_table.clone()),
         vec![
-            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true),
-            ColumnSchema::new("email".to_owned(), Type::TEXT, -1, 3, None, true),
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false, None),
+            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true, None),
+            ColumnSchema::new("email".to_owned(), Type::TEXT, -1, 3, None, true, None),
         ],
     );
     let initial_replicated = ReplicatedTableSchema::all(Arc::new(initial_schema.clone()));
@@ -712,8 +733,8 @@ async fn schema_evolution_drop_column() {
         table_id,
         TableName::new("public".to_owned(), src_table.clone()),
         vec![
-            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true),
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false, None),
+            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true, None),
         ],
         new_snapshot_id,
     );
@@ -825,8 +846,8 @@ async fn schema_evolution_interleaved_ddl_dml() {
         table_id,
         table_name.clone(),
         vec![
-            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true),
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false, None),
+            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true, None),
         ],
     );
     let replicated_v1 = ReplicatedTableSchema::all(Arc::new(schema_v1.clone()));
@@ -836,9 +857,9 @@ async fn schema_evolution_interleaved_ddl_dml() {
         table_id,
         table_name.clone(),
         vec![
-            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true),
-            ColumnSchema::new("email".to_owned(), Type::TEXT, -1, 3, None, true),
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false, None),
+            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true, None),
+            ColumnSchema::new("email".to_owned(), Type::TEXT, -1, 3, None, true, None),
         ],
         SnapshotId::new(PgLsn::from(100u64)),
     );
@@ -849,9 +870,9 @@ async fn schema_evolution_interleaved_ddl_dml() {
         table_id,
         table_name.clone(),
         vec![
-            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("full_name".to_owned(), Type::TEXT, -1, 2, None, true),
-            ColumnSchema::new("email".to_owned(), Type::TEXT, -1, 3, None, true),
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false, None),
+            ColumnSchema::new("full_name".to_owned(), Type::TEXT, -1, 2, None, true, None),
+            ColumnSchema::new("email".to_owned(), Type::TEXT, -1, 3, None, true, None),
         ],
         SnapshotId::new(PgLsn::from(200u64)),
     );
@@ -862,8 +883,8 @@ async fn schema_evolution_interleaved_ddl_dml() {
         table_id,
         table_name.clone(),
         vec![
-            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("full_name".to_owned(), Type::TEXT, -1, 2, None, true),
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false, None),
+            ColumnSchema::new("full_name".to_owned(), Type::TEXT, -1, 2, None, true, None),
         ],
         SnapshotId::new(PgLsn::from(300u64)),
     );

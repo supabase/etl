@@ -2205,6 +2205,13 @@ async fn table_schema_change() {
     pipeline.start().await.unwrap();
     table_sync_done.notified().await;
 
+    let initial_state = store
+        .get_applied_destination_table_metadata(table_id)
+        .await
+        .unwrap()
+        .expect("destination schema state should exist after table creation");
+    let initial_snapshot_id = initial_state.snapshot_id;
+
     // Insert the initial row.
     let event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
 
@@ -2264,6 +2271,16 @@ async fn table_schema_change() {
     event_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
+
+    let final_state = store
+        .get_applied_destination_table_metadata(table_id)
+        .await
+        .unwrap()
+        .expect("destination schema state should exist after schema change");
+    assert!(
+        final_state.snapshot_id > initial_snapshot_id,
+        "snapshot_id should have increased after schema change"
+    );
 
     let rows = bigquery_database.query_table(table_name).await.unwrap();
     let mut rows = parse_bigquery_table_rows::<BigQuerySchemaChangeRow>(rows);

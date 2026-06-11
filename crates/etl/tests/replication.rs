@@ -47,6 +47,7 @@ fn test_column(
         ordinal_position,
         if primary_key { Some(1) } else { None },
         nullable,
+        None,
     )
 }
 
@@ -72,8 +73,8 @@ fn column_schemas_from_ddl_message(message: &JsonValue) -> Vec<ColumnSchema> {
                 column["attnum"].as_i64().unwrap() as i32,
                 primary_key_positions.get(&(column["attnum"].as_i64().unwrap() as i32)).copied(),
                 !column["attnotnull"].as_bool().unwrap(),
+                column["default_expression"].as_str().map(ToOwned::to_owned),
             )
-            .with_default_expression(column["default_expression"].as_str().map(ToOwned::to_owned))
         })
         .collect::<Vec<_>>();
     columns.sort_by_key(|column| column.ordinal_position);
@@ -2346,7 +2347,8 @@ async fn table_copy_stream_with_ctid_partition() {
     let (transaction, _) =
         client.create_slot_with_transaction(&test_slot_name("my_slot")).await.unwrap();
 
-    let column_schemas = &[ColumnSchema::new("age".to_owned(), Type::INT4, -1, 1, None, true)];
+    let column_schemas =
+        &[ColumnSchema::new("age".to_owned(), Type::INT4, -1, 1, None, true, None)];
 
     let partitions = transaction.plan_ctid_partitions(table_id, 4).await.unwrap();
     assert!(!partitions.is_empty(), "expected at least one partition for non-empty table");

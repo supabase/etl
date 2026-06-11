@@ -167,7 +167,7 @@ mod tests {
     use super::*;
 
     fn col(name: &str) -> ColumnSchema {
-        ColumnSchema::new(name.to_owned(), Type::INT4, -1, 1, None, true)
+        ColumnSchema::new(name.to_owned(), Type::INT4, -1, 1, None, true, None)
     }
 
     #[test]
@@ -230,8 +230,8 @@ mod tests {
     #[test]
     fn build_column_defs_output() {
         let columns = vec![
-            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, None, true),
-            ColumnSchema::new("created_at".to_owned(), Type::TIMESTAMPTZ, -1, 2, None, true),
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, None, true, None),
+            ColumnSchema::new("created_at".to_owned(), Type::TIMESTAMPTZ, -1, 2, None, true, None),
         ];
         let defs = build_column_defs(&columns);
         assert_eq!(
@@ -243,10 +243,24 @@ mod tests {
     #[test]
     fn build_column_defs_includes_supported_default() {
         let columns = vec![
-            ColumnSchema::new("status".to_owned(), Type::TEXT, -1, 1, None, true)
-                .with_default_expression(Some("'pending'::text".to_owned())),
-            ColumnSchema::new("payload".to_owned(), Type::JSONB, -1, 2, None, true)
-                .with_default_expression(Some("'{}'::jsonb".to_owned())),
+            ColumnSchema::new(
+                "status".to_owned(),
+                Type::TEXT,
+                -1,
+                1,
+                None,
+                true,
+                Some("'pending'::text".to_owned()),
+            ),
+            ColumnSchema::new(
+                "payload".to_owned(),
+                Type::JSONB,
+                -1,
+                2,
+                None,
+                true,
+                Some("'{}'::jsonb".to_owned()),
+            ),
         ];
 
         let defs = build_column_defs(&columns);
@@ -271,8 +285,15 @@ mod tests {
         ];
 
         for (typ, expression, expected) in cases {
-            let column = ColumnSchema::new("value".to_owned(), typ, -1, 1, None, true)
-                .with_default_expression(Some(expression.to_owned()));
+            let column = ColumnSchema::new(
+                "value".to_owned(),
+                typ,
+                -1,
+                1,
+                None,
+                true,
+                Some(expression.to_owned()),
+            );
 
             assert_eq!(default_clause(&column).as_deref(), Some(expected));
         }
@@ -280,14 +301,33 @@ mod tests {
 
     #[test]
     fn add_column_default_clause_only_renders_snowflake_add_column_safe_expressions() {
-        let supported = ColumnSchema::new("value".to_owned(), Type::TEXT, -1, 1, None, true)
-            .with_default_expression(Some("'pending'::text".to_owned()));
-        let unsupported_function =
-            ColumnSchema::new("value".to_owned(), Type::UUID, -1, 1, None, true)
-                .with_default_expression(Some("gen_random_uuid()".to_owned()));
-        let unsupported_json =
-            ColumnSchema::new("value".to_owned(), Type::JSONB, -1, 1, None, true)
-                .with_default_expression(Some("'{}'::jsonb".to_owned()));
+        let supported = ColumnSchema::new(
+            "value".to_owned(),
+            Type::TEXT,
+            -1,
+            1,
+            None,
+            true,
+            Some("'pending'::text".to_owned()),
+        );
+        let unsupported_function = ColumnSchema::new(
+            "value".to_owned(),
+            Type::UUID,
+            -1,
+            1,
+            None,
+            true,
+            Some("gen_random_uuid()".to_owned()),
+        );
+        let unsupported_json = ColumnSchema::new(
+            "value".to_owned(),
+            Type::JSONB,
+            -1,
+            1,
+            None,
+            true,
+            Some("'{}'::jsonb".to_owned()),
+        );
 
         assert_eq!(add_column_default_clause(&supported).as_deref(), Some(" DEFAULT 'pending'"));
         assert_eq!(add_column_default_clause(&unsupported_function), None);

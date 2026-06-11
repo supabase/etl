@@ -30,6 +30,7 @@ fn test_column(
         ordinal_position,
         primary_key_ordinal_position,
         nullable,
+        None,
     )
 }
 #[tokio::test]

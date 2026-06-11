@@ -1685,7 +1685,15 @@ mod tests {
         nullable: bool,
         primary_key_ordinal: Option<i32>,
     ) -> ColumnSchema {
-        ColumnSchema::new(name.to_owned(), typ, -1, ordinal_position, primary_key_ordinal, nullable)
+        ColumnSchema::new(
+            name.to_owned(),
+            typ,
+            -1,
+            ordinal_position,
+            primary_key_ordinal,
+            nullable,
+            None,
+        )
     }
 
     /// Creates a [`ReplicatedTableSchema`] from test columns with all columns
@@ -1790,8 +1798,15 @@ mod tests {
 
     #[test]
     fn column_spec_includes_supported_default() {
-        let column_schema = test_column("status", Type::TEXT, 1, true, None)
-            .with_default_expression(Some("'pending'::text".to_owned()));
+        let column_schema = ColumnSchema::new(
+            "status".to_owned(),
+            Type::TEXT,
+            -1,
+            1,
+            None,
+            true,
+            Some("'pending'::text".to_owned()),
+        );
 
         let spec = BigQueryClient::column_spec(&column_schema).expect("column spec generation");
 
@@ -1828,8 +1843,15 @@ mod tests {
         ];
 
         for (typ, expression, expected) in cases {
-            let column_schema = test_column("value", typ, 1, true, None)
-                .with_default_expression(Some(expression.to_owned()));
+            let column_schema = ColumnSchema::new(
+                "value".to_owned(),
+                typ,
+                -1,
+                1,
+                None,
+                true,
+                Some(expression.to_owned()),
+            );
 
             assert_eq!(
                 BigQueryClient::default_expression(&column_schema).as_deref(),
@@ -1847,8 +1869,15 @@ mod tests {
         ];
 
         for (typ, expression) in cases {
-            let column_schema = test_column("value", typ, 1, true, None)
-                .with_default_expression(Some(expression.to_owned()));
+            let column_schema = ColumnSchema::new(
+                "value".to_owned(),
+                typ,
+                -1,
+                1,
+                None,
+                true,
+                Some(expression.to_owned()),
+            );
 
             assert_eq!(BigQueryClient::default_expression(&column_schema), None);
             assert!(!BigQueryClient::supports_column_default(&column_schema));

@@ -873,12 +873,6 @@ where
                         let old_default_was_supported = old_expression.is_some()
                             && supports_clickhouse_default(&change.old_column);
 
-                        if old_default_was_supported {
-                            self.client
-                                .materialize_column(clickhouse_table_name, &change.new_column.name)
-                                .await?;
-                        }
-
                         if new_expression.is_some() {
                             if supports_clickhouse_default(&change.new_column) {
                                 self.client
@@ -1405,8 +1399,8 @@ mod tests {
             TableId::new(1),
             TableName::new("public".to_owned(), "users".to_owned()),
             vec![
-                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
-                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true),
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false, None),
+                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true, None),
             ],
         ));
         let replication_mask = ReplicationMask::all(&table_schema);
@@ -1424,9 +1418,9 @@ mod tests {
             TableId::new(1),
             TableName::new("public".to_owned(), "users".to_owned()),
             vec![
-                ColumnSchema::new("tenant_id".to_owned(), Type::INT4, -1, 1, Some(1), false),
-                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 2, Some(2), false),
-                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 3, None, true),
+                ColumnSchema::new("tenant_id".to_owned(), Type::INT4, -1, 1, Some(1), false, None),
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 2, Some(2), false, None),
+                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 3, None, true, None),
             ],
         ));
         let replication_mask = ReplicationMask::from_bytes(vec![0, 1, 1]);
@@ -1490,7 +1484,7 @@ mod tests {
         let table_schema = Arc::new(TableSchema::new(
             TableId::new(2),
             TableName::new("public".to_owned(), "events".to_owned()),
-            vec![ColumnSchema::new("value".to_owned(), Type::TEXT, -1, 1, None, true)],
+            vec![ColumnSchema::new("value".to_owned(), Type::TEXT, -1, 1, None, true, None)],
         ));
         let replication_mask = ReplicationMask::all(&table_schema);
         let identity_mask = IdentityMask::from_bytes(vec![1]);
@@ -1533,9 +1527,9 @@ mod tests {
             TableId::new(7),
             TableName::new("public".to_owned(), "replacing_merge_tree_alter".to_owned()),
             vec![
-                ColumnSchema::new("tenant_id".to_owned(), Type::INT4, -1, 1, Some(1), false),
-                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 2, Some(2), false),
-                ColumnSchema::new("value".to_owned(), Type::TEXT, -1, 3, None, true),
+                ColumnSchema::new("tenant_id".to_owned(), Type::INT4, -1, 1, Some(1), false, None),
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 2, Some(2), false, None),
+                ColumnSchema::new("value".to_owned(), Type::TEXT, -1, 3, None, true, None),
             ],
         ));
         let replication_mask = ReplicationMask::all(&table_schema);
@@ -1557,6 +1551,7 @@ mod tests {
                 ordinal_position,
                 None,
                 true,
+                None,
             ),
             new_column: ColumnSchema::new(
                 new_name.to_owned(),
@@ -1565,6 +1560,7 @@ mod tests {
                 ordinal_position,
                 None,
                 true,
+                None,
             ),
             modifications: vec![etl::types::ColumnModification::Rename {
                 old_name: old_name.to_owned(),
@@ -1586,6 +1582,7 @@ mod tests {
                 3,
                 None,
                 true,
+                None,
             )],
             columns_to_change: Vec::new(),
         };
@@ -1611,6 +1608,7 @@ mod tests {
                 1,
                 Some(1),
                 false,
+                None,
             )],
             columns_to_change: Vec::new(),
         };

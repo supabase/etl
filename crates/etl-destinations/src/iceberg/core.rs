@@ -607,8 +607,24 @@ where
         let sequence_number_col =
             find_unique_column_name(&column_schemas, SEQUENCE_NUMBER_COLUMN_NAME);
 
-        column_schemas.push(ColumnSchema::new(cdc_operation_col, Type::TEXT, -1, 0, None, false));
-        column_schemas.push(ColumnSchema::new(sequence_number_col, Type::TEXT, -1, 0, None, false));
+        column_schemas.push(ColumnSchema::new(
+            cdc_operation_col,
+            Type::TEXT,
+            -1,
+            0,
+            None,
+            false,
+            None,
+        ));
+        column_schemas.push(ColumnSchema::new(
+            sequence_number_col,
+            Type::TEXT,
+            -1,
+            0,
+            None,
+            false,
+            None,
+        ));
 
         column_schemas
     }
@@ -790,8 +806,8 @@ mod tests {
             TableId::new(1),
             TableName::new("public".to_owned(), "users".to_owned()),
             vec![
-                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
-                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true),
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false, None),
+                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true, None),
             ],
         ));
         let replication_mask = ReplicationMask::all(&table_schema);
@@ -817,7 +833,15 @@ mod tests {
         nullable: bool,
         primary_key_ordinal: Option<i32>,
     ) -> ColumnSchema {
-        ColumnSchema::new(name.to_owned(), typ, -1, ordinal_position, primary_key_ordinal, nullable)
+        ColumnSchema::new(
+            name.to_owned(),
+            typ,
+            -1,
+            ordinal_position,
+            primary_key_ordinal,
+            nullable,
+            None,
+        )
     }
 
     #[test]

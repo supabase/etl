@@ -1,5 +1,6 @@
 use etl::{
     state::TableStateType,
+    store::StateStore,
     test_utils::{
         database::{spawn_source_database, test_table_name},
         notifying_store::NotifyingStore,
@@ -1778,6 +1779,13 @@ async fn schema_change_add_column_inner(engine: ClickHouseEngine) {
     let initial_columns = clickhouse_db.column_names(clickhouse_table_name).await;
     assert_eq!(initial_columns, vec!["id", "name", "age"]);
 
+    let initial_metadata = store
+        .get_applied_destination_table_metadata(table_id)
+        .await
+        .unwrap()
+        .expect("metadata should exist after table creation");
+    let initial_snapshot_id = initial_metadata.snapshot_id;
+
     // --- WHEN: add column and insert with new schema ---
     let event_notify = destination
         .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
@@ -1831,6 +1839,16 @@ async fn schema_change_add_column_inner(engine: ClickHouseEngine) {
     // --- THEN: ClickHouse has the new columns, both rows present ---
     let final_columns = clickhouse_db.column_names(clickhouse_table_name).await;
     assert_eq!(final_columns, vec!["id", "name", "age", "email", "score"]);
+
+    let final_metadata = store
+        .get_applied_destination_table_metadata(table_id)
+        .await
+        .unwrap()
+        .expect("metadata should exist after schema change");
+    assert!(
+        final_metadata.snapshot_id > initial_snapshot_id,
+        "snapshot_id should increase after schema change"
+    );
 
     let final_column_types = clickhouse_db.column_types(clickhouse_table_name).await;
     assert_eq!(
@@ -2083,6 +2101,13 @@ async fn schema_change_add_drop_rename_inner(engine: ClickHouseEngine) {
     let initial_columns = clickhouse_db.column_names(clickhouse_table_name).await;
     assert_eq!(initial_columns, vec!["id", "name", "age", "status"]);
 
+    let initial_metadata = store
+        .get_applied_destination_table_metadata(table_id)
+        .await
+        .unwrap()
+        .expect("metadata should exist after table creation");
+    let initial_snapshot_id = initial_metadata.snapshot_id;
+
     // --- WHEN: rename + drop + add and insert with new schema ---
     let event_notify = destination
         .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
@@ -2144,6 +2169,16 @@ async fn schema_change_add_drop_rename_inner(engine: ClickHouseEngine) {
     // --- THEN: ClickHouse schema reflects all changes ---
     let final_columns = clickhouse_db.column_names(clickhouse_table_name).await;
     assert_eq!(final_columns, vec!["id", "full_name", "status", "email"]);
+
+    let final_metadata = store
+        .get_applied_destination_table_metadata(table_id)
+        .await
+        .unwrap()
+        .expect("metadata should exist after schema change");
+    assert!(
+        final_metadata.snapshot_id > initial_snapshot_id,
+        "snapshot_id should increase after schema change"
+    );
 
     assert_eq!(rows.len(), 2, "expected Alice + Bob");
 
