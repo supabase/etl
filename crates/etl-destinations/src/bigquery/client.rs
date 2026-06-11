@@ -4,8 +4,7 @@ use etl::{
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
     types::{
-        Cell, ColumnSchema, DefaultExpression, DefaultInterval, DefaultIntervalOperator,
-        DefaultIntervalUnit, DefaultTemporalType, PipelineId, ReplicatedTableSchema, Type,
+        Cell, ColumnSchema, DefaultExpression, PipelineId, ReplicatedTableSchema, Type,
         is_array_type, parse_default_expression,
     },
 };
@@ -81,31 +80,6 @@ const TRANSIENT_BIGQUERY_QUERY_REASONS: &[&str] = &["backendError", "jobBackendE
 /// Protobuf type name for BigQuery storage errors embedded in gRPC status
 /// details.
 const BIGQUERY_STORAGE_ERROR_TYPE_NAME: &str = "google.cloud.bigquery.storage.v1.StorageError";
-
-/// Returns whether BigQuery supports a unit for date interval arithmetic.
-fn is_bigquery_date_interval_unit(unit: DefaultIntervalUnit) -> bool {
-    matches!(
-        unit,
-        DefaultIntervalUnit::Day
-            | DefaultIntervalUnit::Week
-            | DefaultIntervalUnit::Month
-            | DefaultIntervalUnit::Quarter
-            | DefaultIntervalUnit::Year
-    )
-}
-
-/// Returns whether BigQuery supports a unit for timestamp interval arithmetic.
-fn is_bigquery_timestamp_interval_unit(unit: DefaultIntervalUnit) -> bool {
-    matches!(
-        unit,
-        DefaultIntervalUnit::Microsecond
-            | DefaultIntervalUnit::Millisecond
-            | DefaultIntervalUnit::Second
-            | DefaultIntervalUnit::Minute
-            | DefaultIntervalUnit::Hour
-            | DefaultIntervalUnit::Day
-    )
-}
 
 /// Special column name for Change Data Capture operations in BigQuery.
 const BIGQUERY_CDC_SPECIAL_COLUMN: &str = "_CHANGE_TYPE";
@@ -1429,8 +1403,7 @@ impl BigQueryClient {
             DefaultExpression::StringLiteral(expression)
             | DefaultExpression::NumericLiteral(expression)
             | DefaultExpression::BooleanLiteral(expression)
-            | DefaultExpression::TimeLiteral(expression)
-            | DefaultExpression::NumericExpression(expression) => Some(expression.clone()),
+            | DefaultExpression::TimeLiteral(expression) => Some(expression.clone()),
             DefaultExpression::DateLiteral(expression) => Some(format!("DATE {expression}")),
             DefaultExpression::TimestampLiteral(expression) => {
                 Some(format!("TIMESTAMP {expression}"))
@@ -1444,49 +1417,10 @@ impl BigQueryClient {
             DefaultExpression::CurrentDate => Some("CURRENT_DATE()".to_owned()),
             DefaultExpression::CurrentTime => Some("CURRENT_TIME()".to_owned()),
             DefaultExpression::LocalTimestamp => Some("CURRENT_DATETIME()".to_owned()),
-            DefaultExpression::IntervalArithmetic { base, operator, interval, temporal_type } => {
-                Self::render_interval_arithmetic(base, *operator, interval, *temporal_type)
-            }
-            DefaultExpression::LiteralFunction { function, argument } => {
-                Some(format!("{}({argument})", function.as_upper_name()))
-            }
+            DefaultExpression::IntervalArithmetic { .. }
+            | DefaultExpression::LiteralFunction { .. }
+            | DefaultExpression::NumericExpression(_) => None,
         }
-    }
-
-    /// Renders BigQuery interval arithmetic for supported temporal types.
-    fn render_interval_arithmetic(
-        base: &DefaultExpression,
-        operator: DefaultIntervalOperator,
-        interval: &DefaultInterval,
-        temporal_type: DefaultTemporalType,
-    ) -> Option<String> {
-        let base = Self::render_default_expression(base)?;
-        let unit = interval.unit.as_upper_singular();
-        let function = match (operator, temporal_type) {
-            (DefaultIntervalOperator::Add, DefaultTemporalType::Date)
-                if is_bigquery_date_interval_unit(interval.unit) =>
-            {
-                "DATE_ADD"
-            }
-            (DefaultIntervalOperator::Subtract, DefaultTemporalType::Date)
-                if is_bigquery_date_interval_unit(interval.unit) =>
-            {
-                "DATE_SUB"
-            }
-            (DefaultIntervalOperator::Add, DefaultTemporalType::Timestamp)
-                if is_bigquery_timestamp_interval_unit(interval.unit) =>
-            {
-                "TIMESTAMP_ADD"
-            }
-            (DefaultIntervalOperator::Subtract, DefaultTemporalType::Timestamp)
-                if is_bigquery_timestamp_interval_unit(interval.unit) =>
-            {
-                "TIMESTAMP_SUB"
-            }
-            _ => return None,
-        };
-
-        Some(format!("{function}({base}, INTERVAL {} {unit})", interval.amount))
     }
 
     /// Creates a primary key clause for table creation.
@@ -1868,12 +1802,7 @@ mod tests {
             (Type::DATE, "'2026-01-01'::date", "DATE '2026-01-01'"),
             (Type::JSONB, "'{}'::jsonb", "JSON '{}'"),
             (Type::UUID, "gen_random_uuid()", "GENERATE_UUID()"),
-            (
-                Type::TIMESTAMPTZ,
-                "now() + interval '30 days'",
-                "TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)",
-            ),
-            (Type::TEXT, "lower('USER'::text)", "LOWER('USER')"),
+            (Type::TIMESTAMPTZ, "now()", "CURRENT_TIMESTAMP()"),
         ];
 
         for (typ, expression, expected) in cases {
@@ -1884,6 +1813,23 @@ mod tests {
                 BigQueryClient::default_expression(&column_schema).as_deref(),
                 Some(expected)
             );
+        }
+    }
+
+    #[test]
+    fn default_expression_rejects_bigquery_unsupported_expressions() {
+        let cases = [
+            (Type::INT4, "10 + 5"),
+            (Type::TIMESTAMPTZ, "now() + interval '30 days'"),
+            (Type::TEXT, "lower('USER'::text)"),
+        ];
+
+        for (typ, expression) in cases {
+            let column_schema = test_column("value", typ, 1, true, None)
+                .with_default_expression(Some(expression.to_owned()));
+
+            assert_eq!(BigQueryClient::default_expression(&column_schema), None);
+            assert!(!BigQueryClient::supports_column_default(&column_schema));
         }
     }
 

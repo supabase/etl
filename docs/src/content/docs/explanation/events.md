@@ -276,8 +276,9 @@ schemas are also ordered by `attnum`, so
 `ReplicatedTableSchema::column_schemas()` becomes a positional view that matches
 the tuple payloads exactly, even when a publication filters columns.
 
-For DDL behavior, including **add/drop/rename semantics** and current limitations,
-see [Schema Changes](/etl/explanation/schema-changes/).
+For DDL behavior, including add/drop/rename semantics, default and nullability
+handling, and current limitations, see
+[Schema Changes](/etl/explanation/schema-changes/).
 
 ## Begin/Commit Behavior
 

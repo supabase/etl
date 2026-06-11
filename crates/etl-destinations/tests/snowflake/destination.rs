@@ -418,6 +418,177 @@ async fn schema_evolution_add_column() {
 
 #[tokio::test]
 #[ignore = "requires Snowflake credentials"]
+async fn schema_evolution_add_column_defaults() {
+    let harness = TestHarness::new();
+    let src_table = format!("ETL_TEST_{}", uuid::Uuid::new_v4().simple()).to_uppercase();
+    let sf_table = snowflake_table_name("public", &src_table);
+
+    let table_id = TableId::new(1011);
+    let zero = OffsetToken::zero();
+
+    let initial_schema = TableSchema::new(
+        table_id,
+        TableName::new("public".to_owned(), src_table.clone()),
+        vec![
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
+            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true),
+        ],
+    );
+    let initial_replicated = ReplicatedTableSchema::all(Arc::new(initial_schema.clone()));
+
+    let new_snapshot_id = SnapshotId::new(PgLsn::from(100u64));
+    let evolved_schema = TableSchema::with_snapshot_id(
+        table_id,
+        TableName::new("public".to_owned(), src_table.clone()),
+        vec![
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
+            ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true),
+            ColumnSchema::new("status".to_owned(), Type::TEXT, -1, 3, None, true)
+                .with_default_expression(Some("'new'::text".to_owned())),
+            ColumnSchema::new("score".to_owned(), Type::INT4, -1, 4, None, true)
+                .with_default_expression(Some("15".to_owned())),
+            ColumnSchema::new("active".to_owned(), Type::BOOL, -1, 5, None, true)
+                .with_default_expression(Some("true".to_owned())),
+        ],
+        new_snapshot_id,
+    );
+    let evolved_replicated = ReplicatedTableSchema::all(Arc::new(evolved_schema.clone()));
+
+    harness.store.store_table_schema(initial_schema).await.unwrap();
+    harness.store.store_table_schema(evolved_schema).await.unwrap();
+
+    with_table_cleanup(&harness.sql, &[&sf_table], || async {
+        harness
+            .destination
+            .write_table_rows(
+                &initial_replicated,
+                vec![TableRow::new(vec![Cell::I32(1), Cell::String("Alice".into())])],
+            )
+            .await
+            .expect("initial write_table_rows failed");
+
+        let committed = poll_destination_offset(
+            &harness.destination,
+            table_id,
+            &zero,
+            DESTINATION_OFFSET_POLL_INTERVAL,
+            DESTINATION_OFFSET_MAX_ATTEMPTS,
+        )
+        .await;
+        assert!(committed.is_some(), "initial data should commit before DDL");
+
+        let initial_metadata = DestinationTableMetadata::new_applied(
+            sf_table.clone(),
+            SnapshotId::initial(),
+            initial_replicated.replication_mask().clone(),
+        );
+        harness.store.store_destination_table_metadata(table_id, initial_metadata).await.unwrap();
+
+        harness
+            .destination
+            .process_events(vec![Event::Relation(RelationEvent {
+                start_lsn: PgLsn::from(100u64),
+                commit_lsn: PgLsn::from(100u64),
+                tx_ordinal: 0,
+                replicated_table_schema: evolved_replicated.clone(),
+            })])
+            .await
+            .expect("process_events (RelationEvent defaults) failed");
+
+        harness
+            .destination
+            .process_events(vec![Event::Insert(InsertEvent {
+                start_lsn: PgLsn::from(101u64),
+                commit_lsn: PgLsn::from(101u64),
+                tx_ordinal: 0,
+                replicated_table_schema: evolved_replicated.clone(),
+                table_row: TableRow::new(vec![
+                    Cell::I32(2),
+                    Cell::String("Bob".into()),
+                    Cell::String("new".into()),
+                    Cell::I32(15),
+                    Cell::Bool(true),
+                ]),
+            })])
+            .await
+            .expect("process_events (Insert with defaults) failed");
+
+        let expected_offset = OffsetToken::new(PgLsn::from(101u64), 0);
+        let committed = poll_destination_offset(
+            &harness.destination,
+            table_id,
+            &expected_offset,
+            DESTINATION_OFFSET_POLL_INTERVAL,
+            DESTINATION_OFFSET_MAX_ATTEMPTS,
+        )
+        .await;
+        assert_eq!(committed, Some(expected_offset), "data should commit within 90s");
+
+        let fqn = format!(
+            "\"{}\".\"{}\".\"{sf_table}\"",
+            harness.config.database(),
+            harness.config.schema()
+        );
+        let rows = query_rows(
+            &harness.sql,
+            &format!(
+                "SELECT \"id\"::VARCHAR, \"status\", \"score\"::VARCHAR, \"active\"::VARCHAR FROM \
+                 {fqn} ORDER BY \"id\""
+            ),
+        )
+        .await
+        .expect("query for defaulted rows failed");
+        assert_eq!(
+            rows,
+            vec![
+                vec![
+                    serde_json::json!("1"),
+                    serde_json::json!("new"),
+                    serde_json::json!("15"),
+                    serde_json::json!("true"),
+                ],
+                vec![
+                    serde_json::json!("2"),
+                    serde_json::json!("new"),
+                    serde_json::json!("15"),
+                    serde_json::json!("true"),
+                ],
+            ]
+        );
+
+        let defaults = query_rows(
+            &harness.sql,
+            &format!(
+                "SELECT column_name, column_default FROM \"{}\".INFORMATION_SCHEMA.COLUMNS WHERE \
+                 table_schema = '{}' AND table_name = '{}' AND column_name IN ('STATUS', 'SCORE', \
+                 'ACTIVE') ORDER BY column_name",
+                harness.config.database(),
+                harness.config.schema(),
+                sf_table
+            ),
+        )
+        .await
+        .expect("query for column defaults failed");
+        assert_eq!(defaults.len(), 3);
+        assert!(defaults.iter().any(|row| row[0] == serde_json::json!("ACTIVE")
+            && row[1].to_string().to_ascii_lowercase().contains("true")));
+        assert!(
+            defaults.iter().any(
+                |row| row[0] == serde_json::json!("SCORE") && row[1].to_string().contains("15")
+            )
+        );
+        assert!(
+            defaults
+                .iter()
+                .any(|row| row[0] == serde_json::json!("STATUS")
+                    && row[1].to_string().contains("new"))
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "requires Snowflake credentials"]
 async fn schema_evolution_rename_column() {
     let harness = TestHarness::new();
     let src_table = format!("ETL_TEST_{}", uuid::Uuid::new_v4().simple()).to_uppercase();

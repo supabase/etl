@@ -183,6 +183,14 @@ fn build_drop_default_sql(table_name: &str, column_name: &str) -> String {
     format!("ALTER TABLE {table_name} MODIFY COLUMN {column_name} REMOVE DEFAULT")
 }
 
+/// Builds the SQL used to materialize a column's current default values.
+fn build_materialize_column_sql(table_name: &str, column_name: &str) -> String {
+    let table_name = quote_identifier(table_name);
+    let column_name = quote_identifier(column_name);
+
+    format!("ALTER TABLE {table_name} MATERIALIZE COLUMN {column_name}")
+}
+
 /// Builds the SQL used to truncate a ClickHouse table.
 fn build_truncate_table_sql(table_name: &str) -> String {
     let table_name = quote_identifier(table_name);
@@ -215,6 +223,7 @@ pub(crate) enum DdlKind {
     DropColumn,
     RenameColumn,
     ModifyColumn,
+    MaterializeColumn,
 }
 
 impl DdlKind {
@@ -229,6 +238,7 @@ impl DdlKind {
             DdlKind::DropColumn => "drop_column",
             DdlKind::RenameColumn => "rename_column",
             DdlKind::ModifyColumn => "modify_column",
+            DdlKind::MaterializeColumn => "materialize_column",
         }
     }
 }
@@ -518,6 +528,27 @@ impl ClickHouseClient {
         self.execute_ddl(DdlKind::ModifyColumn, &sql).await
     }
 
+    /// Materializes a column's current default values into existing data parts.
+    pub(crate) async fn materialize_column(
+        &self,
+        table_name: &str,
+        column_name: &str,
+    ) -> EtlResult<()> {
+        let sql = build_materialize_column_sql(table_name, column_name);
+        let ddl_start = Instant::now();
+        let ddl_secs = floor_secs(self.config.ddl_timeout);
+        let query = self
+            .inner
+            .query(&sql)
+            .with_option("max_execution_time", &ddl_secs)
+            .with_option("lock_acquire_timeout", &ddl_secs)
+            .with_option("mutations_sync", "1");
+        let result =
+            timeout_call(ClickHouseOperationKind::Ddl, &self.config, None, query.execute()).await;
+        record_ddl_metrics(DdlKind::MaterializeColumn, ddl_start, result.as_ref().err());
+        result
+    }
+
     /// Executes `TRUNCATE TABLE IF EXISTS` for the supplied table.
     pub(crate) async fn truncate_table(&self, table_name: &str) -> EtlResult<()> {
         let ddl_start = Instant::now();
@@ -715,6 +746,13 @@ mod tests {
             sql,
             "ALTER TABLE \"table\\\"name\" MODIFY COLUMN \"old\\\"column\" REMOVE DEFAULT"
         );
+    }
+
+    #[test]
+    fn materialize_column_sql_quotes_identifiers() {
+        let sql = build_materialize_column_sql("table\"name", "old\"column");
+
+        assert_eq!(sql, "ALTER TABLE \"table\\\"name\" MATERIALIZE COLUMN \"old\\\"column\"");
     }
 
     #[test]

@@ -870,6 +870,15 @@ where
                             .await?;
                     }
                     ColumnModification::Default { old_expression, new_expression } => {
+                        let old_default_was_supported = old_expression.is_some()
+                            && supports_clickhouse_default(&change.old_column);
+
+                        if old_default_was_supported {
+                            self.client
+                                .materialize_column(clickhouse_table_name, &change.new_column.name)
+                                .await?;
+                        }
+
                         if new_expression.is_some() {
                             if supports_clickhouse_default(&change.new_column) {
                                 self.client
@@ -881,9 +890,7 @@ where
                                     column_name = %change.new_column.name,
                                     "skipping unsupported source column default for ClickHouse"
                                 );
-                                if old_expression.is_some()
-                                    && supports_clickhouse_default(&change.old_column)
-                                {
+                                if old_default_was_supported {
                                     self.client
                                         .drop_column_default(
                                             clickhouse_table_name,

@@ -68,10 +68,18 @@ fn postgres_column_type_to_ducklake_sql(typ: &Type) -> &'static str {
 ///
 /// For example, a non-null source `name text` column becomes
 /// `"name" varchar not null`.
-fn ducklake_column_definition(column_schema: &ColumnSchema, include_not_null: bool) -> String {
+fn ducklake_column_definition(
+    column_schema: &ColumnSchema,
+    include_default: bool,
+    include_not_null: bool,
+) -> String {
     let column_name = quote_identifier(&column_schema.name);
     let duckdb_type = postgres_column_type_to_ducklake_sql(&column_schema.typ);
-    let default_clause = ducklake_default_clause(column_schema).unwrap_or_default();
+    let default_clause = if include_default {
+        ducklake_default_clause(column_schema).unwrap_or_default()
+    } else {
+        String::new()
+    };
     let nullability = if include_not_null && !column_schema.nullable { " not null" } else { "" };
     format!("{column_name} {duckdb_type}{default_clause}{nullability}")
 }
@@ -95,12 +103,12 @@ fn render_ducklake_default_expression(expression: &DefaultExpression) -> Option<
     match expression {
         DefaultExpression::StringLiteral(expression)
         | DefaultExpression::NumericLiteral(expression)
-        | DefaultExpression::BooleanLiteral(expression)
         | DefaultExpression::DateLiteral(expression)
         | DefaultExpression::TimeLiteral(expression)
         | DefaultExpression::TimestampLiteral(expression)
         | DefaultExpression::JsonLiteral(expression)
         | DefaultExpression::NumericExpression(expression) => Some(expression.clone()),
+        DefaultExpression::BooleanLiteral(_) => None,
         DefaultExpression::UuidV4 => Some("uuid()".to_owned()),
         DefaultExpression::CurrentUser => Some("current_user".to_owned()),
         DefaultExpression::CurrentTimestamp | DefaultExpression::TimezoneNow => {
@@ -144,7 +152,7 @@ pub(super) fn build_create_table_sql_ducklake(
     let table_name = qualified_lake_table_name(table_name);
     let col_defs: Vec<String> = column_schemas
         .iter()
-        .map(|col| format!("  {}", ducklake_column_definition(col, true)))
+        .map(|col| format!("  {}", ducklake_column_definition(col, true, true)))
         .collect();
 
     format!("create table if not exists {table_name} ({})", col_defs.join(",\n"))
@@ -152,14 +160,15 @@ pub(super) fn build_create_table_sql_ducklake(
 
 /// Builds a DuckLake `alter table add column` statement.
 ///
-/// Added columns are always nullable at the destination because existing rows
-/// cannot be backfilled from the source-side default expression.
+/// Added columns are nullable at the destination, but supported defaults are
+/// included in the add-column statement so DuckLake can record the add-time
+/// default for existing files.
 pub(super) fn build_add_column_sql_ducklake(
     table_name: &str,
     column_schema: &ColumnSchema,
 ) -> String {
     let table_name = qualified_lake_table_name(table_name);
-    let column_definition = ducklake_column_definition(column_schema, false);
+    let column_definition = ducklake_column_definition(column_schema, true, false);
 
     format!("alter table {table_name} add column {column_definition}")
 }

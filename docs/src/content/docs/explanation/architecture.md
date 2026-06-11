@@ -63,10 +63,10 @@ Once tables are copied, the **Apply Worker** streams ongoing changes from the Po
 ETL supports schema changes for simple `ALTER TABLE` column evolution. A
 source-side event trigger emits internal DDL messages for published permanent
 tables, ETL stores a new schema snapshot, and destinations observe the change
-through a fresh `Relation` event before following row events. Today ETL
-intentionally models **add, drop, and rename** column cases; broader DDL behavior
-is being improved. See [Schema Changes](/etl/explanation/schema-changes/) for exact semantics
-and limitations.
+through a fresh `Relation` event before following row events. Today ETL models
+column adds, drops, renames, nullability changes, and supported default changes.
+See [Schema Changes](/etl/explanation/schema-changes/) for exact semantics and
+limitations.
 
 ## Core Components
 

@@ -1,4 +1,4 @@
-use std::{str::FromStr, sync::Once, time::Duration};
+use std::{collections::HashMap, str::FromStr, sync::Once, time::Duration};
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use etl::{
@@ -38,8 +38,8 @@ fn install_crypto_provider() {
 }
 
 use crate::support::bigquery::{
-    BigQueryOrder, BigQueryUser, NonNullableColsScalar, NullableColsArray, NullableColsScalar,
-    parse_bigquery_table_rows,
+    BigQueryDefaultsRow, BigQueryOrder, BigQueryUser, NonNullableColsScalar, NullableColsArray,
+    NullableColsScalar, parse_bigquery_table_rows,
 };
 
 const REPLICA_IDENTITY_LARGE_TEXT_SIZE_BYTES: usize = 8192;
@@ -2056,6 +2056,152 @@ async fn table_validation_out_of_bounds_values() {
         let table_state = store.get_table_state(table_id).await.unwrap().unwrap();
         assert!(matches!(table_state, TableState::Errored { .. }));
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn schema_change_add_column_defaults() {
+    if skip_if_missing_bigquery_env_vars() {
+        return;
+    }
+    init_test_tracing();
+    install_crypto_provider();
+
+    let database = spawn_source_database().await;
+    let bigquery_database = setup_bigquery_database().await;
+    let table_name = test_table_name("defaults_schema");
+    let table_id = database
+        .create_table(table_name.clone(), true, &[("name", "text not null")])
+        .await
+        .expect("failed to create source table");
+
+    let publication_name = "test_pub_bq_defaults_schema".to_owned();
+    database
+        .create_publication(&publication_name, std::slice::from_ref(&table_name))
+        .await
+        .expect("failed to create publication");
+    database
+        .run_sql(&format!(
+            "insert into {} (name) values ('Alice')",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .expect("failed to insert initial source row");
+
+    let store = NotifyingStore::new();
+    let pipeline_id: PipelineId = random();
+    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
+    let destination = TestDestinationWrapper::wrap(raw_destination);
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name.clone(),
+        store.clone(),
+        destination.clone(),
+    );
+    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+
+    pipeline.start().await.unwrap();
+    table_ready.notified().await;
+    destination.clear_events().await;
+
+    let initial_metadata = store
+        .get_applied_destination_table_metadata(table_id)
+        .await
+        .unwrap()
+        .expect("destination metadata should exist after table creation");
+    let initial_snapshot_id = initial_metadata.snapshot_id;
+
+    database
+        .alter_table(
+            table_name.clone(),
+            &[
+                TableModification::AddColumn {
+                    name: "status",
+                    data_type: "text default 'new'::text",
+                },
+                TableModification::AddColumn { name: "score", data_type: "integer default 15" },
+                TableModification::AddColumn { name: "active", data_type: "boolean default true" },
+            ],
+        )
+        .await
+        .expect("failed to alter source table");
+
+    pipeline.shutdown_and_wait().await.unwrap();
+    drop(destination);
+
+    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
+    let destination = TestDestinationWrapper::wrap(raw_destination);
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name,
+        store.clone(),
+        destination.clone(),
+    );
+
+    pipeline.start().await.unwrap();
+    destination.clear_events().await;
+
+    let event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
+    database
+        .run_sql(&format!(
+            "insert into {} (name) values ('Bob')",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .expect("failed to insert defaulted source row");
+
+    event_notify.notified().await;
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let final_metadata = store
+        .get_applied_destination_table_metadata(table_id)
+        .await
+        .unwrap()
+        .expect("destination metadata should exist after schema change");
+    assert!(final_metadata.snapshot_id > initial_snapshot_id);
+
+    let final_schema = bigquery_database
+        .get_table_schema_by_id(&final_metadata.destination_table_id)
+        .await
+        .unwrap();
+    final_schema.assert_columns(&["id", "name", "status", "score", "active"]);
+
+    let defaults = bigquery_database
+        .query_column_defaults_by_id(&final_metadata.destination_table_id)
+        .await
+        .into_iter()
+        .map(|column| (column.column_name, column.column_default))
+        .collect::<HashMap<_, _>>();
+    assert_eq!(defaults.get("status").and_then(Option::as_deref), Some("'new'"));
+    assert_eq!(defaults.get("score").and_then(Option::as_deref), Some("15"));
+    assert_eq!(
+        defaults.get("active").and_then(Option::as_deref).map(str::to_ascii_lowercase).as_deref(),
+        Some("true")
+    );
+
+    let rows = bigquery_database.query_table(table_name).await.unwrap();
+    let mut rows = parse_bigquery_table_rows::<BigQueryDefaultsRow>(rows);
+    rows.sort();
+    assert_eq!(
+        rows,
+        vec![
+            BigQueryDefaultsRow {
+                id: 1,
+                name: "Alice".to_owned(),
+                status: None,
+                score: None,
+                active: None,
+            },
+            BigQueryDefaultsRow {
+                id: 2,
+                name: "Bob".to_owned(),
+                status: Some("new".to_owned()),
+                score: Some(15),
+                active: Some(true),
+            },
+        ]
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

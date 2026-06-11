@@ -1683,6 +1683,24 @@ struct AddColumnRow {
     score: Option<i32>,
 }
 
+/// Row struct for the defaulted ADD COLUMN test.
+#[derive(clickhouse::Row, serde::Deserialize, Debug, PartialEq, Eq)]
+struct DefaultedSchemaRow {
+    id: i64,
+    name: String,
+    status: Option<String>,
+    score: Option<i32>,
+    active: Option<bool>,
+}
+
+/// Default metadata read from ClickHouse `system.columns`.
+#[derive(clickhouse::Row, serde::Deserialize)]
+struct ClickHouseColumnDefault {
+    name: String,
+    default_kind: String,
+    default_expression: String,
+}
+
 /// Tests that ALTER TABLE ADD COLUMN in Postgres propagates to ClickHouse
 /// and subsequent inserts include the new column.
 ///
@@ -1866,6 +1884,183 @@ async fn schema_change_add_column_inner(engine: ClickHouseEngine) {
     }
 
     // Metadata snapshot_id should have advanced.
+    let final_metadata = store
+        .get_applied_destination_table_metadata(table_id)
+        .await
+        .unwrap()
+        .expect("metadata should exist after schema change");
+    assert!(
+        final_metadata.snapshot_id > initial_snapshot_id,
+        "snapshot_id should increase after schema change"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn schema_change_add_column_defaults_merge_tree() {
+    init_test_tracing();
+    install_crypto_provider();
+
+    let clickhouse_table_name = "test_defaults__schema";
+    let database = spawn_source_database().await;
+    let table_name = test_table_name("defaults_schema");
+    let table_id = database
+        .create_table(table_name.clone(), true, &[("name", "text not null")])
+        .await
+        .expect("failed to create source table");
+
+    let publication_name = "test_pub_ch_defaults_schema";
+    database
+        .create_publication(publication_name, std::slice::from_ref(&table_name))
+        .await
+        .expect("failed to create publication");
+    database
+        .run_sql(&format!(
+            "INSERT INTO {} (name) VALUES ('Alice')",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .expect("failed to insert initial source row");
+
+    let clickhouse_db = setup_clickhouse_database().await;
+    let store = NotifyingStore::new();
+    let pipeline_id: PipelineId = random();
+    let destination = TestDestinationWrapper::wrap(
+        clickhouse_db
+            .build_destination_with_engine(store.clone(), ClickHouseEngine::MergeTree)
+            .await,
+    );
+
+    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name.to_owned(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    pipeline.start().await.unwrap();
+    table_ready.notified().await;
+    destination.clear_events().await;
+
+    let initial_metadata = store
+        .get_applied_destination_table_metadata(table_id)
+        .await
+        .unwrap()
+        .expect("metadata should exist after table creation");
+    let initial_snapshot_id = initial_metadata.snapshot_id;
+
+    database
+        .alter_table(
+            table_name.clone(),
+            &[
+                TableModification::AddColumn {
+                    name: "status",
+                    data_type: "text default 'new'::text",
+                },
+                TableModification::AddColumn { name: "score", data_type: "integer default 15" },
+                TableModification::AddColumn { name: "active", data_type: "boolean default true" },
+            ],
+        )
+        .await
+        .expect("failed to alter source table");
+
+    pipeline.shutdown_and_wait().await.unwrap();
+    drop(destination);
+
+    let destination = TestDestinationWrapper::wrap(
+        clickhouse_db
+            .build_destination_with_engine(store.clone(), ClickHouseEngine::MergeTree)
+            .await,
+    );
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name.to_owned(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    pipeline.start().await.unwrap();
+    destination.clear_events().await;
+
+    let event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
+    database
+        .run_sql(&format!(
+            "insert into {} (name) values ('Bob')",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .expect("failed to insert defaulted source row");
+
+    event_notify.notified().await;
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let query = current_state_query(
+        ClickHouseEngine::MergeTree,
+        clickhouse_table_name,
+        "id, name, status, score, active",
+        &["id"],
+        "id",
+    );
+    let rows: Vec<DefaultedSchemaRow> = clickhouse_db.query(&query).await;
+
+    assert_eq!(
+        clickhouse_db.column_types(clickhouse_table_name).await,
+        vec![
+            ("id".to_owned(), "Int64".to_owned()),
+            ("name".to_owned(), "String".to_owned()),
+            ("status".to_owned(), "Nullable(String)".to_owned()),
+            ("score".to_owned(), "Nullable(Int32)".to_owned()),
+            ("active".to_owned(), "Nullable(Bool)".to_owned()),
+        ]
+    );
+
+    let defaults: Vec<ClickHouseColumnDefault> = clickhouse_db
+        .query(&format!(
+            "SELECT name, default_kind, default_expression FROM system.columns WHERE database = \
+             currentDatabase() AND table = '{clickhouse_table_name}' AND name IN ('status', \
+             'score', 'active') ORDER BY name"
+        ))
+        .await;
+    assert_eq!(defaults.len(), 3);
+    for column in &defaults {
+        assert_eq!(column.default_kind, "DEFAULT");
+    }
+    assert!(
+        defaults
+            .iter()
+            .any(|column| column.name == "status" && column.default_expression.contains("'new'"))
+    );
+    assert!(
+        defaults.iter().any(|column| column.name == "score" && column.default_expression == "15")
+    );
+    assert!(
+        defaults
+            .iter()
+            .any(|column| column.name == "active" && column.default_expression == "true")
+    );
+
+    assert_eq!(
+        rows,
+        vec![
+            DefaultedSchemaRow {
+                id: 1,
+                name: "Alice".to_owned(),
+                status: Some("new".to_owned()),
+                score: Some(15),
+                active: Some(true),
+            },
+            DefaultedSchemaRow {
+                id: 2,
+                name: "Bob".to_owned(),
+                status: Some("new".to_owned()),
+                score: Some(15),
+                active: Some(true),
+            },
+        ]
+    );
+
     let final_metadata = store
         .get_applied_destination_table_metadata(table_id)
         .await

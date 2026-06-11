@@ -59,6 +59,29 @@ impl From<TableRow> for BigQueryOrder {
 }
 
 #[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub(crate) struct BigQueryDefaultsRow {
+    pub(crate) id: i32,
+    pub(crate) name: String,
+    pub(crate) status: Option<String>,
+    pub(crate) score: Option<i32>,
+    pub(crate) active: Option<bool>,
+}
+
+impl From<TableRow> for BigQueryDefaultsRow {
+    fn from(value: TableRow) -> Self {
+        let columns = value.columns.unwrap();
+
+        BigQueryDefaultsRow {
+            id: parse_table_cell(columns[0].clone()).unwrap(),
+            name: parse_table_cell(columns[1].clone()).unwrap(),
+            status: parse_table_cell(columns[2].clone()),
+            score: parse_table_cell(columns[3].clone()),
+            active: parse_table_cell(columns[4].clone()),
+        }
+    }
+}
+
+#[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub(crate) struct BigQueryReplicaIdentityRow {
     id: i32,
     name: String,
