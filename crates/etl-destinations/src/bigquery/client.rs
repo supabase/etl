@@ -1417,7 +1417,7 @@ impl BigQueryClient {
             }
             DefaultExpression::CurrentDate => Some("CURRENT_DATE()".to_owned()),
             DefaultExpression::CurrentTime => Some("CURRENT_TIME()".to_owned()),
-            DefaultExpression::LocalTimestamp => Some("CURRENT_DATETIME()".to_owned()),
+            DefaultExpression::LocalTimestamp => Some("CURRENT_TIMESTAMP()".to_owned()),
             DefaultExpression::IntervalArithmetic { .. }
             | DefaultExpression::LiteralFunction { .. }
             | DefaultExpression::NumericExpression(_) => None,
@@ -1840,6 +1840,7 @@ mod tests {
             (Type::JSONB, "'{}'::jsonb", "JSON '{}'"),
             (Type::UUID, "gen_random_uuid()", "GENERATE_UUID()"),
             (Type::TIMESTAMPTZ, "now()", "CURRENT_TIMESTAMP()"),
+            (Type::TIMESTAMP, "localtimestamp", "CURRENT_TIMESTAMP()"),
         ];
 
         for (typ, expression, expected) in cases {

@@ -486,10 +486,11 @@ fn is_current_user_expression(expression: &str) -> bool {
 fn parse_current_time_expression(expression: &str, typ: &Type) -> Option<DefaultExpression> {
     let expression = expression.trim();
 
-    if expression.eq_ignore_ascii_case("now()")
+    if (expression.eq_ignore_ascii_case("now()")
         || expression.eq_ignore_ascii_case("transaction_timestamp()")
         || expression.eq_ignore_ascii_case("current_timestamp")
-        || expression.eq_ignore_ascii_case("current_timestamp()")
+        || expression.eq_ignore_ascii_case("current_timestamp()"))
+        && is_timestamp_type(typ)
     {
         return Some(DefaultExpression::CurrentTimestamp);
     }
@@ -508,19 +509,26 @@ fn parse_current_time_expression(expression: &str, typ: &Type) -> Option<Default
         return Some(DefaultExpression::CurrentTime);
     }
 
-    if expression.eq_ignore_ascii_case("localtimestamp")
-        || expression.eq_ignore_ascii_case("localtimestamp()")
+    if (expression.eq_ignore_ascii_case("localtimestamp")
+        || expression.eq_ignore_ascii_case("localtimestamp()"))
+        && is_timestamp_type(typ)
     {
         return Some(DefaultExpression::LocalTimestamp);
     }
 
     if starts_with_ignore_ascii_case(expression, "timezone(")
         && ends_with_ignore_ascii_case(expression, "now())")
+        && is_timestamp_type(typ)
     {
         return Some(DefaultExpression::TimezoneNow);
     }
 
     None
+}
+
+/// Returns whether a Postgres type maps to a timestamp-like destination type.
+fn is_timestamp_type(typ: &Type) -> bool {
+    matches!(typ, &Type::TIMESTAMP | &Type::TIMESTAMPTZ)
 }
 
 /// Parses current-time plus/minus simple interval defaults.
@@ -817,6 +825,12 @@ mod tests {
             parse_default_expression("now()", &Type::TIMESTAMPTZ),
             Some(DefaultExpression::CurrentTimestamp)
         );
+        assert_eq!(parse_default_expression("now()", &Type::DATE), None);
+        assert_eq!(
+            parse_default_expression("localtimestamp", &Type::TIMESTAMP),
+            Some(DefaultExpression::LocalTimestamp)
+        );
+        assert_eq!(parse_default_expression("localtimestamp", &Type::DATE), None);
         assert_eq!(
             parse_default_expression("CURRENT_DATE", &Type::DATE),
             Some(DefaultExpression::CurrentDate)
