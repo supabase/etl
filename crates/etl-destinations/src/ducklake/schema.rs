@@ -247,9 +247,8 @@ pub(super) fn build_create_table_sql_ducklake(
 
 /// Builds a DuckLake `alter table add column` statement.
 ///
-/// Added columns are nullable at the destination, but supported defaults are
-/// included in the add-column statement so DuckLake can record the add-time
-/// default for existing files.
+/// DuckLake stores add-time defaults as metadata and does not rewrite data
+/// files during schema evolution.
 pub(super) fn build_add_column_sql_ducklake(
     table_name: &str,
     column_schema: &ColumnSchema,

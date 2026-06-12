@@ -1361,6 +1361,8 @@ async fn write_events_applies_defaulted_schema_change() {
         .collect::<Result<Vec<_>, _>>()
         .expect("failed to read defaulted rows");
 
+    // DuckLake records supported add-time defaults as metadata without
+    // rewriting existing data files.
     assert_eq!(
         rows,
         vec![

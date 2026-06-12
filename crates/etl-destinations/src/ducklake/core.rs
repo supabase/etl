@@ -736,6 +736,22 @@ fn plan_schema_diff_sql_ducklake(
                 column = %column.name,
                 "ducklake add column skipped because destination column already exists"
             );
+
+            if column.default_expression.is_some() {
+                let Some(sql) = build_set_default_sql_ducklake(table_name, column) else {
+                    warn!(
+                        table_name = %table_name,
+                        column_name = %column.name,
+                        "skipping unsupported source column default for DuckLake"
+                    );
+                    continue;
+                };
+                statements.push(DuckLakeSchemaDdlStatement {
+                    sql,
+                    error_description: "DuckLake alter table set default failed",
+                });
+            }
+
             continue;
         }
 
@@ -2772,6 +2788,30 @@ mod tests {
             ]
         );
         assert_eq!(plan.column_names, vec!["id", "full_name", "name"]);
+    }
+
+    #[test]
+    fn plan_schema_diff_adds_column_with_supported_default() {
+        let diff = SchemaDiff {
+            columns_to_add: vec![
+                ColumnSchema::new("status".to_owned(), PgType::TEXT, -1, 3, true)
+                    .with_default_expression("'pending'::text".to_owned()),
+            ],
+            columns_to_remove: Vec::new(),
+            columns_to_change: Vec::new(),
+        };
+
+        let plan =
+            plan_schema_diff_sql_ducklake("users", vec!["id".to_owned(), "name".to_owned()], &diff)
+                .expect("schema diff should plan");
+        let statement_sql: Vec<_> =
+            plan.statements.iter().map(|statement| statement.sql.clone()).collect();
+
+        assert_eq!(
+            statement_sql,
+            vec![r#"alter table "lake"."users" add column "status" varchar default 'pending'"#]
+        );
+        assert_eq!(plan.column_names, vec!["id", "name", "status"]);
     }
 
     #[test]
