@@ -1,7 +1,7 @@
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
-use clap::Args;
+use clap::{Args, ValueEnum};
 use xshell::{Cmd, Shell, cmd};
 
 use crate::utils::{
@@ -12,16 +12,27 @@ use crate::utils::{
 const GREEN: &str = "\x1b[32m";
 const YELLOW: &str = "\x1b[33m";
 const RESET: &str = "\x1b[0m";
+const SNOWFLAKE_CONNECTION_ENV: &str = "TESTS_SNOWFLAKE_CONNECTION";
 
 #[derive(Args)]
 pub(crate) struct TestSnowflakeArgs {
-    /// Run only tests that do not require Snowflake credentials.
-    #[arg(long)]
-    no_credentials: bool,
+    /// How to handle Snowflake credentialed tests.
+    #[arg(long, value_enum, default_value = "auto")]
+    credentials: CredentialMode,
 
     /// Enable sccache for cargo builds (also enabled by ETL_SCCACHE=1).
     #[arg(long)]
     sccache: bool,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum CredentialMode {
+    /// Run credentialed tests when credentials are available.
+    Auto,
+    /// Require credentials and fail if they are missing.
+    Required,
+    /// Skip credentialed tests even when credentials are available.
+    Skip,
 }
 
 impl TestSnowflakeArgs {
@@ -29,7 +40,14 @@ impl TestSnowflakeArgs {
         let sh = Shell::new()?;
 
         let sccache = self.sccache;
+        let credential_mode = self.credentials;
         let pg_env = PgEnv::from_env();
+        let has_snowflake_connection =
+            !matches!(credential_mode, CredentialMode::Skip) && has_snowflake_connection_env();
+
+        if matches!(credential_mode, CredentialMode::Required) && !has_snowflake_connection {
+            bail!("Snowflake credentialed tests require {SNOWFLAKE_CONNECTION_ENV}.");
+        }
 
         check_postgres_ready(&pg_env.host, &pg_env.port, &pg_env.username)?;
 
@@ -41,34 +59,20 @@ impl TestSnowflakeArgs {
             .arg("snowflake");
         with_pg_env(maybe_with_sccache(tests, sccache), &pg_env).run()?;
 
-        if self.no_credentials {
-            eprintln!("{YELLOW}⏭ skipping Snowflake credentialed tests (--no-credentials).{RESET}");
+        if matches!(credential_mode, CredentialMode::Skip) {
+            eprintln!(
+                "{YELLOW}⏭ skipping Snowflake credentialed tests (--credentials skip).{RESET}"
+            );
             return Ok(());
         }
 
-        let has_account =
-            std::env::var("TESTS_SNOWFLAKE_ACCOUNT").ok().filter(|s| !s.is_empty()).is_some();
-        let has_user =
-            std::env::var("TESTS_SNOWFLAKE_USER").ok().filter(|s| !s.is_empty()).is_some();
-        let key_path =
-            std::env::var("TESTS_SNOWFLAKE_PRIVATE_KEY_PATH").ok().filter(|s| !s.is_empty());
-
-        if !has_account || !has_user || key_path.is_none() {
+        if !has_snowflake_connection {
             eprintln!(
-                "{YELLOW}⏭ skipping Snowflake credentialed tests: one or more of \
-                 TESTS_SNOWFLAKE_ACCOUNT, TESTS_SNOWFLAKE_USER, TESTS_SNOWFLAKE_PRIVATE_KEY_PATH \
-                 is missing.\n   See .env.example and \
+                "{YELLOW}⏭ skipping Snowflake credentialed tests: Snowflake credentials are \
+                 missing.\n   Set {SNOWFLAKE_CONNECTION_ENV}, or see .env.example and \
                  crates/etl-destinations/src/snowflake/README.md for setup instructions.{RESET}"
             );
             return Ok(());
-        }
-
-        let key_path = key_path.unwrap();
-        if std::fs::File::open(&key_path).is_err() {
-            bail!(
-                "TESTS_SNOWFLAKE_PRIVATE_KEY_PATH={key_path} is not readable. Check that the file \
-                 exists and has correct permissions."
-            );
         }
 
         eprintln!("{GREEN}🔑 running Snowflake API validator integration tests.{RESET}");
@@ -128,6 +132,10 @@ fn with_pg_env<'a>(cmd: Cmd<'a>, pg_env: &PgEnv) -> Cmd<'a> {
         .env("TESTS_DATABASE_PORT", &pg_env.port)
         .env("TESTS_DATABASE_USERNAME", &pg_env.username)
         .env("TESTS_DATABASE_PASSWORD", &pg_env.password)
+}
+
+fn has_snowflake_connection_env() -> bool {
+    std::env::var(SNOWFLAKE_CONNECTION_ENV).is_ok_and(|value| !value.trim().is_empty())
 }
 
 fn check_postgres_ready(host: &str, port: &str, user: &str) -> Result<()> {

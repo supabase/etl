@@ -342,7 +342,7 @@ loads DuckDB's `httpfs` extension during connection setup.
 | `--db-username`                | _(required)_ | Postgres user (must have REPLICATION)                             |
 | `--db-password`                | —            | Postgres password (omit for trust auth)                           |
 | `--catalog-url`                | _(required)_ | DuckLake catalog URL (`postgres://...` or `file://...`)           |
-| `--data-path`                  | _(required)_ | `s3://` URI for Parquet files                                    |
+| `--data-path`                  | _(required)_ | `s3://` URI for Parquet files                                     |
 | `--pool-size`                  | `4`          | DuckDB connection pool size                                       |
 | `--max-batch-fill-duration-ms` | `5000`       | Max time to wait before flushing a batch                          |
 | `--max-table-sync-workers`     | `4`          | Concurrent workers during initial copy                            |
@@ -433,49 +433,37 @@ Replicates a Postgres publication to a Snowflake database via Snowpipe Streaming
 ### Prerequisites
 
 1. A Snowflake account with a user configured for **key-pair authentication**.
-2. An RSA private key file (`.p8`) with the public key registered on the Snowflake user.
+2. `TESTS_SNOWFLAKE_CONNECTION` set with the Snowflake JSON connection string.
 3. A target database and schema created in Snowflake.
 4. A role with USAGE on warehouse/database/schema and CREATE TABLE, CREATE STAGE,
    CREATE PIPE on the schema.
 
-See `.env.example` for detailed setup instructions and SQL commands for each step.
+See `crates/etl-destinations/src/snowflake/README.md` for setup instructions and SQL commands.
 
 ### Run
 
 ```bash
+source .env
 cargo run --bin snowflake -p etl-examples --features snowflake -- \
     --db-host localhost \
     --db-port 5430 \
     --db-name etl_testdata \
     --db-username postgres \
     --db-password postgres \
-    --snowflake-account ORG-ACCOUNT \
-    --snowflake-user myuser \
-    --snowflake-private-key-path /path/to/rsa_key.p8 \
-    --snowflake-database MY_DATABASE \
-    --snowflake-role my_role \
     --publication seed_pub
 ```
 
-Snowflake args can also be set via `SNOWFLAKE_*` environment variables (e.g.
-`SNOWFLAKE_ACCOUNT`, `SNOWFLAKE_USER`, etc.) instead of CLI flags.
+The Snowflake example reads credentials from `TESTS_SNOWFLAKE_CONNECTION` only. The JSON object must contain `account`, `user`, `database`, `schema`, and `private_key`; `role` and `private_key_passphrase` are optional. Put `private_key` last so the target account details remain easy to inspect before the secret material.
 
 ### All flags
 
-| Flag                                 | Default      | Description                                       |
-| ------------------------------------ | ------------ | ------------------------------------------------- |
-| `--db-host`                          | _(required)_ | Postgres host                                     |
-| `--db-port`                          | _(required)_ | Postgres port                                     |
-| `--db-name`                          | _(required)_ | Postgres database name                            |
-| `--db-username`                      | _(required)_ | Postgres user                                     |
-| `--db-password`                      | --           | Postgres password                                 |
-| `--snowflake-account`                | _(required)_ | Snowflake account identifier (ORG-ACCOUNT format) |
-| `--snowflake-user`                   | _(required)_ | Snowflake user for key-pair auth                  |
-| `--snowflake-private-key-path`       | _(required)_ | Path to RSA private key file (.p8)                |
-| `--snowflake-private-key-passphrase` | --           | Passphrase if the key is encrypted                |
-| `--snowflake-database`               | _(required)_ | Snowflake target database                         |
-| `--snowflake-schema`                 | `PUBLIC`     | Snowflake target schema                           |
-| `--snowflake-role`                   | --           | Snowflake role (uses user default if omitted)     |
-| `--max-batch-fill-duration-ms`       | `5000`       | Max time to wait before flushing a batch          |
-| `--max-table-sync-workers`           | `4`          | Concurrent workers during initial copy            |
-| `--publication`                      | _(required)_ | Postgres publication name                         |
+| Flag                           | Default      | Description                              |
+| ------------------------------ | ------------ | ---------------------------------------- |
+| `--db-host`                    | _(required)_ | Postgres host                            |
+| `--db-port`                    | _(required)_ | Postgres port                            |
+| `--db-name`                    | _(required)_ | Postgres database name                   |
+| `--db-username`                | _(required)_ | Postgres user                            |
+| `--db-password`                | --           | Postgres password                        |
+| `--max-batch-fill-duration-ms` | `5000`       | Max time to wait before flushing a batch |
+| `--max-table-sync-workers`     | `4`          | Concurrent workers during initial copy   |
+| `--publication`                | _(required)_ | Postgres publication name                |

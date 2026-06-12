@@ -19,7 +19,11 @@ fn build_clients(
         Arc::clone(&auth),
         reqwest::Client::new(),
     );
-    let sql = SqlClient::new(config.clone(), Arc::clone(&auth), reqwest::Client::new());
+    let sql = SqlClient::new(
+        config.clone_without_credentials(),
+        Arc::clone(&auth),
+        reqwest::Client::new(),
+    );
     (stream, sql)
 }
 
@@ -34,7 +38,7 @@ fn build_batch(cols: &[ColumnSchema], rows: &[TableRow], offset: &OffsetToken) -
 #[tokio::test]
 #[ignore = "requires Snowflake credentials"]
 async fn channel_open_insert_status_drop() {
-    let config = load_test_config();
+    let config = load_test_config().clone_without_credentials();
     let (stream, sql) = build_clients(&config);
 
     let table = format!("ETL_TEST_{}", uuid::Uuid::new_v4().simple()).to_uppercase();
@@ -109,7 +113,7 @@ async fn channel_open_insert_status_drop() {
 #[tokio::test]
 #[ignore = "requires Snowflake credentials"]
 async fn channel_reopen_preserves_offset() {
-    let config = load_test_config();
+    let config = load_test_config().clone_without_credentials();
     let (stream, sql) = build_clients(&config);
 
     let table = format!("ETL_TEST_{}", uuid::Uuid::new_v4().simple()).to_uppercase();
@@ -180,7 +184,7 @@ async fn channel_reopen_preserves_offset() {
 #[tokio::test]
 #[ignore = "requires Snowflake credentials"]
 async fn continuation_token() {
-    let config = load_test_config();
+    let config = load_test_config().clone_without_credentials();
     let (stream, sql) = build_clients(&config);
 
     let table = format!("ETL_TEST_{}", uuid::Uuid::new_v4().simple()).to_uppercase();

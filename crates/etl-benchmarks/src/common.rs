@@ -190,24 +190,6 @@ pub struct DestinationArgs {
     /// ClickHouse database. Must already exist.
     #[arg(long)]
     pub clickhouse_database: Option<String>,
-    /// Snowflake account identifier.
-    #[arg(long)]
-    pub sf_account: Option<String>,
-    /// Snowflake username.
-    #[arg(long)]
-    pub sf_user: Option<String>,
-    /// Snowflake private key PEM contents.
-    #[arg(long, allow_hyphen_values = true)]
-    pub sf_private_key: Option<String>,
-    /// Snowflake database.
-    #[arg(long)]
-    pub sf_database: Option<String>,
-    /// Snowflake schema.
-    #[arg(long)]
-    pub sf_schema: Option<String>,
-    /// Snowflake role.
-    #[arg(long)]
-    pub sf_role: Option<String>,
 }
 
 /// Snapshot of destination-side benchmark counters.
@@ -478,10 +460,7 @@ impl Destination for NullDestination {
 }
 
 /// Benchmark destination variants.
-#[cfg_attr(
-    any(feature = "bigquery", feature = "clickhouse", feature = "snowflake"),
-    expect(clippy::large_enum_variant)
-)]
+#[cfg_attr(any(feature = "bigquery", feature = "clickhouse"), expect(clippy::large_enum_variant))]
 #[derive(Clone)]
 pub enum BenchDestination {
     /// Null destination variant.
@@ -500,7 +479,7 @@ pub enum BenchDestination {
 impl BenchDestination {
     /// Creates a benchmark destination from CLI arguments.
     #[cfg_attr(
-        not(any(feature = "bigquery", feature = "clickhouse", feature = "snowflake")),
+        not(any(feature = "bigquery", feature = "clickhouse")),
         expect(clippy::unused_async)
     )]
     #[allow(
@@ -595,42 +574,9 @@ impl BenchDestination {
             DestinationType::Snowflake => {
                 install_crypto_provider();
 
-                let account = destination_args
-                    .sf_account
-                    .clone()
-                    .filter(|a| !a.trim().is_empty())
-                    .context("Snowflake account is required for Snowflake benchmarks")?;
-                let user = destination_args
-                    .sf_user
-                    .clone()
-                    .filter(|u| !u.trim().is_empty())
-                    .context("Snowflake user is required for Snowflake benchmarks")?;
-                let private_key = destination_args
-                    .sf_private_key
-                    .clone()
-                    .filter(|k| !k.trim().is_empty())
-                    .context("Snowflake private key is required for Snowflake benchmarks")?;
-                let database = destination_args
-                    .sf_database
-                    .clone()
-                    .filter(|d| !d.trim().is_empty())
-                    .context("Snowflake database is required for Snowflake benchmarks")?;
-                let schema = destination_args
-                    .sf_schema
-                    .clone()
-                    .filter(|s| !s.trim().is_empty())
-                    .context("Snowflake schema is required for Snowflake benchmarks")?;
-
-                let mut config = SnowflakeConfig::new(&account, &user, &database, &schema)
-                    .context("invalid Snowflake account identifier")?;
-                if let Some(role) = &destination_args.sf_role
-                    && !role.trim().is_empty()
-                {
-                    config = config.with_role(role);
-                }
-
-                let auth = AuthManager::new(&config, &private_key, None)?;
-                let client = SnowflakeClient::new(config, Arc::new(auth), pipeline_id);
+                let config = SnowflakeConfig::require_bench_env()?;
+                let auth = Arc::new(AuthManager::new(config)?);
+                let client = SnowflakeClient::new(auth, pipeline_id);
                 let destination = SnowflakeDestination::new(client, store);
 
                 Ok(Self::Snowflake(CountingDestination::new(destination)))

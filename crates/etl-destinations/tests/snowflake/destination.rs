@@ -34,13 +34,17 @@ struct TestHarness {
 
 impl TestHarness {
     fn new() -> Self {
-        let config = load_test_config();
+        let config = load_test_config().clone_without_credentials();
         let auth = build_auth();
-        let sql = SqlClient::new(config.clone(), Arc::clone(&auth), reqwest::Client::new());
+        let sql = SqlClient::new(
+            config.clone_without_credentials(),
+            Arc::clone(&auth),
+            reqwest::Client::new(),
+        );
         let store = NotifyingStore::new();
         let pipeline_id: PipelineId = 1;
 
-        let client = Client::new(config.clone(), Arc::clone(&auth), pipeline_id);
+        let client = Client::new(Arc::clone(&auth), pipeline_id);
         let destination = Destination::new(client, store.clone());
 
         Self { destination, sql, config, store }
