@@ -1,15 +1,9 @@
-use etl_destinations::snowflake::{
-    AuthManager, TokenProvider,
-    test_utils::{load_test_config, load_test_private_key_pem},
-};
+use etl_destinations::snowflake::{AuthManager, TokenProvider, test_utils::load_test_config};
 
 #[tokio::test]
 #[ignore = "requires Snowflake credentials — see etl-destinations/src/snowflake/README.md"]
 async fn authenticate_against_snowflake() {
-    let config = load_test_config();
-    let pem = load_test_private_key_pem();
-
-    let auth = AuthManager::new(&config, &pem, None).expect("AuthManager creation failed");
+    let auth = AuthManager::new(load_test_config()).expect("AuthManager creation failed");
 
     let token = auth.get_token().await.expect("authentication failed");
     assert!(!token.is_empty(), "token should not be empty");

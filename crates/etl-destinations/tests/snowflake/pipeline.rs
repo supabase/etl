@@ -134,15 +134,19 @@ async fn schema_change_add_column_defaults() {
         .await
         .expect("failed to insert initial source row");
 
-    let config = load_test_config();
+    let config = load_test_config().clone_without_credentials();
     let auth = build_auth();
-    let sql = SqlClient::new(config.clone(), Arc::clone(&auth), reqwest::Client::new());
+    let sql = SqlClient::new(
+        config.clone_without_credentials(),
+        Arc::clone(&auth),
+        reqwest::Client::new(),
+    );
     let snowflake_table = snowflake_table_name(&table_name);
 
     with_table_cleanup(&sql, &[&snowflake_table], || async {
         let store = NotifyingStore::new();
         let pipeline_id: PipelineId = random();
-        let client = Client::new(config.clone(), Arc::clone(&auth), pipeline_id);
+        let client = Client::new(Arc::clone(&auth), pipeline_id);
         let raw_destination = Destination::new(client, store.clone());
         let destination_for_polling = raw_destination.clone();
         let destination = TestDestinationWrapper::wrap(raw_destination);

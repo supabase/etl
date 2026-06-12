@@ -73,35 +73,7 @@ impl ExampleArgs {
                     &self.args,
                 );
             }
-            "snowflake" => {
-                inject_env(
-                    &mut extra,
-                    "--snowflake-account",
-                    "TESTS_SNOWFLAKE_ACCOUNT",
-                    &self.args,
-                );
-                inject_env(&mut extra, "--snowflake-user", "TESTS_SNOWFLAKE_USER", &self.args);
-                inject_env(
-                    &mut extra,
-                    "--snowflake-private-key-path",
-                    "TESTS_SNOWFLAKE_PRIVATE_KEY_PATH",
-                    &self.args,
-                );
-                inject_env(
-                    &mut extra,
-                    "--snowflake-private-key-passphrase",
-                    "TESTS_SNOWFLAKE_PRIVATE_KEY_PASSPHRASE",
-                    &self.args,
-                );
-                inject_env(
-                    &mut extra,
-                    "--snowflake-database",
-                    "TESTS_SNOWFLAKE_DATABASE",
-                    &self.args,
-                );
-                inject_env(&mut extra, "--snowflake-schema", "TESTS_SNOWFLAKE_SCHEMA", &self.args);
-                inject_env(&mut extra, "--snowflake-role", "TESTS_SNOWFLAKE_ROLE", &self.args);
-            }
+            "snowflake" => {}
             _ => {}
         }
 

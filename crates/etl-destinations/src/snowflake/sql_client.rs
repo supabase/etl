@@ -65,7 +65,7 @@ pub(crate) struct StatementResponse {
 
 impl<T: TokenProvider> SqlClient<T> {
     pub fn new(config: Config, auth: Arc<T>, http: Client) -> Self {
-        Self { config, http, auth }
+        Self { config: config.without_credentials(), http, auth }
     }
 
     /// Execute a DDL statement (runs on Cloud Services, no warehouse required).

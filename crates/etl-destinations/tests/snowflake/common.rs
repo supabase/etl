@@ -2,15 +2,12 @@ use std::sync::Arc;
 
 use etl_destinations::snowflake::{
     AuthManager, Config, Destination, HttpExchanger, OffsetToken, RestStreamClient, SqlClient,
-    StreamClient,
-    test_utils::{load_test_config, load_test_private_key_pem},
+    StreamClient, test_utils,
 };
 use futures::FutureExt;
 
 pub fn build_auth() -> Arc<AuthManager<HttpExchanger>> {
-    let config = load_test_config();
-    let pem = load_test_private_key_pem();
-    Arc::new(AuthManager::new(&config, &pem, None).expect("AuthManager creation failed"))
+    Arc::new(AuthManager::new(test_utils::load_test_config()).expect("AuthManager creation failed"))
 }
 
 pub async fn with_table_cleanup<F, Fut>(

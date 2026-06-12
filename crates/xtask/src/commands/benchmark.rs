@@ -24,6 +24,7 @@ const DEFAULT_TPCC_MIN_THREADS: usize = 8;
 const DEFAULT_TPCC_MAX_THREADS: usize = 64;
 const MEMORY_BACKPRESSURE_ACTIVATE_THRESHOLD: f32 = 0.85;
 const MEMORY_BACKPRESSURE_RESUME_THRESHOLD: f32 = 0.75;
+const BENCH_SNOWFLAKE_CONNECTION_ENV: &str = "BENCH_SNOWFLAKE_CONNECTION";
 
 #[derive(Args)]
 pub(crate) struct BenchmarkArgs {
@@ -88,24 +89,6 @@ pub(crate) struct BenchmarkArgs {
     /// ClickHouse database. Must already exist.
     #[arg(long, env = "BENCH_CLICKHOUSE_DATABASE")]
     clickhouse_database: Option<String>,
-    /// Snowflake account identifier.
-    #[arg(long, env = "BENCH_SNOWFLAKE_ACCOUNT")]
-    sf_account: Option<String>,
-    /// Snowflake username.
-    #[arg(long, env = "BENCH_SNOWFLAKE_USER")]
-    sf_user: Option<String>,
-    /// Snowflake private key: PEM contents or path to a .p8 key file.
-    #[arg(long, env = "BENCH_SNOWFLAKE_PRIVATE_KEY")]
-    sf_private_key: Option<String>,
-    /// Snowflake database.
-    #[arg(long, env = "BENCH_SNOWFLAKE_DATABASE")]
-    sf_database: Option<String>,
-    /// Snowflake schema.
-    #[arg(long, env = "BENCH_SNOWFLAKE_SCHEMA")]
-    sf_schema: Option<String>,
-    /// Snowflake role.
-    #[arg(long, env = "BENCH_SNOWFLAKE_ROLE")]
-    sf_role: Option<String>,
     /// Run the TPC-C streaming workload for this many seconds.
     #[arg(long)]
     streaming_duration_seconds: Option<u64>,
@@ -303,24 +286,9 @@ impl BenchmarkArgs {
         }
 
         if matches!(self.destination, Destination::Snowflake) {
-            if self.sf_account.as_deref().is_none_or(|id| id.trim().is_empty()) {
-                bail!("--sf-account is required for --destination snowflake");
-            }
-
-            if self.sf_user.as_deref().is_none_or(|user| user.trim().is_empty()) {
-                bail!("--sf-user is required for --destination snowflake");
-            }
-
-            if self.sf_private_key.as_deref().is_none_or(|key| key.trim().is_empty()) {
-                bail!("--sf-private-key is required for --destination snowflake");
-            }
-
-            if self.sf_database.as_deref().is_none_or(|db| db.trim().is_empty()) {
-                bail!("--sf-database is required for --destination snowflake");
-            }
-
-            if self.sf_schema.as_deref().is_none_or(|schema| schema.trim().is_empty()) {
-                bail!("--sf-schema is required for --destination snowflake");
+            let connection = std::env::var(BENCH_SNOWFLAKE_CONNECTION_ENV).ok();
+            if connection.as_deref().is_none_or(|connection| connection.trim().is_empty()) {
+                bail!("{BENCH_SNOWFLAKE_CONNECTION_ENV} is required for --destination snowflake");
             }
         }
 
@@ -756,38 +724,7 @@ impl BenchmarkArgs {
                     args.extend(["--clickhouse-database".to_owned(), database.clone()]);
                 }
             }
-            Destination::Snowflake => {
-                if let Some(account) = &self.sf_account {
-                    args.extend(["--sf-account".to_owned(), account.clone()]);
-                }
-
-                if let Some(user) = &self.sf_user {
-                    args.extend(["--sf-user".to_owned(), user.clone()]);
-                }
-
-                if let Some(key) = &self.sf_private_key {
-                    let pem = if key.starts_with("-----") {
-                        key.clone()
-                    } else {
-                        std::fs::read_to_string(key).with_context(|| {
-                            format!("failed to read Snowflake private key file: {key}")
-                        })?
-                    };
-                    args.extend(["--sf-private-key".to_owned(), pem]);
-                }
-
-                if let Some(database) = &self.sf_database {
-                    args.extend(["--sf-database".to_owned(), database.clone()]);
-                }
-
-                if let Some(schema) = &self.sf_schema {
-                    args.extend(["--sf-schema".to_owned(), schema.clone()]);
-                }
-
-                if let Some(role) = &self.sf_role {
-                    args.extend(["--sf-role".to_owned(), role.clone()]);
-                }
-            }
+            Destination::Snowflake => {}
             Destination::Null => {}
         }
 

@@ -82,14 +82,14 @@ impl Validator for SnowflakeValidator {
         if let Some(role) = &self.role {
             config = config.with_role(role);
         }
+        config = config.with_private_key(
+            self.private_key.expose_secret().to_owned(),
+            self.private_key_passphrase
+                .as_ref()
+                .map(|passphrase| passphrase.expose_secret().to_owned().into()),
+        );
 
-        match snowflake::Client::validate_connectivity(
-            &config,
-            self.private_key.expose_secret(),
-            self.private_key_passphrase.as_deref(),
-        )
-        .await
-        {
+        match snowflake::Client::validate_connectivity(config).await {
             Ok(()) => Ok(vec![]),
             Err(snowflake::Error::Auth(msg)) => Ok(vec![ValidationFailure::critical(
                 "Snowflake Authentication Failed",
