@@ -20,7 +20,10 @@ use crate::{
         tables::{Table, TablesDbError},
     },
     k8s::{TrustedRootCertsCache, TrustedRootCertsError},
-    routes::{ErrorMessage, IntoInner, TenantIdError, error_response, extract_tenant_id},
+    routes::{
+        ErrorMessage, IntoInner, TenantIdError, error_response_with_internal_error,
+        extract_tenant_id,
+    },
 };
 
 #[derive(Debug, Error)]
@@ -74,7 +77,7 @@ impl IntoResponse for TableError {
             TableError::TenantId(_) => StatusCode::BAD_REQUEST,
         };
 
-        error_response(status_code, self.to_message())
+        error_response_with_internal_error(status_code, self.to_message(), &self)
     }
 }
 

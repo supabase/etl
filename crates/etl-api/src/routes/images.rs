@@ -12,7 +12,7 @@ use utoipa::ToSchema;
 use crate::{
     data,
     data::images::ImagesDbError,
-    routes::{ErrorMessage, IntoInner, error_response},
+    routes::{ErrorMessage, IntoInner, error_response_with_internal_error},
 };
 
 #[derive(Debug, Error)]
@@ -43,7 +43,7 @@ impl IntoResponse for ImageError {
             ImageError::ImageNotFound(_) => StatusCode::NOT_FOUND,
         };
 
-        error_response(status_code, self.to_message())
+        error_response_with_internal_error(status_code, self.to_message(), &self)
     }
 }
 

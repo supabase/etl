@@ -33,9 +33,9 @@ use std::{error::Error, sync::Once};
 use clap::{Args, Parser};
 use etl::{
     config::{
-        BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PgConnectionConfig,
-        PipelineConfig, TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
-        parse_ducklake_s3_data_path, parse_ducklake_url,
+        BatchConfig, InvalidatedSlotBehavior, PgConnectionConfig, PipelineConfig,
+        TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig, parse_ducklake_s3_data_path,
+        parse_ducklake_url,
     },
     pipeline::Pipeline,
     store::PostgresStore,
@@ -206,7 +206,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         table_error_retry_max_attempts: 5,
         max_table_sync_workers: args.ducklake_args.max_table_sync_workers,
         memory_refresh_interval_ms: 100,
-        memory_backpressure: Some(MemoryBackpressureConfig::default()),
+        memory_backpressure: None,
         table_sync_copy: TableSyncCopyConfig::default(),
         invalidated_slot_behavior: InvalidatedSlotBehavior::default(),
         max_copy_connections_per_table: PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE,

@@ -11,7 +11,10 @@ use sqlx::PgPool;
 use thiserror::Error;
 use utoipa::ToSchema;
 
-use super::{ErrorMessage, IntoInner, TenantIdError, error_response, extract_tenant_id, utils};
+use super::{
+    ErrorMessage, IntoInner, TenantIdError, error_response_with_internal_error, extract_tenant_id,
+    utils,
+};
 use crate::{
     config::ApiConfig,
     configs::{
@@ -164,7 +167,7 @@ impl IntoResponse for DestinationPipelineError {
             }
         };
 
-        error_response(status_code, self.to_message())
+        error_response_with_internal_error(status_code, self.to_message(), &self)
     }
 }
 
