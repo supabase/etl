@@ -6,8 +6,8 @@ use clap::{Parser, Subcommand};
 use commands::{
     BenchmarkArgs, BenchmarkCompareArgs, ChaosArgs, CheckArgs, DeployLocalArgs, ExampleArgs,
     FixArgs, FmtArgs, InitArgs, MigrateArgs, MsrvArgs, NextestArgs, PostgresArgs,
-    RotateEncryptionKeyArgs, SeedArgs, TestArgs, TestClickhouseArgs, TestSnowflakeArgs,
-    VendorDuckdbArgs,
+    RemoveHostaddrArgs, RotateEncryptionKeyArgs, SeedArgs, TestArgs, TestClickhouseArgs,
+    TestSnowflakeArgs, VendorDuckdbArgs,
 };
 
 #[derive(Parser)]
@@ -48,6 +48,9 @@ enum Command {
     Nextest(NextestArgs),
     /// Manage test Postgres clusters.
     Postgres(PostgresArgs),
+    /// Remove the hostaddr field from a source configuration to force DNS resolution.
+    #[command(name = "remove-hostaddr")]
+    RemoveHostaddr(RemoveHostaddrArgs),
     /// Re-encrypt API source and destination configs with the latest configured
     /// key.
     #[command(name = "rotate-encryption-key")]
@@ -86,6 +89,7 @@ async fn main() -> Result<()> {
         Command::Msrv(cmd) => cmd.run(),
         Command::Nextest(cmd) => cmd.run(),
         Command::Postgres(cmd) => cmd.run(),
+        Command::RemoveHostaddr(cmd) => cmd.run().await,
         Command::RotateEncryptionKey(cmd) => cmd.run().await,
         Command::Seed(cmd) => cmd.run(),
         Command::Test(cmd) => cmd.run(),

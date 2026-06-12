@@ -58,15 +58,15 @@ COPY --from=planner /app/recipe.json recipe.json
 RUN RUSTFLAGS="-C panic=abort -C link-arg=-fuse-ld=lld" cargo chef cook --release --recipe-path recipe.json
 
 # Build application with optimizations.
-# The release profile in Cargo.toml handles: thin LTO, strip, opt-level=3.
+# The release profile in Cargo.toml handles: thin LTO, opt-level=3.
+# Debug symbols are kept for better error diagnostics.
 # ENABLE_EGRESS: set to "true" to enable egress metrics logging.
 ARG ENABLE_EGRESS="false"
 COPY . .
 RUN sed -i '\#"crates/xtask"#d' Cargo.toml && rm -rf crates/xtask
 RUN FEATURES=""; \
     if [ "$ENABLE_EGRESS" = "true" ]; then FEATURES="--features egress"; fi && \
-    RUSTFLAGS="-C panic=abort -C link-arg=-fuse-ld=lld" cargo build --release -p etl-replicator $FEATURES && \
-    strip target/release/etl-replicator target/release/etl-ducklake-maintenance
+    RUSTFLAGS="-C panic=abort -C link-arg=-fuse-ld=lld -C debuginfo=2" cargo build --release -p etl-replicator $FEATURES
 
 # Runtime stage with distroless for security.
 FROM gcr.io/distroless/cc-debian12:nonroot

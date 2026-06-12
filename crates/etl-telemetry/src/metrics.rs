@@ -100,9 +100,12 @@ pub fn init_metrics(
     pipeline_id: Option<u64>,
     destination: Option<&str>,
 ) -> Result<(), BuildError> {
+    let metrics_port: u16 =
+        std::env::var("APP_METRICS_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(9000);
+
     let mut builder = PrometheusBuilder::new().with_http_listener(std::net::SocketAddr::new(
         std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
-        9000,
+        metrics_port,
     ));
 
     if let Some(project_ref) = project_ref {

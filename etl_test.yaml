@@ -1,0 +1,10 @@
+etl_test
+postgres://postgres:postgres@host.docker.internal:5430/postgres
+s3://dev-and-test/ducklake
+minio-admin
+minio-admin-password
+us-east-1
+localhost:9010
+path
+false
+Metadata schema: ducklake

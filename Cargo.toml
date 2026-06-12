@@ -154,3 +154,5 @@ lto = "thin"
 codegen-units = 16
 # Maximum optimization level for best runtime performance
 opt-level = 3
+# Keep debug symbols for better error diagnostics
+debug = true

@@ -105,7 +105,9 @@ fn try_main() -> ReplicatorResult<()> {
     let notification_client = init::init_error_notification(&replicator_config);
 
     // We initialize the Prometheus recorder.
-    init::init_metrics(&replicator_config)?;
+    if let Err(err) = init::init_metrics(&replicator_config) {
+        error!("failed to initialize metrics, continuing without metrics: {err}");
+    }
 
     debug!("starting tokio runtime");
 
