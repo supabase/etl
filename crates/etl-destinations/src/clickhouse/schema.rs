@@ -1,9 +1,10 @@
 use etl::{
     error::{ErrorKind, EtlResult},
     etl_error,
-    types::{ColumnSchema, Type, is_array_type},
+    types::{ColumnSchema, DefaultExpression, Type, is_array_type, parse_default_expression},
 };
 use etl_config::shared::ClickHouseEngine;
+use tracing::warn;
 
 use crate::clickhouse::sql::quote_identifier;
 
@@ -92,6 +93,147 @@ pub(super) fn clickhouse_column_type(col: &ColumnSchema, force_nullable: bool) -
     }
 }
 
+/// Returns the ClickHouse default clause for a column, if supported.
+pub(super) fn clickhouse_default_clause(col: &ColumnSchema) -> Option<String> {
+    let default_clause =
+        clickhouse_default_expression(col).map(|expression| format!(" DEFAULT {expression}"));
+    if default_clause.is_none() && col.default_expression.is_some() {
+        warn!(
+            column_name = %col.name,
+            "skipping unsupported source column default for ClickHouse"
+        );
+    }
+
+    default_clause
+}
+
+/// Returns whether a column default can be represented in ClickHouse SQL.
+pub(super) fn supports_clickhouse_default(col: &ColumnSchema) -> bool {
+    clickhouse_default_expression(col).is_some()
+}
+
+/// Returns a rendered ClickHouse default expression for a column, if supported.
+fn clickhouse_default_expression(col: &ColumnSchema) -> Option<String> {
+    col.default_expression.as_deref().and_then(|expression| {
+        parse_default_expression(expression, &col.typ)
+            .and_then(|expression| render_clickhouse_default_expression(&expression, &col.typ))
+    })
+}
+
+/// Renders a parsed default expression as ClickHouse SQL.
+fn render_clickhouse_default_expression(
+    expression: &DefaultExpression,
+    typ: &Type,
+) -> Option<String> {
+    match expression {
+        DefaultExpression::StringLiteral(expression) => {
+            is_clickhouse_string_default_type(typ).then(|| expression.clone())
+        }
+        DefaultExpression::NumericLiteral(expression) => {
+            if is_clickhouse_numeric_default_type(typ) {
+                Some(expression.clone())
+            } else if is_clickhouse_numeric_string_default_type(typ) {
+                Some(quote_numeric_literal_as_string(expression))
+            } else {
+                None
+            }
+        }
+        DefaultExpression::NumericExpression(expression) => {
+            is_clickhouse_numeric_default_type(typ).then(|| expression.clone())
+        }
+        DefaultExpression::BooleanLiteral(expression) => {
+            matches!(typ, &Type::BOOL).then(|| expression.clone())
+        }
+        DefaultExpression::TimeLiteral(expression) => {
+            matches!(typ, &Type::TIME).then(|| expression.clone())
+        }
+        DefaultExpression::JsonLiteral(expression) => is_json_type(typ).then(|| expression.clone()),
+        DefaultExpression::DateLiteral(expression) => {
+            matches!(typ, &Type::DATE).then(|| format!("toDate32({expression})"))
+        }
+        DefaultExpression::TimestampLiteral(expression) => {
+            is_clickhouse_timestamp_default_type(typ)
+                .then(|| format!("toDateTime64({expression}, 6, 'UTC')"))
+        }
+        DefaultExpression::UuidV4 => {
+            matches!(typ, &Type::UUID).then(|| "generateUUIDv4()".to_owned())
+        }
+        DefaultExpression::CurrentUser => {
+            is_clickhouse_text_default_type(typ).then(|| "currentUser()".to_owned())
+        }
+        DefaultExpression::CurrentTimestamp
+        | DefaultExpression::LocalTimestamp
+        | DefaultExpression::TimezoneNow => render_clickhouse_current_timestamp_default(typ),
+        DefaultExpression::CurrentDate => matches!(typ, &Type::DATE).then(|| "today()".to_owned()),
+        DefaultExpression::CurrentTime => None,
+        DefaultExpression::IntervalArithmetic { base, operator, interval, .. } => {
+            let base = render_clickhouse_default_expression(base, typ)?;
+            Some(format!(
+                "{base} {} INTERVAL {} {}",
+                operator.as_sql(),
+                interval.amount,
+                interval.unit.as_upper_singular()
+            ))
+        }
+        DefaultExpression::LiteralFunction { function, argument } => {
+            is_clickhouse_text_default_type(typ)
+                .then(|| format!("{}({argument})", function.as_lower_name()))
+        }
+    }
+}
+
+/// Renders timestamp-like Postgres defaults for the destination column type.
+fn render_clickhouse_current_timestamp_default(typ: &Type) -> Option<String> {
+    match typ {
+        &Type::DATE => Some("today()".to_owned()),
+        &Type::TIMESTAMP | &Type::TIMESTAMPTZ => Some("now()".to_owned()),
+        _ => None,
+    }
+}
+
+/// Returns whether a Postgres type is a ClickHouse numeric column.
+fn is_clickhouse_numeric_default_type(typ: &Type) -> bool {
+    matches!(
+        typ,
+        &Type::INT2 | &Type::INT4 | &Type::INT8 | &Type::FLOAT4 | &Type::FLOAT8 | &Type::OID
+    )
+}
+
+/// Returns whether a Postgres numeric-like type is stored as ClickHouse String.
+fn is_clickhouse_numeric_string_default_type(typ: &Type) -> bool {
+    matches!(typ, &Type::NUMERIC | &Type::MONEY)
+}
+
+/// Returns whether a Postgres type is stored as ClickHouse String and can
+/// safely receive source string literals.
+fn is_clickhouse_string_default_type(typ: &Type) -> bool {
+    is_clickhouse_text_default_type(typ)
+        || matches!(
+            typ,
+            &Type::NUMERIC | &Type::MONEY | &Type::TIME | &Type::UUID | &Type::JSON | &Type::JSONB
+        )
+}
+
+/// Returns whether a Postgres type is a text-like ClickHouse String column.
+fn is_clickhouse_text_default_type(typ: &Type) -> bool {
+    matches!(typ, &Type::CHAR | &Type::BPCHAR | &Type::VARCHAR | &Type::NAME | &Type::TEXT)
+}
+
+/// Returns whether a Postgres type is a ClickHouse DateTime column.
+fn is_clickhouse_timestamp_default_type(typ: &Type) -> bool {
+    matches!(typ, &Type::TIMESTAMP | &Type::TIMESTAMPTZ)
+}
+
+/// Returns whether a Postgres JSON type is stored as ClickHouse String.
+fn is_json_type(typ: &Type) -> bool {
+    matches!(typ, &Type::JSON | &Type::JSONB)
+}
+
+/// Quotes a parser-validated numeric literal as a SQL string literal.
+fn quote_numeric_literal_as_string(expression: &str) -> String {
+    format!("'{expression}'")
+}
+
 /// Trailing CDC column names appended to each replicated row, by engine.
 pub(super) fn trailing_cdc_column_names(engine: ClickHouseEngine) -> &'static [&'static str] {
     match engine {
@@ -130,7 +272,8 @@ where
 
     for col in iter {
         let col_type = clickhouse_column_type(col, false);
-        cols.push(format!("  {} {}", quote_identifier(&col.name), col_type));
+        let default_clause = clickhouse_default_clause(col).unwrap_or_default();
+        cols.push(format!("  {} {}{}", quote_identifier(&col.name), col_type, default_clause));
     }
 
     cols.push(format!("  {} String", quote_identifier(CDC_OPERATION_COLUMN_NAME)));
@@ -167,7 +310,13 @@ where
     let mut col_defs: Vec<String> = columns
         .iter()
         .map(|col| {
-            format!("  {} {}", quote_identifier(&col.name), clickhouse_column_type(col, false))
+            let default_clause = clickhouse_default_clause(col).unwrap_or_default();
+            format!(
+                "  {} {}{}",
+                quote_identifier(&col.name),
+                clickhouse_column_type(col, false),
+                default_clause
+            )
         })
         .collect();
     col_defs.push(format!("  {} UInt128", quote_identifier(ETL_VERSION_COLUMN_NAME)));
@@ -255,6 +404,7 @@ mod tests {
             ordinal_position: 1,
             primary_key_ordinal_position: Some(1),
             nullable: false,
+            default_expression: None,
         }];
         // Pre-encoded table name with embedded quotes to verify the SQL
         // builder quotes/escapes the identifier itself.
@@ -321,6 +471,7 @@ mod tests {
                 ordinal_position: 1,
                 primary_key_ordinal_position: Some(1),
                 nullable: false,
+                default_expression: None,
             },
             ColumnSchema {
                 name: "name".to_owned(),
@@ -329,11 +480,65 @@ mod tests {
                 ordinal_position: 2,
                 primary_key_ordinal_position: None,
                 nullable: true,
+                default_expression: None,
             },
         ];
         let sql = create_merge_tree_sql("public_users", &schemas);
         assert!(sql.contains("\"id\" Int32"), "id should be non-nullable Int32");
         assert!(sql.contains("\"name\" Nullable(String)"), "name should be Nullable(String)");
+    }
+
+    #[test]
+    fn create_merge_tree_sql_includes_supported_defaults() {
+        let schemas = vec![
+            ColumnSchema::new("status".to_owned(), Type::TEXT, -1, 1, true)
+                .with_default_expression("'pending'::text".to_owned()),
+        ];
+
+        let sql = create_merge_tree_sql("public_t", &schemas);
+
+        assert!(
+            sql.contains("\"status\" Nullable(String) DEFAULT 'pending'"),
+            "default expression should be rendered in column definition: {sql}"
+        );
+    }
+
+    #[test]
+    fn clickhouse_default_clause_renders_portable_expressions() {
+        let cases = [
+            (Type::TEXT, "true", " DEFAULT 'true'"),
+            (Type::BOOL, "'true'::text", " DEFAULT true"),
+            (Type::DATE, "'2026-01-01'::date", " DEFAULT toDate32('2026-01-01')"),
+            (Type::DATE, "now()", " DEFAULT today()"),
+            (Type::NUMERIC, "42", " DEFAULT '42'"),
+            (Type::UUID, "gen_random_uuid()", " DEFAULT generateUUIDv4()"),
+            (Type::TIMESTAMPTZ, "now() + interval '30 days'", " DEFAULT now() + INTERVAL 30 DAY"),
+            (Type::TEXT, "upper('user'::text)", " DEFAULT upper('user')"),
+        ];
+
+        for (typ, expression, expected) in cases {
+            let column = ColumnSchema::new("value".to_owned(), typ, -1, 1, true)
+                .with_default_expression(expression.to_owned());
+
+            assert_eq!(clickhouse_default_clause(&column).as_deref(), Some(expected));
+        }
+
+        let unsupported = ColumnSchema::new("value".to_owned(), Type::TIME, -1, 1, true)
+            .with_default_expression("current_time".to_owned());
+        assert_eq!(clickhouse_default_clause(&unsupported), None);
+
+        let unsupported_cases = [
+            (Type::INT4, "'abc'::text"),
+            (Type::NUMERIC, "10 + 5"),
+            (Type::TEXT, "current_date"),
+            (Type::DATE, "current_time"),
+        ];
+        for (typ, expression) in unsupported_cases {
+            let column = ColumnSchema::new("value".to_owned(), typ, -1, 1, true)
+                .with_default_expression(expression.to_owned());
+
+            assert_eq!(clickhouse_default_clause(&column), None);
+        }
     }
 
     #[test]
@@ -345,6 +550,7 @@ mod tests {
             ordinal_position: 1,
             primary_key_ordinal_position: Some(1),
             nullable: false,
+            default_expression: None,
         }];
         let sql = create_merge_tree_sql("public_t", &schemas);
         assert!(sql.contains("\"cdc_operation\" String"), "cdc_operation should be non-nullable");
@@ -362,6 +568,7 @@ mod tests {
             ordinal_position: 1,
             primary_key_ordinal_position: None,
             nullable: false,
+            default_expression: None,
         }];
         let sql = create_merge_tree_sql("public_t", &schemas);
         assert!(
@@ -381,6 +588,7 @@ mod tests {
                 ordinal_position: 1,
                 primary_key_ordinal_position: Some(1),
                 nullable: false,
+                default_expression: None,
             },
             ColumnSchema {
                 name: "name".to_owned(),
@@ -389,6 +597,7 @@ mod tests {
                 ordinal_position: 2,
                 primary_key_ordinal_position: None,
                 nullable: true,
+                default_expression: None,
             },
         ];
         // --- WHEN: build the ReplacingMergeTree DDL ---
@@ -413,6 +622,7 @@ mod tests {
                 ordinal_position: 1,
                 primary_key_ordinal_position: Some(2),
                 nullable: false,
+                default_expression: None,
             },
             ColumnSchema {
                 name: "name".to_owned(),
@@ -421,6 +631,7 @@ mod tests {
                 ordinal_position: 2,
                 primary_key_ordinal_position: None,
                 nullable: true,
+                default_expression: None,
             },
             ColumnSchema {
                 name: "tenant_id".to_owned(),
@@ -429,6 +640,7 @@ mod tests {
                 ordinal_position: 3,
                 primary_key_ordinal_position: Some(1),
                 nullable: false,
+                default_expression: None,
             },
         ];
         // --- WHEN: build the ReplacingMergeTree DDL ---
@@ -450,6 +662,7 @@ mod tests {
             ordinal_position: 1,
             primary_key_ordinal_position: None,
             nullable: true,
+            default_expression: None,
         }];
         // --- WHEN: build the ReplacingMergeTree DDL ---
         let err = create_replacing_merge_tree_sql("public_events", &schemas).unwrap_err();
@@ -467,6 +680,7 @@ mod tests {
             ordinal_position: 1,
             primary_key_ordinal_position: Some(1),
             nullable: false,
+            default_expression: None,
         }];
         // --- WHEN/THEN: dispatcher selects the matching engine branch ---
         let merge_tree =
@@ -488,6 +702,7 @@ mod tests {
                 ordinal_position: 1,
                 primary_key_ordinal_position: Some(1),
                 nullable: false,
+                default_expression: None,
             },
             ColumnSchema {
                 name: "name".to_owned(),
@@ -496,6 +711,7 @@ mod tests {
                 ordinal_position: 2,
                 primary_key_ordinal_position: None,
                 nullable: true,
+                default_expression: None,
             },
         ];
         // --- WHEN: build the current-state view DDL ---

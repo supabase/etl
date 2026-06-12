@@ -113,15 +113,23 @@ impl<T: TokenProvider> SqlClient<T> {
     }
 
     /// Add a nullable column to an existing table.
+    ///
+    /// When `default_clause` is present, Snowflake populates existing rows with
+    /// that default as part of the add-column operation.
     pub async fn add_column(
         &self,
         table_name: &str,
         column_name: &str,
         column_type: &str,
+        default_clause: Option<&str>,
     ) -> Result<()> {
         let fqn = self.fully_qualified_name(table_name);
         let col = quote_identifier(column_name);
-        self.execute_ddl(&format!("ALTER TABLE {fqn} ADD COLUMN {col} {column_type}")).await
+        let default_clause = default_clause.unwrap_or_default();
+        self.execute_ddl(&format!(
+            "ALTER TABLE {fqn} ADD COLUMN {col} {column_type}{default_clause}"
+        ))
+        .await
     }
 
     /// Remove a column from an existing table.
@@ -142,6 +150,13 @@ impl<T: TokenProvider> SqlClient<T> {
         let old = quote_identifier(old_name);
         let new = quote_identifier(new_name);
         self.execute_ddl(&format!("ALTER TABLE {fqn} RENAME COLUMN {old} TO {new}")).await
+    }
+
+    /// Remove the NOT NULL constraint from an existing column.
+    pub async fn drop_column_not_null(&self, table_name: &str, column_name: &str) -> Result<()> {
+        let fqn = self.fully_qualified_name(table_name);
+        let col = quote_identifier(column_name);
+        self.execute_ddl(&format!("ALTER TABLE {fqn} ALTER COLUMN {col} DROP NOT NULL")).await
     }
 
     fn fully_qualified_name(&self, name: &str) -> String {

@@ -88,7 +88,7 @@ async fn schema_evolution_ddl() {
             .await
             .expect("create table failed");
 
-        client.add_column(&table, "email", "VARCHAR").await.expect("add column failed");
+        client.add_column(&table, "email", "VARCHAR", None).await.expect("add column failed");
 
         client.rename_column(&table, "email", "user_email").await.expect("rename column failed");
 

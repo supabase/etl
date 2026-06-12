@@ -1,8 +1,9 @@
 use std::{collections::HashMap, sync::Arc};
 
-use etl::types::{ColumnSchema, PipelineId, SchemaDiff, TableId};
+use etl::types::{ColumnChange, ColumnModification, ColumnSchema, PipelineId, SchemaDiff, TableId};
 use reqwest::StatusCode;
 use tokio::sync::{Mutex, RwLock};
+use tracing::warn;
 
 use crate::snowflake::{
     Config, Error, Result,
@@ -174,18 +175,55 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
         Ok(true)
     }
 
-    /// Apply column additions, renames, and removals from a schema diff.
+    /// Apply column additions, renames, updates, and removals from a schema
+    /// diff.
     pub async fn apply_schema_diff(&self, table_name: &str, diff: &SchemaDiff) -> Result<()> {
         if diff.is_empty() {
             return Ok(());
         }
 
         for col in &diff.columns_to_add {
-            self.sql_client.add_column(table_name, &col.name, schema::type_name(&col.typ)).await?;
+            let add_column_default_clause = schema::add_column_default_clause(col);
+            self.sql_client
+                .add_column(
+                    table_name,
+                    &col.name,
+                    schema::type_name(&col.typ),
+                    add_column_default_clause.as_deref(),
+                )
+                .await?;
         }
 
-        for rename in &diff.columns_to_rename {
-            self.sql_client.rename_column(table_name, &rename.old_name, &rename.new_name).await?;
+        for change in &diff.columns_to_change {
+            for modification in &change.modifications {
+                let ColumnModification::Rename { old_name, new_name } = modification else {
+                    continue;
+                };
+
+                self.sql_client.rename_column(table_name, old_name, new_name).await?;
+            }
+        }
+
+        for change in &diff.columns_to_change {
+            for modification in &change.modifications {
+                match modification {
+                    ColumnModification::Rename { .. } => {}
+                    ColumnModification::Nullability { old_nullable, new_nullable } => {
+                        if !old_nullable && *new_nullable {
+                            self.sql_client
+                                .drop_column_not_null(table_name, &change.new_column.name)
+                                .await?;
+                        }
+                    }
+                    ColumnModification::Default { old_expression: _, new_expression } => {
+                        if new_expression.is_some() {
+                            Self::warn_skipping_column_default_change(table_name, change);
+                        } else {
+                            Self::warn_skipping_column_default_drop(table_name, change);
+                        }
+                    }
+                }
+            }
         }
 
         for col in &diff.columns_to_remove {
@@ -193,6 +231,30 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
         }
 
         Ok(())
+    }
+
+    /// Logs that Snowflake default-change DDL is being skipped.
+    fn warn_skipping_column_default_change(table_name: &str, change: &ColumnChange) {
+        if change.new_column.default_expression.is_some() {
+            warn!(
+                table_name,
+                column_name = %change.new_column.name,
+                "skipping source column default change for Snowflake because ALTER COLUMN SET \
+                 DEFAULT is only supported for existing sequence defaults"
+            );
+        }
+    }
+
+    /// Logs that Snowflake default-drop DDL is being skipped.
+    fn warn_skipping_column_default_drop(table_name: &str, change: &ColumnChange) {
+        if schema::supports_default(&change.old_column) {
+            warn!(
+                table_name,
+                column_name = %change.new_column.name,
+                "skipping source column default removal for Snowflake because defaults introduced \
+                 by ALTER TABLE ADD COLUMN cannot be dropped safely"
+            );
+        }
     }
 
     /// Truncate the table and reset ingestion state so offsets restart.

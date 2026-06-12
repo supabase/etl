@@ -17,7 +17,7 @@ use etl::{
     state::destination_table_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus},
     store::DestinationStore,
     types::{
-        Cell, Event, EventSequenceKey, IdentityType, OldTableRow, PipelineId,
+        Cell, ColumnModification, Event, EventSequenceKey, IdentityType, OldTableRow, PipelineId,
         ReplicatedTableSchema, SchemaDiff, TableId, TableName, TableRow, UpdatedTableRow,
     },
 };
@@ -820,11 +820,11 @@ where
         }
 
         info!(
-            "applying schema changes to table {}: {} additions, {} removals, {} renames",
+            "applying schema changes to table {}: {} additions, {} removals, {} column changes",
             sequenced_bigquery_table_id,
             diff.columns_to_add.len(),
             diff.columns_to_remove.len(),
-            diff.columns_to_rename.len()
+            diff.columns_to_change.len()
         );
 
         // Apply column additions first (safest operation).
@@ -832,19 +832,99 @@ where
             self.client
                 .add_column(&self.dataset_id, &sequenced_bigquery_table_id.to_string(), column)
                 .await?;
+            if column.default_expression.is_some() {
+                self.client
+                    .set_column_default(
+                        &self.dataset_id,
+                        &sequenced_bigquery_table_id.to_string(),
+                        column,
+                    )
+                    .await?;
+            }
         }
 
-        // Apply column renames (must be done before removals in case of position
-        // conflicts).
-        for rename in &diff.columns_to_rename {
-            self.client
-                .rename_column(
-                    &self.dataset_id,
-                    &sequenced_bigquery_table_id.to_string(),
-                    &rename.old_name,
-                    &rename.new_name,
-                )
-                .await?;
+        // Apply column renames before other changes so subsequent DDL targets
+        // the new column name.
+        for change in &diff.columns_to_change {
+            for modification in &change.modifications {
+                let ColumnModification::Rename { old_name, new_name } = modification else {
+                    continue;
+                };
+
+                self.client
+                    .rename_column(
+                        &self.dataset_id,
+                        &sequenced_bigquery_table_id.to_string(),
+                        old_name,
+                        new_name,
+                    )
+                    .await?;
+            }
+        }
+
+        for change in &diff.columns_to_change {
+            for modification in &change.modifications {
+                match modification {
+                    ColumnModification::Rename { .. } => {}
+                    ColumnModification::Nullability { old_nullable, new_nullable } => {
+                        if !old_nullable && *new_nullable {
+                            self.client
+                                .drop_column_not_null(
+                                    &self.dataset_id,
+                                    &sequenced_bigquery_table_id.to_string(),
+                                    &change.new_column.name,
+                                )
+                                .await?;
+                        }
+                    }
+                    ColumnModification::Default { old_expression, new_expression } => {
+                        let old_default_was_supported = old_expression.is_some()
+                            && BigQueryClient::supports_column_default(&change.old_column);
+
+                        if new_expression.is_some() {
+                            if BigQueryClient::supports_column_default(&change.new_column) {
+                                self.client
+                                    .set_column_default(
+                                        &self.dataset_id,
+                                        &sequenced_bigquery_table_id.to_string(),
+                                        &change.new_column,
+                                    )
+                                    .await?;
+                            } else {
+                                warn!(
+                                    table_id = %table_id,
+                                    column_name = %change.new_column.name,
+                                    "skipping unsupported source column default for BigQuery"
+                                );
+                                if old_default_was_supported {
+                                    self.client
+                                        .drop_column_default(
+                                            &self.dataset_id,
+                                            &sequenced_bigquery_table_id.to_string(),
+                                            &change.new_column.name,
+                                        )
+                                        .await?;
+                                }
+                            }
+                        } else if old_default_was_supported {
+                            self.client
+                                .drop_column_default(
+                                    &self.dataset_id,
+                                    &sequenced_bigquery_table_id.to_string(),
+                                    &change.new_column.name,
+                                )
+                                .await?;
+                        } else if old_expression.is_some() {
+                            warn!(
+                                table_id = %table_id,
+                                column_name = %change.new_column.name,
+                                "skipping source column default removal for BigQuery because no \
+                                 supported destination default was set"
+                            );
+                        }
+                    }
+                }
+            }
         }
 
         // Apply column removals last.
@@ -1748,8 +1828,8 @@ mod tests {
             TableId::new(1),
             TableName::new("public".to_owned(), "users".to_owned()),
             vec![
-                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
-                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true),
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true),
             ],
         ));
         let replication_mask = etl::types::ReplicationMask::all(&table_schema);
@@ -1768,9 +1848,10 @@ mod tests {
             TableId::new(1),
             TableName::new("public".to_owned(), "users".to_owned()),
             vec![
-                ColumnSchema::new("tenant_id".to_owned(), Type::INT4, -1, 1, Some(1), false),
-                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 2, Some(2), false),
-                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 3, None, true),
+                ColumnSchema::new("tenant_id".to_owned(), Type::INT4, -1, 1, false)
+                    .with_primary_key(1),
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 2, false).with_primary_key(2),
+                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 3, true),
             ],
         ));
         let replication_mask = etl::types::ReplicationMask::from_bytes(vec![0, 1, 1]);
@@ -2309,9 +2390,9 @@ mod tests {
             TableId::new(1),
             TableName::new("public".to_owned(), "users".to_owned()),
             vec![
-                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
-                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, false),
-                ColumnSchema::new("age".to_owned(), Type::INT4, -1, 3, None, false),
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, false),
+                ColumnSchema::new("age".to_owned(), Type::INT4, -1, 3, false),
             ],
         ));
         let replicated_table_schema = ReplicatedTableSchema::from_masks(
@@ -2353,9 +2434,9 @@ mod tests {
             TableId::new(1),
             TableName::new("public".to_owned(), "users".to_owned()),
             vec![
-                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
-                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, false),
-                ColumnSchema::new("age".to_owned(), Type::INT4, -1, 3, None, false),
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, false),
+                ColumnSchema::new("age".to_owned(), Type::INT4, -1, 3, false),
             ],
         ));
         let replicated_table_schema = ReplicatedTableSchema::from_masks(
