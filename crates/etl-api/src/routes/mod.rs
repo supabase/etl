@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use utoipa::ToSchema;
 
+use crate::sentry_scrubbing;
+
 pub mod common;
 pub mod destinations;
 pub mod destinations_pipelines;
@@ -73,6 +75,24 @@ fn extract_tenant_id(headers: &HeaderMap) -> Result<&str, TenantIdError> {
 /// Builds a JSON error response for route errors.
 pub(crate) fn error_response(status_code: axum::http::StatusCode, message: String) -> Response {
     (status_code, Json(ErrorMessage { message })).into_response()
+}
+
+/// Builds a JSON error response and attaches internal details for Sentry.
+pub(crate) fn error_response_with_internal_error<E>(
+    status_code: axum::http::StatusCode,
+    message: String,
+    error: &E,
+) -> Response
+where
+    E: std::error::Error + 'static,
+{
+    let mut response = error_response(status_code, message);
+
+    if status_code.is_server_error() {
+        response.extensions_mut().insert(sentry_scrubbing::ServerErrorReport::from_error(error));
+    }
+
+    response
 }
 
 /// Returns the inner value from axum extractors used by route handlers.

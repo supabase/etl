@@ -23,7 +23,10 @@ use crate::{
         K8sClient,
         core::{K8sCoreError, first_active_pipeline_id},
     },
-    routes::{ErrorMessage, IntoInner, TenantIdError, error_response, extract_tenant_id, utils},
+    routes::{
+        ErrorMessage, IntoInner, TenantIdError, error_response_with_internal_error,
+        extract_tenant_id, utils,
+    },
     validation,
     validation::{FailureType, ValidationContext, ValidationError, ValidationFailure},
 };
@@ -90,7 +93,7 @@ impl IntoResponse for DestinationError {
             DestinationError::TenantId(_) => StatusCode::BAD_REQUEST,
         };
 
-        error_response(status_code, self.to_message())
+        error_response_with_internal_error(status_code, self.to_message(), &self)
     }
 }
 

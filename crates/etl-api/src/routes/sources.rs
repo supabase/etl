@@ -27,7 +27,8 @@ use crate::{
         core::{K8sCoreError, first_active_pipeline_id},
     },
     routes::{
-        ErrorMessage, IntoInner, TenantIdError, common, error_response, extract_tenant_id, utils,
+        ErrorMessage, IntoInner, TenantIdError, common, error_response_with_internal_error,
+        extract_tenant_id, utils,
     },
     validation::{FailureType, ValidationError, ValidationFailure},
 };
@@ -92,7 +93,7 @@ impl IntoResponse for SourceError {
             SourceError::ActivePipeline(_) | SourceError::SourceInUse(_) => StatusCode::CONFLICT,
         };
 
-        error_response(status_code, self.to_message())
+        error_response_with_internal_error(status_code, self.to_message(), &self)
     }
 }
 

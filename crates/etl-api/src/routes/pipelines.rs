@@ -43,8 +43,8 @@ use crate::{
         },
     },
     routes::{
-        ErrorMessage, IntoInner, TenantIdError, error_response, extract_tenant_id,
-        utils as route_utils,
+        ErrorMessage, IntoInner, TenantIdError, error_response_with_internal_error,
+        extract_tenant_id, utils as route_utils,
     },
     utils::parse_docker_image_tag,
     validation,
@@ -239,7 +239,7 @@ impl IntoResponse for PipelineError {
             PipelineError::PipelineLimitReached { .. } => StatusCode::UNPROCESSABLE_ENTITY,
         };
 
-        error_response(status_code, self.to_message())
+        error_response_with_internal_error(status_code, self.to_message(), &self)
     }
 }
 

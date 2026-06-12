@@ -28,7 +28,10 @@ use crate::{
         K8sClient, TrustedRootCertsCache, TrustedRootCertsError,
         core::{K8sCoreError, first_active_pipeline_id},
     },
-    routes::{ErrorMessage, IntoInner, TenantIdError, error_response, validate_tenant_id},
+    routes::{
+        ErrorMessage, IntoInner, TenantIdError, error_response_with_internal_error,
+        validate_tenant_id,
+    },
 };
 
 #[derive(Debug, Error)]
@@ -92,7 +95,7 @@ impl IntoResponse for TenantError {
             TenantError::TenantNotFound(_) => StatusCode::NOT_FOUND,
         };
 
-        error_response(status_code, self.to_message())
+        error_response_with_internal_error(status_code, self.to_message(), &self)
     }
 }
 
