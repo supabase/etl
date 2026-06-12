@@ -678,7 +678,8 @@ async fn schema_evolution_existing_column_default_changes() {
 
         apply_relation_event(&harness.destination, set_default_replicated, 100, "set default")
             .await;
-        insert_row_omitting_status(&harness.sql, &fqn, 1, "manual-1", "with set default").await;
+        insert_row_omitting_status(&harness.sql, &fqn, 1, "manual-1", "after skipped set default")
+            .await;
 
         apply_relation_event(
             &harness.destination,
@@ -692,17 +693,25 @@ async fn schema_evolution_existing_column_default_changes() {
             &fqn,
             2,
             "manual-2",
-            "after unsupported default cleanup",
+            "after unsupported default is skipped",
         )
         .await;
 
         apply_relation_event(&harness.destination, reset_default_replicated, 300, "reset default")
             .await;
-        insert_row_omitting_status(&harness.sql, &fqn, 3, "manual-3", "with reset default").await;
+        insert_row_omitting_status(
+            &harness.sql,
+            &fqn,
+            3,
+            "manual-3",
+            "after skipped reset default",
+        )
+        .await;
 
         apply_relation_event(&harness.destination, drop_default_replicated, 400, "drop default")
             .await;
-        insert_row_omitting_status(&harness.sql, &fqn, 4, "manual-4", "after drop default").await;
+        insert_row_omitting_status(&harness.sql, &fqn, 4, "manual-4", "after skipped drop default")
+            .await;
 
         let rows = query_rows(
             &harness.sql,
@@ -713,9 +722,9 @@ async fn schema_evolution_existing_column_default_changes() {
         assert_eq!(
             rows,
             vec![
-                vec![serde_json::json!("1"), serde_json::json!("pending")],
+                vec![serde_json::json!("1"), serde_json::Value::Null],
                 vec![serde_json::json!("2"), serde_json::Value::Null],
-                vec![serde_json::json!("3"), serde_json::json!("queued")],
+                vec![serde_json::json!("3"), serde_json::Value::Null],
                 vec![serde_json::json!("4"), serde_json::Value::Null],
             ]
         );

@@ -878,6 +878,9 @@ where
                         }
                     }
                     ColumnModification::Default { old_expression, new_expression } => {
+                        let old_default_was_supported = old_expression.is_some()
+                            && BigQueryClient::supports_column_default(&change.old_column);
+
                         if new_expression.is_some() {
                             if BigQueryClient::supports_column_default(&change.new_column) {
                                 self.client
@@ -893,9 +896,7 @@ where
                                     column_name = %change.new_column.name,
                                     "skipping unsupported source column default for BigQuery"
                                 );
-                                if old_expression.is_some()
-                                    && BigQueryClient::supports_column_default(&change.old_column)
-                                {
+                                if old_default_was_supported {
                                     self.client
                                         .drop_column_default(
                                             &self.dataset_id,
@@ -905,7 +906,7 @@ where
                                         .await?;
                                 }
                             }
-                        } else {
+                        } else if old_default_was_supported {
                             self.client
                                 .drop_column_default(
                                     &self.dataset_id,
@@ -913,6 +914,13 @@ where
                                     &change.new_column.name,
                                 )
                                 .await?;
+                        } else if old_expression.is_some() {
+                            warn!(
+                                table_id = %table_id,
+                                column_name = %change.new_column.name,
+                                "skipping source column default removal for BigQuery because no \
+                                 supported destination default was set"
+                            );
                         }
                     }
                 }

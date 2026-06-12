@@ -76,7 +76,7 @@ ETL has one shared schema-change signal, but **DDL behavior is implemented per d
 | BigQuery | Supports add, drop, rename, supported default metadata, and dropping `NOT NULL`. BigQuery requires added columns to be nullable and does not backfill existing rows for `ADD COLUMN ... DEFAULT`. |
 | ClickHouse | Supports add, drop, rename, supported defaults, and nullability changes. `ReplacingMergeTree` rejects primary-key drops or renames because the ordering expression cannot be rewritten safely. ClickHouse default expressions are metadata-only unless explicitly materialized; ETL does not issue `MATERIALIZE COLUMN`. |
 | DuckLake | Supports add, drop, rename, supported defaults, and nullability changes. DuckLake records supported add-time defaults as metadata without rewriting existing data files. |
-| Snowflake | Supports add, drop, rename, supported defaults, and dropping `NOT NULL`. Supported defaults are included in `ADD COLUMN` so Snowflake can expose add-time default values for existing rows. |
+| Snowflake | Supports add, drop, rename, create-table defaults, literal add-column defaults, and dropping `NOT NULL`. Literal defaults are included in `ADD COLUMN` so Snowflake can expose add-time default values for existing rows; non-literal add-column defaults and later default changes are skipped with a warning. |
 | Iceberg | Deprecated for now. Schema-change DDL is not a supported path for new deployments. |
 | Custom destinations | Destination authors decide which `Event::Relation` changes to apply, reject, or handle manually. |
 
@@ -97,9 +97,10 @@ support:
   metadata, but ETL does not issue `MATERIALIZE COLUMN`.
 - DuckLake uses add-time initial default metadata for supported defaults; its
   schema evolution does not rewrite data files.
-- Snowflake uses `ADD COLUMN ... DEFAULT` for supported defaults. Snowflake
-  exposes default values for existing rows and does not document this as a
-  physical row rewrite, but defaults created this way cannot later be dropped.
+- Snowflake uses `ADD COLUMN ... DEFAULT` for the literal default subset allowed
+  by Snowflake. Snowflake exposes default values for existing rows and does not
+  document this as a physical row rewrite, but defaults created this way cannot
+  later be dropped.
 
 As a result, pre-existing destination rows might not match PostgreSQL's
 historical `ADD COLUMN ... DEFAULT` view unless the destination has a
@@ -165,9 +166,10 @@ ETL currently supports the simplest safe cases:
 - `ALTER TABLE ... ADD COLUMN` for replicated columns.
 - `ALTER TABLE ... DROP COLUMN` for replicated columns.
 - `ALTER TABLE ... RENAME COLUMN` for replicated columns.
-- `ALTER TABLE ... ALTER COLUMN ... SET DEFAULT` for supported default
-  expressions.
-- `ALTER TABLE ... ALTER COLUMN ... DROP DEFAULT`.
+- `ALTER TABLE ... ALTER COLUMN ... SET DEFAULT` where the destination supports
+  setting compatible default metadata.
+- `ALTER TABLE ... ALTER COLUMN ... DROP DEFAULT` where the destination supports
+  removing default metadata safely.
 - `ALTER TABLE ... ALTER COLUMN ... DROP NOT NULL`.
 - `ALTER TABLE ... ALTER COLUMN ... SET NOT NULL` where the destination can
   apply it safely.
@@ -195,7 +197,10 @@ These behaviors are **not full destination DDL semantics** yet:
   skipped with a warning instead of failing replication. If a previously
   supported default becomes unsupported, ETL removes the old destination default
   where the destination supports that operation so stale behavior is not left
-  behind.
+  behind. Snowflake default changes on existing columns are skipped with a
+  warning because `ALTER COLUMN SET DEFAULT` is documented only for existing
+  sequence defaults, and defaults introduced by
+  `ALTER TABLE ADD COLUMN ... DEFAULT` cannot be dropped safely.
 - Volatile defaults cannot be made historically identical without explicit
   source backfill. Examples include `now()`, `clock_timestamp()`,
   `gen_random_uuid()`, `random()`, sequence defaults, and session-dependent
@@ -207,7 +212,9 @@ These behaviors are **not full destination DDL semantics** yet:
   avoids destination DDL that rewrites all existing rows. BigQuery leaves
   pre-existing destination rows null for newly added defaulted columns, while
   ClickHouse, DuckLake, and Snowflake can expose supported add-time defaults
-  without ETL issuing a materialization rewrite.
+  without ETL issuing a materialization rewrite. Snowflake only receives
+  add-column defaults for source defaults that can be rendered as Snowflake
+  literals.
 - Tightening nullability with `SET NOT NULL` is destination-specific and may
   fail if existing destination data violates the constraint. BigQuery and
   Snowflake currently automate only `DROP NOT NULL`.

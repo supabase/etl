@@ -233,6 +233,7 @@ fn normalize_postgres_expression(expression: &str) -> &str {
                 expression.len(),
                 None,
             );
+
             return expression;
         }
 
@@ -252,6 +253,7 @@ fn strip_postgres_cast(expression: &str) -> &str {
 
     let Some(type_start) = cast_start.checked_add(2) else {
         warn_default_parser_guard("cast suffix index overflow", expression.len(), Some(cast_start));
+
         return expression;
     };
 
@@ -261,6 +263,7 @@ fn strip_postgres_cast(expression: &str) -> &str {
             expression.len(),
             Some(type_start),
         );
+
         return expression;
     };
 
@@ -270,6 +273,7 @@ fn strip_postgres_cast(expression: &str) -> &str {
             expression.len(),
             Some(cast_start),
         );
+
         return expression;
     };
 
@@ -314,6 +318,7 @@ fn top_level_cast_start(expression: &str) -> Option<usize> {
                         bytes.len(),
                         Some(index),
                     );
+
                     return None;
                 };
                 paren_depth = new_depth;
@@ -394,6 +399,7 @@ fn has_top_level_binary_operator(expression: &str) -> bool {
                         bytes.len(),
                         Some(index),
                     );
+
                     return true;
                 };
                 paren_depth = new_depth;
@@ -509,6 +515,7 @@ fn strip_outer_parens(expression: &str) -> &str {
                         bytes.len(),
                         Some(index),
                     );
+
                     return expression;
                 };
                 depth = new_depth;
@@ -521,6 +528,7 @@ fn strip_outer_parens(expression: &str) -> &str {
                         bytes.len(),
                         Some(index),
                     );
+
                     return expression;
                 };
                 depth = new_depth;
@@ -726,6 +734,7 @@ fn split_top_level_interval_arithmetic(expression: &str) -> Option<(&str, char, 
                         bytes.len(),
                         Some(index),
                     );
+
                     return None;
                 };
                 paren_depth = new_depth;
@@ -844,6 +853,7 @@ fn parse_function_call(expression: &str) -> Option<(&str, &str)> {
                         bytes.len(),
                         Some(index),
                     );
+
                     return None;
                 };
                 depth = new_depth;
@@ -856,6 +866,7 @@ fn parse_function_call(expression: &str) -> Option<(&str, &str)> {
                         bytes.len(),
                         Some(index),
                     );
+
                     return None;
                 };
                 depth = new_depth;
@@ -894,6 +905,7 @@ fn parse_single_top_level_arg(args: &str) -> Option<&str> {
                         bytes.len(),
                         Some(index),
                     );
+
                     return None;
                 };
                 paren_depth = new_depth;
@@ -941,6 +953,7 @@ fn is_valid_numeric_expression(expression: &str) -> bool {
                         bytes.len(),
                         Some(index),
                     );
+
                     return false;
                 };
                 paren_depth = new_depth;
@@ -968,6 +981,7 @@ fn is_valid_numeric_expression(expression: &str) -> bool {
                         bytes.len(),
                         Some(index),
                     );
+
                     return false;
                 };
                 paren_depth = new_depth;

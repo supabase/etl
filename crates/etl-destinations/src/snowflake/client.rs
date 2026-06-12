@@ -1,8 +1,9 @@
 use std::{collections::HashMap, sync::Arc};
 
-use etl::types::{ColumnModification, ColumnSchema, PipelineId, SchemaDiff, TableId};
+use etl::types::{ColumnChange, ColumnModification, ColumnSchema, PipelineId, SchemaDiff, TableId};
 use reqwest::StatusCode;
 use tokio::sync::{Mutex, RwLock};
+use tracing::warn;
 
 use crate::snowflake::{
     Config, Error, Result,
@@ -226,30 +227,11 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
                                 .await?;
                         }
                     }
-                    ColumnModification::Default { old_expression, new_expression } => {
+                    ColumnModification::Default { old_expression: _, new_expression } => {
                         if new_expression.is_some() {
-                            if let Some(default_clause) = schema::default_clause(&change.new_column)
-                            {
-                                let default_expression =
-                                    default_clause.trim_start_matches(" DEFAULT ");
-                                self.sql_client
-                                    .set_column_default(
-                                        table_name,
-                                        &change.new_column.name,
-                                        default_expression,
-                                    )
-                                    .await?;
-                            } else if old_expression.is_some()
-                                && schema::supports_default(&change.old_column)
-                            {
-                                self.sql_client
-                                    .drop_column_default(table_name, &change.new_column.name)
-                                    .await?;
-                            }
+                            Self::warn_skipping_column_default_change(table_name, change);
                         } else {
-                            self.sql_client
-                                .drop_column_default(table_name, &change.new_column.name)
-                                .await?;
+                            Self::warn_skipping_column_default_drop(table_name, change);
                         }
                     }
                 }
@@ -261,6 +243,30 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
         }
 
         Ok(())
+    }
+
+    /// Logs that Snowflake default-change DDL is being skipped.
+    fn warn_skipping_column_default_change(table_name: &str, change: &ColumnChange) {
+        if change.new_column.default_expression.is_some() {
+            warn!(
+                table_name,
+                column_name = %change.new_column.name,
+                "skipping source column default change for Snowflake because ALTER COLUMN SET \
+                 DEFAULT is only supported for existing sequence defaults"
+            );
+        }
+    }
+
+    /// Logs that Snowflake default-drop DDL is being skipped.
+    fn warn_skipping_column_default_drop(table_name: &str, change: &ColumnChange) {
+        if schema::supports_default(&change.old_column) {
+            warn!(
+                table_name,
+                column_name = %change.new_column.name,
+                "skipping source column default removal for Snowflake because defaults introduced \
+                 by ALTER TABLE ADD COLUMN cannot be dropped safely"
+            );
+        }
     }
 
     /// Truncate the table and reset ingestion state so offsets restart.

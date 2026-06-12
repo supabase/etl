@@ -689,6 +689,9 @@ fn plan_schema_diff_sql_ducklake(
                     });
                 }
                 ColumnModification::Default { old_expression, new_expression } => {
+                    let old_default_was_supported =
+                        old_expression.is_some() && supports_default_ducklake(&change.old_column);
+
                     if new_expression.is_some() {
                         let Some(sql) =
                             build_set_default_sql_ducklake(table_name, &change.new_column)
@@ -698,9 +701,7 @@ fn plan_schema_diff_sql_ducklake(
                                 column_name = %change.new_column.name,
                                 "skipping unsupported source column default for DuckLake"
                             );
-                            if old_expression.is_some()
-                                && supports_default_ducklake(&change.old_column)
-                            {
+                            if old_default_was_supported {
                                 statements.push(DuckLakeSchemaDdlStatement {
                                     sql: build_drop_default_sql_ducklake(
                                         table_name,
@@ -715,7 +716,7 @@ fn plan_schema_diff_sql_ducklake(
                             sql,
                             error_description: "DuckLake alter table set default failed",
                         });
-                    } else {
+                    } else if old_default_was_supported {
                         statements.push(DuckLakeSchemaDdlStatement {
                             sql: build_drop_default_sql_ducklake(
                                 table_name,
@@ -723,6 +724,13 @@ fn plan_schema_diff_sql_ducklake(
                             ),
                             error_description: "DuckLake alter table drop default failed",
                         });
+                    } else if old_expression.is_some() {
+                        warn!(
+                            table_name = %table_name,
+                            column_name = %change.new_column.name,
+                            "skipping source column default removal for DuckLake because no \
+                             supported destination default was set"
+                        );
                     }
                 }
             }
@@ -2729,6 +2737,30 @@ mod tests {
         }
     }
 
+    fn default_change(
+        name: &str,
+        ordinal_position: i32,
+        old_expression: Option<&str>,
+        new_expression: Option<&str>,
+    ) -> ColumnChange {
+        let old_column =
+            ColumnSchema::new(name.to_owned(), PgType::TEXT, -1, ordinal_position, true)
+                .with_default_expression_option(old_expression.map(ToOwned::to_owned));
+        let new_column =
+            ColumnSchema::new(name.to_owned(), PgType::TEXT, -1, ordinal_position, true)
+                .with_default_expression_option(new_expression.map(ToOwned::to_owned));
+
+        ColumnChange {
+            ordinal_position,
+            old_column,
+            new_column,
+            modifications: vec![ColumnModification::Default {
+                old_expression: old_expression.map(ToOwned::to_owned),
+                new_expression: new_expression.map(ToOwned::to_owned),
+            }],
+        }
+    }
+
     #[test]
     fn key_row_from_updated_partial_row_uses_alternative_identity_columns() {
         let replicated_table_schema = make_alternative_identity_schema();
@@ -2811,6 +2843,30 @@ mod tests {
             statement_sql,
             vec![r#"alter table "lake"."users" add column "status" varchar default 'pending'"#]
         );
+        assert_eq!(plan.column_names, vec!["id", "name", "status"]);
+    }
+
+    #[test]
+    fn plan_schema_diff_skips_unsupported_default_drop() {
+        let diff = SchemaDiff {
+            columns_to_add: Vec::new(),
+            columns_to_remove: Vec::new(),
+            columns_to_change: vec![default_change(
+                "status",
+                3,
+                Some("array['unsupported']::text[]"),
+                None,
+            )],
+        };
+
+        let plan = plan_schema_diff_sql_ducklake(
+            "users",
+            vec!["id".to_owned(), "name".to_owned(), "status".to_owned()],
+            &diff,
+        )
+        .expect("schema diff should plan");
+
+        assert!(plan.statements.is_empty());
         assert_eq!(plan.column_names, vec!["id", "name", "status"]);
     }
 

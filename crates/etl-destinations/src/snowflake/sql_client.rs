@@ -152,28 +152,6 @@ impl<T: TokenProvider> SqlClient<T> {
         self.execute_ddl(&format!("ALTER TABLE {fqn} RENAME COLUMN {old} TO {new}")).await
     }
 
-    /// Set a default expression on an existing column.
-    pub async fn set_column_default(
-        &self,
-        table_name: &str,
-        column_name: &str,
-        default_expression: &str,
-    ) -> Result<()> {
-        let fqn = self.fully_qualified_name(table_name);
-        let col = quote_identifier(column_name);
-        self.execute_ddl(&format!(
-            "ALTER TABLE {fqn} ALTER COLUMN {col} SET DEFAULT {default_expression}"
-        ))
-        .await
-    }
-
-    /// Remove a default expression from an existing column.
-    pub async fn drop_column_default(&self, table_name: &str, column_name: &str) -> Result<()> {
-        let fqn = self.fully_qualified_name(table_name);
-        let col = quote_identifier(column_name);
-        self.execute_ddl(&format!("ALTER TABLE {fqn} ALTER COLUMN {col} DROP DEFAULT")).await
-    }
-
     /// Remove the NOT NULL constraint from an existing column.
     pub async fn drop_column_not_null(&self, table_name: &str, column_name: &str) -> Result<()> {
         let fqn = self.fully_qualified_name(table_name);

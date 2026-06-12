@@ -893,10 +893,17 @@ where
                                         .await?;
                                 }
                             }
-                        } else {
+                        } else if old_default_was_supported {
                             self.client
                                 .drop_column_default(clickhouse_table_name, &change.new_column.name)
                                 .await?;
+                        } else if old_expression.is_some() {
+                            warn!(
+                                table_name = %clickhouse_table_name,
+                                column_name = %change.new_column.name,
+                                "skipping source column default removal for ClickHouse because no \
+                                 supported destination default was set"
+                            );
                         }
                     }
                 }
