@@ -1,4 +1,5 @@
 use tokio_postgres::types::Type;
+use tracing::warn;
 
 /// A conservative, portable representation of a Postgres column default.
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -218,15 +219,29 @@ pub fn parse_default_expression(expression: &str, typ: &Type) -> Option<DefaultE
 /// Normalizes PostgreSQL-specific expression wrappers.
 fn normalize_postgres_expression(expression: &str) -> &str {
     let mut expression = expression.trim();
+    let max_iterations = expression.len();
 
-    loop {
+    for _ in 0..max_iterations {
         let stripped = strip_outer_parens(strip_postgres_cast(expression));
         if stripped == expression {
             return expression;
         }
 
+        if stripped.len() >= expression.len() {
+            warn_default_parser_guard(
+                "normalization rewrite did not shrink expression",
+                expression.len(),
+                None,
+            );
+            return expression;
+        }
+
         expression = stripped;
     }
+
+    warn_default_parser_guard("normalization reached iteration limit", expression.len(), None);
+
+    expression
 }
 
 /// Strips a trailing Postgres type cast from a default expression.
@@ -235,8 +250,31 @@ fn strip_postgres_cast(expression: &str) -> &str {
         return expression;
     };
 
-    let type_name = expression[cast_start + 2..].trim();
-    let cast_subject = expression[..cast_start].trim();
+    let Some(type_start) = cast_start.checked_add(2) else {
+        warn_default_parser_guard("cast suffix index overflow", expression.len(), Some(cast_start));
+        return expression;
+    };
+
+    let Some(type_name) = expression.get(type_start..) else {
+        warn_default_parser_guard(
+            "cast suffix index out of bounds",
+            expression.len(),
+            Some(type_start),
+        );
+        return expression;
+    };
+
+    let Some(cast_subject) = expression.get(..cast_start) else {
+        warn_default_parser_guard(
+            "cast subject index out of bounds",
+            expression.len(),
+            Some(cast_start),
+        );
+        return expression;
+    };
+
+    let type_name = type_name.trim();
+    let cast_subject = cast_subject.trim();
     if is_cast_type_name(type_name) && !has_top_level_binary_operator(cast_subject) {
         cast_subject
     } else {
@@ -255,36 +293,40 @@ fn top_level_cast_start(expression: &str) -> Option<usize> {
         match bytes[index] {
             b'\'' => {
                 in_string = !in_string;
-                index += 1;
+                index = advance_index(index, 1, bytes.len());
                 while in_string && index < bytes.len() {
                     if bytes[index] == b'\'' {
-                        if index + 1 < bytes.len() && bytes[index + 1] == b'\'' {
-                            index += 2;
+                        if next_byte_is(bytes, index, b'\'') {
+                            index = advance_index(index, 2, bytes.len());
                         } else {
                             in_string = false;
-                            index += 1;
+                            index = advance_index(index, 1, bytes.len());
                         }
                     } else {
-                        index += 1;
+                        index = advance_index(index, 1, bytes.len());
                     }
                 }
             }
             b'(' if !in_string => {
-                paren_depth += 1;
-                index += 1;
+                let Some(new_depth) = paren_depth.checked_add(1) else {
+                    warn_default_parser_guard(
+                        "cast parser parenthesis depth overflow",
+                        bytes.len(),
+                        Some(index),
+                    );
+                    return None;
+                };
+                paren_depth = new_depth;
+                index = advance_index(index, 1, bytes.len());
             }
             b')' if !in_string => {
                 paren_depth = paren_depth.saturating_sub(1);
-                index += 1;
+                index = advance_index(index, 1, bytes.len());
             }
-            b':' if !in_string
-                && paren_depth == 0
-                && index + 1 < bytes.len()
-                && bytes[index + 1] == b':' =>
-            {
+            b':' if !in_string && paren_depth == 0 && next_byte_is(bytes, index, b':') => {
                 return Some(index);
             }
-            _ => index += 1,
+            _ => index = advance_index(index, 1, bytes.len()),
         }
     }
 
@@ -326,7 +368,12 @@ fn quote_simple_string_literal(expression: &str) -> String {
 
 /// Unquotes a SQL single-quoted string literal.
 fn unquote_string_literal(expression: &str) -> Option<String> {
-    is_string_literal(expression).then(|| expression[1..expression.len() - 1].replace("''", "'"))
+    if !is_string_literal(expression) {
+        return None;
+    }
+
+    let end = expression.len().checked_sub(1)?;
+    Some(expression.get(1..end)?.replace("''", "'"))
 }
 
 /// Returns whether an expression contains a top-level binary operator.
@@ -341,21 +388,31 @@ fn has_top_level_binary_operator(expression: &str) -> bool {
                 index = skip_string_literal(bytes, index);
             }
             b'(' => {
-                paren_depth += 1;
-                index += 1;
+                let Some(new_depth) = paren_depth.checked_add(1) else {
+                    warn_default_parser_guard(
+                        "binary operator parser parenthesis depth overflow",
+                        bytes.len(),
+                        Some(index),
+                    );
+                    return true;
+                };
+                paren_depth = new_depth;
+                index = advance_index(index, 1, bytes.len());
             }
             b')' => {
                 paren_depth = paren_depth.saturating_sub(1);
-                index += 1;
+                index = advance_index(index, 1, bytes.len());
             }
-            b'+' | b'-' if paren_depth == 0 && index == 0 => index += 1,
+            b'+' | b'-' if paren_depth == 0 && index == 0 => {
+                index = advance_index(index, 1, bytes.len());
+            }
             b'+' | b'-' | b'*' | b'/' | b'%' if paren_depth == 0 => {
                 return true;
             }
-            b'|' if paren_depth == 0 && index + 1 < bytes.len() && bytes[index + 1] == b'|' => {
+            b'|' if paren_depth == 0 && next_byte_is(bytes, index, b'|') => {
                 return true;
             }
-            _ => index += 1,
+            _ => index = advance_index(index, 1, bytes.len()),
         }
     }
 
@@ -364,21 +421,47 @@ fn has_top_level_binary_operator(expression: &str) -> bool {
 
 /// Skips over a SQL single-quoted string literal.
 fn skip_string_literal(bytes: &[u8], mut index: usize) -> usize {
-    index += 1;
+    index = advance_index(index, 1, bytes.len());
 
     while index < bytes.len() {
         if bytes[index] == b'\'' {
-            if index + 1 < bytes.len() && bytes[index + 1] == b'\'' {
-                index += 2;
+            if next_byte_is(bytes, index, b'\'') {
+                index = advance_index(index, 2, bytes.len());
             } else {
-                return index + 1;
+                return advance_index(index, 1, bytes.len());
             }
         } else {
-            index += 1;
+            index = advance_index(index, 1, bytes.len());
         }
     }
 
     index
+}
+
+/// Advances a byte index, capping at the input length on overflow.
+fn advance_index(index: usize, amount: usize, len: usize) -> usize {
+    index.checked_add(amount).unwrap_or(len).min(len)
+}
+
+/// Returns whether the byte after `index` equals `expected`.
+fn next_byte_is(bytes: &[u8], index: usize, expected: u8) -> bool {
+    index
+        .checked_add(1)
+        .and_then(|next_index| bytes.get(next_index))
+        .is_some_and(|byte| *byte == expected)
+}
+
+/// Logs a defensive parser guard without including source default contents.
+fn warn_default_parser_guard(
+    reason: &'static str,
+    expression_len: usize,
+    byte_index: Option<usize>,
+) {
+    if let Some(byte_index) = byte_index {
+        warn!(reason, expression_len, byte_index, "default expression parser hit defensive guard");
+    } else {
+        warn!(reason, expression_len, "default expression parser hit defensive guard");
+    }
 }
 
 /// Returns whether a string starts with an ASCII prefix, ignoring case.
@@ -420,24 +503,45 @@ fn strip_outer_parens(expression: &str) -> &str {
                 index = skip_string_literal(bytes, index);
             }
             b'(' => {
-                depth += 1;
-                index += 1;
-            }
-            b')' => {
-                let Some(new_depth) = depth.checked_sub(1) else {
+                let Some(new_depth) = depth.checked_add(1) else {
+                    warn_default_parser_guard(
+                        "outer parenthesis parser depth overflow",
+                        bytes.len(),
+                        Some(index),
+                    );
                     return expression;
                 };
                 depth = new_depth;
-                if depth == 0 && index != bytes.len() - 1 {
+                index = advance_index(index, 1, bytes.len());
+            }
+            b')' => {
+                let Some(new_depth) = depth.checked_sub(1) else {
+                    warn_default_parser_guard(
+                        "outer parenthesis parser depth underflow",
+                        bytes.len(),
+                        Some(index),
+                    );
+                    return expression;
+                };
+                depth = new_depth;
+                if depth == 0 && index != bytes.len().saturating_sub(1) {
                     return expression;
                 }
-                index += 1;
+                index = advance_index(index, 1, bytes.len());
             }
-            _ => index += 1,
+            _ => index = advance_index(index, 1, bytes.len()),
         }
     }
 
-    if depth == 0 { expression[1..expression.len() - 1].trim() } else { expression }
+    if depth != 0 {
+        return expression;
+    }
+
+    let Some(end) = expression.len().checked_sub(1) else {
+        return expression;
+    };
+
+    expression.get(1..end).map(str::trim).unwrap_or(expression)
 }
 
 /// Returns whether an expression is a SQL string literal.
@@ -616,19 +720,28 @@ fn split_top_level_interval_arithmetic(expression: &str) -> Option<(&str, char, 
         match bytes[index] {
             b'\'' => index = skip_string_literal(bytes, index),
             b'(' => {
-                paren_depth += 1;
-                index += 1;
+                let Some(new_depth) = paren_depth.checked_add(1) else {
+                    warn_default_parser_guard(
+                        "interval parser parenthesis depth overflow",
+                        bytes.len(),
+                        Some(index),
+                    );
+                    return None;
+                };
+                paren_depth = new_depth;
+                index = advance_index(index, 1, bytes.len());
             }
             b')' => {
                 paren_depth = paren_depth.saturating_sub(1);
-                index += 1;
+                index = advance_index(index, 1, bytes.len());
             }
             b'+' | b'-' if paren_depth == 0 && index > 0 => {
-                let left = expression[..index].trim();
-                let right = expression[index + 1..].trim();
+                let left = expression.get(..index)?.trim();
+                let right_start = index.checked_add(1)?;
+                let right = expression.get(right_start..)?.trim();
                 return Some((left, bytes[index] as char, right));
             }
-            _ => index += 1,
+            _ => index = advance_index(index, 1, bytes.len()),
         }
     }
 
@@ -639,7 +752,7 @@ fn split_top_level_interval_arithmetic(expression: &str) -> Option<(&str, char, 
 fn parse_simple_interval_literal(expression: &str) -> Option<DefaultInterval> {
     let expression = expression.trim();
     let literal = if starts_with_ignore_ascii_case(expression, "interval ") {
-        expression[9..].trim()
+        expression.get(9..)?.trim()
     } else {
         normalize_postgres_expression(expression)
     };
@@ -647,7 +760,8 @@ fn parse_simple_interval_literal(expression: &str) -> Option<DefaultInterval> {
         return None;
     }
 
-    let literal = &literal[1..literal.len() - 1];
+    let literal_end = literal.len().checked_sub(1)?;
+    let literal = literal.get(1..literal_end)?;
     let mut parts = literal.split_whitespace();
     let amount = parts.next()?.parse::<i64>().ok()?;
     let unit = parse_simple_interval_unit(parts.next()?)?;
@@ -712,7 +826,7 @@ fn parse_function_call(expression: &str) -> Option<(&str, &str)> {
         return None;
     }
 
-    let name = expression[..open].trim();
+    let name = expression.get(..open)?.trim();
     if name.is_empty() || !name.chars().all(|ch| ch.is_ascii_alphabetic() || ch == '_') {
         return None;
     }
@@ -724,22 +838,44 @@ fn parse_function_call(expression: &str) -> Option<(&str, &str)> {
         match bytes[index] {
             b'\'' => index = skip_string_literal(bytes, index),
             b'(' => {
-                depth += 1;
-                index += 1;
+                let Some(new_depth) = depth.checked_add(1) else {
+                    warn_default_parser_guard(
+                        "function parser parenthesis depth overflow",
+                        bytes.len(),
+                        Some(index),
+                    );
+                    return None;
+                };
+                depth = new_depth;
+                index = advance_index(index, 1, bytes.len());
             }
             b')' => {
-                depth = depth.checked_sub(1)?;
-                if depth == 0 && index != bytes.len() - 1 {
+                let Some(new_depth) = depth.checked_sub(1) else {
+                    warn_default_parser_guard(
+                        "function parser parenthesis depth underflow",
+                        bytes.len(),
+                        Some(index),
+                    );
+                    return None;
+                };
+                depth = new_depth;
+                if depth == 0 && index != bytes.len().saturating_sub(1) {
                     return None;
                 }
 
-                index += 1;
+                index = advance_index(index, 1, bytes.len());
             }
-            _ => index += 1,
+            _ => index = advance_index(index, 1, bytes.len()),
         }
     }
 
-    if depth == 0 { Some((name, &expression[open + 1..expression.len() - 1])) } else { None }
+    if depth != 0 {
+        return None;
+    }
+
+    let args_start = open.checked_add(1)?;
+    let args_end = expression.len().checked_sub(1)?;
+    Some((name, expression.get(args_start..args_end)?))
 }
 
 /// Parses a single function argument and rejects top-level comma separators.
@@ -752,15 +888,23 @@ fn parse_single_top_level_arg(args: &str) -> Option<&str> {
         match bytes[index] {
             b'\'' => index = skip_string_literal(bytes, index),
             b'(' => {
-                paren_depth += 1;
-                index += 1;
+                let Some(new_depth) = paren_depth.checked_add(1) else {
+                    warn_default_parser_guard(
+                        "function argument parser parenthesis depth overflow",
+                        bytes.len(),
+                        Some(index),
+                    );
+                    return None;
+                };
+                paren_depth = new_depth;
+                index = advance_index(index, 1, bytes.len());
             }
             b')' => {
                 paren_depth = paren_depth.saturating_sub(1);
-                index += 1;
+                index = advance_index(index, 1, bytes.len());
             }
             b',' if paren_depth == 0 => return None,
-            _ => index += 1,
+            _ => index = advance_index(index, 1, bytes.len()),
         }
     }
 
@@ -783,15 +927,25 @@ fn is_valid_numeric_expression(expression: &str) -> bool {
 
     while index < bytes.len() {
         match bytes[index] {
-            byte if byte.is_ascii_whitespace() => index += 1,
+            byte if byte.is_ascii_whitespace() => {
+                index = advance_index(index, 1, bytes.len());
+            }
             b'+' | b'-' if expect_operand && unary_sign_allowed => {
                 unary_sign_allowed = false;
-                index += 1;
+                index = advance_index(index, 1, bytes.len());
             }
             b'(' if expect_operand && unary_sign_allowed => {
-                paren_depth += 1;
+                let Some(new_depth) = paren_depth.checked_add(1) else {
+                    warn_default_parser_guard(
+                        "numeric parser parenthesis depth overflow",
+                        bytes.len(),
+                        Some(index),
+                    );
+                    return false;
+                };
+                paren_depth = new_depth;
                 unary_sign_allowed = true;
-                index += 1;
+                index = advance_index(index, 1, bytes.len());
             }
             b'0'..=b'9' | b'.' if expect_operand => {
                 let Some(next_index) = scan_numeric_literal(bytes, index) else {
@@ -805,11 +959,19 @@ fn is_valid_numeric_expression(expression: &str) -> bool {
             b'+' | b'-' | b'*' | b'/' | b'%' if !expect_operand => {
                 expect_operand = true;
                 unary_sign_allowed = true;
-                index += 1;
+                index = advance_index(index, 1, bytes.len());
             }
             b')' if !expect_operand && paren_depth > 0 => {
-                paren_depth -= 1;
-                index += 1;
+                let Some(new_depth) = paren_depth.checked_sub(1) else {
+                    warn_default_parser_guard(
+                        "numeric parser parenthesis depth underflow",
+                        bytes.len(),
+                        Some(index),
+                    );
+                    return false;
+                };
+                paren_depth = new_depth;
+                index = advance_index(index, 1, bytes.len());
             }
             _ => return false,
         }
@@ -827,11 +989,11 @@ fn scan_numeric_literal(bytes: &[u8], mut index: usize) -> Option<usize> {
         match bytes[index] {
             b'0'..=b'9' => {
                 has_digit = true;
-                index += 1;
+                index = advance_index(index, 1, bytes.len());
             }
             b'.' if !has_decimal => {
                 has_decimal = true;
-                index += 1;
+                index = advance_index(index, 1, bytes.len());
             }
             _ => break,
         }
@@ -887,6 +1049,11 @@ mod tests {
             Some(DefaultExpression::NumericLiteral("1".to_owned()))
         );
         assert_eq!(parse_default_expression("'abc'::text", &Type::INT4), None);
+    }
+
+    #[test]
+    fn normalizes_nested_postgres_wrappers() {
+        assert_eq!(normalize_postgres_expression("((('pending'::text)))"), "'pending'");
     }
 
     #[test]

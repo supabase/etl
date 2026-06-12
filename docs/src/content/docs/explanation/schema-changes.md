@@ -76,7 +76,7 @@ ETL has one shared schema-change signal, but **DDL behavior is implemented per d
 | BigQuery | Supports add, drop, rename, supported default metadata, and dropping `NOT NULL`. BigQuery requires added columns to be nullable and does not backfill existing rows for `ADD COLUMN ... DEFAULT`. |
 | ClickHouse | Supports add, drop, rename, supported defaults, and nullability changes. `ReplacingMergeTree` rejects primary-key drops or renames because the ordering expression cannot be rewritten safely. When changing a supported default, ETL materializes old default values before updating destination default metadata. |
 | DuckLake | Supports add, drop, rename, supported defaults, and nullability changes. Supported defaults are included in `ADD COLUMN` so DuckLake can record add-time defaults for existing files. |
-| Snowflake | Supports add, drop, rename, supported defaults, and dropping `NOT NULL`. Safe literal defaults are included in `ADD COLUMN` so existing rows are populated; defaults that cannot be used in Snowflake `ADD COLUMN` may still be applied as future-write default metadata. |
+| Snowflake | Supports add, drop, rename, supported defaults, and dropping `NOT NULL`. Supported defaults are included in `ADD COLUMN` so Snowflake can populate existing rows. |
 | Iceberg | Deprecated for now. Schema-change DDL is not a supported path for new deployments. |
 | Custom destinations | Destination authors decide which `Event::Relation` changes to apply, reject, or handle manually. |
 
@@ -172,12 +172,14 @@ These behaviors are **not full destination DDL semantics** yet:
   `gen_random_uuid()`, `random()`, sequence defaults, and session-dependent
   expressions such as `current_user`. Future row events remain correct because
   PostgreSQL sends the evaluated row values, but existing rows affected by
-  `ADD COLUMN ... DEFAULT` may use destination-native behavior.
+  `ADD COLUMN ... DEFAULT` may use destination-native behavior. Avoid volatile
+  defaults for replicated schema changes when exact historical values matter.
 - `ADD COLUMN ... DEFAULT` semantics differ by destination. ClickHouse,
-  DuckLake, and Snowflake can approximate PostgreSQL semantics for supported
-  defaults using native DDL. BigQuery cannot backfill existing rows through
-  add-column default DDL, so existing destination rows remain null unless a
-  separate backfill is performed.
+  DuckLake, and Snowflake approximate PostgreSQL semantics for supported
+  defaults using native DDL, including destination-native evaluation of volatile
+  expressions. BigQuery cannot backfill existing rows through add-column default
+  DDL, so existing destination rows remain null unless a separate backfill is
+  performed.
 - Tightening nullability with `SET NOT NULL` is destination-specific and may
   fail if existing destination data violates the constraint. BigQuery and
   Snowflake currently automate only `DROP NOT NULL`.

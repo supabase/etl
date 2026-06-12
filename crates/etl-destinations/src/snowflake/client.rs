@@ -203,14 +203,6 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
                     add_column_default_clause.as_deref(),
                 )
                 .await?;
-            if add_column_default_clause.is_none()
-                && let Some(default_clause) = schema::default_clause(col)
-            {
-                let default_expression = default_clause.trim_start_matches(" DEFAULT ");
-                self.sql_client
-                    .set_column_default(table_name, &col.name, default_expression)
-                    .await?;
-            }
         }
 
         for change in &diff.columns_to_change {
