@@ -490,15 +490,10 @@ mod tests {
 
     #[test]
     fn create_merge_tree_sql_includes_supported_defaults() {
-        let schemas = vec![ColumnSchema::new(
-            "status".to_owned(),
-            Type::TEXT,
-            -1,
-            1,
-            None,
-            true,
-            Some("'pending'::text".to_owned()),
-        )];
+        let schemas = vec![
+            ColumnSchema::new("status".to_owned(), Type::TEXT, -1, 1, true)
+                .with_default_expression("'pending'::text".to_owned()),
+        ];
 
         let sql = create_merge_tree_sql("public_t", &schemas);
 
@@ -522,28 +517,14 @@ mod tests {
         ];
 
         for (typ, expression, expected) in cases {
-            let column = ColumnSchema::new(
-                "value".to_owned(),
-                typ,
-                -1,
-                1,
-                None,
-                true,
-                Some(expression.to_owned()),
-            );
+            let column = ColumnSchema::new("value".to_owned(), typ, -1, 1, true)
+                .with_default_expression(expression.to_owned());
 
             assert_eq!(clickhouse_default_clause(&column).as_deref(), Some(expected));
         }
 
-        let unsupported = ColumnSchema::new(
-            "value".to_owned(),
-            Type::TIME,
-            -1,
-            1,
-            None,
-            true,
-            Some("current_time".to_owned()),
-        );
+        let unsupported = ColumnSchema::new("value".to_owned(), Type::TIME, -1, 1, true)
+            .with_default_expression("current_time".to_owned());
         assert_eq!(clickhouse_default_clause(&unsupported), None);
 
         let unsupported_cases = [
@@ -553,15 +534,8 @@ mod tests {
             (Type::DATE, "current_time"),
         ];
         for (typ, expression) in unsupported_cases {
-            let column = ColumnSchema::new(
-                "value".to_owned(),
-                typ,
-                -1,
-                1,
-                None,
-                true,
-                Some(expression.to_owned()),
-            );
+            let column = ColumnSchema::new("value".to_owned(), typ, -1, 1, true)
+                .with_default_expression(expression.to_owned());
 
             assert_eq!(clickhouse_default_clause(&column), None);
         }

@@ -355,7 +355,7 @@ mod tests {
     fn build_create_table_sql_qualifies_lake_catalog() {
         let sql = build_create_table_sql_ducklake(
             "odd\"table",
-            &[ColumnSchema::new("select".to_owned(), Type::INT4, -1, 1, Some(1), false, None)],
+            &[ColumnSchema::new("select".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1)],
         );
 
         assert!(sql.starts_with("create table if not exists \"lake\".\"odd\"\"table\""));
@@ -366,7 +366,7 @@ mod tests {
     fn build_add_column_sql_keeps_added_columns_nullable() {
         let sql = build_add_column_sql_ducklake(
             "test_table",
-            &ColumnSchema::new("score".to_owned(), Type::INT4, -1, 4, None, false, None),
+            &ColumnSchema::new("score".to_owned(), Type::INT4, -1, 4, false),
         );
 
         assert_eq!(sql, r#"alter table "lake"."test_table" add column "score" integer"#);
@@ -374,15 +374,8 @@ mod tests {
 
     #[test]
     fn build_add_column_sql_includes_supported_default() {
-        let column = ColumnSchema::new(
-            "status".to_owned(),
-            Type::TEXT,
-            -1,
-            4,
-            None,
-            true,
-            Some("'pending'::text".to_owned()),
-        );
+        let column = ColumnSchema::new("status".to_owned(), Type::TEXT, -1, 4, true)
+            .with_default_expression("'pending'::text".to_owned());
         let sql = build_add_column_sql_ducklake("test_table", &column);
 
         assert_eq!(
@@ -409,15 +402,8 @@ mod tests {
         ];
 
         for (typ, expression, expected) in cases {
-            let column = ColumnSchema::new(
-                "value".to_owned(),
-                typ,
-                -1,
-                1,
-                None,
-                true,
-                Some(expression.to_owned()),
-            );
+            let column = ColumnSchema::new("value".to_owned(), typ, -1, 1, true)
+                .with_default_expression(expression.to_owned());
 
             assert_eq!(ducklake_default_clause(&column).as_deref(), Some(expected));
         }
@@ -431,15 +417,8 @@ mod tests {
             (Type::DATE, "current_time"),
         ];
         for (typ, expression) in unsupported_cases {
-            let column = ColumnSchema::new(
-                "value".to_owned(),
-                typ,
-                -1,
-                1,
-                None,
-                true,
-                Some(expression.to_owned()),
-            );
+            let column = ColumnSchema::new("value".to_owned(), typ, -1, 1, true)
+                .with_default_expression(expression.to_owned());
 
             assert_eq!(ducklake_default_clause(&column), None);
         }
@@ -464,15 +443,8 @@ mod tests {
 
     #[test]
     fn build_column_update_sql_quotes_identifiers() {
-        let column = ColumnSchema::new(
-            "status\"value".to_owned(),
-            Type::TEXT,
-            -1,
-            4,
-            None,
-            true,
-            Some("'pending'::text".to_owned()),
-        );
+        let column = ColumnSchema::new("status\"value".to_owned(), Type::TEXT, -1, 4, true)
+            .with_default_expression("'pending'::text".to_owned());
 
         assert_eq!(
             build_set_default_sql_ducklake("table\"name", &column),

@@ -534,8 +534,8 @@ mod tests {
     #[test]
     fn ndjson_formatting() {
         let cols = [
-            ColumnSchema::new("id".into(), Type::INT4, -1, 1, None, true, None),
-            ColumnSchema::new("name".into(), Type::TEXT, -1, 2, None, true, None),
+            ColumnSchema::new("id".into(), Type::INT4, -1, 1, true),
+            ColumnSchema::new("name".into(), Type::TEXT, -1, 2, true),
         ];
 
         let mut buf = Vec::new();
@@ -569,7 +569,7 @@ mod tests {
 
     #[test]
     fn compressed_roundtrip() {
-        let cols = [ColumnSchema::new("id".into(), Type::INT4, -1, 1, None, true, None)];
+        let cols = [ColumnSchema::new("id".into(), Type::INT4, -1, 1, true)];
         let mut builder = RowBatchBuilder::new();
         builder
             .push_row(

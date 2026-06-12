@@ -25,15 +25,8 @@ fn test_column(
     nullable: bool,
     primary_key: bool,
 ) -> ColumnSchema {
-    ColumnSchema::new(
-        name.to_owned(),
-        typ,
-        -1,
-        ordinal_position,
-        if primary_key { Some(1) } else { None },
-        nullable,
-        None,
-    )
+    ColumnSchema::new(name.to_owned(), typ, -1, ordinal_position, nullable)
+        .with_primary_key_ordinal_position(if primary_key { Some(1) } else { None })
 }
 
 #[derive(Debug, Clone, Copy)]

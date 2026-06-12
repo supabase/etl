@@ -23,15 +23,8 @@ fn test_column(
     nullable: bool,
     primary_key_ordinal_position: Option<i32>,
 ) -> ColumnSchema {
-    ColumnSchema::new(
-        name.to_owned(),
-        typ,
-        -1,
-        ordinal_position,
-        primary_key_ordinal_position,
-        nullable,
-        None,
-    )
+    ColumnSchema::new(name.to_owned(), typ, -1, ordinal_position, nullable)
+        .with_primary_key_ordinal_position(primary_key_ordinal_position)
 }
 #[tokio::test]
 async fn create_namespace() {

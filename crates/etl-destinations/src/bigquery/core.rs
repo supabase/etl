@@ -1820,8 +1820,8 @@ mod tests {
             TableId::new(1),
             TableName::new("public".to_owned(), "users".to_owned()),
             vec![
-                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false, None),
-                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true, None),
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true),
             ],
         ));
         let replication_mask = etl::types::ReplicationMask::all(&table_schema);
@@ -1840,9 +1840,10 @@ mod tests {
             TableId::new(1),
             TableName::new("public".to_owned(), "users".to_owned()),
             vec![
-                ColumnSchema::new("tenant_id".to_owned(), Type::INT4, -1, 1, Some(1), false, None),
-                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 2, Some(2), false, None),
-                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 3, None, true, None),
+                ColumnSchema::new("tenant_id".to_owned(), Type::INT4, -1, 1, false)
+                    .with_primary_key(1),
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 2, false).with_primary_key(2),
+                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 3, true),
             ],
         ));
         let replication_mask = etl::types::ReplicationMask::from_bytes(vec![0, 1, 1]);
@@ -2381,9 +2382,9 @@ mod tests {
             TableId::new(1),
             TableName::new("public".to_owned(), "users".to_owned()),
             vec![
-                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false, None),
-                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, false, None),
-                ColumnSchema::new("age".to_owned(), Type::INT4, -1, 3, None, false, None),
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, false),
+                ColumnSchema::new("age".to_owned(), Type::INT4, -1, 3, false),
             ],
         ));
         let replicated_table_schema = ReplicatedTableSchema::from_masks(
@@ -2425,9 +2426,9 @@ mod tests {
             TableId::new(1),
             TableName::new("public".to_owned(), "users".to_owned()),
             vec![
-                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false, None),
-                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, false, None),
-                ColumnSchema::new("age".to_owned(), Type::INT4, -1, 3, None, false, None),
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, false),
+                ColumnSchema::new("age".to_owned(), Type::INT4, -1, 3, false),
             ],
         ));
         let replicated_table_schema = ReplicatedTableSchema::from_masks(

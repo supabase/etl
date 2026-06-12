@@ -174,16 +174,8 @@ mod tests {
             table_id,
             TableName::new("public".to_owned(), format!("table_{table_id}")),
             vec![
-                ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, Some(1), false, None),
-                ColumnSchema::new(
-                    format!("col_at_{snapshot_id}"),
-                    Type::TEXT,
-                    -1,
-                    2,
-                    None,
-                    true,
-                    None,
-                ),
+                ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new(format!("col_at_{snapshot_id}"), Type::TEXT, -1, 2, true),
             ],
             SnapshotId::from(snapshot_id),
         )

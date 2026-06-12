@@ -2655,8 +2655,8 @@ mod tests {
             TableId::new(table_id),
             TableName::new(schema.to_owned(), table.to_owned()),
             vec![
-                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false, None),
-                ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, None, true, None),
+                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, true),
             ],
         )
     }
@@ -2666,9 +2666,9 @@ mod tests {
             TableId::new(2),
             TableName::new("public".to_owned(), "users".to_owned()),
             vec![
-                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false, None),
-                ColumnSchema::new("email".to_owned(), PgType::TEXT, -1, 2, None, false, None),
-                ColumnSchema::new("payload".to_owned(), PgType::TEXT, -1, 3, None, true, None),
+                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("email".to_owned(), PgType::TEXT, -1, 2, false),
+                ColumnSchema::new("payload".to_owned(), PgType::TEXT, -1, 3, true),
             ],
         ));
 
@@ -2697,18 +2697,14 @@ mod tests {
                 PgType::TEXT,
                 -1,
                 ordinal_position,
-                None,
                 true,
-                None,
             ),
             new_column: ColumnSchema::new(
                 new_name.to_owned(),
                 PgType::TEXT,
                 -1,
                 ordinal_position,
-                None,
                 true,
-                None,
             ),
             modifications: vec![ColumnModification::Rename {
                 old_name: old_name.to_owned(),
@@ -2757,15 +2753,7 @@ mod tests {
     #[test]
     fn plan_schema_diff_renames_before_adding_reused_source_name() {
         let diff = SchemaDiff {
-            columns_to_add: vec![ColumnSchema::new(
-                "name".to_owned(),
-                PgType::TEXT,
-                -1,
-                3,
-                None,
-                true,
-                None,
-            )],
+            columns_to_add: vec![ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 3, true)],
             columns_to_remove: Vec::new(),
             columns_to_change: vec![rename_change("name", "full_name", 2)],
         };
@@ -2789,15 +2777,7 @@ mod tests {
     #[test]
     fn plan_schema_diff_skips_replayed_rename_with_reused_source_name() {
         let diff = SchemaDiff {
-            columns_to_add: vec![ColumnSchema::new(
-                "name".to_owned(),
-                PgType::TEXT,
-                -1,
-                3,
-                None,
-                true,
-                None,
-            )],
+            columns_to_add: vec![ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 3, true)],
             columns_to_remove: Vec::new(),
             columns_to_change: vec![rename_change("name", "full_name", 2)],
         };
@@ -2858,8 +2838,7 @@ mod tests {
 
     #[test]
     fn plan_schema_diff_tombstones_removed_column_when_name_is_reused_by_rename() {
-        let removed_column =
-            ColumnSchema::new("status".to_owned(), PgType::TEXT, -1, 3, None, true, None);
+        let removed_column = ColumnSchema::new("status".to_owned(), PgType::TEXT, -1, 3, true);
         let tombstone_name = dropped_column_tombstone_name_ducklake(&removed_column);
         let diff = SchemaDiff {
             columns_to_add: Vec::new(),
@@ -2890,19 +2869,10 @@ mod tests {
 
     #[test]
     fn plan_schema_diff_tombstones_removed_column_when_name_is_reused_by_add() {
-        let removed_column =
-            ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, None, true, None);
+        let removed_column = ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, true);
         let tombstone_name = dropped_column_tombstone_name_ducklake(&removed_column);
         let diff = SchemaDiff {
-            columns_to_add: vec![ColumnSchema::new(
-                "name".to_owned(),
-                PgType::TEXT,
-                -1,
-                3,
-                None,
-                true,
-                None,
-            )],
+            columns_to_add: vec![ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 3, true)],
             columns_to_remove: vec![removed_column],
             columns_to_change: Vec::new(),
         };
@@ -2925,19 +2895,10 @@ mod tests {
 
     #[test]
     fn plan_schema_diff_skips_replayed_reused_removed_column_name() {
-        let removed_column =
-            ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, None, true, None);
+        let removed_column = ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, true);
         let tombstone_name = dropped_column_tombstone_name_ducklake(&removed_column);
         let diff = SchemaDiff {
-            columns_to_add: vec![ColumnSchema::new(
-                "name".to_owned(),
-                PgType::TEXT,
-                -1,
-                3,
-                None,
-                true,
-                None,
-            )],
+            columns_to_add: vec![ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 3, true)],
             columns_to_remove: vec![removed_column],
             columns_to_change: Vec::new(),
         };
@@ -2959,15 +2920,13 @@ mod tests {
             TableId::new(1),
             TableName::new("public".to_owned(), "users".to_owned()),
             vec![
-                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false, None),
+                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
                 ColumnSchema::new(
                     "__etl_ducklake_dropped_business".to_owned(),
                     PgType::TEXT,
                     -1,
                     2,
-                    None,
                     true,
-                    None,
                 ),
             ],
         ));
@@ -2991,10 +2950,10 @@ mod tests {
             TableId::new(4),
             TableName::new("public".to_owned(), "users".to_owned()),
             vec![
-                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false, None),
-                ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, None, true, None),
-                ColumnSchema::new("hidden".to_owned(), PgType::TEXT, -1, 3, None, true, None),
-                ColumnSchema::new("email".to_owned(), PgType::TEXT, -1, 4, None, true, None),
+                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, true),
+                ColumnSchema::new("hidden".to_owned(), PgType::TEXT, -1, 3, true),
+                ColumnSchema::new("email".to_owned(), PgType::TEXT, -1, 4, true),
             ],
         ));
         let target_schema = ReplicatedTableSchema::from_mask(
@@ -3018,17 +2977,17 @@ mod tests {
             TableId::new(4),
             TableName::new("public".to_owned(), "users".to_owned()),
             vec![
-                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false, None),
-                ColumnSchema::new("hidden".to_owned(), PgType::TEXT, -1, 2, None, true, None),
+                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("hidden".to_owned(), PgType::TEXT, -1, 2, true),
             ],
         );
         let target_schema = TableSchema::with_snapshot_id(
             previous_schema.id,
             previous_schema.name.clone(),
             vec![
-                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false, None),
-                ColumnSchema::new("hidden".to_owned(), PgType::TEXT, -1, 2, None, true, None),
-                ColumnSchema::new("email".to_owned(), PgType::TEXT, -1, 3, None, true, None),
+                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("hidden".to_owned(), PgType::TEXT, -1, 2, true),
+                ColumnSchema::new("email".to_owned(), PgType::TEXT, -1, 3, true),
             ],
             SnapshotId::from(42_u64),
         );
@@ -3046,17 +3005,17 @@ mod tests {
             TableId::new(5),
             TableName::new("public".to_owned(), "users".to_owned()),
             vec![
-                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false, None),
-                ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, None, true, None),
-                ColumnSchema::new("old_col".to_owned(), PgType::TEXT, -1, 3, None, true, None),
+                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, true),
+                ColumnSchema::new("old_col".to_owned(), PgType::TEXT, -1, 3, true),
             ],
         );
         let target_schema = TableSchema::with_snapshot_id(
             previous_schema.id,
             previous_schema.name.clone(),
             vec![
-                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false, None),
-                ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, None, true, None),
+                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, true),
             ],
             SnapshotId::from(43_u64),
         );

@@ -2214,8 +2214,8 @@ mod tests {
             TableId::new(1),
             TableName::new("public".to_owned(), "users".to_owned()),
             vec![
-                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false, None),
-                ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, None, true, None),
+                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, true),
             ],
         )
     }
@@ -2299,17 +2299,10 @@ mod tests {
             TableId::new(1),
             TableName::new("public".to_owned(), "users".to_owned()),
             vec![
-                ColumnSchema::new(
-                    "tenant_id".to_owned(),
-                    PgType::INT4,
-                    -1,
-                    1,
-                    Some(1),
-                    false,
-                    None,
-                ),
-                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 2, Some(2), false, None),
-                ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 3, None, true, None),
+                ColumnSchema::new("tenant_id".to_owned(), PgType::INT4, -1, 1, false)
+                    .with_primary_key(1),
+                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 2, false).with_primary_key(2),
+                ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 3, true),
             ],
         )));
         let row =
@@ -2327,9 +2320,9 @@ mod tests {
             TableId::new(1),
             TableName::new("public".to_owned(), "users".to_owned()),
             vec![
-                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, None, false, None),
-                ColumnSchema::new("email".to_owned(), PgType::TEXT, -1, 2, None, false, None),
-                ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 3, None, true, None),
+                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false),
+                ColumnSchema::new("email".to_owned(), PgType::TEXT, -1, 2, false),
+                ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 3, true),
             ],
         ));
         let replicated_table_schema = ReplicatedTableSchema::from_masks(
@@ -2355,9 +2348,9 @@ mod tests {
             TableId::new(1),
             TableName::new("public".to_owned(), "users".to_owned()),
             vec![
-                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false, None),
-                ColumnSchema::new("email".to_owned(), PgType::TEXT, -1, 2, None, false, None),
-                ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 3, None, true, None),
+                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("email".to_owned(), PgType::TEXT, -1, 2, false),
+                ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 3, true),
             ],
         ));
         let replicated_table_schema = ReplicatedTableSchema::from_masks(
@@ -2462,10 +2455,10 @@ mod tests {
             TableId::new(1),
             TableName::new("public".to_owned(), "users".to_owned()),
             vec![
-                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false, None),
-                ColumnSchema::new("email".to_owned(), PgType::TEXT, -1, 2, None, false, None),
-                ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 3, None, true, None),
-                ColumnSchema::new("payload".to_owned(), PgType::TEXT, -1, 4, None, true, None),
+                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("email".to_owned(), PgType::TEXT, -1, 2, false),
+                ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 3, true),
+                ColumnSchema::new("payload".to_owned(), PgType::TEXT, -1, 4, true),
             ],
         ));
         let replicated_table_schema = ReplicatedTableSchema::from_masks(
@@ -2518,10 +2511,10 @@ mod tests {
             TableId::new(1),
             TableName::new("public".to_owned(), "users".to_owned()),
             vec![
-                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false, None),
-                ColumnSchema::new("email".to_owned(), PgType::TEXT, -1, 2, None, false, None),
-                ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 3, None, true, None),
-                ColumnSchema::new("payload".to_owned(), PgType::TEXT, -1, 4, None, true, None),
+                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("email".to_owned(), PgType::TEXT, -1, 2, false),
+                ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 3, true),
+                ColumnSchema::new("payload".to_owned(), PgType::TEXT, -1, 4, true),
             ],
         ));
         let replicated_table_schema = ReplicatedTableSchema::from_masks(

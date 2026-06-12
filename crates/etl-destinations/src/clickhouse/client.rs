@@ -689,15 +689,9 @@ mod tests {
 
     #[test]
     fn add_column_sql_includes_supported_default() {
-        let column = ColumnSchema::new(
-            "score".to_owned(),
-            Type::INT4,
-            -1,
-            1,
-            Some(1),
-            false,
-            Some("42".to_owned()),
-        );
+        let column = ColumnSchema::new("score".to_owned(), Type::INT4, -1, 1, false)
+            .with_primary_key(1)
+            .with_default_expression("42".to_owned());
         let sql = build_add_column_sql("test_table", &column, Some("id"));
 
         assert_eq!(
@@ -709,15 +703,9 @@ mod tests {
 
     #[test]
     fn modify_column_sql_includes_supported_default() {
-        let column = ColumnSchema::new(
-            "score".to_owned(),
-            Type::INT4,
-            -1,
-            1,
-            Some(1),
-            false,
-            Some("42".to_owned()),
-        );
+        let column = ColumnSchema::new("score".to_owned(), Type::INT4, -1, 1, false)
+            .with_primary_key(1)
+            .with_default_expression("42".to_owned());
         let sql = build_modify_column_sql("test_table", &column);
 
         assert_eq!(sql, "ALTER TABLE \"test_table\" MODIFY COLUMN \"score\" Int32 DEFAULT 42");

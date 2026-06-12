@@ -75,8 +75,8 @@ fn make_schema(table_id: u32, schema: &str, table: &str) -> TableSchema {
         TableId::new(table_id),
         TableName::new(schema.to_owned(), table.to_owned()),
         vec![
-            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false, None),
-            ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, None, true, None),
+            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, true),
         ],
     )
 }
@@ -86,9 +86,9 @@ fn make_schema_with_email(previous_schema: &TableSchema, snapshot_id: u64) -> Ta
         previous_schema.id,
         previous_schema.name.clone(),
         vec![
-            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false, None),
-            ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, None, true, None),
-            ColumnSchema::new("email".to_owned(), PgType::TEXT, -1, 3, None, true, None),
+            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, true),
+            ColumnSchema::new("email".to_owned(), PgType::TEXT, -1, 3, true),
         ],
         SnapshotId::from(snapshot_id),
     )
@@ -99,11 +99,11 @@ fn make_rich_schema(table_id: u32) -> TableSchema {
         TableId::new(table_id),
         TableName::new("public".to_owned(), "rich".to_owned()),
         vec![
-            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false, None),
-            ColumnSchema::new("label".to_owned(), PgType::VARCHAR, -1, 2, None, true, None),
-            ColumnSchema::new("score".to_owned(), PgType::FLOAT8, -1, 3, None, true, None),
-            ColumnSchema::new("active".to_owned(), PgType::BOOL, -1, 4, None, true, None),
-            ColumnSchema::new("birthday".to_owned(), PgType::DATE, -1, 5, None, true, None),
+            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("label".to_owned(), PgType::VARCHAR, -1, 2, true),
+            ColumnSchema::new("score".to_owned(), PgType::FLOAT8, -1, 3, true),
+            ColumnSchema::new("active".to_owned(), PgType::BOOL, -1, 4, true),
+            ColumnSchema::new("birthday".to_owned(), PgType::DATE, -1, 5, true),
         ],
     )
 }
@@ -1149,9 +1149,9 @@ async fn write_events_recovers_applying_metadata_before_relation_event() {
         old_schema.id,
         old_schema.name.clone(),
         vec![
-            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false, None),
-            ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, None, true, None),
-            ColumnSchema::new("email".to_owned(), PgType::TEXT, -1, 3, None, true, None),
+            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, true),
+            ColumnSchema::new("email".to_owned(), PgType::TEXT, -1, 3, true),
         ],
         SnapshotId::from(42_u64),
     );
@@ -1266,35 +1266,14 @@ async fn write_events_applies_defaulted_schema_change() {
         old_schema.id,
         old_schema.name.clone(),
         vec![
-            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false, None),
-            ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, None, true, None),
-            ColumnSchema::new(
-                "status".to_owned(),
-                PgType::TEXT,
-                -1,
-                3,
-                None,
-                true,
-                Some("'new'::text".to_owned()),
-            ),
-            ColumnSchema::new(
-                "score".to_owned(),
-                PgType::INT4,
-                -1,
-                4,
-                None,
-                true,
-                Some("15".to_owned()),
-            ),
-            ColumnSchema::new(
-                "active".to_owned(),
-                PgType::BOOL,
-                -1,
-                5,
-                None,
-                true,
-                Some("true".to_owned()),
-            ),
+            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, true),
+            ColumnSchema::new("status".to_owned(), PgType::TEXT, -1, 3, true)
+                .with_default_expression("'new'::text".to_owned()),
+            ColumnSchema::new("score".to_owned(), PgType::INT4, -1, 4, true)
+                .with_default_expression("15".to_owned()),
+            ColumnSchema::new("active".to_owned(), PgType::BOOL, -1, 5, true)
+                .with_default_expression("true".to_owned()),
         ],
         SnapshotId::from(44_u64),
     );
@@ -1407,9 +1386,9 @@ async fn write_events_reconciles_missing_columns_after_applied_metadata() {
         old_schema.id,
         old_schema.name.clone(),
         vec![
-            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false, None),
-            ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, None, true, None),
-            ColumnSchema::new("email".to_owned(), PgType::TEXT, -1, 3, None, true, None),
+            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, true),
+            ColumnSchema::new("email".to_owned(), PgType::TEXT, -1, 3, true),
         ],
         SnapshotId::from(43_u64),
     );
@@ -1520,18 +1499,18 @@ async fn write_events_supports_drop_and_add_same_column_name() {
         TableId::new(47),
         TableName::new("public".to_owned(), "replace_column_type".to_owned()),
         vec![
-            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false, None),
-            ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, None, true, None),
-            ColumnSchema::new("status".to_owned(), PgType::TEXT, -1, 3, None, true, None),
+            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, true),
+            ColumnSchema::new("status".to_owned(), PgType::TEXT, -1, 3, true),
         ],
     );
     let new_schema = TableSchema::with_snapshot_id(
         old_schema.id,
         old_schema.name.clone(),
         vec![
-            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false, None),
-            ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, None, true, None),
-            ColumnSchema::new("status".to_owned(), PgType::INT4, -1, 4, None, true, None),
+            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, true),
+            ColumnSchema::new("status".to_owned(), PgType::INT4, -1, 4, true),
         ],
         SnapshotId::from(48_u64),
     );
@@ -1618,16 +1597,16 @@ async fn write_events_supports_repeated_drop_and_add_same_column_name() {
         TableId::new(49),
         TableName::new("public".to_owned(), "replace_column_twice".to_owned()),
         vec![
-            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false, None),
-            ColumnSchema::new("status".to_owned(), PgType::TEXT, -1, 2, None, true, None),
+            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("status".to_owned(), PgType::TEXT, -1, 2, true),
         ],
     );
     let int_schema = TableSchema::with_snapshot_id(
         text_schema.id,
         text_schema.name.clone(),
         vec![
-            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false, None),
-            ColumnSchema::new("status".to_owned(), PgType::INT4, -1, 3, None, true, None),
+            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("status".to_owned(), PgType::INT4, -1, 3, true),
         ],
         SnapshotId::from(50_u64),
     );
@@ -1635,8 +1614,8 @@ async fn write_events_supports_repeated_drop_and_add_same_column_name() {
         text_schema.id,
         text_schema.name.clone(),
         vec![
-            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false, None),
-            ColumnSchema::new("status".to_owned(), PgType::TEXT, -1, 4, None, true, None),
+            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("status".to_owned(), PgType::TEXT, -1, 4, true),
         ],
         SnapshotId::from(51_u64),
     );
@@ -1733,15 +1712,13 @@ async fn write_table_rows_preserves_active_column_with_tombstone_prefix() {
         TableId::new(52),
         TableName::new("public".to_owned(), "active_tombstone_prefix".to_owned()),
         vec![
-            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false, None),
+            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
             ColumnSchema::new(
                 "__etl_ducklake_dropped_business".to_owned(),
                 PgType::TEXT,
                 -1,
                 2,
-                None,
                 true,
-                None,
             ),
         ],
     );
@@ -1923,16 +1900,16 @@ async fn startup_after_restart_drops_stale_rename_source_when_target_exists() {
         TableId::new(53),
         TableName::new("public".to_owned(), "restart_stale_rename_source".to_owned()),
         vec![
-            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false, None),
-            ColumnSchema::new("ddl_col_4_1".to_owned(), PgType::TEXT, -1, 4, None, true, None),
+            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("ddl_col_4_1".to_owned(), PgType::TEXT, -1, 4, true),
         ],
     );
     let new_schema = TableSchema::with_snapshot_id(
         old_schema.id,
         old_schema.name.clone(),
         vec![
-            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false, None),
-            ColumnSchema::new("ddl_col_4_0".to_owned(), PgType::TEXT, -1, 4, None, true, None),
+            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("ddl_col_4_0".to_owned(), PgType::TEXT, -1, 4, true),
         ],
         SnapshotId::from(54_u64),
     );

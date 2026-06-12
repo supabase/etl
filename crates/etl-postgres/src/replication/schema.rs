@@ -583,10 +583,10 @@ fn parse_column_schema(row: &PgRow) -> ColumnSchema {
         string_to_postgres_type(&column_type),
         type_modifier,
         ordinal_position,
-        primary_key_ordinal_position,
         nullable,
-        default_expression,
     )
+    .with_primary_key_ordinal_position(primary_key_ordinal_position)
+    .with_default_expression_option(default_expression)
 }
 
 #[cfg(test)]

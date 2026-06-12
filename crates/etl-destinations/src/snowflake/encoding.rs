@@ -287,7 +287,7 @@ mod tests {
     use super::*;
 
     fn col(name: &str) -> ColumnSchema {
-        ColumnSchema::new(name.to_owned(), Type::TEXT, -1, 1, None, true, None)
+        ColumnSchema::new(name.to_owned(), Type::TEXT, -1, 1, true)
     }
 
     fn push_single_cell(cell: Cell) -> std::result::Result<Value, Error> {

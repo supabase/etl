@@ -1399,8 +1399,8 @@ mod tests {
             TableId::new(1),
             TableName::new("public".to_owned(), "users".to_owned()),
             vec![
-                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false, None),
-                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true, None),
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true),
             ],
         ));
         let replication_mask = ReplicationMask::all(&table_schema);
@@ -1418,9 +1418,10 @@ mod tests {
             TableId::new(1),
             TableName::new("public".to_owned(), "users".to_owned()),
             vec![
-                ColumnSchema::new("tenant_id".to_owned(), Type::INT4, -1, 1, Some(1), false, None),
-                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 2, Some(2), false, None),
-                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 3, None, true, None),
+                ColumnSchema::new("tenant_id".to_owned(), Type::INT4, -1, 1, false)
+                    .with_primary_key(1),
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 2, false).with_primary_key(2),
+                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 3, true),
             ],
         ));
         let replication_mask = ReplicationMask::from_bytes(vec![0, 1, 1]);
@@ -1484,7 +1485,7 @@ mod tests {
         let table_schema = Arc::new(TableSchema::new(
             TableId::new(2),
             TableName::new("public".to_owned(), "events".to_owned()),
-            vec![ColumnSchema::new("value".to_owned(), Type::TEXT, -1, 1, None, true, None)],
+            vec![ColumnSchema::new("value".to_owned(), Type::TEXT, -1, 1, true)],
         ));
         let replication_mask = ReplicationMask::all(&table_schema);
         let identity_mask = IdentityMask::from_bytes(vec![1]);
@@ -1527,9 +1528,10 @@ mod tests {
             TableId::new(7),
             TableName::new("public".to_owned(), "replacing_merge_tree_alter".to_owned()),
             vec![
-                ColumnSchema::new("tenant_id".to_owned(), Type::INT4, -1, 1, Some(1), false, None),
-                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 2, Some(2), false, None),
-                ColumnSchema::new("value".to_owned(), Type::TEXT, -1, 3, None, true, None),
+                ColumnSchema::new("tenant_id".to_owned(), Type::INT4, -1, 1, false)
+                    .with_primary_key(1),
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 2, false).with_primary_key(2),
+                ColumnSchema::new("value".to_owned(), Type::TEXT, -1, 3, true),
             ],
         ));
         let replication_mask = ReplicationMask::all(&table_schema);
@@ -1549,18 +1551,14 @@ mod tests {
                 Type::TEXT,
                 -1,
                 ordinal_position,
-                None,
                 true,
-                None,
             ),
             new_column: ColumnSchema::new(
                 new_name.to_owned(),
                 Type::TEXT,
                 -1,
                 ordinal_position,
-                None,
                 true,
-                None,
             ),
             modifications: vec![etl::types::ColumnModification::Rename {
                 old_name: old_name.to_owned(),
@@ -1575,15 +1573,7 @@ mod tests {
         let schema = replicated_schema_for_pk_alters();
         let diff = SchemaDiff {
             columns_to_add: Vec::new(),
-            columns_to_remove: vec![ColumnSchema::new(
-                "value".to_owned(),
-                Type::TEXT,
-                -1,
-                3,
-                None,
-                true,
-                None,
-            )],
+            columns_to_remove: vec![ColumnSchema::new("value".to_owned(), Type::TEXT, -1, 3, true)],
             columns_to_change: Vec::new(),
         };
         // --- WHEN/THEN: guard passes ---
@@ -1601,15 +1591,10 @@ mod tests {
         let schema = replicated_schema_for_pk_alters();
         let diff = SchemaDiff {
             columns_to_add: Vec::new(),
-            columns_to_remove: vec![ColumnSchema::new(
-                "tenant_id".to_owned(),
-                Type::INT4,
-                -1,
-                1,
-                Some(1),
-                false,
-                None,
-            )],
+            columns_to_remove: vec![
+                ColumnSchema::new("tenant_id".to_owned(), Type::INT4, -1, 1, false)
+                    .with_primary_key(1),
+            ],
             columns_to_change: Vec::new(),
         };
         // --- WHEN: validating ---

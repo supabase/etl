@@ -40,15 +40,8 @@ fn test_column(
     nullable: bool,
     primary_key: bool,
 ) -> ColumnSchema {
-    ColumnSchema::new(
-        name.to_owned(),
-        typ,
-        -1,
-        ordinal_position,
-        if primary_key { Some(1) } else { None },
-        nullable,
-        None,
-    )
+    ColumnSchema::new(name.to_owned(), typ, -1, ordinal_position, nullable)
+        .with_primary_key_ordinal_position(if primary_key { Some(1) } else { None })
 }
 
 fn column_schemas_from_ddl_message(message: &JsonValue) -> Vec<ColumnSchema> {
@@ -71,8 +64,12 @@ fn column_schemas_from_ddl_message(message: &JsonValue) -> Vec<ColumnSchema> {
                 convert_type_oid_to_type(column["atttypid"].as_u64().unwrap() as u32),
                 column["atttypmod"].as_i64().unwrap() as i32,
                 column["attnum"].as_i64().unwrap() as i32,
-                primary_key_positions.get(&(column["attnum"].as_i64().unwrap() as i32)).copied(),
                 !column["attnotnull"].as_bool().unwrap(),
+            )
+            .with_primary_key_ordinal_position(
+                primary_key_positions.get(&(column["attnum"].as_i64().unwrap() as i32)).copied(),
+            )
+            .with_default_expression_option(
                 column["default_expression"].as_str().map(ToOwned::to_owned),
             )
         })
@@ -2347,8 +2344,7 @@ async fn table_copy_stream_with_ctid_partition() {
     let (transaction, _) =
         client.create_slot_with_transaction(&test_slot_name("my_slot")).await.unwrap();
 
-    let column_schemas =
-        &[ColumnSchema::new("age".to_owned(), Type::INT4, -1, 1, None, true, None)];
+    let column_schemas = &[ColumnSchema::new("age".to_owned(), Type::INT4, -1, 1, true)];
 
     let partitions = transaction.plan_ctid_partitions(table_id, 4).await.unwrap();
     assert!(!partitions.is_empty(), "expected at least one partition for non-empty table");
