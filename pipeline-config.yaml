@@ -1,0 +1,49 @@
+destination:
+  ducklake:
+    data_path: s3://dev-and-test/ducklake
+    pool_size: 4
+    s3_region: us-east-1
+    s3_endpoint: localhost:9010
+    s3_url_style: path
+    s3_use_ssl: false
+    s3_access_key_id: minio-admin
+    s3_secret_access_key: minio-admin-password
+    metadata_schema: ducklake
+    maintenance_target_file_size: 1GB
+    expire_snapshots_older_than: null
+    maintenance_mode: disabled
+    catalog_url: postgres://postgres:postgres@host.docker.internal:5430/postgres
+
+pipeline:
+  id: 2
+  publication_name: etl_test
+  pg_connection:
+    host: db.ucyaspzqrfwsrkwymtss.supabase.red
+    port: 5432
+    name: postgres
+    username: supabase_etl_admin
+    tls:
+      trusted_root_certs: ""
+      enabled: false
+    keepalive:
+      idle_secs: 30
+      interval_secs: 10
+      retries: 3
+  batch:
+    max_fill_ms: 10000
+    memory_budget_ratio: 0.2
+    max_bytes: 8388608
+  table_error_retry_delay_ms: 10000
+  table_error_retry_max_attempts: 5
+  max_table_sync_workers: 4
+  max_copy_connections_per_table: 2
+  memory_refresh_interval_ms: 100
+  memory_backpressure:
+    activate_threshold: 0.85
+    resume_threshold: 0.75
+  table_sync_copy:
+    type: include_all_tables
+  invalidated_slot_behavior: error
+
+supabase:
+  project_ref: ucyaspzqrfwsrkwymtss
