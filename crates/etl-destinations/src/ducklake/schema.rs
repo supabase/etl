@@ -129,9 +129,7 @@ fn render_ducklake_default_expression(
             is_ducklake_timestamp_default_type(typ).then(|| expression.clone())
         }
         DefaultExpression::JsonLiteral(expression) => is_json_type(typ).then(|| expression.clone()),
-        DefaultExpression::BooleanLiteral(expression) => {
-            matches!(typ, &Type::BOOL).then(|| expression.clone())
-        }
+        DefaultExpression::BooleanLiteral(_) => None,
         DefaultExpression::UuidV4 => matches!(typ, &Type::UUID).then(|| "uuid()".to_owned()),
         DefaultExpression::CurrentUser => {
             is_ducklake_text_default_type(typ).then(|| "current_user".to_owned())
@@ -389,8 +387,6 @@ mod tests {
     fn ducklake_default_clause_renders_portable_expressions() {
         let cases = [
             (Type::TEXT, "true", " default 'true'"),
-            (Type::BOOL, "true", " default true"),
-            (Type::BOOL, "'true'::text", " default true"),
             (Type::JSONB, "'{}'::jsonb", " default '{}'"),
             (Type::NUMERIC, "42", " default '42'"),
             (Type::UUID, "gen_random_uuid()", " default uuid()"),
@@ -412,6 +408,8 @@ mod tests {
         }
 
         let unsupported_cases = [
+            (Type::BOOL, "true"),
+            (Type::BOOL, "'true'::text"),
             (Type::INT4, "'abc'::text"),
             (Type::NUMERIC, "10 + 5"),
             (Type::TEXT, "current_date"),
