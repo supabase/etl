@@ -541,7 +541,7 @@ fn strip_outer_parens(expression: &str) -> &str {
         return expression;
     };
 
-    expression.get(1..end).map(str::trim).unwrap_or(expression)
+    expression.get(1..end).map_or(expression, str::trim)
 }
 
 /// Returns whether an expression is a SQL string literal.
