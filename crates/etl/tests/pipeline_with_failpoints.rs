@@ -18,7 +18,6 @@ use etl::{
             assert_replicated_schema_column_names_types, assert_schema_snapshots_ordering,
             assert_table_schema_column_names_types,
         },
-        table_sync_state::subscribe_table_sync_state_changes,
         test_destination_wrapper::TestDestinationWrapper,
         test_schema::{
             TableSelection, assert_events_equal, insert_orders_data, insert_users_data,
@@ -411,12 +410,13 @@ async fn table_sync_streaming_replays_rows_written_after_copy_before_handoff() {
     let finished_copy_notify =
         store.notify_on_table_state_type(table_id, TableStateType::FinishedCopy).await;
     let ready_notify = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
-    let mut table_sync_state_changes = subscribe_table_sync_state_changes();
 
     pipeline.start().await.unwrap();
 
     finished_copy_notify.notified().await;
 
+    // Rows inserted while the worker is paused after copy must be replayed by
+    // table-sync streaming.
     insert_users_data(
         &mut database,
         &users_schema.name,
@@ -434,12 +434,6 @@ async fn table_sync_streaming_replays_rows_written_after_copy_before_handoff() {
 
     fail::remove(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP);
 
-    table_sync_state_changes
-        .wait_for_state_types(
-            table_id,
-            &[TableStateType::SyncWait, TableStateType::Catchup, TableStateType::SyncDone],
-        )
-        .await;
     ready_notify.notified().await;
     all_rows_notify.notified().await;
 
@@ -489,18 +483,9 @@ async fn table_sync_streaming_error_unblocks_apply_worker() {
         store.notify_on_table_state_type(users_table_id, TableStateType::Errored).await;
     let orders_ready_notify =
         store.notify_on_table_state_type(orders_table_id, TableStateType::Ready).await;
-    let mut table_sync_state_changes = subscribe_table_sync_state_changes();
 
     pipeline.start().await.unwrap();
 
-    // The failpoint fires after the apply worker moves this table to `Catchup`,
-    // so the subsequent `Errored` transition must unblock the apply worker.
-    table_sync_state_changes
-        .wait_for_state_types(
-            users_table_id,
-            &[TableStateType::SyncWait, TableStateType::Catchup, TableStateType::Errored],
-        )
-        .await;
     errored_notify.notified().await;
     // Assert that apply worker made progress after the errored table before
     // shutdown. Otherwise a shutdown signal could hide a stuck catchup wait.

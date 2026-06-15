@@ -13,6 +13,5 @@ pub mod notify;
 pub mod notifying_store;
 pub mod pipeline;
 pub mod schema;
-pub mod table_sync_state;
 pub mod test_destination_wrapper;
 pub mod test_schema;
