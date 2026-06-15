@@ -73,7 +73,7 @@ use crate::{
             build_drop_column_sql_ducklake, build_drop_default_sql_ducklake,
             build_drop_not_null_sql_ducklake, build_rename_column_sql_ducklake,
             build_set_default_sql_ducklake, build_set_not_null_sql_ducklake,
-            supports_default_ducklake,
+            supports_column_default_ducklake,
         },
         sql::qualified_lake_table_name,
     },
@@ -690,12 +690,20 @@ fn plan_schema_diff_sql_ducklake(
                 }
                 ColumnModification::Default { old_expression, new_expression } => {
                     let old_default_was_supported =
-                        old_expression.is_some() && supports_default_ducklake(&change.old_column);
+                        old_expression.as_deref().is_some_and(|default_expression| {
+                            supports_column_default_ducklake(
+                                default_expression,
+                                &change.old_column.typ,
+                            )
+                        });
 
-                    if new_expression.is_some() {
-                        let Some(sql) =
-                            build_set_default_sql_ducklake(table_name, &change.new_column)
-                        else {
+                    if let Some(new_default_expression) = new_expression.as_deref() {
+                        let Some(sql) = build_set_default_sql_ducklake(
+                            table_name,
+                            &change.new_column.name,
+                            &change.new_column.typ,
+                            new_default_expression,
+                        ) else {
                             warn!(
                                 table_name = %table_name,
                                 column_name = %change.new_column.name,
@@ -745,8 +753,13 @@ fn plan_schema_diff_sql_ducklake(
                 "ducklake add column skipped because destination column already exists"
             );
 
-            if column.default_expression.is_some() {
-                let Some(sql) = build_set_default_sql_ducklake(table_name, column) else {
+            if let Some(default_expression) = column.default_expression.as_deref() {
+                let Some(sql) = build_set_default_sql_ducklake(
+                    table_name,
+                    &column.name,
+                    &column.typ,
+                    default_expression,
+                ) else {
                     warn!(
                         table_name = %table_name,
                         column_name = %column.name,

@@ -86,8 +86,13 @@ fn ducklake_column_definition(
 
 /// Returns the DuckLake default clause for a column, if supported.
 fn ducklake_default_clause(column_schema: &ColumnSchema) -> Option<String> {
-    let default_clause = ducklake_default_expression(column_schema)
-        .map(|expression| format!(" default {expression}"));
+    let default_clause = column_schema
+        .default_expression
+        .as_deref()
+        .and_then(|default_expression| {
+            ducklake_default_expression(default_expression, &column_schema.typ)
+        })
+        .map(|rendered_default_expression| format!(" default {rendered_default_expression}"));
     if default_clause.is_none() && column_schema.default_expression.is_some() {
         warn!(
             column_name = %column_schema.name,
@@ -169,17 +174,14 @@ fn quote_numeric_literal_as_string(expression: &str) -> String {
 }
 
 /// Returns whether a column default can be represented in DuckLake SQL.
-pub(super) fn supports_default_ducklake(column_schema: &ColumnSchema) -> bool {
-    ducklake_default_expression(column_schema).is_some()
+pub(super) fn supports_column_default_ducklake(default_expression: &str, typ: &Type) -> bool {
+    ducklake_default_expression(default_expression, typ).is_some()
 }
 
 /// Returns a rendered DuckLake default expression for a column, if supported.
-fn ducklake_default_expression(column_schema: &ColumnSchema) -> Option<String> {
-    column_schema.default_expression.as_deref().and_then(|expression| {
-        parse_default_expression(expression, &column_schema.typ).and_then(|expression| {
-            render_ducklake_default_expression(&expression, &column_schema.typ)
-        })
-    })
+fn ducklake_default_expression(default_expression: &str, typ: &Type) -> Option<String> {
+    parse_default_expression(default_expression, typ)
+        .and_then(|expression| render_ducklake_default_expression(&expression, typ))
 }
 
 /// Builds a `create table if not exists` DDL statement for the given table name
@@ -238,13 +240,18 @@ pub(super) fn build_rename_column_sql_ducklake(
 /// Builds a DuckLake `alter table alter column set default` statement.
 pub(super) fn build_set_default_sql_ducklake(
     table_name: &str,
-    column_schema: &ColumnSchema,
+    column_name: &str,
+    typ: &Type,
+    default_expression: &str,
 ) -> Option<String> {
-    let expression = ducklake_default_expression(column_schema)?;
+    let rendered_default_expression = ducklake_default_expression(default_expression, typ)?;
     let table_name = qualified_lake_table_name(table_name);
-    let column_name = quote_identifier(&column_schema.name);
+    let column_name = quote_identifier(column_name);
 
-    Some(format!("alter table {table_name} alter column {column_name} set default {expression}"))
+    Some(format!(
+        "alter table {table_name} alter column {column_name} set default \
+         {rendered_default_expression}"
+    ))
 }
 
 /// Builds a DuckLake `alter table alter column drop default` statement.
@@ -407,7 +414,12 @@ mod tests {
             .with_default_expression("'pending'::text".to_owned());
 
         assert_eq!(
-            build_set_default_sql_ducklake("table\"name", &column),
+            build_set_default_sql_ducklake(
+                "table\"name",
+                &column.name,
+                &column.typ,
+                column.default_expression.as_deref().expect("test default")
+            ),
             Some(
                 r#"alter table "lake"."table""name" alter column "status""value" set default 'pending'"#
                     .to_owned()

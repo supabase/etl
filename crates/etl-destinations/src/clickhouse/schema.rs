@@ -84,19 +84,27 @@ fn postgres_array_element_clickhouse_sql(typ: &Type) -> &'static str {
 /// When `force_nullable` is true (ALTER TABLE ADD), all scalar columns become
 /// Nullable since ClickHouse cannot backfill existing rows.
 pub(super) fn clickhouse_column_type(col: &ColumnSchema, force_nullable: bool) -> String {
-    if is_array_type(&col.typ) {
-        let elem = postgres_array_element_clickhouse_sql(&col.typ);
+    clickhouse_type(&col.typ, col.nullable, force_nullable)
+}
+
+/// Returns the full ClickHouse type string for a Postgres type.
+pub(super) fn clickhouse_type(typ: &Type, nullable: bool, force_nullable: bool) -> String {
+    if is_array_type(typ) {
+        let elem = postgres_array_element_clickhouse_sql(typ);
         format!("Array(Nullable({elem}))")
     } else {
-        let base = postgres_column_type_to_clickhouse_sql(&col.typ);
-        if col.nullable || force_nullable { format!("Nullable({base})") } else { base.to_owned() }
+        let base = postgres_column_type_to_clickhouse_sql(typ);
+        if nullable || force_nullable { format!("Nullable({base})") } else { base.to_owned() }
     }
 }
 
 /// Returns the ClickHouse default clause for a column, if supported.
 pub(super) fn clickhouse_default_clause(col: &ColumnSchema) -> Option<String> {
-    let default_clause =
-        clickhouse_default_expression(col).map(|expression| format!(" DEFAULT {expression}"));
+    let default_clause = col
+        .default_expression
+        .as_deref()
+        .and_then(|default_expression| clickhouse_default_expression(default_expression, &col.typ))
+        .map(|rendered_default_expression| format!(" DEFAULT {rendered_default_expression}"));
     if default_clause.is_none() && col.default_expression.is_some() {
         warn!(
             column_name = %col.name,
@@ -108,16 +116,17 @@ pub(super) fn clickhouse_default_clause(col: &ColumnSchema) -> Option<String> {
 }
 
 /// Returns whether a column default can be represented in ClickHouse SQL.
-pub(super) fn supports_clickhouse_default(col: &ColumnSchema) -> bool {
-    clickhouse_default_expression(col).is_some()
+pub(super) fn supports_column_default(default_expression: &str, typ: &Type) -> bool {
+    clickhouse_default_expression(default_expression, typ).is_some()
 }
 
 /// Returns a rendered ClickHouse default expression for a column, if supported.
-fn clickhouse_default_expression(col: &ColumnSchema) -> Option<String> {
-    col.default_expression.as_deref().and_then(|expression| {
-        parse_default_expression(expression, &col.typ)
-            .and_then(|expression| render_clickhouse_default_expression(&expression, &col.typ))
-    })
+pub(super) fn clickhouse_default_expression(
+    default_expression: &str,
+    typ: &Type,
+) -> Option<String> {
+    parse_default_expression(default_expression, typ)
+        .and_then(|expression| render_clickhouse_default_expression(&expression, typ))
 }
 
 /// Renders a parsed default expression as ClickHouse SQL.

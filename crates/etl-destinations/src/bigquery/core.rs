@@ -832,12 +832,14 @@ where
             self.client
                 .add_column(&self.dataset_id, &sequenced_bigquery_table_id.to_string(), column)
                 .await?;
-            if column.default_expression.is_some() {
+            if let Some(default_expression) = column.default_expression.as_deref() {
                 self.client
                     .set_column_default(
                         &self.dataset_id,
                         &sequenced_bigquery_table_id.to_string(),
-                        column,
+                        &column.name,
+                        &column.typ,
+                        default_expression,
                     )
                     .await?;
             }
@@ -878,16 +880,26 @@ where
                         }
                     }
                     ColumnModification::Default { old_expression, new_expression } => {
-                        let old_default_was_supported = old_expression.is_some()
-                            && BigQueryClient::supports_column_default(&change.old_column);
+                        let old_default_was_supported =
+                            old_expression.as_deref().is_some_and(|default_expression| {
+                                BigQueryClient::supports_column_default(
+                                    default_expression,
+                                    &change.old_column.typ,
+                                )
+                            });
 
-                        if new_expression.is_some() {
-                            if BigQueryClient::supports_column_default(&change.new_column) {
+                        if let Some(new_default_expression) = new_expression.as_deref() {
+                            if BigQueryClient::supports_column_default(
+                                new_default_expression,
+                                &change.new_column.typ,
+                            ) {
                                 self.client
                                     .set_column_default(
                                         &self.dataset_id,
                                         &sequenced_bigquery_table_id.to_string(),
-                                        &change.new_column,
+                                        &change.new_column.name,
+                                        &change.new_column.typ,
+                                        new_default_expression,
                                     )
                                     .await?;
                             } else {

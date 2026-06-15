@@ -215,11 +215,15 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
                                 .await?;
                         }
                     }
-                    ColumnModification::Default { old_expression: _, new_expression } => {
+                    ColumnModification::Default { old_expression, new_expression } => {
                         if new_expression.is_some() {
                             Self::warn_skipping_column_default_change(table_name, change);
                         } else {
-                            Self::warn_skipping_column_default_drop(table_name, change);
+                            Self::warn_skipping_column_default_drop(
+                                table_name,
+                                change,
+                                old_expression.as_deref(),
+                            );
                         }
                     }
                 }
@@ -235,19 +239,23 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
 
     /// Logs that Snowflake default-change DDL is being skipped.
     fn warn_skipping_column_default_change(table_name: &str, change: &ColumnChange) {
-        if change.new_column.default_expression.is_some() {
-            warn!(
-                table_name,
-                column_name = %change.new_column.name,
-                "skipping source column default change for Snowflake because ALTER COLUMN SET \
-                 DEFAULT is only supported for existing sequence defaults"
-            );
-        }
+        warn!(
+            table_name,
+            column_name = %change.new_column.name,
+            "skipping source column default change for Snowflake because ALTER COLUMN SET DEFAULT \
+             is only supported for existing sequence defaults"
+        );
     }
 
     /// Logs that Snowflake default-drop DDL is being skipped.
-    fn warn_skipping_column_default_drop(table_name: &str, change: &ColumnChange) {
-        if schema::supports_default(&change.old_column) {
+    fn warn_skipping_column_default_drop(
+        table_name: &str,
+        change: &ColumnChange,
+        old_expression: Option<&str>,
+    ) {
+        if old_expression.is_some_and(|default_expression| {
+            schema::supports_column_default(default_expression, &change.old_column.typ)
+        }) {
             warn!(
                 table_name,
                 column_name = %change.new_column.name,

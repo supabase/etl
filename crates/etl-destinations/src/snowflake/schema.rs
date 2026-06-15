@@ -70,8 +70,13 @@ pub(crate) fn build_column_defs(columns: &[ColumnSchema]) -> String {
 
 /// Returns the Snowflake default clause for a column, if supported.
 pub(crate) fn default_clause(column_schema: &ColumnSchema) -> Option<String> {
-    let default_clause = snowflake_default_expression(column_schema)
-        .map(|expression| format!(" DEFAULT {expression}"));
+    let default_clause = column_schema
+        .default_expression
+        .as_deref()
+        .and_then(|default_expression| {
+            snowflake_default_expression(default_expression, &column_schema.typ)
+        })
+        .map(|rendered_default_expression| format!(" DEFAULT {rendered_default_expression}"));
     if default_clause.is_none() && column_schema.default_expression.is_some() {
         warn!(
             column_name = %column_schema.name,
@@ -85,8 +90,13 @@ pub(crate) fn default_clause(column_schema: &ColumnSchema) -> Option<String> {
 /// Returns the Snowflake default clause to include in `ADD COLUMN`, if
 /// supported.
 pub(crate) fn add_column_default_clause(column_schema: &ColumnSchema) -> Option<String> {
-    let default_clause = snowflake_add_column_default_expression(column_schema)
-        .map(|expression| format!(" DEFAULT {expression}"));
+    let default_clause = column_schema
+        .default_expression
+        .as_deref()
+        .and_then(|default_expression| {
+            snowflake_add_column_default_expression(default_expression, &column_schema.typ)
+        })
+        .map(|rendered_default_expression| format!(" DEFAULT {rendered_default_expression}"));
     if default_clause.is_none() && column_schema.default_expression.is_some() {
         warn!(
             column_name = %column_schema.name,
@@ -99,26 +109,20 @@ pub(crate) fn add_column_default_clause(column_schema: &ColumnSchema) -> Option<
 }
 
 /// Returns whether a column default can be represented in Snowflake SQL.
-pub(crate) fn supports_default(column_schema: &ColumnSchema) -> bool {
-    snowflake_default_expression(column_schema).is_some()
+pub(crate) fn supports_column_default(default_expression: &str, typ: &Type) -> bool {
+    snowflake_default_expression(default_expression, typ).is_some()
 }
 
 /// Returns a rendered Snowflake default expression for a column, if supported.
-fn snowflake_default_expression(column_schema: &ColumnSchema) -> Option<String> {
-    column_schema.default_expression.as_deref().and_then(|expression| {
-        parse_default_expression(expression, &column_schema.typ).and_then(|expression| {
-            render_snowflake_default_expression(&expression, &column_schema.typ)
-        })
-    })
+fn snowflake_default_expression(default_expression: &str, typ: &Type) -> Option<String> {
+    parse_default_expression(default_expression, typ)
+        .and_then(|expression| render_snowflake_default_expression(&expression, typ))
 }
 
 /// Returns a Snowflake `ADD COLUMN` default expression, if supported.
-fn snowflake_add_column_default_expression(column_schema: &ColumnSchema) -> Option<String> {
-    column_schema.default_expression.as_deref().and_then(|expression| {
-        parse_default_expression(expression, &column_schema.typ).and_then(|expression| {
-            render_snowflake_add_column_default_expression(&expression, &column_schema.typ)
-        })
-    })
+fn snowflake_add_column_default_expression(default_expression: &str, typ: &Type) -> Option<String> {
+    parse_default_expression(default_expression, typ)
+        .and_then(|expression| render_snowflake_add_column_default_expression(&expression, typ))
 }
 
 /// Renders a parsed default expression as Snowflake SQL.

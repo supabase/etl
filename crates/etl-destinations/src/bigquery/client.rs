@@ -1022,28 +1022,29 @@ impl BigQueryClient {
         &self,
         dataset_id: &BigQueryDatasetId,
         table_id: &BigQueryTableId,
-        column_schema: &ColumnSchema,
+        column_name: &str,
+        typ: &Type,
+        default_expression: &str,
     ) -> EtlResult<()> {
-        let Some(default_expression) = Self::default_expression(column_schema) else {
-            if column_schema.default_expression.is_some() {
-                warn!(
-                    dataset_id = %dataset_id,
-                    table_id = %table_id,
-                    column_name = %column_schema.name,
-                    "skipping unsupported source column default for BigQuery"
-                );
-            }
+        let Some(rendered_default_expression) = Self::default_expression(default_expression, typ)
+        else {
+            warn!(
+                dataset_id = %dataset_id,
+                table_id = %table_id,
+                column_name = %column_name,
+                "skipping unsupported source column default for BigQuery"
+            );
             return Ok(());
         };
 
         let full_table_name = self.full_table_name(dataset_id, table_id)?;
-        let column_name = quote_identifier(&column_schema.name, "BigQuery column name")?;
+        let column_name = quote_identifier(column_name, "BigQuery column name")?;
 
         info!("setting default for column {column_name} in table {full_table_name} in BigQuery");
 
         let query = format!(
             "alter table {full_table_name} alter column {column_name} set default \
-             {default_expression}"
+             {rendered_default_expression}"
         );
 
         let _ = self.query(QueryRequest::new(query)).await?;
@@ -1052,8 +1053,8 @@ impl BigQueryClient {
     }
 
     /// Returns whether a column default can be represented in BigQuery SQL.
-    pub(crate) fn supports_column_default(column_schema: &ColumnSchema) -> bool {
-        Self::default_expression(column_schema).is_some()
+    pub(crate) fn supports_column_default(default_expression: &str, typ: &Type) -> bool {
+        Self::default_expression(default_expression, typ).is_some()
     }
 
     /// Drops a default expression from a BigQuery column.
@@ -1374,8 +1375,12 @@ impl BigQueryClient {
         let mut column_spec =
             format!("{} {}", column_name, Self::postgres_to_bigquery_type(&column_schema.typ));
 
-        if let Some(default_expression) = Self::default_expression(column_schema) {
-            column_spec.push_str(&format!(" default {default_expression}"));
+        if let Some(rendered_default_expression) =
+            column_schema.default_expression.as_deref().and_then(|default_expression| {
+                Self::default_expression(default_expression, &column_schema.typ)
+            })
+        {
+            column_spec.push_str(&format!(" default {rendered_default_expression}"));
         } else if column_schema.default_expression.is_some() {
             warn!(
                 column_name = %column_schema.name,
@@ -1391,12 +1396,9 @@ impl BigQueryClient {
     }
 
     /// Returns a rendered default expression for BigQuery, if supported.
-    fn default_expression(column_schema: &ColumnSchema) -> Option<String> {
-        column_schema.default_expression.as_deref().and_then(|expression| {
-            parse_default_expression(expression, &column_schema.typ).and_then(|expression| {
-                Self::render_default_expression(&expression, &column_schema.typ)
-            })
-        })
+    fn default_expression(default_expression: &str, typ: &Type) -> Option<String> {
+        parse_default_expression(default_expression, typ)
+            .and_then(|expression| Self::render_default_expression(&expression, typ))
     }
 
     /// Renders a parsed default expression as BigQuery SQL.
@@ -1902,11 +1904,8 @@ mod tests {
         ];
 
         for (typ, expression, expected) in cases {
-            let column_schema = ColumnSchema::new("value".to_owned(), typ, -1, 1, true)
-                .with_default_expression(expression.to_owned());
-
             assert_eq!(
-                BigQueryClient::default_expression(&column_schema).as_deref(),
+                BigQueryClient::default_expression(expression, &typ).as_deref(),
                 Some(expected)
             );
         }
@@ -1927,11 +1926,8 @@ mod tests {
         ];
 
         for (typ, expression) in cases {
-            let column_schema = ColumnSchema::new("value".to_owned(), typ, -1, 1, true)
-                .with_default_expression(expression.to_owned());
-
-            assert_eq!(BigQueryClient::default_expression(&column_schema), None);
-            assert!(!BigQueryClient::supports_column_default(&column_schema));
+            assert_eq!(BigQueryClient::default_expression(expression, &typ), None);
+            assert!(!BigQueryClient::supports_column_default(expression, &typ));
         }
     }
 

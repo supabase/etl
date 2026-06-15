@@ -8,6 +8,7 @@ use clickhouse::Client;
 use etl::{
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
+    types::Type,
 };
 use url::Url;
 
@@ -21,7 +22,10 @@ use crate::clickhouse::{
         ETL_CLICKHOUSE_INSERT_ERRORS_TOTAL, ETL_CLICKHOUSE_INSERT_ROWS,
         ETL_CLICKHOUSE_SCHEMA_QUERY_DURATION_SECONDS, ETL_CLICKHOUSE_STATEMENTS_PER_BATCH,
     },
-    schema::{clickhouse_column_type, clickhouse_default_clause},
+    schema::{
+        clickhouse_column_type, clickhouse_default_clause, clickhouse_default_expression,
+        clickhouse_type,
+    },
     sql::quote_identifier,
 };
 
@@ -170,9 +174,22 @@ fn build_modify_column_sql(table_name: &str, column: &etl::types::ColumnSchema) 
 }
 
 /// Builds the SQL used to set a supported column default in ClickHouse.
-fn build_set_default_sql(table_name: &str, column: &etl::types::ColumnSchema) -> Option<String> {
-    clickhouse_default_clause(column)?;
-    Some(build_modify_column_sql(table_name, column))
+fn build_set_default_sql(
+    table_name: &str,
+    column_name: &str,
+    typ: &Type,
+    nullable: bool,
+    default_expression: &str,
+) -> Option<String> {
+    let rendered_default_expression = clickhouse_default_expression(default_expression, typ)?;
+    let col_type = clickhouse_type(typ, nullable, false);
+    let table_name = quote_identifier(table_name);
+    let column_name = quote_identifier(column_name);
+
+    Some(format!(
+        "ALTER TABLE {table_name} MODIFY COLUMN {column_name} {col_type} DEFAULT \
+         {rendered_default_expression}"
+    ))
 }
 
 /// Builds the SQL used to drop a column default in ClickHouse.
@@ -499,9 +516,14 @@ impl ClickHouseClient {
     pub(crate) async fn set_column_default(
         &self,
         table_name: &str,
-        column: &etl::types::ColumnSchema,
+        column_name: &str,
+        typ: &Type,
+        nullable: bool,
+        default_expression: &str,
     ) -> EtlResult<()> {
-        let Some(sql) = build_set_default_sql(table_name, column) else {
+        let Some(sql) =
+            build_set_default_sql(table_name, column_name, typ, nullable, default_expression)
+        else {
             return Ok(());
         };
 

@@ -27,7 +27,7 @@ use crate::{
         metrics::register_metrics,
         schema::{
             create_current_view_sql, create_table_sql, drop_current_view_sql,
-            supports_clickhouse_default, trailing_cdc_column_names,
+            supports_column_default, trailing_cdc_column_names,
         },
     },
     table_name::try_stringify_table_name,
@@ -870,13 +870,24 @@ where
                             .await?;
                     }
                     ColumnModification::Default { old_expression, new_expression } => {
-                        let old_default_was_supported = old_expression.is_some()
-                            && supports_clickhouse_default(&change.old_column);
+                        let old_default_was_supported =
+                            old_expression.as_deref().is_some_and(|default_expression| {
+                                supports_column_default(default_expression, &change.old_column.typ)
+                            });
 
-                        if new_expression.is_some() {
-                            if supports_clickhouse_default(&change.new_column) {
+                        if let Some(new_default_expression) = new_expression.as_deref() {
+                            if supports_column_default(
+                                new_default_expression,
+                                &change.new_column.typ,
+                            ) {
                                 self.client
-                                    .set_column_default(clickhouse_table_name, &change.new_column)
+                                    .set_column_default(
+                                        clickhouse_table_name,
+                                        &change.new_column.name,
+                                        &change.new_column.typ,
+                                        change.new_column.nullable,
+                                        new_default_expression,
+                                    )
                                     .await?;
                             } else {
                                 warn!(
