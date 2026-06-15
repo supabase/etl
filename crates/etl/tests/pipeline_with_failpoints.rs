@@ -2,15 +2,15 @@
 
 use etl::{
     failpoints::{
-        FORCE_SCHEMA_CLEANUP_FP, SEND_STATUS_UPDATE_FP,
+        FORCE_SCHEMA_CLEANUP_FP, SEND_STATUS_UPDATE_FP, START_TABLE_SYNC_AFTER_FINISHED_COPY_FP,
         START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP, START_TABLE_SYNC_DURING_DATA_SYNC_FP,
-        STORE_REPLICATION_PROGRESS_FP,
+        STORE_REPLICATION_PROGRESS_FP, TABLE_SYNC_WORKER_BEFORE_STREAMING_FP,
     },
     state::{TableRetryPolicy, TableState, TableStateType},
     store::state::StateStore,
     test_utils::{
         database::{spawn_source_database, test_table_name},
-        event::group_events_by_type_and_table_id,
+        event::{EventCondition, group_events_by_type_and_table_id},
         memory_destination::MemoryDestination,
         notifying_store::NotifyingStore,
         pipeline::{create_database_and_ready_pipeline_with_table, create_pipeline},
@@ -18,9 +18,11 @@ use etl::{
             assert_replicated_schema_column_names_types, assert_schema_snapshots_ordering,
             assert_table_schema_column_names_types,
         },
+        table_sync_state::subscribe_table_sync_state_changes,
         test_destination_wrapper::TestDestinationWrapper,
         test_schema::{
-            TableSelection, assert_events_equal, insert_users_data, setup_test_database_schema,
+            TableSelection, assert_events_equal, insert_orders_data, insert_users_data,
+            setup_test_database_schema,
         },
     },
     types::{Event, EventType, InsertEvent, PipelineId, TableId, Type},
@@ -376,6 +378,147 @@ async fn table_copy_is_consistent_during_data_sync_threw_an_error_with_timed_ret
         *table_schemas.get(&database_schema.users_schema().id).unwrap(),
         database_schema.users_schema()
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn table_sync_streaming_replays_rows_written_after_copy_before_handoff() {
+    let _scenario = FailScenario::setup();
+    fail::cfg(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP, "pause").unwrap();
+
+    init_test_tracing();
+
+    let mut database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+    let users_schema = database_schema.users_schema();
+    let table_id = users_schema.id;
+
+    let copied_rows = 3;
+    let catchup_rows = 2;
+    insert_users_data(&mut database, &users_schema.name, 1..=copied_rows).await;
+
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    let finished_copy_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::FinishedCopy).await;
+    let ready_notify = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let mut table_sync_state_changes = subscribe_table_sync_state_changes();
+
+    pipeline.start().await.unwrap();
+
+    finished_copy_notify.notified().await;
+
+    insert_users_data(
+        &mut database,
+        &users_schema.name,
+        copied_rows + 1..=copied_rows + catchup_rows,
+    )
+    .await;
+
+    let all_rows_notify = destination
+        .wait_for_all_events(vec![EventCondition::Table(
+            EventType::Insert,
+            table_id,
+            (copied_rows + catchup_rows) as u64,
+        )])
+        .await;
+
+    fail::remove(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP);
+
+    table_sync_state_changes
+        .wait_for_state_types(
+            table_id,
+            &[TableStateType::SyncWait, TableStateType::Catchup, TableStateType::SyncDone],
+        )
+        .await;
+    ready_notify.notified().await;
+    all_rows_notify.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let table_rows = destination.get_table_rows().await;
+    let copied_table_rows = table_rows.get(&table_id).unwrap();
+    assert_eq!(copied_table_rows.len(), copied_rows);
+
+    let events = destination.get_events().await;
+    let grouped_events = group_events_by_type_and_table_id(&events);
+    let catchup_events = grouped_events.get(&(EventType::Insert, table_id)).map_or(0, Vec::len);
+    assert_eq!(catchup_events, catchup_rows);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn table_sync_streaming_error_unblocks_apply_worker() {
+    let _scenario = FailScenario::setup();
+    fail::cfg(TABLE_SYNC_WORKER_BEFORE_STREAMING_FP, "1*return(no_retry)").unwrap();
+
+    init_test_tracing();
+
+    let mut database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
+    let users_schema = database_schema.users_schema();
+    let orders_schema = database_schema.orders_schema();
+    let users_table_id = users_schema.id;
+    let orders_table_id = orders_schema.id;
+
+    let copied_rows = 3;
+    insert_users_data(&mut database, &users_schema.name, 1..=copied_rows).await;
+    insert_orders_data(&mut database, &orders_schema.name, 1..=copied_rows).await;
+
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    let errored_notify =
+        store.notify_on_table_state_type(users_table_id, TableStateType::Errored).await;
+    let orders_ready_notify =
+        store.notify_on_table_state_type(orders_table_id, TableStateType::Ready).await;
+    let mut table_sync_state_changes = subscribe_table_sync_state_changes();
+
+    pipeline.start().await.unwrap();
+
+    // The failpoint fires after the apply worker moves this table to `Catchup`,
+    // so the subsequent `Errored` transition must unblock the apply worker.
+    table_sync_state_changes
+        .wait_for_state_types(
+            users_table_id,
+            &[TableStateType::SyncWait, TableStateType::Catchup, TableStateType::Errored],
+        )
+        .await;
+    errored_notify.notified().await;
+    // Assert that apply worker made progress after the errored table before
+    // shutdown. Otherwise a shutdown signal could hide a stuck catchup wait.
+    orders_ready_notify.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let table_state = store.get_table_state(users_table_id).await.unwrap().unwrap();
+    assert!(matches!(
+        table_state,
+        TableState::Errored { retry_policy: TableRetryPolicy::NoRetry, .. }
+    ));
+
+    let table_rows = destination.get_table_rows().await;
+    let copied_users_table_rows = table_rows.get(&users_table_id).unwrap();
+    assert_eq!(copied_users_table_rows.len(), copied_rows);
+    let copied_orders_table_rows = table_rows.get(&orders_table_id).unwrap();
+    assert_eq!(copied_orders_table_rows.len(), copied_rows);
 }
 
 #[tokio::test(flavor = "multi_thread")]

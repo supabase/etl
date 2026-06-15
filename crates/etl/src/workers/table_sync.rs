@@ -11,6 +11,10 @@ use tokio::{
 };
 use tracing::{Instrument, debug, error, info, warn};
 
+#[cfg(feature = "failpoints")]
+use crate::failpoints::{TABLE_SYNC_WORKER_BEFORE_STREAMING_FP, etl_fail_point};
+#[cfg(feature = "test-utils")]
+use crate::test_utils::table_sync_state::{TableSyncStateChange, emit_table_sync_state_change};
 use crate::{
     bail,
     concurrency::{BatchBudgetController, MemoryMonitor, ShutdownResult, ShutdownRx},
@@ -82,6 +86,11 @@ impl TableSyncWorkerStateInner {
     /// broadcasts the change to any workers that may be waiting for state
     /// transitions.
     pub(crate) fn set(&mut self, state: TableState) {
+        #[cfg(feature = "test-utils")]
+        let from_state_type = self.table_state.as_type();
+        #[cfg(feature = "test-utils")]
+        let to_state_type = state.as_type();
+
         info!(
             table_id = self.table_id.0,
             from_state = %self.table_state,
@@ -90,6 +99,13 @@ impl TableSyncWorkerStateInner {
         );
 
         self.table_state = state;
+
+        #[cfg(feature = "test-utils")]
+        emit_table_sync_state_change(TableSyncStateChange::new(
+            self.table_id,
+            from_state_type,
+            to_state_type,
+        ));
 
         // Broadcast notification to all active waiters.
         //
@@ -761,6 +777,9 @@ where
                 return Err(err);
             }
         };
+
+        #[cfg(feature = "failpoints")]
+        etl_fail_point(TABLE_SYNC_WORKER_BEFORE_STREAMING_FP)?;
 
         let worker_context = WorkerContext::TableSync(TableSyncWorkerContext {
             table_id: self.table_id,
