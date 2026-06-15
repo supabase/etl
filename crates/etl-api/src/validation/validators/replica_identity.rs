@@ -1,3 +1,8 @@
+//! Replica identity validation for destination compatibility.
+//!
+//! The validator classifies each publication table into semantic identity
+//! types so destinations can declare the row identities they can safely apply.
+
 use async_trait::async_trait;
 use etl_postgres::types::IdentityType;
 use sqlx::FromRow;
@@ -8,8 +13,11 @@ use crate::validation::{ValidationContext, ValidationError, ValidationFailure, V
 /// identities.
 #[derive(Debug)]
 pub(super) struct ReplicaIdentityValidator {
+    /// Name of the publication whose tables should be checked.
     publication_name: String,
+    /// User-facing destination name included in validation messages.
     destination_name: &'static str,
+    /// Semantic replica identity types accepted by the destination.
     supported_identity_types: &'static [IdentityType],
 }
 
@@ -24,11 +32,16 @@ impl ReplicaIdentityValidator {
     }
 }
 
+/// Replica identity catalog data for one publication table.
 #[derive(Debug, FromRow)]
 struct TableReplicaIdentityAudit {
+    /// Schema-qualified table name for warning output.
     table_name: String,
+    /// Raw `pg_class.relreplident` value for the table.
     relreplident: String,
+    /// Table primary-key column numbers from `pg_constraint.conkey`.
     primary_key_attnums: Vec<i32>,
+    /// Key column numbers from the index marked by `pg_index.indisreplident`.
     replica_identity_index_attnums: Vec<i32>,
 }
 
@@ -164,6 +177,7 @@ impl Validator for ReplicaIdentityValidator {
     }
 }
 
+/// Formats unsupported table identities for a compact warning message.
 fn format_unsupported_tables(tables: &[String]) -> String {
     const MAX_DISPLAYED_TABLES: usize = 20;
 
@@ -178,6 +192,7 @@ fn format_unsupported_tables(tables: &[String]) -> String {
     }
 }
 
+/// Converts raw Postgres replica identity metadata into a semantic identity.
 fn identity_type_for_table(
     relreplident: &str,
     primary_key_attnums: &[i32],
@@ -197,6 +212,7 @@ fn identity_type_for_table(
     }
 }
 
+/// Returns whether two attnum lists refer to the same table columns.
 fn attnums_match(left: &[i32], right: &[i32]) -> bool {
     if left.len() != right.len() {
         return false;
@@ -210,6 +226,7 @@ fn attnums_match(left: &[i32], right: &[i32]) -> bool {
     left == right
 }
 
+/// Formats supported identity types as user-facing suggestions.
 fn format_supported_identity_types(identity_types: &[IdentityType]) -> String {
     match identity_types {
         [] => "no".to_owned(),
@@ -234,6 +251,7 @@ fn format_supported_identity_types(identity_types: &[IdentityType]) -> String {
     }
 }
 
+/// Formats a single identity type as a user-facing suggestion.
 fn format_identity_type_suggestion(identity_type: IdentityType) -> &'static str {
     match identity_type {
         IdentityType::PrimaryKey => {

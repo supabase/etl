@@ -192,6 +192,9 @@ pub async fn validate_source(
 /// Checks that the destination is accessible and properly configured:
 /// - **BigQuery**: Validates dataset exists and is accessible.
 /// - **Iceberg**: Validates catalog connectivity.
+///
+/// If a pipeline configuration is provided, validates that the publication
+/// tables use replica identities supported by the destination.
 pub async fn validate_destination(
     ctx: &ValidationContext,
     destination_config: &FullApiDestinationConfig,

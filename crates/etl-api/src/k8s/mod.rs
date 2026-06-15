@@ -7,10 +7,10 @@
 //!
 //! The default client, [`http::HttpK8sClient`], is backed by the [`kube`]
 //! crate and talks to the cluster using the ambient configuration (in-cluster
-//! or local `~/.kube/config`). Keeping the abstraction in [`base`] lets us
+//! or local `~/.kube/config`). Keeping the abstraction in `base` lets us
 //! swap implementations in tests and non-Kubernetes environments.
 //!
-//! See [`base`] for errors, pod phase mapping, and the client trait.
+//! See `base` for errors, pod phase mapping, and the client trait.
 
 mod base;
 pub mod cache;

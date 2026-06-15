@@ -12,7 +12,9 @@ use crate::configs::destination::FullApiDestinationConfig;
 /// Composite validator for destination prerequisites.
 #[derive(Debug)]
 pub(crate) struct DestinationValidator {
+    /// Destination configuration to validate.
     config: FullApiDestinationConfig,
+    /// Publication name used for source-aware replica identity checks.
     replica_identity_publication_name: Option<String>,
 }
 
@@ -25,6 +27,7 @@ impl DestinationValidator {
         Self { config, replica_identity_publication_name }
     }
 
+    /// Builds the replica identity validator for the configured destination.
     fn replica_identity_validator(&self) -> Option<ReplicaIdentityValidator> {
         let publication_name = self.replica_identity_publication_name.clone()?;
 
