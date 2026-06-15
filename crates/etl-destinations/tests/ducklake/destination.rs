@@ -1717,9 +1717,9 @@ async fn write_events_drops_stale_tombstone_before_reusing_tombstone_name() {
         old_schema.id,
         old_schema.name.clone(),
         vec![
-            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, Some(1), false),
-            ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, None, true),
-            ColumnSchema::new(stale_tombstone_column.to_owned(), PgType::TEXT, -1, 3, None, true),
+            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("name".to_owned(), PgType::TEXT, -1, 2, true),
+            ColumnSchema::new(stale_tombstone_column.to_owned(), PgType::TEXT, -1, 3, true),
         ],
         SnapshotId::from(53_u64),
     );
