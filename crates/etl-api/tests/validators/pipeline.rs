@@ -153,7 +153,7 @@ async fn validate_pipeline_rejects_etl_schema_publication() {
 }
 
 #[tokio::test]
-async fn validate_pipeline_tables_without_primary_keys() {
+async fn validate_pipeline_allows_tables_without_primary_keys() {
     let (ctx, pool, config) = create_validation_context_with_source().await;
 
     pool.execute("create table no_pk_table (id int, name text)").await.unwrap();
@@ -162,19 +162,17 @@ async fn validate_pipeline_tables_without_primary_keys() {
     let pipeline_config = create_pipeline_config("pk_test_pub");
     let failures = validate_pipeline(&ctx, &pipeline_config).await.unwrap();
 
-    let pk_failure = failures.iter().find(|f| f.name == "Tables Missing Primary Keys");
-    assert!(pk_failure.is_some(), "Should warn for table without primary key");
-    assert_eq!(pk_failure.unwrap().failure_type, FailureType::Warning);
+    let pk_failure = failures.iter().find(|f| f.name == "Source Primary Keys Required");
     assert!(
-        pk_failure.unwrap().reason.contains("no_pk_table"),
-        "Failure reason should mention the table name"
+        pk_failure.is_none(),
+        "Pipeline validation should leave primary-key requirements to destination validation"
     );
 
     drop_pg_database(&config).await;
 }
 
 #[tokio::test]
-async fn validate_pipeline_tables_with_primary_keys_passes() {
+async fn validate_pipeline_tables_with_primary_keys_does_not_emit_destination_pk_warning() {
     let (ctx, pool, config) = create_validation_context_with_source().await;
 
     pool.execute("create table pk_table (id serial primary key, name text)").await.unwrap();
@@ -183,8 +181,11 @@ async fn validate_pipeline_tables_with_primary_keys_passes() {
     let pipeline_config = create_pipeline_config("pk_pass_pub");
     let failures = validate_pipeline(&ctx, &pipeline_config).await.unwrap();
 
-    let pk_failure = failures.iter().find(|f| f.name == "Tables Missing Primary Keys");
-    assert!(pk_failure.is_none(), "Should pass for table with primary key");
+    let pk_failure = failures.iter().find(|f| f.name == "Source Primary Keys Required");
+    assert!(
+        pk_failure.is_none(),
+        "Pipeline validation should not emit destination primary-key warnings"
+    );
 
     drop_pg_database(&config).await;
 }

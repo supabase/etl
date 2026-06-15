@@ -340,66 +340,6 @@ impl Validator for PublicationExcludesEtlTablesValidator {
     }
 }
 
-/// Validates that all tables in a publication have primary keys.
-#[derive(Debug)]
-pub(super) struct PrimaryKeysValidator {
-    publication_name: String,
-}
-
-impl PrimaryKeysValidator {
-    pub(super) fn new(publication_name: String) -> Self {
-        Self { publication_name }
-    }
-}
-
-#[async_trait]
-impl Validator for PrimaryKeysValidator {
-    async fn validate(
-        &self,
-        ctx: &ValidationContext,
-    ) -> Result<Vec<ValidationFailure>, ValidationError> {
-        let source_pool =
-            ctx.source_pool.as_ref().expect("source pool required for primary keys validation");
-
-        // Find tables without primary keys using pg_publication_rel for direct OID
-        // access
-        let tables_without_pk: Vec<String> = sqlx::query_scalar(
-            r#"
-            select n.nspname || '.' || c.relname
-            from pg_publication_rel pr
-            join pg_publication p on p.oid = pr.prpubid
-            join pg_class c on c.oid = pr.prrelid
-            join pg_namespace n on n.oid = c.relnamespace
-            where p.pubname = $1
-              and not exists (
-                select 1
-                from pg_constraint con
-                where con.conrelid = pr.prrelid
-                  and con.contype = 'p'
-              )
-            order by n.nspname, c.relname
-            limit 100
-            "#,
-        )
-        .bind(&self.publication_name)
-        .fetch_all(source_pool)
-        .await?;
-
-        if tables_without_pk.is_empty() {
-            Ok(vec![])
-        } else {
-            Ok(vec![ValidationFailure::warning(
-                "Tables Missing Primary Keys",
-                format!(
-                    "Tables without primary keys: {}\n\nPrimary keys are required for UPDATE and \
-                     DELETE replication.",
-                    tables_without_pk.join(", ")
-                ),
-            )])
-        }
-    }
-}
-
 /// Validates that tables in a publication don't have generated columns.
 #[derive(Debug)]
 pub(super) struct GeneratedColumnsValidator {

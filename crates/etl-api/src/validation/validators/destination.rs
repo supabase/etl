@@ -1,10 +1,12 @@
 //! Destination validation dispatch.
 
 use async_trait::async_trait;
+use etl_config::shared::ClickHouseEngine;
 use etl_postgres::types::IdentityType;
 
 use super::{
     super::{ValidationContext, ValidationError, ValidationFailure, Validator},
+    primary_key::PrimaryKeyValidator,
     replica_identity::ReplicaIdentityValidator,
 };
 use crate::configs::destination::FullApiDestinationConfig;
@@ -55,6 +57,41 @@ impl DestinationValidator {
             }
         })
     }
+
+    /// Builds the primary-key validator for destinations that require source
+    /// primary keys.
+    ///
+    /// Keep this aligned with destination runtime checks:
+    /// - BigQuery always requires source primary keys because destination rows
+    ///   are keyed by the source primary key for initial loads and CDC.
+    /// - ClickHouse `ReplacingMergeTree` requires source primary keys because
+    ///   it uses them as the `ORDER BY` and deduplication key.
+    /// - ClickHouse `MergeTree`, Iceberg, DuckLake, and Snowflake do not
+    ///   require source primary keys. They still have their own replica
+    ///   identity requirements, handled by [`Self::replica_identity_validator`]
+    ///   and destination runtime checks.
+    fn primary_key_validator(&self) -> Option<PrimaryKeyValidator> {
+        let publication_name = self.replica_identity_publication_name.clone()?;
+
+        match &self.config {
+            FullApiDestinationConfig::BigQuery { .. } => Some(PrimaryKeyValidator::new(
+                publication_name,
+                "BigQuery",
+                "BigQuery tables are keyed by the source primary key for initial loads, upserts, \
+                 deletes, and primary-key-changing updates.",
+            )),
+            FullApiDestinationConfig::ClickHouse {
+                engine: ClickHouseEngine::ReplacingMergeTree,
+                ..
+            } => Some(PrimaryKeyValidator::new(
+                publication_name,
+                "ClickHouse ReplacingMergeTree",
+                "ClickHouse ReplacingMergeTree uses the source primary key as the ORDER BY and \
+                 deduplication key.",
+            )),
+            _ => None,
+        }
+    }
 }
 
 #[async_trait]
@@ -80,6 +117,10 @@ impl Validator for DestinationValidator {
         }?;
 
         if let Some(validator) = self.replica_identity_validator() {
+            failures.extend(validator.validate(ctx).await?);
+        }
+
+        if let Some(validator) = self.primary_key_validator() {
             failures.extend(validator.validate(ctx).await?);
         }
 

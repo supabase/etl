@@ -8,6 +8,7 @@ mod ducklake;
 #[cfg(feature = "iceberg")]
 mod iceberg;
 mod pipeline;
+mod primary_key;
 mod replica_identity;
 #[cfg(feature = "snowflake")]
 mod snowflake;
@@ -16,9 +17,9 @@ mod source;
 use async_trait::async_trait;
 pub(super) use destination::DestinationValidator;
 use pipeline::{
-    GeneratedColumnsValidator, PrimaryKeysValidator, PublicationExcludesEtlTablesValidator,
-    PublicationExistsValidator, PublicationHasTablesValidator, ReplicationPermissionsValidator,
-    ReplicationSlotsValidator, WalLevelValidator,
+    GeneratedColumnsValidator, PublicationExcludesEtlTablesValidator, PublicationExistsValidator,
+    PublicationHasTablesValidator, ReplicationPermissionsValidator, ReplicationSlotsValidator,
+    WalLevelValidator,
 };
 pub(super) use source::SourceValidator;
 
@@ -46,7 +47,6 @@ impl PipelineValidator {
             Box::new(PublicationExistsValidator::new(publication_name.clone())),
             Box::new(PublicationHasTablesValidator::new(publication_name.clone())),
             Box::new(PublicationExcludesEtlTablesValidator::new(publication_name.clone())),
-            Box::new(PrimaryKeysValidator::new(publication_name.clone())),
             Box::new(GeneratedColumnsValidator::new(publication_name)),
             Box::new(ReplicationSlotsValidator::new(max_table_sync_workers)),
         ]
