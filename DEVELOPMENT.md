@@ -125,7 +125,7 @@ POSTGRES_DATA_VOLUME=/path/to/data cargo x init
 | `POSTGRES_REPLICA_WAL_RECEIVER_STATUS_INTERVAL` | `1s` | Read replica WAL receiver feedback interval |
 | `POSTGRES_REPLICA_MAX_STANDBY_STREAMING_DELAY` | `-1` | Read replica conflict delay used to avoid canceling long test copies |
 | `CLICKHOUSE_HTTP_PORT` | `8123` | ClickHouse HTTP port |
-| `CLICKHOUSE_NATIVE_PORT` | `9000` | ClickHouse native TCP port |
+| `CLICKHOUSE_NATIVE_PORT` | `9001` | ClickHouse native TCP port (mapped to container `9000`; host default avoids the replicator's `9000` metrics port) |
 | `CLICKHOUSE_USER` | `etl` | ClickHouse user for the local Docker Compose setup |
 | `CLICKHOUSE_PASSWORD` | `etl` | ClickHouse password for the local Docker Compose setup |
 | `SKIP_DOCKER` | (empty) | Skip Docker Compose if set |
