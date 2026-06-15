@@ -110,6 +110,73 @@ physical destination backfill mode may be added in the future, but it needs
 explicit controls for batching, throttling, observability, and how long the
 pipeline can safely pause or run behind while the destination rewrite happens.
 
+## Supported Column Defaults
+
+Column defaults are **best-effort metadata translations**, not a PostgreSQL
+expression evaluator. ETL reads the source default from PostgreSQL's
+`pg_get_expr` output, parses only a small portable subset, and asks each
+destination whether that parsed default can be rendered safely in that
+destination's SQL dialect.
+
+If a default is not in the supported subset, ETL skips the destination default
+with a warning. Replication does not fail because PostgreSQL still sends
+evaluated values for future row events.
+
+The shared parser currently recognizes only these source default shapes:
+
+| Source default shape | Examples |
+|----------------------|----------|
+| String literals | `'pending'::text`, `('don''t'::text)` |
+| Numeric literals | `42`, `-1`, `'42.10'::numeric(10,2)` |
+| Boolean literals | `true`, `false`, `'true'::boolean` |
+| Date/time/timestamp literals | `'2026-01-01'::date`, `'12:30:00'::time`, `'2026-01-01 12:30:00'::timestamp` |
+| JSON literals | `'{}'::jsonb`, `'{"enabled": true}'::json` |
+| UUID v4 generators | `gen_random_uuid()`, `uuid_generate_v4()` |
+| Current user expressions | `current_user`, `session_user` |
+| Current temporal expressions | `now()`, `transaction_timestamp()`, `current_timestamp`, `current_date`, `current_time`, `localtimestamp` |
+| Simple current-temporal interval arithmetic | `now() + interval '30 days'`, `current_date - interval '7 days'` |
+| Literal string case functions | `lower('USER'::text)`, `upper('user')` |
+| Simple numeric arithmetic | `(10 + 5) * 2` |
+
+The parser is intentionally conservative. These PostgreSQL defaults are
+examples of **unsupported** expressions:
+
+```sql
+default nextval('users_id_seq')
+default 'a' || 'b'
+default lower('USER' || '_ID')
+default concat('a', 'b')
+default md5('x')
+default random()
+default clock_timestamp()
+default array['a', 'b']
+default (select 'x')
+default current_setting('app.tenant_id')
+default 1e6
+default interval '1 day 2 hours'
+```
+
+Unsupported defaults are skipped because translating arbitrary PostgreSQL
+expressions would require both a PostgreSQL parser and a destination-specific
+expression translator. Most destinations do not accept arbitrary PostgreSQL
+expressions as column defaults, and even similar-looking SQL can have different
+volatility, time zone, type coercion, or evaluation semantics.
+
+Destination support is narrower than parser support:
+
+| Destination | Supported default behavior |
+|-------------|----------------------------|
+| BigQuery | Supports compatible literals, `GENERATE_UUID()` for UUID-as-string columns, `SESSION_USER()` for text columns, and current date/time/timestamp defaults for matching temporal columns. It does not render lower/upper functions, interval arithmetic, numeric arithmetic, string concatenation, or other expressions. Added columns are created nullable and supported defaults are set afterward for future writes. |
+| ClickHouse | Supports compatible literals, UUID generation, current user for text columns, current date/timestamp defaults, simple current-temporal interval arithmetic, lower/upper over string literals, and simple numeric arithmetic for native numeric columns. Defaults are metadata only unless separately materialized. |
+| DuckLake | Supports compatible string/numeric/date/time/timestamp/JSON literals, UUID generation, current user for text columns, current date/time/timestamp defaults, simple current-temporal interval arithmetic, lower/upper over string literals, and simple numeric arithmetic for native numeric columns. Boolean defaults are currently skipped. |
+| Snowflake | `CREATE TABLE` supports compatible literals, JSON literals via `PARSE_JSON`, UUID generation, current user for text columns, current date/time/timestamp defaults, simple current-temporal interval arithmetic, lower/upper over string literals, and simple numeric arithmetic for native numeric columns. `ADD COLUMN` only receives the literal subset Snowflake allows for add-column defaults: string, numeric, and boolean literals. Later default changes on existing columns are skipped. |
+
+When changing a default from one supported expression to an unsupported
+expression, destinations that can safely remove defaults drop the old supported
+default to avoid leaving stale destination behavior behind. Snowflake is the
+exception for defaults introduced by `ADD COLUMN ... DEFAULT`, because Snowflake
+does not allow those defaults to be dropped safely.
+
 ## Diff Semantics
 
 ETL stores schemas in **PostgreSQL column ordinal order** (`pg_attribute.attnum`)

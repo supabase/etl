@@ -426,7 +426,20 @@ fn has_top_level_binary_operator(expression: &str) -> bool {
 }
 
 /// Skips over a SQL single-quoted string literal.
-fn skip_string_literal(bytes: &[u8], mut index: usize) -> usize {
+fn skip_string_literal(bytes: &[u8], index: usize) -> usize {
+    let Some(end) = string_literal_end(bytes, index) else {
+        return bytes.len();
+    };
+
+    end
+}
+
+/// Returns the byte after a SQL single-quoted string literal.
+fn string_literal_end(bytes: &[u8], mut index: usize) -> Option<usize> {
+    if bytes.get(index) != Some(&b'\'') {
+        return None;
+    }
+
     index = advance_index(index, 1, bytes.len());
 
     while index < bytes.len() {
@@ -434,14 +447,14 @@ fn skip_string_literal(bytes: &[u8], mut index: usize) -> usize {
             if next_byte_is(bytes, index, b'\'') {
                 index = advance_index(index, 2, bytes.len());
             } else {
-                return advance_index(index, 1, bytes.len());
+                return Some(advance_index(index, 1, bytes.len()));
             }
         } else {
             index = advance_index(index, 1, bytes.len());
         }
     }
 
-    index
+    None
 }
 
 /// Advances a byte index, capping at the input length on overflow.
@@ -552,9 +565,9 @@ fn strip_outer_parens(expression: &str) -> &str {
     expression.get(1..end).map_or(expression, str::trim)
 }
 
-/// Returns whether an expression is a SQL string literal.
+/// Returns whether an expression is exactly one SQL string literal.
 fn is_string_literal(expression: &str) -> bool {
-    expression.len() >= 2 && expression.starts_with('\'') && expression.ends_with('\'')
+    string_literal_end(expression.as_bytes(), 0).is_some_and(|end| end == expression.len())
 }
 
 /// Returns whether an expression is a numeric SQL literal.
@@ -1173,6 +1186,16 @@ mod tests {
             })
         );
         assert_eq!(parse_default_expression("lower('a', 'b')", &Type::TEXT), None);
+    }
+
+    #[test]
+    fn skips_string_concatenation_expressions() {
+        assert_eq!(parse_default_expression("'a' || 'b'", &Type::TEXT), None);
+        assert_eq!(
+            parse_default_expression("(('user'::text || '_'::text) || 'id'::text)", &Type::TEXT),
+            None
+        );
+        assert_eq!(parse_default_expression("lower('a' || 'b')", &Type::TEXT), None);
     }
 
     #[test]
