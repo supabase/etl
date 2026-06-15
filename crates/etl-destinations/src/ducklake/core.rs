@@ -1462,6 +1462,8 @@ where
         {
             self.reconcile_missing_replicated_columns(&table_name, new_replicated_table_schema)
                 .await?;
+            self.cleanup_tombstone_columns_after_applied(&table_name, new_replicated_table_schema)
+                .await;
             info!(
                 table_id = %table_id,
                 snapshot_id = %new_snapshot_id,
@@ -1491,6 +1493,8 @@ where
             current_table_schema,
             current_replication_mask.clone(),
         );
+        self.cleanup_tombstone_columns_after_applied(&table_name, &current_schema).await;
+
         let updated_metadata = DestinationTableMetadata::new_applied(
             table_name.clone(),
             current_snapshot_id,
