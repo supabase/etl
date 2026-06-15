@@ -177,28 +177,29 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
       - name: Create and Push Multi-Arch Manifest
+        shell: bash
         run: |
           IMAGE="${{ inputs.image }}"
           FULL_SHA=$(git rev-parse HEAD)
 
           # Prepare digest list for imagetools
-          DIGEST_LIST=""
+          DIGEST_LIST=()
           for digest_file in /tmp/digests/*.txt; do
             digest=$(cat "$digest_file")
-            DIGEST_LIST="${DIGEST_LIST} ${IMAGE}@${digest}"
+            DIGEST_LIST+=("${IMAGE}@${digest}")
           done
 
           if [ "${{ inputs.experimental }}" = "true" ]; then
             # Experimental mode: only tag with commithash-experimental
-            docker buildx imagetools create -t "${IMAGE}:${FULL_SHA}-experimental" ${DIGEST_LIST}
+            docker buildx imagetools create -t "${IMAGE}:${FULL_SHA}-experimental" "${DIGEST_LIST[@]}"
           else
             # Standard mode: tag with latest and SHA
-            docker buildx imagetools create -t "${IMAGE}:latest" ${DIGEST_LIST}
-            docker buildx imagetools create -t "${IMAGE}:${FULL_SHA}" ${DIGEST_LIST}
+            docker buildx imagetools create -t "${IMAGE}:latest" "${DIGEST_LIST[@]}"
+            docker buildx imagetools create -t "${IMAGE}:${FULL_SHA}" "${DIGEST_LIST[@]}"
 
             # Create manifest for version if needed
             if [ "${{ inputs.tag_with_version }}" = "true" ] && [ -n "${{ inputs.version }}" ]; then
-              docker buildx imagetools create -t "${IMAGE}:v${{ inputs.version }}" ${DIGEST_LIST}
+              docker buildx imagetools create -t "${IMAGE}:v${{ inputs.version }}" "${DIGEST_LIST[@]}"
             fi
           fi
 
