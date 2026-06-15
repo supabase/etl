@@ -43,6 +43,7 @@ use crate::support::bigquery::{
 };
 
 const REPLICA_IDENTITY_LARGE_TEXT_SIZE_BYTES: usize = 8192;
+const BIGQUERY_RECREATED_TABLE_READY_TIMEOUT: Duration = Duration::from_secs(600);
 
 fn generate_random_ascii_string(length: usize) -> String {
     rand::rng().sample_iter(&Alphanumeric).take(length).map(char::from).collect()
@@ -284,7 +285,10 @@ async fn table_copy_reset_drops_destination_table_before_recopy() {
 
     pipeline.start().await.unwrap();
 
-    users_ready.notified().await;
+    // BigQuery can keep the default Storage Write stream for a dropped and
+    // re-created table unavailable for several minutes. The destination is
+    // expected to keep retrying while preserving the physical `*_0` table id.
+    users_ready.wait_for(BIGQUERY_RECREATED_TABLE_READY_TIMEOUT).notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -1813,7 +1817,10 @@ async fn table_array_with_null_values() {
 
     pipeline.start().await.unwrap();
 
-    table_sync_done_notification.notified().await;
+    // BigQuery can keep the default Storage Write stream for a dropped and
+    // re-created table unavailable for several minutes. The destination is
+    // expected to keep retrying while preserving the physical `*_0` table id.
+    table_sync_done_notification.wait_for(BIGQUERY_RECREATED_TABLE_READY_TIMEOUT).notified().await;
 
     let event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
 
