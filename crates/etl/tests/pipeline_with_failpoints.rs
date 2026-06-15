@@ -409,7 +409,6 @@ async fn table_sync_streaming_replays_rows_written_after_copy_before_handoff() {
 
     let finished_copy_notify =
         store.notify_on_table_state_type(table_id, TableStateType::FinishedCopy).await;
-    let ready_notify = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 
@@ -432,6 +431,8 @@ async fn table_sync_streaming_replays_rows_written_after_copy_before_handoff() {
         )])
         .await;
 
+    let ready_notify = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+
     fail::remove(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP);
 
     ready_notify.notified().await;
@@ -450,7 +451,7 @@ async fn table_sync_streaming_replays_rows_written_after_copy_before_handoff() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn table_sync_streaming_error_unblocks_apply_worker() {
+async fn table_sync_catchup_error_does_not_block_apply_worker() {
     let _scenario = FailScenario::setup();
     fail::cfg(TABLE_SYNC_WORKER_BEFORE_STREAMING_FP, "1*return(no_retry)").unwrap();
 
@@ -479,21 +480,29 @@ async fn table_sync_streaming_error_unblocks_apply_worker() {
         destination.clone(),
     );
 
-    let errored_notify =
+    let users_errored_notify =
         store.notify_on_table_state_type(users_table_id, TableStateType::Errored).await;
+    let orders_errored_notify =
+        store.notify_on_table_state_type(orders_table_id, TableStateType::Errored).await;
+    let users_ready_notify =
+        store.notify_on_table_state_type(users_table_id, TableStateType::Ready).await;
     let orders_ready_notify =
         store.notify_on_table_state_type(orders_table_id, TableStateType::Ready).await;
 
     pipeline.start().await.unwrap();
 
-    errored_notify.notified().await;
+    let (errored_table_id, ready_notify) = tokio::select! {
+        () = users_errored_notify.notified() => (users_table_id, orders_ready_notify),
+        () = orders_errored_notify.notified() => (orders_table_id, users_ready_notify),
+    };
+
     // Assert that apply worker made progress after the errored table before
     // shutdown. Otherwise a shutdown signal could hide a stuck catchup wait.
-    orders_ready_notify.notified().await;
+    ready_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
-    let table_state = store.get_table_state(users_table_id).await.unwrap().unwrap();
+    let table_state = store.get_table_state(errored_table_id).await.unwrap().unwrap();
     assert!(matches!(
         table_state,
         TableState::Errored { retry_policy: TableRetryPolicy::NoRetry, .. }
