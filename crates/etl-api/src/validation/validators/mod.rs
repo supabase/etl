@@ -8,6 +8,7 @@ mod ducklake;
 #[cfg(feature = "iceberg")]
 mod iceberg;
 mod pipeline;
+mod replica_identity;
 #[cfg(feature = "snowflake")]
 mod snowflake;
 mod source;

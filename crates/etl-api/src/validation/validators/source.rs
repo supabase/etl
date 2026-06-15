@@ -6,7 +6,7 @@ use super::super::{ValidationContext, ValidationError, ValidationFailure, Valida
 
 /// Validates the connected source role profile for ETL.
 #[derive(Debug)]
-pub(in crate::validation) struct SourceValidator;
+pub(crate) struct SourceValidator;
 
 #[derive(Debug, FromRow)]
 struct SourceRoleAudit {

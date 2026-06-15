@@ -76,7 +76,7 @@ fn create_snowflake_config(
 async fn validate_snowflake_empty_account_id() {
     let ctx = create_validation_context();
     let config = create_snowflake_config("", "ETL_USER", "fake-key", None, "DB", "PUBLIC", None);
-    let failures = validate_destination(&ctx, &config).await.unwrap();
+    let failures = validate_destination(&ctx, &config, None).await.unwrap();
 
     assert!(!failures.is_empty(), "Expected validation failure");
     assert_eq!(failures[0].name, "Snowflake Account ID Required");
@@ -87,7 +87,7 @@ async fn validate_snowflake_empty_account_id() {
 async fn validate_snowflake_empty_user() {
     let ctx = create_validation_context();
     let config = create_snowflake_config("ORG-ACCT", "", "fake-key", None, "DB", "PUBLIC", None);
-    let failures = validate_destination(&ctx, &config).await.unwrap();
+    let failures = validate_destination(&ctx, &config, None).await.unwrap();
 
     assert!(!failures.is_empty(), "Expected validation failure");
     assert_eq!(failures[0].name, "Snowflake User Required");
@@ -106,7 +106,7 @@ async fn validate_snowflake_invalid_private_key() {
         "PUBLIC",
         None,
     );
-    let failures = validate_destination(&ctx, &config).await.unwrap();
+    let failures = validate_destination(&ctx, &config, None).await.unwrap();
 
     assert!(!failures.is_empty(), "Expected validation failure");
     assert_eq!(failures[0].name, "Snowflake Authentication Failed");
@@ -122,7 +122,7 @@ async fn validate_snowflake_connection_success() {
     let env = SnowflakeTestEnv::load();
     let ctx = create_validation_context();
     let config = env.config(&env.database, &env.schema);
-    let failures = validate_destination(&ctx, &config).await.unwrap();
+    let failures = validate_destination(&ctx, &config, None).await.unwrap();
 
     assert!(failures.is_empty(), "Expected no validation failures, got: {failures:?}");
 }
@@ -136,7 +136,7 @@ async fn validate_snowflake_wrong_database() {
     let env = SnowflakeTestEnv::load();
     let ctx = create_validation_context();
     let config = env.config("NONEXISTENT_DB_12345", &env.schema);
-    let failures = validate_destination(&ctx, &config).await.unwrap();
+    let failures = validate_destination(&ctx, &config, None).await.unwrap();
 
     assert!(!failures.is_empty(), "Expected validation failure");
     assert_eq!(failures[0].name, "Snowflake Database Not Found");
@@ -152,7 +152,7 @@ async fn validate_snowflake_wrong_schema() {
     let env = SnowflakeTestEnv::load();
     let ctx = create_validation_context();
     let config = env.config(&env.database, "NONEXISTENT_SCHEMA_12345");
-    let failures = validate_destination(&ctx, &config).await.unwrap();
+    let failures = validate_destination(&ctx, &config, None).await.unwrap();
 
     assert!(!failures.is_empty(), "Expected validation failure");
     assert_eq!(failures[0].name, "Snowflake Schema Not Found");
@@ -168,7 +168,7 @@ async fn validate_snowflake_empty_database() {
     let env = SnowflakeTestEnv::load();
     let ctx = create_validation_context();
     let config = env.config("", &env.schema);
-    let failures = validate_destination(&ctx, &config).await.unwrap();
+    let failures = validate_destination(&ctx, &config, None).await.unwrap();
 
     assert!(!failures.is_empty(), "Expected validation failure");
     assert_eq!(failures[0].name, "Snowflake Database Required");
