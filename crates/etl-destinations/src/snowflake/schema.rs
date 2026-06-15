@@ -139,9 +139,6 @@ fn render_snowflake_default_expression(
                 None
             }
         }
-        DefaultExpression::NumericExpression(expression) => {
-            is_snowflake_numeric_default_type(typ).then(|| expression.clone())
-        }
         DefaultExpression::BooleanLiteral(expression) => {
             matches!(typ, &Type::BOOL).then(|| expression.clone())
         }
@@ -156,29 +153,6 @@ fn render_snowflake_default_expression(
         }
         DefaultExpression::JsonLiteral(expression) => {
             is_json_type(typ).then(|| format!("PARSE_JSON({expression})"))
-        }
-        DefaultExpression::UuidV4 => {
-            is_snowflake_uuid_default_type(typ).then(|| "UUID_STRING()".to_owned())
-        }
-        DefaultExpression::CurrentUser => {
-            is_snowflake_text_default_type(typ).then(|| "CURRENT_USER()".to_owned())
-        }
-        DefaultExpression::CurrentTimestamp
-        | DefaultExpression::LocalTimestamp
-        | DefaultExpression::TimezoneNow => render_snowflake_current_timestamp_default(typ),
-        DefaultExpression::CurrentDate => {
-            matches!(typ, &Type::DATE).then(|| "CURRENT_DATE()".to_owned())
-        }
-        DefaultExpression::CurrentTime => {
-            matches!(typ, &Type::TIME).then(|| "CURRENT_TIME()".to_owned())
-        }
-        DefaultExpression::IntervalArithmetic { base, operator, interval, .. } => {
-            let base = render_snowflake_default_expression(base, typ)?;
-            Some(format!("{base} {} INTERVAL '{}'", operator.as_sql(), interval.literal))
-        }
-        DefaultExpression::LiteralFunction { function, argument } => {
-            is_snowflake_text_default_type(typ)
-                .then(|| format!("{}({argument})", function.as_upper_name()))
         }
     }
 }
@@ -207,27 +181,7 @@ fn render_snowflake_add_column_default_expression(
         DefaultExpression::DateLiteral(_)
         | DefaultExpression::TimeLiteral(_)
         | DefaultExpression::TimestampLiteral(_)
-        | DefaultExpression::JsonLiteral(_)
-        | DefaultExpression::UuidV4
-        | DefaultExpression::CurrentUser
-        | DefaultExpression::CurrentTimestamp
-        | DefaultExpression::CurrentDate
-        | DefaultExpression::CurrentTime
-        | DefaultExpression::LocalTimestamp
-        | DefaultExpression::TimezoneNow
-        | DefaultExpression::IntervalArithmetic { .. }
-        | DefaultExpression::LiteralFunction { .. }
-        | DefaultExpression::NumericExpression(_) => None,
-    }
-}
-
-/// Renders timestamp-like Postgres defaults for the destination column type.
-fn render_snowflake_current_timestamp_default(typ: &Type) -> Option<String> {
-    match typ {
-        &Type::DATE => Some("CURRENT_DATE()".to_owned()),
-        &Type::TIME => Some("CURRENT_TIME()".to_owned()),
-        &Type::TIMESTAMP | &Type::TIMESTAMPTZ => Some("CURRENT_TIMESTAMP()".to_owned()),
-        _ => None,
+        | DefaultExpression::JsonLiteral(_) => None,
     }
 }
 
@@ -253,14 +207,6 @@ fn is_snowflake_string_default_type(typ: &Type) -> bool {
 /// Returns whether a Postgres type is a text-like Snowflake VARCHAR column.
 fn is_snowflake_text_default_type(typ: &Type) -> bool {
     matches!(typ, &Type::CHAR | &Type::BPCHAR | &Type::VARCHAR | &Type::NAME | &Type::TEXT)
-}
-
-/// Returns whether a Postgres type can safely receive UUID-producing defaults.
-fn is_snowflake_uuid_default_type(typ: &Type) -> bool {
-    matches!(
-        typ,
-        &Type::UUID | &Type::CHAR | &Type::BPCHAR | &Type::VARCHAR | &Type::NAME | &Type::TEXT
-    )
 }
 
 /// Returns whether a Postgres type is a Snowflake timestamp column.
@@ -378,17 +324,17 @@ mod tests {
         let cases = [
             (Type::TEXT, "true", " DEFAULT 'true'"),
             (Type::BOOL, "'true'::text", " DEFAULT true"),
-            (Type::UUID, "gen_random_uuid()", " DEFAULT UUID_STRING()"),
-            (Type::TEXT, "CURRENT_USER", " DEFAULT CURRENT_USER()"),
             (Type::NUMERIC, "42", " DEFAULT '42'"),
-            (Type::DATE, "now()", " DEFAULT CURRENT_DATE()"),
-            (Type::TIME, "now()", " DEFAULT CURRENT_TIME()"),
             (
                 Type::TIMESTAMPTZ,
-                "now() + interval '30 days'",
-                " DEFAULT CURRENT_TIMESTAMP() + INTERVAL '30 days'",
+                "'2026-01-01 12:30:00'::timestamptz",
+                " DEFAULT '2026-01-01 12:30:00'",
             ),
-            (Type::TEXT, "upper('user'::text)", " DEFAULT UPPER('user')"),
+            (
+                Type::UUID,
+                "'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'::uuid",
+                " DEFAULT 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'",
+            ),
         ];
 
         for (typ, expression, expected) in cases {
@@ -401,6 +347,12 @@ mod tests {
         let unsupported_cases = [
             (Type::INT4, "'abc'::text"),
             (Type::NUMERIC, "10 + 5"),
+            (Type::UUID, "gen_random_uuid()"),
+            (Type::TEXT, "CURRENT_USER"),
+            (Type::DATE, "now()"),
+            (Type::TIME, "now()"),
+            (Type::TIMESTAMPTZ, "now() + interval '30 days'"),
+            (Type::TEXT, "upper('user'::text)"),
             (Type::TEXT, "current_date"),
             (Type::DATE, "current_time"),
         ];

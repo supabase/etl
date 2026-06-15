@@ -3,10 +3,7 @@ mod schema;
 mod time;
 mod utils;
 
-pub use default_expression::{
-    DefaultExpression, DefaultInterval, DefaultIntervalOperator, DefaultIntervalUnit,
-    DefaultLiteralFunction, DefaultTemporalType, parse_default_expression,
-};
+pub use default_expression::{DefaultExpression, parse_default_expression};
 pub use schema::{
     ColumnChange, ColumnModification, ColumnSchema, IdentityMask, IdentityType,
     ReplicatedTableSchema, ReplicationMask, SchemaDiff, SchemaError, SizedIterator, SnapshotId,

@@ -138,9 +138,6 @@ fn render_clickhouse_default_expression(
                 None
             }
         }
-        DefaultExpression::NumericExpression(expression) => {
-            is_clickhouse_numeric_default_type(typ).then(|| expression.clone())
-        }
         DefaultExpression::BooleanLiteral(expression) => {
             matches!(typ, &Type::BOOL).then(|| expression.clone())
         }
@@ -155,39 +152,6 @@ fn render_clickhouse_default_expression(
             is_clickhouse_timestamp_default_type(typ)
                 .then(|| format!("toDateTime64({expression}, 6, 'UTC')"))
         }
-        DefaultExpression::UuidV4 => {
-            matches!(typ, &Type::UUID).then(|| "generateUUIDv4()".to_owned())
-        }
-        DefaultExpression::CurrentUser => {
-            is_clickhouse_text_default_type(typ).then(|| "currentUser()".to_owned())
-        }
-        DefaultExpression::CurrentTimestamp
-        | DefaultExpression::LocalTimestamp
-        | DefaultExpression::TimezoneNow => render_clickhouse_current_timestamp_default(typ),
-        DefaultExpression::CurrentDate => matches!(typ, &Type::DATE).then(|| "today()".to_owned()),
-        DefaultExpression::CurrentTime => None,
-        DefaultExpression::IntervalArithmetic { base, operator, interval, .. } => {
-            let base = render_clickhouse_default_expression(base, typ)?;
-            Some(format!(
-                "{base} {} INTERVAL {} {}",
-                operator.as_sql(),
-                interval.amount,
-                interval.unit.as_upper_singular()
-            ))
-        }
-        DefaultExpression::LiteralFunction { function, argument } => {
-            is_clickhouse_text_default_type(typ)
-                .then(|| format!("{}({argument})", function.as_lower_name()))
-        }
-    }
-}
-
-/// Renders timestamp-like Postgres defaults for the destination column type.
-fn render_clickhouse_current_timestamp_default(typ: &Type) -> Option<String> {
-    match typ {
-        &Type::DATE => Some("today()".to_owned()),
-        &Type::TIMESTAMP | &Type::TIMESTAMPTZ => Some("now()".to_owned()),
-        _ => None,
     }
 }
 
@@ -509,11 +473,17 @@ mod tests {
             (Type::TEXT, "true", " DEFAULT 'true'"),
             (Type::BOOL, "'true'::text", " DEFAULT true"),
             (Type::DATE, "'2026-01-01'::date", " DEFAULT toDate32('2026-01-01')"),
-            (Type::DATE, "now()", " DEFAULT today()"),
+            (
+                Type::TIMESTAMPTZ,
+                "'2026-01-01 12:30:00'::timestamptz",
+                " DEFAULT toDateTime64('2026-01-01 12:30:00', 6, 'UTC')",
+            ),
             (Type::NUMERIC, "42", " DEFAULT '42'"),
-            (Type::UUID, "gen_random_uuid()", " DEFAULT generateUUIDv4()"),
-            (Type::TIMESTAMPTZ, "now() + interval '30 days'", " DEFAULT now() + INTERVAL 30 DAY"),
-            (Type::TEXT, "upper('user'::text)", " DEFAULT upper('user')"),
+            (
+                Type::UUID,
+                "'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'::uuid",
+                " DEFAULT 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'",
+            ),
         ];
 
         for (typ, expression, expected) in cases {
@@ -530,6 +500,10 @@ mod tests {
         let unsupported_cases = [
             (Type::INT4, "'abc'::text"),
             (Type::NUMERIC, "10 + 5"),
+            (Type::UUID, "gen_random_uuid()"),
+            (Type::DATE, "now()"),
+            (Type::TIMESTAMPTZ, "now() + interval '30 days'"),
+            (Type::TEXT, "upper('user'::text)"),
             (Type::TEXT, "current_date"),
             (Type::DATE, "current_time"),
         ];

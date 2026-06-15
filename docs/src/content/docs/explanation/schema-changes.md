@@ -73,54 +73,64 @@ ETL has one shared schema-change signal, but **DDL behavior is implemented per d
 
 | Destination | Current DDL behavior |
 |-------------|----------------------|
-| BigQuery | Supports add, drop, rename, supported default metadata, and dropping `NOT NULL`. BigQuery requires added columns to be nullable and does not backfill existing rows for `ADD COLUMN ... DEFAULT`. |
-| ClickHouse | Supports add, drop, rename, supported defaults, and nullability changes. `ReplacingMergeTree` rejects primary-key drops or renames because the ordering expression cannot be rewritten safely. ClickHouse default expressions are metadata-only unless explicitly materialized; ETL does not issue `MATERIALIZE COLUMN`. |
-| DuckLake | Supports add, drop, rename, supported defaults, and nullability changes. DuckLake records supported add-time defaults as metadata without rewriting existing data files. |
-| Snowflake | Supports add, drop, rename, create-table defaults, literal add-column defaults, and dropping `NOT NULL`. Literal defaults are included in `ADD COLUMN` so Snowflake can expose add-time default values for existing rows; non-literal add-column defaults and later default changes are skipped with a warning. |
+| BigQuery | Supports add, drop, rename, supported literal default metadata, and dropping `NOT NULL`. BigQuery requires added columns to be nullable and does not backfill existing rows for `ADD COLUMN ... DEFAULT`. |
+| ClickHouse | Supports add, drop, rename, supported literal defaults, and nullability changes. `ReplacingMergeTree` rejects primary-key drops or renames because the ordering expression cannot be rewritten safely. ClickHouse default expressions are metadata-only unless explicitly materialized; ETL does not issue `MATERIALIZE COLUMN`. |
+| DuckLake | Supports add, drop, rename, supported literal defaults, and nullability changes. DuckLake records supported add-time defaults as metadata without rewriting existing data files. |
+| Snowflake | Supports add, drop, rename, create-table literal defaults, literal add-column defaults, and dropping `NOT NULL`. Literal defaults are included in `ADD COLUMN` so Snowflake can expose add-time default values for existing rows; non-literal defaults and later default changes are skipped with a warning. |
 | Iceberg | Deprecated for now. Schema-change DDL is not a supported path for new deployments. |
 | Custom destinations | Destination authors decide which `Event::Relation` changes to apply, reject, or handle manually. |
 
 ## Default Backfills
 
-When a source table adds a replicated column with a default, ETL deliberately
-avoids **physical destination backfills** for existing rows. Built-in
-destinations avoid operations such as `UPDATE`, `MERGE`, CTAS/swap rewrites,
-or ClickHouse `MATERIALIZE COLUMN` because those operations can rewrite large
-tables, block replication progress, and create destination-specific cost spikes.
+When a source table adds a replicated column with a default, PostgreSQL can make
+pre-existing source rows read as though they already contain that default. ETL
+deliberately avoids **physical destination backfills** for those existing rows.
+Built-in destinations avoid operations such as `UPDATE`, `MERGE`, CTAS/swap
+rewrites, or ClickHouse `MATERIALIZE COLUMN` because those operations can
+rewrite large tables, block replication progress, and create
+destination-specific cost spikes.
 
 Instead, destinations apply the schema change in the cheapest safe form they
 support:
 
-- BigQuery adds the column as nullable, then sets supported default metadata for
-  future writes.
+- BigQuery adds the column as nullable, then sets supported literal default
+  metadata for future writes.
 - ClickHouse may expose default values for pre-existing rows through default
   metadata, but ETL does not issue `MATERIALIZE COLUMN`.
 - DuckLake uses add-time initial default metadata for supported defaults; its
   schema evolution does not rewrite data files.
-- Snowflake uses `ADD COLUMN ... DEFAULT` for the literal default subset allowed
-  by Snowflake. Snowflake exposes default values for existing rows and does not
-  document this as a physical row rewrite, but defaults created this way cannot
-  later be dropped.
+- Snowflake uses `ADD COLUMN ... DEFAULT` for supported literal defaults.
+  Snowflake exposes default values for existing rows and does not document this
+  as a physical row rewrite, but defaults created this way cannot later be
+  dropped.
 
 As a result, pre-existing destination rows might not match PostgreSQL's
 historical `ADD COLUMN ... DEFAULT` view unless the destination has a
-metadata-only initial-default mechanism. Future row events remain correct
-because PostgreSQL sends the evaluated row values after the relation change. A
-physical destination backfill mode may be added in the future, but it needs
-explicit controls for batching, throttling, observability, and how long the
-pipeline can safely pause or run behind while the destination rewrite happens.
+metadata-only initial-default mechanism and the source default is supported.
+This does **not** mean future replicated tuples lose their default values:
+PostgreSQL sends evaluated column values in row data after the relation change,
+and ETL writes those values normally. The limitation is only that unsupported
+defaults are not installed as destination schema default metadata, and existing
+destination rows are not rewritten by ETL. A physical destination backfill mode
+may be added in the future, but it needs explicit controls for batching,
+throttling, observability, and how long the pipeline can safely pause or run
+behind while the destination rewrite happens.
 
 ## Supported Column Defaults
 
 Column defaults are **best-effort metadata translations**, not a PostgreSQL
 expression evaluator. ETL reads the source default from PostgreSQL's
-`pg_get_expr` output, parses only a small portable subset, and asks each
+`pg_get_expr` output, parses only deterministic literal defaults, and asks each
 destination whether that parsed default can be rendered safely in that
 destination's SQL dialect.
 
 If a default is not in the supported subset, ETL skips the destination default
-with a warning. Replication does not fail because PostgreSQL still sends
-evaluated values for future row events.
+metadata with a warning. Replication does not fail, and future tuples still
+carry evaluated values from PostgreSQL. This is intentional: runtime-generated
+defaults can evaluate at different times or under different session settings in
+different systems, so installing a similar-looking destination default can create
+silent mismatches. ETL can add support for specific additional defaults later
+when their semantics can be preserved for the destination.
 
 The shared parser currently recognizes only these source default shapes:
 
@@ -131,12 +141,7 @@ The shared parser currently recognizes only these source default shapes:
 | Boolean literals | `true`, `false`, `'true'::boolean` |
 | Date/time/timestamp literals | `'2026-01-01'::date`, `'12:30:00'::time`, `'2026-01-01 12:30:00'::timestamp` |
 | JSON literals | `'{}'::jsonb`, `'{"enabled": true}'::json` |
-| UUID v4 generators | `gen_random_uuid()`, `uuid_generate_v4()` |
-| Current user expressions | `current_user`, `session_user` |
-| Current temporal expressions | `now()`, `transaction_timestamp()`, `current_timestamp`, `current_date`, `current_time`, `localtimestamp` |
-| Simple current-temporal interval arithmetic | `now() + interval '30 days'`, `current_date - interval '7 days'` |
-| Literal string case functions | `lower('USER'::text)`, `upper('user')` |
-| Simple numeric arithmetic | `(10 + 5) * 2` |
+| UUID literals | `'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'::uuid` |
 
 The parser is intentionally conservative. These PostgreSQL defaults are
 examples of **unsupported** expressions:
@@ -149,6 +154,12 @@ default concat('a', 'b')
 default md5('x')
 default random()
 default clock_timestamp()
+default now()
+default current_timestamp
+default current_user
+default gen_random_uuid()
+default uuid_generate_v4()
+default timezone('UTC', now())
 default array['a', 'b']
 default (select 'x')
 default current_setting('app.tenant_id')
@@ -160,16 +171,18 @@ Unsupported defaults are skipped because translating arbitrary PostgreSQL
 expressions would require both a PostgreSQL parser and a destination-specific
 expression translator. Most destinations do not accept arbitrary PostgreSQL
 expressions as column defaults, and even similar-looking SQL can have different
-volatility, time zone, type coercion, or evaluation semantics.
+volatility, time zone, type coercion, or evaluation semantics. Skipping the
+destination schema default does not drop actual row values emitted by
+PostgreSQL.
 
-Destination support is narrower than parser support:
+Destination support may be narrower than parser support:
 
 | Destination | Supported default behavior |
 |-------------|----------------------------|
-| BigQuery | Supports compatible literals, `GENERATE_UUID()` for UUID-as-string columns, `SESSION_USER()` for text columns, and current date/time/timestamp defaults for matching temporal columns. It does not render lower/upper functions, interval arithmetic, numeric arithmetic, string concatenation, or other expressions. Added columns are created nullable and supported defaults are set afterward for future writes. |
-| ClickHouse | Supports compatible literals, UUID generation, current user for text columns, current date/timestamp defaults, simple current-temporal interval arithmetic, lower/upper over string literals, and simple numeric arithmetic for native numeric columns. Defaults are metadata only unless separately materialized. |
-| DuckLake | Supports compatible string/numeric/date/time/timestamp/JSON literals, UUID generation, current user for text columns, current date/time/timestamp defaults, simple current-temporal interval arithmetic, lower/upper over string literals, and simple numeric arithmetic for native numeric columns. Boolean defaults are currently skipped. |
-| Snowflake | `CREATE TABLE` supports compatible literals, JSON literals via `PARSE_JSON`, UUID generation, current user for text columns, current date/time/timestamp defaults, simple current-temporal interval arithmetic, lower/upper over string literals, and simple numeric arithmetic for native numeric columns. `ADD COLUMN` only receives the literal subset Snowflake allows for add-column defaults: string, numeric, and boolean literals. Later default changes on existing columns are skipped. |
+| BigQuery | Supports compatible string, numeric, boolean, date, time, timestamp, JSON, and UUID literals. Added columns are created nullable and supported defaults are set afterward for future writes. |
+| ClickHouse | Supports compatible string, numeric, boolean, date, time, timestamp, JSON, and UUID literals. Defaults are metadata only unless separately materialized. |
+| DuckLake | Supports compatible string, numeric, date, time, timestamp, JSON, and UUID literals. Boolean defaults are currently skipped by the DuckLake destination. |
+| Snowflake | `CREATE TABLE` supports compatible string, numeric, boolean, date, time, timestamp, JSON, and UUID literals. `ADD COLUMN` only receives the literal subset Snowflake allows for add-column defaults: string, numeric, and boolean literals. Later default changes on existing columns are skipped. |
 
 When changing a default from one supported expression to an unsupported
 expression, destinations that can safely remove defaults drop the old supported
@@ -260,20 +273,23 @@ These behaviors are **not full destination DDL semantics** yet:
   other pipeline logic.
 - A drop and re-add is not treated as a rename. It becomes a drop plus an add
   because PostgreSQL assigns a new ordinal position to the new column.
-- Destination defaults are best-effort translations. Unsupported defaults are
-  skipped with a warning instead of failing replication. If a previously
-  supported default becomes unsupported, ETL removes the old destination default
-  where the destination supports that operation so stale behavior is not left
-  behind. Snowflake default changes on existing columns are skipped with a
-  warning because `ALTER COLUMN SET DEFAULT` is documented only for existing
-  sequence defaults, and defaults introduced by
-  `ALTER TABLE ADD COLUMN ... DEFAULT` cannot be dropped safely.
-- Volatile defaults cannot be made historically identical without explicit
-  source backfill. Examples include `now()`, `clock_timestamp()`,
-  `gen_random_uuid()`, `random()`, sequence defaults, and session-dependent
-  expressions such as `current_user`. Future row events remain correct because
-  PostgreSQL sends the evaluated row values, but existing destination rows are
-  not physically backfilled by ETL. Avoid volatile defaults for replicated
+- Destination defaults are best-effort metadata translations. Unsupported
+  defaults are skipped with a warning instead of failing replication. This does
+  not remove values PostgreSQL emits in future row events; it only means the
+  destination schema default metadata is not set. If a previously supported
+  default becomes unsupported, ETL removes the old destination default where the
+  destination supports that operation so stale behavior is not left behind.
+  Snowflake default changes on existing columns are skipped with a warning
+  because `ALTER COLUMN SET DEFAULT` is documented only for existing sequence
+  defaults, and defaults introduced by `ALTER TABLE ADD COLUMN ... DEFAULT`
+  cannot be dropped safely.
+- Runtime-generated defaults are intentionally unsupported as destination schema
+  defaults. Examples include `now()`, `clock_timestamp()`, `gen_random_uuid()`,
+  `random()`, sequence defaults, and session-dependent expressions such as
+  `current_user`. Those expressions can evaluate at different times or under
+  different session settings in each destination. PostgreSQL still sends
+  evaluated values for future row events, but existing destination rows are not
+  physically backfilled by ETL. Avoid runtime-generated defaults for replicated
   schema changes when exact historical values matter.
 - `ADD COLUMN ... DEFAULT` semantics differ by destination. ETL intentionally
   avoids destination DDL that rewrites all existing rows. BigQuery leaves

@@ -116,9 +116,6 @@ fn render_ducklake_default_expression(
                 None
             }
         }
-        DefaultExpression::NumericExpression(expression) => {
-            is_ducklake_numeric_default_type(typ).then(|| expression.clone())
-        }
         DefaultExpression::DateLiteral(expression) => {
             matches!(typ, &Type::DATE).then(|| expression.clone())
         }
@@ -130,38 +127,6 @@ fn render_ducklake_default_expression(
         }
         DefaultExpression::JsonLiteral(expression) => is_json_type(typ).then(|| expression.clone()),
         DefaultExpression::BooleanLiteral(_) => None,
-        DefaultExpression::UuidV4 => matches!(typ, &Type::UUID).then(|| "uuid()".to_owned()),
-        DefaultExpression::CurrentUser => {
-            is_ducklake_text_default_type(typ).then(|| "current_user".to_owned())
-        }
-        DefaultExpression::CurrentTimestamp | DefaultExpression::TimezoneNow => {
-            render_ducklake_current_timestamp_default(typ)
-        }
-        DefaultExpression::CurrentDate => {
-            matches!(typ, &Type::DATE).then(|| "current_date".to_owned())
-        }
-        DefaultExpression::CurrentTime => {
-            matches!(typ, &Type::TIME).then(|| "current_time".to_owned())
-        }
-        DefaultExpression::LocalTimestamp => render_ducklake_local_timestamp_default(typ),
-        DefaultExpression::IntervalArithmetic { base, operator, interval, .. } => {
-            let base = render_ducklake_default_expression(base, typ)?;
-            Some(format!("{base} {} interval '{}'", operator.as_sql(), interval.literal))
-        }
-        DefaultExpression::LiteralFunction { function, argument } => {
-            is_ducklake_text_default_type(typ)
-                .then(|| format!("{}({argument})", function.as_lower_name()))
-        }
-    }
-}
-
-/// Renders timestamp-like Postgres defaults for the destination column type.
-fn render_ducklake_current_timestamp_default(typ: &Type) -> Option<String> {
-    match typ {
-        &Type::DATE => Some("current_date".to_owned()),
-        &Type::TIME => Some("current_time".to_owned()),
-        &Type::TIMESTAMP | &Type::TIMESTAMPTZ => Some("current_timestamp".to_owned()),
-        _ => None,
     }
 }
 
@@ -201,16 +166,6 @@ fn is_json_type(typ: &Type) -> bool {
 /// Quotes a parser-validated numeric literal as a SQL string literal.
 fn quote_numeric_literal_as_string(expression: &str) -> String {
     format!("'{expression}'")
-}
-
-/// Renders local timestamp defaults for the destination column type.
-fn render_ducklake_local_timestamp_default(typ: &Type) -> Option<String> {
-    match typ {
-        &Type::DATE => Some("current_date".to_owned()),
-        &Type::TIME => Some("current_time".to_owned()),
-        &Type::TIMESTAMP | &Type::TIMESTAMPTZ => Some("localtimestamp".to_owned()),
-        _ => None,
-    }
 }
 
 /// Returns whether a column default can be represented in DuckLake SQL.
@@ -389,15 +344,16 @@ mod tests {
             (Type::TEXT, "true", " default 'true'"),
             (Type::JSONB, "'{}'::jsonb", " default '{}'"),
             (Type::NUMERIC, "42", " default '42'"),
-            (Type::UUID, "gen_random_uuid()", " default uuid()"),
-            (Type::DATE, "now()", " default current_date"),
-            (Type::TIME, "now()", " default current_time"),
             (
                 Type::TIMESTAMPTZ,
-                "now() + interval '30 days'",
-                " default current_timestamp + interval '30 days'",
+                "'2026-01-01 12:30:00'::timestamptz",
+                " default '2026-01-01 12:30:00'",
             ),
-            (Type::TEXT, "lower('USER'::text)", " default lower('USER')"),
+            (
+                Type::UUID,
+                "'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'::uuid",
+                " default 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'",
+            ),
         ];
 
         for (typ, expression, expected) in cases {
@@ -412,6 +368,11 @@ mod tests {
             (Type::BOOL, "'true'::text"),
             (Type::INT4, "'abc'::text"),
             (Type::NUMERIC, "10 + 5"),
+            (Type::UUID, "gen_random_uuid()"),
+            (Type::DATE, "now()"),
+            (Type::TIME, "now()"),
+            (Type::TIMESTAMPTZ, "now() + interval '30 days'"),
+            (Type::TEXT, "lower('USER'::text)"),
             (Type::TEXT, "current_date"),
             (Type::DATE, "current_time"),
         ];

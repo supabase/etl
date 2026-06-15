@@ -1430,35 +1430,6 @@ impl BigQueryClient {
             DefaultExpression::JsonLiteral(expression) => {
                 Self::is_json_type(typ).then(|| format!("JSON {expression}"))
             }
-            DefaultExpression::UuidV4 => {
-                Self::is_bigquery_string_default_type(typ).then(|| "GENERATE_UUID()".to_owned())
-            }
-            DefaultExpression::CurrentUser => {
-                Self::is_bigquery_string_default_type(typ).then(|| "SESSION_USER()".to_owned())
-            }
-            DefaultExpression::CurrentTimestamp
-            | DefaultExpression::LocalTimestamp
-            | DefaultExpression::TimezoneNow => Self::render_current_timestamp_default(typ),
-            DefaultExpression::CurrentDate => {
-                matches!(typ, &Type::DATE).then(|| "CURRENT_DATE()".to_owned())
-            }
-            DefaultExpression::CurrentTime => {
-                matches!(typ, &Type::TIME).then(|| "CURRENT_TIME()".to_owned())
-            }
-            DefaultExpression::IntervalArithmetic { .. }
-            | DefaultExpression::LiteralFunction { .. }
-            | DefaultExpression::NumericExpression(_) => None,
-        }
-    }
-
-    /// Renders timestamp-like Postgres defaults for the destination column
-    /// type.
-    fn render_current_timestamp_default(typ: &Type) -> Option<String> {
-        match typ {
-            &Type::DATE => Some("CURRENT_DATE()".to_owned()),
-            &Type::TIME => Some("CURRENT_TIME()".to_owned()),
-            &Type::TIMESTAMP | &Type::TIMESTAMPTZ => Some("CURRENT_TIMESTAMP()".to_owned()),
-            _ => None,
         }
     }
 
@@ -1917,12 +1888,17 @@ mod tests {
             (Type::BOOL, "'true'::text", "true"),
             (Type::MONEY, "42", "'42'"),
             (Type::DATE, "'2026-01-01'::date", "DATE '2026-01-01'"),
+            (
+                Type::TIMESTAMP,
+                "'2026-01-01 12:30:00'::timestamp",
+                "TIMESTAMP '2026-01-01 12:30:00'",
+            ),
             (Type::JSONB, "'{}'::jsonb", "JSON '{}'"),
-            (Type::UUID, "gen_random_uuid()", "GENERATE_UUID()"),
-            (Type::TIMESTAMPTZ, "now()", "CURRENT_TIMESTAMP()"),
-            (Type::DATE, "now()", "CURRENT_DATE()"),
-            (Type::TIME, "now()", "CURRENT_TIME()"),
-            (Type::TIMESTAMP, "localtimestamp", "CURRENT_TIMESTAMP()"),
+            (
+                Type::UUID,
+                "'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'::uuid",
+                "'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'",
+            ),
         ];
 
         for (typ, expression, expected) in cases {
@@ -1942,6 +1918,9 @@ mod tests {
             (Type::INT4, "10 + 5"),
             (Type::INT4, "'abc'::text"),
             (Type::TIMESTAMPTZ, "now() + interval '30 days'"),
+            (Type::UUID, "gen_random_uuid()"),
+            (Type::TIMESTAMPTZ, "now()"),
+            (Type::TIMESTAMP, "localtimestamp"),
             (Type::TEXT, "current_date"),
             (Type::DATE, "current_time"),
             (Type::TEXT, "lower('USER'::text)"),

@@ -18,152 +18,6 @@ pub enum DefaultExpression {
     TimestampLiteral(String),
     /// A SQL JSON literal.
     JsonLiteral(String),
-    /// A UUID v4 generator.
-    UuidV4,
-    /// The current database user.
-    CurrentUser,
-    /// The current transaction timestamp.
-    CurrentTimestamp,
-    /// The current date.
-    CurrentDate,
-    /// The current time.
-    CurrentTime,
-    /// The current local timestamp.
-    LocalTimestamp,
-    /// A Postgres `timezone(..., now())` expression.
-    TimezoneNow,
-    /// A current temporal expression plus or minus a simple interval.
-    IntervalArithmetic {
-        /// The temporal expression on the left-hand side.
-        base: Box<DefaultExpression>,
-        /// The interval arithmetic operator.
-        operator: DefaultIntervalOperator,
-        /// The simple interval literal.
-        interval: DefaultInterval,
-        /// The temporal type of the resulting expression.
-        temporal_type: DefaultTemporalType,
-    },
-    /// A portable single-argument literal function.
-    LiteralFunction {
-        /// The function to evaluate.
-        function: DefaultLiteralFunction,
-        /// The SQL string literal argument.
-        argument: String,
-    },
-    /// A portable numeric expression made only of numeric literals and
-    /// operators.
-    NumericExpression(String),
-}
-
-/// A simple interval literal used by a default expression.
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct DefaultInterval {
-    /// The interval amount.
-    pub amount: i64,
-    /// The interval unit.
-    pub unit: DefaultIntervalUnit,
-    /// The original interval literal without surrounding quotes.
-    pub literal: String,
-}
-
-/// A supported interval arithmetic operator.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum DefaultIntervalOperator {
-    /// Addition.
-    Add,
-    /// Subtraction.
-    Subtract,
-}
-
-impl DefaultIntervalOperator {
-    /// Returns the SQL operator token.
-    pub fn as_sql(self) -> &'static str {
-        match self {
-            Self::Add => "+",
-            Self::Subtract => "-",
-        }
-    }
-}
-
-/// A simple interval unit.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum DefaultIntervalUnit {
-    /// Microseconds.
-    Microsecond,
-    /// Milliseconds.
-    Millisecond,
-    /// Seconds.
-    Second,
-    /// Minutes.
-    Minute,
-    /// Hours.
-    Hour,
-    /// Days.
-    Day,
-    /// Weeks.
-    Week,
-    /// Months.
-    Month,
-    /// Quarters.
-    Quarter,
-    /// Years.
-    Year,
-}
-
-impl DefaultIntervalUnit {
-    /// Returns the singular uppercase SQL spelling.
-    pub fn as_upper_singular(self) -> &'static str {
-        match self {
-            Self::Microsecond => "MICROSECOND",
-            Self::Millisecond => "MILLISECOND",
-            Self::Second => "SECOND",
-            Self::Minute => "MINUTE",
-            Self::Hour => "HOUR",
-            Self::Day => "DAY",
-            Self::Week => "WEEK",
-            Self::Month => "MONTH",
-            Self::Quarter => "QUARTER",
-            Self::Year => "YEAR",
-        }
-    }
-}
-
-/// A temporal type produced by a default expression.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum DefaultTemporalType {
-    /// A date expression.
-    Date,
-    /// A time expression.
-    Time,
-    /// A timestamp expression.
-    Timestamp,
-}
-
-/// A supported literal string function.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum DefaultLiteralFunction {
-    /// Converts a string literal to lowercase.
-    Lower,
-    /// Converts a string literal to uppercase.
-    Upper,
-}
-
-impl DefaultLiteralFunction {
-    /// Returns the lowercase SQL function name.
-    pub fn as_lower_name(self) -> &'static str {
-        match self {
-            Self::Lower => "lower",
-            Self::Upper => "upper",
-        }
-    }
-
-    /// Returns the uppercase SQL function name.
-    pub fn as_upper_name(self) -> &'static str {
-        match self {
-            Self::Lower => "LOWER",
-            Self::Upper => "UPPER",
-        }
-    }
 }
 
 /// Parses a Postgres default expression into a portable representation.
@@ -175,26 +29,6 @@ pub fn parse_default_expression(expression: &str, typ: &Type) -> Option<DefaultE
     let expression = normalize_postgres_expression(expression);
     if expression.is_empty() || expression.eq_ignore_ascii_case("null") {
         return None;
-    }
-
-    if is_uuid_expression(expression) {
-        return Some(DefaultExpression::UuidV4);
-    }
-
-    if is_current_user_expression(expression) {
-        return Some(DefaultExpression::CurrentUser);
-    }
-
-    if let Some(expression) = parse_current_time_expression(expression) {
-        return Some(expression);
-    }
-
-    if let Some(expression) = parse_interval_arithmetic_expression(expression, typ) {
-        return Some(expression);
-    }
-
-    if let Some(expression) = parse_literal_function_expression(expression) {
-        return Some(expression);
     }
 
     if is_unsupported_portability_boundary(expression) {
@@ -213,7 +47,7 @@ pub fn parse_default_expression(expression: &str, typ: &Type) -> Option<DefaultE
         return Some(parse_bool_literal(expression, typ));
     }
 
-    parse_numeric_expression(expression).map(DefaultExpression::NumericExpression)
+    None
 }
 
 /// Normalizes PostgreSQL-specific expression wrappers.
@@ -491,14 +325,6 @@ fn starts_with_ignore_ascii_case(value: &str, prefix: &str) -> bool {
         .is_some_and(|value| value.eq_ignore_ascii_case(prefix.as_bytes()))
 }
 
-/// Returns whether a string ends with an ASCII suffix, ignoring case.
-fn ends_with_ignore_ascii_case(value: &str, suffix: &str) -> bool {
-    value
-        .as_bytes()
-        .get(value.len().saturating_sub(suffix.len())..)
-        .is_some_and(|value| value.eq_ignore_ascii_case(suffix.as_bytes()))
-}
-
 /// Returns whether a string contains an ASCII needle, ignoring case.
 fn contains_ignore_ascii_case(value: &str, needle: &str) -> bool {
     let needle = needle.as_bytes();
@@ -645,390 +471,6 @@ fn parse_bool_literal(expression: &str, typ: &Type) -> DefaultExpression {
     }
 }
 
-/// Returns whether the expression is a common UUID generator.
-fn is_uuid_expression(expression: &str) -> bool {
-    let expression = expression.trim();
-
-    expression.eq_ignore_ascii_case("gen_random_uuid()")
-        || expression.eq_ignore_ascii_case("uuid_generate_v4()")
-}
-
-/// Returns whether the expression is a current-user expression.
-fn is_current_user_expression(expression: &str) -> bool {
-    let expression = expression.trim();
-
-    expression.eq_ignore_ascii_case("current_user")
-        || expression.eq_ignore_ascii_case("current_user()")
-        || expression.eq_ignore_ascii_case("session_user")
-}
-
-/// Parses common current-time defaults.
-fn parse_current_time_expression(expression: &str) -> Option<DefaultExpression> {
-    let expression = expression.trim();
-
-    if expression.eq_ignore_ascii_case("now()")
-        || expression.eq_ignore_ascii_case("transaction_timestamp()")
-        || expression.eq_ignore_ascii_case("current_timestamp")
-        || expression.eq_ignore_ascii_case("current_timestamp()")
-    {
-        return Some(DefaultExpression::CurrentTimestamp);
-    }
-
-    if expression.eq_ignore_ascii_case("current_date")
-        || expression.eq_ignore_ascii_case("current_date()")
-    {
-        return Some(DefaultExpression::CurrentDate);
-    }
-
-    if expression.eq_ignore_ascii_case("current_time")
-        || expression.eq_ignore_ascii_case("current_time()")
-    {
-        return Some(DefaultExpression::CurrentTime);
-    }
-
-    if expression.eq_ignore_ascii_case("localtimestamp")
-        || expression.eq_ignore_ascii_case("localtimestamp()")
-    {
-        return Some(DefaultExpression::LocalTimestamp);
-    }
-
-    if starts_with_ignore_ascii_case(expression, "timezone(")
-        && ends_with_ignore_ascii_case(expression, "now())")
-    {
-        return Some(DefaultExpression::TimezoneNow);
-    }
-
-    None
-}
-
-/// Parses current-time plus/minus simple interval defaults.
-fn parse_interval_arithmetic_expression(expression: &str, typ: &Type) -> Option<DefaultExpression> {
-    let (left, operator, right) = split_top_level_interval_arithmetic(expression)?;
-    let base = parse_current_time_expression(left)?;
-    let interval = parse_simple_interval_literal(right)?;
-    let temporal_type = temporal_type_for_column_type(typ)?;
-    let operator = match operator {
-        '+' => DefaultIntervalOperator::Add,
-        '-' => DefaultIntervalOperator::Subtract,
-        _ => return None,
-    };
-
-    Some(DefaultExpression::IntervalArithmetic {
-        base: Box::new(base),
-        operator,
-        interval,
-        temporal_type,
-    })
-}
-
-/// Returns the temporal expression type for a Postgres column type.
-fn temporal_type_for_column_type(typ: &Type) -> Option<DefaultTemporalType> {
-    match typ {
-        &Type::DATE => Some(DefaultTemporalType::Date),
-        &Type::TIME => Some(DefaultTemporalType::Time),
-        &Type::TIMESTAMP | &Type::TIMESTAMPTZ => Some(DefaultTemporalType::Timestamp),
-        _ => None,
-    }
-}
-
-/// Splits `current_time_expression +/- interval '...'`.
-fn split_top_level_interval_arithmetic(expression: &str) -> Option<(&str, char, &str)> {
-    let bytes = expression.as_bytes();
-    let mut index = 0;
-    let mut paren_depth: usize = 0;
-
-    while index < bytes.len() {
-        match bytes[index] {
-            b'\'' => index = skip_string_literal(bytes, index),
-            b'(' => {
-                let Some(new_depth) = paren_depth.checked_add(1) else {
-                    warn_default_parser_guard(
-                        "interval parser parenthesis depth overflow",
-                        bytes.len(),
-                        Some(index),
-                    );
-
-                    return None;
-                };
-                paren_depth = new_depth;
-                index = advance_index(index, 1, bytes.len());
-            }
-            b')' => {
-                paren_depth = paren_depth.saturating_sub(1);
-                index = advance_index(index, 1, bytes.len());
-            }
-            b'+' | b'-' if paren_depth == 0 && index > 0 => {
-                let left = expression.get(..index)?.trim();
-                let right_start = index.checked_add(1)?;
-                let right = expression.get(right_start..)?.trim();
-                return Some((left, bytes[index] as char, right));
-            }
-            _ => index = advance_index(index, 1, bytes.len()),
-        }
-    }
-
-    None
-}
-
-/// Parses an `interval 'N unit'` expression.
-fn parse_simple_interval_literal(expression: &str) -> Option<DefaultInterval> {
-    let expression = expression.trim();
-    let literal = if starts_with_ignore_ascii_case(expression, "interval ") {
-        expression.get(9..)?.trim()
-    } else {
-        normalize_postgres_expression(expression)
-    };
-    if !is_string_literal(literal) {
-        return None;
-    }
-
-    let literal_end = literal.len().checked_sub(1)?;
-    let literal = literal.get(1..literal_end)?;
-    let mut parts = literal.split_whitespace();
-    let amount = parts.next()?.parse::<i64>().ok()?;
-    let unit = parse_simple_interval_unit(parts.next()?)?;
-    if parts.next().is_some() {
-        return None;
-    }
-
-    Some(DefaultInterval { amount, unit, literal: literal.to_owned() })
-}
-
-/// Parses a simple interval unit.
-fn parse_simple_interval_unit(unit: &str) -> Option<DefaultIntervalUnit> {
-    let unit = unit.trim_end_matches('s');
-    if unit.eq_ignore_ascii_case("microsecond") {
-        Some(DefaultIntervalUnit::Microsecond)
-    } else if unit.eq_ignore_ascii_case("millisecond") {
-        Some(DefaultIntervalUnit::Millisecond)
-    } else if unit.eq_ignore_ascii_case("second") {
-        Some(DefaultIntervalUnit::Second)
-    } else if unit.eq_ignore_ascii_case("minute") {
-        Some(DefaultIntervalUnit::Minute)
-    } else if unit.eq_ignore_ascii_case("hour") {
-        Some(DefaultIntervalUnit::Hour)
-    } else if unit.eq_ignore_ascii_case("day") {
-        Some(DefaultIntervalUnit::Day)
-    } else if unit.eq_ignore_ascii_case("week") {
-        Some(DefaultIntervalUnit::Week)
-    } else if unit.eq_ignore_ascii_case("month") {
-        Some(DefaultIntervalUnit::Month)
-    } else if unit.eq_ignore_ascii_case("quarter") {
-        Some(DefaultIntervalUnit::Quarter)
-    } else if unit.eq_ignore_ascii_case("year") {
-        Some(DefaultIntervalUnit::Year)
-    } else {
-        None
-    }
-}
-
-/// Parses simple literal functions that are portable across destinations.
-fn parse_literal_function_expression(expression: &str) -> Option<DefaultExpression> {
-    let (function_name, args) = parse_function_call(expression)?;
-    let function = if function_name.eq_ignore_ascii_case("lower") {
-        DefaultLiteralFunction::Lower
-    } else if function_name.eq_ignore_ascii_case("upper") {
-        DefaultLiteralFunction::Upper
-    } else {
-        return None;
-    };
-
-    let arg = normalize_postgres_expression(parse_single_top_level_arg(args)?);
-    if !is_string_literal(arg) {
-        return None;
-    }
-
-    Some(DefaultExpression::LiteralFunction { function, argument: arg.to_owned() })
-}
-
-/// Parses a function call that spans the whole expression.
-fn parse_function_call(expression: &str) -> Option<(&str, &str)> {
-    let open = expression.find('(')?;
-    if !expression.ends_with(')') {
-        return None;
-    }
-
-    let name = expression.get(..open)?.trim();
-    if name.is_empty() || !name.chars().all(|ch| ch.is_ascii_alphabetic() || ch == '_') {
-        return None;
-    }
-
-    let bytes = expression.as_bytes();
-    let mut index = open;
-    let mut depth = 0usize;
-    while index < bytes.len() {
-        match bytes[index] {
-            b'\'' => index = skip_string_literal(bytes, index),
-            b'(' => {
-                let Some(new_depth) = depth.checked_add(1) else {
-                    warn_default_parser_guard(
-                        "function parser parenthesis depth overflow",
-                        bytes.len(),
-                        Some(index),
-                    );
-
-                    return None;
-                };
-                depth = new_depth;
-                index = advance_index(index, 1, bytes.len());
-            }
-            b')' => {
-                let Some(new_depth) = depth.checked_sub(1) else {
-                    warn_default_parser_guard(
-                        "function parser parenthesis depth underflow",
-                        bytes.len(),
-                        Some(index),
-                    );
-
-                    return None;
-                };
-                depth = new_depth;
-                if depth == 0 && index != bytes.len().saturating_sub(1) {
-                    return None;
-                }
-
-                index = advance_index(index, 1, bytes.len());
-            }
-            _ => index = advance_index(index, 1, bytes.len()),
-        }
-    }
-
-    if depth != 0 {
-        return None;
-    }
-
-    let args_start = open.checked_add(1)?;
-    let args_end = expression.len().checked_sub(1)?;
-    Some((name, expression.get(args_start..args_end)?))
-}
-
-/// Parses a single function argument and rejects top-level comma separators.
-fn parse_single_top_level_arg(args: &str) -> Option<&str> {
-    let bytes = args.as_bytes();
-    let mut index = 0;
-    let mut paren_depth: usize = 0;
-
-    while index < bytes.len() {
-        match bytes[index] {
-            b'\'' => index = skip_string_literal(bytes, index),
-            b'(' => {
-                let Some(new_depth) = paren_depth.checked_add(1) else {
-                    warn_default_parser_guard(
-                        "function argument parser parenthesis depth overflow",
-                        bytes.len(),
-                        Some(index),
-                    );
-
-                    return None;
-                };
-                paren_depth = new_depth;
-                index = advance_index(index, 1, bytes.len());
-            }
-            b')' => {
-                paren_depth = paren_depth.saturating_sub(1);
-                index = advance_index(index, 1, bytes.len());
-            }
-            b',' if paren_depth == 0 => return None,
-            _ => index = advance_index(index, 1, bytes.len()),
-        }
-    }
-
-    Some(args.trim())
-}
-
-/// Parses simple literal arithmetic expressions that are broadly portable.
-fn parse_numeric_expression(expression: &str) -> Option<String> {
-    if is_valid_numeric_expression(expression) { Some(expression.to_owned()) } else { None }
-}
-
-/// Returns whether a numeric expression uses only simple arithmetic syntax.
-fn is_valid_numeric_expression(expression: &str) -> bool {
-    let bytes = expression.as_bytes();
-    let mut index = 0;
-    let mut paren_depth = 0usize;
-    let mut saw_digit = false;
-    let mut expect_operand = true;
-    let mut unary_sign_allowed = true;
-
-    while index < bytes.len() {
-        match bytes[index] {
-            byte if byte.is_ascii_whitespace() => {
-                index = advance_index(index, 1, bytes.len());
-            }
-            b'+' | b'-' if expect_operand && unary_sign_allowed => {
-                unary_sign_allowed = false;
-                index = advance_index(index, 1, bytes.len());
-            }
-            b'(' if expect_operand && unary_sign_allowed => {
-                let Some(new_depth) = paren_depth.checked_add(1) else {
-                    warn_default_parser_guard(
-                        "numeric parser parenthesis depth overflow",
-                        bytes.len(),
-                        Some(index),
-                    );
-
-                    return false;
-                };
-                paren_depth = new_depth;
-                unary_sign_allowed = true;
-                index = advance_index(index, 1, bytes.len());
-            }
-            b'0'..=b'9' | b'.' if expect_operand => {
-                let Some(next_index) = scan_numeric_literal(bytes, index) else {
-                    return false;
-                };
-                saw_digit = true;
-                index = next_index;
-                expect_operand = false;
-                unary_sign_allowed = false;
-            }
-            b'+' | b'-' | b'*' | b'/' | b'%' if !expect_operand => {
-                expect_operand = true;
-                unary_sign_allowed = true;
-                index = advance_index(index, 1, bytes.len());
-            }
-            b')' if !expect_operand && paren_depth > 0 => {
-                let Some(new_depth) = paren_depth.checked_sub(1) else {
-                    warn_default_parser_guard(
-                        "numeric parser parenthesis depth underflow",
-                        bytes.len(),
-                        Some(index),
-                    );
-
-                    return false;
-                };
-                paren_depth = new_depth;
-                index = advance_index(index, 1, bytes.len());
-            }
-            _ => return false,
-        }
-    }
-
-    saw_digit && !expect_operand && paren_depth == 0
-}
-
-/// Scans a numeric literal and returns the byte after it.
-fn scan_numeric_literal(bytes: &[u8], mut index: usize) -> Option<usize> {
-    let mut has_digit = false;
-    let mut has_decimal = false;
-
-    while index < bytes.len() {
-        match bytes[index] {
-            b'0'..=b'9' => {
-                has_digit = true;
-                index = advance_index(index, 1, bytes.len());
-            }
-            b'.' if !has_decimal => {
-                has_decimal = true;
-                index = advance_index(index, 1, bytes.len());
-            }
-            _ => break,
-        }
-    }
-
-    has_digit.then_some(index)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1084,68 +526,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_current_time_expressions() {
-        assert_eq!(
-            parse_default_expression("now()", &Type::TIMESTAMPTZ),
-            Some(DefaultExpression::CurrentTimestamp)
-        );
-        assert_eq!(
-            parse_default_expression("now()", &Type::DATE),
-            Some(DefaultExpression::CurrentTimestamp)
-        );
-        assert_eq!(
-            parse_default_expression("localtimestamp", &Type::TIMESTAMP),
-            Some(DefaultExpression::LocalTimestamp)
-        );
-        assert_eq!(
-            parse_default_expression("localtimestamp", &Type::DATE),
-            Some(DefaultExpression::LocalTimestamp)
-        );
-        assert_eq!(
-            parse_default_expression("CURRENT_DATE", &Type::DATE),
-            Some(DefaultExpression::CurrentDate)
-        );
-        assert_eq!(
-            parse_default_expression("CURRENT_DATE", &Type::TEXT),
-            Some(DefaultExpression::CurrentDate)
-        );
-        assert_eq!(
-            parse_default_expression("CURRENT_TIME", &Type::TEXT),
-            Some(DefaultExpression::CurrentTime)
-        );
-    }
-
-    #[test]
-    fn parses_current_time_interval_arithmetic() {
-        assert_eq!(
-            parse_default_expression("now() + interval '30 days'", &Type::TIMESTAMPTZ),
-            Some(DefaultExpression::IntervalArithmetic {
-                base: Box::new(DefaultExpression::CurrentTimestamp),
-                operator: DefaultIntervalOperator::Add,
-                interval: DefaultInterval {
-                    amount: 30,
-                    unit: DefaultIntervalUnit::Day,
-                    literal: "30 days".to_owned(),
-                },
-                temporal_type: DefaultTemporalType::Timestamp,
-            })
-        );
-        assert_eq!(
-            parse_default_expression("(CURRENT_DATE - INTERVAL '7 days')", &Type::DATE),
-            Some(DefaultExpression::IntervalArithmetic {
-                base: Box::new(DefaultExpression::CurrentDate),
-                operator: DefaultIntervalOperator::Subtract,
-                interval: DefaultInterval {
-                    amount: 7,
-                    unit: DefaultIntervalUnit::Day,
-                    literal: "7 days".to_owned(),
-                },
-                temporal_type: DefaultTemporalType::Date,
-            })
-        );
-    }
-
-    #[test]
     fn parses_typed_literals() {
         assert_eq!(
             parse_default_expression("'2026-01-01'::date", &Type::DATE),
@@ -1155,77 +535,45 @@ mod tests {
             parse_default_expression("'{}'::jsonb", &Type::JSONB),
             Some(DefaultExpression::JsonLiteral("'{}'".to_owned()))
         );
-    }
-
-    #[test]
-    fn parses_common_functions() {
         assert_eq!(
-            parse_default_expression("gen_random_uuid()", &Type::UUID),
-            Some(DefaultExpression::UuidV4)
-        );
-        assert_eq!(
-            parse_default_expression("CURRENT_USER", &Type::TEXT),
-            Some(DefaultExpression::CurrentUser)
+            parse_default_expression("'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'::uuid", &Type::UUID,),
+            Some(DefaultExpression::StringLiteral(
+                "'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'".to_owned(),
+            ))
         );
     }
 
     #[test]
-    fn parses_literal_string_functions() {
-        assert_eq!(
-            parse_default_expression("lower('USER'::text)", &Type::TEXT),
-            Some(DefaultExpression::LiteralFunction {
-                function: DefaultLiteralFunction::Lower,
-                argument: "'USER'".to_owned(),
-            })
-        );
-        assert_eq!(
-            parse_default_expression("upper('user')", &Type::TEXT),
-            Some(DefaultExpression::LiteralFunction {
-                function: DefaultLiteralFunction::Upper,
-                argument: "'user'".to_owned(),
-            })
-        );
-        assert_eq!(parse_default_expression("lower('a', 'b')", &Type::TEXT), None);
-    }
-
-    #[test]
-    fn skips_string_concatenation_expressions() {
+    fn skips_non_literal_expressions() {
+        assert_eq!(parse_default_expression("now()", &Type::TIMESTAMPTZ), None);
+        assert_eq!(parse_default_expression("current_timestamp", &Type::TIMESTAMPTZ), None);
+        assert_eq!(parse_default_expression("current_date", &Type::DATE), None);
+        assert_eq!(parse_default_expression("current_time", &Type::TIME), None);
+        assert_eq!(parse_default_expression("localtimestamp", &Type::TIMESTAMP), None);
+        assert_eq!(parse_default_expression("timezone('UTC', now())", &Type::TIMESTAMP), None);
+        assert_eq!(parse_default_expression("gen_random_uuid()", &Type::UUID), None);
+        assert_eq!(parse_default_expression("uuid_generate_v4()", &Type::UUID), None);
+        assert_eq!(parse_default_expression("current_user", &Type::TEXT), None);
+        assert_eq!(parse_default_expression("session_user", &Type::TEXT), None);
+        assert_eq!(parse_default_expression("lower('USER'::text)", &Type::TEXT), None);
+        assert_eq!(parse_default_expression("upper('user')", &Type::TEXT), None);
         assert_eq!(parse_default_expression("'a' || 'b'", &Type::TEXT), None);
         assert_eq!(
             parse_default_expression("(('user'::text || '_'::text) || 'id'::text)", &Type::TEXT),
             None
         );
         assert_eq!(parse_default_expression("lower('a' || 'b')", &Type::TEXT), None);
-    }
-
-    #[test]
-    fn parses_numeric_expressions_conservatively() {
-        assert_eq!(
-            parse_default_expression("(10 + 5) * 2", &Type::INT4),
-            Some(DefaultExpression::NumericExpression("(10 + 5) * 2".to_owned()))
-        );
+        assert_eq!(parse_default_expression("(10 + 5) * 2", &Type::INT4), None);
         assert_eq!(parse_default_expression("1 +", &Type::INT4), None);
         assert_eq!(parse_default_expression("1..2", &Type::INT4), None);
         assert_eq!(parse_default_expression("(1 + 2", &Type::INT4), None);
         assert_eq!(parse_default_expression("--1", &Type::INT4), None);
-    }
-
-    #[test]
-    fn skips_complex_expressions() {
         assert_eq!(parse_default_expression("nextval('users_id_seq')", &Type::INT8), None);
         assert_eq!(
             parse_default_expression("now() + '30 days'::interval", &Type::TIMESTAMPTZ),
-            Some(DefaultExpression::IntervalArithmetic {
-                base: Box::new(DefaultExpression::CurrentTimestamp),
-                operator: DefaultIntervalOperator::Add,
-                interval: DefaultInterval {
-                    amount: 30,
-                    unit: DefaultIntervalUnit::Day,
-                    literal: "30 days".to_owned(),
-                },
-                temporal_type: DefaultTemporalType::Timestamp,
-            })
+            None
         );
         assert_eq!(parse_default_expression("array['a', 'b']::text[]", &Type::TEXT_ARRAY), None);
+        assert_eq!(parse_default_expression("1e6", &Type::INT8), None);
     }
 }
