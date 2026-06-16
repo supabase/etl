@@ -29,6 +29,20 @@ fn create_clickhouse_config(engine: ClickHouseEngine) -> FullApiDestinationConfi
     }
 }
 
+fn create_snowflake_config() -> FullApiDestinationConfig {
+    FullApiDestinationConfig::Snowflake {
+        account_id: String::new(),
+        user: "etl".to_owned(),
+        private_key: SerializableSecretString::from(
+            "-----BEGIN PRIVATE KEY-----\ninvalid\n-----END PRIVATE KEY-----".to_owned(),
+        ),
+        private_key_passphrase: None,
+        database: "analytics".to_owned(),
+        schema: "public".to_owned(),
+        role: None,
+    }
+}
+
 async fn create_nested_partitioned_table_with_primary_key(pool: &sqlx::PgPool) {
     pool.execute(
         "create table nested_partitioned_events (
@@ -181,6 +195,28 @@ async fn validate_destination_allows_clickhouse_merge_tree_table_without_primary
     assert!(
         primary_key_failure.is_none(),
         "ClickHouse MergeTree should allow source tables without primary keys"
+    );
+
+    drop_pg_database(&config).await;
+}
+
+#[tokio::test]
+async fn validate_destination_fails_when_pipeline_publication_does_not_exist() {
+    let (ctx, _pool, config) = create_validation_context_with_source().await;
+
+    let pipeline_config = create_pipeline_config("missing_destination_validation_pub");
+    let failures = validate_destination(&ctx, &create_bigquery_config(), Some(&pipeline_config))
+        .await
+        .unwrap();
+
+    let publication_failure = failures
+        .iter()
+        .find(|failure| failure.name == "Publication Not Found")
+        .expect("Should fail when destination validation receives a missing publication");
+    assert_eq!(publication_failure.failure_type, FailureType::Critical);
+    assert!(
+        publication_failure.reason.contains("missing_destination_validation_pub"),
+        "Failure reason should mention the missing publication"
     );
 
     drop_pg_database(&config).await;
@@ -472,7 +508,7 @@ async fn validate_destination_warns_for_insert_only_unsupported_replica_identity
         "Failure reason should mention the table and identity type"
     );
     assert!(
-        replica_identity_failure.reason.contains("only replicates INSERT"),
+        replica_identity_failure.reason.contains("does not replicate UPDATE or DELETE"),
         "Failure reason should explain this does not block pipeline start"
     );
     assert!(
@@ -482,6 +518,124 @@ async fn validate_destination_warns_for_insert_only_unsupported_replica_identity
     assert!(
         replica_identity_failure.reason.contains("columns with large values (TOAST columns)"),
         "Failure reason should recommend full replica identity for columns with large values"
+    );
+
+    drop_pg_database(&config).await;
+}
+
+#[tokio::test]
+async fn validate_destination_fails_when_snowflake_update_uses_alternative_replica_identity() {
+    let (ctx, pool, config) = create_validation_context_with_source().await;
+
+    pool.execute(
+        "create table snowflake_update_alt_identity_table (
+            id serial primary key,
+            email text not null,
+            name text
+        )",
+    )
+    .await
+    .unwrap();
+    pool.execute(
+        "create unique index snowflake_update_alt_identity_table_email_idx
+         on snowflake_update_alt_identity_table (email)",
+    )
+    .await
+    .unwrap();
+    pool.execute(
+        "alter table snowflake_update_alt_identity_table replica identity using index \
+         snowflake_update_alt_identity_table_email_idx",
+    )
+    .await
+    .unwrap();
+    pool.execute(
+        "create publication snowflake_update_alt_identity_pub
+         for table snowflake_update_alt_identity_table
+         with (publish = 'update')",
+    )
+    .await
+    .unwrap();
+
+    let pipeline_config = create_pipeline_config("snowflake_update_alt_identity_pub");
+    let failures = validate_destination(&ctx, &create_snowflake_config(), Some(&pipeline_config))
+        .await
+        .unwrap();
+
+    let replica_identity_failure = failures
+        .iter()
+        .find(|failure| failure.name == "Unsupported Replica Identity")
+        .expect("Should fail when Snowflake UPDATE replication does not have full identity");
+    assert_eq!(replica_identity_failure.failure_type, FailureType::Critical);
+    assert!(
+        replica_identity_failure
+            .reason
+            .contains("snowflake_update_alt_identity_table (alternative_key)"),
+        "Failure reason should mention the table and identity type"
+    );
+    assert!(
+        replica_identity_failure.reason.contains("UPDATE changes"),
+        "Failure reason should explain the published operation"
+    );
+    assert!(
+        replica_identity_failure.reason.contains("`REPLICA IDENTITY FULL`"),
+        "Failure reason should suggest full identity"
+    );
+
+    drop_pg_database(&config).await;
+}
+
+#[tokio::test]
+async fn validate_destination_warns_when_snowflake_delete_identity_would_not_support_updates() {
+    let (ctx, pool, config) = create_validation_context_with_source().await;
+
+    pool.execute(
+        "create table snowflake_delete_alt_identity_table (
+            id serial primary key,
+            email text not null,
+            name text
+        )",
+    )
+    .await
+    .unwrap();
+    pool.execute(
+        "create unique index snowflake_delete_alt_identity_table_email_idx
+         on snowflake_delete_alt_identity_table (email)",
+    )
+    .await
+    .unwrap();
+    pool.execute(
+        "alter table snowflake_delete_alt_identity_table replica identity using index \
+         snowflake_delete_alt_identity_table_email_idx",
+    )
+    .await
+    .unwrap();
+    pool.execute(
+        "create publication snowflake_delete_alt_identity_pub
+         for table snowflake_delete_alt_identity_table
+         with (publish = 'delete')",
+    )
+    .await
+    .unwrap();
+
+    let pipeline_config = create_pipeline_config("snowflake_delete_alt_identity_pub");
+    let failures = validate_destination(&ctx, &create_snowflake_config(), Some(&pipeline_config))
+        .await
+        .unwrap();
+
+    let replica_identity_failure = failures
+        .iter()
+        .find(|failure| failure.name == "Unsupported Replica Identity")
+        .expect("Should warn because this identity would not support future updates");
+    assert_eq!(replica_identity_failure.failure_type, FailureType::Warning);
+    assert!(
+        replica_identity_failure
+            .reason
+            .contains("snowflake_delete_alt_identity_table (alternative_key)"),
+        "Failure reason should mention the table and identity type"
+    );
+    assert!(
+        replica_identity_failure.reason.contains("unsupported for UPDATE"),
+        "Failure reason should explain that DELETE is supported but UPDATE is not"
     );
 
     drop_pg_database(&config).await;

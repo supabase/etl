@@ -6,6 +6,7 @@ use etl_postgres::types::IdentityType;
 
 use super::{
     super::{ValidationContext, ValidationError, ValidationFailure, Validator},
+    pipeline::PublicationExistsValidator,
     primary_key::PrimaryKeyValidator,
     replica_identity::ReplicaIdentityValidator,
 };
@@ -26,6 +27,14 @@ impl DestinationValidator {
         Self { config, publication_name }
     }
 
+    /// Builds the publication existence validator when publication-aware
+    /// destination checks are enabled.
+    fn publication_exists_validator(&self) -> Option<PublicationExistsValidator> {
+        let publication_name = self.publication_name.clone()?;
+
+        Some(PublicationExistsValidator::new(publication_name))
+    }
+
     /// Builds the replica identity validator for the configured destination.
     fn replica_identity_validator(&self) -> Option<ReplicaIdentityValidator> {
         let publication_name = self.publication_name.clone()?;
@@ -35,23 +44,32 @@ impl DestinationValidator {
                 publication_name,
                 "BigQuery",
                 &[IdentityType::PrimaryKey, IdentityType::Full],
+                &[IdentityType::PrimaryKey, IdentityType::Full],
             ),
             FullApiDestinationConfig::ClickHouse { .. } => ReplicaIdentityValidator::new(
                 publication_name,
                 "ClickHouse",
                 &[IdentityType::PrimaryKey, IdentityType::Full],
+                &[IdentityType::PrimaryKey, IdentityType::Full],
             ),
-            FullApiDestinationConfig::Iceberg { .. } => {
-                ReplicaIdentityValidator::new(publication_name, "Iceberg", &[IdentityType::Full])
-            }
+            FullApiDestinationConfig::Iceberg { .. } => ReplicaIdentityValidator::new(
+                publication_name,
+                "Iceberg",
+                &[IdentityType::Full],
+                &[IdentityType::Full],
+            ),
             FullApiDestinationConfig::Ducklake { .. } => ReplicaIdentityValidator::new(
                 publication_name,
                 "DuckLake",
                 &[IdentityType::PrimaryKey, IdentityType::AlternativeKey, IdentityType::Full],
+                &[IdentityType::PrimaryKey, IdentityType::AlternativeKey, IdentityType::Full],
             ),
-            FullApiDestinationConfig::Snowflake { .. } => {
-                ReplicaIdentityValidator::new(publication_name, "Snowflake", &[IdentityType::Full])
-            }
+            FullApiDestinationConfig::Snowflake { .. } => ReplicaIdentityValidator::new(
+                publication_name,
+                "Snowflake",
+                &[IdentityType::Full],
+                &[IdentityType::PrimaryKey, IdentityType::AlternativeKey, IdentityType::Full],
+            ),
         })
     }
 
@@ -113,6 +131,10 @@ impl Validator for DestinationValidator {
                 snowflake::validate(&self.config, ctx).await
             }
         }?;
+
+        if let Some(validator) = self.publication_exists_validator() {
+            failures.extend(validator.validate(ctx).await?);
+        }
 
         if let Some(validator) = self.replica_identity_validator() {
             failures.extend(validator.validate(ctx).await?);

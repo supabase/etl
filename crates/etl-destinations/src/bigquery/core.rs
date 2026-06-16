@@ -398,15 +398,15 @@ where
     /// Prepares a table for BigQuery writes with schema-aware table creation.
     ///
     /// Creates or verifies the BigQuery table exists using the provided schema,
-    /// ensures the view points to the current versioned table, and validates
-    /// that the source replica identity is compatible with BigQuery deletes and
-    /// upserts. Uses caching to avoid redundant table creation checks.
+    /// ensures the view points to the current versioned table, and verifies the
+    /// source primary key needed by BigQuery CDC. Uses caching to avoid
+    /// redundant table creation checks.
     async fn prepare_table_for_streaming(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
         use_cdc_sequence_column: bool,
     ) -> EtlResult<(SequencedBigQueryTableId, TableDescriptor)> {
-        validate_bigquery_replica_identity(replicated_table_schema)?;
+        validate_bigquery_table_shape(replicated_table_schema)?;
 
         // We hold the lock for the entire preparation to avoid race conditions since
         // the consistency of this code path is critical.
@@ -675,7 +675,7 @@ where
         &self,
         new_replicated_table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<()> {
-        validate_bigquery_replica_identity(new_replicated_table_schema)?;
+        validate_bigquery_table_shape(new_replicated_table_schema)?;
 
         let table_id = new_replicated_table_schema.id();
         let new_snapshot_id = new_replicated_table_schema.inner().snapshot_id;
@@ -912,7 +912,6 @@ where
                         entry.1.push(BigQueryTableRow::try_from(insert.table_row)?);
                     }
                     Event::Update(update) => {
-                        validate_bigquery_replica_identity(&update.replicated_table_schema)?;
                         let sequence_key = update.event_sequence_key();
                         let table_id = update.replicated_table_schema.id();
                         let table_row = match update.updated_table_row {
@@ -935,7 +934,6 @@ where
                         )?);
                     }
                     Event::Delete(delete) => {
-                        validate_bigquery_replica_identity(&delete.replicated_table_schema)?;
                         let sequence_key = bigquery_sequence_key(
                             delete.event_sequence_key(),
                             BIGQUERY_SEQUENCE_ORDINAL_FIRST,
@@ -1221,21 +1219,11 @@ where
     }
 }
 
-/// Validates that a replicated table schema can be applied in BigQuery.
+/// Validates that a replicated table schema can be written to BigQuery CDC.
 ///
 /// BigQuery matches CDC rows by the destination table primary key, so the
-/// source table must always expose that key.
-/// PostgreSQL replica identity may either:
-/// - match the source primary key directly, or
-/// - request full old-row images (`FULL`), which still let us recover the
-///   source primary key for deletes and primary-key-changing updates.
-///
-/// Alternative replica-identity indexes are not compatible with BigQuery's
-/// destination key because BigQuery would deduplicate against a different row
-/// identity than the source publisher.
-fn validate_bigquery_replica_identity(
-    replicated_table_schema: &ReplicatedTableSchema,
-) -> EtlResult<()> {
+/// source table must expose that key when creating or writing the table.
+fn validate_bigquery_table_shape(replicated_table_schema: &ReplicatedTableSchema) -> EtlResult<()> {
     if replicated_table_schema.primary_key_column_schemas().len() == 0 {
         bail!(
             ErrorKind::SourceSchemaError,
@@ -1264,6 +1252,22 @@ fn validate_bigquery_replica_identity(
         );
     }
 
+    Ok(())
+}
+
+/// Validates that a mutation event carries an identity BigQuery can apply.
+///
+/// PostgreSQL replica identity may either:
+/// - match the source primary key directly, or
+/// - request full old-row images (`FULL`), which still let us recover the
+///   source primary key for deletes and primary-key-changing updates.
+///
+/// Alternative replica-identity indexes are not compatible with BigQuery's
+/// destination key because BigQuery would deduplicate against a different row
+/// identity than the source publisher.
+fn validate_bigquery_mutation_identity(
+    replicated_table_schema: &ReplicatedTableSchema,
+) -> EtlResult<()> {
     match replicated_table_schema.identity_type() {
         IdentityType::PrimaryKey | IdentityType::Full => Ok(()),
         identity_type => {
@@ -1380,6 +1384,8 @@ fn bigquery_update_rows(
     old_table_row: Option<OldTableRow>,
     sequence_key: EventSequenceKey,
 ) -> EtlResult<Vec<BigQueryTableRow>> {
+    validate_bigquery_mutation_identity(replicated_table_schema)?;
+
     let primary_key_changed = match old_table_row.as_ref() {
         // PostgreSQL omits the old-side image only when the publisher
         // determined it was unnecessary. For primary-key identity, that means
@@ -1542,6 +1548,8 @@ fn bigquery_primary_key_tagged_cells_from_old_row(
     replicated_table_schema: &ReplicatedTableSchema,
     old_table_row: OldTableRow,
 ) -> EtlResult<Vec<(usize, Cell)>> {
+    validate_bigquery_mutation_identity(replicated_table_schema)?;
+
     match old_table_row {
         OldTableRow::Full(row) => {
             let column_count = replicated_table_schema.column_schemas().len();
@@ -1994,33 +2002,40 @@ mod tests {
     }
 
     #[test]
-    fn validate_bigquery_replica_identity_accepts_primary_key() {
+    fn validate_bigquery_mutation_identity_accepts_primary_key() {
         let replicated_table_schema = replicated_schema(IdentityType::PrimaryKey);
 
-        validate_bigquery_replica_identity(&replicated_table_schema).unwrap();
+        validate_bigquery_mutation_identity(&replicated_table_schema).unwrap();
     }
 
     #[test]
-    fn validate_bigquery_replica_identity_accepts_full() {
+    fn validate_bigquery_mutation_identity_accepts_full() {
         let replicated_table_schema = replicated_schema(IdentityType::Full);
 
-        validate_bigquery_replica_identity(&replicated_table_schema).unwrap();
+        validate_bigquery_mutation_identity(&replicated_table_schema).unwrap();
     }
 
     #[test]
-    fn validate_bigquery_replica_identity_rejects_alternative_key() {
+    fn validate_bigquery_mutation_identity_rejects_alternative_key() {
         let replicated_table_schema = replicated_schema(IdentityType::AlternativeKey);
 
-        let error = validate_bigquery_replica_identity(&replicated_table_schema).unwrap_err();
+        let error = validate_bigquery_mutation_identity(&replicated_table_schema).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::SourceReplicaIdentityError);
     }
 
     #[test]
-    fn validate_bigquery_replica_identity_rejects_missing() {
+    fn validate_bigquery_mutation_identity_rejects_missing() {
         let replicated_table_schema = replicated_schema(IdentityType::Missing);
 
-        let error = validate_bigquery_replica_identity(&replicated_table_schema).unwrap_err();
+        let error = validate_bigquery_mutation_identity(&replicated_table_schema).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::SourceReplicaIdentityError);
+    }
+
+    #[test]
+    fn validate_bigquery_table_shape_accepts_alternative_identity() {
+        let replicated_table_schema = replicated_schema(IdentityType::AlternativeKey);
+
+        validate_bigquery_table_shape(&replicated_table_schema).unwrap();
     }
 
     #[test]
@@ -2034,10 +2049,10 @@ mod tests {
     }
 
     #[test]
-    fn validate_bigquery_replica_identity_rejects_partial_primary_key() {
+    fn validate_bigquery_table_shape_rejects_partial_primary_key() {
         let replicated_table_schema = replicated_schema_with_partial_primary_key();
 
-        let error = validate_bigquery_replica_identity(&replicated_table_schema).unwrap_err();
+        let error = validate_bigquery_table_shape(&replicated_table_schema).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::SourceSchemaError);
         assert!(error.to_string().contains("tenant_id"));
     }

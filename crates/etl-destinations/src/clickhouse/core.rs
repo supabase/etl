@@ -510,7 +510,7 @@ where
         &self,
         schema: &ReplicatedTableSchema,
     ) -> EtlResult<(String, Arc<[bool]>)> {
-        validate_replica_identity_for_clickhouse(schema, self.inserter_config.engine)?;
+        validate_clickhouse_table_shape(schema, self.inserter_config.engine)?;
         let clickhouse_table_name = try_stringify_table_name(schema.name())?;
 
         if let Some(flags) = self.table_cache.read().get(&clickhouse_table_name).cloned() {
@@ -682,7 +682,7 @@ where
     /// Handles a schema change event (Relation) by computing the diff and
     /// applying ALTER TABLE statements.
     async fn handle_relation_event(&self, new_schema: &ReplicatedTableSchema) -> EtlResult<()> {
-        validate_replica_identity_for_clickhouse(new_schema, self.inserter_config.engine)?;
+        validate_clickhouse_table_shape(new_schema, self.inserter_config.engine)?;
 
         let table_id = new_schema.id();
         let new_snapshot_id = new_schema.inner().snapshot_id;
@@ -902,6 +902,10 @@ where
                         });
                     }
                     Event::Update(update) => {
+                        validate_replacing_merge_tree_mutation_identity(
+                            &update.replicated_table_schema,
+                            self.inserter_config.engine,
+                        )?;
                         let UpdatedTableRow::Full(table_row) = update.updated_table_row else {
                             return Err(etl_error!(
                                 ErrorKind::SourceReplicaIdentityError,
@@ -936,7 +940,7 @@ where
                         let old_row = match old_table_row {
                             OldTableRow::Full(row) => row,
                             OldTableRow::Key(key_row) => {
-                                expand_key_row(key_row, &delete.replicated_table_schema)
+                                expand_key_row(key_row, &delete.replicated_table_schema)?
                             }
                         };
                         let table_id = delete.replicated_table_schema.id();
@@ -1127,20 +1131,13 @@ fn ensure_engine_supported(engine: ClickHouseEngine, server_version: (u32, u32))
     Ok(())
 }
 
-/// Rejects replica identities and schemas the ClickHouse destination cannot
-/// represent for the configured engine.
-///
-/// Common to both engines: `expand_key_row` assumes the key-only old-row image
-/// carries primary-key values, so the row identity must match the primary key.
-/// `Full` is also fine because it bypasses `expand_key_row` entirely.
-/// `AlternativeKey` (a non-PK unique index) and `Missing` would either land
-/// identity values in the wrong PK slots or leave us without enough data to
-/// write a well-formed tombstone.
+/// Rejects source schemas the ClickHouse destination cannot represent for the
+/// configured engine.
 ///
 /// ReplacingMergeTree-only: the source table must have a primary key.
 /// ReplacingMergeTree uses the PK as `ORDER BY`, which is also the dedup key;
 /// without a PK there is nothing to merge on.
-fn validate_replica_identity_for_clickhouse(
+fn validate_clickhouse_table_shape(
     replicated_table_schema: &ReplicatedTableSchema,
     engine: ClickHouseEngine,
 ) -> EtlResult<()> {
@@ -1175,9 +1172,37 @@ fn validate_replica_identity_for_clickhouse(
         ));
     }
 
-    match replicated_table_schema.identity_type() {
-        IdentityType::PrimaryKey | IdentityType::Full => Ok(()),
-        identity_type => Err(etl_error!(
+    Ok(())
+}
+
+/// Validates the replica identity for a ReplacingMergeTree mutation.
+///
+/// ReplacingMergeTree uses the source primary key as its dedup key. Updates and
+/// deletes therefore need either primary-key identity or full row images so PK
+/// changes do not leave stale rows behind.
+fn validate_replacing_merge_tree_mutation_identity(
+    replicated_table_schema: &ReplicatedTableSchema,
+    engine: ClickHouseEngine,
+) -> EtlResult<()> {
+    if !matches!(engine, ClickHouseEngine::ReplacingMergeTree) {
+        return Ok(());
+    }
+
+    validate_clickhouse_key_identity(replicated_table_schema)
+}
+
+/// Validates that a key-only old-row image can be interpreted as source PK
+/// values.
+fn validate_clickhouse_key_identity(
+    replicated_table_schema: &ReplicatedTableSchema,
+) -> EtlResult<()> {
+    if replicated_table_schema.identity_matches_primary_key()
+        || matches!(replicated_table_schema.identity_type(), IdentityType::Full)
+    {
+        Ok(())
+    } else {
+        let identity_type = replicated_table_schema.identity_type();
+        Err(etl_error!(
             ErrorKind::SourceReplicaIdentityError,
             "ClickHouse requires primary-key or full replica identity",
             format!(
@@ -1188,7 +1213,7 @@ fn validate_replica_identity_for_clickhouse(
                 replicated_table_schema.name(),
                 identity_type
             )
-        )),
+        ))
     }
 }
 
@@ -1198,10 +1223,11 @@ fn validate_replica_identity_for_clickhouse(
 /// nullable, or a type-appropriate zero value if non-nullable (since RowBinary
 /// rejects NULL for non-nullable columns).
 ///
-/// Caller must ensure the source replica identity is `PrimaryKey` (or `Full`,
-/// in which case this function isn't invoked) -- see
-/// [`validate_replica_identity_for_clickhouse`].
-fn expand_key_row(key_row: TableRow, schema: &ReplicatedTableSchema) -> TableRow {
+/// Caller only reaches this path for key-only deletes, so this function
+/// validates that the key row can be interpreted as source primary-key values.
+fn expand_key_row(key_row: TableRow, schema: &ReplicatedTableSchema) -> EtlResult<TableRow> {
+    validate_clickhouse_key_identity(schema)?;
+
     let key_cells = key_row.into_values();
     let mut key_iter = key_cells.into_iter();
     let cells: Vec<Cell> = schema
@@ -1219,7 +1245,7 @@ fn expand_key_row(key_row: TableRow, schema: &ReplicatedTableSchema) -> TableRow
             }
         })
         .collect();
-    TableRow::new(cells)
+    Ok(TableRow::new(cells))
 }
 
 /// Returns a zero-value Cell for a Postgres type, used to fill non-PK columns
@@ -1378,46 +1404,55 @@ mod tests {
     }
 
     #[test]
-    fn validate_replica_identity_for_clickhouse_accepts_primary_key() {
-        validate_replica_identity_for_clickhouse(
+    fn validate_replacing_merge_tree_mutation_identity_accepts_primary_key() {
+        validate_replacing_merge_tree_mutation_identity(
             &replicated_schema(IdentityType::PrimaryKey),
-            ClickHouseEngine::MergeTree,
+            ClickHouseEngine::ReplacingMergeTree,
         )
         .unwrap();
     }
 
     #[test]
-    fn validate_replica_identity_for_clickhouse_accepts_full() {
-        validate_replica_identity_for_clickhouse(
+    fn validate_replacing_merge_tree_mutation_identity_accepts_full() {
+        validate_replacing_merge_tree_mutation_identity(
             &replicated_schema(IdentityType::Full),
-            ClickHouseEngine::MergeTree,
+            ClickHouseEngine::ReplacingMergeTree,
         )
         .unwrap();
     }
 
     #[test]
-    fn validate_replica_identity_for_clickhouse_rejects_alternative_key() {
-        let err = validate_replica_identity_for_clickhouse(
+    fn validate_replacing_merge_tree_mutation_identity_rejects_alternative_key() {
+        let err = validate_replacing_merge_tree_mutation_identity(
+            &replicated_schema(IdentityType::AlternativeKey),
+            ClickHouseEngine::ReplacingMergeTree,
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::SourceReplicaIdentityError);
+    }
+
+    #[test]
+    fn validate_replacing_merge_tree_mutation_identity_rejects_missing() {
+        let err = validate_replacing_merge_tree_mutation_identity(
+            &replicated_schema(IdentityType::Missing),
+            ClickHouseEngine::ReplacingMergeTree,
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::SourceReplicaIdentityError);
+    }
+
+    #[test]
+    fn validate_clickhouse_table_shape_accepts_alternative_identity() {
+        validate_clickhouse_table_shape(
             &replicated_schema(IdentityType::AlternativeKey),
             ClickHouseEngine::MergeTree,
         )
-        .unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::SourceReplicaIdentityError);
+        .unwrap();
     }
 
     #[test]
-    fn validate_replica_identity_for_clickhouse_rejects_missing() {
-        let err = validate_replica_identity_for_clickhouse(
-            &replicated_schema(IdentityType::Missing),
-            ClickHouseEngine::MergeTree,
-        )
-        .unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::SourceReplicaIdentityError);
-    }
-
-    #[test]
-    fn validate_replica_identity_for_clickhouse_rejects_partial_primary_key() {
-        let err = validate_replica_identity_for_clickhouse(
+    fn validate_clickhouse_table_shape_rejects_partial_primary_key() {
+        let err = validate_clickhouse_table_shape(
             &replicated_schema_with_partial_primary_key(),
             ClickHouseEngine::MergeTree,
         )
@@ -1427,7 +1462,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_replica_identity_for_clickhouse_rejects_pkless_schema_under_replacing_merge_tree() {
+    fn validate_clickhouse_table_shape_rejects_pkless_schema_under_replacing_merge_tree() {
         // --- GIVEN: a PK-less schema and engine = ReplacingMergeTree ---
         let table_schema = Arc::new(TableSchema::new(
             TableId::new(2),
@@ -1440,9 +1475,8 @@ mod tests {
             ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask);
 
         // --- WHEN: validating under ReplacingMergeTree ---
-        let err =
-            validate_replica_identity_for_clickhouse(&schema, ClickHouseEngine::ReplacingMergeTree)
-                .unwrap_err();
+        let err = validate_clickhouse_table_shape(&schema, ClickHouseEngine::ReplacingMergeTree)
+            .unwrap_err();
 
         // --- THEN: rejected with SourceSchemaError ---
         assert_eq!(err.kind(), ErrorKind::SourceSchemaError);
