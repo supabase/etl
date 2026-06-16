@@ -16,22 +16,19 @@ use crate::configs::destination::FullApiDestinationConfig;
 pub(crate) struct DestinationValidator {
     /// Destination configuration to validate.
     config: FullApiDestinationConfig,
-    /// Publication name used for source-aware replica identity checks.
-    replica_identity_publication_name: Option<String>,
+    /// Publication name of the pipeline that will be used for table checks.
+    publication_name: Option<String>,
 }
 
 impl DestinationValidator {
     /// Creates a destination validator for the provided configuration.
-    pub(crate) fn new(
-        config: FullApiDestinationConfig,
-        replica_identity_publication_name: Option<String>,
-    ) -> Self {
-        Self { config, replica_identity_publication_name }
+    pub(crate) fn new(config: FullApiDestinationConfig, publication_name: Option<String>) -> Self {
+        Self { config, publication_name }
     }
 
     /// Builds the replica identity validator for the configured destination.
     fn replica_identity_validator(&self) -> Option<ReplicaIdentityValidator> {
-        let publication_name = self.replica_identity_publication_name.clone()?;
+        let publication_name = self.publication_name.clone()?;
 
         Some(match &self.config {
             FullApiDestinationConfig::BigQuery { .. } => ReplicaIdentityValidator::new(
@@ -71,14 +68,14 @@ impl DestinationValidator {
     ///   identity requirements, handled by [`Self::replica_identity_validator`]
     ///   and destination runtime checks.
     fn primary_key_validator(&self) -> Option<PrimaryKeyValidator> {
-        let publication_name = self.replica_identity_publication_name.clone()?;
+        let publication_name = self.publication_name.clone()?;
 
         match &self.config {
             FullApiDestinationConfig::BigQuery { .. } => Some(PrimaryKeyValidator::new(
                 publication_name,
                 "BigQuery",
-                "BigQuery tables are keyed by the source primary key for initial loads, upserts, \
-                 deletes, and primary-key-changing updates.",
+                "BigQuery uses the source primary key to match rows during initial loads, \
+                 upserts, deletes, and updates that change primary-key values.",
             )),
             FullApiDestinationConfig::ClickHouse {
                 engine: ClickHouseEngine::ReplacingMergeTree,
@@ -145,7 +142,10 @@ macro_rules! disabled_destination {
             ) -> std::future::Ready<Result<Vec<ValidationFailure>, ValidationError>> {
                 std::future::ready(Ok(vec![ValidationFailure::critical(
                     format!("{} Backend Disabled", $destination),
-                    format!("{} support is not compiled into this API binary.", $destination),
+                    format!(
+                        "This API server was built without {} destination support.",
+                        $destination
+                    ),
                 )]))
             }
         }

@@ -68,16 +68,18 @@ impl Validator for DucklakeValidator {
                 }
                 _ => {
                     return Ok(vec![ValidationFailure::critical(
-                        "Ducklake S3 Configuration Invalid",
-                        "DuckLake S3 credentials are required.",
+                        "DuckLake S3 Configuration Invalid",
+                        "DuckLake needs both an S3 access key ID and secret access key to read \
+                         and write the data path.",
                     )]);
                 }
             };
 
         if s3_access_key_id.is_empty() || s3_secret_access_key.is_empty() {
             return Ok(vec![ValidationFailure::critical(
-                "Ducklake S3 Configuration Invalid",
-                "DuckLake S3 credentials are required.",
+                "DuckLake S3 Configuration Invalid",
+                "DuckLake needs both an S3 access key ID and secret access key to read and write \
+                 the data path.",
             )]);
         }
 
@@ -85,7 +87,7 @@ impl Validator for DucklakeValidator {
             Ok(url) => url,
             Err(error) => {
                 return Ok(vec![ValidationFailure::critical(
-                    "Ducklake Catalog Url Invalid",
+                    "DuckLake Catalog URL Invalid",
                     error.to_string(),
                 )]);
             }
@@ -95,7 +97,7 @@ impl Validator for DucklakeValidator {
             Ok(url) => url,
             Err(error) => {
                 return Ok(vec![ValidationFailure::critical(
-                    "Ducklake Data Path Invalid",
+                    "DuckLake Data Path Invalid",
                     error.to_string(),
                 )]);
             }
@@ -124,11 +126,10 @@ impl Validator for DucklakeValidator {
         {
             Ok(_) => Ok(vec![]),
             Err(_) => Ok(vec![ValidationFailure::critical(
-                "Ducklake Connection Failed",
-                "Unable to connect to DuckLake.\n\nPlease verify:\n(1) The catalog URL and data \
-                 path are valid and reachable\n(2) DuckLake catalog credentials are embedded \
-                 correctly in the catalog URL\n(3) The S3-compatible credentials and endpoint are \
-                 correct when using object storage",
+                "DuckLake Connection Failed",
+                "We couldn't connect to DuckLake with this catalog and data path.\n\nCheck that \
+                 the catalog URL is reachable, catalog credentials are present in the URL, and \
+                 the S3-compatible endpoint and credentials are correct.",
             )]),
         }
     }
@@ -166,7 +167,7 @@ mod tests {
         let failures = validator.validate(&ctx).await.unwrap();
 
         assert_eq!(failures.len(), 1);
-        assert_eq!(failures[0].name, "Ducklake Data Path Invalid");
+        assert_eq!(failures[0].name, "DuckLake Data Path Invalid");
         assert_eq!(failures[0].reason, "DuckLake data path must use the s3:// scheme, got file://");
     }
 }

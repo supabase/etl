@@ -87,7 +87,7 @@ async fn create_nested_partitioned_table_without_primary_key(pool: &sqlx::PgPool
 }
 
 #[tokio::test]
-async fn validate_destination_warns_when_bigquery_source_table_has_no_primary_key() {
+async fn validate_destination_fails_when_bigquery_source_table_has_no_primary_key() {
     let (ctx, pool, config) = create_validation_context_with_source().await;
 
     pool.execute("create table no_pk_bigquery_table (id int, name text)").await.unwrap();
@@ -103,8 +103,8 @@ async fn validate_destination_warns_when_bigquery_source_table_has_no_primary_ke
     let primary_key_failure = failures
         .iter()
         .find(|failure| failure.name == "Source Primary Keys Required")
-        .expect("Should warn when BigQuery source tables do not have primary keys");
-    assert_eq!(primary_key_failure.failure_type, FailureType::Warning);
+        .expect("Should fail when BigQuery source tables do not have primary keys");
+    assert_eq!(primary_key_failure.failure_type, FailureType::Critical);
     assert!(
         primary_key_failure.reason.contains("no_pk_bigquery_table"),
         "Failure reason should mention the table name"
@@ -118,7 +118,7 @@ async fn validate_destination_warns_when_bigquery_source_table_has_no_primary_ke
 }
 
 #[tokio::test]
-async fn validate_destination_warns_when_clickhouse_replacing_merge_tree_table_has_no_primary_key()
+async fn validate_destination_fails_when_clickhouse_replacing_merge_tree_table_has_no_primary_key()
 {
     let (ctx, pool, config) = create_validation_context_with_source().await;
 
@@ -138,9 +138,9 @@ async fn validate_destination_warns_when_clickhouse_replacing_merge_tree_table_h
 
     let primary_key_failure =
         failures.iter().find(|failure| failure.name == "Source Primary Keys Required").expect(
-            "Should warn when ClickHouse ReplacingMergeTree source tables have no primary keys",
+            "Should fail when ClickHouse ReplacingMergeTree source tables have no primary keys",
         );
-    assert_eq!(primary_key_failure.failure_type, FailureType::Warning);
+    assert_eq!(primary_key_failure.failure_type, FailureType::Critical);
     assert!(
         primary_key_failure.reason.contains("no_pk_clickhouse_table"),
         "Failure reason should mention the table name"
@@ -222,7 +222,7 @@ async fn validate_destination_accepts_nested_partition_leaf_with_parent_primary_
 }
 
 #[tokio::test]
-async fn validate_destination_warns_for_nested_partition_leaf_without_parent_primary_key() {
+async fn validate_destination_fails_for_nested_partition_leaf_without_parent_primary_key() {
     let (ctx, pool, config) = create_validation_context_with_source().await;
 
     create_nested_partitioned_table_without_primary_key(&pool).await;
@@ -241,8 +241,8 @@ async fn validate_destination_warns_for_nested_partition_leaf_without_parent_pri
     let primary_key_failure = failures
         .iter()
         .find(|failure| failure.name == "Source Primary Keys Required")
-        .expect("Should warn for nested partition leaves without parent primary keys");
-    assert_eq!(primary_key_failure.failure_type, FailureType::Warning);
+        .expect("Should fail for nested partition leaves without parent primary keys");
+    assert_eq!(primary_key_failure.failure_type, FailureType::Critical);
     assert!(
         primary_key_failure.reason.contains("nested_partitioned_events_no_pk_2026_01"),
         "Failure reason should mention the published leaf partition"
@@ -252,7 +252,7 @@ async fn validate_destination_warns_for_nested_partition_leaf_without_parent_pri
 }
 
 #[tokio::test]
-async fn validate_destination_warns_for_unsupported_replica_identity() {
+async fn validate_destination_fails_for_blocking_unsupported_replica_identity() {
     let (ctx, pool, config) = create_validation_context_with_source().await;
 
     pool.execute(
@@ -282,11 +282,15 @@ async fn validate_destination_warns_for_unsupported_replica_identity() {
     let replica_identity_failure = failures
         .iter()
         .find(|failure| failure.name == "Unsupported Replica Identity")
-        .expect("Should warn for alternative replica identity");
-    assert_eq!(replica_identity_failure.failure_type, FailureType::Warning);
+        .expect("Should fail for alternative replica identity");
+    assert_eq!(replica_identity_failure.failure_type, FailureType::Critical);
     assert!(
         replica_identity_failure.reason.contains("alt_identity_table (alternative_key)"),
         "Failure reason should mention the table and identity type"
+    );
+    assert!(
+        replica_identity_failure.reason.contains("cannot safely replicate UPDATE or DELETE"),
+        "Failure reason should explain this blocks pipeline start"
     );
     assert!(
         replica_identity_failure.reason.contains("REPLICA IDENTITY DEFAULT"),
@@ -299,6 +303,67 @@ async fn validate_destination_warns_for_unsupported_replica_identity() {
     assert!(
         replica_identity_failure.reason.contains("UPDATE or DELETE"),
         "Failure reason should explain the operation risk"
+    );
+
+    drop_pg_database(&config).await;
+}
+
+#[tokio::test]
+async fn validate_destination_warns_for_insert_only_unsupported_replica_identity() {
+    let (ctx, pool, config) = create_validation_context_with_source().await;
+
+    pool.execute(
+        "create table insert_only_alt_identity_table (
+            id serial primary key,
+            email text not null,
+            name text
+        )",
+    )
+    .await
+    .unwrap();
+    pool.execute(
+        "create unique index insert_only_alt_identity_table_email_idx
+         on insert_only_alt_identity_table (email)",
+    )
+    .await
+    .unwrap();
+    pool.execute(
+        "alter table insert_only_alt_identity_table replica identity using index \
+         insert_only_alt_identity_table_email_idx",
+    )
+    .await
+    .unwrap();
+    pool.execute(
+        "create publication insert_only_alt_identity_pub
+         for table insert_only_alt_identity_table
+         with (publish = 'insert')",
+    )
+    .await
+    .unwrap();
+
+    let pipeline_config = create_pipeline_config("insert_only_alt_identity_pub");
+    let failures = validate_destination(&ctx, &create_bigquery_config(), Some(&pipeline_config))
+        .await
+        .unwrap();
+
+    let replica_identity_failure = failures
+        .iter()
+        .find(|failure| failure.name == "Unsupported Replica Identity")
+        .expect("Should warn for insert-only alternative replica identity");
+    assert_eq!(replica_identity_failure.failure_type, FailureType::Warning);
+    assert!(
+        replica_identity_failure
+            .reason
+            .contains("insert_only_alt_identity_table (alternative_key)"),
+        "Failure reason should mention the table and identity type"
+    );
+    assert!(
+        replica_identity_failure.reason.contains("only replicates INSERT"),
+        "Failure reason should explain this does not block pipeline start"
+    );
+    assert!(
+        replica_identity_failure.reason.contains("UPDATE or DELETE"),
+        "Failure reason should explain the mutation risk"
     );
 
     drop_pg_database(&config).await;

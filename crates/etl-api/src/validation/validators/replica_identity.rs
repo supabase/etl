@@ -71,10 +71,6 @@ impl Validator for ReplicaIdentityValidator {
             return Ok(vec![]);
         };
 
-        if !publication_publishes_updates_or_deletes {
-            return Ok(vec![]);
-        }
-
         let table_identities = sqlx::query_as::<_, TableReplicaIdentityAudit>(
             r#"
             select
@@ -160,14 +156,26 @@ impl Validator for ReplicaIdentityValidator {
 
         if unsupported_tables.is_empty() {
             Ok(vec![])
+        } else if publication_publishes_updates_or_deletes {
+            Ok(vec![ValidationFailure::critical(
+                "Unsupported Replica Identity",
+                format!(
+                    "{} cannot safely replicate UPDATE or DELETE changes for these publication \
+                     tables because their replica identity is unsupported: {}.\n\nSet each table \
+                     to {} before starting the pipeline.",
+                    self.destination_name,
+                    format_unsupported_tables(&unsupported_tables),
+                    format_supported_identity_types(self.supported_identity_types),
+                ),
+            )])
         } else {
             Ok(vec![ValidationFailure::warning(
                 "Unsupported Replica Identity",
                 format!(
-                    "The following publication tables use replica identities that {} does not \
-                     support: {}.\n\nUse {} as the replica identity for reliable UPDATE and \
-                     DELETE replication to this destination. Otherwise, the destination may fail \
-                     to apply UPDATE or DELETE operations for those tables.",
+                    "{} can start because this publication only replicates INSERT changes, but \
+                     these tables use replica identities that would not support UPDATE or DELETE \
+                     replication: {}.\n\nSet each table to {} before enabling UPDATE or DELETE on \
+                     the publication.",
                     self.destination_name,
                     format_unsupported_tables(&unsupported_tables),
                     format_supported_identity_types(self.supported_identity_types),
@@ -259,8 +267,8 @@ fn format_identity_type_suggestion(identity_type: IdentityType) -> &'static str 
              `REPLICA IDENTITY USING INDEX` with the primary-key index)"
         }
         IdentityType::AlternativeKey => {
-            "an alternative-key identity (`REPLICA IDENTITY USING INDEX` with a non-primary-key \
-             unique index)"
+            "an alternative-key identity (`REPLICA IDENTITY USING INDEX` with a unique, \
+             non-primary-key index)"
         }
         IdentityType::Full => "`REPLICA IDENTITY FULL`",
         IdentityType::Missing => "no replica identity",

@@ -38,7 +38,7 @@ async fn validate_source_with_trusted_username_mismatch() {
     let failures = validate_source(&ctx).await.unwrap();
 
     assert_eq!(failures.len(), 1);
-    assert_eq!(failures[0].name, "Invalid source username");
+    assert_eq!(failures[0].name, "Invalid Source Username");
     assert_eq!(failures[0].failure_type, FailureType::Critical);
 
     drop_pg_database(&config).await;

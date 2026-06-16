@@ -39,9 +39,8 @@ impl Validator for ClickHouseValidator {
             return Ok(vec![ValidationFailure::critical(
                 "ClickHouse URL Invalid",
                 format!(
-                    "ClickHouse URL must use 'https'. Got '{scheme}'. ETL requires TLS for all \
-                     ClickHouse destinations to keep credentials and replicated rows off the wire \
-                     in cleartext."
+                    "ClickHouse URL must use https, but this URL uses '{scheme}'.\n\nETL requires \
+                     TLS to protect credentials and replicated rows."
                 ),
             )]);
         }
@@ -49,14 +48,14 @@ impl Validator for ClickHouseValidator {
         if self.user.is_empty() {
             return Ok(vec![ValidationFailure::critical(
                 "ClickHouse User Required",
-                "ClickHouse user must not be empty.",
+                "Enter the ClickHouse user that ETL should connect with.",
             )]);
         }
 
         if self.database.is_empty() {
             return Ok(vec![ValidationFailure::critical(
                 "ClickHouse Database Required",
-                "ClickHouse database must not be empty.",
+                "Choose the ClickHouse database where replicated tables should be written.",
             )]);
         }
 
@@ -72,8 +71,8 @@ impl Validator for ClickHouseValidator {
         if client.validate_connectivity().await.is_err() {
             return Ok(vec![ValidationFailure::critical(
                 "ClickHouse Connection Failed",
-                "Cannot connect to ClickHouse.\n\nPlease verify:\n(1) The URL is correct and \
-                 reachable\n(2) The user name is correct\n(3) The password is correct",
+                "We couldn't connect to ClickHouse with this URL and user.\n\nCheck that the host \
+                 is reachable and that the username and password are correct.",
             )]);
         }
 
@@ -82,17 +81,15 @@ impl Validator for ClickHouseValidator {
             Ok(false) => Ok(vec![ValidationFailure::critical(
                 "ClickHouse Database Not Found",
                 format!(
-                    "ClickHouse database '{}' does not exist.\n\nPlease verify:\n(1) The database \
-                     name is correct\n(2) The database has been created on the server\n(3) The \
-                     user has permission to use it",
+                    "ClickHouse database '{}' was not found.\n\nCreate the database, or choose an \
+                     existing database this user can access.",
                     self.database
                 ),
             )]),
             Err(_) => Ok(vec![ValidationFailure::critical(
                 "ClickHouse Connection Failed",
-                "Cannot query ClickHouse to confirm the target database exists.\n\nPlease \
-                 verify:\n(1) The user has permission to read system.databases\n(2) The server is \
-                 healthy and reachable",
+                "We connected to ClickHouse, but couldn't confirm whether the target database \
+                 exists.\n\nGrant this user permission to read system.databases and try again.",
             )]),
         }
     }

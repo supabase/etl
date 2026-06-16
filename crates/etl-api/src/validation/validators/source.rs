@@ -42,8 +42,12 @@ impl Validator for SourceValidator {
 
         if current_user != *expected_username {
             return Ok(vec![ValidationFailure::critical(
-                "Invalid source username",
-                format!("Connected as '{current_user}' but expected '{expected_username}'"),
+                "Invalid Source Username",
+                format!(
+                    "The source connection authenticated as '{current_user}', but this API server \
+                     expects '{expected_username}'.\n\nUpdate the source credentials to use the \
+                     trusted ETL role."
+                ),
             )]);
         }
 
@@ -129,8 +133,12 @@ impl Validator for SourceValidator {
 
         let Some(audit) = audit else {
             return Ok(vec![ValidationFailure::critical(
-                "Invalid source role attributes",
-                "Role not found",
+                "Invalid Source Role Attributes",
+                format!(
+                    "The trusted ETL role '{expected_username}' was not found in the source \
+                     database.\n\nCreate the role or update the source credentials to use the \
+                     configured trusted role."
+                ),
             )]);
         };
 
@@ -145,9 +153,10 @@ impl Validator for SourceValidator {
         let mut failures = Vec::new();
         if !has_required_role_attributes {
             failures.push(ValidationFailure::critical(
-                "Invalid source role attributes",
-                "The source database does not grant the trusted username role all permissions ETL \
-                 needs to work properly.",
+                "Invalid Source Role Attributes",
+                "The trusted ETL role does not have the required source database \
+                 attributes.\n\nIt must be able to log in, use replication, bypass RLS, inherit \
+                 privileges, and avoid superuser-style role or database creation permissions.",
             ));
         }
 
@@ -161,10 +170,12 @@ impl Validator for SourceValidator {
 
         if !has_required_etl_schema_permissions {
             failures.push(ValidationFailure::critical(
-                "Invalid source etl schema permissions",
+                "Invalid Source ETL Schema Permissions",
                 format!(
-                    "The source database does not grant the trusted username role all permissions \
-                     ETL needs to manage schema {ETL_SCHEMA_NAME} properly."
+                    "The trusted ETL role cannot manage the '{ETL_SCHEMA_NAME}' schema in the \
+                     source database.\n\nGrant it permission to create the schema if it does not \
+                     exist, or USAGE and CREATE on the schema plus ownership access to existing \
+                     ETL tables."
                 ),
             ));
         }

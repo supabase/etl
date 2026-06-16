@@ -181,6 +181,7 @@ pub async fn validate_source(
     ctx: &ValidationContext,
 ) -> Result<Vec<ValidationFailure>, ValidationError> {
     let validator = SourceValidator;
+
     validator.validate(ctx).await
 }
 
@@ -193,17 +194,19 @@ pub async fn validate_source(
 /// - **BigQuery**: Validates dataset exists and is accessible.
 /// - **Iceberg**: Validates catalog connectivity.
 ///
-/// If a pipeline configuration is provided, validates that the publication
-/// tables use replica identities supported by the destination.
+/// If a pipeline configuration is provided, validates source compatibility for
+/// the publication tables, including destination-specific primary-key and
+/// replica-identity requirements.
 pub async fn validate_destination(
     ctx: &ValidationContext,
     destination_config: &FullApiDestinationConfig,
     pipeline_config: Option<&FullApiPipelineConfig>,
 ) -> Result<Vec<ValidationFailure>, ValidationError> {
-    let replica_identity_publication_name =
+    let publication_name =
         pipeline_config.map(|pipeline_config| pipeline_config.publication_name.clone());
-    let validator =
-        DestinationValidator::new(destination_config.clone(), replica_identity_publication_name);
+
+    let validator = DestinationValidator::new(destination_config.clone(), publication_name);
+
     validator.validate(ctx).await
 }
 
@@ -222,6 +225,7 @@ pub async fn validate_pipeline(
     let mut failures = validate_source(ctx).await?;
 
     let validator = PipelineValidator::new(pipeline_config.clone());
+
     failures.extend(validator.validate(ctx).await?);
 
     Ok(failures)

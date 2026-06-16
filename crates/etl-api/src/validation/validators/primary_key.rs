@@ -112,11 +112,12 @@ impl Validator for PrimaryKeyValidator {
         if tables_without_pk.is_empty() {
             Ok(vec![])
         } else {
-            Ok(vec![ValidationFailure::warning(
+            Ok(vec![ValidationFailure::critical(
                 "Source Primary Keys Required",
                 format!(
-                    "{} requires source primary keys for the following publication tables: \
-                     {}.\n\n{}",
+                    "{} can only replicate these publication tables when they have a primary key: \
+                     {}.\n\nAdd a primary key to each listed table, or remove the table from the \
+                     publication before starting the pipeline. {}",
                     self.destination_name,
                     tables_without_pk.join(", "),
                     self.reason

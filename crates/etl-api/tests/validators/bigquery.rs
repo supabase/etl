@@ -85,7 +85,7 @@ async fn validate_pipeline_includes_source_validation() {
 
     let failures = validate_pipeline(&ctx, &create_pipeline_config("test_pub")).await.unwrap();
 
-    let source_failure = failures.iter().find(|failure| failure.name == "Invalid source username");
+    let source_failure = failures.iter().find(|failure| failure.name == "Invalid Source Username");
     assert!(source_failure.is_some(), "Expected source validation failure");
 
     drop_pg_database(&config).await;
