@@ -32,7 +32,7 @@ impl Validator for BigQueryValidator {
                 format!(
                     "We couldn't authenticate with BigQuery using the service account \
                      key.\n\nCheck that the key is valid JSON, has not been revoked, and belongs \
-                     to a service account with access to project '{}'.",
+                     to a service account with access to project `{}`.",
                     self.project_id
                 ),
             )]);
@@ -43,7 +43,7 @@ impl Validator for BigQueryValidator {
             Ok(false) => Ok(vec![ValidationFailure::critical(
                 "BigQuery Dataset Not Found",
                 format!(
-                    "BigQuery dataset '{}' was not found in project '{}'.\n\nCheck the dataset \
+                    "BigQuery dataset `{}` was not found in project `{}`.\n\nCheck the dataset \
                      name and make sure the service account can access it.",
                     self.dataset_id, self.project_id
                 ),
@@ -52,7 +52,7 @@ impl Validator for BigQueryValidator {
                 "BigQuery Connection Failed",
                 "We couldn't reach BigQuery or confirm that the dataset exists.\n\nCheck network \
                  access to Google Cloud, that the BigQuery API is enabled, and that the service \
-                 account has BigQuery Data Editor and BigQuery Job User permissions.",
+                 account has `BigQuery Data Editor` and `BigQuery Job User` permissions.",
             )]),
         }
     }

@@ -74,7 +74,7 @@ impl DestinationValidator {
             } => Some(PrimaryKeyValidator::new(
                 publication_name,
                 "ClickHouse ReplacingMergeTree",
-                "ClickHouse ReplacingMergeTree uses the source primary key as the ORDER BY and \
+                "ClickHouse ReplacingMergeTree uses the source primary key as the `ORDER BY` and \
                  deduplication key.",
                 true,
             )),

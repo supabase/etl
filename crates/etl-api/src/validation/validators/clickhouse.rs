@@ -39,8 +39,8 @@ impl Validator for ClickHouseValidator {
             return Ok(vec![ValidationFailure::critical(
                 "ClickHouse URL Invalid",
                 format!(
-                    "ClickHouse URL must use https, but this URL uses '{scheme}'.\n\nETL requires \
-                     TLS to protect credentials and replicated rows."
+                    "ClickHouse URL must use `https`, but this URL uses `{scheme}`.\n\nETL \
+                     requires TLS to protect credentials and replicated rows."
                 ),
             )]);
         }
@@ -81,7 +81,7 @@ impl Validator for ClickHouseValidator {
             Ok(false) => Ok(vec![ValidationFailure::critical(
                 "ClickHouse Database Not Found",
                 format!(
-                    "ClickHouse database '{}' was not found.\n\nCreate the database, or choose an \
+                    "ClickHouse database `{}` was not found.\n\nCreate the database, or choose an \
                      existing database this user can access.",
                     self.database
                 ),
@@ -89,7 +89,7 @@ impl Validator for ClickHouseValidator {
             Err(_) => Ok(vec![ValidationFailure::critical(
                 "ClickHouse Connection Failed",
                 "We connected to ClickHouse, but couldn't confirm whether the target database \
-                 exists.\n\nGrant this user permission to read system.databases and try again.",
+                 exists.\n\nGrant this user permission to read `system.databases` and try again.",
             )]),
         }
     }

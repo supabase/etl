@@ -44,8 +44,8 @@ impl Validator for SourceValidator {
             return Ok(vec![ValidationFailure::critical(
                 "Invalid Source Username",
                 format!(
-                    "The source connection authenticated as '{current_user}', but this API server \
-                     expects '{expected_username}'.\n\nUpdate the source credentials to use the \
+                    "The source connection authenticated as `{current_user}`, but this API server \
+                     expects `{expected_username}`.\n\nUpdate the source credentials to use the \
                      trusted ETL role."
                 ),
             )]);
@@ -135,7 +135,7 @@ impl Validator for SourceValidator {
             return Ok(vec![ValidationFailure::critical(
                 "Invalid Source Role Attributes",
                 format!(
-                    "The trusted ETL role '{expected_username}' was not found in the source \
+                    "The trusted ETL role `{expected_username}` was not found in the source \
                      database.\n\nCreate the role or update the source credentials to use the \
                      configured trusted role."
                 ),
@@ -155,8 +155,9 @@ impl Validator for SourceValidator {
             failures.push(ValidationFailure::critical(
                 "Invalid Source Role Attributes",
                 "The trusted ETL role does not have the required source database \
-                 attributes.\n\nIt must be able to log in, use replication, bypass RLS, inherit \
-                 privileges, and avoid superuser-style role or database creation permissions.",
+                 attributes.\n\nIt must be able to `LOGIN`, use `REPLICATION`, `BYPASSRLS`, and \
+                 `INHERIT` privileges, and avoid superuser-style `CREATEROLE` or `CREATEDB` \
+                 permissions.",
             ));
         }
 
@@ -172,10 +173,10 @@ impl Validator for SourceValidator {
             failures.push(ValidationFailure::critical(
                 "Invalid Source ETL Schema Permissions",
                 format!(
-                    "The trusted ETL role cannot manage the '{ETL_SCHEMA_NAME}' schema in the \
+                    "The trusted ETL role cannot manage the `{ETL_SCHEMA_NAME}` schema in the \
                      source database.\n\nGrant it permission to create the schema if it does not \
-                     exist, or USAGE and CREATE on the schema plus ownership access to existing \
-                     ETL tables."
+                     exist, or `USAGE` and `CREATE` on the schema plus ownership access to \
+                     existing ETL tables."
                 ),
             ));
         }

@@ -79,8 +79,8 @@ impl Validator for IcebergValidator {
             return Ok(vec![ValidationFailure::critical(
                 "Iceberg Authentication Failed",
                 "We couldn't authenticate with the Iceberg catalog.\n\nCheck that the catalog \
-                 token is valid, the catalog URI is correct, and the S3 access key and secret key \
-                 are correct.",
+                 token is valid, the catalog URI is correct, and the `S3 access key` and `S3 \
+                 secret key` are correct.",
             )]);
         };
 
@@ -89,8 +89,8 @@ impl Validator for IcebergValidator {
             Err(_) => Ok(vec![ValidationFailure::critical(
                 "Iceberg Connection Failed",
                 "We couldn't connect to the Iceberg catalog or warehouse.\n\nCheck that the \
-                 catalog and S3 endpoint are reachable, the warehouse exists, and the configured \
-                 credentials can access it.",
+                 catalog and `S3 endpoint` are reachable, the warehouse exists, and the \
+                 configured credentials can access it.",
             )]),
         }
     }

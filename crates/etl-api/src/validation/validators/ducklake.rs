@@ -69,8 +69,8 @@ impl Validator for DucklakeValidator {
                 _ => {
                     return Ok(vec![ValidationFailure::critical(
                         "DuckLake S3 Configuration Invalid",
-                        "DuckLake needs both an S3 access key ID and secret access key to read \
-                         and write the data path.",
+                        "DuckLake needs both an `S3 access key ID` and `S3 secret access key` to \
+                         read and write the data path.",
                     )]);
                 }
             };
@@ -78,8 +78,8 @@ impl Validator for DucklakeValidator {
         if s3_access_key_id.is_empty() || s3_secret_access_key.is_empty() {
             return Ok(vec![ValidationFailure::critical(
                 "DuckLake S3 Configuration Invalid",
-                "DuckLake needs both an S3 access key ID and secret access key to read and write \
-                 the data path.",
+                "DuckLake needs both an `S3 access key ID` and `S3 secret access key` to read and \
+                 write the data path.",
             )]);
         }
 
@@ -129,7 +129,7 @@ impl Validator for DucklakeValidator {
                 "DuckLake Connection Failed",
                 "We couldn't connect to DuckLake with this catalog and data path.\n\nCheck that \
                  the catalog URL is reachable, catalog credentials are present in the URL, and \
-                 the S3-compatible endpoint and credentials are correct.",
+                 the `S3-compatible endpoint` and credentials are correct.",
             )]),
         }
     }

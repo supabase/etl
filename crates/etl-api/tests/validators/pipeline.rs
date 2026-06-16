@@ -145,7 +145,7 @@ async fn validate_pipeline_rejects_etl_schema_publication() {
     assert!(etl_failure.is_some(), "Should reject publications containing the ETL schema");
     assert_eq!(etl_failure.unwrap().failure_type, FailureType::Critical);
     assert!(
-        etl_failure.unwrap().reason.contains("'etl' schema"),
+        etl_failure.unwrap().reason.contains("`etl` schema"),
         "Failure reason should mention the ETL schema"
     );
 

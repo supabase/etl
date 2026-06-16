@@ -229,8 +229,11 @@ async fn validate_destination_fails_when_bigquery_column_list_omits_primary_key_
         .expect("Should fail when BigQuery source primary-key columns are omitted");
     assert_eq!(primary_key_failure.failure_type, FailureType::Critical);
     assert!(
-        primary_key_failure.reason.contains("omitted_pk_column_bigquery_table (account_id)"),
-        "Failure reason should mention the table and omitted primary-key column"
+        primary_key_failure
+            .reason
+            .contains("`public.omitted_pk_column_bigquery_table` (`account_id`)"),
+        "Failure reason should mention the table and omitted primary-key column: {}",
+        primary_key_failure.reason
     );
 
     drop_pg_database(&config).await;
@@ -283,8 +286,11 @@ async fn validate_destination_fails_when_clickhouse_merge_tree_omits_primary_key
         .expect("Should fail when ClickHouse source primary-key columns are omitted");
     assert_eq!(primary_key_failure.failure_type, FailureType::Critical);
     assert!(
-        primary_key_failure.reason.contains("omitted_pk_column_clickhouse_table (account_id)"),
-        "Failure reason should mention the table and omitted primary-key column"
+        primary_key_failure
+            .reason
+            .contains("`public.omitted_pk_column_clickhouse_table` (`account_id`)"),
+        "Failure reason should mention the table and omitted primary-key column: {}",
+        primary_key_failure.reason
     );
 
     drop_pg_database(&config).await;
@@ -409,8 +415,8 @@ async fn validate_destination_fails_for_blocking_unsupported_replica_identity() 
         "Failure reason should explain the operation risk"
     );
     assert!(
-        replica_identity_failure.reason.contains("large TOAST-backed columns"),
-        "Failure reason should recommend full replica identity for TOAST-backed columns"
+        replica_identity_failure.reason.contains("columns with large values (TOAST columns)"),
+        "Failure reason should recommend full replica identity for columns with large values"
     );
 
     drop_pg_database(&config).await;
@@ -474,8 +480,8 @@ async fn validate_destination_warns_for_insert_only_unsupported_replica_identity
         "Failure reason should explain the mutation risk"
     );
     assert!(
-        replica_identity_failure.reason.contains("large TOAST-backed columns"),
-        "Failure reason should recommend full replica identity for TOAST-backed columns"
+        replica_identity_failure.reason.contains("columns with large values (TOAST columns)"),
+        "Failure reason should recommend full replica identity for columns with large values"
     );
 
     drop_pg_database(&config).await;

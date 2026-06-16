@@ -100,7 +100,7 @@ impl Validator for SnowflakeValidator {
                 "Snowflake Authentication Failed",
                 format!(
                     "We couldn't authenticate with Snowflake using this user and private \
-                     key.\n\nCheck that the private key is a valid PEM-encoded RSA key, the \
+                     key.\n\nCheck that the private key is a valid `PEM`-encoded `RSA` key, the \
                      passphrase is correct if the key is encrypted, and the public key is \
                      registered for this Snowflake user. Snowflake returned: {msg}"
                 ),
@@ -108,17 +108,17 @@ impl Validator for SnowflakeValidator {
             Err(snowflake::Error::DatabaseNotFound(db)) => Ok(vec![ValidationFailure::critical(
                 "Snowflake Database Not Found",
                 format!(
-                    "Snowflake database '{db}' was not found.\n\nCreate the database, choose an \
-                     existing database, or grant this user USAGE on it."
+                    "Snowflake database `{db}` was not found.\n\nCreate the database, choose an \
+                     existing database, or grant this user `USAGE` on it."
                 ),
             )]),
             Err(snowflake::Error::SchemaNotFound { database, schema }) => {
                 Ok(vec![ValidationFailure::critical(
                     "Snowflake Schema Not Found",
                     format!(
-                        "Snowflake schema '{schema}' was not found in database \
-                         '{database}'.\n\nCreate the schema, choose an existing schema, or grant \
-                         this user USAGE on it."
+                        "Snowflake schema `{schema}` was not found in database \
+                         `{database}`.\n\nCreate the schema, choose an existing schema, or grant \
+                         this user `USAGE` on it."
                     ),
                 )])
             }

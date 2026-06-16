@@ -207,7 +207,7 @@ impl Validator for PrimaryKeyValidator {
                      {}.\n\nAdd a primary key to each listed table, or remove the table from the \
                      publication before starting the pipeline. {}",
                     self.destination_name,
-                    tables_without_pk.join(", "),
+                    format_code_list(&tables_without_pk),
                     self.reason
                 ),
             ));
@@ -216,7 +216,9 @@ impl Validator for PrimaryKeyValidator {
         if !tables_with_omitted_pk_columns.is_empty() {
             let formatted_tables = tables_with_omitted_pk_columns
                 .iter()
-                .map(|(table_name, omitted_columns)| format!("{table_name} ({omitted_columns})"))
+                .map(|(table_name, omitted_columns)| {
+                    format!("`{table_name}` (`{omitted_columns}`)")
+                })
                 .collect::<Vec<_>>()
                 .join(", ");
             failures.push(ValidationFailure::critical(
@@ -234,4 +236,9 @@ impl Validator for PrimaryKeyValidator {
 
         Ok(failures)
     }
+}
+
+/// Formats validation values as inline code for UI rendering.
+fn format_code_list(values: &[String]) -> String {
+    values.iter().map(|value| format!("`{value}`")).collect::<Vec<_>>().join(", ")
 }
