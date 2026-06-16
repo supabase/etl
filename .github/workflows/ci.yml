@@ -25,7 +25,7 @@ jobs:
       should_run: ${{ steps.filter.outputs.should_run }}
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           fetch-depth: 0
 
@@ -69,10 +69,10 @@ jobs:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
       - name: Set up Rust
-        uses: actions-rust-lang/setup-rust-toolchain@150fca883cd4034361b621bd4e6a9d34e5143606 # v1.15.4
+        uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
@@ -80,7 +80,7 @@ jobs:
           key: msrv-sync
 
       - name: Install cargo-msrv
-        uses: taiki-e/install-action@328a871ad8f62ecac78390391f463ccabc974b72 # v2.69.9
+        uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
         with:
           tool: cargo-msrv
 
@@ -102,10 +102,10 @@ jobs:
         check: [fmt, clippy, sort]
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
       - name: Set up Rust
-        uses: actions-rust-lang/setup-rust-toolchain@150fca883cd4034361b621bd4e6a9d34e5143606 # v1.15.4
+        uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
@@ -131,6 +131,18 @@ jobs:
       - name: Run Cargo Sort
         if: matrix.check == 'sort'
         run: cargo sort --workspace --grouped --check
+
+  check-actions:
+    name: Actions Lint
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Run actionlint
+        uses: farazdagi/action-actionlint@70abd65766f0daeed92198b965bedf5d79a4ab17 # v0.1.1
+        with:
+          version: 1.7.12
 
   test-full:
     name: Tests (Full, ${{ matrix.postgres_label }})
@@ -188,13 +200,13 @@ jobs:
       ETL_DUCKDB_EXTENSION_ROOT: ${{ github.workspace }}/vendor/duckdb/extensions
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
       - name: Set up Rust
-        uses: actions-rust-lang/setup-rust-toolchain@150fca883cd4034361b621bd4e6a9d34e5143606 # v1.15.4
+        uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
 
       - name: Cache Cargo
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           key: test-full
 
@@ -229,16 +241,21 @@ jobs:
 
       - name: Set up BigQuery Credentials
         # Conditional: fork PRs never receive secrets, BigQuery tests skipped gracefully.
+        env:
+          TESTS_BIGQUERY_PROJECT_ID: ${{ secrets.TESTS_BIGQUERY_PROJECT_ID }}
+          TESTS_BIGQUERY_SA_KEY_JSON: ${{ secrets.TESTS_BIGQUERY_SA_KEY_JSON }}
         run: |
-          if [ -n '${{ secrets.TESTS_BIGQUERY_SA_KEY_JSON }}' ]; then
-            printf '%s' '${{ secrets.TESTS_BIGQUERY_SA_KEY_JSON }}' > /tmp/bigquery-sa-key.json
-            echo "TESTS_BIGQUERY_SA_KEY_PATH=/tmp/bigquery-sa-key.json" >> $GITHUB_ENV
-            echo "TESTS_BIGQUERY_PROJECT_ID=${{ secrets.TESTS_BIGQUERY_PROJECT_ID }}" >> $GITHUB_ENV
-            echo "REQUIRE_BIGQUERY_CREDENTIALS=true" >> $GITHUB_ENV
+          if [ -n "${TESTS_BIGQUERY_SA_KEY_JSON}" ]; then
+            printf '%s' "${TESTS_BIGQUERY_SA_KEY_JSON}" > /tmp/bigquery-sa-key.json
+            {
+              echo "TESTS_BIGQUERY_SA_KEY_PATH=/tmp/bigquery-sa-key.json"
+              echo "TESTS_BIGQUERY_PROJECT_ID=${TESTS_BIGQUERY_PROJECT_ID}"
+              echo "REQUIRE_BIGQUERY_CREDENTIALS=true"
+            } >> "$GITHUB_ENV"
           fi
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@328a871ad8f62ecac78390391f463ccabc974b72 # v2.69.9
+        uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
         with:
           tool: cargo-nextest
 
@@ -249,7 +266,7 @@ jobs:
 
       - name: Install cargo-llvm-cov
         if: matrix.coverage == true
-        uses: taiki-e/install-action@328a871ad8f62ecac78390391f463ccabc974b72 # v2.69.9
+        uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
         with:
           tool: cargo-llvm-cov
 

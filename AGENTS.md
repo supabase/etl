@@ -165,6 +165,10 @@
 - Verify that expected tests actually ran, not just that Cargo exited successfully.
 - Prefer running `cargo nextest list` before using filters or crate-specific commands if there is any doubt.
 - When fixing a specific crate, run the narrowest relevant tests first, then broaden if needed.
+- When a test failure needs deeper debugging, rerun the targeted test with
+  `ENABLE_TRACING=1`; set a focused `RUST_LOG` filter when needed, such as
+  `RUST_LOG=etl::replication::apply=debug,etl_destinations::bigquery=debug`,
+  to make the relevant pipeline or destination logs visible.
 - Add or update tests when behavior changes, regressions are possible, or new logic is introduced.
 - Prefer existing test utilities and fixtures over custom test plumbing. Before adding bespoke
   setup, waits, assertions, or database helpers, check nearby tests and `crates/etl/src/test_utils/` for

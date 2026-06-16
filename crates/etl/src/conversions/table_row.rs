@@ -185,14 +185,8 @@ mod tests {
         nullable: bool,
         primary_key: bool,
     ) -> ColumnSchema {
-        ColumnSchema::new(
-            name.to_owned(),
-            typ,
-            -1,
-            ordinal_position,
-            if primary_key { Some(1) } else { None },
-            nullable,
-        )
+        ColumnSchema::new(name.to_owned(), typ, -1, ordinal_position, nullable)
+            .with_primary_key_ordinal_position(if primary_key { Some(1) } else { None })
     }
 
     fn create_test_column_schemas() -> Vec<ColumnSchema> {

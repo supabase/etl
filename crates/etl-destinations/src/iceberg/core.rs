@@ -599,8 +599,8 @@ where
         let sequence_number_col =
             find_unique_column_name(&column_schemas, SEQUENCE_NUMBER_COLUMN_NAME);
 
-        column_schemas.push(ColumnSchema::new(cdc_operation_col, Type::TEXT, -1, 0, None, false));
-        column_schemas.push(ColumnSchema::new(sequence_number_col, Type::TEXT, -1, 0, None, false));
+        column_schemas.push(ColumnSchema::new(cdc_operation_col, Type::TEXT, -1, 0, false));
+        column_schemas.push(ColumnSchema::new(sequence_number_col, Type::TEXT, -1, 0, false));
 
         column_schemas
     }
@@ -757,7 +757,8 @@ mod tests {
         nullable: bool,
         primary_key_ordinal: Option<i32>,
     ) -> ColumnSchema {
-        ColumnSchema::new(name.to_owned(), typ, -1, ordinal_position, primary_key_ordinal, nullable)
+        ColumnSchema::new(name.to_owned(), typ, -1, ordinal_position, nullable)
+            .with_primary_key_ordinal_position(primary_key_ordinal)
     }
 
     #[test]

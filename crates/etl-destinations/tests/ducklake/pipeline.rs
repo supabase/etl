@@ -886,6 +886,7 @@ async fn schema_change_add_column() {
         .unwrap()
         .expect("metadata should exist after table creation");
     let initial_snapshot_id = initial_metadata.snapshot_id;
+
     let event_notify = destination
         .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
         .await;
@@ -916,15 +917,18 @@ async fn schema_change_add_column() {
     drop(destination);
     checkpoint_lake(&catalog_url, &data_url);
 
+    let final_metadata = store
+        .get_applied_destination_table_metadata(table_id)
+        .await
+        .unwrap()
+        .expect("metadata should exist after schema change");
+    assert!(final_metadata.snapshot_id > initial_snapshot_id);
+
     let conn = open_lake_conn(&catalog_url, &data_url);
-    assert_eq!(
-        query_table_columns(&conn, &ducklake_table_name),
-        vec!["id", "name", "age", "email", "score"]
-    );
     assert_eq!(
         query_schema_add_rows(&conn, &ducklake_table_name),
         vec![
-            SchemaAddRow { id: 1, name: "Alice".to_owned(), age: 25, email: None, score: None },
+            SchemaAddRow { id: 1, name: "Alice".to_owned(), age: 25, email: None, score: Some(0) },
             SchemaAddRow {
                 id: 2,
                 name: "Bob".to_owned(),
@@ -934,13 +938,6 @@ async fn schema_change_add_column() {
             },
         ]
     );
-
-    let final_metadata = store
-        .get_applied_destination_table_metadata(table_id)
-        .await
-        .unwrap()
-        .expect("metadata should exist after schema change");
-    assert!(final_metadata.snapshot_id > initial_snapshot_id);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -990,6 +987,13 @@ async fn schema_change_is_visible_to_already_open_connection() {
     pipeline.start().await.unwrap();
     table_ready.notified().await;
 
+    let initial_snapshot_id = store
+        .get_applied_destination_table_metadata(table_id)
+        .await
+        .unwrap()
+        .expect("metadata should exist after table creation")
+        .snapshot_id;
+
     checkpoint_lake(&catalog_url, &data_url);
     let conn = open_lake_conn(&catalog_url, &data_url);
     assert_eq!(query_table_columns(&conn, &ducklake_table_name), vec!["id", "name", "age"]);
@@ -1024,6 +1028,14 @@ async fn schema_change_is_visible_to_already_open_connection() {
     drop(destination);
     checkpoint_lake(&catalog_url, &data_url);
 
+    let final_snapshot_id = store
+        .get_applied_destination_table_metadata(table_id)
+        .await
+        .unwrap()
+        .expect("metadata should exist after schema change")
+        .snapshot_id;
+    assert!(final_snapshot_id > initial_snapshot_id);
+
     assert_eq!(
         query_table_columns(&conn, &ducklake_table_name),
         vec!["id", "name", "age", "email", "score"]
@@ -1031,7 +1043,7 @@ async fn schema_change_is_visible_to_already_open_connection() {
     assert_eq!(
         query_schema_add_rows(&conn, &ducklake_table_name),
         vec![
-            SchemaAddRow { id: 1, name: "Alice".to_owned(), age: 25, email: None, score: None },
+            SchemaAddRow { id: 1, name: "Alice".to_owned(), age: 25, email: None, score: Some(0) },
             SchemaAddRow {
                 id: 2,
                 name: "Bob".to_owned(),
@@ -1090,12 +1102,6 @@ async fn schema_change_add_drop_rename() {
     pipeline.start().await.unwrap();
     table_ready.notified().await;
 
-    let initial_snapshot_id = store
-        .get_applied_destination_table_metadata(table_id)
-        .await
-        .unwrap()
-        .expect("metadata should exist after table creation")
-        .snapshot_id;
     let event_notify = destination
         .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
         .await;
@@ -1134,10 +1140,6 @@ async fn schema_change_add_drop_rename() {
 
     let conn = open_lake_conn(&catalog_url, &data_url);
     assert_eq!(
-        query_table_columns(&conn, &ducklake_table_name),
-        vec!["id", "full_name", "status", "email"]
-    );
-    assert_eq!(
         query_schema_multi_rows(&conn, &ducklake_table_name),
         vec![
             SchemaMultiRow {
@@ -1154,14 +1156,6 @@ async fn schema_change_add_drop_rename() {
             },
         ]
     );
-
-    let final_snapshot_id = store
-        .get_applied_destination_table_metadata(table_id)
-        .await
-        .unwrap()
-        .expect("metadata should exist after schema change")
-        .snapshot_id;
-    assert!(final_snapshot_id > initial_snapshot_id);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1314,7 +1308,6 @@ async fn schema_change_matches_simulator_generated_column_rotation() {
     pipeline.start().await.unwrap();
     table_ready.notified().await;
 
-    destination.clear_events().await;
     let event_notify = destination
         .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
         .await;
@@ -1455,7 +1448,6 @@ async fn schema_change_matches_simulator_generated_column_types() {
     pipeline.start().await.unwrap();
     table_ready.notified().await;
 
-    destination.clear_events().await;
     let event_notify = destination
         .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
         .await;

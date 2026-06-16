@@ -32,14 +32,8 @@ fn test_column(
     nullable: bool,
     primary_key: bool,
 ) -> ColumnSchema {
-    ColumnSchema::new(
-        name.to_owned(),
-        typ,
-        modifier,
-        ordinal_position,
-        if primary_key { Some(1) } else { None },
-        nullable,
-    )
+    ColumnSchema::new(name.to_owned(), typ, modifier, ordinal_position, nullable)
+        .with_primary_key_ordinal_position(if primary_key { Some(1) } else { None })
 }
 
 fn create_sample_table_schema() -> TableSchema {
