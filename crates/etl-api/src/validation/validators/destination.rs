@@ -57,17 +57,6 @@ impl DestinationValidator {
 
     /// Builds the primary-key validator for destinations that require source
     /// primary keys.
-    ///
-    /// Keep this aligned with destination runtime checks:
-    /// - BigQuery always requires source primary keys because destination rows
-    ///   are keyed by the source primary key for initial loads and CDC.
-    /// - ClickHouse requires all source primary-key columns to be replicated
-    ///   when a source primary key exists, and `ReplacingMergeTree` also
-    ///   requires source primary keys because it uses them as the `ORDER BY`
-    ///   and deduplication key.
-    /// - Iceberg, DuckLake, and Snowflake do not require source primary keys.
-    ///   They still have their own replica identity requirements, handled by
-    ///   [`Self::replica_identity_validator`] and destination runtime checks.
     fn primary_key_validator(&self) -> Option<PrimaryKeyValidator> {
         let publication_name = self.publication_name.clone()?;
 

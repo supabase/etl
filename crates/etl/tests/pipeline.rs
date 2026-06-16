@@ -3,7 +3,7 @@ use std::time::Duration;
 use etl::{
     error::ErrorKind,
     state::{TableState, TableStateType},
-    store::{schema::SchemaStore, state::StateStore},
+    store::schema::SchemaStore,
     test_utils::{
         database::{spawn_source_database, test_table_name},
         event::{EventCondition, group_events_by_type_and_table_id},
