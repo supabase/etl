@@ -304,6 +304,10 @@ async fn validate_destination_fails_for_blocking_unsupported_replica_identity() 
         replica_identity_failure.reason.contains("UPDATE or DELETE"),
         "Failure reason should explain the operation risk"
     );
+    assert!(
+        replica_identity_failure.reason.contains("large TOAST-backed columns"),
+        "Failure reason should recommend full replica identity for TOAST-backed columns"
+    );
 
     drop_pg_database(&config).await;
 }
@@ -364,6 +368,10 @@ async fn validate_destination_warns_for_insert_only_unsupported_replica_identity
     assert!(
         replica_identity_failure.reason.contains("UPDATE or DELETE"),
         "Failure reason should explain the mutation risk"
+    );
+    assert!(
+        replica_identity_failure.reason.contains("large TOAST-backed columns"),
+        "Failure reason should recommend full replica identity for TOAST-backed columns"
     );
 
     drop_pg_database(&config).await;

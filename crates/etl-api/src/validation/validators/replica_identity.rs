@@ -162,7 +162,8 @@ impl Validator for ReplicaIdentityValidator {
                 format!(
                     "{} cannot safely replicate UPDATE or DELETE changes for these publication \
                      tables because their replica identity is unsupported: {}.\n\nSet each table \
-                     to {} before starting the pipeline.",
+                     to {} before starting the pipeline. If a table has large TOAST-backed \
+                     columns, `REPLICA IDENTITY FULL` is recommended.",
                     self.destination_name,
                     format_unsupported_tables(&unsupported_tables),
                     format_supported_identity_types(self.supported_identity_types),
@@ -175,7 +176,8 @@ impl Validator for ReplicaIdentityValidator {
                     "{} can start because this publication only replicates INSERT changes, but \
                      these tables use replica identities that would not support UPDATE or DELETE \
                      replication: {}.\n\nSet each table to {} before enabling UPDATE or DELETE on \
-                     the publication.",
+                     the publication. If a table has large TOAST-backed columns, `REPLICA \
+                     IDENTITY FULL` is recommended.",
                     self.destination_name,
                     format_unsupported_tables(&unsupported_tables),
                     format_supported_identity_types(self.supported_identity_types),
