@@ -885,7 +885,6 @@ where
                                         clickhouse_table_name,
                                         &change.new_column.name,
                                         &change.new_column.typ,
-                                        change.new_column.nullable,
                                         new_default_expression,
                                     )
                                     .await?;

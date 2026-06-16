@@ -22,10 +22,7 @@ use crate::clickhouse::{
         ETL_CLICKHOUSE_INSERT_ERRORS_TOTAL, ETL_CLICKHOUSE_INSERT_ROWS,
         ETL_CLICKHOUSE_SCHEMA_QUERY_DURATION_SECONDS, ETL_CLICKHOUSE_STATEMENTS_PER_BATCH,
     },
-    schema::{
-        clickhouse_column_type, clickhouse_default_clause, clickhouse_default_expression,
-        clickhouse_type,
-    },
+    schema::{clickhouse_column_type, clickhouse_default_clause, clickhouse_default_expression},
     sql::quote_identifier,
 };
 
@@ -178,16 +175,14 @@ fn build_set_default_sql(
     table_name: &str,
     column_name: &str,
     typ: &Type,
-    nullable: bool,
     default_expression: &str,
 ) -> Option<String> {
     let rendered_default_expression = clickhouse_default_expression(default_expression, typ)?;
-    let col_type = clickhouse_type(typ, nullable, false);
     let table_name = quote_identifier(table_name);
     let column_name = quote_identifier(column_name);
 
     Some(format!(
-        "ALTER TABLE {table_name} MODIFY COLUMN {column_name} {col_type} DEFAULT \
+        "ALTER TABLE {table_name} MODIFY COLUMN {column_name} DEFAULT \
          {rendered_default_expression}"
     ))
 }
@@ -518,11 +513,9 @@ impl ClickHouseClient {
         table_name: &str,
         column_name: &str,
         typ: &Type,
-        nullable: bool,
         default_expression: &str,
     ) -> EtlResult<()> {
-        let Some(sql) =
-            build_set_default_sql(table_name, column_name, typ, nullable, default_expression)
+        let Some(sql) = build_set_default_sql(table_name, column_name, typ, default_expression)
         else {
             return Ok(());
         };
@@ -731,6 +724,14 @@ mod tests {
         let sql = build_modify_column_sql("test_table", &column);
 
         assert_eq!(sql, "ALTER TABLE \"test_table\" MODIFY COLUMN \"score\" Int32 DEFAULT 42");
+    }
+
+    #[test]
+    fn set_default_sql_preserves_existing_column_type() {
+        let sql =
+            build_set_default_sql("test_table", "score", &Type::INT4, "42").expect("default sql");
+
+        assert_eq!(sql, "ALTER TABLE \"test_table\" MODIFY COLUMN \"score\" DEFAULT 42");
     }
 
     #[test]
