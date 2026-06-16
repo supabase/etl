@@ -3,7 +3,7 @@ use etl_api::{
     validation::{FailureType, validate_destination},
 };
 use etl_config::{SerializableSecretString, shared::ClickHouseEngine};
-use etl_postgres::sqlx::test_utils::drop_pg_database;
+use etl_postgres::{sqlx::test_utils::drop_pg_database, version::POSTGRES_15};
 use sqlx::Executor;
 use url::Url;
 
@@ -181,6 +181,110 @@ async fn validate_destination_allows_clickhouse_merge_tree_table_without_primary
     assert!(
         primary_key_failure.is_none(),
         "ClickHouse MergeTree should allow source tables without primary keys"
+    );
+
+    drop_pg_database(&config).await;
+}
+
+#[tokio::test]
+async fn validate_destination_fails_when_bigquery_column_list_omits_primary_key_column() {
+    let (ctx, pool, config) = create_validation_context_with_source().await;
+
+    let server_version_num: i32 =
+        sqlx::query_scalar("select current_setting('server_version_num')::int")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    if server_version_num < POSTGRES_15 {
+        drop_pg_database(&config).await;
+        return;
+    }
+
+    pool.execute(
+        "create table omitted_pk_column_bigquery_table (
+            id integer not null,
+            account_id integer not null,
+            name text,
+            primary key (id, account_id)
+        )",
+    )
+    .await
+    .unwrap();
+    pool.execute(
+        "create publication omitted_pk_column_bigquery_pub
+         for table omitted_pk_column_bigquery_table (id, name)
+         with (publish = 'insert')",
+    )
+    .await
+    .unwrap();
+
+    let pipeline_config = create_pipeline_config("omitted_pk_column_bigquery_pub");
+    let failures = validate_destination(&ctx, &create_bigquery_config(), Some(&pipeline_config))
+        .await
+        .unwrap();
+
+    let primary_key_failure = failures
+        .iter()
+        .find(|failure| failure.name == "Source Primary Key Columns Required")
+        .expect("Should fail when BigQuery source primary-key columns are omitted");
+    assert_eq!(primary_key_failure.failure_type, FailureType::Critical);
+    assert!(
+        primary_key_failure.reason.contains("omitted_pk_column_bigquery_table (account_id)"),
+        "Failure reason should mention the table and omitted primary-key column"
+    );
+
+    drop_pg_database(&config).await;
+}
+
+#[tokio::test]
+async fn validate_destination_fails_when_clickhouse_merge_tree_omits_primary_key_column() {
+    let (ctx, pool, config) = create_validation_context_with_source().await;
+
+    let server_version_num: i32 =
+        sqlx::query_scalar("select current_setting('server_version_num')::int")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    if server_version_num < POSTGRES_15 {
+        drop_pg_database(&config).await;
+        return;
+    }
+
+    pool.execute(
+        "create table omitted_pk_column_clickhouse_table (
+            id integer not null,
+            account_id integer not null,
+            name text,
+            primary key (id, account_id)
+        )",
+    )
+    .await
+    .unwrap();
+    pool.execute(
+        "create publication omitted_pk_column_clickhouse_pub
+         for table omitted_pk_column_clickhouse_table (id, name)
+         with (publish = 'insert')",
+    )
+    .await
+    .unwrap();
+
+    let pipeline_config = create_pipeline_config("omitted_pk_column_clickhouse_pub");
+    let failures = validate_destination(
+        &ctx,
+        &create_clickhouse_config(ClickHouseEngine::MergeTree),
+        Some(&pipeline_config),
+    )
+    .await
+    .unwrap();
+
+    let primary_key_failure = failures
+        .iter()
+        .find(|failure| failure.name == "Source Primary Key Columns Required")
+        .expect("Should fail when ClickHouse source primary-key columns are omitted");
+    assert_eq!(primary_key_failure.failure_type, FailureType::Critical);
+    assert!(
+        primary_key_failure.reason.contains("omitted_pk_column_clickhouse_table (account_id)"),
+        "Failure reason should mention the table and omitted primary-key column"
     );
 
     drop_pg_database(&config).await;

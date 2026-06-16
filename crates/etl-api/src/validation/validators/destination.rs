@@ -61,12 +61,13 @@ impl DestinationValidator {
     /// Keep this aligned with destination runtime checks:
     /// - BigQuery always requires source primary keys because destination rows
     ///   are keyed by the source primary key for initial loads and CDC.
-    /// - ClickHouse `ReplacingMergeTree` requires source primary keys because
-    ///   it uses them as the `ORDER BY` and deduplication key.
-    /// - ClickHouse `MergeTree`, Iceberg, DuckLake, and Snowflake do not
-    ///   require source primary keys. They still have their own replica
-    ///   identity requirements, handled by [`Self::replica_identity_validator`]
-    ///   and destination runtime checks.
+    /// - ClickHouse requires all source primary-key columns to be replicated
+    ///   when a source primary key exists, and `ReplacingMergeTree` also
+    ///   requires source primary keys because it uses them as the `ORDER BY`
+    ///   and deduplication key.
+    /// - Iceberg, DuckLake, and Snowflake do not require source primary keys.
+    ///   They still have their own replica identity requirements, handled by
+    ///   [`Self::replica_identity_validator`] and destination runtime checks.
     fn primary_key_validator(&self) -> Option<PrimaryKeyValidator> {
         let publication_name = self.publication_name.clone()?;
 
@@ -76,6 +77,7 @@ impl DestinationValidator {
                 "BigQuery",
                 "BigQuery uses the source primary key to match rows during initial loads, \
                  upserts, deletes, and updates that change primary-key values.",
+                true,
             )),
             FullApiDestinationConfig::ClickHouse {
                 engine: ClickHouseEngine::ReplacingMergeTree,
@@ -85,6 +87,16 @@ impl DestinationValidator {
                 "ClickHouse ReplacingMergeTree",
                 "ClickHouse ReplacingMergeTree uses the source primary key as the ORDER BY and \
                  deduplication key.",
+                true,
+            )),
+            FullApiDestinationConfig::ClickHouse {
+                engine: ClickHouseEngine::MergeTree, ..
+            } => Some(PrimaryKeyValidator::new(
+                publication_name,
+                "ClickHouse MergeTree",
+                "ClickHouse uses replicated source primary-key columns to apply row-level updates \
+                 and deletes when a source primary key exists.",
+                false,
             )),
             _ => None,
         }
