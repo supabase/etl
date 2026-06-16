@@ -160,16 +160,6 @@ fn build_rename_column_sql(table_name: &str, old_name: &str, new_name: &str) -> 
     format!("ALTER TABLE {table_name} RENAME COLUMN IF EXISTS {old_name} TO {new_name}")
 }
 
-/// Builds the SQL used to modify a ClickHouse column type and default.
-fn build_modify_column_sql(table_name: &str, column: &etl::types::ColumnSchema) -> String {
-    let default_clause = clickhouse_default_clause(column).unwrap_or_default();
-    let col_type = clickhouse_column_type(column, false);
-    let table_name = quote_identifier(table_name);
-    let column_name = quote_identifier(&column.name);
-
-    format!("ALTER TABLE {table_name} MODIFY COLUMN {column_name} {col_type}{default_clause}")
-}
-
 /// Builds the SQL used to set a supported column default in ClickHouse.
 fn build_set_default_sql(
     table_name: &str,
@@ -497,16 +487,6 @@ impl ClickHouseClient {
         self.execute_ddl(DdlKind::RenameColumn, &sql).await
     }
 
-    /// Modifies the ClickHouse column definition.
-    pub(crate) async fn modify_column(
-        &self,
-        table_name: &str,
-        column: &etl::types::ColumnSchema,
-    ) -> EtlResult<()> {
-        let sql = build_modify_column_sql(table_name, column);
-        self.execute_ddl(DdlKind::ModifyColumn, &sql).await
-    }
-
     /// Sets a supported default expression on a ClickHouse column.
     pub(crate) async fn set_column_default(
         &self,
@@ -714,16 +694,6 @@ mod tests {
             "ALTER TABLE \"test_table\" ADD COLUMN IF NOT EXISTS \"score\" Nullable(Int32) \
              DEFAULT 42 AFTER \"id\""
         );
-    }
-
-    #[test]
-    fn modify_column_sql_includes_supported_default() {
-        let column = ColumnSchema::new("score".to_owned(), Type::INT4, -1, 1, false)
-            .with_primary_key(1)
-            .with_default_expression("42".to_owned());
-        let sql = build_modify_column_sql("test_table", &column);
-
-        assert_eq!(sql, "ALTER TABLE \"test_table\" MODIFY COLUMN \"score\" Int32 DEFAULT 42");
     }
 
     #[test]

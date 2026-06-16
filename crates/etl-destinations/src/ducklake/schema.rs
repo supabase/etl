@@ -262,22 +262,6 @@ pub(super) fn build_drop_default_sql_ducklake(table_name: &str, column_name: &st
     format!("alter table {table_name} alter column {column_name} drop default")
 }
 
-/// Builds a DuckLake `alter table alter column set not null` statement.
-pub(super) fn build_set_not_null_sql_ducklake(table_name: &str, column_name: &str) -> String {
-    let table_name = qualified_lake_table_name(table_name);
-    let column_name = quote_identifier(column_name);
-
-    format!("alter table {table_name} alter column {column_name} set not null")
-}
-
-/// Builds a DuckLake `alter table alter column drop not null` statement.
-pub(super) fn build_drop_not_null_sql_ducklake(table_name: &str, column_name: &str) -> String {
-    let table_name = qualified_lake_table_name(table_name);
-    let column_name = quote_identifier(column_name);
-
-    format!("alter table {table_name} alter column {column_name} drop not null")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -428,14 +412,6 @@ mod tests {
         assert_eq!(
             build_drop_default_sql_ducklake("table\"name", "status\"value"),
             r#"alter table "lake"."table""name" alter column "status""value" drop default"#
-        );
-        assert_eq!(
-            build_set_not_null_sql_ducklake("table\"name", "status\"value"),
-            r#"alter table "lake"."table""name" alter column "status""value" set not null"#
-        );
-        assert_eq!(
-            build_drop_not_null_sql_ducklake("table\"name", "status\"value"),
-            r#"alter table "lake"."table""name" alter column "status""value" drop not null"#
         );
     }
 }

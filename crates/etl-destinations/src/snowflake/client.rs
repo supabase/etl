@@ -209,11 +209,13 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
                 match modification {
                     ColumnModification::Rename { .. } => {}
                     ColumnModification::Nullability { old_nullable, new_nullable } => {
-                        if !old_nullable && *new_nullable {
-                            self.sql_client
-                                .drop_column_not_null(table_name, &change.new_column.name)
-                                .await?;
-                        }
+                        warn!(
+                            table_name,
+                            column_name = %change.new_column.name,
+                            old_nullable,
+                            new_nullable,
+                            "skipping source column nullability change for Snowflake"
+                        );
                     }
                     ColumnModification::Default { old_expression, new_expression } => {
                         if new_expression.is_some() {

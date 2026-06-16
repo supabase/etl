@@ -1077,26 +1077,6 @@ impl BigQueryClient {
         Ok(())
     }
 
-    /// Drops a NOT NULL constraint from a BigQuery column.
-    pub async fn drop_column_not_null(
-        &self,
-        dataset_id: &BigQueryDatasetId,
-        table_id: &BigQueryTableId,
-        column_name: &str,
-    ) -> EtlResult<()> {
-        let full_table_name = self.full_table_name(dataset_id, table_id)?;
-        let column_name = quote_identifier(column_name, "BigQuery column name")?;
-
-        info!("dropping not null for column {column_name} in table {full_table_name} in BigQuery");
-
-        let query =
-            format!("alter table {full_table_name} alter column {column_name} drop not null");
-
-        let _ = self.query(QueryRequest::new(query)).await?;
-
-        Ok(())
-    }
-
     /// Checks whether a table exists in the BigQuery dataset.
     ///
     /// Returns `true` if the table exists, `false` otherwise.

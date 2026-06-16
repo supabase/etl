@@ -8,8 +8,8 @@ description: How ETL handles DDL and evolving table schemas.
 ETL supports schema changes, and this area is actively being improved. The
 current implementation is intentionally conservative: the source-side event
 trigger captures a rich PostgreSQL-shaped snapshot, while ETL currently models
-well-understood column changes: **adds, drops, renames, nullability changes, and
-column default changes**. Built-in destination support varies by destination DDL
+well-understood column changes: **adds, drops, renames, and column default
+changes**. Built-in destination support varies by destination DDL
 capabilities. **BigQuery, ClickHouse, DuckLake, and Snowflake** apply supported
 schema changes automatically; Iceberg is deprecated for new deployments and does
 not support schema-change DDL.
@@ -26,8 +26,8 @@ changes:
 | Rename a replicated column | Rename column |
 | Change a replicated column default | Column default modification |
 | Drop a replicated column default | Column default removal |
-| Drop `NOT NULL` from a replicated column | Nullability modification |
-| Set `NOT NULL` on a replicated column | Destination-specific nullability modification |
+| Drop `NOT NULL` from a replicated column | Detected in the schema snapshot, but not applied to built-in destinations |
+| Set `NOT NULL` on a replicated column | Detected in the schema snapshot, but not applied to built-in destinations |
 | Several of the above in one statement | One schema snapshot, diffed into column additions, removals, and grouped column modifications |
 
 When several attributes of the same logical column change at once, ETL groups
@@ -73,10 +73,10 @@ ETL has one shared schema-change signal, but **DDL behavior is implemented per d
 
 | Destination | Current DDL behavior |
 |-------------|----------------------|
-| BigQuery | Supports add, drop, rename, supported literal default metadata, and dropping `NOT NULL`. BigQuery requires added columns to be nullable and does not backfill existing rows for `ADD COLUMN ... DEFAULT`. |
-| ClickHouse | Supports add, drop, rename, supported literal defaults, and nullability changes. `ReplacingMergeTree` rejects primary-key drops or renames because the ordering expression cannot be rewritten safely. ClickHouse default expressions are metadata-only unless explicitly materialized; ETL does not issue `MATERIALIZE COLUMN`. |
-| DuckLake | Supports add, drop, rename, supported literal defaults, and nullability changes. DuckLake records supported add-time defaults as metadata without rewriting existing data files. |
-| Snowflake | Supports add, drop, rename, create-table literal defaults, literal add-column defaults, and dropping `NOT NULL`. Literal defaults are included in `ADD COLUMN` so Snowflake can expose add-time default values for existing rows; non-literal defaults and later default changes are skipped with a warning. |
+| BigQuery | Supports add, drop, rename, and supported literal default metadata. BigQuery requires added columns to be nullable and does not backfill existing rows for `ADD COLUMN ... DEFAULT`. |
+| ClickHouse | Supports add, drop, rename, and supported literal defaults. `ReplacingMergeTree` rejects primary-key drops or renames because the ordering expression cannot be rewritten safely. ClickHouse default expressions are metadata-only unless explicitly materialized; ETL does not issue `MATERIALIZE COLUMN`. |
+| DuckLake | Supports add, drop, rename, and supported literal defaults. DuckLake records supported add-time defaults as metadata without rewriting existing data files. |
+| Snowflake | Supports add, drop, rename, create-table literal defaults, and literal add-column defaults. Literal defaults are included in `ADD COLUMN` so Snowflake can expose add-time default values for existing rows; non-literal defaults and later default changes are skipped with a warning. |
 | Iceberg | Deprecated for now. Schema-change DDL is not a supported path for new deployments. |
 | Custom destinations | Destination authors decide which `Event::Relation` changes to apply, reject, or handle manually. |
 
@@ -199,7 +199,7 @@ The current diff rules are:
 
 - Same ordinal position, different name: column rename.
 - Same ordinal position, different default expression: column default change.
-- Same ordinal position, different nullability: column nullability change.
+- Same ordinal position, different nullability: detected schema metadata change.
 - Old ordinal position missing from the new schema: column drop.
 - New ordinal position missing from the old schema: column add.
 
@@ -222,8 +222,7 @@ A practical flow is:
    `ReplicatedTableSchema`.
 4. Mark destination metadata as `Applying` if the destination needs recovery
    bookkeeping for the DDL transition.
-5. Apply supported destination DDL for adds, drops, renames, nullability changes,
-   and default changes.
+5. Apply supported destination DDL for adds, drops, renames, and default changes.
 6. Mark destination metadata as `Applied` only after the destination schema is
    actually ready for following row events.
 7. Process following row events with the new schema.
@@ -250,9 +249,6 @@ ETL currently supports the simplest safe cases:
   setting compatible default metadata.
 - `ALTER TABLE ... ALTER COLUMN ... DROP DEFAULT` where the destination supports
   removing default metadata safely.
-- `ALTER TABLE ... ALTER COLUMN ... DROP NOT NULL`.
-- `ALTER TABLE ... ALTER COLUMN ... SET NOT NULL` where the destination can
-  apply it safely.
 - Multi-subcommand `ALTER TABLE` statements composed of those simple changes.
 - Changes to published permanent tables only.
 
@@ -298,9 +294,10 @@ These behaviors are **not full destination DDL semantics** yet:
   without ETL issuing a materialization rewrite. Snowflake only receives
   add-column defaults for source defaults that can be rendered as Snowflake
   literals.
-- Tightening nullability with `SET NOT NULL` is destination-specific and may
-  fail if existing destination data violates the constraint. BigQuery and
-  Snowflake currently automate only `DROP NOT NULL`.
+- Built-in destinations only enforce source column nullability when creating a
+  destination table. Streaming schema changes do not apply `SET NOT NULL` or
+  `DROP NOT NULL`; newly added columns remain nullable where the destination
+  requires that for historical rows.
 - The trigger payload includes `current_query` for debugging only. It can
   contain literals and multiple statements, so it must not be treated as
   replayable DDL.

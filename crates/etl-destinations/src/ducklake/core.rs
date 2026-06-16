@@ -71,8 +71,7 @@ use crate::{
         schema::{
             build_add_column_sql_ducklake, build_create_table_sql_ducklake,
             build_drop_column_sql_ducklake, build_drop_default_sql_ducklake,
-            build_drop_not_null_sql_ducklake, build_rename_column_sql_ducklake,
-            build_set_default_sql_ducklake, build_set_not_null_sql_ducklake,
+            build_rename_column_sql_ducklake, build_set_default_sql_ducklake,
             supports_column_default_ducklake,
         },
         sql::qualified_lake_table_name,
@@ -677,16 +676,14 @@ fn plan_schema_diff_sql_ducklake(
         for modification in &change.modifications {
             match modification {
                 ColumnModification::Rename { .. } => {}
-                ColumnModification::Nullability { new_nullable, .. } => {
-                    let sql = if *new_nullable {
-                        build_drop_not_null_sql_ducklake(table_name, &change.new_column.name)
-                    } else {
-                        build_set_not_null_sql_ducklake(table_name, &change.new_column.name)
-                    };
-                    statements.push(DuckLakeSchemaDdlStatement {
-                        sql,
-                        error_description: "DuckLake alter table column nullability failed",
-                    });
+                ColumnModification::Nullability { old_nullable, new_nullable } => {
+                    warn!(
+                        table_name = %table_name,
+                        column_name = %change.new_column.name,
+                        old_nullable,
+                        new_nullable,
+                        "skipping source column nullability change for DuckLake"
+                    );
                 }
                 ColumnModification::Default { old_expression, new_expression } => {
                     let old_default_was_supported =

@@ -864,10 +864,14 @@ where
             for modification in &change.modifications {
                 match modification {
                     ColumnModification::Rename { .. } => {}
-                    ColumnModification::Nullability { .. } => {
-                        self.client
-                            .modify_column(clickhouse_table_name, &change.new_column)
-                            .await?;
+                    ColumnModification::Nullability { old_nullable, new_nullable } => {
+                        warn!(
+                            table_name = %clickhouse_table_name,
+                            column_name = %change.new_column.name,
+                            old_nullable,
+                            new_nullable,
+                            "skipping source column nullability change for ClickHouse"
+                        );
                     }
                     ColumnModification::Default { old_expression, new_expression } => {
                         let old_default_was_supported =
