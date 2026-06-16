@@ -5,12 +5,17 @@ use etl_postgres::{
     replication::slots::EtlReplicationSlot,
     types::{ReplicatedTableSchema, ReplicationMask, SchemaError, TableId},
 };
+#[cfg(feature = "failpoints")]
+use fail::fail_point;
 use metrics::histogram;
 use tokio_postgres::types::PgLsn;
 use tracing::{debug, info, warn};
 
 #[cfg(feature = "failpoints")]
-use crate::failpoints::{START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP, etl_fail_point};
+use crate::failpoints::{
+    START_TABLE_SYNC_AFTER_FINISHED_COPY_FP, START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP,
+    etl_fail_point,
+};
 use crate::{
     bail,
     concurrency::{BatchBudgetController, MemoryMonitor, ShutdownRx},
@@ -375,6 +380,9 @@ where
             // message will be received, so we want the apply worker to already be able to
             // start decoding.
             shared_table_cache.note_ready(table_id, replicated_table_schema.clone()).await;
+
+            #[cfg(feature = "failpoints")]
+            fail_point!(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP);
 
             slot.consistent_point
         }

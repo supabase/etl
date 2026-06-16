@@ -11,6 +11,8 @@ use tokio::{
 };
 use tracing::{Instrument, debug, error, info, warn};
 
+#[cfg(feature = "failpoints")]
+use crate::failpoints::{TABLE_SYNC_WORKER_BEFORE_STREAMING_FP, etl_fail_point};
 use crate::{
     bail,
     concurrency::{BatchBudgetController, MemoryMonitor, ShutdownResult, ShutdownRx},
@@ -761,6 +763,11 @@ where
                 return Err(err);
             }
         };
+
+        // Let tests fail after the apply worker has entered `Catchup`, so they
+        // cover the apply worker unblocking on `Errored`.
+        #[cfg(feature = "failpoints")]
+        etl_fail_point(TABLE_SYNC_WORKER_BEFORE_STREAMING_FP)?;
 
         let worker_context = WorkerContext::TableSync(TableSyncWorkerContext {
             table_id: self.table_id,
