@@ -206,7 +206,7 @@ mod tests {
     use crate::snowflake::encoding::{CdcMeta, CdcOperation};
 
     fn col(name: &str) -> ColumnSchema {
-        ColumnSchema::new(name.to_owned(), Type::TEXT, -1, 1, None, true)
+        ColumnSchema::new(name.to_owned(), Type::TEXT, -1, 1, true)
     }
 
     fn incompressible_string(len: usize, seed: u64) -> String {

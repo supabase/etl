@@ -8,6 +8,7 @@ use clickhouse::Client;
 use etl::{
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
+    types::Type,
 };
 use url::Url;
 
@@ -21,7 +22,7 @@ use crate::clickhouse::{
         ETL_CLICKHOUSE_INSERT_ERRORS_TOTAL, ETL_CLICKHOUSE_INSERT_ROWS,
         ETL_CLICKHOUSE_SCHEMA_QUERY_DURATION_SECONDS, ETL_CLICKHOUSE_STATEMENTS_PER_BATCH,
     },
-    schema::clickhouse_column_type,
+    schema::{clickhouse_column_type, clickhouse_default_clause, clickhouse_default_expression},
     sql::quote_identifier,
 };
 
@@ -133,12 +134,14 @@ fn build_add_column_sql(
     after_column: Option<&str>,
 ) -> String {
     let col_type = clickhouse_column_type(column, true);
+    let default_clause = clickhouse_default_clause(column).unwrap_or_default();
     let table_name = quote_identifier(table_name);
     let column_name = quote_identifier(&column.name);
     let placement = add_column_placement_clause(after_column);
 
     format!(
-        "ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS {column_name} {col_type} {placement}"
+        "ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS {column_name} \
+         {col_type}{default_clause} {placement}"
     )
 }
 
@@ -155,6 +158,31 @@ fn build_rename_column_sql(table_name: &str, old_name: &str, new_name: &str) -> 
     let old_name = quote_identifier(old_name);
     let new_name = quote_identifier(new_name);
     format!("ALTER TABLE {table_name} RENAME COLUMN IF EXISTS {old_name} TO {new_name}")
+}
+
+/// Builds the SQL used to set a supported column default in ClickHouse.
+fn build_set_default_sql(
+    table_name: &str,
+    column_name: &str,
+    typ: &Type,
+    default_expression: &str,
+) -> Option<String> {
+    let rendered_default_expression = clickhouse_default_expression(default_expression, typ)?;
+    let table_name = quote_identifier(table_name);
+    let column_name = quote_identifier(column_name);
+
+    Some(format!(
+        "ALTER TABLE {table_name} MODIFY COLUMN {column_name} DEFAULT \
+         {rendered_default_expression}"
+    ))
+}
+
+/// Builds the SQL used to drop a column default in ClickHouse.
+fn build_drop_default_sql(table_name: &str, column_name: &str) -> String {
+    let table_name = quote_identifier(table_name);
+    let column_name = quote_identifier(column_name);
+
+    format!("ALTER TABLE {table_name} MODIFY COLUMN {column_name} REMOVE DEFAULT")
 }
 
 /// Builds the SQL used to truncate a ClickHouse table.
@@ -188,6 +216,7 @@ pub(crate) enum DdlKind {
     AddColumn,
     DropColumn,
     RenameColumn,
+    ModifyColumn,
 }
 
 impl DdlKind {
@@ -201,6 +230,7 @@ impl DdlKind {
             DdlKind::AddColumn => "add_column",
             DdlKind::DropColumn => "drop_column",
             DdlKind::RenameColumn => "rename_column",
+            DdlKind::ModifyColumn => "modify_column",
         }
     }
 }
@@ -457,6 +487,32 @@ impl ClickHouseClient {
         self.execute_ddl(DdlKind::RenameColumn, &sql).await
     }
 
+    /// Sets a supported default expression on a ClickHouse column.
+    pub(crate) async fn set_column_default(
+        &self,
+        table_name: &str,
+        column_name: &str,
+        typ: &Type,
+        default_expression: &str,
+    ) -> EtlResult<()> {
+        let Some(sql) = build_set_default_sql(table_name, column_name, typ, default_expression)
+        else {
+            return Ok(());
+        };
+
+        self.execute_ddl(DdlKind::ModifyColumn, &sql).await
+    }
+
+    /// Drops a default expression from a ClickHouse column.
+    pub(crate) async fn drop_column_default(
+        &self,
+        table_name: &str,
+        column_name: &str,
+    ) -> EtlResult<()> {
+        let sql = build_drop_default_sql(table_name, column_name);
+        self.execute_ddl(DdlKind::ModifyColumn, &sql).await
+    }
+
     /// Executes `TRUNCATE TABLE IF EXISTS` for the supplied table.
     pub(crate) async fn truncate_table(&self, table_name: &str) -> EtlResult<()> {
         let ddl_start = Instant::now();
@@ -598,6 +654,7 @@ mod tests {
             ordinal_position: 1,
             primary_key_ordinal_position: Some(1),
             nullable: false,
+            default_expression: None,
         }
     }
 
@@ -622,6 +679,38 @@ mod tests {
             sql,
             "ALTER TABLE \"test_table\" ADD COLUMN IF NOT EXISTS \"only_col\" Nullable(Int32) \
              FIRST"
+        );
+    }
+
+    #[test]
+    fn add_column_sql_includes_supported_default() {
+        let column = ColumnSchema::new("score".to_owned(), Type::INT4, -1, 1, false)
+            .with_primary_key(1)
+            .with_default_expression("42".to_owned());
+        let sql = build_add_column_sql("test_table", &column, Some("id"));
+
+        assert_eq!(
+            sql,
+            "ALTER TABLE \"test_table\" ADD COLUMN IF NOT EXISTS \"score\" Nullable(Int32) \
+             DEFAULT 42 AFTER \"id\""
+        );
+    }
+
+    #[test]
+    fn set_default_sql_preserves_existing_column_type() {
+        let sql =
+            build_set_default_sql("test_table", "score", &Type::INT4, "42").expect("default sql");
+
+        assert_eq!(sql, "ALTER TABLE \"test_table\" MODIFY COLUMN \"score\" DEFAULT 42");
+    }
+
+    #[test]
+    fn drop_default_sql_quotes_identifiers() {
+        let sql = build_drop_default_sql("table\"name", "old\"column");
+
+        assert_eq!(
+            sql,
+            "ALTER TABLE \"table\\\"name\" MODIFY COLUMN \"old\\\"column\" REMOVE DEFAULT"
         );
     }
 

@@ -60,8 +60,8 @@ async fn channel_open_insert_status_drop() {
 
         // Insert rows.
         let cols = [
-            ColumnSchema::new("id".into(), Type::INT4, -1, 1, None, true),
-            ColumnSchema::new("name".into(), Type::TEXT, -1, 2, None, true),
+            ColumnSchema::new("id".into(), Type::INT4, -1, 1, true),
+            ColumnSchema::new("name".into(), Type::TEXT, -1, 2, true),
         ];
         let offset: OffsetToken = "0000000000000001/0000000000000001".parse().unwrap();
         let batch = build_batch(
@@ -131,8 +131,8 @@ async fn channel_reopen_preserves_offset() {
             .expect("open_channel failed");
 
         let cols = [
-            ColumnSchema::new("id".into(), Type::INT4, -1, 1, None, true),
-            ColumnSchema::new("name".into(), Type::TEXT, -1, 2, None, true),
+            ColumnSchema::new("id".into(), Type::INT4, -1, 1, true),
+            ColumnSchema::new("name".into(), Type::TEXT, -1, 2, true),
         ];
         let offset: OffsetToken = "0000000000000001/0000000000000000".parse().unwrap();
         let batch = build_batch(
@@ -235,8 +235,8 @@ async fn continuation_token() {
             .expect("open_channel failed");
 
         let cols = [
-            ColumnSchema::new("id".into(), Type::INT4, -1, 1, None, true),
-            ColumnSchema::new("name".into(), Type::TEXT, -1, 2, None, true),
+            ColumnSchema::new("id".into(), Type::INT4, -1, 1, true),
+            ColumnSchema::new("name".into(), Type::TEXT, -1, 2, true),
         ];
 
         // Batch 1

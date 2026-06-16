@@ -17,7 +17,7 @@ use etl::{
     state::destination_table_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus},
     store::DestinationStore,
     types::{
-        Cell, Event, EventSequenceKey, IdentityType, OldTableRow, PipelineId,
+        Cell, ColumnModification, Event, EventSequenceKey, IdentityType, OldTableRow, PipelineId,
         ReplicatedTableSchema, SchemaDiff, TableId, TableName, TableRow, UpdatedTableRow,
     },
 };
@@ -820,11 +820,11 @@ where
         }
 
         info!(
-            "applying schema changes to table {}: {} additions, {} removals, {} renames",
+            "applying schema changes to table {}: {} additions, {} removals, {} column changes",
             sequenced_bigquery_table_id,
             diff.columns_to_add.len(),
             diff.columns_to_remove.len(),
-            diff.columns_to_rename.len()
+            diff.columns_to_change.len()
         );
 
         // Apply column additions first (safest operation).
@@ -832,19 +832,109 @@ where
             self.client
                 .add_column(&self.dataset_id, &sequenced_bigquery_table_id.to_string(), column)
                 .await?;
+            if let Some(default_expression) = column.default_expression.as_deref() {
+                self.client
+                    .set_column_default(
+                        &self.dataset_id,
+                        &sequenced_bigquery_table_id.to_string(),
+                        &column.name,
+                        &column.typ,
+                        default_expression,
+                    )
+                    .await?;
+            }
         }
 
-        // Apply column renames (must be done before removals in case of position
-        // conflicts).
-        for rename in &diff.columns_to_rename {
-            self.client
-                .rename_column(
-                    &self.dataset_id,
-                    &sequenced_bigquery_table_id.to_string(),
-                    &rename.old_name,
-                    &rename.new_name,
-                )
-                .await?;
+        // Apply column renames before other changes so subsequent DDL targets
+        // the new column name.
+        for change in &diff.columns_to_change {
+            for modification in &change.modifications {
+                let ColumnModification::Rename { old_name, new_name } = modification else {
+                    continue;
+                };
+
+                self.client
+                    .rename_column(
+                        &self.dataset_id,
+                        &sequenced_bigquery_table_id.to_string(),
+                        old_name,
+                        new_name,
+                    )
+                    .await?;
+            }
+        }
+
+        for change in &diff.columns_to_change {
+            for modification in &change.modifications {
+                match modification {
+                    ColumnModification::Rename { .. } => {}
+                    ColumnModification::Nullability { old_nullable, new_nullable } => {
+                        warn!(
+                            table_id = %table_id,
+                            column_name = %change.new_column.name,
+                            old_nullable,
+                            new_nullable,
+                            "skipping source column nullability change for BigQuery"
+                        );
+                    }
+                    ColumnModification::Default { old_expression, new_expression } => {
+                        let old_default_was_supported =
+                            old_expression.as_deref().is_some_and(|default_expression| {
+                                BigQueryClient::supports_column_default(
+                                    default_expression,
+                                    &change.old_column.typ,
+                                )
+                            });
+
+                        if let Some(new_default_expression) = new_expression.as_deref() {
+                            if BigQueryClient::supports_column_default(
+                                new_default_expression,
+                                &change.new_column.typ,
+                            ) {
+                                self.client
+                                    .set_column_default(
+                                        &self.dataset_id,
+                                        &sequenced_bigquery_table_id.to_string(),
+                                        &change.new_column.name,
+                                        &change.new_column.typ,
+                                        new_default_expression,
+                                    )
+                                    .await?;
+                            } else {
+                                warn!(
+                                    table_id = %table_id,
+                                    column_name = %change.new_column.name,
+                                    "skipping unsupported source column default for BigQuery"
+                                );
+                                if old_default_was_supported {
+                                    self.client
+                                        .drop_column_default(
+                                            &self.dataset_id,
+                                            &sequenced_bigquery_table_id.to_string(),
+                                            &change.new_column.name,
+                                        )
+                                        .await?;
+                                }
+                            }
+                        } else if old_default_was_supported {
+                            self.client
+                                .drop_column_default(
+                                    &self.dataset_id,
+                                    &sequenced_bigquery_table_id.to_string(),
+                                    &change.new_column.name,
+                                )
+                                .await?;
+                        } else if old_expression.is_some() {
+                            warn!(
+                                table_id = %table_id,
+                                column_name = %change.new_column.name,
+                                "skipping source column default removal for BigQuery because no \
+                                 supported destination default was set"
+                            );
+                        }
+                    }
+                }
+            }
         }
 
         // Apply column removals last.
@@ -1748,8 +1838,8 @@ mod tests {
             TableId::new(1),
             TableName::new("public".to_owned(), "users".to_owned()),
             vec![
-                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
-                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true),
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true),
             ],
         ));
         let replication_mask = etl::types::ReplicationMask::all(&table_schema);
@@ -1768,9 +1858,10 @@ mod tests {
             TableId::new(1),
             TableName::new("public".to_owned(), "users".to_owned()),
             vec![
-                ColumnSchema::new("tenant_id".to_owned(), Type::INT4, -1, 1, Some(1), false),
-                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 2, Some(2), false),
-                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 3, None, true),
+                ColumnSchema::new("tenant_id".to_owned(), Type::INT4, -1, 1, false)
+                    .with_primary_key(1),
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 2, false).with_primary_key(2),
+                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 3, true),
             ],
         ));
         let replication_mask = etl::types::ReplicationMask::from_bytes(vec![0, 1, 1]);
@@ -2309,9 +2400,9 @@ mod tests {
             TableId::new(1),
             TableName::new("public".to_owned(), "users".to_owned()),
             vec![
-                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
-                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, false),
-                ColumnSchema::new("age".to_owned(), Type::INT4, -1, 3, None, false),
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, false),
+                ColumnSchema::new("age".to_owned(), Type::INT4, -1, 3, false),
             ],
         ));
         let replicated_table_schema = ReplicatedTableSchema::from_masks(
@@ -2353,9 +2444,9 @@ mod tests {
             TableId::new(1),
             TableName::new("public".to_owned(), "users".to_owned()),
             vec![
-                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
-                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, false),
-                ColumnSchema::new("age".to_owned(), Type::INT4, -1, 3, None, false),
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, false),
+                ColumnSchema::new("age".to_owned(), Type::INT4, -1, 3, false),
             ],
         ));
         let replicated_table_schema = ReplicatedTableSchema::from_masks(

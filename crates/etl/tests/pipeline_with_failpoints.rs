@@ -319,10 +319,13 @@ async fn table_copy_is_consistent_after_data_sync_threw_an_error_with_timed_retr
 
     // Verify table schemas were correctly stored.
     let table_schemas = store.get_latest_table_schemas().await;
+    let mut expected_users_schema = database_schema.users_schema();
+    expected_users_schema.column_schemas[0].default_expression =
+        Some("nextval('test.users_id_seq'::regclass)".to_owned());
     assert_eq!(table_schemas.len(), 1);
     assert_eq!(
         *table_schemas.get(&database_schema.users_schema().id).unwrap(),
-        database_schema.users_schema()
+        expected_users_schema
     );
 }
 
@@ -372,10 +375,13 @@ async fn table_copy_is_consistent_during_data_sync_threw_an_error_with_timed_ret
 
     // Verify table schemas were correctly stored.
     let table_schemas = store.get_latest_table_schemas().await;
+    let mut expected_users_schema = database_schema.users_schema();
+    expected_users_schema.column_schemas[0].default_expression =
+        Some("nextval('test.users_id_seq'::regclass)".to_owned());
     assert_eq!(table_schemas.len(), 1);
     assert_eq!(
         *table_schemas.get(&database_schema.users_schema().id).unwrap(),
-        database_schema.users_schema()
+        expected_users_schema
     );
 }
 

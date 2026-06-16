@@ -3,7 +3,10 @@ use std::fmt;
 use etl::{
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
-    types::{Cell, ColumnSchema, PipelineId, ReplicatedTableSchema, Type, is_array_type},
+    types::{
+        Cell, ColumnSchema, DefaultExpression, PipelineId, ReplicatedTableSchema, Type,
+        is_array_type, parse_default_expression,
+    },
 };
 use gcp_bigquery_client::{
     Client,
@@ -73,7 +76,8 @@ const QUERY_RETRY_POLICY: RetryPolicy = RetryPolicy {
 };
 /// BigQuery response reasons that are transient even when surfaced with a 4xx
 /// status code.
-const TRANSIENT_BIGQUERY_QUERY_REASONS: &[&str] = &["backendError", "jobBackendError"];
+const TRANSIENT_BIGQUERY_QUERY_REASONS: &[&str] =
+    &["backendError", "jobBackendError", "jobRateLimitExceeded", "rateLimitExceeded"];
 /// Protobuf type name for BigQuery storage errors embedded in gRPC status
 /// details.
 const BIGQUERY_STORAGE_ERROR_TYPE_NAME: &str = "google.cloud.bigquery.storage.v1.StorageError";
@@ -958,8 +962,8 @@ impl BigQueryClient {
         info!("adding column {column_name} ({column_type}) to table {full_table_name} in BigQuery");
 
         // BigQuery requires new columns to be nullable (no NOT NULL constraint
-        // allowed). Also, we wouldn't be able to add it nonetheless since we
-        // don't have a way to set a default value for past columns.
+        // allowed). Defaults must be applied through a separate ALTER COLUMN
+        // statement because BigQuery rejects ADD COLUMN with a default value.
         let query = format!("alter table {full_table_name} add column {column_name} {column_type}");
 
         let _ = self.query(QueryRequest::new(query)).await?;
@@ -1007,6 +1011,66 @@ impl BigQueryClient {
         info!("renaming column {old_name} to {new_name} in table {full_table_name} in BigQuery");
 
         let query = format!("alter table {full_table_name} rename column {old_name} to {new_name}");
+
+        let _ = self.query(QueryRequest::new(query)).await?;
+
+        Ok(())
+    }
+
+    /// Sets a supported default expression on a BigQuery column.
+    pub async fn set_column_default(
+        &self,
+        dataset_id: &BigQueryDatasetId,
+        table_id: &BigQueryTableId,
+        column_name: &str,
+        typ: &Type,
+        default_expression: &str,
+    ) -> EtlResult<()> {
+        let Some(rendered_default_expression) = Self::default_expression(default_expression, typ)
+        else {
+            warn!(
+                dataset_id = %dataset_id,
+                table_id = %table_id,
+                column_name = %column_name,
+                "skipping unsupported source column default for BigQuery"
+            );
+            return Ok(());
+        };
+
+        let full_table_name = self.full_table_name(dataset_id, table_id)?;
+        let column_name = quote_identifier(column_name, "BigQuery column name")?;
+
+        info!("setting default for column {column_name} in table {full_table_name} in BigQuery");
+
+        let query = format!(
+            "alter table {full_table_name} alter column {column_name} set default \
+             {rendered_default_expression}"
+        );
+
+        let _ = self.query(QueryRequest::new(query)).await?;
+
+        Ok(())
+    }
+
+    /// Returns whether a column default can be represented in BigQuery SQL.
+    pub(crate) fn supports_column_default(default_expression: &str, typ: &Type) -> bool {
+        Self::default_expression(default_expression, typ).is_some()
+    }
+
+    /// Drops a default expression from a BigQuery column.
+    pub async fn drop_column_default(
+        &self,
+        dataset_id: &BigQueryDatasetId,
+        table_id: &BigQueryTableId,
+        column_name: &str,
+    ) -> EtlResult<()> {
+        let full_table_name = self.full_table_name(dataset_id, table_id)?;
+        let column_name = quote_identifier(column_name, "BigQuery column name")?;
+
+        info!("dropping default for column {column_name} in table {full_table_name} in BigQuery");
+
+        let query =
+            format!("alter table {full_table_name} alter column {column_name} drop default");
 
         let _ = self.query(QueryRequest::new(query)).await?;
 
@@ -1291,11 +1355,117 @@ impl BigQueryClient {
         let mut column_spec =
             format!("{} {}", column_name, Self::postgres_to_bigquery_type(&column_schema.typ));
 
+        if let Some(rendered_default_expression) =
+            column_schema.default_expression.as_deref().and_then(|default_expression| {
+                Self::default_expression(default_expression, &column_schema.typ)
+            })
+        {
+            column_spec.push_str(&format!(" default {rendered_default_expression}"));
+        } else if column_schema.default_expression.is_some() {
+            warn!(
+                column_name = %column_schema.name,
+                "skipping unsupported source column default for BigQuery table creation"
+            );
+        }
+
         if !column_schema.nullable && !is_array_type(&column_schema.typ) {
             column_spec.push_str(" not null");
         };
 
         Ok(column_spec)
+    }
+
+    /// Returns a rendered default expression for BigQuery, if supported.
+    fn default_expression(default_expression: &str, typ: &Type) -> Option<String> {
+        parse_default_expression(default_expression, typ)
+            .and_then(|expression| Self::render_default_expression(&expression, typ))
+    }
+
+    /// Renders a parsed default expression as BigQuery SQL.
+    fn render_default_expression(expression: &DefaultExpression, typ: &Type) -> Option<String> {
+        match expression {
+            DefaultExpression::StringLiteral(expression) => {
+                Self::is_bigquery_string_default_type(typ).then(|| expression.clone())
+            }
+            DefaultExpression::NumericLiteral(expression) => {
+                if Self::is_bigquery_numeric_default_type(typ) {
+                    Some(expression.clone())
+                } else if Self::is_bigquery_numeric_string_default_type(typ) {
+                    Some(Self::quote_numeric_literal_as_string(expression))
+                } else {
+                    None
+                }
+            }
+            DefaultExpression::BooleanLiteral(expression) => {
+                matches!(typ, &Type::BOOL).then(|| expression.clone())
+            }
+            DefaultExpression::DateLiteral(expression) => {
+                matches!(typ, &Type::DATE).then(|| format!("DATE {expression}"))
+            }
+            DefaultExpression::TimeLiteral(expression) => {
+                matches!(typ, &Type::TIME).then(|| expression.clone())
+            }
+            DefaultExpression::TimestampLiteral(expression) => {
+                Self::is_bigquery_timestamp_default_type(typ)
+                    .then(|| format!("TIMESTAMP {expression}"))
+            }
+            DefaultExpression::JsonLiteral(expression) => {
+                Self::is_json_type(typ).then(|| format!("JSON {expression}"))
+            }
+        }
+    }
+
+    /// Returns whether this Postgres type is created as a BigQuery string
+    /// column and can safely receive string-producing defaults.
+    fn is_bigquery_string_default_type(typ: &Type) -> bool {
+        matches!(
+            typ,
+            &Type::CHAR
+                | &Type::BPCHAR
+                | &Type::VARCHAR
+                | &Type::NAME
+                | &Type::TEXT
+                | &Type::MONEY
+                | &Type::UUID
+        )
+    }
+
+    /// Returns whether this Postgres type is created as a BigQuery numeric
+    /// column and can safely receive numeric defaults.
+    fn is_bigquery_numeric_default_type(typ: &Type) -> bool {
+        matches!(
+            typ,
+            &Type::INT2
+                | &Type::INT4
+                | &Type::INT8
+                | &Type::FLOAT4
+                | &Type::FLOAT8
+                | &Type::NUMERIC
+                | &Type::OID
+        )
+    }
+
+    /// Returns whether this Postgres numeric-like type is created as a
+    /// BigQuery string column.
+    fn is_bigquery_numeric_string_default_type(typ: &Type) -> bool {
+        matches!(typ, &Type::MONEY)
+    }
+
+    /// Returns whether this Postgres type is created as a BigQuery timestamp
+    /// column and can safely receive timestamp defaults.
+    fn is_bigquery_timestamp_default_type(typ: &Type) -> bool {
+        matches!(typ, &Type::TIMESTAMP | &Type::TIMESTAMPTZ)
+    }
+
+    /// Returns whether this Postgres type is created as a BigQuery JSON
+    /// column and can safely receive JSON defaults.
+    fn is_json_type(typ: &Type) -> bool {
+        matches!(typ, &Type::JSON | &Type::JSONB)
+    }
+
+    /// Quotes a parser-validated numeric literal as a SQL string literal.
+    fn quote_numeric_literal_as_string(expression: &str) -> String {
+        format!("'{expression}'")
     }
 
     /// Creates a primary key clause for table creation.
@@ -1510,8 +1680,9 @@ mod tests {
     use std::{collections::HashSet, sync::Arc};
 
     use etl::types::{IdentityMask, ReplicationMask, TableId, TableName, TableSchema};
-    use gcp_bigquery_client::google::cloud::bigquery::storage::v1::{
-        AppendRowsResponse, append_rows_response,
+    use gcp_bigquery_client::{
+        error::{NestedResponseError, ResponseError},
+        google::cloud::bigquery::storage::v1::{AppendRowsResponse, append_rows_response},
     };
 
     use super::*;
@@ -1558,7 +1729,8 @@ mod tests {
         nullable: bool,
         primary_key_ordinal: Option<i32>,
     ) -> ColumnSchema {
-        ColumnSchema::new(name.to_owned(), typ, -1, ordinal_position, primary_key_ordinal, nullable)
+        ColumnSchema::new(name.to_owned(), typ, -1, ordinal_position, nullable)
+            .with_primary_key_ordinal_position(primary_key_ordinal)
     }
 
     /// Creates a [`ReplicatedTableSchema`] from test columns with all columns
@@ -1659,6 +1831,84 @@ mod tests {
         let array_column = test_column("tags", Type::TEXT_ARRAY, 1, false, None);
         let array_spec = BigQueryClient::column_spec(&array_column).expect("array column spec");
         assert_eq!(array_spec, "`tags` array<string>");
+    }
+
+    #[test]
+    fn column_spec_includes_supported_default() {
+        let column_schema = ColumnSchema::new("status".to_owned(), Type::TEXT, -1, 1, true)
+            .with_default_expression("'pending'::text".to_owned());
+
+        let spec = BigQueryClient::column_spec(&column_schema).expect("column spec generation");
+
+        assert_eq!(spec, "`status` string default 'pending'");
+    }
+
+    #[test]
+    fn query_retry_classifies_bigquery_table_update_rate_limit_as_transient() {
+        let error = BQError::ResponseError {
+            error: ResponseError {
+                error: NestedResponseError {
+                    code: 400,
+                    errors: vec![
+                        [("reason".to_owned(), "jobRateLimitExceeded".to_owned())]
+                            .into_iter()
+                            .collect(),
+                    ],
+                    message: "Job exceeded rate limits".to_owned(),
+                    status: "INVALID_ARGUMENT".to_owned(),
+                },
+            },
+        };
+
+        assert_eq!(is_transient_query_error(&error), RetryDecision::Retry);
+    }
+
+    #[test]
+    fn default_expression_renders_portable_expressions() {
+        let cases = [
+            (Type::TEXT, "true", "'true'"),
+            (Type::BOOL, "'true'::text", "true"),
+            (Type::MONEY, "42", "'42'"),
+            (Type::DATE, "'2026-01-01'::date", "DATE '2026-01-01'"),
+            (
+                Type::TIMESTAMP,
+                "'2026-01-01 12:30:00'::timestamp",
+                "TIMESTAMP '2026-01-01 12:30:00'",
+            ),
+            (Type::JSONB, "'{}'::jsonb", "JSON '{}'"),
+            (
+                Type::UUID,
+                "'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'::uuid",
+                "'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'",
+            ),
+        ];
+
+        for (typ, expression, expected) in cases {
+            assert_eq!(
+                BigQueryClient::default_expression(expression, &typ).as_deref(),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn default_expression_rejects_bigquery_unsupported_expressions() {
+        let cases = [
+            (Type::INT4, "10 + 5"),
+            (Type::INT4, "'abc'::text"),
+            (Type::TIMESTAMPTZ, "now() + interval '30 days'"),
+            (Type::UUID, "gen_random_uuid()"),
+            (Type::TIMESTAMPTZ, "now()"),
+            (Type::TIMESTAMP, "localtimestamp"),
+            (Type::TEXT, "current_date"),
+            (Type::DATE, "current_time"),
+            (Type::TEXT, "lower('USER'::text)"),
+        ];
+
+        for (typ, expression) in cases {
+            assert_eq!(BigQueryClient::default_expression(expression, &typ), None);
+            assert!(!BigQueryClient::supports_column_default(expression, &typ));
+        }
     }
 
     #[test]
