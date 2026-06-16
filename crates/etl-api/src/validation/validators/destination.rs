@@ -6,7 +6,6 @@ use etl_postgres::types::IdentityType;
 
 use super::{
     super::{ValidationContext, ValidationError, ValidationFailure, Validator},
-    pipeline::PublicationExistsValidator,
     primary_key::PrimaryKeyValidator,
     replica_identity::ReplicaIdentityValidator,
 };
@@ -25,14 +24,6 @@ impl DestinationValidator {
     /// Creates a destination validator for the provided configuration.
     pub(crate) fn new(config: FullApiDestinationConfig, publication_name: Option<String>) -> Self {
         Self { config, publication_name }
-    }
-
-    /// Builds the publication existence validator when publication-aware
-    /// destination checks are enabled.
-    fn publication_exists_validator(&self) -> Option<PublicationExistsValidator> {
-        let publication_name = self.publication_name.clone()?;
-
-        Some(PublicationExistsValidator::new(publication_name))
     }
 
     /// Builds the replica identity validator for the configured destination.
@@ -131,10 +122,6 @@ impl Validator for DestinationValidator {
                 snowflake::validate(&self.config, ctx).await
             }
         }?;
-
-        if let Some(validator) = self.publication_exists_validator() {
-            failures.extend(validator.validate(ctx).await?);
-        }
 
         if let Some(validator) = self.replica_identity_validator() {
             failures.extend(validator.validate(ctx).await?);

@@ -201,28 +201,6 @@ async fn validate_destination_allows_clickhouse_merge_tree_table_without_primary
 }
 
 #[tokio::test]
-async fn validate_destination_fails_when_pipeline_publication_does_not_exist() {
-    let (ctx, _pool, config) = create_validation_context_with_source().await;
-
-    let pipeline_config = create_pipeline_config("missing_destination_validation_pub");
-    let failures = validate_destination(&ctx, &create_bigquery_config(), Some(&pipeline_config))
-        .await
-        .unwrap();
-
-    let publication_failure = failures
-        .iter()
-        .find(|failure| failure.name == "Publication Not Found")
-        .expect("Should fail when destination validation receives a missing publication");
-    assert_eq!(publication_failure.failure_type, FailureType::Critical);
-    assert!(
-        publication_failure.reason.contains("missing_destination_validation_pub"),
-        "Failure reason should mention the missing publication"
-    );
-
-    drop_pg_database(&config).await;
-}
-
-#[tokio::test]
 async fn validate_destination_fails_when_bigquery_column_list_omits_primary_key_column() {
     let (ctx, pool, config) = create_validation_context_with_source().await;
 
