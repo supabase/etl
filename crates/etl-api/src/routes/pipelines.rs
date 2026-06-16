@@ -1047,6 +1047,10 @@ pub(crate) async fn get_pipeline_version(
 
     let mut txn = pool.begin().await?;
 
+    data::pipelines::read_pipeline(txn.deref_mut(), tenant_id, pipeline_id)
+        .await?
+        .ok_or(PipelineError::PipelineNotFound(pipeline_id))?;
+
     let replicator =
         data::replicators::read_replicator_by_pipeline_id(txn.deref_mut(), tenant_id, pipeline_id)
             .await?
