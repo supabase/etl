@@ -3,7 +3,7 @@ use std::time::Duration;
 use etl::{
     error::ErrorKind,
     state::{TableState, TableStateType},
-    store::{schema::SchemaStore, state::StateStore},
+    store::schema::SchemaStore,
     test_utils::{
         database::{spawn_source_database, test_table_name},
         event::{EventCondition, group_events_by_type_and_table_id},
@@ -1331,60 +1331,6 @@ async fn table_processing_converges_to_apply_loop_with_no_events_coming() {
     let age_sum =
         get_users_age_sum_from_rows(&destination, database_schema.users_schema().id).await;
     assert_eq!(age_sum, expected_age_sum);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn table_without_primary_key_is_errored() {
-    init_test_tracing();
-    let database = spawn_source_database().await;
-
-    let table_name = test_table_name("no_primary_key_table");
-    let table_id =
-        database.create_table(table_name.clone(), false, &[("name", "text")]).await.unwrap();
-
-    let publication_name = "test_pub".to_owned();
-    database
-        .create_publication(&publication_name, std::slice::from_ref(&table_name))
-        .await
-        .expect("Failed to create publication");
-
-    // Insert a row to later check that this doesn't appear in destination's table
-    // rows.
-    database.insert_values(table_name.clone(), &["name"], &[&"abc"]).await.unwrap();
-
-    let state_store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
-
-    let pipeline_id: PipelineId = random();
-    let mut pipeline = create_pipeline(
-        &database.config,
-        pipeline_id,
-        publication_name,
-        state_store.clone(),
-        destination.clone(),
-    );
-
-    // We wait for the table to be errored.
-    let errored_state =
-        state_store.notify_on_table_state_type(table_id, TableStateType::Errored).await;
-
-    pipeline.start().await.unwrap();
-
-    // Insert a row to later check that it is not processed by the apply worker.
-    database.insert_values(table_name.clone(), &["name"], &[&"abc1"]).await.unwrap();
-
-    errored_state.notified().await;
-
-    pipeline.shutdown_and_wait().await.unwrap();
-
-    let table_state = state_store.get_table_state(table_id).await.unwrap().unwrap();
-    assert!(matches!(table_state, TableState::Errored { .. }));
-
-    // We expect the insert events to not be saved.
-    let events = destination.get_events().await;
-    let grouped_events = group_events_by_type_and_table_id(&events);
-    let insert_events = grouped_events.get(&(EventType::Insert, table_id));
-    assert!(insert_events.is_none());
 }
 
 #[tokio::test(flavor = "multi_thread")]

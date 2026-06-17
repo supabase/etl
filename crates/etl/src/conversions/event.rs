@@ -71,9 +71,8 @@ impl SchemaChangeMessage {
     /// detected. The snapshot_id should be the start_lsn of the DDL
     /// message.
     pub(crate) fn into_table_schema(self, snapshot_id: SnapshotId) -> TableSchema {
-        let table_id = self.table_id();
         build_table_schema(
-            table_id,
+            self.table_id(),
             TableName::new(self.nspname, self.relname),
             self.columns,
             self.identity.primary_key_attnums,

@@ -181,6 +181,7 @@ pub async fn validate_source(
     ctx: &ValidationContext,
 ) -> Result<Vec<ValidationFailure>, ValidationError> {
     let validator = SourceValidator;
+
     validator.validate(ctx).await
 }
 
@@ -192,11 +193,21 @@ pub async fn validate_source(
 /// Checks that the destination is accessible and properly configured:
 /// - **BigQuery**: Validates dataset exists and is accessible.
 /// - **Iceberg**: Validates catalog connectivity.
+///
+/// If a pipeline configuration is provided, validates source compatibility for
+/// the publication tables, including destination-specific primary-key and
+/// replica-identity requirements.
 pub async fn validate_destination(
     ctx: &ValidationContext,
     destination_config: &FullApiDestinationConfig,
+    pipeline_config: Option<&FullApiPipelineConfig>,
 ) -> Result<Vec<ValidationFailure>, ValidationError> {
-    validate_destination_internal(ctx, destination_config, true).await
+    let publication_name =
+        pipeline_config.map(|pipeline_config| pipeline_config.publication_name.clone());
+
+    let validator = DestinationValidator::new(destination_config.clone(), publication_name);
+
+    validator.validate(ctx).await
 }
 
 /// Validates pipeline configuration against the source database.
@@ -211,38 +222,10 @@ pub async fn validate_pipeline(
     ctx: &ValidationContext,
     pipeline_config: &FullApiPipelineConfig,
 ) -> Result<Vec<ValidationFailure>, ValidationError> {
-    validate_pipeline_internal(ctx, pipeline_config, true).await
-}
-
-async fn validate_destination_internal(
-    ctx: &ValidationContext,
-    destination_config: &FullApiDestinationConfig,
-    validate_source_profile: bool,
-) -> Result<Vec<ValidationFailure>, ValidationError> {
-    let mut failures = Vec::new();
-
-    if validate_source_profile {
-        failures.extend(validate_source(ctx).await?);
-    }
-
-    let validator = DestinationValidator::new(destination_config.clone());
-    failures.extend(validator.validate(ctx).await?);
-
-    Ok(failures)
-}
-
-async fn validate_pipeline_internal(
-    ctx: &ValidationContext,
-    pipeline_config: &FullApiPipelineConfig,
-    validate_source_profile: bool,
-) -> Result<Vec<ValidationFailure>, ValidationError> {
-    let mut failures = Vec::new();
-
-    if validate_source_profile {
-        failures.extend(validate_source(ctx).await?);
-    }
+    let mut failures = validate_source(ctx).await?;
 
     let validator = PipelineValidator::new(pipeline_config.clone());
+
     failures.extend(validator.validate(ctx).await?);
 
     Ok(failures)

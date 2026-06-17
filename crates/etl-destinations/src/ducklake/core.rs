@@ -1866,7 +1866,7 @@ where
                         )?;
                         let Some(old_row) = delete.old_table_row else {
                             return Err(etl_error!(
-                                ErrorKind::InvalidState,
+                                ErrorKind::SourceReplicaIdentityError,
                                 "DuckLake delete requires an old row image",
                                 format!(
                                     "Table '{}' emitted a delete without an old row despite \

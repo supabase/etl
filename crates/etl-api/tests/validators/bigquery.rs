@@ -37,7 +37,7 @@ async fn validate_bigquery_connection_success() {
 
     let ctx = create_validation_context();
     let config = create_bigquery_config(db.project_id(), db.dataset_id(), &db.sa_key());
-    let failures = validate_destination(&ctx, &config).await.unwrap();
+    let failures = validate_destination(&ctx, &config, None).await.unwrap();
 
     assert!(failures.is_empty(), "Expected no failures: {failures:?}");
 }
@@ -52,7 +52,7 @@ async fn validate_bigquery_dataset_not_found() {
 
     let ctx = create_validation_context();
     let config = create_bigquery_config(db.project_id(), db.dataset_id(), &db.sa_key());
-    let failures = validate_destination(&ctx, &config).await.unwrap();
+    let failures = validate_destination(&ctx, &config, None).await.unwrap();
 
     assert!(!failures.is_empty(), "Expected validation failure");
     assert_eq!(failures[0].name, "BigQuery Dataset Not Found");
@@ -67,31 +67,11 @@ async fn validate_bigquery_invalid_credentials() {
 
     let ctx = create_validation_context();
     let config = create_bigquery_config("fake-project", "fake-dataset", "{}");
-    let failures = validate_destination(&ctx, &config).await.unwrap();
+    let failures = validate_destination(&ctx, &config, None).await.unwrap();
 
     assert!(!failures.is_empty(), "Expected validation failure");
     assert_eq!(failures[0].name, "BigQuery Authentication Failed");
     assert_eq!(failures[0].failure_type, FailureType::Critical);
-}
-
-#[tokio::test]
-async fn validate_destination_includes_source_validation() {
-    let (ctx, _pool, config) = create_validation_context_with_source().await;
-    let environment = Environment::load().expect("Failed to load environment");
-    let ctx = ValidationContext::builder(environment)
-        .source_pool(ctx.source_pool.expect("source pool should be present for validation"))
-        .trusted_username(Some("different_user".to_owned()))
-        .build();
-
-    let failures =
-        validate_destination(&ctx, &create_bigquery_config("fake-project", "fake-dataset", "{}"))
-            .await
-            .unwrap();
-
-    let source_failure = failures.iter().find(|failure| failure.name == "Invalid source username");
-    assert!(source_failure.is_some(), "Expected source validation failure");
-
-    drop_pg_database(&config).await;
 }
 
 #[tokio::test]
@@ -105,7 +85,7 @@ async fn validate_pipeline_includes_source_validation() {
 
     let failures = validate_pipeline(&ctx, &create_pipeline_config("test_pub")).await.unwrap();
 
-    let source_failure = failures.iter().find(|failure| failure.name == "Invalid source username");
+    let source_failure = failures.iter().find(|failure| failure.name == "Invalid Source Username");
     assert!(source_failure.is_some(), "Expected source validation failure");
 
     drop_pg_database(&config).await;

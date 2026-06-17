@@ -36,8 +36,9 @@ impl Validator for PublicationExistsValidator {
             Ok(vec![ValidationFailure::critical(
                 "Publication Not Found",
                 format!(
-                    "Publication '{}' does not exist in the source database. Create it with: \
-                     CREATE PUBLICATION {} FOR TABLE <table_name>, ...",
+                    "Publication `{}` does not exist in the source database.\n\nCreate the \
+                     publication, or choose an existing publication for this pipeline. For \
+                     example: `CREATE PUBLICATION {} FOR TABLE <table_name>, ...`.",
                     self.publication_name, self.publication_name
                 ),
             )])
@@ -89,12 +90,12 @@ impl Validator for ReplicationSlotsValidator {
             Ok(vec![ValidationFailure::critical(
                 "Insufficient Replication Slots",
                 format!(
-                    "Not enough replication slots available.\nFound {free_slots} free slots, but \
-                     {required_slots} are required at most during initial table copy \
-                     ({used_slots}/{max_slots} currently in use).\nOnce all tables are copied, \
-                     only 1 slot will be used.\n\nPlease verify:\n(1) max_replication_slots in \
-                     postgresql.conf is sufficient\n(2) Unused replication slots can be \
-                     removed\n(3) max_table_sync_workers can be reduced if needed",
+                    "The source database has {free_slots} free replication slots, but this \
+                     pipeline can need up to {required_slots} during the initial table copy \
+                     ({used_slots}/{max_slots} slots are currently in use).\n\nIncrease \
+                     `max_replication_slots`, remove unused replication slots, or reduce \
+                     `max_table_sync_workers`. After the initial copy, this pipeline only uses 1 \
+                     slot.",
                 ),
             )])
         }
@@ -124,8 +125,9 @@ impl Validator for WalLevelValidator {
             Ok(vec![ValidationFailure::critical(
                 "Invalid WAL Level",
                 format!(
-                    "WAL level is set to '{wal_level}', but must be 'logical' for replication. \
-                     Update postgresql.conf with: wal_level = 'logical' and restart PostgreSQL"
+                    "The source database WAL level is `{wal_level}`, but logical replication \
+                     requires `logical`.\n\nSet `wal_level = 'logical'` in `postgresql.conf` and \
+                     restart PostgreSQL."
                 ),
             )])
         }
@@ -159,7 +161,8 @@ impl Validator for ReplicationPermissionsValidator {
         } else {
             Ok(vec![ValidationFailure::critical(
                 "Missing Replication Permission",
-                "The database user does not have replication privileges",
+                "The source database user does not have replication privileges.\n\nGrant the user \
+                 the `REPLICATION` attribute or connect with a role that already has it.",
             )])
         }
     }
@@ -214,8 +217,9 @@ impl Validator for PublicationHasTablesValidator {
             Ok(vec![ValidationFailure::critical(
                 "Publication Empty",
                 format!(
-                    "Publication '{}' exists but contains no tables.\n\nAdd tables with: ALTER \
-                     PUBLICATION {} ADD TABLE <table_name>",
+                    "Publication `{}` exists, but it does not publish any tables.\n\nAdd tables \
+                     to the publication before starting the pipeline. For example: `ALTER \
+                     PUBLICATION {} ADD TABLE <table_name>`.",
                     self.publication_name, self.publication_name
                 ),
             )])
@@ -282,10 +286,10 @@ impl Validator for PublicationExcludesEtlTablesValidator {
             return Ok(vec![ValidationFailure::critical(
                 "Publication Includes ETL Tables",
                 format!(
-                    "Publication '{}' is defined FOR ALL TABLES, which also publishes ETL's \
-                     internal schema tables when they exist. Use an explicit table list or FOR \
-                     TABLES IN SCHEMA for customer-owned schemas, excluding the \
-                     '{ETL_SCHEMA_NAME}' schema.",
+                    "Publication `{}` is defined `FOR ALL TABLES`, which also publishes ETL's \
+                     internal schema tables when they exist.\n\nUse an explicit table list, or \
+                     `FOR TABLES IN SCHEMA` with only customer-owned schemas. Exclude the \
+                     `{ETL_SCHEMA_NAME}` schema.",
                     self.publication_name
                 ),
             )]);
@@ -295,12 +299,12 @@ impl Validator for PublicationExcludesEtlTablesValidator {
             return Ok(vec![ValidationFailure::critical(
                 "Publication Includes ETL Tables",
                 format!(
-                    "Publication '{}' includes ETL internal tables: {}.\n\nRemove the \
-                     '{ETL_SCHEMA_NAME}' schema from the publication before starting this \
+                    "Publication `{}` includes ETL internal tables: {}.\n\nRemove the \
+                     `{ETL_SCHEMA_NAME}` schema from the publication before starting the \
                      pipeline. ETL state tables are implementation details and must not be \
                      replicated.",
                     self.publication_name,
-                    published_etl_tables.join(", ")
+                    format_code_list(&published_etl_tables)
                 ),
             )]);
         }
@@ -327,7 +331,7 @@ impl Validator for PublicationExcludesEtlTablesValidator {
                 return Ok(vec![ValidationFailure::critical(
                     "Publication Includes ETL Tables",
                     format!(
-                        "Publication '{}' includes the '{ETL_SCHEMA_NAME}' schema. Remove that \
+                        "Publication `{}` includes the `{ETL_SCHEMA_NAME}` schema.\n\nRemove that \
                          schema from the publication and publish only customer-owned schemas or \
                          explicit customer tables.",
                         self.publication_name
@@ -337,66 +341,6 @@ impl Validator for PublicationExcludesEtlTablesValidator {
         }
 
         Ok(vec![])
-    }
-}
-
-/// Validates that all tables in a publication have primary keys.
-#[derive(Debug)]
-pub(super) struct PrimaryKeysValidator {
-    publication_name: String,
-}
-
-impl PrimaryKeysValidator {
-    pub(super) fn new(publication_name: String) -> Self {
-        Self { publication_name }
-    }
-}
-
-#[async_trait]
-impl Validator for PrimaryKeysValidator {
-    async fn validate(
-        &self,
-        ctx: &ValidationContext,
-    ) -> Result<Vec<ValidationFailure>, ValidationError> {
-        let source_pool =
-            ctx.source_pool.as_ref().expect("source pool required for primary keys validation");
-
-        // Find tables without primary keys using pg_publication_rel for direct OID
-        // access
-        let tables_without_pk: Vec<String> = sqlx::query_scalar(
-            r#"
-            select n.nspname || '.' || c.relname
-            from pg_publication_rel pr
-            join pg_publication p on p.oid = pr.prpubid
-            join pg_class c on c.oid = pr.prrelid
-            join pg_namespace n on n.oid = c.relnamespace
-            where p.pubname = $1
-              and not exists (
-                select 1
-                from pg_constraint con
-                where con.conrelid = pr.prrelid
-                  and con.contype = 'p'
-              )
-            order by n.nspname, c.relname
-            limit 100
-            "#,
-        )
-        .bind(&self.publication_name)
-        .fetch_all(source_pool)
-        .await?;
-
-        if tables_without_pk.is_empty() {
-            Ok(vec![])
-        } else {
-            Ok(vec![ValidationFailure::warning(
-                "Tables Missing Primary Keys",
-                format!(
-                    "Tables without primary keys: {}\n\nPrimary keys are required for UPDATE and \
-                     DELETE replication.",
-                    tables_without_pk.join(", ")
-                ),
-            )])
-        }
     }
 }
 
@@ -455,11 +399,17 @@ impl Validator for GeneratedColumnsValidator {
             Ok(vec![ValidationFailure::warning(
                 "Tables With Generated Columns",
                 format!(
-                    "Tables with generated columns: {}\n\nGenerated columns cannot be replicated \
-                     and will be excluded from the destination.",
-                    tables_with_generated.join(", ")
+                    "These publication tables have generated columns: {}.\n\nThe pipeline can \
+                     start, but generated columns are not replicated and will be omitted from the \
+                     destination.",
+                    format_code_list(&tables_with_generated)
                 ),
             )])
         }
     }
+}
+
+/// Formats validation values as inline code for UI rendering.
+fn format_code_list(values: &[String]) -> String {
+    values.iter().map(|value| format!("`{value}`")).collect::<Vec<_>>().join(", ")
 }

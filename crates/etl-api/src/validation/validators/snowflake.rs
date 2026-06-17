@@ -40,28 +40,29 @@ impl Validator for SnowflakeValidator {
         if self.account_id.is_empty() {
             return Ok(vec![ValidationFailure::critical(
                 "Snowflake Account ID Required",
-                "Snowflake account identifier must not be empty.",
+                "Enter the Snowflake account identifier from your account URL or connection \
+                 settings.",
             )]);
         }
 
         if self.user.is_empty() {
             return Ok(vec![ValidationFailure::critical(
                 "Snowflake User Required",
-                "Snowflake user must not be empty.",
+                "Enter the Snowflake user that ETL should connect with.",
             )]);
         }
 
         if self.database.is_empty() {
             return Ok(vec![ValidationFailure::critical(
                 "Snowflake Database Required",
-                "Snowflake database must not be empty.",
+                "Choose the Snowflake database where replicated tables should be written.",
             )]);
         }
 
         if self.schema.is_empty() {
             return Ok(vec![ValidationFailure::critical(
                 "Snowflake Schema Required",
-                "Snowflake schema must not be empty.",
+                "Choose the Snowflake schema where replicated tables should be written.",
             )]);
         }
 
@@ -75,7 +76,11 @@ impl Validator for SnowflakeValidator {
             Err(err) => {
                 return Ok(vec![ValidationFailure::critical(
                     "Invalid Snowflake Account ID",
-                    format!("The Snowflake account identifier is not valid.\n\nError: {err}"),
+                    format!(
+                        "The Snowflake account identifier is not valid.\n\nUse the account \
+                         identifier from your Snowflake account URL or connection settings. \
+                         Snowflake returned: {err}"
+                    ),
                 )]);
             }
         };
@@ -94,33 +99,35 @@ impl Validator for SnowflakeValidator {
             Err(snowflake::Error::Auth(msg)) => Ok(vec![ValidationFailure::critical(
                 "Snowflake Authentication Failed",
                 format!(
-                    "Failed to authenticate with Snowflake.\n\nPlease verify:\n(1) The private \
-                     key is a valid PEM-encoded RSA key\n(2) The passphrase is correct (if the \
-                     key is encrypted)\n(3) The key is registered for this user\n\nError: {msg}"
+                    "We couldn't authenticate with Snowflake using this user and private \
+                     key.\n\nCheck that the private key is a valid `PEM`-encoded `RSA` key, the \
+                     passphrase is correct if the key is encrypted, and the public key is \
+                     registered for this Snowflake user. Snowflake returned: {msg}"
                 ),
             )]),
             Err(snowflake::Error::DatabaseNotFound(db)) => Ok(vec![ValidationFailure::critical(
                 "Snowflake Database Not Found",
                 format!(
-                    "Database '{db}' does not exist.\n\nPlease verify:\n(1) The database name is \
-                     correct\n(2) The user has USAGE privilege on the database"
+                    "Snowflake database `{db}` was not found.\n\nCreate the database, choose an \
+                     existing database, or grant this user `USAGE` on it."
                 ),
             )]),
             Err(snowflake::Error::SchemaNotFound { database, schema }) => {
                 Ok(vec![ValidationFailure::critical(
                     "Snowflake Schema Not Found",
                     format!(
-                        "Schema '{schema}' not found in database '{database}'.\n\nPlease \
-                         verify:\n(1) The schema name is correct\n(2) The user has USAGE \
-                         privilege on the schema"
+                        "Snowflake schema `{schema}` was not found in database \
+                         `{database}`.\n\nCreate the schema, choose an existing schema, or grant \
+                         this user `USAGE` on it."
                     ),
                 )])
             }
             Err(err) => Ok(vec![ValidationFailure::critical(
                 "Snowflake Connection Failed",
                 format!(
-                    "Cannot connect to Snowflake.\n\nPlease verify:\n(1) The account identifier \
-                     is correct\n(2) Network connectivity to Snowflake\n\nError: {err}"
+                    "We couldn't connect to Snowflake with this account identifier and \
+                     user.\n\nCheck the account identifier, role, network access, and \
+                     warehouse/database permissions. Snowflake returned: {err}"
                 ),
             )]),
         }
