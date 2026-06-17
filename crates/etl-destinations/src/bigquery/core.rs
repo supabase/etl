@@ -1004,14 +1004,10 @@ where
                     Event::Update(update) => {
                         let sequence_key = update.event_sequence_key();
                         let table_id = update.replicated_table_schema.id();
-                        let table_row = match update.updated_table_row {
-                            UpdatedTableRow::Full(row) => row,
-                            UpdatedTableRow::Partial(_) => {
-                                return Err(bigquery_partial_update_row_error(
-                                    &update.replicated_table_schema,
-                                ));
-                            }
-                        };
+                        let table_row = bigquery_update_new_row(
+                            &update.replicated_table_schema,
+                            update.updated_table_row,
+                        )?;
 
                         let entry = table_id_to_data.entry(table_id).or_insert_with(|| {
                             (update.replicated_table_schema.clone(), Vec::new())
@@ -1028,18 +1024,10 @@ where
                             delete.event_sequence_key(),
                             BIGQUERY_SEQUENCE_ORDINAL_FIRST,
                         );
-                        let old_table_row = delete.old_table_row.ok_or_else(|| {
-                            etl_error!(
-                                ErrorKind::InvalidState,
-                                "BigQuery delete requires an old row image",
-                                format!(
-                                    "Table '{}' emitted a delete without an old row image. \
-                                     BigQuery deletes are keyed by the source primary key and \
-                                     cannot be applied safely without it.",
-                                    delete.replicated_table_schema.name()
-                                )
-                            )
-                        })?;
+                        let old_table_row = bigquery_delete_old_row(
+                            &delete.replicated_table_schema,
+                            delete.old_table_row,
+                        )?;
 
                         let table_id = delete.replicated_table_schema.id();
                         let entry = table_id_to_data.entry(table_id).or_insert_with(|| {
@@ -1345,36 +1333,6 @@ fn validate_bigquery_table_shape(replicated_table_schema: &ReplicatedTableSchema
     Ok(())
 }
 
-/// Validates that a mutation event carries an identity BigQuery can apply.
-///
-/// PostgreSQL replica identity may either:
-/// - match the source primary key directly, or
-/// - request full old-row images (`FULL`), which still let us recover the
-///   source primary key for deletes and primary-key-changing updates.
-///
-/// Alternative replica-identity indexes are not compatible with BigQuery's
-/// destination key because BigQuery would deduplicate against a different row
-/// identity than the source publisher.
-fn validate_bigquery_mutation_identity(
-    replicated_table_schema: &ReplicatedTableSchema,
-) -> EtlResult<()> {
-    match replicated_table_schema.identity_type() {
-        IdentityType::PrimaryKey | IdentityType::Full => Ok(()),
-        identity_type => {
-            bail!(
-                ErrorKind::SourceReplicaIdentityError,
-                "BigQuery requires primary-key or full replica identity",
-                format!(
-                    "Table '{}' uses replica identity {:?}, but BigQuery only supports source \
-                     primary-key identity or full old-row images",
-                    replicated_table_schema.name(),
-                    identity_type
-                )
-            );
-        }
-    }
-}
-
 impl<S> Destination for BigQueryDestination<S>
 where
     S: DestinationStore,
@@ -1474,8 +1432,6 @@ fn bigquery_update_rows(
     old_table_row: Option<OldTableRow>,
     sequence_key: EventSequenceKey,
 ) -> EtlResult<Vec<BigQueryTableRow>> {
-    validate_bigquery_mutation_identity(replicated_table_schema)?;
-
     let primary_key_changed = match old_table_row.as_ref() {
         // PostgreSQL omits the old-side image only when the publisher
         // determined it was unnecessary. For primary-key identity, that means
@@ -1484,7 +1440,10 @@ fn bigquery_update_rows(
         Some(old_table_row) => {
             bigquery_primary_key_changed(replicated_table_schema, old_table_row, &new_table_row)?
         }
-        None => false,
+        None => {
+            ensure_bigquery_update_without_old_row_can_skip_delete(replicated_table_schema)?;
+            false
+        }
     };
 
     let mut rows = Vec::with_capacity(1 + usize::from(primary_key_changed));
@@ -1519,17 +1478,83 @@ fn bigquery_update_rows(
     Ok(rows)
 }
 
-/// Builds an error for a partial update row BigQuery cannot safely apply.
-fn bigquery_partial_update_row_error(replicated_table_schema: &ReplicatedTableSchema) -> EtlError {
-    etl_error!(
-        ErrorKind::SourceReplicaIdentityError,
-        "BigQuery update requires a full new row image",
-        format!(
-            "Table '{}' emitted a partial update row. BigQuery CDC UPSERT does not preserve \
-             omitted columns.",
-            replicated_table_schema.name()
+/// Returns the full new row required for a BigQuery update upsert.
+fn bigquery_update_new_row(
+    replicated_table_schema: &ReplicatedTableSchema,
+    updated_table_row: UpdatedTableRow,
+) -> EtlResult<TableRow> {
+    match updated_table_row {
+        UpdatedTableRow::Full(row) => Ok(row),
+        UpdatedTableRow::Partial(_) => Err(etl_error!(
+            ErrorKind::SourceReplicaIdentityError,
+            "BigQuery update requires a full new row image",
+            format!(
+                "Table '{}' emitted a partial update row. BigQuery CDC UPSERT does not preserve \
+                 omitted columns.",
+                replicated_table_schema.name()
+            )
+        )),
+    }
+}
+
+/// Returns the old row image required for a BigQuery delete.
+fn bigquery_delete_old_row(
+    replicated_table_schema: &ReplicatedTableSchema,
+    old_table_row: Option<OldTableRow>,
+) -> EtlResult<OldTableRow> {
+    old_table_row.ok_or_else(|| {
+        etl_error!(
+            ErrorKind::SourceReplicaIdentityError,
+            "BigQuery delete requires an old row image",
+            format!(
+                "Table '{}' emitted a delete without an old row image. BigQuery deletes are keyed \
+                 by the source primary key and cannot be applied safely without it.",
+                replicated_table_schema.name()
+            )
         )
-    )
+    })
+}
+
+/// Verifies that a BigQuery update without an old row cannot have changed the
+/// destination primary key.
+fn ensure_bigquery_update_without_old_row_can_skip_delete(
+    replicated_table_schema: &ReplicatedTableSchema,
+) -> EtlResult<()> {
+    if matches!(replicated_table_schema.identity_type(), IdentityType::PrimaryKey) {
+        Ok(())
+    } else {
+        Err(etl_error!(
+            ErrorKind::SourceReplicaIdentityError,
+            "BigQuery update requires old primary-key values",
+            format!(
+                "Table '{}' emitted an update without an old row image for replica identity {:?}. \
+                 BigQuery can only skip the generated delete when the source replica identity \
+                 matches the primary key.",
+                replicated_table_schema.name(),
+                replicated_table_schema.identity_type()
+            )
+        ))
+    }
+}
+
+/// Verifies that a key-only row image carries source primary-key values.
+fn ensure_bigquery_key_image_matches_primary_key(
+    replicated_table_schema: &ReplicatedTableSchema,
+) -> EtlResult<()> {
+    if matches!(replicated_table_schema.identity_type(), IdentityType::PrimaryKey) {
+        Ok(())
+    } else {
+        Err(etl_error!(
+            ErrorKind::SourceReplicaIdentityError,
+            "BigQuery key image does not match the source primary key",
+            format!(
+                "Table '{}' emitted a key image for replica identity {:?}, but BigQuery rows are \
+                 keyed by the source primary key",
+                replicated_table_schema.name(),
+                replicated_table_schema.identity_type()
+            )
+        ))
+    }
 }
 
 /// Returns whether an update changed the destination primary key.
@@ -1576,19 +1601,6 @@ fn bigquery_primary_key_changed(
                 }))
         }
         OldTableRow::Key(row) => {
-            if !replicated_table_schema.identity_matches_primary_key() {
-                bail!(
-                    ErrorKind::SourceReplicaIdentityError,
-                    "BigQuery key image does not match the source primary key",
-                    format!(
-                        "Table '{}' emitted a key image for replica identity {:?}, but BigQuery \
-                         rows are keyed by the source primary key",
-                        replicated_table_schema.name(),
-                        replicated_table_schema.identity_type()
-                    )
-                );
-            }
-
             let primary_key_column_count =
                 replicated_table_schema.primary_key_column_schemas().len();
             let old_key_values = row.values();
@@ -1604,6 +1616,8 @@ fn bigquery_primary_key_changed(
                     )
                 );
             }
+
+            ensure_bigquery_key_image_matches_primary_key(replicated_table_schema)?;
 
             let mut new_primary_key_values = replicated_table_schema
                 .column_schemas()
@@ -1638,8 +1652,6 @@ fn bigquery_primary_key_tagged_cells_from_old_row(
     replicated_table_schema: &ReplicatedTableSchema,
     old_table_row: OldTableRow,
 ) -> EtlResult<Vec<(usize, Cell)>> {
-    validate_bigquery_mutation_identity(replicated_table_schema)?;
-
     match old_table_row {
         OldTableRow::Full(row) => {
             let column_count = replicated_table_schema.column_schemas().len();
@@ -1670,19 +1682,6 @@ fn bigquery_primary_key_tagged_cells_from_old_row(
             Ok(tagged_cells)
         }
         OldTableRow::Key(row) => {
-            if !replicated_table_schema.identity_matches_primary_key() {
-                bail!(
-                    ErrorKind::SourceReplicaIdentityError,
-                    "BigQuery key image does not match the source primary key",
-                    format!(
-                        "Table '{}' emitted a key image for replica identity {:?}, but BigQuery \
-                         rows are keyed by the source primary key",
-                        replicated_table_schema.name(),
-                        replicated_table_schema.identity_type()
-                    )
-                );
-            }
-
             let primary_key_column_count =
                 replicated_table_schema.primary_key_column_schemas().len();
             if row.values().len() != primary_key_column_count {
@@ -1697,6 +1696,8 @@ fn bigquery_primary_key_tagged_cells_from_old_row(
                     )
                 );
             }
+
+            ensure_bigquery_key_image_matches_primary_key(replicated_table_schema)?;
 
             let mut tagged_cells = Vec::with_capacity(primary_key_column_count);
             let mut primary_key_columns =
@@ -2093,36 +2094,6 @@ mod tests {
     }
 
     #[test]
-    fn validate_bigquery_mutation_identity_accepts_primary_key() {
-        let replicated_table_schema = replicated_schema(IdentityType::PrimaryKey);
-
-        validate_bigquery_mutation_identity(&replicated_table_schema).unwrap();
-    }
-
-    #[test]
-    fn validate_bigquery_mutation_identity_accepts_full() {
-        let replicated_table_schema = replicated_schema(IdentityType::Full);
-
-        validate_bigquery_mutation_identity(&replicated_table_schema).unwrap();
-    }
-
-    #[test]
-    fn validate_bigquery_mutation_identity_rejects_alternative_key() {
-        let replicated_table_schema = replicated_schema(IdentityType::AlternativeKey);
-
-        let error = validate_bigquery_mutation_identity(&replicated_table_schema).unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::SourceReplicaIdentityError);
-    }
-
-    #[test]
-    fn validate_bigquery_mutation_identity_rejects_missing() {
-        let replicated_table_schema = replicated_schema(IdentityType::Missing);
-
-        let error = validate_bigquery_mutation_identity(&replicated_table_schema).unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::SourceReplicaIdentityError);
-    }
-
-    #[test]
     fn validate_bigquery_table_shape_accepts_alternative_identity() {
         let replicated_table_schema = replicated_schema(IdentityType::AlternativeKey);
 
@@ -2130,13 +2101,49 @@ mod tests {
     }
 
     #[test]
-    fn bigquery_partial_update_row_error_uses_replica_identity_kind() {
+    fn bigquery_update_new_row_rejects_partial_rows() {
         let replicated_table_schema = replicated_schema(IdentityType::PrimaryKey);
+        let partial_row =
+            etl::types::PartialTableRow::new(2, TableRow::new(vec![Cell::I32(1)]), vec![1]);
 
-        let error = bigquery_partial_update_row_error(&replicated_table_schema);
+        let error = bigquery_update_new_row(
+            &replicated_table_schema,
+            UpdatedTableRow::Partial(partial_row),
+        )
+        .unwrap_err();
 
         assert_eq!(error.kind(), ErrorKind::SourceReplicaIdentityError);
         assert!(error.to_string().contains("emitted a partial update row"));
+    }
+
+    #[test]
+    fn bigquery_delete_old_row_rejects_missing_old_rows() {
+        let replicated_table_schema = replicated_schema(IdentityType::PrimaryKey);
+
+        let error = bigquery_delete_old_row(&replicated_table_schema, None).unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::SourceReplicaIdentityError);
+    }
+
+    #[test]
+    fn ensure_bigquery_key_image_matches_primary_key_rejects_alternative_key() {
+        let replicated_table_schema = replicated_schema(IdentityType::AlternativeKey);
+
+        let error =
+            ensure_bigquery_key_image_matches_primary_key(&replicated_table_schema).unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::SourceReplicaIdentityError);
+    }
+
+    #[test]
+    fn ensure_bigquery_update_without_old_row_rejects_alternative_key() {
+        let replicated_table_schema = replicated_schema(IdentityType::AlternativeKey);
+
+        let error =
+            ensure_bigquery_update_without_old_row_can_skip_delete(&replicated_table_schema)
+                .unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::SourceReplicaIdentityError);
     }
 
     #[test]
@@ -2608,5 +2615,40 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn bigquery_update_rows_accepts_alternative_identity_when_full_old_row_is_available() {
+        let replicated_table_schema = replicated_schema(IdentityType::AlternativeKey);
+        let sequence_key = EventSequenceKey::new(PgLsn::from(1), 0);
+
+        let rows = bigquery_update_rows(
+            &replicated_table_schema,
+            TableRow::new(vec![Cell::I32(2), Cell::String("updated".to_owned())]),
+            Some(OldTableRow::Full(TableRow::new(vec![
+                Cell::I32(1),
+                Cell::String("before".to_owned()),
+            ]))),
+            sequence_key,
+        )
+        .unwrap();
+
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn bigquery_update_rows_rejects_alternative_identity_without_old_row() {
+        let replicated_table_schema = replicated_schema(IdentityType::AlternativeKey);
+        let sequence_key = EventSequenceKey::new(PgLsn::from(1), 0);
+
+        let error = bigquery_update_rows(
+            &replicated_table_schema,
+            TableRow::new(vec![Cell::I32(2), Cell::String("updated".to_owned())]),
+            None,
+            sequence_key,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::SourceReplicaIdentityError);
     }
 }

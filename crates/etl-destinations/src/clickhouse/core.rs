@@ -970,25 +970,11 @@ where
                         });
                     }
                     Event::Update(update) => {
-                        validate_replacing_merge_tree_mutation_identity(
+                        let table_row = clickhouse_update_row(
                             &update.replicated_table_schema,
+                            update.updated_table_row,
                             self.inserter_config.engine,
                         )?;
-                        let UpdatedTableRow::Full(table_row) = update.updated_table_row else {
-                            return Err(etl_error!(
-                                ErrorKind::SourceReplicaIdentityError,
-                                "ClickHouse update requires a full new row image",
-                                format!(
-                                    "Table '{}' emitted a partial update row: some column values \
-                                     could not be reconstructed. Writing it would record NULL for \
-                                     the missing columns and misrepresent the source. Configuring \
-                                     the source so that all column values are available in the \
-                                     new- or old-row image (e.g. REPLICA IDENTITY FULL) prevents \
-                                     this.",
-                                    update.replicated_table_schema.name()
-                                )
-                            ));
-                        };
                         let table_id = update.replicated_table_schema.id();
                         let entry = pending
                             .entry(table_id)
@@ -1001,10 +987,10 @@ where
                         });
                     }
                     Event::Delete(delete) => {
-                        let Some(old_table_row) = delete.old_table_row else {
-                            debug!("delete event has no row data, skipping");
-                            continue;
-                        };
+                        let old_table_row = clickhouse_delete_old_row(
+                            &delete.replicated_table_schema,
+                            delete.old_table_row,
+                        )?;
                         let old_row = match old_table_row {
                             OldTableRow::Full(row) => row,
                             OldTableRow::Key(key_row) => {
@@ -1248,30 +1234,62 @@ fn validate_clickhouse_table_shape(
     Ok(())
 }
 
-/// Validates the replica identity for a ReplacingMergeTree mutation.
+/// Returns the full new row required for a ClickHouse update.
 ///
-/// ReplacingMergeTree uses the source primary key as its dedup key. Updates and
-/// deletes therefore need either primary-key identity or full row images so PK
-/// changes do not leave stale rows behind.
-fn validate_replacing_merge_tree_mutation_identity(
+/// ReplacingMergeTree also uses the source primary key as its dedup key, so
+/// update events must be keyed by the primary key or carry full row images.
+fn clickhouse_update_row(
     replicated_table_schema: &ReplicatedTableSchema,
+    updated_table_row: UpdatedTableRow,
     engine: ClickHouseEngine,
-) -> EtlResult<()> {
-    if !matches!(engine, ClickHouseEngine::ReplacingMergeTree) {
-        return Ok(());
+) -> EtlResult<TableRow> {
+    let UpdatedTableRow::Full(row) = updated_table_row else {
+        return Err(etl_error!(
+            ErrorKind::SourceReplicaIdentityError,
+            "ClickHouse update requires a full new row image",
+            format!(
+                "Table '{}' emitted a partial update row: some column values could not be \
+                 reconstructed. Writing it would record NULL for the missing columns and \
+                 misrepresent the source.",
+                replicated_table_schema.name()
+            )
+        ));
+    };
+
+    if matches!(engine, ClickHouseEngine::ReplacingMergeTree) {
+        ensure_clickhouse_key_identity_is_primary_key(replicated_table_schema)?;
     }
 
-    validate_clickhouse_key_identity(replicated_table_schema)
+    Ok(row)
+}
+
+/// Returns the old row image required for a ClickHouse delete tombstone.
+fn clickhouse_delete_old_row(
+    replicated_table_schema: &ReplicatedTableSchema,
+    old_table_row: Option<OldTableRow>,
+) -> EtlResult<OldTableRow> {
+    old_table_row.ok_or_else(|| {
+        etl_error!(
+            ErrorKind::SourceReplicaIdentityError,
+            "ClickHouse delete requires an old row image",
+            format!(
+                "Table '{}' emitted a delete without an old row image. ClickHouse deletes need \
+                 either a full old row or a key image that can be expanded into a tombstone.",
+                replicated_table_schema.name()
+            )
+        )
+    })
 }
 
 /// Validates that a key-only old-row image can be interpreted as source PK
 /// values.
-fn validate_clickhouse_key_identity(
+fn ensure_clickhouse_key_identity_is_primary_key(
     replicated_table_schema: &ReplicatedTableSchema,
 ) -> EtlResult<()> {
-    if replicated_table_schema.identity_matches_primary_key()
-        || matches!(replicated_table_schema.identity_type(), IdentityType::Full)
-    {
+    if matches!(
+        replicated_table_schema.identity_type(),
+        IdentityType::PrimaryKey | IdentityType::Full
+    ) {
         Ok(())
     } else {
         let identity_type = replicated_table_schema.identity_type();
@@ -1299,7 +1317,21 @@ fn validate_clickhouse_key_identity(
 /// Caller only reaches this path for key-only deletes, so this function
 /// validates that the key row can be interpreted as source primary-key values.
 fn expand_key_row(key_row: TableRow, schema: &ReplicatedTableSchema) -> EtlResult<TableRow> {
-    validate_clickhouse_key_identity(schema)?;
+    let primary_key_column_count = schema.primary_key_column_schemas().len();
+    if key_row.values().len() != primary_key_column_count {
+        return Err(etl_error!(
+            ErrorKind::InvalidState,
+            "ClickHouse key image does not match the source primary key",
+            format!(
+                "Expected {} key values for table '{}', got {}",
+                primary_key_column_count,
+                schema.name(),
+                key_row.values().len()
+            )
+        ));
+    }
+
+    ensure_clickhouse_key_identity_is_primary_key(schema)?;
 
     let key_cells = key_row.into_values();
     let mut key_iter = key_cells.into_iter();
@@ -1431,7 +1463,8 @@ where
 #[cfg(test)]
 mod tests {
     use etl::types::{
-        ArrayCell, ColumnSchema, IdentityMask, ReplicationMask, TableName, TableSchema,
+        ArrayCell, ColumnSchema, IdentityMask, PartialTableRow, ReplicationMask, TableName,
+        TableSchema,
     };
 
     use super::*;
@@ -1478,27 +1511,40 @@ mod tests {
     }
 
     #[test]
-    fn validate_replacing_merge_tree_mutation_identity_accepts_primary_key() {
-        validate_replacing_merge_tree_mutation_identity(
+    fn clickhouse_update_row_accepts_primary_key_identity_under_replacing_merge_tree() {
+        let row = TableRow::new(vec![Cell::I32(1), Cell::String("alice".to_owned())]);
+
+        let result = clickhouse_update_row(
             &replicated_schema(IdentityType::PrimaryKey),
+            UpdatedTableRow::Full(row.clone()),
             ClickHouseEngine::ReplacingMergeTree,
         )
         .unwrap();
+
+        assert_eq!(result, row);
     }
 
     #[test]
-    fn validate_replacing_merge_tree_mutation_identity_accepts_full() {
-        validate_replacing_merge_tree_mutation_identity(
+    fn clickhouse_update_row_accepts_full_identity_under_replacing_merge_tree() {
+        let row = TableRow::new(vec![Cell::I32(1), Cell::String("alice".to_owned())]);
+
+        let result = clickhouse_update_row(
             &replicated_schema(IdentityType::Full),
+            UpdatedTableRow::Full(row.clone()),
             ClickHouseEngine::ReplacingMergeTree,
         )
         .unwrap();
+
+        assert_eq!(result, row);
     }
 
     #[test]
-    fn validate_replacing_merge_tree_mutation_identity_rejects_alternative_key() {
-        let err = validate_replacing_merge_tree_mutation_identity(
+    fn clickhouse_update_row_rejects_alternative_key_under_replacing_merge_tree() {
+        let row = TableRow::new(vec![Cell::I32(1), Cell::String("alice".to_owned())]);
+
+        let err = clickhouse_update_row(
             &replicated_schema(IdentityType::AlternativeKey),
+            UpdatedTableRow::Full(row),
             ClickHouseEngine::ReplacingMergeTree,
         )
         .unwrap_err();
@@ -1506,13 +1552,49 @@ mod tests {
     }
 
     #[test]
-    fn validate_replacing_merge_tree_mutation_identity_rejects_missing() {
-        let err = validate_replacing_merge_tree_mutation_identity(
+    fn clickhouse_update_row_rejects_missing_identity_under_replacing_merge_tree() {
+        let row = TableRow::new(vec![Cell::I32(1), Cell::String("alice".to_owned())]);
+
+        let err = clickhouse_update_row(
             &replicated_schema(IdentityType::Missing),
+            UpdatedTableRow::Full(row),
             ClickHouseEngine::ReplacingMergeTree,
         )
         .unwrap_err();
         assert_eq!(err.kind(), ErrorKind::SourceReplicaIdentityError);
+    }
+
+    #[test]
+    fn clickhouse_update_row_rejects_partial_rows_before_identity_checks() {
+        let partial_row = PartialTableRow::new(2, TableRow::new(vec![Cell::I32(1)]), vec![1]);
+
+        let err = clickhouse_update_row(
+            &replicated_schema(IdentityType::AlternativeKey),
+            UpdatedTableRow::Partial(partial_row),
+            ClickHouseEngine::ReplacingMergeTree,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::SourceReplicaIdentityError);
+        assert!(err.to_string().contains("partial update row"));
+    }
+
+    #[test]
+    fn clickhouse_delete_old_row_rejects_missing_old_rows() {
+        let err = clickhouse_delete_old_row(&replicated_schema(IdentityType::PrimaryKey), None)
+            .unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::SourceReplicaIdentityError);
+    }
+
+    #[test]
+    fn expand_key_row_rejects_short_key_payload_before_identity_checks() {
+        let err =
+            expand_key_row(TableRow::new(vec![]), &replicated_schema(IdentityType::AlternativeKey))
+                .unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::InvalidState);
+        assert!(err.to_string().contains("Expected 1 key values"));
     }
 
     #[test]
