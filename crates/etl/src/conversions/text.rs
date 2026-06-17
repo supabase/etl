@@ -34,19 +34,6 @@ pub(crate) fn parse_cell_from_postgres_text(typ: &Type, str: &str) -> EtlResult<
             |str| Ok(Some(parse_bool(str)?)),
             ArrayCell::Bool,
         ),
-        Type::CHAR | Type::BPCHAR | Type::VARCHAR | Type::NAME | Type::TEXT | Type::MONEY => {
-            Ok(Cell::String(str.to_owned()))
-        }
-        Type::CHAR_ARRAY
-        | Type::BPCHAR_ARRAY
-        | Type::VARCHAR_ARRAY
-        | Type::NAME_ARRAY
-        | Type::TEXT_ARRAY
-        | Type::MONEY_ARRAY => parse_cell_from_postgres_text_array(
-            str,
-            |str| Ok(Some(str.to_owned())),
-            ArrayCell::String,
-        ),
         Type::INT2 => Ok(Cell::I16(str.parse()?)),
         Type::INT2_ARRAY => {
             parse_cell_from_postgres_text_array(str, |str| Ok(Some(str.parse()?)), ArrayCell::I16)
@@ -149,6 +136,10 @@ pub(crate) fn parse_cell_from_postgres_text(typ: &Type, str: &str) -> EtlResult<
         Type::OID_ARRAY => {
             parse_cell_from_postgres_text_array(str, |str| Ok(Some(str.parse()?)), ArrayCell::U32)
         }
+        // [`Cell`] is only the internal Rust value representation. The source
+        // Postgres type is still available from the corresponding
+        // [`ColumnSchema`], so values that do not need a specialized Rust type
+        // preserve their Postgres text output here.
         _ if is_array_type(typ) => parse_cell_from_postgres_text_array(
             str,
             |str| Ok(Some(str.to_owned())),

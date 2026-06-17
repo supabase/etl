@@ -30,12 +30,14 @@ macro_rules! convert_array_variant {
 /// Represents a single database cell value with support for Postgres types.
 ///
 /// [`Cell`] is the primary data container for individual values during ETL
-/// processing. It supports all common Postgres data types including arrays,
-/// JSON, and temporal types. Each variant handles nullable data appropriately
-/// for the destination system.
+/// processing. It represents the ergonomic Rust value shape passed to
+/// destinations, not the source database schema type. The original Postgres
+/// type remains available on the corresponding [`crate::types::ColumnSchema`],
+/// so values without specialized Rust semantics can be preserved as
+/// [`Cell::String`] while destinations still know the source column type.
 ///
-/// The enum is designed to preserve type information and enable efficient
-/// conversion to destination formats while maintaining data fidelity.
+/// The enum is designed to make destination conversion efficient while
+/// maintaining data fidelity.
 #[derive(Debug, PartialEq, Clone)]
 pub enum Cell {
     /// Represents a NULL database value
