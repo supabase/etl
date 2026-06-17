@@ -31,20 +31,15 @@ pub(crate) const CURRENT_VIEW_SUFFIX: &str = "__current";
 fn postgres_column_type_to_clickhouse_sql(typ: &Type) -> &'static str {
     match typ {
         &Type::BOOL => "Boolean",
-        &Type::CHAR | &Type::BPCHAR | &Type::VARCHAR | &Type::NAME | &Type::TEXT => "String",
         &Type::INT2 => "Int16",
         &Type::INT4 => "Int32",
         &Type::INT8 => "Int64",
         &Type::FLOAT4 => "Float32",
         &Type::FLOAT8 => "Float64",
-        &Type::NUMERIC | &Type::MONEY => "String",
         &Type::DATE => "Date32",
-        &Type::TIME | &Type::TIMETZ | &Type::INTERVAL => "String",
         &Type::TIMESTAMP => "DateTime64(6)",
         &Type::TIMESTAMPTZ => "DateTime64(6, 'UTC')",
         &Type::UUID => "UUID",
-        &Type::JSON | &Type::JSONB => "String",
-        &Type::BYTEA => "String",
         &Type::OID => "UInt32",
         _ => "String",
     }
@@ -54,25 +49,15 @@ fn postgres_column_type_to_clickhouse_sql(typ: &Type) -> &'static str {
 fn postgres_array_element_clickhouse_sql(typ: &Type) -> &'static str {
     match typ {
         &Type::BOOL_ARRAY => "Boolean",
-        &Type::CHAR_ARRAY
-        | &Type::BPCHAR_ARRAY
-        | &Type::VARCHAR_ARRAY
-        | &Type::NAME_ARRAY
-        | &Type::TEXT_ARRAY
-        | &Type::MONEY_ARRAY => "String",
         &Type::INT2_ARRAY => "Int16",
         &Type::INT4_ARRAY => "Int32",
         &Type::INT8_ARRAY => "Int64",
         &Type::FLOAT4_ARRAY => "Float32",
         &Type::FLOAT8_ARRAY => "Float64",
-        &Type::NUMERIC_ARRAY => "String",
         &Type::DATE_ARRAY => "Date32",
-        &Type::TIME_ARRAY | &Type::TIMETZ_ARRAY | &Type::INTERVAL_ARRAY => "String",
         &Type::TIMESTAMP_ARRAY => "DateTime64(6)",
         &Type::TIMESTAMPTZ_ARRAY => "DateTime64(6, 'UTC')",
         &Type::UUID_ARRAY => "UUID",
-        &Type::JSON_ARRAY | &Type::JSONB_ARRAY => "String",
-        &Type::BYTEA_ARRAY => "String",
         &Type::OID_ARRAY => "UInt32",
         _ => "String",
     }

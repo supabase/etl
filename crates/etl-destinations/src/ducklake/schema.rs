@@ -7,18 +7,13 @@ use crate::ducklake::sql::{qualified_lake_table_name, quote_identifier};
 fn postgres_scalar_type_to_ducklake_sql(typ: &Type) -> &'static str {
     match typ {
         &Type::BOOL => "boolean",
-        &Type::CHAR | &Type::BPCHAR | &Type::VARCHAR | &Type::NAME | &Type::TEXT => "varchar",
         &Type::INT2 => "smallint",
         &Type::INT4 => "integer",
         &Type::INT8 => "bigint",
         &Type::FLOAT4 => "float",
         &Type::FLOAT8 => "double",
-        // numeric is mapped to varchar to preserve precision without loss,
-        // since DuckDB decimal needs explicit scale/precision we don't have in the Type.
-        &Type::NUMERIC => "varchar",
         &Type::DATE => "date",
         &Type::TIME => "time",
-        &Type::TIMETZ | &Type::INTERVAL => "varchar",
         &Type::TIMESTAMP => "timestamp",
         &Type::TIMESTAMPTZ => "timestamptz",
         &Type::UUID => "uuid",
@@ -33,20 +28,13 @@ fn postgres_scalar_type_to_ducklake_sql(typ: &Type) -> &'static str {
 fn postgres_array_type_to_ducklake_sql(typ: &Type) -> &'static str {
     match typ {
         &Type::BOOL_ARRAY => "boolean[]",
-        &Type::CHAR_ARRAY
-        | &Type::BPCHAR_ARRAY
-        | &Type::VARCHAR_ARRAY
-        | &Type::NAME_ARRAY
-        | &Type::TEXT_ARRAY => "varchar[]",
         &Type::INT2_ARRAY => "smallint[]",
         &Type::INT4_ARRAY => "integer[]",
         &Type::INT8_ARRAY => "bigint[]",
         &Type::FLOAT4_ARRAY => "float[]",
         &Type::FLOAT8_ARRAY => "double[]",
-        &Type::NUMERIC_ARRAY => "varchar[]",
         &Type::DATE_ARRAY => "date[]",
         &Type::TIME_ARRAY => "time[]",
-        &Type::TIMETZ_ARRAY | &Type::INTERVAL_ARRAY => "varchar[]",
         &Type::TIMESTAMP_ARRAY => "timestamp[]",
         &Type::TIMESTAMPTZ_ARRAY => "timestamptz[]",
         &Type::UUID_ARRAY => "uuid[]",

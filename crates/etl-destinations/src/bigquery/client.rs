@@ -1529,21 +1529,12 @@ impl BigQueryClient {
         if is_array_type(typ) {
             let element_type = match typ {
                 &Type::BOOL_ARRAY => "bool",
-                &Type::CHAR_ARRAY
-                | &Type::BPCHAR_ARRAY
-                | &Type::VARCHAR_ARRAY
-                | &Type::NAME_ARRAY
-                | &Type::TEXT_ARRAY => "string",
                 &Type::INT2_ARRAY | &Type::INT4_ARRAY | &Type::INT8_ARRAY => "int64",
                 &Type::FLOAT4_ARRAY | &Type::FLOAT8_ARRAY => "float64",
                 &Type::NUMERIC_ARRAY => "bignumeric",
-                &Type::MONEY_ARRAY => "string",
                 &Type::DATE_ARRAY => "date",
                 &Type::TIME_ARRAY => "time",
-                &Type::TIMETZ_ARRAY => "string",
                 &Type::TIMESTAMP_ARRAY | &Type::TIMESTAMPTZ_ARRAY => "timestamp",
-                &Type::INTERVAL_ARRAY => "string",
-                &Type::UUID_ARRAY => "string",
                 &Type::JSON_ARRAY | &Type::JSONB_ARRAY => "json",
                 &Type::OID_ARRAY => "int64",
                 &Type::BYTEA_ARRAY => "bytes",
@@ -1555,17 +1546,12 @@ impl BigQueryClient {
 
         match typ {
             &Type::BOOL => "bool",
-            &Type::CHAR | &Type::BPCHAR | &Type::VARCHAR | &Type::NAME | &Type::TEXT => "string",
             &Type::INT2 | &Type::INT4 | &Type::INT8 => "int64",
             &Type::FLOAT4 | &Type::FLOAT8 => "float64",
             &Type::NUMERIC => "bignumeric",
-            &Type::MONEY => "string",
             &Type::DATE => "date",
             &Type::TIME => "time",
-            &Type::TIMETZ => "string",
             &Type::TIMESTAMP | &Type::TIMESTAMPTZ => "timestamp",
-            &Type::INTERVAL => "string",
-            &Type::UUID => "string",
             &Type::JSON | &Type::JSONB => "json",
             &Type::OID => "int64",
             &Type::BYTEA => "bytes",
@@ -1589,49 +1575,19 @@ impl BigQueryClient {
         for column_schema in replicated_table_schema.column_schemas() {
             let typ = match column_schema.typ {
                 Type::BOOL => ColumnType::Bool,
-                Type::CHAR | Type::BPCHAR | Type::VARCHAR | Type::NAME | Type::TEXT => {
-                    ColumnType::String
-                }
                 Type::INT2 => ColumnType::Int32,
                 Type::INT4 => ColumnType::Int32,
                 Type::INT8 => ColumnType::Int64,
                 Type::FLOAT4 => ColumnType::Float,
                 Type::FLOAT8 => ColumnType::Double,
-                Type::NUMERIC => ColumnType::String,
-                Type::MONEY => ColumnType::String,
-                Type::DATE => ColumnType::String,
-                Type::TIME => ColumnType::String,
-                Type::TIMETZ => ColumnType::String,
-                Type::TIMESTAMP => ColumnType::String,
-                Type::TIMESTAMPTZ => ColumnType::String,
-                Type::INTERVAL => ColumnType::String,
-                Type::UUID => ColumnType::String,
-                Type::JSON => ColumnType::String,
-                Type::JSONB => ColumnType::String,
                 Type::OID => ColumnType::Int32,
                 Type::BYTEA => ColumnType::Bytes,
                 Type::BOOL_ARRAY => ColumnType::Bool,
-                Type::CHAR_ARRAY
-                | Type::BPCHAR_ARRAY
-                | Type::VARCHAR_ARRAY
-                | Type::NAME_ARRAY
-                | Type::TEXT_ARRAY => ColumnType::String,
                 Type::INT2_ARRAY => ColumnType::Int32,
                 Type::INT4_ARRAY => ColumnType::Int32,
                 Type::INT8_ARRAY => ColumnType::Int64,
                 Type::FLOAT4_ARRAY => ColumnType::Float,
                 Type::FLOAT8_ARRAY => ColumnType::Double,
-                Type::NUMERIC_ARRAY => ColumnType::String,
-                Type::MONEY_ARRAY => ColumnType::String,
-                Type::DATE_ARRAY => ColumnType::String,
-                Type::TIME_ARRAY => ColumnType::String,
-                Type::TIMETZ_ARRAY => ColumnType::String,
-                Type::TIMESTAMP_ARRAY => ColumnType::String,
-                Type::TIMESTAMPTZ_ARRAY => ColumnType::String,
-                Type::INTERVAL_ARRAY => ColumnType::String,
-                Type::UUID_ARRAY => ColumnType::String,
-                Type::JSON_ARRAY => ColumnType::String,
-                Type::JSONB_ARRAY => ColumnType::String,
                 Type::OID_ARRAY => ColumnType::Int32,
                 Type::BYTEA_ARRAY => ColumnType::Bytes,
                 _ => ColumnType::String,

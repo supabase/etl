@@ -17,22 +17,17 @@ pub(crate) fn type_name(typ: &Type) -> &'static str {
 
     match typ {
         &Type::BOOL => "BOOLEAN",
-        &Type::CHAR | &Type::BPCHAR | &Type::VARCHAR | &Type::NAME | &Type::TEXT => "VARCHAR",
         &Type::INT2 => "SMALLINT",
         &Type::INT4 => "INTEGER",
         &Type::INT8 => "BIGINT",
         &Type::FLOAT4 => "FLOAT",
         &Type::FLOAT8 => "DOUBLE",
-        &Type::NUMERIC => "VARCHAR",
         &Type::DATE => "DATE",
         &Type::TIME => "TIME",
-        &Type::TIMETZ | &Type::INTERVAL => "VARCHAR",
         &Type::TIMESTAMP => "TIMESTAMP_NTZ",
         &Type::TIMESTAMPTZ => "TIMESTAMP_TZ",
-        &Type::UUID => "VARCHAR",
         &Type::JSON | &Type::JSONB => "VARIANT",
         &Type::OID => "BIGINT",
-        &Type::BYTEA => "VARCHAR",
         _ => "VARCHAR",
     }
 }

@@ -1317,19 +1317,6 @@ fn default_cell(typ: &Type) -> Cell {
         Type::TIMESTAMP => Cell::Timestamp(chrono::DateTime::UNIX_EPOCH.naive_utc()),
         Type::TIMESTAMPTZ => Cell::TimestampTz(chrono::DateTime::UNIX_EPOCH),
         Type::UUID => Cell::Uuid(uuid::Uuid::nil()),
-        Type::CHAR
-        | Type::BPCHAR
-        | Type::VARCHAR
-        | Type::NAME
-        | Type::TEXT
-        | Type::NUMERIC
-        | Type::MONEY
-        | Type::TIME
-        | Type::TIMETZ
-        | Type::INTERVAL
-        | Type::JSON
-        | Type::JSONB
-        | Type::BYTEA => Cell::String(String::new()),
         Type::BOOL_ARRAY => Cell::Array(ArrayCell::Bool(Vec::new())),
         Type::INT2_ARRAY => Cell::Array(ArrayCell::I16(Vec::new())),
         Type::INT4_ARRAY => Cell::Array(ArrayCell::I32(Vec::new())),
@@ -1337,14 +1324,6 @@ fn default_cell(typ: &Type) -> Cell {
         Type::OID_ARRAY => Cell::Array(ArrayCell::U32(Vec::new())),
         Type::FLOAT4_ARRAY => Cell::Array(ArrayCell::F32(Vec::new())),
         Type::FLOAT8_ARRAY => Cell::Array(ArrayCell::F64(Vec::new())),
-        Type::TEXT_ARRAY
-        | Type::VARCHAR_ARRAY
-        | Type::CHAR_ARRAY
-        | Type::BPCHAR_ARRAY
-        | Type::NAME_ARRAY
-        | Type::MONEY_ARRAY
-        | Type::TIMETZ_ARRAY
-        | Type::INTERVAL_ARRAY => Cell::Array(ArrayCell::String(Vec::new())),
         Type::NUMERIC_ARRAY => Cell::Array(ArrayCell::Numeric(Vec::new())),
         Type::DATE_ARRAY => Cell::Array(ArrayCell::Date(Vec::new())),
         Type::TIME_ARRAY => Cell::Array(ArrayCell::Time(Vec::new())),
