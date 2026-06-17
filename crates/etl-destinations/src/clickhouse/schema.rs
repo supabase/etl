@@ -29,36 +29,36 @@ pub(crate) const CURRENT_VIEW_SUFFIX: &str = "__current";
 /// responsible for applying that when the column is nullable. Arrays always use
 /// `Array(Nullable(T))` since Postgres array elements are nullable.
 fn postgres_column_type_to_clickhouse_sql(typ: &Type) -> &'static str {
-    match typ {
-        &Type::BOOL => "Boolean",
-        &Type::INT2 => "Int16",
-        &Type::INT4 => "Int32",
-        &Type::INT8 => "Int64",
-        &Type::FLOAT4 => "Float32",
-        &Type::FLOAT8 => "Float64",
-        &Type::DATE => "Date32",
-        &Type::TIMESTAMP => "DateTime64(6)",
-        &Type::TIMESTAMPTZ => "DateTime64(6, 'UTC')",
-        &Type::UUID => "UUID",
-        &Type::OID => "UInt32",
+    match *typ {
+        Type::BOOL => "Boolean",
+        Type::INT2 => "Int16",
+        Type::INT4 => "Int32",
+        Type::INT8 => "Int64",
+        Type::FLOAT4 => "Float32",
+        Type::FLOAT8 => "Float64",
+        Type::DATE => "Date32",
+        Type::TIMESTAMP => "DateTime64(6)",
+        Type::TIMESTAMPTZ => "DateTime64(6, 'UTC')",
+        Type::UUID => "UUID",
+        Type::OID => "UInt32",
         _ => "String",
     }
 }
 
 /// Returns the ClickHouse array element type for a Postgres array type.
 fn postgres_array_element_clickhouse_sql(typ: &Type) -> &'static str {
-    match typ {
-        &Type::BOOL_ARRAY => "Boolean",
-        &Type::INT2_ARRAY => "Int16",
-        &Type::INT4_ARRAY => "Int32",
-        &Type::INT8_ARRAY => "Int64",
-        &Type::FLOAT4_ARRAY => "Float32",
-        &Type::FLOAT8_ARRAY => "Float64",
-        &Type::DATE_ARRAY => "Date32",
-        &Type::TIMESTAMP_ARRAY => "DateTime64(6)",
-        &Type::TIMESTAMPTZ_ARRAY => "DateTime64(6, 'UTC')",
-        &Type::UUID_ARRAY => "UUID",
-        &Type::OID_ARRAY => "UInt32",
+    match *typ {
+        Type::BOOL_ARRAY => "Boolean",
+        Type::INT2_ARRAY => "Int16",
+        Type::INT4_ARRAY => "Int32",
+        Type::INT8_ARRAY => "Int64",
+        Type::FLOAT4_ARRAY => "Float32",
+        Type::FLOAT8_ARRAY => "Float64",
+        Type::DATE_ARRAY => "Date32",
+        Type::TIMESTAMP_ARRAY => "DateTime64(6)",
+        Type::TIMESTAMPTZ_ARRAY => "DateTime64(6, 'UTC')",
+        Type::UUID_ARRAY => "UUID",
+        Type::OID_ARRAY => "UInt32",
         _ => "String",
     }
 }

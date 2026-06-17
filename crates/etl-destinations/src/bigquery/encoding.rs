@@ -337,7 +337,7 @@ fn array_cell_encode_prost(
             prost::encoding::string::encode_repeated(tag, &values, buf);
         }
         ArrayCellNonOptional::TimestampTz(vec) => {
-            let values: Vec<i64> = vec.iter().map(|v| v.timestamp_micros()).collect();
+            let values: Vec<i64> = vec.iter().map(chrono::DateTime::timestamp_micros).collect();
             prost::encoding::int64::encode_packed(tag, &values, buf);
         }
         ArrayCellNonOptional::Uuid(vec) => {
@@ -399,7 +399,7 @@ fn array_cell_non_optional_encoded_len_prost(array_cell: &ArrayCellNonOptional, 
             prost::encoding::string::encoded_len_repeated(tag, &values)
         }
         ArrayCellNonOptional::TimestampTz(vec) => {
-            let values: Vec<i64> = vec.iter().map(|v| v.timestamp_micros()).collect();
+            let values: Vec<i64> = vec.iter().map(chrono::DateTime::timestamp_micros).collect();
             prost::encoding::int64::encoded_len_packed(tag, &values)
         }
         ArrayCellNonOptional::Uuid(vec) => {
