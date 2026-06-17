@@ -185,6 +185,10 @@ fn cell_encode_prost(cell: &CellNonOptional, tag: u32, buf: &mut impl bytes::Buf
             let s = t.format(TIME_FORMAT).to_string();
             prost::encoding::string::encode(tag, &s, buf);
         }
+        CellNonOptional::TimeTz(t) => {
+            let s = t.to_string();
+            prost::encoding::string::encode(tag, &s, buf);
+        }
         CellNonOptional::Timestamp(t) => {
             let s = t.format(TIMESTAMP_FORMAT).to_string();
             prost::encoding::string::encode(tag, &s, buf);
@@ -242,6 +246,10 @@ fn cell_encode_len_prost(cell: &CellNonOptional, tag: u32) -> usize {
         }
         CellNonOptional::Time(t) => {
             let s = t.format(TIME_FORMAT).to_string();
+            prost::encoding::string::encoded_len(tag, &s)
+        }
+        CellNonOptional::TimeTz(t) => {
+            let s = t.to_string();
             prost::encoding::string::encoded_len(tag, &s)
         }
         CellNonOptional::Timestamp(t) => {
@@ -317,6 +325,10 @@ fn array_cell_encode_prost(
                 vec.iter().map(|v| v.format(TIME_FORMAT).to_string()).collect();
             prost::encoding::string::encode_repeated(tag, &values, buf);
         }
+        ArrayCellNonOptional::TimeTz(vec) => {
+            let values: Vec<String> = vec.iter().map(ToString::to_string).collect();
+            prost::encoding::string::encode_repeated(tag, &values, buf);
+        }
         ArrayCellNonOptional::Timestamp(vec) => {
             let values: Vec<String> =
                 vec.iter().map(|v| v.format(TIMESTAMP_FORMAT).to_string()).collect();
@@ -374,6 +386,10 @@ fn array_cell_non_optional_encoded_len_prost(array_cell: &ArrayCellNonOptional, 
         ArrayCellNonOptional::Time(vec) => {
             let values: Vec<String> =
                 vec.iter().map(|v| v.format(TIME_FORMAT).to_string()).collect();
+            prost::encoding::string::encoded_len_repeated(tag, &values)
+        }
+        ArrayCellNonOptional::TimeTz(vec) => {
+            let values: Vec<String> = vec.iter().map(ToString::to_string).collect();
             prost::encoding::string::encoded_len_repeated(tag, &values)
         }
         ArrayCellNonOptional::Timestamp(vec) => {

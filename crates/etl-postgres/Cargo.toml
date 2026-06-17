@@ -22,6 +22,7 @@ replication = ["sqlx"]
 
 aws-lc-rs = { workspace = true }
 bytes = { workspace = true }
+chrono = { workspace = true }
 const-oid = { workspace = true }
 etl-config = { workspace = true }
 futures = { workspace = true }

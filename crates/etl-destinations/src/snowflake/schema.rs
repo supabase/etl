@@ -26,6 +26,7 @@ pub(crate) fn type_name(typ: &Type) -> &'static str {
         &Type::NUMERIC => "VARCHAR",
         &Type::DATE => "DATE",
         &Type::TIME => "TIME",
+        &Type::TIMETZ | &Type::INTERVAL => "VARCHAR",
         &Type::TIMESTAMP => "TIMESTAMP_NTZ",
         &Type::TIMESTAMPTZ => "TIMESTAMP_TZ",
         &Type::UUID => "VARCHAR",
@@ -152,8 +153,17 @@ fn render_snowflake_default_expression(
         DefaultExpression::TimeLiteral(expression) => {
             matches!(typ, &Type::TIME).then(|| expression.clone())
         }
+        DefaultExpression::TimeTzLiteral(expression) => {
+            matches!(typ, &Type::TIMETZ).then(|| expression.clone())
+        }
         DefaultExpression::TimestampLiteral(expression) => {
-            is_snowflake_timestamp_default_type(typ).then(|| expression.clone())
+            matches!(typ, &Type::TIMESTAMP).then(|| expression.clone())
+        }
+        DefaultExpression::TimestampTzLiteral(expression) => {
+            matches!(typ, &Type::TIMESTAMPTZ).then(|| expression.clone())
+        }
+        DefaultExpression::IntervalLiteral(expression) => {
+            matches!(typ, &Type::INTERVAL).then(|| expression.clone())
         }
         DefaultExpression::JsonLiteral(expression) => {
             is_json_type(typ).then(|| format!("PARSE_JSON({expression})"))
@@ -184,7 +194,10 @@ fn render_snowflake_add_column_default_expression(
         }
         DefaultExpression::DateLiteral(_)
         | DefaultExpression::TimeLiteral(_)
+        | DefaultExpression::TimeTzLiteral(_)
         | DefaultExpression::TimestampLiteral(_)
+        | DefaultExpression::TimestampTzLiteral(_)
+        | DefaultExpression::IntervalLiteral(_)
         | DefaultExpression::JsonLiteral(_) => None,
     }
 }
@@ -205,17 +218,15 @@ fn is_snowflake_numeric_string_default_type(typ: &Type) -> bool {
 /// Returns whether a Postgres type can safely receive source string literals.
 fn is_snowflake_string_default_type(typ: &Type) -> bool {
     is_snowflake_text_default_type(typ)
-        || matches!(typ, &Type::NUMERIC | &Type::MONEY | &Type::UUID)
+        || matches!(
+            typ,
+            &Type::NUMERIC | &Type::MONEY | &Type::TIMETZ | &Type::INTERVAL | &Type::UUID
+        )
 }
 
 /// Returns whether a Postgres type is a text-like Snowflake VARCHAR column.
 fn is_snowflake_text_default_type(typ: &Type) -> bool {
     matches!(typ, &Type::CHAR | &Type::BPCHAR | &Type::VARCHAR | &Type::NAME | &Type::TEXT)
-}
-
-/// Returns whether a Postgres type is a Snowflake timestamp column.
-fn is_snowflake_timestamp_default_type(typ: &Type) -> bool {
-    matches!(typ, &Type::TIMESTAMP | &Type::TIMESTAMPTZ)
 }
 
 /// Returns whether a Postgres type is a Snowflake VARIANT JSON column.
@@ -254,8 +265,10 @@ mod tests {
             (&Type::NUMERIC, "VARCHAR"),
             (&Type::DATE, "DATE"),
             (&Type::TIME, "TIME"),
+            (&Type::TIMETZ, "VARCHAR"),
             (&Type::TIMESTAMP, "TIMESTAMP_NTZ"),
             (&Type::TIMESTAMPTZ, "TIMESTAMP_TZ"),
+            (&Type::INTERVAL, "VARCHAR"),
             (&Type::UUID, "VARCHAR"),
             (&Type::JSON, "VARIANT"),
             (&Type::JSONB, "VARIANT"),
@@ -329,6 +342,9 @@ mod tests {
             (Type::TEXT, "true", " DEFAULT 'true'"),
             (Type::BOOL, "'true'::text", " DEFAULT true"),
             (Type::NUMERIC, "42", " DEFAULT '42'"),
+            (Type::TIME, "'12:30:00'::time", " DEFAULT '12:30:00'"),
+            (Type::TIMETZ, "'12:30:00+02'::timetz", " DEFAULT '12:30:00+02'"),
+            (Type::INTERVAL, "'30 days'::interval", " DEFAULT '30 days'"),
             (
                 Type::TIMESTAMPTZ,
                 "'2026-01-01 12:30:00'::timestamptz",
@@ -383,6 +399,8 @@ mod tests {
             .with_default_expression("gen_random_uuid()".to_owned());
         let unsupported_json = ColumnSchema::new("value".to_owned(), Type::JSONB, -1, 1, true)
             .with_default_expression("'{}'::jsonb".to_owned());
+        let unsupported_timetz = ColumnSchema::new("value".to_owned(), Type::TIMETZ, -1, 1, true)
+            .with_default_expression("'12:30:00+02'::timetz".to_owned());
         let unsupported_current_timestamp =
             ColumnSchema::new("value".to_owned(), Type::TIMESTAMPTZ, -1, 1, true)
                 .with_default_expression("now()".to_owned());
@@ -402,6 +420,7 @@ mod tests {
         );
         assert_eq!(add_column_default_clause(&unsupported_function), None);
         assert_eq!(add_column_default_clause(&unsupported_json), None);
+        assert_eq!(add_column_default_clause(&unsupported_timetz), None);
         assert_eq!(add_column_default_clause(&unsupported_current_timestamp), None);
         assert_eq!(add_column_default_clause(&unsupported_numeric_expression), None);
     }

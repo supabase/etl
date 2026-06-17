@@ -107,6 +107,7 @@ pub(super) fn validate_cell_for_bigquery(cell: &CellNonOptional) -> EtlResult<()
         CellNonOptional::Numeric(numeric) => validate_numeric_for_bigquery(numeric),
         CellNonOptional::Date(_) => Ok(()),
         CellNonOptional::Time(_) => Ok(()),
+        CellNonOptional::TimeTz(_) => Ok(()),
         CellNonOptional::Timestamp(_) => Ok(()),
         CellNonOptional::TimestampTz(_) => Ok(()),
         CellNonOptional::Uuid(_) => Ok(()),
@@ -145,6 +146,7 @@ fn validate_array_cell_for_bigquery(array_cell: &ArrayCellNonOptional) -> EtlRes
         }
         ArrayCellNonOptional::Date(_) => Ok(()),
         ArrayCellNonOptional::Time(_) => Ok(()),
+        ArrayCellNonOptional::TimeTz(_) => Ok(()),
         ArrayCellNonOptional::Timestamp(_) => Ok(()),
         ArrayCellNonOptional::TimestampTz(_) => Ok(()),
         ArrayCellNonOptional::Uuid(_) => Ok(()),

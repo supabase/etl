@@ -1403,11 +1403,19 @@ impl BigQueryClient {
                 matches!(typ, &Type::DATE).then(|| format!("DATE {expression}"))
             }
             DefaultExpression::TimeLiteral(expression) => {
-                matches!(typ, &Type::TIME).then(|| expression.clone())
+                matches!(typ, &Type::TIME).then(|| format!("TIME {expression}"))
+            }
+            DefaultExpression::TimeTzLiteral(expression) => {
+                matches!(typ, &Type::TIMETZ).then(|| expression.clone())
             }
             DefaultExpression::TimestampLiteral(expression) => {
-                Self::is_bigquery_timestamp_default_type(typ)
-                    .then(|| format!("TIMESTAMP {expression}"))
+                matches!(typ, &Type::TIMESTAMP).then(|| format!("TIMESTAMP {expression}"))
+            }
+            DefaultExpression::TimestampTzLiteral(expression) => {
+                matches!(typ, &Type::TIMESTAMPTZ).then(|| format!("TIMESTAMP {expression}"))
+            }
+            DefaultExpression::IntervalLiteral(expression) => {
+                matches!(typ, &Type::INTERVAL).then(|| expression.clone())
             }
             DefaultExpression::JsonLiteral(expression) => {
                 Self::is_json_type(typ).then(|| format!("JSON {expression}"))
@@ -1426,6 +1434,8 @@ impl BigQueryClient {
                 | &Type::NAME
                 | &Type::TEXT
                 | &Type::MONEY
+                | &Type::TIMETZ
+                | &Type::INTERVAL
                 | &Type::UUID
         )
     }
@@ -1449,12 +1459,6 @@ impl BigQueryClient {
     /// BigQuery string column.
     fn is_bigquery_numeric_string_default_type(typ: &Type) -> bool {
         matches!(typ, &Type::MONEY)
-    }
-
-    /// Returns whether this Postgres type is created as a BigQuery timestamp
-    /// column and can safely receive timestamp defaults.
-    fn is_bigquery_timestamp_default_type(typ: &Type) -> bool {
-        matches!(typ, &Type::TIMESTAMP | &Type::TIMESTAMPTZ)
     }
 
     /// Returns whether this Postgres type is created as a BigQuery JSON
@@ -1536,7 +1540,9 @@ impl BigQueryClient {
                 &Type::MONEY_ARRAY => "string",
                 &Type::DATE_ARRAY => "date",
                 &Type::TIME_ARRAY => "time",
+                &Type::TIMETZ_ARRAY => "string",
                 &Type::TIMESTAMP_ARRAY | &Type::TIMESTAMPTZ_ARRAY => "timestamp",
+                &Type::INTERVAL_ARRAY => "string",
                 &Type::UUID_ARRAY => "string",
                 &Type::JSON_ARRAY | &Type::JSONB_ARRAY => "json",
                 &Type::OID_ARRAY => "int64",
@@ -1556,7 +1562,9 @@ impl BigQueryClient {
             &Type::MONEY => "string",
             &Type::DATE => "date",
             &Type::TIME => "time",
+            &Type::TIMETZ => "string",
             &Type::TIMESTAMP | &Type::TIMESTAMPTZ => "timestamp",
+            &Type::INTERVAL => "string",
             &Type::UUID => "string",
             &Type::JSON | &Type::JSONB => "json",
             &Type::OID => "int64",
@@ -1593,8 +1601,10 @@ impl BigQueryClient {
                 Type::MONEY => ColumnType::String,
                 Type::DATE => ColumnType::String,
                 Type::TIME => ColumnType::String,
+                Type::TIMETZ => ColumnType::String,
                 Type::TIMESTAMP => ColumnType::String,
                 Type::TIMESTAMPTZ => ColumnType::String,
+                Type::INTERVAL => ColumnType::String,
                 Type::UUID => ColumnType::String,
                 Type::JSON => ColumnType::String,
                 Type::JSONB => ColumnType::String,
@@ -1615,8 +1625,10 @@ impl BigQueryClient {
                 Type::MONEY_ARRAY => ColumnType::String,
                 Type::DATE_ARRAY => ColumnType::String,
                 Type::TIME_ARRAY => ColumnType::String,
+                Type::TIMETZ_ARRAY => ColumnType::String,
                 Type::TIMESTAMP_ARRAY => ColumnType::String,
                 Type::TIMESTAMPTZ_ARRAY => ColumnType::String,
+                Type::INTERVAL_ARRAY => ColumnType::String,
                 Type::UUID_ARRAY => ColumnType::String,
                 Type::JSON_ARRAY => ColumnType::String,
                 Type::JSONB_ARRAY => ColumnType::String,
@@ -1776,7 +1788,12 @@ mod tests {
         assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::NUMERIC), "bignumeric");
         assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::MONEY), "string");
         assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::OID), "int64");
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::DATE), "date");
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::TIME), "time");
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::TIMETZ), "string");
         assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::TIMESTAMP), "timestamp");
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::TIMESTAMPTZ), "timestamp");
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::INTERVAL), "string");
         assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::JSON), "json");
         assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::BYTEA), "bytes");
     }
@@ -1802,8 +1819,15 @@ mod tests {
         );
         assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::MONEY_ARRAY), "array<string>");
         assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::OID_ARRAY), "array<int64>");
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::DATE_ARRAY), "array<date>");
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::TIME_ARRAY), "array<time>");
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::TIMETZ_ARRAY), "array<string>");
         assert_eq!(
             BigQueryClient::postgres_to_bigquery_type(&Type::TIMESTAMP_ARRAY),
+            "array<timestamp>"
+        );
+        assert_eq!(
+            BigQueryClient::postgres_to_bigquery_type(&Type::TIMESTAMPTZ_ARRAY),
             "array<timestamp>"
         );
         assert_eq!(
@@ -1870,6 +1894,9 @@ mod tests {
             (Type::BOOL, "'true'::text", "true"),
             (Type::MONEY, "42", "'42'"),
             (Type::DATE, "'2026-01-01'::date", "DATE '2026-01-01'"),
+            (Type::TIME, "'12:30:00'::time", "TIME '12:30:00'"),
+            (Type::TIMETZ, "'12:30:00+02'::timetz", "'12:30:00+02'"),
+            (Type::INTERVAL, "'30 days'::interval", "'30 days'"),
             (
                 Type::TIMESTAMP,
                 "'2026-01-01 12:30:00'::timestamp",

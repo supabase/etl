@@ -14,8 +14,14 @@ pub enum DefaultExpression {
     DateLiteral(String),
     /// A SQL time literal.
     TimeLiteral(String),
+    /// A SQL time with time zone literal.
+    TimeTzLiteral(String),
     /// A SQL timestamp literal.
     TimestampLiteral(String),
+    /// A SQL timestamp with time zone literal.
+    TimestampTzLiteral(String),
+    /// A SQL interval literal.
+    IntervalLiteral(String),
     /// A SQL JSON literal.
     JsonLiteral(String),
 }
@@ -445,9 +451,10 @@ fn parse_string_literal(expression: &str, typ: &Type) -> Option<DefaultExpressio
         }
         &Type::DATE => Some(DefaultExpression::DateLiteral(expression.to_owned())),
         &Type::TIME => Some(DefaultExpression::TimeLiteral(expression.to_owned())),
-        &Type::TIMESTAMP | &Type::TIMESTAMPTZ => {
-            Some(DefaultExpression::TimestampLiteral(expression.to_owned()))
-        }
+        &Type::TIMETZ => Some(DefaultExpression::TimeTzLiteral(expression.to_owned())),
+        &Type::TIMESTAMP => Some(DefaultExpression::TimestampLiteral(expression.to_owned())),
+        &Type::TIMESTAMPTZ => Some(DefaultExpression::TimestampTzLiteral(expression.to_owned())),
+        &Type::INTERVAL => Some(DefaultExpression::IntervalLiteral(expression.to_owned())),
         &Type::JSON | &Type::JSONB => Some(DefaultExpression::JsonLiteral(expression.to_owned())),
         _ => Some(DefaultExpression::StringLiteral(expression.to_owned())),
     }
@@ -532,6 +539,26 @@ mod tests {
             Some(DefaultExpression::DateLiteral("'2026-01-01'".to_owned()))
         );
         assert_eq!(
+            parse_default_expression("'12:30:00'::time without time zone", &Type::TIME),
+            Some(DefaultExpression::TimeLiteral("'12:30:00'".to_owned()))
+        );
+        assert_eq!(
+            parse_default_expression("'12:30:00+02'::time with time zone", &Type::TIMETZ),
+            Some(DefaultExpression::TimeTzLiteral("'12:30:00+02'".to_owned()))
+        );
+        assert_eq!(
+            parse_default_expression("'2026-01-01 12:30:00'::timestamp", &Type::TIMESTAMP),
+            Some(DefaultExpression::TimestampLiteral("'2026-01-01 12:30:00'".to_owned()))
+        );
+        assert_eq!(
+            parse_default_expression("'2026-01-01 12:30:00+02'::timestamptz", &Type::TIMESTAMPTZ),
+            Some(DefaultExpression::TimestampTzLiteral("'2026-01-01 12:30:00+02'".to_owned(),))
+        );
+        assert_eq!(
+            parse_default_expression("'30 days'::interval", &Type::INTERVAL),
+            Some(DefaultExpression::IntervalLiteral("'30 days'".to_owned()))
+        );
+        assert_eq!(
             parse_default_expression("'{}'::jsonb", &Type::JSONB),
             Some(DefaultExpression::JsonLiteral("'{}'".to_owned()))
         );
@@ -548,7 +575,8 @@ mod tests {
         assert_eq!(parse_default_expression("now()", &Type::TIMESTAMPTZ), None);
         assert_eq!(parse_default_expression("current_timestamp", &Type::TIMESTAMPTZ), None);
         assert_eq!(parse_default_expression("current_date", &Type::DATE), None);
-        assert_eq!(parse_default_expression("current_time", &Type::TIME), None);
+        assert_eq!(parse_default_expression("current_time", &Type::TIMETZ), None);
+        assert_eq!(parse_default_expression("localtime", &Type::TIME), None);
         assert_eq!(parse_default_expression("localtimestamp", &Type::TIMESTAMP), None);
         assert_eq!(parse_default_expression("timezone('UTC', now())", &Type::TIMESTAMP), None);
         assert_eq!(parse_default_expression("gen_random_uuid()", &Type::UUID), None);

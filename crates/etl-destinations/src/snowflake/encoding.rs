@@ -112,6 +112,7 @@ impl Serialize for CellSerializer<'_> {
             // output buffer, avoiding an intermediate String allocation.
             Cell::Date(d) => ser.collect_str(&d.format(DATE_FORMAT)),
             Cell::Time(t) => ser.collect_str(&t.format(TIME_FORMAT)),
+            Cell::TimeTz(t) => ser.collect_str(t),
             Cell::Timestamp(dt) => ser.collect_str(&dt.format(TIMESTAMP_FORMAT)),
             Cell::TimestampTz(dt) => ser.collect_str(&dt.format(TIMESTAMPTZ_FORMAT_HH_MM)),
             Cell::Uuid(u) => ser.collect_str(u),
@@ -228,6 +229,7 @@ impl Serialize for ArrayCellSerializer<'_> {
             ArrayCell::Time(v) => {
                 serialize_array_with(v, ser, |t| CollectStr(t.format(TIME_FORMAT)))
             }
+            ArrayCell::TimeTz(v) => serialize_array_with(v, ser, CollectStr),
             ArrayCell::Timestamp(v) => {
                 serialize_array_with(v, ser, |dt| CollectStr(dt.format(TIMESTAMP_FORMAT)))
             }
