@@ -17,7 +17,7 @@ A real-time data pipeline that:
 
 ## Prerequisites
 
-- Rust toolchain 1.93.1, matching `rust-toolchain.toml`
+- Rust toolchain 1.95.0, matching `rust-toolchain.toml`
 - Postgres 14+ with logical replication enabled (`wal_level = logical` in `postgresql.conf`)
 - Basic familiarity with Rust and SQL
 

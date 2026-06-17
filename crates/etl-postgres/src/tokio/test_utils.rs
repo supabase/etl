@@ -670,7 +670,7 @@ impl<G> Drop for PgDatabase<G> {
 /// Creates a [`ColumnSchema`] for a non-nullable, primary key column named "id"
 /// of type `INT8` that is added by default to tables created by [`PgDatabase`].
 pub fn id_column_schema() -> ColumnSchema {
-    ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, Some(1), false)
+    ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false).with_primary_key(1)
 }
 
 /// Connects with the TLS mode described by the test database configuration.

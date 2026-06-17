@@ -38,11 +38,12 @@ fn install_crypto_provider() {
 }
 
 use crate::support::bigquery::{
-    BigQueryOrder, BigQueryUser, NonNullableColsScalar, NullableColsArray, NullableColsScalar,
-    parse_bigquery_table_rows,
+    BigQueryDefaultsRow, BigQueryOrder, BigQuerySchemaChangeRow, BigQueryUser,
+    NonNullableColsScalar, NullableColsArray, NullableColsScalar, parse_bigquery_table_rows,
 };
 
 const REPLICA_IDENTITY_LARGE_TEXT_SIZE_BYTES: usize = 8192;
+const BIGQUERY_RECREATED_TABLE_READY_TIMEOUT: Duration = Duration::from_secs(600);
 
 fn generate_random_ascii_string(length: usize) -> String {
     rand::rng().sample_iter(&Alphanumeric).take(length).map(char::from).collect()
@@ -284,7 +285,10 @@ async fn table_copy_reset_drops_destination_table_before_recopy() {
 
     pipeline.start().await.unwrap();
 
-    users_ready.notified().await;
+    // BigQuery can keep the default Storage Write stream for a dropped and
+    // re-created table unavailable for several minutes. The destination is
+    // expected to keep retrying while preserving the physical `*_0` table id.
+    users_ready.wait_for(BIGQUERY_RECREATED_TABLE_READY_TIMEOUT).notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -1813,7 +1817,10 @@ async fn table_array_with_null_values() {
 
     pipeline.start().await.unwrap();
 
-    table_sync_done_notification.notified().await;
+    // BigQuery can keep the default Storage Write stream for a dropped and
+    // re-created table unavailable for several minutes. The destination is
+    // expected to keep retrying while preserving the physical `*_0` table id.
+    table_sync_done_notification.wait_for(BIGQUERY_RECREATED_TABLE_READY_TIMEOUT).notified().await;
 
     let event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
 
@@ -2059,6 +2066,108 @@ async fn table_validation_out_of_bounds_values() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn schema_change_add_column_defaults() {
+    if skip_if_missing_bigquery_env_vars() {
+        return;
+    }
+
+    init_test_tracing();
+    install_crypto_provider();
+
+    let database = spawn_source_database().await;
+    let bigquery_database = setup_bigquery_database().await;
+    let table_name = test_table_name("defaults_schema");
+    let table_id = database
+        .create_table(table_name.clone(), true, &[("name", "text not null")])
+        .await
+        .expect("failed to create source table");
+
+    let publication_name = "test_pub_bq_defaults_schema".to_owned();
+    database
+        .create_publication(&publication_name, std::slice::from_ref(&table_name))
+        .await
+        .expect("failed to create publication");
+    database
+        .run_sql(&format!(
+            "insert into {} (name) values ('Alice')",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .expect("failed to insert initial source row");
+
+    let store = NotifyingStore::new();
+    let pipeline_id: PipelineId = random();
+    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
+    let destination = TestDestinationWrapper::wrap(raw_destination);
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name,
+        store.clone(),
+        destination.clone(),
+    );
+
+    let table_ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+
+    pipeline.start().await.unwrap();
+
+    table_ready.notified().await;
+
+    let event_notify = destination
+        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+        .await;
+
+    database
+        .alter_table(
+            table_name.clone(),
+            &[
+                TableModification::AddColumn {
+                    name: "status",
+                    data_type: "text default 'new'::text",
+                },
+                TableModification::AddColumn { name: "score", data_type: "integer default 15" },
+                TableModification::AddColumn { name: "active", data_type: "boolean default true" },
+            ],
+        )
+        .await
+        .expect("failed to alter source table");
+    database
+        .run_sql(&format!(
+            "insert into {} (name) values ('Bob')",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .expect("failed to insert defaulted source row");
+
+    event_notify.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let rows = bigquery_database.query_table(table_name).await.unwrap();
+    let mut rows = parse_bigquery_table_rows::<BigQueryDefaultsRow>(rows);
+    rows.sort();
+    assert_eq!(
+        rows,
+        vec![
+            BigQueryDefaultsRow {
+                id: 1,
+                name: "Alice".to_owned(),
+                status: None,
+                score: None,
+                active: None,
+            },
+            BigQueryDefaultsRow {
+                id: 2,
+                name: "Bob".to_owned(),
+                status: Some("new".to_owned()),
+                score: Some(15),
+                active: Some(true),
+            },
+        ]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn table_schema_change() {
     if skip_if_missing_bigquery_env_vars() {
         return;
@@ -2103,6 +2212,13 @@ async fn table_schema_change() {
     pipeline.start().await.unwrap();
     table_sync_done.notified().await;
 
+    let initial_state = store
+        .get_applied_destination_table_metadata(table_id)
+        .await
+        .unwrap()
+        .expect("destination schema state should exist after table creation");
+    let initial_snapshot_id = initial_state.snapshot_id;
+
     // Insert the initial row.
     let event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
 
@@ -2113,20 +2229,6 @@ async fn table_schema_change() {
 
     event_notify.notified().await;
     destination.clear_events().await;
-
-    // Verify initial schema.
-    let initial_schema = bigquery_database.query_table_schema(table_name.clone()).await.unwrap();
-    initial_schema.assert_columns(&["id", "name", "age", "status"]);
-    let initial_view_schema = bigquery_database.get_view_schema(table_name.clone()).await.unwrap();
-    initial_view_schema.assert_columns(&["id", "name", "age", "status"]);
-
-    // Verify destination schema state is applied after initial table creation.
-    let initial_state = store
-        .get_applied_destination_table_metadata(table_id)
-        .await
-        .unwrap()
-        .expect("destination schema state should exist after table creation");
-    let initial_snapshot_id = initial_state.snapshot_id;
 
     // Apply multiple schema changes:
     // 1. Rename name -> full_name
@@ -2177,7 +2279,6 @@ async fn table_schema_change() {
 
     pipeline.shutdown_and_wait().await.unwrap();
 
-    // Verify destination schema state is applied after schema changes.
     let final_state = store
         .get_applied_destination_table_metadata(table_id)
         .await
@@ -2188,21 +2289,19 @@ async fn table_schema_change() {
         "snapshot_id should have increased after schema change"
     );
 
-    // Verify the final schema:
-    // - name should be renamed to full_name
-    // - status should be dropped
-    // - email should be added
-    let final_schema =
-        bigquery_database.get_table_schema_by_id(&final_state.destination_table_id).await.unwrap();
-    final_schema.assert_columns(&["id", "full_name", "age", "email"]);
-    final_schema.assert_no_column("name");
-    final_schema.assert_no_column("status");
-    let final_view_schema = bigquery_database.get_view_schema(table_name.clone()).await.unwrap();
-    final_view_schema.assert_columns(&["id", "full_name", "age", "email"]);
-    final_view_schema.assert_no_column("name");
-    final_view_schema.assert_no_column("status");
-
-    // Verify data was inserted correctly.
     let rows = bigquery_database.query_table(table_name).await.unwrap();
-    assert_eq!(rows.len(), 2);
+    let mut rows = parse_bigquery_table_rows::<BigQuerySchemaChangeRow>(rows);
+    rows.sort();
+    assert_eq!(
+        rows,
+        vec![
+            BigQuerySchemaChangeRow { id: 1, full_name: "Alice".to_owned(), age: 25, email: None },
+            BigQuerySchemaChangeRow {
+                id: 2,
+                full_name: "Bob".to_owned(),
+                age: 30,
+                email: Some("bob@example.com".to_owned()),
+            },
+        ]
+    );
 }

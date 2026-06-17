@@ -345,6 +345,26 @@ impl BigQueryDatabase {
         Some(BigQueryTableSchema::from_table_fields(table.schema.fields.unwrap_or_default()))
     }
 
+    /// Queries BigQuery column defaults for an exact table ID.
+    pub async fn query_column_defaults_by_id(&self, table_id: &str) -> Vec<BigQueryColumnDefault> {
+        let query = format!(
+            "SELECT column_name, column_default FROM `{}.{}.INFORMATION_SCHEMA.COLUMNS` WHERE \
+             table_name = '{}' ORDER BY ordinal_position",
+            self.project_id, self.dataset_id, table_id
+        );
+
+        let rows = retry_bigquery_test_operation("table default metadata query", || {
+            let request = QueryRequest::new(query.clone());
+            async { self.client.job().query(&self.project_id, request).await }
+        })
+        .await
+        .unwrap_or_else(|err| panic!("Failed to query BigQuery column defaults: {err:?}"))
+        .rows
+        .unwrap_or_default();
+
+        parse_bigquery_table_rows(rows)
+    }
+
     /// Manually creates a table in the test dataset using column definitions.
     ///
     /// Creates a table by generating a DDL statement from the provided column
@@ -433,6 +453,24 @@ impl From<TableRow> for BigQueryColumnSchema {
             column_name: parse_table_cell(columns[0].clone()).unwrap(),
             data_type: parse_table_cell(columns[1].clone()).unwrap(),
             ordinal_position: parse_table_cell(columns[2].clone()).unwrap(),
+        }
+    }
+}
+
+/// BigQuery column default metadata returned from `INFORMATION_SCHEMA.COLUMNS`.
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
+pub struct BigQueryColumnDefault {
+    pub column_name: String,
+    pub column_default: Option<String>,
+}
+
+impl From<TableRow> for BigQueryColumnDefault {
+    fn from(value: TableRow) -> Self {
+        let columns = value.columns.unwrap();
+
+        BigQueryColumnDefault {
+            column_name: parse_table_cell(columns[0].clone()).unwrap(),
+            column_default: parse_table_cell(columns[1].clone()),
         }
     }
 }

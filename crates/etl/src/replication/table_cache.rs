@@ -165,9 +165,9 @@ mod tests {
             TableId::new(123),
             TableName::new("public".to_owned(), "test_table".to_owned()),
             vec![
-                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, Some(1), false),
-                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, None, true),
-                ColumnSchema::new("age".to_owned(), Type::INT4, -1, 3, None, true),
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true),
+                ColumnSchema::new("age".to_owned(), Type::INT4, -1, 3, true),
             ],
             SnapshotId::new(10.into()),
         );

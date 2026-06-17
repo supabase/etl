@@ -20,9 +20,12 @@ ETL delivers data to destinations in **two phases**:
 
 Schema changes are surfaced through `Event::Relation`. If your destination
 keeps physical schemas, flush pending writes before handling a relation event,
-apply the supported add/drop/rename diff, then process following row events
-with the new schema. See [Schema Changes](/etl/explanation/schema-changes/) for
-the current semantics and limitations.
+apply the supported schema diff, then process following row events with the new
+schema. The built-in destinations handle column adds, drops, renames,
+nullability changes, and supported default changes, but default expressions and
+backfill semantics remain destination-specific. See
+[Schema Changes](/etl/explanation/schema-changes/) for the current semantics and
+limitations.
 
 ## Step 1: Create the Project
 
