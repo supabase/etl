@@ -32,7 +32,7 @@ Before starting, ensure you have the following installed:
 Install SQLx CLI:
 
 ```bash
-cargo install --version 0.9.0-alpha.1 sqlx-cli --no-default-features --features rustls,postgres --locked
+cargo install --version 0.9.0 sqlx-cli --no-default-features --features rustls,postgres --locked
 ```
 
 ### Optional Tools
