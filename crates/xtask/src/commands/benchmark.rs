@@ -788,8 +788,9 @@ fn recommended_threads(warehouses: u16) -> u16 {
     let warehouse_threads =
         usize::from(warehouses).saturating_mul(DEFAULT_TPCC_THREADS_PER_WAREHOUSE);
     let cpu_threads = std::thread::available_parallelism()
-        .map(|parallelism| parallelism.get().saturating_mul(DEFAULT_TPCC_THREADS_PER_CPU))
-        .unwrap_or(DEFAULT_TPCC_MIN_THREADS);
+        .map_or(DEFAULT_TPCC_MIN_THREADS, |parallelism| {
+            parallelism.get().saturating_mul(DEFAULT_TPCC_THREADS_PER_CPU)
+        });
     warehouse_threads.max(cpu_threads).clamp(DEFAULT_TPCC_MIN_THREADS, DEFAULT_TPCC_MAX_THREADS)
         as u16
 }

@@ -270,7 +270,7 @@ async fn postgres_store_schema_storage_migration_round_trips_old_state() {
     let database = spawn_unmigrated_database().await;
 
     let mut conn = migration_connection(&database.config).await;
-    postgres_store_migrator().run_direct(None, &mut conn).await.unwrap();
+    postgres_store_migrator().run_direct(None, &mut conn, false).await.unwrap();
     postgres_store_migrator().undo(&mut conn, POSTGRES_STORE_BASE_VERSION).await.unwrap();
     drop(conn);
 
@@ -353,7 +353,7 @@ async fn postgres_store_schema_storage_migration_round_trips_old_state() {
         .unwrap();
 
     let mut conn = migration_connection(&database.config).await;
-    postgres_store_migrator().run_direct(None, &mut conn).await.unwrap();
+    postgres_store_migrator().run_direct(None, &mut conn, false).await.unwrap();
     drop(conn);
 
     let migrated_columns: String = client

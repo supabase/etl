@@ -96,7 +96,7 @@ impl PostgresExternalMaintenanceStore {
             sqlx_error(error, "Failed to configure external maintenance migration search path")
         })?;
 
-        postgres_migrator().run_direct(None, &mut *connection).await.map_err(|error| {
+        postgres_migrator().run_direct(None, &mut *connection, false).await.map_err(|error| {
             migration_error(error, "Failed to run external maintenance migrations")
         })?;
 

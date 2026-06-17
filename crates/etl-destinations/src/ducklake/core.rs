@@ -3278,8 +3278,7 @@ mod tests {
             [],
             |row| row.get::<_, i64>(0),
         )
-        .map(|count| count > 0)
-        .unwrap_or(false)
+        .is_ok_and(|count| count > 0)
     }
 
     async fn open_lake_conn_when_table_visible(
