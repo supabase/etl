@@ -333,8 +333,7 @@ fn storage_write_metadata_lag_timeout_error(detail: &str) -> EtlError {
 /// Converts BigQuery row errors to ETL destination errors.
 fn row_error_to_etl_error(err: RowError) -> EtlError {
     let code = RowErrorCode::try_from(err.code)
-        .map(|code| code.as_str_name())
-        .unwrap_or("UNKNOWN_ROW_ERROR_CODE");
+        .map_or("UNKNOWN_ROW_ERROR_CODE", |code| code.as_str_name());
 
     etl_error!(
         ErrorKind::DestinationError,

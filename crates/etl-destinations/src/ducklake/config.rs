@@ -285,7 +285,7 @@ fn ensure_vendored_extension_dir(directory: &Path) -> EtlResult<()> {
 }
 
 fn vendored_extension_path(extension_dir: &Path, filename: &str) -> EtlResult<String> {
-    extension_dir.join(filename).to_str().map(std::string::ToString::to_string).ok_or_else(|| {
+    extension_dir.join(filename).to_str().map(str::to_owned).ok_or_else(|| {
         etl_error!(
             ErrorKind::ConfigError,
             "Vendored DuckDB extension path contains non-utf8 characters",

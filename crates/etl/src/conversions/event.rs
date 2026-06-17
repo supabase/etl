@@ -331,7 +331,7 @@ pub(crate) fn parse_replicated_column_names(
     let column_names = relation_body
         .columns()
         .iter()
-        .map(|column| column.name().map(ToString::to_string))
+        .map(|column| column.name().map(str::to_owned))
         .collect::<Result<HashSet<String>, _>>()?;
 
     Ok(column_names)
@@ -355,7 +355,7 @@ pub(crate) fn parse_replica_identity_column_names(
         protocol::ReplicaIdentity::Full => relation_body
             .columns()
             .iter()
-            .map(|column| column.name().map(ToString::to_string))
+            .map(|column| column.name().map(str::to_owned))
             .collect::<Result<HashSet<String>, _>>()?,
         _ => relation_body
             .columns()
@@ -364,7 +364,7 @@ pub(crate) fn parse_replica_identity_column_names(
             // LOGICALREP_IS_REPLICA_IDENTITY, so `& 1` tests only that bit
             // while ignoring any other protocol flags that may be present.
             .filter(|column| column.flags() & 1 == 1)
-            .map(|column| column.name().map(ToString::to_string))
+            .map(|column| column.name().map(str::to_owned))
             .collect::<Result<HashSet<String>, _>>()?,
     };
 
