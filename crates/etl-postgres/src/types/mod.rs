@@ -13,7 +13,6 @@ pub use schema::{
 };
 pub use time::{
     DATE_FORMAT, POSTGRES_EPOCH, ParseTimeError, PgTimeTz, TIME_FORMAT, TIMESTAMP_FORMAT,
-    TIMESTAMPTZ_FORMAT_HH_MM, TIMESTAMPTZ_FORMAT_HHMM, TIMETZ_FORMAT_HH_MM, TIMETZ_FORMAT_HHMM,
-    parse_postgres_utc_offset,
+    TIMESTAMPTZ_FORMAT_HH_MM, parse_postgres_utc_offset,
 };
 pub use utils::{convert_type_oid_to_type, generate_sequence_number, is_array_type};

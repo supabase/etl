@@ -78,6 +78,9 @@ pub static ETL_MIGRATION_OPTIONS: LazyLock<PgConnectionOptions> =
 /// and long-running transactions during initial table synchronization and WAL
 /// streaming.
 ///
+/// Keep the session timezone at UTC so Postgres renders `timestamptz` text
+/// output with a deterministic UTC offset for replication parsing.
+///
 /// Lock timeout is disabled because `CREATE_REPLICATION_SLOT` must wait for all
 /// in-progress write transactions to reach a consistent snapshot point. On
 /// heavily-loaded databases this can take minutes, and a timeout would only

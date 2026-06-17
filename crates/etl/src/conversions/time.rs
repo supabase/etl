@@ -12,6 +12,11 @@ pub(crate) fn parse_postgres_timetz(value: &str) -> Result<PgTimeTz, ParseTimeEr
 }
 
 /// Parses a Postgres `timestamp with time zone` text value.
+///
+/// Replication connections set the Postgres session timezone to UTC through
+/// `ETL_REPLICATION_OPTIONS`. This parser accepts numeric offsets, but UTC
+/// session output keeps `timestamptz` values deterministic before they are
+/// normalized into [`chrono::Utc`].
 pub(crate) fn parse_postgres_timestamptz(
     value: &str,
 ) -> Result<DateTime<FixedOffset>, ParseTimeError> {

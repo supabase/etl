@@ -3,7 +3,7 @@ use etl::{
     etl_error,
     types::{
         ArrayCellNonOptional, Cell, CellNonOptional, DATE_FORMAT, TIME_FORMAT, TIMESTAMP_FORMAT,
-        TIMESTAMPTZ_FORMAT_HH_MM, TableRow,
+        TableRow,
     },
 };
 use prost::bytes;
@@ -146,8 +146,9 @@ impl prost::Message for BigQueryTableRow {
 /// specified tag.
 ///
 /// Each cell type is encoded using the appropriate prost encoding method.
-/// Temporal types and UUIDs are formatted as strings, while numeric types use
-/// their native encoding. Null cells produce no encoded output.
+/// Temporal civil types and UUIDs are formatted as strings, while instant
+/// timestamps and numeric types use their native encoding. Null cells produce
+/// no encoded output.
 fn cell_encode_prost(cell: &CellNonOptional, tag: u32, buf: &mut impl bytes::BufMut) {
     match cell {
         CellNonOptional::Null => {}
@@ -194,8 +195,8 @@ fn cell_encode_prost(cell: &CellNonOptional, tag: u32, buf: &mut impl bytes::Buf
             prost::encoding::string::encode(tag, &s, buf);
         }
         CellNonOptional::TimestampTz(t) => {
-            let s = t.format(TIMESTAMPTZ_FORMAT_HH_MM).to_string();
-            prost::encoding::string::encode(tag, &s, buf);
+            let micros = t.timestamp_micros();
+            prost::encoding::int64::encode(tag, &micros, buf);
         }
         CellNonOptional::Uuid(u) => {
             let s = u.to_string();
@@ -257,8 +258,8 @@ fn cell_encode_len_prost(cell: &CellNonOptional, tag: u32) -> usize {
             prost::encoding::string::encoded_len(tag, &s)
         }
         CellNonOptional::TimestampTz(t) => {
-            let s = t.format(TIMESTAMPTZ_FORMAT_HH_MM).to_string();
-            prost::encoding::string::encoded_len(tag, &s)
+            let micros = t.timestamp_micros();
+            prost::encoding::int64::encoded_len(tag, &micros)
         }
         CellNonOptional::Uuid(u) => {
             let s = u.to_string();
@@ -277,9 +278,10 @@ fn cell_encode_len_prost(cell: &CellNonOptional, tag: u32) -> usize {
 /// Encodes an [`ArrayCellNonOptional`] into Protocol Buffer format using the
 /// specified tag.
 ///
-/// Array cells are encoded using either packed encoding for numeric types or
-/// repeated encoding for string-based types. Temporal arrays are converted to
-/// string arrays with appropriate formatting before encoding.
+/// Array cells are encoded using either packed encoding for numeric/instant
+/// timestamp types or repeated encoding for string-based types. Civil temporal
+/// arrays are converted to string arrays with appropriate formatting before
+/// encoding.
 fn array_cell_encode_prost(
     array_cell: &ArrayCellNonOptional,
     tag: u32,
@@ -335,9 +337,8 @@ fn array_cell_encode_prost(
             prost::encoding::string::encode_repeated(tag, &values, buf);
         }
         ArrayCellNonOptional::TimestampTz(vec) => {
-            let values: Vec<String> =
-                vec.iter().map(|v| v.format(TIMESTAMPTZ_FORMAT_HH_MM).to_string()).collect();
-            prost::encoding::string::encode_repeated(tag, &values, buf);
+            let values: Vec<i64> = vec.iter().map(|v| v.timestamp_micros()).collect();
+            prost::encoding::int64::encode_packed(tag, &values, buf);
         }
         ArrayCellNonOptional::Uuid(vec) => {
             let values: Vec<String> = vec.iter().map(ToString::to_string).collect();
@@ -398,9 +399,8 @@ fn array_cell_non_optional_encoded_len_prost(array_cell: &ArrayCellNonOptional, 
             prost::encoding::string::encoded_len_repeated(tag, &values)
         }
         ArrayCellNonOptional::TimestampTz(vec) => {
-            let values: Vec<String> =
-                vec.iter().map(|v| v.format(TIMESTAMPTZ_FORMAT_HH_MM).to_string()).collect();
-            prost::encoding::string::encoded_len_repeated(tag, &values)
+            let values: Vec<i64> = vec.iter().map(|v| v.timestamp_micros()).collect();
+            prost::encoding::int64::encoded_len_packed(tag, &values)
         }
         ArrayCellNonOptional::Uuid(vec) => {
             let values: Vec<String> = vec.iter().map(ToString::to_string).collect();
@@ -418,11 +418,12 @@ fn array_cell_non_optional_encoded_len_prost(array_cell: &ArrayCellNonOptional, 
 mod tests {
     use std::str::FromStr;
 
-    use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
+    use chrono::{NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
     use etl::{
         error::ErrorKind,
         types::{Cell, PgNumeric},
     };
+    use prost::Message;
 
     use super::*;
 
@@ -562,6 +563,42 @@ mod tests {
 
         let result = BigQueryTableRow::try_from(table_row);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn timestamptz_values_encode_as_epoch_microseconds() {
+        let timestamptz = Utc.with_ymd_and_hms(2026, 1, 2, 3, 4, 5).unwrap();
+        let expected_micros = timestamptz.timestamp_micros();
+
+        let row = BigQueryTableRow(vec![(1, CellNonOptional::TimestampTz(timestamptz))]);
+        let mut actual = Vec::new();
+        row.encode(&mut actual).unwrap();
+
+        let mut expected = Vec::new();
+        prost::encoding::int64::encode(1, &expected_micros, &mut expected);
+
+        assert_eq!(actual, expected);
+        assert_eq!(row.encoded_len(), expected.len());
+
+        let array_row = BigQueryTableRow(vec![(
+            1,
+            CellNonOptional::Array(ArrayCellNonOptional::TimestampTz(vec![timestamptz])),
+        )]);
+        let mut actual_array = Vec::new();
+        array_row.encode(&mut actual_array).unwrap();
+
+        let mut expected_array = Vec::new();
+        prost::encoding::int64::encode_packed(1, &[expected_micros], &mut expected_array);
+
+        assert_eq!(actual_array, expected_array);
+        assert_eq!(array_row.encoded_len(), expected_array.len());
+        assert_eq!(
+            array_cell_non_optional_encoded_len_prost(
+                &ArrayCellNonOptional::TimestampTz(vec![timestamptz]),
+                1,
+            ),
+            expected_array.len()
+        );
     }
 
     #[test]

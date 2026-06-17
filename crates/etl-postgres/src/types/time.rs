@@ -14,18 +14,9 @@ pub const DATE_FORMAT: &str = "%Y-%m-%d";
 /// seconds.
 pub const TIME_FORMAT: &str = "%H:%M:%S%.f";
 
-/// Postgres timetz format string with time zone offset in +HHMM format.
-pub const TIMETZ_FORMAT_HHMM: &str = "%H:%M:%S%.f%#z";
-
-/// Postgres timetz format string with time zone offset in +HH:MM format.
-pub const TIMETZ_FORMAT_HH_MM: &str = "%H:%M:%S%.f%:z";
-
 /// Postgres timestamp format string for parsing timestamps with optional
 /// fractional seconds.
 pub const TIMESTAMP_FORMAT: &str = "%Y-%m-%d %H:%M:%S%.f";
-
-/// Postgres timestamptz format string with time zone offset in +HHMM format.
-pub const TIMESTAMPTZ_FORMAT_HHMM: &str = "%Y-%m-%d %H:%M:%S%.f%#z";
 
 /// Postgres timestamptz format string with time zone offset in +HH:MM format.
 pub const TIMESTAMPTZ_FORMAT_HH_MM: &str = "%Y-%m-%d %H:%M:%S%.f%:z";
