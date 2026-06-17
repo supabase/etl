@@ -1,25 +1,25 @@
 //! Date and time conversion helpers for Postgres text output.
 
 use chrono::{DateTime, FixedOffset, NaiveDateTime, TimeZone};
-use etl_postgres::types::{PgTimeTz, TIMESTAMP_FORMAT, parse_postgres_utc_offset};
+use etl_postgres::types::{ParseTimeError, PgTimeTz, TIMESTAMP_FORMAT, parse_postgres_utc_offset};
 
 /// Minimum byte index after `YYYY-MM-DD` where a UTC offset sign can appear.
 const MIN_TIMESTAMP_OFFSET_INDEX: usize = 10;
 
 /// Parses a Postgres `time with time zone` text value.
-pub(crate) fn parse_postgres_timetz(value: &str) -> Result<PgTimeTz, chrono::ParseError> {
+pub(crate) fn parse_postgres_timetz(value: &str) -> Result<PgTimeTz, ParseTimeError> {
     value.parse()
 }
 
 /// Parses a Postgres `timestamp with time zone` text value.
 pub(crate) fn parse_postgres_timestamptz(
     value: &str,
-) -> Result<DateTime<FixedOffset>, chrono::ParseError> {
-    let (timestamp, offset) = split_timestamp_offset(value).ok_or_else(invalid_timestamp_error)?;
+) -> Result<DateTime<FixedOffset>, ParseTimeError> {
+    let (timestamp, offset) = split_timestamp_offset(value).ok_or_else(ParseTimeError::InvalidSyntax)?;
     let timestamp = NaiveDateTime::parse_from_str(timestamp.trim_end(), TIMESTAMP_FORMAT)?;
-    let offset = parse_postgres_utc_offset(offset).ok_or_else(invalid_timestamp_error)?;
+    let offset = parse_postgres_utc_offset(offset).ok_or_else(ParseTimeError::InvalidSyntax)?;
 
-    offset.from_local_datetime(&timestamp).single().ok_or_else(invalid_timestamp_error)
+    offset.from_local_datetime(&timestamp).single().ok_or_else(ParseTimeError::InvalidSyntax)
 }
 
 /// Splits a timestamp string into timestamp and numeric UTC offset parts.
@@ -27,12 +27,6 @@ fn split_timestamp_offset(value: &str) -> Option<(&str, &str)> {
     value.char_indices().rev().find_map(|(idx, ch)| {
         (idx > MIN_TIMESTAMP_OFFSET_INDEX && matches!(ch, '+' | '-')).then(|| value.split_at(idx))
     })
-}
-
-/// Returns a stable chrono parse error for invalid timestamp values.
-fn invalid_timestamp_error() -> chrono::ParseError {
-    NaiveDateTime::parse_from_str("", TIMESTAMP_FORMAT)
-        .expect_err("empty timestamp should not parse")
 }
 
 #[cfg(test)]
@@ -103,5 +97,17 @@ mod tests {
         assert!(parse_postgres_timestamptz("2026-01-01 12:30:00+15:59:60").is_err());
         assert!(parse_postgres_timestamptz("2026-01-01 12:30:00+1").is_err());
         assert!(parse_postgres_timestamptz("2026-01-01 12:30:00+01:02:03:04").is_err());
+    }
+
+    #[test]
+    fn timestamptz_distinguishes_chrono_and_offset_errors() {
+        assert!(matches!(
+            parse_postgres_timestamptz("2026-99-01 12:30:00+00").unwrap_err(),
+            ParseTimeError::Chrono(_)
+        ));
+        assert_eq!(
+            parse_postgres_timestamptz("2026-01-01 12:30:00+16").unwrap_err(),
+            ParseTimeError::InvalidSyntax
+        );
     }
 }

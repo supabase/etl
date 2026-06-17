@@ -109,6 +109,30 @@
 - Use `debug_assert!` and `unreachable!` where they make internal invariants explicit, but prefer typed errors for runtime failures that can be triggered by external input or system state.
 - Only document `# Panics` when a function can actually panic.
 
+### Parser Safety
+- Parser entrypoints and helpers that consume external input should not panic
+  for malformed input. Return a typed parse error, `EtlError`, `Option::None`,
+  or another explicit failure value that matches the surrounding API.
+- Treat unexpected end of input, malformed tokens, invalid byte sequences,
+  invalid numeric or temporal ranges, and unsupported syntax as recoverable
+  parser failures, not internal invariants.
+- Prefer checked access such as `slice.get(index)`, `str::get(range)`,
+  iterator methods, or byte-slice parsing when input controls indexes or
+  ranges. Convert `None` into the parser's error type.
+- Direct indexing with `[]` is acceptable only when the invariant is local and
+  obvious, such as `bytes[index]` inside `while index < bytes.len()` or fixed
+  chunk indexes after `chunks_exact`. Use bytes rather than `str` byte ranges
+  when parsing ASCII protocols so non-ASCII malformed input cannot panic on a
+  UTF-8 boundary.
+- `expect`, `panic!`, and `unreachable!` in parser internals are reserved for
+  broken programmer invariants that prior code has guaranteed. The message
+  should state the invariant, for example `expect("validated token index should
+  be in bounds")`.
+- Add regression tests for malformed inputs that exercise boundary cases:
+  empty input, unterminated quotes or escapes, invalid UTF-8-adjacent text,
+  non-ASCII bytes in ASCII formats, overflow, underflow, and unsupported
+  syntax.
+
 ## Unsafe And Concurrency
 - Avoid `unsafe` unless it is necessary.
 - Every `unsafe` block should have a preceding `// SAFETY:` comment explaining why it is sound.

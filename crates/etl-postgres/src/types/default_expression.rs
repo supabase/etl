@@ -603,5 +603,9 @@ mod tests {
         );
         assert_eq!(parse_default_expression("array['a', 'b']::text[]", &Type::TEXT_ARRAY), None);
         assert_eq!(parse_default_expression("1e6", &Type::INT8), None);
+
+        for expression in ["'", "('", "(('a'", "'a", "'a'::", "((1 + 2"] {
+            assert_eq!(parse_default_expression(expression, &Type::TEXT), None);
+        }
     }
 }

@@ -41,6 +41,39 @@ const POSTGRES_EPOCH_OFFSET_SECONDS: u64 = 946_684_800;
 pub static POSTGRES_EPOCH: LazyLock<SystemTime> =
     LazyLock::new(|| UNIX_EPOCH + Duration::from_secs(POSTGRES_EPOCH_OFFSET_SECONDS));
 
+/// Error types that can occur when parsing Postgres temporal strings.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ParseTimeError {
+    /// The underlying calendar or clock value failed chrono parsing.
+    Chrono(chrono::ParseError),
+    /// The input string has invalid temporal syntax.
+    InvalidSyntax,
+}
+
+impl From<chrono::ParseError> for ParseTimeError {
+    fn from(error: chrono::ParseError) -> Self {
+        Self::Chrono(error)
+    }
+}
+
+impl fmt::Display for ParseTimeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ParseTimeError::Chrono(error) => write!(f, "{error}"),
+            ParseTimeError::InvalidSyntax => write!(f, "Invalid syntax"),
+        }
+    }
+}
+
+impl std::error::Error for ParseTimeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ParseTimeError::Chrono(error) => Some(error),
+            ParseTimeError::InvalidSyntax => None,
+        }
+    }
+}
+
 /// A Postgres `time with time zone` value.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct PgTimeTz {
@@ -77,7 +110,7 @@ impl Default for PgTimeTz {
 }
 
 impl FromStr for PgTimeTz {
-    type Err = chrono::ParseError;
+    type Err = ParseTimeError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         parse_postgres_timetz(value)
@@ -92,10 +125,10 @@ impl fmt::Display for PgTimeTz {
 }
 
 /// Parses a Postgres timetz text value with supported UTC offset forms.
-fn parse_postgres_timetz(value: &str) -> Result<PgTimeTz, chrono::ParseError> {
-    let (time, offset) = split_timetz_offset(value).ok_or_else(invalid_time_error)?;
+fn parse_postgres_timetz(value: &str) -> Result<PgTimeTz, ParseTimeError> {
+    let (time, offset) = split_timetz_offset(value).ok_or_else(ParseTimeError::InvalidSyntax)?;
     let time = NaiveTime::parse_from_str(time.trim_end(), TIME_FORMAT)?;
-    let offset = parse_postgres_utc_offset(offset).ok_or_else(invalid_time_error)?;
+    let offset = parse_postgres_utc_offset(offset).ok_or_else(ParseTimeError::InvalidSyntax)?;
 
     Ok(PgTimeTz::new(time, offset))
 }
@@ -153,13 +186,14 @@ fn parse_colon_utc_offset(value: &str) -> Option<(i32, i32, i32)> {
 
 /// Parses an unsigned UTC offset in HH, HHMM, or HHMMSS form.
 fn parse_compact_utc_offset(value: &str) -> Option<(i32, i32, i32)> {
+    let bytes = value.as_bytes();
     match value.len() {
-        2 => Some((parse_two_digits(value)?, 0, 0)),
-        4 => Some((parse_two_digits(&value[..2])?, parse_two_digits(&value[2..])?, 0)),
+        2 => Some((parse_two_digit_bytes(bytes)?, 0, 0)),
+        4 => Some((parse_two_digit_bytes(&bytes[..2])?, parse_two_digit_bytes(&bytes[2..])?, 0)),
         6 => Some((
-            parse_two_digits(&value[..2])?,
-            parse_two_digits(&value[2..4])?,
-            parse_two_digits(&value[4..])?,
+            parse_two_digit_bytes(&bytes[..2])?,
+            parse_two_digit_bytes(&bytes[2..4])?,
+            parse_two_digit_bytes(&bytes[4..])?,
         )),
         _ => None,
     }
@@ -167,17 +201,16 @@ fn parse_compact_utc_offset(value: &str) -> Option<(i32, i32, i32)> {
 
 /// Parses exactly two ASCII digits.
 fn parse_two_digits(value: &str) -> Option<i32> {
-    let bytes = value.as_bytes();
+    parse_two_digit_bytes(value.as_bytes())
+}
+
+/// Parses exactly two ASCII digit bytes.
+fn parse_two_digit_bytes(bytes: &[u8]) -> Option<i32> {
     if bytes.len() != 2 || !bytes.iter().all(u8::is_ascii_digit) {
         return None;
     }
 
     Some(((bytes[0] - b'0') as i32 * 10) + (bytes[1] - b'0') as i32)
-}
-
-/// Returns a stable chrono parse error for invalid time values.
-fn invalid_time_error() -> chrono::ParseError {
-    NaiveTime::parse_from_str("", TIME_FORMAT).expect_err("empty time should not parse")
 }
 
 /// Writes a fixed offset the same way Postgres ISO output does.
@@ -241,6 +274,16 @@ mod tests {
         assert!("12:30:00+15:59:60".parse::<PgTimeTz>().is_err());
         assert!("12:30:00+1".parse::<PgTimeTz>().is_err());
         assert!("12:30:00+01:02:03:04".parse::<PgTimeTz>().is_err());
+        assert!("12:30:00+aéa".parse::<PgTimeTz>().is_err());
+    }
+
+    #[test]
+    fn timetz_distinguishes_chrono_and_offset_errors() {
+        assert!(matches!(
+            "24:00:00+00".parse::<PgTimeTz>().unwrap_err(),
+            ParseTimeError::Chrono(_)
+        ));
+        assert_eq!("12:30:00+16".parse::<PgTimeTz>().unwrap_err(), ParseTimeError::InvalidSyntax);
     }
 
     #[test]
@@ -263,5 +306,6 @@ mod tests {
         assert!(parse_postgres_utc_offset("+15:60").is_none());
         assert!(parse_postgres_utc_offset("+15:59:60").is_none());
         assert!(parse_postgres_utc_offset("+01:02:03:04").is_none());
+        assert!(parse_postgres_utc_offset("+aéa").is_none());
     }
 }

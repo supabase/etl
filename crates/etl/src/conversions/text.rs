@@ -218,6 +218,14 @@ where
             }
         }
 
+        if in_quotes {
+            bail!(ErrorKind::ConversionError, "Array input contains an unterminated quote");
+        }
+
+        if in_escape {
+            bail!(ErrorKind::ConversionError, "Array input contains an unterminated escape");
+        }
+
         // PostgreSQL treats unquoted `NULL` as a null array element, while
         // quoted `"NULL"` is just the literal string. Keep that distinction.
         let val = if !val_quoted && val_str.eq_ignore_ascii_case("null") {
@@ -767,6 +775,10 @@ mod tests {
         assert!(parse_cell_from_postgres_text(&Type::INT4_ARRAY, "{").is_err());
         assert!(parse_cell_from_postgres_text(&Type::INT4_ARRAY, "}").is_err());
         assert!(parse_cell_from_postgres_text(&Type::INT4_ARRAY, "").is_err());
+
+        // Unterminated quote or escape.
+        assert!(parse_cell_from_postgres_text(&Type::TEXT_ARRAY, r#"{"unterminated}"#).is_err());
+        assert!(parse_cell_from_postgres_text(&Type::TEXT_ARRAY, r#"{dangling\}"#).is_err());
     }
 
     #[test]
