@@ -552,7 +552,7 @@ mod tests {
     fn try_from_str_timetz() {
         let cell = parse_cell_from_postgres_text(&Type::TIMETZ, "14:30:45.123+02").unwrap();
         if let Cell::TimeTz(time) = cell {
-            assert_eq!(time.to_string(), "14:30:45.123+02:00");
+            assert_eq!(time.to_string(), "14:30:45.123+02");
         } else {
             panic!("Expected TimeTz cell");
         }

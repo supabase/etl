@@ -180,7 +180,7 @@ fn invalid_time_error() -> chrono::ParseError {
     NaiveTime::parse_from_str("", TIME_FORMAT).expect_err("empty time should not parse")
 }
 
-/// Writes a fixed offset as `+HH:MM` or `+HH:MM:SS`.
+/// Writes a fixed offset the same way Postgres ISO output does.
 fn write_utc_offset(f: &mut fmt::Formatter<'_>, offset: FixedOffset) -> fmt::Result {
     let seconds = offset.local_minus_utc();
     let sign = if seconds < 0 { '-' } else { '+' };
@@ -189,10 +189,12 @@ fn write_utc_offset(f: &mut fmt::Formatter<'_>, offset: FixedOffset) -> fmt::Res
     let minutes = (seconds % 3600) / 60;
     let remaining_seconds = seconds % 60;
 
-    if remaining_seconds == 0 {
+    if remaining_seconds != 0 {
+        write!(f, "{sign}{hours:02}:{minutes:02}:{remaining_seconds:02}")
+    } else if minutes != 0 {
         write!(f, "{sign}{hours:02}:{minutes:02}")
     } else {
-        write!(f, "{sign}{hours:02}:{minutes:02}:{remaining_seconds:02}")
+        write!(f, "{sign}{hours:02}")
     }
 }
 
@@ -203,7 +205,7 @@ mod tests {
     #[test]
     fn timetz_parses_and_formats_offsets() {
         let value: PgTimeTz = "12:30:00.123+02".parse().unwrap();
-        assert_eq!(value.to_string(), "12:30:00.123+02:00");
+        assert_eq!(value.to_string(), "12:30:00.123+02");
 
         let value: PgTimeTz = "12:30:00-07:30".parse().unwrap();
         assert_eq!(value.to_string(), "12:30:00-07:30");
