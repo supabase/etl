@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Timelike, Utc};
 use etl::{
     error::EtlResult,
@@ -18,7 +16,7 @@ use postgres_replication::{
     protocol::{LogicalReplicationMessage, ReplicationMessage},
 };
 use serde_json::json;
-use tokio::{pin, time::timeout};
+use tokio::pin;
 
 const MATRIX_ROW_ID: i64 = 1;
 const MATRIX_UUID: &str = "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11";
@@ -442,9 +440,9 @@ async fn collect_insert_row(
     pin!(stream);
 
     loop {
-        let event = timeout(Duration::from_secs(10), stream.next())
+        let event = stream
+            .next()
             .await
-            .expect("timed out while waiting for logical replication data")
             .expect("logical replication stream ended unexpectedly")
             .expect("failed to decode logical replication data");
 
@@ -465,9 +463,9 @@ async fn collect_insert_parse_result(
     pin!(stream);
 
     loop {
-        let event = timeout(Duration::from_secs(10), stream.next())
+        let event = stream
+            .next()
             .await
-            .expect("timed out while waiting for logical replication data")
             .expect("logical replication stream ended unexpectedly")
             .expect("failed to decode logical replication data");
 
