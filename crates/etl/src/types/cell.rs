@@ -4,8 +4,8 @@ use uuid::Uuid;
 
 use crate::{
     bail,
-    conversions::PgNumeric,
     error::{ErrorKind, EtlError},
+    types::PgNumeric,
 };
 
 macro_rules! convert_array_variant {

@@ -1,9 +1,9 @@
 mod bool;
 mod event;
 mod hex;
-mod numeric;
 mod table_row;
 mod text;
+mod time;
 
 #[cfg(any(test, feature = "test-utils"))]
 pub(crate) use event::convert_tuple_to_row;
@@ -14,5 +14,4 @@ pub(crate) use event::{
     parse_event_from_truncate_message, parse_event_from_update_message,
     parse_replica_identity_column_names, parse_replicated_column_names,
 };
-pub use numeric::{InvalidSign, ParseNumericError, PgNumeric, Sign};
 pub(crate) use table_row::parse_table_row_from_postgres_copy_bytes;

@@ -1,16 +1,17 @@
 use core::str;
-use std::str::FromStr;
 
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
-use etl_postgres::types::{
-    DATE_FORMAT, PgTimeTz, TIME_FORMAT, TIMESTAMP_FORMAT, is_array_type, parse_postgres_timestamptz,
-};
+use etl_postgres::types::{DATE_FORMAT, TIME_FORMAT, TIMESTAMP_FORMAT, is_array_type};
 use tokio_postgres::types::Type;
 use uuid::Uuid;
 
 use crate::{
     bail,
-    conversions::{bool::parse_bool, hex},
+    conversions::{
+        bool::parse_bool,
+        hex,
+        time::{parse_postgres_timestamptz, parse_postgres_timetz},
+    },
     error::{ErrorKind, EtlResult},
     types::{ArrayCell, Cell},
 };
@@ -97,12 +98,12 @@ pub(crate) fn parse_cell_from_postgres_text(typ: &Type, str: &str) -> EtlResult<
             ArrayCell::Time,
         ),
         Type::TIMETZ => {
-            let val = PgTimeTz::from_str(str)?;
+            let val = parse_postgres_timetz(str)?;
             Ok(Cell::TimeTz(val))
         }
         Type::TIMETZ_ARRAY => parse_cell_from_postgres_text_array(
             str,
-            |str| Ok(Some(PgTimeTz::from_str(str)?)),
+            |str| Ok(Some(parse_postgres_timetz(str)?)),
             ArrayCell::TimeTz,
         ),
         Type::TIMESTAMP => {

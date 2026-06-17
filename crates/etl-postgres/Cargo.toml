@@ -21,6 +21,7 @@ replication = ["sqlx"]
 [dependencies]
 
 aws-lc-rs = { workspace = true }
+byteorder = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
 const-oid = { workspace = true }

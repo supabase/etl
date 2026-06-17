@@ -17,7 +17,6 @@ default = []
 
 [dependencies]
 
-byteorder = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
 etl-config = { workspace = true }
