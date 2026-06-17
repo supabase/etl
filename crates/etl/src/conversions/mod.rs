@@ -5,6 +5,8 @@ mod numeric;
 mod table_row;
 mod text;
 
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) use event::convert_tuple_to_row;
 pub(crate) use event::{
     ColumnSchemaMessage, DDL_MESSAGE_PREFIX, IdentityMessage, SchemaChangeMessage,
     build_table_schema, parse_event_from_begin_message, parse_event_from_commit_message,

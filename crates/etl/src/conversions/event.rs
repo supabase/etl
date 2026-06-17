@@ -550,7 +550,7 @@ pub(crate) fn parse_event_from_truncate_message(
 /// The tuple width must exactly match the number of provided column schemas.
 /// Every field must decode to a concrete [`Cell`]; `UnchangedToast` is
 /// therefore rejected here because full row images must be self-contained.
-fn convert_tuple_to_row<'a>(
+pub(crate) fn convert_tuple_to_row<'a>(
     column_schemas: impl ExactSizeIterator<Item = &'a ColumnSchema>,
     tuple_data: &[protocol::TupleData],
 ) -> EtlResult<TableRow> {
