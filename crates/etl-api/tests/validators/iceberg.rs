@@ -34,7 +34,7 @@ async fn validate_iceberg_connection_success() {
 
     let ctx = create_validation_context();
     let config = create_iceberg_config(&warehouse_name);
-    let failures = validate_destination(&ctx, &config).await.unwrap();
+    let failures = validate_destination(&ctx, &config, None).await.unwrap();
 
     let _ = lakekeeper.drop_warehouse(warehouse_id).await;
 
@@ -48,7 +48,7 @@ async fn validate_iceberg_connection_failure() {
     }
     let ctx = create_validation_context();
     let config = create_iceberg_config("nonexistent-warehouse");
-    let failures = validate_destination(&ctx, &config).await.unwrap();
+    let failures = validate_destination(&ctx, &config, None).await.unwrap();
 
     assert!(!failures.is_empty(), "Expected validation failure");
     assert_eq!(failures[0].name, "Iceberg Connection Failed");

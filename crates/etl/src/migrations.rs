@@ -69,7 +69,7 @@ async fn run_migration_set(
     let mut conn = create_migration_connection(connection_config).await?;
 
     debug!(migration_set = label, "applying ETL migrations");
-    migrator.run_direct(None, &mut conn).await?;
+    migrator.run_direct(None, &mut conn, false).await?;
     debug!(migration_set = label, "ETL migrations successfully applied");
 
     Ok(())

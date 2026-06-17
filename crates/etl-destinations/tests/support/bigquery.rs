@@ -235,7 +235,7 @@ impl From<TableRow> for NullableColsScalar {
         fn parse_unix_timestamp_from_cell(table_cell: TableCell) -> Option<DateTime<Utc>> {
             table_cell
                 .value
-                .and_then(|v| v.as_str().map(ToString::to_string))
+                .and_then(|v| v.as_str().map(str::to_owned))
                 .and_then(|s| s.parse::<f64>().ok())
                 .and_then(|timestamp| {
                     let secs = timestamp.trunc() as i64;
@@ -660,7 +660,7 @@ impl From<TableRow> for NonNullableColsScalar {
         fn parse_unix_timestamp_from_cell(table_cell: TableCell) -> DateTime<Utc> {
             table_cell
                 .value
-                .and_then(|v| v.as_str().map(ToString::to_string))
+                .and_then(|v| v.as_str().map(str::to_owned))
                 .and_then(|s| s.parse::<f64>().ok())
                 .and_then(|timestamp| {
                     let secs = timestamp.trunc() as i64;

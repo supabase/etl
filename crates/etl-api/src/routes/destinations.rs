@@ -13,14 +13,19 @@ use thiserror::Error;
 use utoipa::ToSchema;
 
 use crate::{
-    configs::{destination::FullApiDestinationConfig, encryption::EncryptionKeyring},
+    config::ApiConfig,
+    configs::{
+        destination::FullApiDestinationConfig, encryption::EncryptionKeyring,
+        pipeline::FullApiPipelineConfig,
+    },
     data,
     data::{
         destinations::{DestinationsDbError, destination_exists},
         pipelines::{PipelinesDbError, read_pipelines_for_destination_for_deletion},
+        sources::SourcesDbError,
     },
     k8s::{
-        K8sClient,
+        K8sClient, TrustedRootCertsCache,
         core::{K8sCoreError, first_active_pipeline_id},
     },
     routes::{
@@ -46,6 +51,9 @@ pub enum DestinationError {
     PipelinesDb(#[from] PipelinesDbError),
 
     #[error(transparent)]
+    SourcesDb(#[from] SourcesDbError),
+
+    #[error(transparent)]
     Validation(#[from] ValidationError),
 
     #[error("Failed to load environment: {0}")]
@@ -59,6 +67,12 @@ pub enum DestinationError {
 
     #[error("The destination with id {0} is still used by pipelines; delete those pipelines first")]
     DestinationInUse(i64),
+
+    #[error("The source with id {0} was not found")]
+    SourceNotFound(i64),
+
+    #[error("Invalid destination validation request: {0}")]
+    InvalidValidationRequest(String),
 }
 
 impl DestinationError {
@@ -67,6 +81,7 @@ impl DestinationError {
             // Do not expose internal details in error messages.
             DestinationError::DestinationsDb(DestinationsDbError::Database(_))
             | DestinationError::PipelinesDb(PipelinesDbError::Database(_))
+            | DestinationError::SourcesDb(SourcesDbError::Database(_))
             | DestinationError::Environment(_)
             | DestinationError::K8sCore(_) => "Internal server error".to_owned(),
             DestinationError::Validation(error) => {
@@ -83,14 +98,19 @@ impl IntoResponse for DestinationError {
         let status_code = match &self {
             DestinationError::DestinationsDb(_)
             | DestinationError::PipelinesDb(_)
+            | DestinationError::SourcesDb(_)
             | DestinationError::Environment(_)
             | DestinationError::K8sCore(_) => StatusCode::INTERNAL_SERVER_ERROR,
             DestinationError::Validation(error) => utils::validation_error_status_code(error),
-            DestinationError::DestinationNotFound(_) => StatusCode::NOT_FOUND,
+            DestinationError::DestinationNotFound(_) | DestinationError::SourceNotFound(_) => {
+                StatusCode::NOT_FOUND
+            }
             DestinationError::ActivePipeline(_) | DestinationError::DestinationInUse(_) => {
                 StatusCode::CONFLICT
             }
-            DestinationError::TenantId(_) => StatusCode::BAD_REQUEST,
+            DestinationError::TenantId(_) | DestinationError::InvalidValidationRequest(_) => {
+                StatusCode::BAD_REQUEST
+            }
         };
 
         error_response_with_internal_error(status_code, self.to_message(), &self)
@@ -139,8 +159,15 @@ pub struct ReadDestinationsResponse {
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ValidateDestinationRequest {
+    /// Source identifier used for source-aware destination validation.
+    #[schema(example = 1)]
+    pub source_id: Option<i64>,
+    /// Destination configuration to validate.
     #[schema(required = true)]
     pub config: FullApiDestinationConfig,
+    /// Pipeline configuration used to cross-reference source publication
+    /// details.
+    pub pipeline_config: Option<FullApiPipelineConfig>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -161,6 +188,7 @@ impl From<ValidationFailure> for ValidationFailureResponse {
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ValidateDestinationResponse {
+    /// Validation failures found for the destination configuration.
     pub validation_failures: Vec<ValidationFailureResponse>,
 }
 
@@ -395,15 +423,46 @@ pub(crate) async fn read_all_destinations(
 )]
 pub(crate) async fn validate_destination(
     headers: HeaderMap,
+    Extension(pool): Extension<PgPool>,
+    Extension(api_config): Extension<Arc<ApiConfig>>,
+    Extension(trusted_root_certs_cache): Extension<Arc<TrustedRootCertsCache>>,
+    Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
     request: Json<ValidateDestinationRequest>,
 ) -> Result<impl IntoResponse, DestinationError> {
-    let _tenant_id = extract_tenant_id(&headers)?;
+    let tenant_id = extract_tenant_id(&headers)?;
     let request = request.into_inner();
+    if let Some(pipeline_config) = &request.pipeline_config {
+        pipeline_config.validate().map_err(DestinationError::InvalidValidationRequest)?;
+    }
+    let pipeline_config = request.pipeline_config.as_ref();
+    let publication_name =
+        pipeline_config.map(|pipeline_config| pipeline_config.publication_name.as_str());
 
-    let environment = Environment::load()?;
-    let ctx = ValidationContext::builder(environment).build();
+    let ctx = match (request.source_id, publication_name) {
+        (Some(source_id), Some(_)) => {
+            let source = data::sources::read_source(&pool, tenant_id, source_id, &encryption_key)
+                .await?
+                .ok_or(DestinationError::SourceNotFound(source_id))?;
 
-    let failures = validation::validate_destination(&ctx, &request.config).await?;
+            ValidationContext::build_from_source(
+                source.config,
+                api_config.as_ref(),
+                trusted_root_certs_cache.as_ref(),
+            )
+            .await?
+        }
+        (None, None) => {
+            let environment = Environment::load()?;
+            ValidationContext::builder(environment).build()
+        }
+        _ => {
+            return Err(DestinationError::InvalidValidationRequest(
+                "`source_id` and `pipeline_config` must be provided together.".to_owned(),
+            ));
+        }
+    };
+
+    let failures = validation::validate_destination(&ctx, &request.config, pipeline_config).await?;
     let response = ValidateDestinationResponse {
         validation_failures: failures.into_iter().map(Into::into).collect(),
     };

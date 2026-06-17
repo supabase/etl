@@ -259,14 +259,6 @@ where
             let (table_schema, identity) =
                 replication_transaction.get_table_schema_with_identity(table_id).await?;
 
-            if !table_schema.has_primary_keys() {
-                bail!(
-                    ErrorKind::SourceSchemaError,
-                    "Primary key not found",
-                    format!("Table '{}' has no primary key", table_schema.name)
-                );
-            }
-
             // We store the table schema in the schema store to be able to retrieve it even
             // when the pipeline is restarted, since it's outside the lifecycle
             // of the pipeline.

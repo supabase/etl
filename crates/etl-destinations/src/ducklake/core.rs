@@ -1866,7 +1866,7 @@ where
                         )?;
                         let Some(old_row) = delete.old_table_row else {
                             return Err(etl_error!(
-                                ErrorKind::InvalidState,
+                                ErrorKind::SourceReplicaIdentityError,
                                 "DuckLake delete requires an old row image",
                                 format!(
                                     "Table '{}' emitted a delete without an old row despite \
@@ -3278,8 +3278,7 @@ mod tests {
             [],
             |row| row.get::<_, i64>(0),
         )
-        .map(|count| count > 0)
-        .unwrap_or(false)
+        .is_ok_and(|count| count > 0)
     }
 
     async fn open_lake_conn_when_table_visible(

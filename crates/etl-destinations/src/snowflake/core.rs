@@ -237,18 +237,7 @@ where
         builders: &mut HashMap<TableId, RowBatchBuilder>,
         column_cache: &mut HashMap<TableId, Vec<ColumnSchema>>,
     ) -> EtlResult<()> {
-        // Accept only full rows, otherwise NULL will be recorded for missing columns
-        // (not that they are not changed).
-        let full_row = match e.updated_table_row {
-            UpdatedTableRow::Full(row) => row,
-            UpdatedTableRow::Partial(_) => {
-                bail!(
-                    ErrorKind::SourceReplicaIdentityError,
-                    "Partial update rows not supported",
-                    "Snowflake destination requires REPLICA IDENTITY FULL for update events"
-                );
-            }
-        };
+        let full_row = snowflake_update_row(&e.replicated_table_schema, e.updated_table_row)?;
 
         let table_id = e.replicated_table_schema.id();
         self.ensure_column_cache(column_cache, table_id, &e.replicated_table_schema).await?;
@@ -271,8 +260,8 @@ where
         let table_id = e.replicated_table_schema.id();
         let offset = OffsetToken::new(e.commit_lsn, e.tx_ordinal);
 
-        match e.old_table_row {
-            Some(OldTableRow::Full(row)) => {
+        match snowflake_delete_row(&e.replicated_table_schema, e.old_table_row)? {
+            SnowflakeDeleteRow::Full(row) => {
                 self.ensure_column_cache(column_cache, table_id, &e.replicated_table_schema)
                     .await?;
                 let cols = &column_cache[&table_id];
@@ -287,7 +276,7 @@ where
                     )
                     .map_err(EtlError::from)
             }
-            Some(OldTableRow::Key(key_row)) => {
+            SnowflakeDeleteRow::Key(key_row) => {
                 self.ensure_column_cache(column_cache, table_id, &e.replicated_table_schema)
                     .await?;
                 let identity_cols: Vec<_> =
@@ -302,10 +291,6 @@ where
                         &offset,
                     )
                     .map_err(EtlError::from)
-            }
-            None => {
-                info!(table_id = ?table_id, "delete event has no old row data, skipping");
-                Ok(())
             }
         }
     }
@@ -416,6 +401,54 @@ where
     }
 }
 
+/// Delete row payloads Snowflake can encode.
+#[derive(Debug)]
+enum SnowflakeDeleteRow {
+    /// A full old row image.
+    Full(TableRow),
+    /// A key-only old row image.
+    Key(TableRow),
+}
+
+/// Returns the full new row required for a Snowflake update row.
+fn snowflake_update_row(
+    replicated_table_schema: &ReplicatedTableSchema,
+    updated_table_row: UpdatedTableRow,
+) -> EtlResult<TableRow> {
+    match updated_table_row {
+        UpdatedTableRow::Full(row) => Ok(row),
+        UpdatedTableRow::Partial(_) => Err(etl_error!(
+            ErrorKind::SourceReplicaIdentityError,
+            "Snowflake update requires a full new row image",
+            format!(
+                "Table '{}' emitted a partial update row. Snowflake update rows must include all \
+                 replicated column values.",
+                replicated_table_schema.name()
+            )
+        )),
+    }
+}
+
+/// Returns the old row image required for a Snowflake delete row.
+fn snowflake_delete_row(
+    replicated_table_schema: &ReplicatedTableSchema,
+    old_table_row: Option<OldTableRow>,
+) -> EtlResult<SnowflakeDeleteRow> {
+    match old_table_row {
+        Some(OldTableRow::Full(row)) => Ok(SnowflakeDeleteRow::Full(row)),
+        Some(OldTableRow::Key(row)) => Ok(SnowflakeDeleteRow::Key(row)),
+        None => Err(etl_error!(
+            ErrorKind::SourceReplicaIdentityError,
+            "Snowflake delete requires an old row image",
+            format!(
+                "Table '{}' emitted a delete without an old row image. Snowflake deletes need \
+                 either a full old row or a key image.",
+                replicated_table_schema.name()
+            )
+        )),
+    }
+}
+
 impl<S, T, C> etl::destination::Destination for Destination<S, T, C>
 where
     S: DestinationStore,
@@ -475,5 +508,87 @@ where
             .await;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use etl::types::{
+        Cell, IdentityMask, PartialTableRow, ReplicationMask, TableName, TableSchema, Type,
+    };
+
+    use super::*;
+
+    fn replicated_schema() -> ReplicatedTableSchema {
+        let table_schema = Arc::new(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_owned(), "users".to_owned()),
+            vec![
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true),
+            ],
+        ));
+        let replication_mask = ReplicationMask::all(&table_schema);
+        let identity_mask = IdentityMask::from_bytes(vec![1, 0]);
+
+        ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask)
+    }
+
+    #[test]
+    fn snowflake_update_row_accepts_full_new_row() {
+        let schema = replicated_schema();
+        let row = TableRow::new(vec![Cell::I32(1), Cell::String("alice".to_owned())]);
+
+        let result = snowflake_update_row(&schema, UpdatedTableRow::Full(row.clone())).unwrap();
+
+        assert_eq!(result, row);
+    }
+
+    #[test]
+    fn snowflake_update_row_rejects_partial_new_row() {
+        let schema = replicated_schema();
+        let partial_row = PartialTableRow::new(2, TableRow::new(vec![Cell::I32(1)]), vec![1]);
+
+        let error =
+            snowflake_update_row(&schema, UpdatedTableRow::Partial(partial_row)).unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::SourceReplicaIdentityError);
+    }
+
+    #[test]
+    fn snowflake_delete_row_accepts_full_old_row() {
+        let schema = replicated_schema();
+        let row = TableRow::new(vec![Cell::I32(1), Cell::String("alice".to_owned())]);
+
+        let result = snowflake_delete_row(&schema, Some(OldTableRow::Full(row.clone()))).unwrap();
+
+        match result {
+            SnowflakeDeleteRow::Full(result) => assert_eq!(result, row),
+            SnowflakeDeleteRow::Key(_) => panic!("expected full old row"),
+        }
+    }
+
+    #[test]
+    fn snowflake_delete_row_accepts_key_only_old_row() {
+        let schema = replicated_schema();
+        let row = TableRow::new(vec![Cell::I32(1)]);
+
+        let result = snowflake_delete_row(&schema, Some(OldTableRow::Key(row.clone()))).unwrap();
+
+        match result {
+            SnowflakeDeleteRow::Key(result) => assert_eq!(result, row),
+            SnowflakeDeleteRow::Full(_) => panic!("expected key old row"),
+        }
+    }
+
+    #[test]
+    fn snowflake_delete_row_rejects_missing_old_row() {
+        let schema = replicated_schema();
+
+        let error = snowflake_delete_row(&schema, None).unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::SourceReplicaIdentityError);
     }
 }

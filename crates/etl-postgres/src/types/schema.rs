@@ -915,25 +915,6 @@ impl ReplicatedTableSchema {
         self.identity_type
     }
 
-    /// Returns whether the runtime identity matches the table primary key.
-    ///
-    /// This is the semantic question destinations usually care about. A table
-    /// configured with `REPLICA IDENTITY USING INDEX` can still return `true`
-    /// here if the chosen index resolves to the same current columns as the
-    /// primary key.
-    ///
-    /// This comparison is structural over the runtime schema identity, not a
-    /// direct comparison of PostgreSQL identity modes or index OIDs. Because
-    /// ETL tracks DDL/schema changes, that gives the intended notion of
-    /// primary-key equivalence across schema evolution.
-    pub fn identity_matches_primary_key(&self) -> bool {
-        self.identity_mask.as_slice().iter().eq(Self::primary_key_identity_mask(
-            &self.table_schema,
-            &self.replication_mask,
-        )
-        .as_slice())
-    }
-
     /// Returns an iterator over only the column schemas that are being
     /// replicated.
     ///
@@ -1380,7 +1361,6 @@ mod tests {
         let replicated_table_schema = ReplicatedTableSchema::from_mask(schema, replication_mask);
 
         assert_eq!(replicated_table_schema.identity_type(), IdentityType::PrimaryKey);
-        assert!(replicated_table_schema.identity_matches_primary_key());
     }
 
     #[test]
@@ -1392,7 +1372,6 @@ mod tests {
             ReplicatedTableSchema::from_masks(schema, replication_mask, identity_mask);
 
         assert_eq!(replicated_table_schema.identity_type(), IdentityType::AlternativeKey);
-        assert!(!replicated_table_schema.identity_matches_primary_key());
     }
 
     #[test]
@@ -1404,7 +1383,6 @@ mod tests {
             ReplicatedTableSchema::from_masks(schema, replication_mask, identity_mask);
 
         assert_eq!(replicated_table_schema.identity_type(), IdentityType::Full);
-        assert!(!replicated_table_schema.identity_matches_primary_key());
     }
 
     #[test]
@@ -1416,7 +1394,6 @@ mod tests {
             ReplicatedTableSchema::from_masks(schema, replication_mask, identity_mask);
 
         assert_eq!(replicated_table_schema.identity_type(), IdentityType::Missing);
-        assert!(!replicated_table_schema.identity_matches_primary_key());
     }
 
     #[test]

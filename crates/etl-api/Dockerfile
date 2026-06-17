@@ -1,6 +1,6 @@
 # Build stage with cargo-chef for better layer caching.
 # Native build: each runner builds for its own architecture.
-FROM rust:1.93.1-slim-bookworm AS chef
+FROM rust:1.95.0-slim-bookworm AS chef
 WORKDIR /app
 RUN cargo install cargo-chef --version 0.1.72 --locked
 

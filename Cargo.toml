@@ -17,7 +17,7 @@ members = [
 [workspace.package]
 license = "Apache-2.0"
 edition = "2024"
-rust-version = "1.93.1"
+rust-version = "1.95.0"
 repository = "https://github.com/supabase/etl"
 homepage = "https://supabase.github.io/etl/"
 
@@ -118,8 +118,7 @@ sentry = { version = "0.42.0" }
 serde = { version = "1.0.219", default-features = false }
 serde_json = { version = "1.0.141", default-features = false }
 sha2 = { version = "0.11", default-features = false }
-# Use the 0.9 alpha for the rustls VerifyCa fix in https://github.com/launchbadge/sqlx/pull/3861.
-sqlx = { version = "0.9.0-alpha.1", default-features = false }
+sqlx = { version = "0.9.0", default-features = false }
 sysinfo = { version = "0.38.2", default-features = false }
 tempfile = { version = "3.23.0", default-features = false }
 thiserror = "2.0.12"

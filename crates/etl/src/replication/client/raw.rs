@@ -513,7 +513,7 @@ impl PgReplicationClient {
 
     /// Retrieves the OIDs of all tables included in a publication.
     ///
-    /// This follows `pg_publication_tables`, which applies PostgreSQL's
+    /// This follows `pg_get_publication_tables`, which applies PostgreSQL's
     /// logical replication identity rules for partitioned tables. With
     /// `publish_via_partition_root=true`, PostgreSQL returns the published
     /// partition root or subtree root used for relation messages. With
@@ -531,13 +531,9 @@ impl PgReplicationClient {
     ) -> EtlResult<Vec<TableId>> {
         let query = format!(
             r#"
-            select distinct c.oid
-            from pg_publication_tables pt
-            join pg_class c on c.relname = pt.tablename
-            join pg_namespace n on n.oid = c.relnamespace
-             and n.nspname = pt.schemaname
-            where pt.pubname = {pub}
-            order by c.oid;
+            select distinct gpt.relid::oid as oid
+            from pg_get_publication_tables({pub}) gpt
+            order by oid;
             "#,
             pub = quote_literal(publication_name)
         );

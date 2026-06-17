@@ -1,5 +1,6 @@
 #[cfg(feature = "bigquery")]
 mod bigquery;
+mod destination;
 #[cfg(feature = "iceberg")]
 mod iceberg;
 mod pipeline;

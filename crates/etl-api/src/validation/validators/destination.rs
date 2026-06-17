@@ -1,20 +1,103 @@
 //! Destination validation dispatch.
 
 use async_trait::async_trait;
+use etl_config::shared::ClickHouseEngine;
+use etl_postgres::types::IdentityType;
 
-use super::super::{ValidationContext, ValidationError, ValidationFailure, Validator};
+use super::{
+    super::{ValidationContext, ValidationError, ValidationFailure, Validator},
+    primary_key::PrimaryKeyValidator,
+    replica_identity::ReplicaIdentityValidator,
+};
 use crate::configs::destination::FullApiDestinationConfig;
 
 /// Composite validator for destination prerequisites.
 #[derive(Debug)]
-pub(in crate::validation) struct DestinationValidator {
+pub(crate) struct DestinationValidator {
+    /// Destination configuration to validate.
     config: FullApiDestinationConfig,
+    /// Publication name of the pipeline that will be used for table checks.
+    publication_name: Option<String>,
 }
 
 impl DestinationValidator {
     /// Creates a destination validator for the provided configuration.
-    pub(in crate::validation) fn new(config: FullApiDestinationConfig) -> Self {
-        Self { config }
+    pub(crate) fn new(config: FullApiDestinationConfig, publication_name: Option<String>) -> Self {
+        Self { config, publication_name }
+    }
+
+    /// Builds the replica identity validator for the configured destination.
+    fn replica_identity_validator(&self) -> Option<ReplicaIdentityValidator> {
+        let publication_name = self.publication_name.clone()?;
+
+        Some(match &self.config {
+            FullApiDestinationConfig::BigQuery { .. } => ReplicaIdentityValidator::new(
+                publication_name,
+                "BigQuery",
+                &[IdentityType::PrimaryKey, IdentityType::Full],
+                &[IdentityType::PrimaryKey, IdentityType::Full],
+            ),
+            FullApiDestinationConfig::ClickHouse { .. } => ReplicaIdentityValidator::new(
+                publication_name,
+                "ClickHouse",
+                &[IdentityType::PrimaryKey, IdentityType::Full],
+                &[IdentityType::PrimaryKey, IdentityType::Full],
+            ),
+            FullApiDestinationConfig::Iceberg { .. } => ReplicaIdentityValidator::new(
+                publication_name,
+                "Iceberg",
+                &[IdentityType::Full],
+                &[IdentityType::Full],
+            ),
+            FullApiDestinationConfig::Ducklake { .. } => ReplicaIdentityValidator::new(
+                publication_name,
+                "DuckLake",
+                &[IdentityType::PrimaryKey, IdentityType::AlternativeKey, IdentityType::Full],
+                &[IdentityType::PrimaryKey, IdentityType::AlternativeKey, IdentityType::Full],
+            ),
+            FullApiDestinationConfig::Snowflake { .. } => ReplicaIdentityValidator::new(
+                publication_name,
+                "Snowflake",
+                &[IdentityType::Full],
+                &[IdentityType::PrimaryKey, IdentityType::AlternativeKey, IdentityType::Full],
+            ),
+        })
+    }
+
+    /// Builds the primary-key validator for destinations that require source
+    /// primary keys.
+    fn primary_key_validator(&self) -> Option<PrimaryKeyValidator> {
+        let publication_name = self.publication_name.clone()?;
+
+        match &self.config {
+            FullApiDestinationConfig::BigQuery { .. } => Some(PrimaryKeyValidator::new(
+                publication_name,
+                "BigQuery",
+                "BigQuery uses the source primary key to match rows during initial loads, \
+                 upserts, deletes, and updates that change primary-key values.",
+                true,
+            )),
+            FullApiDestinationConfig::ClickHouse {
+                engine: ClickHouseEngine::ReplacingMergeTree,
+                ..
+            } => Some(PrimaryKeyValidator::new(
+                publication_name,
+                "ClickHouse ReplacingMergeTree",
+                "ClickHouse ReplacingMergeTree uses the source primary key as the `ORDER BY` and \
+                 deduplication key.",
+                true,
+            )),
+            FullApiDestinationConfig::ClickHouse {
+                engine: ClickHouseEngine::MergeTree, ..
+            } => Some(PrimaryKeyValidator::new(
+                publication_name,
+                "ClickHouse MergeTree",
+                "ClickHouse uses replicated source primary-key columns to apply row-level updates \
+                 and deletes when a source primary key exists.",
+                false,
+            )),
+            _ => None,
+        }
     }
 }
 
@@ -24,7 +107,7 @@ impl Validator for DestinationValidator {
         &self,
         ctx: &ValidationContext,
     ) -> Result<Vec<ValidationFailure>, ValidationError> {
-        match &self.config {
+        let mut failures = match &self.config {
             FullApiDestinationConfig::BigQuery { .. } => {
                 bigquery::validate(&self.config, ctx).await
             }
@@ -38,7 +121,17 @@ impl Validator for DestinationValidator {
             FullApiDestinationConfig::Snowflake { .. } => {
                 snowflake::validate(&self.config, ctx).await
             }
+        }?;
+
+        if let Some(validator) = self.replica_identity_validator() {
+            failures.extend(validator.validate(ctx).await?);
         }
+
+        if let Some(validator) = self.primary_key_validator() {
+            failures.extend(validator.validate(ctx).await?);
+        }
+
+        Ok(failures)
     }
 }
 
@@ -59,7 +152,10 @@ macro_rules! disabled_destination {
             ) -> std::future::Ready<Result<Vec<ValidationFailure>, ValidationError>> {
                 std::future::ready(Ok(vec![ValidationFailure::critical(
                     format!("{} Backend Disabled", $destination),
-                    format!("{} support is not compiled into this API binary.", $destination),
+                    format!(
+                        "This API server was built without {} destination support.",
+                        $destination
+                    ),
                 )]))
             }
         }
