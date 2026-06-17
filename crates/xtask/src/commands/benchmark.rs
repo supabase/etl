@@ -8,6 +8,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, ValueEnum};
+use pg_escape::{quote_identifier, quote_literal};
 use serde_json::{Map, Number, Value};
 
 const DEFAULT_DB_HOST: &str = "localhost";
@@ -307,7 +308,7 @@ impl BenchmarkArgs {
 
         self.psql_status(
             "postgres",
-            &format!("create database {}", quote_identifier(&self.database)?),
+            &format!("create database {}", quote_identifier(&self.database)),
         )
         .context("failed to create benchmark database")
     }
@@ -433,8 +434,8 @@ impl BenchmarkArgs {
     fn fetch_expected_row_count(&self, tables: &[String]) -> Result<u64> {
         let query = tables
             .iter()
-            .map(|table| Ok(format!("(select count(*) from {})", quote_identifier(table)?)))
-            .collect::<Result<Vec<_>>>()?
+            .map(|table| format!("(select count(*) from {})", quote_identifier(table)))
+            .collect::<Vec<_>>()
             .join(" + ");
         let count = self.psql_query(&self.database, &format!("select {query}"))?;
 
@@ -442,11 +443,11 @@ impl BenchmarkArgs {
     }
 
     fn create_publication(&self, publication_name: &str, tables: &[String]) -> Result<()> {
-        let publication_name = quote_identifier(publication_name)?;
+        let publication_name = quote_identifier(publication_name);
         let table_list = tables
             .iter()
-            .map(|table| quote_identifier(table))
-            .collect::<Result<Vec<_>>>()?
+            .map(|table| quote_identifier(table).into_owned())
+            .collect::<Vec<_>>()
             .join(", ");
         self.psql_status(
             &self.database,
@@ -459,7 +460,7 @@ impl BenchmarkArgs {
     }
 
     fn drop_publication(&self, publication_name: &str) -> Result<()> {
-        let publication_name = quote_identifier(publication_name)?;
+        let publication_name = quote_identifier(publication_name);
         self.psql_status(&self.database, &format!("drop publication if exists {publication_name}"))
             .context("failed to drop benchmark publication")
     }
@@ -1372,18 +1373,6 @@ fn format_integer(value: u64) -> String {
     }
 
     formatted
-}
-
-fn quote_identifier(identifier: &str) -> Result<String> {
-    if identifier.is_empty() {
-        bail!("identifier cannot be empty");
-    }
-
-    Ok(format!("\"{}\"", identifier.replace('"', "\"\"")))
-}
-
-fn quote_literal(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
 }
 
 #[cfg(test)]

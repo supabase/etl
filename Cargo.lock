@@ -7978,6 +7978,7 @@ dependencies = [
  "etl-config",
  "k8s-openapi",
  "kube",
+ "pg_escape",
  "reqwest",
  "schemars 0.8.22",
  "serde",
