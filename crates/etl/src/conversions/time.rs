@@ -15,11 +15,11 @@ pub(crate) fn parse_postgres_timetz(value: &str) -> Result<PgTimeTz, ParseTimeEr
 pub(crate) fn parse_postgres_timestamptz(
     value: &str,
 ) -> Result<DateTime<FixedOffset>, ParseTimeError> {
-    let (timestamp, offset) = split_timestamp_offset(value).ok_or_else(ParseTimeError::InvalidSyntax)?;
+    let (timestamp, offset) = split_timestamp_offset(value).ok_or(ParseTimeError::InvalidSyntax)?;
     let timestamp = NaiveDateTime::parse_from_str(timestamp.trim_end(), TIMESTAMP_FORMAT)?;
-    let offset = parse_postgres_utc_offset(offset).ok_or_else(ParseTimeError::InvalidSyntax)?;
+    let offset = parse_postgres_utc_offset(offset).ok_or(ParseTimeError::InvalidSyntax)?;
 
-    offset.from_local_datetime(&timestamp).single().ok_or_else(ParseTimeError::InvalidSyntax)
+    offset.from_local_datetime(&timestamp).single().ok_or(ParseTimeError::InvalidSyntax)
 }
 
 /// Splits a timestamp string into timestamp and numeric UTC offset parts.

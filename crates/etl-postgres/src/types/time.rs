@@ -126,9 +126,9 @@ impl fmt::Display for PgTimeTz {
 
 /// Parses a Postgres timetz text value with supported UTC offset forms.
 fn parse_postgres_timetz(value: &str) -> Result<PgTimeTz, ParseTimeError> {
-    let (time, offset) = split_timetz_offset(value).ok_or_else(ParseTimeError::InvalidSyntax)?;
+    let (time, offset) = split_timetz_offset(value).ok_or(ParseTimeError::InvalidSyntax)?;
     let time = NaiveTime::parse_from_str(time.trim_end(), TIME_FORMAT)?;
-    let offset = parse_postgres_utc_offset(offset).ok_or_else(ParseTimeError::InvalidSyntax)?;
+    let offset = parse_postgres_utc_offset(offset).ok_or(ParseTimeError::InvalidSyntax)?;
 
     Ok(PgTimeTz::new(time, offset))
 }
