@@ -1657,6 +1657,20 @@ async fn pipeline_version_includes_new_default_version_when_available() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn pipeline_version_returns_not_found_for_missing_pipeline() {
+    init_test_tracing();
+    // Arrange
+    let app = spawn_test_app().await;
+    let tenant_id = create_tenant(&app).await;
+
+    // Act
+    let response = app.get_pipeline_version(&tenant_id, 42).await;
+
+    // Assert
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn rollback_tables_all_errored_succeeds() {
     init_test_tracing();
     let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =

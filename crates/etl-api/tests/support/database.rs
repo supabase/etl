@@ -203,14 +203,14 @@ pub(crate) async fn run_etl_migrations_on_source_database(source_db_config: &PgC
     let mut store_migrator = sqlx::migrate!("../etl/migrations/postgres_store");
     store_migrator.set_ignore_missing(true);
     store_migrator
-        .run_direct(None, &mut connection)
+        .run_direct(None, &mut connection, false)
         .await
         .expect("failed to run ETL Postgres store migrations");
 
     let mut source_migrator = sqlx::migrate!("../etl/migrations/source");
     source_migrator.set_ignore_missing(true);
     source_migrator
-        .run_direct(None, &mut connection)
+        .run_direct(None, &mut connection, false)
         .await
         .expect("failed to run ETL source migrations");
 }

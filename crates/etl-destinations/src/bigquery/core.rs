@@ -1770,8 +1770,7 @@ fn calculate_target_batches_for_table_copy(table_rows: &[BigQueryTableRow]) -> E
     let estimated_row_size = encoded_row.encoded_len();
 
     // Calculate how many rows would fit in target batch size.
-    let rows_per_batch =
-        if estimated_row_size > 0 { MAX_BATCH_SIZE_BYTES / estimated_row_size } else { total_rows };
+    let rows_per_batch = MAX_BATCH_SIZE_BYTES.checked_div(estimated_row_size).unwrap_or(total_rows);
 
     // Calculate target number of batches, ensuring at least 1. We don't care about
     // the limit of inflight requests since that is enforced by the client.

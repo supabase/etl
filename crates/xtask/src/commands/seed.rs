@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, bail};
 use clap::Args;
+use pg_escape::{quote_identifier, quote_literal};
 use xshell::{Shell, cmd};
 
 #[derive(Args)]
@@ -55,8 +56,7 @@ impl SeedArgs {
         let publication = &self.publication;
         let user_count = (self.rows / 10).max(10);
 
-        // Check if database exists
-        let check_sql = format!("SELECT 1 FROM pg_database WHERE datname = '{database}'");
+        let check_sql = database_exists_sql(database)?;
         let exists =
             cmd!(sh, "psql -q -h {host} -p {port} -U {user} -d postgres -tA -c {check_sql}")
                 .quiet()
@@ -70,7 +70,7 @@ impl SeedArgs {
 
         if db_exists {
             println!("[seed] dropping database {database} (--force)...");
-            let drop_sql = format!("DROP DATABASE IF EXISTS \"{database}\" WITH (FORCE)");
+            let drop_sql = drop_database_sql(database)?;
             cmd!(sh, "psql -q -h {host} -p {port} -U {user} -d postgres -c {drop_sql}")
                 .quiet()
                 .run()
@@ -78,14 +78,68 @@ impl SeedArgs {
         }
 
         println!("[seed] creating database {database}...");
-        let create_db = format!("CREATE DATABASE \"{database}\"");
+        let create_db = create_database_sql(database)?;
         cmd!(sh, "psql -q -h {host} -p {port} -U {user} -d postgres -c {create_db}")
             .quiet()
             .run()
             .context("failed to create database")?;
 
-        let sql = format!(
-            r#"
+        let sql = seed_sql(self.rows, user_count, publication)?;
+
+        println!(
+            "[seed] creating tables and seeding {rows} rows ({user_count} users, {rows} orders, \
+             {rows} events)...",
+            rows = self.rows
+        );
+
+        cmd!(sh, "psql -q -h {host} -p {port} -U {user} -d {database} -c {sql}")
+            .quiet()
+            .run()
+            .context("failed to seed database")?;
+
+        let count_sql = "SELECT 'users: ' || count(*) FROM users UNION ALL SELECT 'orders: ' || \
+                         count(*) FROM orders UNION ALL SELECT 'events: ' || count(*) FROM events";
+        let counts =
+            cmd!(sh, "psql -q -h {host} -p {port} -U {user} -d {database} -t -c {count_sql}")
+                .quiet()
+                .read()
+                .unwrap_or_default();
+
+        println!("[seed] done!");
+        for line in counts.lines() {
+            let line = line.trim();
+            if !line.is_empty() {
+                println!("  {line}");
+            }
+        }
+        println!("[seed] publication: {publication}");
+        println!("[seed] connect with: psql -h {host} -p {port} -U {user} -d {database}");
+
+        Ok(())
+    }
+}
+
+fn database_exists_sql(database: &str) -> Result<String> {
+    ensure_database_name(database)?;
+    Ok(format!("SELECT 1 FROM pg_database WHERE datname = {}", quote_literal(database)))
+}
+
+fn drop_database_sql(database: &str) -> Result<String> {
+    ensure_database_name(database)?;
+    Ok(format!("DROP DATABASE IF EXISTS {} WITH (FORCE)", quote_identifier(database)))
+}
+
+fn create_database_sql(database: &str) -> Result<String> {
+    ensure_database_name(database)?;
+    Ok(format!("CREATE DATABASE {}", quote_identifier(database)))
+}
+
+fn seed_sql(rows: u64, user_count: u64, publication: &str) -> Result<String> {
+    ensure_publication_name(publication)?;
+    let publication = quote_identifier(publication);
+
+    Ok(format!(
+        r#"
 CREATE TABLE users (
     id SERIAL PRIMARY KEY,
     name TEXT NOT NULL,
@@ -147,39 +201,22 @@ SELECT
 FROM generate_series(1, {rows}) n;
 
 CREATE PUBLICATION {publication} FOR TABLE users, orders, events;
-"#,
-            rows = self.rows,
-        );
+"#
+    ))
+}
 
-        println!(
-            "[seed] creating tables and seeding {rows} rows ({user_count} users, {rows} orders, \
-             {rows} events)...",
-            rows = self.rows
-        );
+fn ensure_database_name(database: &str) -> Result<()> {
+    ensure_identifier_is_not_empty("Database", database)
+}
 
-        cmd!(sh, "psql -q -h {host} -p {port} -U {user} -d {database} -c {sql}")
-            .quiet()
-            .run()
-            .context("failed to seed database")?;
+fn ensure_publication_name(publication: &str) -> Result<()> {
+    ensure_identifier_is_not_empty("Publication", publication)
+}
 
-        let count_sql = "SELECT 'users: ' || count(*) FROM users UNION ALL SELECT 'orders: ' || \
-                         count(*) FROM orders UNION ALL SELECT 'events: ' || count(*) FROM events";
-        let counts =
-            cmd!(sh, "psql -q -h {host} -p {port} -U {user} -d {database} -t -c {count_sql}")
-                .quiet()
-                .read()
-                .unwrap_or_default();
-
-        println!("[seed] done!");
-        for line in counts.lines() {
-            let line = line.trim();
-            if !line.is_empty() {
-                println!("  {line}");
-            }
-        }
-        println!("[seed] publication: {publication}");
-        println!("[seed] connect with: psql -h {host} -p {port} -U {user} -d {database}");
-
-        Ok(())
+fn ensure_identifier_is_not_empty(kind: &str, identifier: &str) -> Result<()> {
+    if identifier.is_empty() {
+        bail!("{kind} name cannot be empty");
     }
+
+    Ok(())
 }

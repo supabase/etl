@@ -107,6 +107,7 @@ impl From<DestinationPipelinesDbError> for DestinationPipelineError {
     fn from(e: DestinationPipelinesDbError) -> Self {
         match e {
             DestinationPipelinesDbError::Database(err)
+            | DestinationPipelinesDbError::PipelinesDb(PipelinesDbError::Database(err))
                 if data::utils::is_unique_constraint_violation_error(&err) =>
             {
                 DestinationPipelineError::DuplicatePipeline
