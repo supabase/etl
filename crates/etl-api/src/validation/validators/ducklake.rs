@@ -2,6 +2,8 @@ use async_trait::async_trait;
 use etl::store::both::memory::MemoryStore;
 use etl_config::{parse_ducklake_s3_data_path, parse_ducklake_url};
 use etl_destinations::ducklake::{DuckLakeDestination, S3Config as DucklakeS3Config};
+use sqlx::{PgPool, postgres::PgPoolOptions};
+use url::Url;
 
 use super::super::{ValidationContext, ValidationError, ValidationFailure, Validator};
 
@@ -103,6 +105,13 @@ impl Validator for DucklakeValidator {
             }
         };
 
+        if let Some(failure) =
+            validate_metadata_schema_is_available(&catalog_url, self.metadata_schema.as_deref())
+                .await?
+        {
+            return Ok(vec![failure]);
+        }
+
         let s3_config = Some(DucklakeS3Config {
             access_key_id: s3_access_key_id,
             secret_access_key: s3_secret_access_key,
@@ -125,14 +134,85 @@ impl Validator for DucklakeValidator {
         .await
         {
             Ok(_) => Ok(vec![]),
-            Err(_) => Ok(vec![ValidationFailure::critical(
-                "DuckLake Connection Failed",
-                "We couldn't connect to DuckLake with this catalog and data path.\n\nCheck that \
-                 the catalog URL is reachable, catalog credentials are present in the URL, and \
-                 the `S3-compatible endpoint` and credentials are correct.",
-            )]),
+            Err(_) => Ok(vec![ducklake_connection_failed()]),
         }
     }
+}
+
+/// Validates that the configured PostgreSQL metadata schema is not occupied.
+async fn validate_metadata_schema_is_available(
+    catalog_url: &Url,
+    metadata_schema: Option<&str>,
+) -> Result<Option<ValidationFailure>, ValidationError> {
+    let Some(metadata_schema) = metadata_schema else {
+        return Ok(None);
+    };
+
+    if !matches!(catalog_url.scheme(), "postgres" | "postgresql") {
+        return Ok(None);
+    }
+
+    let Ok(pool) = PgPoolOptions::new()
+        .max_connections(1)
+        .min_connections(0)
+        .acquire_timeout(std::time::Duration::from_secs(5))
+        .connect(catalog_url.as_str())
+        .await
+    else {
+        return Ok(Some(ducklake_connection_failed()));
+    };
+
+    let Ok(table_names) = existing_ducklake_metadata_tables(&pool, metadata_schema).await else {
+        return Ok(Some(ducklake_connection_failed()));
+    };
+
+    if table_names.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(ValidationFailure::critical(
+        "DuckLake Metadata Schema Already Exists",
+        format!(
+            "DuckLake metadata already exists in PostgreSQL schema `{metadata_schema}` (tables: \
+             {}). Drop the existing DuckLake metadata from the catalog database, or choose \
+             another DuckLake metadata schema name.",
+            table_names.join(", ")
+        ),
+    )))
+}
+
+/// Returns existing DuckLake-owned table names in a PostgreSQL schema.
+async fn existing_ducklake_metadata_tables(
+    pool: &PgPool,
+    metadata_schema: &str,
+) -> Result<Vec<String>, sqlx::Error> {
+    sqlx::query_scalar(
+        r#"
+        select c.relname
+        from pg_catalog.pg_namespace n
+        join pg_catalog.pg_class c on c.relnamespace = n.oid
+        where n.nspname = $1
+          and c.relkind in ('r', 'p')
+          and (
+              c.relname like 'ducklake\_%' escape '\'
+              or c.relname in ('__etl_applied_table_batches', '__etl_streaming_progress')
+          )
+        order by c.relname
+        "#,
+    )
+    .bind(metadata_schema)
+    .fetch_all(pool)
+    .await
+}
+
+/// Returns the generic DuckLake connection validation failure.
+fn ducklake_connection_failed() -> ValidationFailure {
+    ValidationFailure::critical(
+        "DuckLake Connection Failed",
+        "We couldn't connect to DuckLake with this catalog and data path.\n\nCheck that the \
+         catalog URL is reachable, catalog credentials are present in the URL, and the \
+         `S3-compatible endpoint` and credentials are correct.",
+    )
 }
 
 #[cfg(test)]
