@@ -20,7 +20,10 @@ use etl::{
 use metrics::{gauge, histogram};
 use pg_escape::{quote_identifier, quote_literal};
 use regex::Regex;
-use sqlx::{AssertSqlSafe, PgPool, postgres::PgPoolOptions};
+use sqlx::{
+    AssertSqlSafe, PgPool,
+    postgres::{PgConnectOptions, PgPoolOptions, PgSslMode},
+};
 use tokio::{
     sync::{Semaphore, oneshot},
     task::JoinHandle,
@@ -55,6 +58,7 @@ const PARQUET_VERSION_OPTION_NAME: &str = "parquet_version";
 const PARQUET_VERSION_OPTION_VALUE: u8 = 2;
 const PRESERVE_INSERTION_ORDER_OPTION_NAME: &str = "preserve_insertion_order";
 const MAINTENANCE_QUERY_TIMEOUT: Duration = Duration::from_secs(6 * 60);
+const MAINTENANCE_DUCKDB_POOL_SIZE: u32 = 1;
 const BLOCKING_ABORT_GRACE: Duration = Duration::from_secs(30);
 const DUCKDB_MAINTENANCE_OPERATION_KIND: &str = "maintenance";
 const ETL_DUCKLAKE_INLINE_FLUSH_ROWS: &str = "etl_ducklake_inline_flush_rows";
@@ -468,6 +472,58 @@ fn catalog_attach_target(catalog_url: &Url) -> EtlResult<String> {
             ErrorKind::ConfigError,
             "Unsupported DuckLake catalog URL scheme",
             format!("catalog URL scheme `{scheme}` is not supported")
+        )),
+    }
+}
+
+/// Builds sqlx connection options for DuckLake metadata catalog queries.
+fn catalog_metadata_connect_options(catalog_url: &Url) -> EtlResult<PgConnectOptions> {
+    let config = PgConfig::from_str(catalog_url.as_str()).map_err(|source| {
+        etl_error!(
+            ErrorKind::ConfigError,
+            "Invalid DuckLake PostgreSQL catalog URL",
+            source: source
+        )
+    })?;
+    let mut options = PgConnectOptions::from_str(catalog_url.as_str()).map_err(|source| {
+        etl_error!(
+            ErrorKind::ConfigError,
+            "Invalid DuckLake PostgreSQL catalog URL",
+            source: source
+        )
+    })?;
+
+    if let Some(hostaddr) = config.get_hostaddrs().first() {
+        options = options.host(&hostaddr.to_string());
+    } else if let Some(host) = catalog_url.host_str() {
+        options = options.host(unbracket_ipv6_literal(host));
+    }
+
+    options = options.ssl_mode(sqlx_ssl_mode(config.get_ssl_mode(), config.get_hostaddrs())?);
+
+    Ok(options)
+}
+
+/// Removes URL brackets from an IPv6 literal host.
+fn unbracket_ipv6_literal(host: &str) -> &str {
+    host.strip_prefix('[').and_then(|host| host.strip_suffix(']')).unwrap_or(host)
+}
+
+/// Maps libpq-style SSL modes onto sqlx's Postgres SSL modes.
+fn sqlx_ssl_mode(ssl_mode: SslMode, hostaddrs: &[std::net::IpAddr]) -> EtlResult<PgSslMode> {
+    match ssl_mode {
+        SslMode::Disable => Ok(PgSslMode::Disable),
+        SslMode::Prefer => Ok(PgSslMode::Prefer),
+        SslMode::Require => Ok(PgSslMode::Require),
+        SslMode::VerifyCa => Ok(PgSslMode::VerifyCa),
+        SslMode::VerifyFull if hostaddrs.is_empty() => Ok(PgSslMode::VerifyFull),
+        // sqlx does not expose libpq's separate hostaddr field. When dialing a
+        // numeric address, verify the CA but avoid hostname verification
+        // against the IP literal.
+        SslMode::VerifyFull => Ok(PgSslMode::VerifyCa),
+        _ => Err(etl_error!(
+            ErrorKind::ConfigError,
+            "DuckLake PostgreSQL catalog URL uses an unsupported sslmode"
         )),
     }
 }
@@ -1376,11 +1432,10 @@ impl DuckDbMaintenanceExecutor {
 
 async fn build_warm_ducklake_pool(
     manager: DuckLakeConnectionManager,
-    pool_size: u32,
 ) -> EtlResult<r2d2::Pool<DuckLakeConnectionManager>> {
     tokio::task::spawn_blocking(move || -> EtlResult<_> {
         let pool = r2d2::Pool::builder()
-            .max_size(pool_size)
+            .max_size(MAINTENANCE_DUCKDB_POOL_SIZE)
             .min_idle(Some(0))
             .connection_timeout(Duration::from_secs(4 * 60))
             .test_on_check_out(true)
@@ -1394,8 +1449,8 @@ async fn build_warm_ducklake_pool(
                 )
             })?;
 
-        let mut warmed_connections = Vec::with_capacity(pool_size as usize);
-        for _ in 0..pool_size {
+        let mut warmed_connections = Vec::with_capacity(MAINTENANCE_DUCKDB_POOL_SIZE as usize);
+        for _ in 0..MAINTENANCE_DUCKDB_POOL_SIZE {
             warmed_connections.push(pool.get().map_err(|source| {
                 etl_error!(
                     ErrorKind::DestinationConnectionFailed,
@@ -1406,7 +1461,10 @@ async fn build_warm_ducklake_pool(
         }
         drop(warmed_connections);
 
-        trace!(pool_size, "ducklake maintenance connection pool warmed");
+        trace!(
+            pool_size = MAINTENANCE_DUCKDB_POOL_SIZE,
+            "ducklake maintenance connection pool warmed"
+        );
         Ok(pool)
     })
     .await
@@ -1434,8 +1492,6 @@ pub struct DuckLakeMaintenanceConfig {
     pub catalog_url: Url,
     /// DuckLake data path.
     pub data_path: Url,
-    /// DuckDB connection pool size for the one-shot runner.
-    pub pool_size: u32,
     /// Optional S3-compatible storage config.
     pub s3: Option<S3Config>,
     /// Optional DuckLake metadata schema.
@@ -1545,7 +1601,7 @@ pub async fn run_maintenance_once(
         config.cleanup_old_files.enabled || config.rewrite_data_files.enabled;
 
     info!(
-        pool_size = config.pool_size,
+        pool_size = MAINTENANCE_DUCKDB_POOL_SIZE,
         metadata_schema = config.metadata_schema.as_deref(),
         inline_flush_enabled = config.inline_flush.enabled,
         inline_flush_min_inlined_bytes = config.inline_flush.min_inlined_bytes,
@@ -1577,14 +1633,7 @@ pub async fn run_maintenance_once(
     );
     let metadata_pg_pool = PgPoolOptions::new()
         .max_connections(1)
-        .connect_lazy(config.catalog_url.as_str())
-        .map_err(|source| {
-            etl_error!(
-                ErrorKind::DestinationConnectionFailed,
-                "DuckLake catalog metadata pool configuration failed",
-                source: source
-            )
-        })?;
+        .connect_lazy_with(catalog_metadata_connect_options(&config.catalog_url)?);
     let table_names = list_ducklake_tables(&metadata_pg_pool, &metadata_schema).await?;
     info!(
         table_count = table_names.len(),
@@ -1651,12 +1700,6 @@ fn validate_config(config: &DuckLakeMaintenanceConfig) -> EtlResult<()> {
             format!("unsupported catalog URL scheme `{}`", config.catalog_url.scheme())
         ));
     }
-    if config.pool_size == 0 {
-        return Err(etl_error!(
-            ErrorKind::ConfigError,
-            "DuckLake external maintenance pool size must be greater than zero"
-        ));
-    }
     Ok(())
 }
 
@@ -1719,8 +1762,8 @@ async fn open_maintenance_executor(
         setup_plan,
         disable_extension_autoload: extension_strategy.disables_autoload(),
     };
-    let pool = Arc::new(build_warm_ducklake_pool(manager, config.pool_size).await?);
-    let blocking_slots = Arc::new(Semaphore::new(config.pool_size as usize));
+    let pool = Arc::new(build_warm_ducklake_pool(manager).await?);
+    let blocking_slots = Arc::new(Semaphore::new(MAINTENANCE_DUCKDB_POOL_SIZE as usize));
     let executor = DuckDbMaintenanceExecutor { pool, blocking_slots };
     let sql = maintenance_target_file_size_sql(Some(target_file_size));
     executor
@@ -2634,6 +2677,61 @@ mod tests {
             "CALL ducklake_cleanup_old_files('lake', older_than => CAST(now() AS TIMESTAMP) - \
              CAST('1 hour' AS INTERVAL));"
         );
+    }
+
+    #[test]
+    fn catalog_metadata_connect_options_uses_catalog_host_without_hostaddr() {
+        let catalog_url = Url::parse(
+            "postgres://user:password@catalog.example.test:5432/ducklake?sslmode=verify-full",
+        )
+        .unwrap();
+
+        let options = catalog_metadata_connect_options(&catalog_url).unwrap();
+
+        assert_eq!(options.get_host(), "catalog.example.test");
+        assert!(matches!(options.get_ssl_mode(), PgSslMode::VerifyFull));
+    }
+
+    #[test]
+    fn catalog_metadata_connect_options_uses_ipv4_hostaddr_as_network_target() {
+        let catalog_url = Url::parse(
+            "postgres://user:password@catalog.example.test:5432/ducklake?hostaddr=192.0.2.10&\
+             sslmode=verify-full",
+        )
+        .unwrap();
+
+        let options = catalog_metadata_connect_options(&catalog_url).unwrap();
+
+        assert_eq!(options.get_host(), "192.0.2.10");
+        assert!(matches!(options.get_ssl_mode(), PgSslMode::VerifyCa));
+    }
+
+    #[test]
+    fn catalog_metadata_connect_options_uses_ipv6_hostaddr_as_network_target() {
+        let catalog_url = Url::parse(
+            "postgres://user:password@catalog.example.test:5432/ducklake?hostaddr=2001:db8::10&\
+             sslmode=verify-full",
+        )
+        .unwrap();
+
+        let options = catalog_metadata_connect_options(&catalog_url).unwrap();
+
+        assert_eq!(options.get_host(), "2001:db8::10");
+        assert!(matches!(options.get_ssl_mode(), PgSslMode::VerifyCa));
+    }
+
+    #[test]
+    fn catalog_metadata_connect_options_supports_ipv6_literal_host() {
+        let catalog_url = Url::parse(
+            "postgres://postgres:FAKE_SECRET@[2a05:dddd:c3c:b703:e52f:e170:4155:c8dd]:5432/\
+             postgres?sslmode=prefer",
+        )
+        .unwrap();
+
+        let options = catalog_metadata_connect_options(&catalog_url).unwrap();
+
+        assert_eq!(options.get_host(), "2a05:dddd:c3c:b703:e52f:e170:4155:c8dd");
+        assert!(matches!(options.get_ssl_mode(), PgSslMode::Prefer));
     }
 
     #[tokio::test]
