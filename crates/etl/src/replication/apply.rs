@@ -2321,20 +2321,11 @@ where
         self.schema_store.upsert_replication_progress(worker_type, flush_lsn).await
     }
 
-    /// Processes syncing tables outside a transaction.
-    ///
-    /// Dispatches to worker-specific implementation based on the worker
-    /// context.
+    /// Processes syncing tables when the apply loop is idle.
     ///
     /// Once an exit has already been requested we intentionally skip this class
     /// of work so draining stays focused on already-started flushes and
     /// shutdown barriers.
-    ///
-    /// Idle syncing uses the effective flush LSN so table handoff can make
-    /// progress even when no new transactions arrive. Keepalive messages may
-    /// advance that effective position, but those idle-only advances are not
-    /// persisted as durable replication progress because they would create
-    /// extra writes during normal quiet periods.
     async fn maybe_process_syncing_tables_when_idle(&mut self) -> EtlResult<()> {
         if self.state.exit_intent.is_some() {
             return Ok(());
@@ -2347,6 +2338,13 @@ where
     ///
     /// Dispatches to worker-specific implementation based on the worker
     /// context.
+    ///
+    /// Idle syncing uses the last received LSN so table handoff can make
+    /// progress even when no new transactions arrive. This is made possible
+    /// thanks to the keep alive messages that carry an ever-growing LSN that
+    /// follows the WAL growth on the main database and allows the apply loop to
+    /// progress even if there are no events for the tables in the publication
+    /// that this instance is interested in.
     async fn process_syncing_tables_when_idle(&mut self) -> EtlResult<()> {
         if !self.state.is_idle() {
             debug!("skipping table sync processing because apply loop is not idle");
@@ -2354,7 +2352,7 @@ where
             return Ok(());
         }
 
-        let current_lsn = self.state.effective_flush_lsn();
+        let current_lsn = self.state.last_received_lsn();
 
         debug!(
             worker_type = %self.worker_context.worker_type(),
