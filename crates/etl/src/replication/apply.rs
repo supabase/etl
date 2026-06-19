@@ -9,7 +9,6 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    fmt::{Display, Formatter},
     future::Future,
     pin::Pin,
     str::FromStr,
@@ -150,34 +149,6 @@ impl ExitIntent {
         match self {
             Self::Pause => ApplyLoopResult::Paused,
             Self::Complete => ApplyLoopResult::Completed,
-        }
-    }
-}
-
-/// Represents the shutdown state of the apply loop.
-#[derive(Debug, Clone)]
-pub(crate) enum ShutdownState {
-    /// Normal operation.
-    NoShutdown,
-    /// Shutdown requested.
-    ///
-    /// No new WAL is accepted, but buffered or in-flight destination work is
-    /// still allowed to drain.
-    DrainingForShutdown,
-}
-
-impl ShutdownState {
-    /// Returns `true` if shutdown is draining buffered destination work.
-    pub(crate) fn is_draining_for_shutdown(&self) -> bool {
-        matches!(self, Self::DrainingForShutdown)
-    }
-}
-
-impl Display for ShutdownState {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::NoShutdown => write!(f, "no_shutdown"),
-            Self::DrainingForShutdown => write!(f, "draining_for_shutdown"),
         }
     }
 }
@@ -358,8 +329,8 @@ struct ApplyLoopState {
     current_tx_events: u64,
     /// Next zero-based ordinal to assign to transaction-scoped events.
     next_tx_ordinal: u64,
-    /// The current shutdown state tracking graceful shutdown progress.
-    shutdown_state: ShutdownState,
+    /// Whether the loop is draining buffered destination work for shutdown.
+    draining_for_shutdown: bool,
     /// The deadline by which the current batch must be flushed.
     flush_deadline: Option<Instant>,
     /// The deadline for the next proactive keep alive status update.
@@ -415,7 +386,7 @@ impl ApplyLoopState {
             current_tx_begin_ts: None,
             current_tx_events: 0,
             next_tx_ordinal: 0,
-            shutdown_state: ShutdownState::NoShutdown,
+            draining_for_shutdown: false,
             flush_deadline: None,
             keep_alive_deadline: Instant::now() + keep_alive_deadline_duration,
             pending_flush_result: None,
@@ -678,6 +649,16 @@ impl ApplyLoopState {
     fn exit_result(&self) -> Option<ApplyLoopResult> {
         self.exit_intent.map(ExitIntent::to_result)
     }
+
+    /// Returns `true` when active intake has stopped to drain shutdown work.
+    fn is_draining_for_shutdown(&self) -> bool {
+        self.draining_for_shutdown
+    }
+
+    /// Stops active intake and starts draining buffered shutdown work.
+    fn start_draining_for_shutdown(&mut self) {
+        self.draining_for_shutdown = true;
+    }
 }
 
 /// Main apply loop implementation that processes replication events.
@@ -831,22 +812,19 @@ where
         let mut connection_updates_rx = replication_client.connection_updates_rx();
 
         loop {
-            let iteration_result = match &self.state.shutdown_state {
-                ShutdownState::NoShutdown => {
-                    self.run_active_iteration(
-                        events_stream.as_mut(),
-                        replication_client,
-                        &mut connection_updates_rx,
-                    )
-                    .await
-                }
-                ShutdownState::DrainingForShutdown => {
-                    self.run_draining_shutdown_iteration(
-                        events_stream.as_mut(),
-                        &mut connection_updates_rx,
-                    )
-                    .await
-                }
+            let iteration_result = if self.state.is_draining_for_shutdown() {
+                self.run_draining_shutdown_iteration(
+                    events_stream.as_mut(),
+                    &mut connection_updates_rx,
+                )
+                .await
+            } else {
+                self.run_active_iteration(
+                    events_stream.as_mut(),
+                    replication_client,
+                    &mut connection_updates_rx,
+                )
+                .await
             };
 
             // If we have a result from the apply loop, we should stop the loop.
@@ -1053,9 +1031,7 @@ where
     /// Returns the final loop result for the active state if all exit barriers
     /// have been resolved.
     fn try_finish_active_iteration(&self) -> Option<ApplyLoopResult> {
-        if self.state.shutdown_state.is_draining_for_shutdown()
-            || self.state.has_unresolved_batch_work()
-        {
+        if self.state.is_draining_for_shutdown() || self.state.has_unresolved_batch_work() {
             return None;
         }
 
@@ -1152,7 +1128,7 @@ where
                 "shutdown signal received, stopping new intake and entering shutdown drain",
             );
 
-            self.state.shutdown_state = ShutdownState::DrainingForShutdown;
+            self.state.start_draining_for_shutdown();
 
             return Ok(());
         }
