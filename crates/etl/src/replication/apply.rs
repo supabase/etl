@@ -168,8 +168,8 @@ pub(crate) enum ShutdownState {
 
 impl ShutdownState {
     /// Returns `true` if a shutdown has been requested.
-    pub(crate) fn is_requested(&self) -> bool {
-        !matches!(self, Self::NoShutdown)
+    pub(crate) fn is_draining_for_shutdown(&self) -> bool {
+        matches!(self, Self::DrainingForShutdown)
     }
 }
 
@@ -848,9 +848,9 @@ where
                     .await
                 }
             };
-            let result = iteration_result?;
 
-            if let Some(result) = result {
+            // If we have a result from the apply loop, we should stop the loop.
+            if let Some(result) = iteration_result? {
                 return Ok(result);
             }
         }
@@ -949,7 +949,6 @@ where
             _ = Self::wait_for_keep_alive_deadline(self.state.keep_alive_deadline) => {
                 self.send_status_update(
                     events_stream.as_mut(),
-                    self.state.effective_flush_lsn(),
                     true,
                     StatusUpdateType::PeriodicKeepAlive,
                 )
@@ -960,7 +959,6 @@ where
             }
         }
 
-        // Try to keep advancing syncing tables whenever the system becomes idle.
         self.maybe_process_syncing_tables_when_idle().await?;
 
         Ok(self.try_finish_active_iteration())
@@ -985,8 +983,10 @@ where
         mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
         connection_updates_rx: &mut watch::Receiver<PostgresConnectionUpdate>,
     ) -> EtlResult<Option<ApplyLoopResult>> {
+        self.maybe_process_syncing_tables_when_idle().await?;
+
         if !self.state.has_unresolved_batch_work() {
-            self.initiate_graceful_shutdown(events_stream.as_mut()).await?;
+            self.send_shutdown_flush_status_update(events_stream.as_mut()).await?;
 
             return Ok(Some(self.finish_shutdown()));
         }
@@ -1014,7 +1014,6 @@ where
             _ = Self::wait_for_keep_alive_deadline(self.state.keep_alive_deadline) => {
                 self.send_status_update(
                     events_stream.as_mut(),
-                    self.state.effective_flush_lsn(),
                     true,
                     StatusUpdateType::PeriodicKeepAlive,
                 )
@@ -1025,11 +1024,10 @@ where
             }
         }
 
-        // Try to keep advancing syncing tables whenever the system becomes idle.
         self.maybe_process_syncing_tables_when_idle().await?;
 
         if !self.state.has_unresolved_batch_work() {
-            self.initiate_graceful_shutdown(events_stream.as_mut()).await?;
+            self.send_shutdown_flush_status_update(events_stream.as_mut()).await?;
 
             return Ok(Some(self.finish_shutdown()));
         }
@@ -1048,7 +1046,7 @@ where
     /// Returns the final loop result for the active state if all exit barriers
     /// have been resolved.
     fn try_finish_active_iteration(&self) -> Option<ApplyLoopResult> {
-        if self.state.shutdown_state.is_requested() || self.state.has_unresolved_batch_work() {
+        if self.state.shutdown_state.is_draining_for_shutdown() || self.state.has_unresolved_batch_work() {
             return None;
         }
 
@@ -1117,7 +1115,7 @@ where
     /// Shutdown stops new message intake immediately. If there is already
     /// buffered or in-flight destination work, the loop first drains that work
     /// so the best durable position can advance before sending the final
-    /// shutdown status update. Otherwise it sends that update immediately and
+    /// shutdown status update. Otherwise, it sends that update immediately and
     /// exits the loop.
     ///
     /// Note: the shutdown system is best-effort. Graceful shutdown may not
@@ -1129,17 +1127,6 @@ where
         mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
     ) -> EtlResult<()> {
         let worker_type = self.worker_context.worker_type();
-
-        // If the shutdown was already requested, we silently skip it.
-        if self.state.shutdown_state.is_requested() {
-            info!(
-                %worker_type,
-                shutdown_state = %self.state.shutdown_state,
-                "shutdown signal received but already in shutdown state, continuing",
-            );
-
-            return Ok(());
-        }
 
         // Shutdown always means this apply loop invocation will eventually return, even
         // if a later quiescent state upgrades the final result from pause to
@@ -1166,38 +1153,21 @@ where
             "shutdown signal received, no unresolved work left, sending final status update",
         );
 
-        self.initiate_graceful_shutdown(events_stream.as_mut()).await
+        self.send_shutdown_flush_status_update(events_stream.as_mut()).await
     }
 
     /// Initiates graceful shutdown by sending a final status update just to
     /// make sure that Postgres can advance its state once more.
-    ///
-    /// The status update uses the loop's effective flush position. When idle,
-    /// this may include received keepalive progress that is intentionally not
-    /// persisted as durable ETL progress.
-    async fn initiate_graceful_shutdown(
+    async fn send_shutdown_flush_status_update(
         &mut self,
         mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
     ) -> EtlResult<()> {
-        let worker_type = self.worker_context.worker_type();
-
-        let flush_lsn = self.state.effective_flush_lsn();
-
-        info!(
-            %worker_type,
-            %flush_lsn,
-            "sending shutdown status update",
-        );
-
         self.send_status_update(
             events_stream.as_mut(),
-            flush_lsn,
             true,
             StatusUpdateType::ShutdownFlush,
         )
         .await?;
-
-        self.state.shutdown_state = ShutdownState::NoShutdown;
 
         Ok(())
     }
@@ -1213,7 +1183,6 @@ where
     async fn send_status_update(
         &mut self,
         mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
-        flush_lsn: PgLsn,
         force: bool,
         status_update_type: StatusUpdateType,
     ) -> EtlResult<()> {
@@ -1222,7 +1191,7 @@ where
             .stream_mut()
             .send_status_update(
                 self.state.last_received_lsn(),
-                flush_lsn,
+                self.state.effective_flush_lsn(),
                 force,
                 status_update_type,
             )
@@ -1718,7 +1687,6 @@ where
 
                 self.send_status_update(
                     events_stream.as_mut(),
-                    self.state.effective_flush_lsn(),
                     message.reply() == 1,
                     StatusUpdateType::KeepAlive,
                 )
