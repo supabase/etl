@@ -9,7 +9,6 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    fmt::{Display, Formatter},
     future::Future,
     pin::Pin,
     str::FromStr,
@@ -150,34 +149,6 @@ impl ExitIntent {
         match self {
             Self::Pause => ApplyLoopResult::Paused,
             Self::Complete => ApplyLoopResult::Completed,
-        }
-    }
-}
-
-/// Represents the shutdown state of the apply loop.
-#[derive(Debug, Clone)]
-pub(crate) enum ShutdownState {
-    /// Normal operation.
-    NoShutdown,
-    /// Shutdown requested.
-    ///
-    /// No new WAL is accepted, but buffered or in-flight destination work is
-    /// still allowed to drain.
-    DrainingForShutdown,
-}
-
-impl ShutdownState {
-    /// Returns `true` if a shutdown has been requested.
-    pub(crate) fn is_requested(&self) -> bool {
-        !matches!(self, Self::NoShutdown)
-    }
-}
-
-impl Display for ShutdownState {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::NoShutdown => write!(f, "no_shutdown"),
-            Self::DrainingForShutdown => write!(f, "draining_for_shutdown"),
         }
     }
 }
@@ -358,8 +329,8 @@ struct ApplyLoopState {
     current_tx_events: u64,
     /// Next zero-based ordinal to assign to transaction-scoped events.
     next_tx_ordinal: u64,
-    /// The current shutdown state tracking graceful shutdown progress.
-    shutdown_state: ShutdownState,
+    /// Whether the loop is draining buffered destination work for shutdown.
+    draining_for_shutdown: bool,
     /// The deadline by which the current batch must be flushed.
     flush_deadline: Option<Instant>,
     /// The deadline for the next proactive keep alive status update.
@@ -415,7 +386,7 @@ impl ApplyLoopState {
             current_tx_begin_ts: None,
             current_tx_events: 0,
             next_tx_ordinal: 0,
-            shutdown_state: ShutdownState::NoShutdown,
+            draining_for_shutdown: false,
             flush_deadline: None,
             keep_alive_deadline: Instant::now() + keep_alive_deadline_duration,
             pending_flush_result: None,
@@ -678,6 +649,16 @@ impl ApplyLoopState {
     fn exit_result(&self) -> Option<ApplyLoopResult> {
         self.exit_intent.map(ExitIntent::to_result)
     }
+
+    /// Returns `true` when active intake has stopped to drain shutdown work.
+    fn is_draining_for_shutdown(&self) -> bool {
+        self.draining_for_shutdown
+    }
+
+    /// Stops active intake and starts draining buffered shutdown work.
+    fn start_draining_for_shutdown(&mut self) {
+        self.draining_for_shutdown = true;
+    }
 }
 
 /// Main apply loop implementation that processes replication events.
@@ -831,26 +812,23 @@ where
         let mut connection_updates_rx = replication_client.connection_updates_rx();
 
         loop {
-            let iteration_result = match &self.state.shutdown_state {
-                ShutdownState::NoShutdown => {
-                    self.run_active_iteration(
-                        events_stream.as_mut(),
-                        replication_client,
-                        &mut connection_updates_rx,
-                    )
-                    .await
-                }
-                ShutdownState::DrainingForShutdown => {
-                    self.run_draining_shutdown_iteration(
-                        events_stream.as_mut(),
-                        &mut connection_updates_rx,
-                    )
-                    .await
-                }
+            let iteration_result = if self.state.is_draining_for_shutdown() {
+                self.run_draining_shutdown_iteration(
+                    events_stream.as_mut(),
+                    &mut connection_updates_rx,
+                )
+                .await
+            } else {
+                self.run_active_iteration(
+                    events_stream.as_mut(),
+                    replication_client,
+                    &mut connection_updates_rx,
+                )
+                .await
             };
-            let result = iteration_result?;
 
-            if let Some(result) = result {
+            // If we have a result from the apply loop, we should stop the loop.
+            if let Some(result) = iteration_result? {
                 return Ok(result);
             }
         }
@@ -892,6 +870,8 @@ where
         replication_client: &PgReplicationClient,
         connection_updates_rx: &mut watch::Receiver<PostgresConnectionUpdate>,
     ) -> EtlResult<Option<ApplyLoopResult>> {
+        // We try to process syncing tables if we are idle, so that we advance state
+        // faster.
         self.maybe_process_syncing_tables_when_idle().await?;
 
         // We try to finish the active iteration even before starting it, since we might
@@ -949,7 +929,6 @@ where
             _ = Self::wait_for_keep_alive_deadline(self.state.keep_alive_deadline) => {
                 self.send_status_update(
                     events_stream.as_mut(),
-                    self.state.effective_flush_lsn(),
                     true,
                     StatusUpdateType::PeriodicKeepAlive,
                 )
@@ -960,7 +939,8 @@ where
             }
         }
 
-        // Try to keep advancing syncing tables whenever the system becomes idle.
+        // We try to process syncing tables if we are idle, so that we advance state
+        // faster.
         self.maybe_process_syncing_tables_when_idle().await?;
 
         Ok(self.try_finish_active_iteration())
@@ -977,16 +957,18 @@ where
     /// 3. Batch flush deadline expiry.
     /// 4. Periodic keep alive status updates.
     ///
-    /// After the selected branch runs, the loop advances idle syncing state.
-    /// Once buffered or in-flight destination work is resolved, it sends the
-    /// final shutdown status update and exits.
+    /// Like the active loop, each draining iteration advances idle table-sync
+    /// coordination before waiting. After the selected branch runs, it checks
+    /// again for idle table-sync work. Once buffered or in-flight destination
+    /// work is resolved, it sends the final shutdown status update and exits.
     async fn run_draining_shutdown_iteration(
         &mut self,
         mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
         connection_updates_rx: &mut watch::Receiver<PostgresConnectionUpdate>,
     ) -> EtlResult<Option<ApplyLoopResult>> {
+        // If we are done with unresolved work, we can finish the shutdown.
         if !self.state.has_unresolved_batch_work() {
-            self.initiate_graceful_shutdown(events_stream.as_mut()).await?;
+            self.send_shutdown_flush_status_update(events_stream.as_mut()).await?;
 
             return Ok(Some(self.finish_shutdown()));
         }
@@ -1014,7 +996,6 @@ where
             _ = Self::wait_for_keep_alive_deadline(self.state.keep_alive_deadline) => {
                 self.send_status_update(
                     events_stream.as_mut(),
-                    self.state.effective_flush_lsn(),
                     true,
                     StatusUpdateType::PeriodicKeepAlive,
                 )
@@ -1025,15 +1006,15 @@ where
             }
         }
 
-        // Try to keep advancing syncing tables whenever the system becomes idle.
-        self.maybe_process_syncing_tables_when_idle().await?;
-
+        // If we are done with unresolved work, we can finish the shutdown.
         if !self.state.has_unresolved_batch_work() {
-            self.initiate_graceful_shutdown(events_stream.as_mut()).await?;
+            self.send_shutdown_flush_status_update(events_stream.as_mut()).await?;
 
             return Ok(Some(self.finish_shutdown()));
         }
 
+        // If the batch work is not completed, we return `None` to continue the draining
+        // in the next iteration.
         Ok(None)
     }
 
@@ -1042,13 +1023,15 @@ where
     fn finish_shutdown(&self) -> ApplyLoopResult {
         debug_assert!(!self.state.has_unresolved_batch_work());
 
+        // We try to honor the existing exit result, otherwise we just mark it as
+        // `Paused` since shutting down is effectively pausing a loop.
         self.state.exit_result().unwrap_or(ApplyLoopResult::Paused)
     }
 
     /// Returns the final loop result for the active state if all exit barriers
     /// have been resolved.
     fn try_finish_active_iteration(&self) -> Option<ApplyLoopResult> {
-        if self.state.shutdown_state.is_requested() || self.state.has_unresolved_batch_work() {
+        if self.state.is_draining_for_shutdown() || self.state.has_unresolved_batch_work() {
             return None;
         }
 
@@ -1117,7 +1100,7 @@ where
     /// Shutdown stops new message intake immediately. If there is already
     /// buffered or in-flight destination work, the loop first drains that work
     /// so the best durable position can advance before sending the final
-    /// shutdown status update. Otherwise it sends that update immediately and
+    /// shutdown status update. Otherwise, it sends that update immediately and
     /// exits the loop.
     ///
     /// Note: the shutdown system is best-effort. Graceful shutdown may not
@@ -1129,17 +1112,6 @@ where
         mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
     ) -> EtlResult<()> {
         let worker_type = self.worker_context.worker_type();
-
-        // If the shutdown was already requested, we silently skip it.
-        if self.state.shutdown_state.is_requested() {
-            info!(
-                %worker_type,
-                shutdown_state = %self.state.shutdown_state,
-                "shutdown signal received but already in shutdown state, continuing",
-            );
-
-            return Ok(());
-        }
 
         // Shutdown always means this apply loop invocation will eventually return, even
         // if a later quiescent state upgrades the final result from pause to
@@ -1156,7 +1128,7 @@ where
                 "shutdown signal received, stopping new intake and entering shutdown drain",
             );
 
-            self.state.shutdown_state = ShutdownState::DrainingForShutdown;
+            self.state.start_draining_for_shutdown();
 
             return Ok(());
         }
@@ -1166,38 +1138,21 @@ where
             "shutdown signal received, no unresolved work left, sending final status update",
         );
 
-        self.initiate_graceful_shutdown(events_stream.as_mut()).await
+        self.send_shutdown_flush_status_update(events_stream.as_mut()).await
     }
 
-    /// Initiates graceful shutdown by sending a final status update just to
-    /// make sure that Postgres can advance its state once more.
+    /// Sends the final shutdown status update to let Postgres advance its
+    /// replication state once more.
     ///
     /// The status update uses the loop's effective flush position. When idle,
     /// this may include received keepalive progress that is intentionally not
     /// persisted as durable ETL progress.
-    async fn initiate_graceful_shutdown(
+    async fn send_shutdown_flush_status_update(
         &mut self,
         mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
     ) -> EtlResult<()> {
-        let worker_type = self.worker_context.worker_type();
-
-        let flush_lsn = self.state.effective_flush_lsn();
-
-        info!(
-            %worker_type,
-            %flush_lsn,
-            "sending shutdown status update",
-        );
-
-        self.send_status_update(
-            events_stream.as_mut(),
-            flush_lsn,
-            true,
-            StatusUpdateType::ShutdownFlush,
-        )
-        .await?;
-
-        self.state.shutdown_state = ShutdownState::NoShutdown;
+        self.send_status_update(events_stream.as_mut(), true, StatusUpdateType::ShutdownFlush)
+            .await?;
 
         Ok(())
     }
@@ -1213,7 +1168,6 @@ where
     async fn send_status_update(
         &mut self,
         mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
-        flush_lsn: PgLsn,
         force: bool,
         status_update_type: StatusUpdateType,
     ) -> EtlResult<()> {
@@ -1222,7 +1176,7 @@ where
             .stream_mut()
             .send_status_update(
                 self.state.last_received_lsn(),
-                flush_lsn,
+                self.state.effective_flush_lsn(),
                 force,
                 status_update_type,
             )
@@ -1718,7 +1672,6 @@ where
 
                 self.send_status_update(
                     events_stream.as_mut(),
-                    self.state.effective_flush_lsn(),
                     message.reply() == 1,
                     StatusUpdateType::KeepAlive,
                 )
@@ -2344,20 +2297,11 @@ where
         self.schema_store.upsert_replication_progress(worker_type, flush_lsn).await
     }
 
-    /// Processes syncing tables outside a transaction.
-    ///
-    /// Dispatches to worker-specific implementation based on the worker
-    /// context.
+    /// Processes syncing tables when the apply loop is idle.
     ///
     /// Once an exit has already been requested we intentionally skip this class
     /// of work so draining stays focused on already-started flushes and
     /// shutdown barriers.
-    ///
-    /// Idle syncing uses the effective flush LSN so table handoff can make
-    /// progress even when no new transactions arrive. Keepalive messages may
-    /// advance that effective position, but those idle-only advances are not
-    /// persisted as durable replication progress because they would create
-    /// extra writes during normal quiet periods.
     async fn maybe_process_syncing_tables_when_idle(&mut self) -> EtlResult<()> {
         if self.state.exit_intent.is_some() {
             return Ok(());
@@ -2370,6 +2314,13 @@ where
     ///
     /// Dispatches to worker-specific implementation based on the worker
     /// context.
+    ///
+    /// Idle syncing uses the last received LSN so table handoff can make
+    /// progress even when no new transactions arrive. This is made possible
+    /// thanks to the keep alive messages that carry an ever-growing LSN that
+    /// follows the WAL growth on the main database and allows the apply loop to
+    /// progress even if there are no events for the tables in the publication
+    /// that this instance is interested in.
     async fn process_syncing_tables_when_idle(&mut self) -> EtlResult<()> {
         if !self.state.is_idle() {
             debug!("skipping table sync processing because apply loop is not idle");
@@ -2377,7 +2328,7 @@ where
             return Ok(());
         }
 
-        let current_lsn = self.state.effective_flush_lsn();
+        let current_lsn = self.state.last_received_lsn();
 
         debug!(
             worker_type = %self.worker_context.worker_type(),
