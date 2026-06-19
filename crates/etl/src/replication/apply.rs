@@ -892,7 +892,8 @@ where
         replication_client: &PgReplicationClient,
         connection_updates_rx: &mut watch::Receiver<PostgresConnectionUpdate>,
     ) -> EtlResult<Option<ApplyLoopResult>> {
-        // We try to process syncing tables if we are idle, so that we advance state faster.
+        // We try to process syncing tables if we are idle, so that we advance state
+        // faster.
         self.maybe_process_syncing_tables_when_idle().await?;
 
         // We try to finish the active iteration even before starting it, since we might
@@ -960,7 +961,8 @@ where
             }
         }
 
-        // We try to process syncing tables if we are idle, so that we advance state faster.
+        // We try to process syncing tables if we are idle, so that we advance state
+        // faster.
         self.maybe_process_syncing_tables_when_idle().await?;
 
         Ok(self.try_finish_active_iteration())
@@ -1033,8 +1035,8 @@ where
             return Ok(Some(self.finish_shutdown()));
         }
 
-        // If the batch work is not completed, we return `None` to continue the draining in the
-        // next iteration.
+        // If the batch work is not completed, we return `None` to continue the draining
+        // in the next iteration.
         Ok(None)
     }
 
@@ -1043,8 +1045,8 @@ where
     fn finish_shutdown(&self) -> ApplyLoopResult {
         debug_assert!(!self.state.has_unresolved_batch_work());
 
-        // We try to honor the existing exit result, otherwise we just mark it as `Paused` since
-        // shutting down is effectively pausing a loop.
+        // We try to honor the existing exit result, otherwise we just mark it as
+        // `Paused` since shutting down is effectively pausing a loop.
         self.state.exit_result().unwrap_or(ApplyLoopResult::Paused)
     }
 
