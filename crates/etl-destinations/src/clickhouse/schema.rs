@@ -29,51 +29,36 @@ pub(crate) const CURRENT_VIEW_SUFFIX: &str = "__current";
 /// responsible for applying that when the column is nullable. Arrays always use
 /// `Array(Nullable(T))` since Postgres array elements are nullable.
 fn postgres_column_type_to_clickhouse_sql(typ: &Type) -> &'static str {
-    match typ {
-        &Type::BOOL => "Boolean",
-        &Type::CHAR | &Type::BPCHAR | &Type::VARCHAR | &Type::NAME | &Type::TEXT => "String",
-        &Type::INT2 => "Int16",
-        &Type::INT4 => "Int32",
-        &Type::INT8 => "Int64",
-        &Type::FLOAT4 => "Float32",
-        &Type::FLOAT8 => "Float64",
-        &Type::NUMERIC | &Type::MONEY => "String",
-        &Type::DATE => "Date32",
-        &Type::TIME => "String",
-        &Type::TIMESTAMP => "DateTime64(6)",
-        &Type::TIMESTAMPTZ => "DateTime64(6, 'UTC')",
-        &Type::UUID => "UUID",
-        &Type::JSON | &Type::JSONB => "String",
-        &Type::BYTEA => "String",
-        &Type::OID => "UInt32",
+    match *typ {
+        Type::BOOL => "Boolean",
+        Type::INT2 => "Int16",
+        Type::INT4 => "Int32",
+        Type::INT8 => "Int64",
+        Type::FLOAT4 => "Float32",
+        Type::FLOAT8 => "Float64",
+        Type::DATE => "Date32",
+        Type::TIMESTAMP => "DateTime64(6)",
+        Type::TIMESTAMPTZ => "DateTime64(6, 'UTC')",
+        Type::UUID => "UUID",
+        Type::OID => "UInt32",
         _ => "String",
     }
 }
 
 /// Returns the ClickHouse array element type for a Postgres array type.
 fn postgres_array_element_clickhouse_sql(typ: &Type) -> &'static str {
-    match typ {
-        &Type::BOOL_ARRAY => "Boolean",
-        &Type::CHAR_ARRAY
-        | &Type::BPCHAR_ARRAY
-        | &Type::VARCHAR_ARRAY
-        | &Type::NAME_ARRAY
-        | &Type::TEXT_ARRAY
-        | &Type::MONEY_ARRAY => "String",
-        &Type::INT2_ARRAY => "Int16",
-        &Type::INT4_ARRAY => "Int32",
-        &Type::INT8_ARRAY => "Int64",
-        &Type::FLOAT4_ARRAY => "Float32",
-        &Type::FLOAT8_ARRAY => "Float64",
-        &Type::NUMERIC_ARRAY => "String",
-        &Type::DATE_ARRAY => "Date32",
-        &Type::TIME_ARRAY => "String",
-        &Type::TIMESTAMP_ARRAY => "DateTime64(6)",
-        &Type::TIMESTAMPTZ_ARRAY => "DateTime64(6, 'UTC')",
-        &Type::UUID_ARRAY => "UUID",
-        &Type::JSON_ARRAY | &Type::JSONB_ARRAY => "String",
-        &Type::BYTEA_ARRAY => "String",
-        &Type::OID_ARRAY => "UInt32",
+    match *typ {
+        Type::BOOL_ARRAY => "Boolean",
+        Type::INT2_ARRAY => "Int16",
+        Type::INT4_ARRAY => "Int32",
+        Type::INT8_ARRAY => "Int64",
+        Type::FLOAT4_ARRAY => "Float32",
+        Type::FLOAT8_ARRAY => "Float64",
+        Type::DATE_ARRAY => "Date32",
+        Type::TIMESTAMP_ARRAY => "DateTime64(6)",
+        Type::TIMESTAMPTZ_ARRAY => "DateTime64(6, 'UTC')",
+        Type::UUID_ARRAY => "UUID",
+        Type::OID_ARRAY => "UInt32",
         _ => "String",
     }
 }
@@ -153,14 +138,21 @@ fn render_clickhouse_default_expression(
         DefaultExpression::TimeLiteral(expression) => {
             matches!(typ, &Type::TIME).then(|| expression.clone())
         }
+        DefaultExpression::TimeTzLiteral(expression) => {
+            matches!(typ, &Type::TIMETZ).then(|| expression.clone())
+        }
+        DefaultExpression::IntervalLiteral(expression) => {
+            matches!(typ, &Type::INTERVAL).then(|| expression.clone())
+        }
         DefaultExpression::JsonLiteral(expression) => is_json_type(typ).then(|| expression.clone()),
         DefaultExpression::DateLiteral(expression) => {
             matches!(typ, &Type::DATE).then(|| format!("toDate32({expression})"))
         }
         DefaultExpression::TimestampLiteral(expression) => {
-            is_clickhouse_timestamp_default_type(typ)
-                .then(|| format!("toDateTime64({expression}, 6, 'UTC')"))
+            matches!(typ, &Type::TIMESTAMP).then(|| format!("toDateTime64({expression}, 6, 'UTC')"))
         }
+        DefaultExpression::TimestampTzLiteral(expression) => matches!(typ, &Type::TIMESTAMPTZ)
+            .then(|| format!("toDateTime64({expression}, 6, 'UTC')")),
     }
 }
 
@@ -183,18 +175,20 @@ fn is_clickhouse_string_default_type(typ: &Type) -> bool {
     is_clickhouse_text_default_type(typ)
         || matches!(
             typ,
-            &Type::NUMERIC | &Type::MONEY | &Type::TIME | &Type::UUID | &Type::JSON | &Type::JSONB
+            &Type::NUMERIC
+                | &Type::MONEY
+                | &Type::TIME
+                | &Type::TIMETZ
+                | &Type::INTERVAL
+                | &Type::UUID
+                | &Type::JSON
+                | &Type::JSONB
         )
 }
 
 /// Returns whether a Postgres type is a text-like ClickHouse String column.
 fn is_clickhouse_text_default_type(typ: &Type) -> bool {
     matches!(typ, &Type::CHAR | &Type::BPCHAR | &Type::VARCHAR | &Type::NAME | &Type::TEXT)
-}
-
-/// Returns whether a Postgres type is a ClickHouse DateTime column.
-fn is_clickhouse_timestamp_default_type(typ: &Type) -> bool {
-    matches!(typ, &Type::TIMESTAMP | &Type::TIMESTAMPTZ)
 }
 
 /// Returns whether a Postgres JSON type is stored as ClickHouse String.
@@ -410,11 +404,13 @@ mod tests {
         assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::MONEY), "String");
         assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::DATE), "Date32");
         assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::TIME), "String");
+        assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::TIMETZ), "String");
         assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::TIMESTAMP), "DateTime64(6)");
         assert_eq!(
             postgres_column_type_to_clickhouse_sql(&Type::TIMESTAMPTZ),
             "DateTime64(6, 'UTC')"
         );
+        assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::INTERVAL), "String");
         assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::UUID), "UUID");
         assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::JSON), "String");
         assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::JSONB), "String");
@@ -427,6 +423,8 @@ mod tests {
         assert_eq!(postgres_array_element_clickhouse_sql(&Type::BOOL_ARRAY), "Boolean");
         assert_eq!(postgres_array_element_clickhouse_sql(&Type::TEXT_ARRAY), "String");
         assert_eq!(postgres_array_element_clickhouse_sql(&Type::MONEY_ARRAY), "String");
+        assert_eq!(postgres_array_element_clickhouse_sql(&Type::TIMETZ_ARRAY), "String");
+        assert_eq!(postgres_array_element_clickhouse_sql(&Type::INTERVAL_ARRAY), "String");
         assert_eq!(postgres_array_element_clickhouse_sql(&Type::INT4_ARRAY), "Int32");
         assert_eq!(postgres_array_element_clickhouse_sql(&Type::INT8_ARRAY), "Int64");
         assert_eq!(postgres_array_element_clickhouse_sql(&Type::FLOAT8_ARRAY), "Float64");
@@ -482,6 +480,9 @@ mod tests {
             (Type::TEXT, "true", " DEFAULT 'true'"),
             (Type::BOOL, "'true'::text", " DEFAULT true"),
             (Type::DATE, "'2026-01-01'::date", " DEFAULT toDate32('2026-01-01')"),
+            (Type::TIME, "'12:30:00'::time", " DEFAULT '12:30:00'"),
+            (Type::TIMETZ, "'12:30:00+02'::timetz", " DEFAULT '12:30:00+02'"),
+            (Type::INTERVAL, "'30 days'::interval", " DEFAULT '30 days'"),
             (
                 Type::TIMESTAMPTZ,
                 "'2026-01-01 12:30:00'::timestamptz",

@@ -9,7 +9,8 @@ use crate::{
 /// the `\x` prefix followed by hexadecimal digits. Each pair of hex digits
 /// represents one byte in the output array.
 pub(crate) fn parse_bytea_hex_string(value: &str) -> EtlResult<Vec<u8>> {
-    if value.len() < 2 || &value[..2] != "\\x" {
+    let value = value.as_bytes();
+    if !value.starts_with(b"\\x") {
         bail!(
             ErrorKind::ConversionError,
             "Bytea hex string conversion failed",
@@ -28,12 +29,29 @@ pub(crate) fn parse_bytea_hex_string(value: &str) -> EtlResult<Vec<u8>> {
         );
     }
 
-    for i in (0..value.len()).step_by(2) {
-        let val = u8::from_str_radix(&value[i..i + 2], 16)?;
-        result.push(val);
+    for digits in value.chunks_exact(2) {
+        let high = parse_hex_digit(digits[0])?;
+        let low = parse_hex_digit(digits[1])?;
+        result.push((high << 4) | low);
     }
 
     Ok(result)
+}
+
+/// Parses one ASCII hexadecimal digit.
+fn parse_hex_digit(byte: u8) -> EtlResult<u8> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => {
+            bail!(
+                ErrorKind::ConversionError,
+                "Bytea hex string conversion failed",
+                "Invalid hexadecimal digit"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -141,10 +159,8 @@ mod tests {
     fn parse_bytea_hex_invalid_hex_char() {
         let result = parse_bytea_hex_string("\\x4g");
         assert!(result.is_err());
-        // This should be a parsing error from from_str_radix
         let err = result.unwrap_err();
-        // The error should propagate from the underlying parsing
-        assert!(err.to_string().contains("invalid digit"));
+        assert!(err.to_string().contains("Invalid hexadecimal digit"));
     }
 
     #[test]
@@ -157,6 +173,9 @@ mod tests {
     #[test]
     fn parse_bytea_hex_non_ascii() {
         let result = parse_bytea_hex_string("\\x4🤔");
+        assert!(result.is_err());
+
+        let result = parse_bytea_hex_string("\\xaéa");
         assert!(result.is_err());
     }
 

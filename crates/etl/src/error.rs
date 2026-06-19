@@ -13,7 +13,7 @@ use std::{
     sync::Arc,
 };
 
-use crate::conversions::ParseNumericError;
+use etl_postgres::types::{ParseNumericError, ParseTimeError};
 
 const MAX_SCHEMA_ERROR_COLUMN_NAMES: usize = 12;
 
@@ -943,6 +943,20 @@ impl From<ParseNumericError> for EtlError {
         EtlError::from_components(
             ErrorKind::ConversionError,
             Cow::Borrowed("Numeric parsing failed"),
+            None,
+            Some(source),
+        )
+    }
+}
+
+/// Converts [`ParseTimeError`] to [`EtlError`] with
+/// [`ErrorKind::ConversionError`].
+impl From<ParseTimeError> for EtlError {
+    fn from(err: ParseTimeError) -> EtlError {
+        let source = Arc::new(err);
+        EtlError::from_components(
+            ErrorKind::ConversionError,
+            Cow::Borrowed("Datetime parsing failed"),
             None,
             Some(source),
         )

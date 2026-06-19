@@ -305,6 +305,7 @@ fn estimate_cell_allocated_bytes(cell: &Cell) -> usize {
         | Cell::F64(_)
         | Cell::Date(_)
         | Cell::Time(_)
+        | Cell::TimeTz(_)
         | Cell::Timestamp(_)
         | Cell::TimestampTz(_)
         | Cell::Uuid(_) => 0,
@@ -422,6 +423,11 @@ fn estimate_array_allocated_bytes(value: &ArrayCell) -> usize {
             values.capacity(),
             size_of::<Option<chrono::NaiveTime>>(),
             "array.time_capacity_mul_option_size",
+        ),
+        ArrayCell::TimeTz(values) => checked_mul_or_saturating(
+            values.capacity(),
+            size_of::<Option<crate::types::PgTimeTz>>(),
+            "array.timetz_capacity_mul_option_size",
         ),
         ArrayCell::Timestamp(values) => checked_mul_or_saturating(
             values.capacity(),

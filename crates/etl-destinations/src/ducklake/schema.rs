@@ -7,15 +7,11 @@ use crate::ducklake::sql::{qualified_lake_table_name, quote_identifier};
 fn postgres_scalar_type_to_ducklake_sql(typ: &Type) -> &'static str {
     match typ {
         &Type::BOOL => "boolean",
-        &Type::CHAR | &Type::BPCHAR | &Type::VARCHAR | &Type::NAME | &Type::TEXT => "varchar",
         &Type::INT2 => "smallint",
         &Type::INT4 => "integer",
         &Type::INT8 => "bigint",
         &Type::FLOAT4 => "float",
         &Type::FLOAT8 => "double",
-        // numeric is mapped to varchar to preserve precision without loss,
-        // since DuckDB decimal needs explicit scale/precision we don't have in the Type.
-        &Type::NUMERIC => "varchar",
         &Type::DATE => "date",
         &Type::TIME => "time",
         &Type::TIMESTAMP => "timestamp",
@@ -32,17 +28,11 @@ fn postgres_scalar_type_to_ducklake_sql(typ: &Type) -> &'static str {
 fn postgres_array_type_to_ducklake_sql(typ: &Type) -> &'static str {
     match typ {
         &Type::BOOL_ARRAY => "boolean[]",
-        &Type::CHAR_ARRAY
-        | &Type::BPCHAR_ARRAY
-        | &Type::VARCHAR_ARRAY
-        | &Type::NAME_ARRAY
-        | &Type::TEXT_ARRAY => "varchar[]",
         &Type::INT2_ARRAY => "smallint[]",
         &Type::INT4_ARRAY => "integer[]",
         &Type::INT8_ARRAY => "bigint[]",
         &Type::FLOAT4_ARRAY => "float[]",
         &Type::FLOAT8_ARRAY => "double[]",
-        &Type::NUMERIC_ARRAY => "varchar[]",
         &Type::DATE_ARRAY => "date[]",
         &Type::TIME_ARRAY => "time[]",
         &Type::TIMESTAMP_ARRAY => "timestamp[]",
@@ -127,8 +117,17 @@ fn render_ducklake_default_expression(
         DefaultExpression::TimeLiteral(expression) => {
             matches!(typ, &Type::TIME).then(|| expression.clone())
         }
+        DefaultExpression::TimeTzLiteral(expression) => {
+            matches!(typ, &Type::TIMETZ).then(|| expression.clone())
+        }
         DefaultExpression::TimestampLiteral(expression) => {
-            is_ducklake_timestamp_default_type(typ).then(|| expression.clone())
+            matches!(typ, &Type::TIMESTAMP).then(|| expression.clone())
+        }
+        DefaultExpression::TimestampTzLiteral(expression) => {
+            matches!(typ, &Type::TIMESTAMPTZ).then(|| expression.clone())
+        }
+        DefaultExpression::IntervalLiteral(expression) => {
+            matches!(typ, &Type::INTERVAL).then(|| expression.clone())
         }
         DefaultExpression::JsonLiteral(expression) => is_json_type(typ).then(|| expression.clone()),
         DefaultExpression::BooleanLiteral(_) => None,
@@ -150,17 +149,13 @@ fn is_ducklake_numeric_string_default_type(typ: &Type) -> bool {
 
 /// Returns whether a Postgres type can safely receive source string literals.
 fn is_ducklake_string_default_type(typ: &Type) -> bool {
-    is_ducklake_text_default_type(typ) || matches!(typ, &Type::NUMERIC | &Type::UUID)
+    is_ducklake_text_default_type(typ)
+        || matches!(typ, &Type::NUMERIC | &Type::TIMETZ | &Type::INTERVAL | &Type::UUID)
 }
 
 /// Returns whether a Postgres type is a text-like DuckLake varchar column.
 fn is_ducklake_text_default_type(typ: &Type) -> bool {
     matches!(typ, &Type::CHAR | &Type::BPCHAR | &Type::VARCHAR | &Type::NAME | &Type::TEXT)
-}
-
-/// Returns whether a Postgres type is a DuckLake timestamp column.
-fn is_ducklake_timestamp_default_type(typ: &Type) -> bool {
-    matches!(typ, &Type::TIMESTAMP | &Type::TIMESTAMPTZ)
 }
 
 /// Returns whether a Postgres type is a DuckLake JSON column.
@@ -278,8 +273,10 @@ mod tests {
         assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::NUMERIC), "varchar");
         assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::DATE), "date");
         assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::TIME), "time");
+        assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::TIMETZ), "varchar");
         assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::TIMESTAMP), "timestamp");
         assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::TIMESTAMPTZ), "timestamptz");
+        assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::INTERVAL), "varchar");
         assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::UUID), "uuid");
         assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::JSON), "json");
         assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::JSONB), "json");
@@ -293,6 +290,8 @@ mod tests {
         assert_eq!(postgres_array_type_to_ducklake_sql(&Type::TEXT_ARRAY), "varchar[]");
         assert_eq!(postgres_array_type_to_ducklake_sql(&Type::INT4_ARRAY), "integer[]");
         assert_eq!(postgres_array_type_to_ducklake_sql(&Type::FLOAT8_ARRAY), "double[]");
+        assert_eq!(postgres_array_type_to_ducklake_sql(&Type::TIMETZ_ARRAY), "varchar[]");
+        assert_eq!(postgres_array_type_to_ducklake_sql(&Type::INTERVAL_ARRAY), "varchar[]");
         assert_eq!(postgres_array_type_to_ducklake_sql(&Type::UUID_ARRAY), "uuid[]");
     }
 
@@ -335,6 +334,9 @@ mod tests {
             (Type::TEXT, "true", " default 'true'"),
             (Type::JSONB, "'{}'::jsonb", " default '{}'"),
             (Type::NUMERIC, "42", " default '42'"),
+            (Type::TIME, "'12:30:00'::time", " default '12:30:00'"),
+            (Type::TIMETZ, "'12:30:00+02'::timetz", " default '12:30:00+02'"),
+            (Type::INTERVAL, "'30 days'::interval", " default '30 days'"),
             (
                 Type::TIMESTAMPTZ,
                 "'2026-01-01 12:30:00'::timestamptz",

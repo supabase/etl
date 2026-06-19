@@ -1402,11 +1402,19 @@ impl BigQueryClient {
                 matches!(typ, &Type::DATE).then(|| format!("DATE {expression}"))
             }
             DefaultExpression::TimeLiteral(expression) => {
-                matches!(typ, &Type::TIME).then(|| expression.clone())
+                matches!(typ, &Type::TIME).then(|| format!("TIME {expression}"))
+            }
+            DefaultExpression::TimeTzLiteral(expression) => {
+                matches!(typ, &Type::TIMETZ).then(|| expression.clone())
             }
             DefaultExpression::TimestampLiteral(expression) => {
-                Self::is_bigquery_timestamp_default_type(typ)
-                    .then(|| format!("TIMESTAMP {expression}"))
+                matches!(typ, &Type::TIMESTAMP).then(|| format!("DATETIME {expression}"))
+            }
+            DefaultExpression::TimestampTzLiteral(expression) => {
+                matches!(typ, &Type::TIMESTAMPTZ).then(|| format!("TIMESTAMP {expression}"))
+            }
+            DefaultExpression::IntervalLiteral(expression) => {
+                matches!(typ, &Type::INTERVAL).then(|| expression.clone())
             }
             DefaultExpression::JsonLiteral(expression) => {
                 Self::is_json_type(typ).then(|| format!("JSON {expression}"))
@@ -1425,6 +1433,8 @@ impl BigQueryClient {
                 | &Type::NAME
                 | &Type::TEXT
                 | &Type::MONEY
+                | &Type::TIMETZ
+                | &Type::INTERVAL
                 | &Type::UUID
         )
     }
@@ -1448,12 +1458,6 @@ impl BigQueryClient {
     /// BigQuery string column.
     fn is_bigquery_numeric_string_default_type(typ: &Type) -> bool {
         matches!(typ, &Type::MONEY)
-    }
-
-    /// Returns whether this Postgres type is created as a BigQuery timestamp
-    /// column and can safely receive timestamp defaults.
-    fn is_bigquery_timestamp_default_type(typ: &Type) -> bool {
-        matches!(typ, &Type::TIMESTAMP | &Type::TIMESTAMPTZ)
     }
 
     /// Returns whether this Postgres type is created as a BigQuery JSON
@@ -1524,19 +1528,13 @@ impl BigQueryClient {
         if is_array_type(typ) {
             let element_type = match typ {
                 &Type::BOOL_ARRAY => "bool",
-                &Type::CHAR_ARRAY
-                | &Type::BPCHAR_ARRAY
-                | &Type::VARCHAR_ARRAY
-                | &Type::NAME_ARRAY
-                | &Type::TEXT_ARRAY => "string",
                 &Type::INT2_ARRAY | &Type::INT4_ARRAY | &Type::INT8_ARRAY => "int64",
                 &Type::FLOAT4_ARRAY | &Type::FLOAT8_ARRAY => "float64",
                 &Type::NUMERIC_ARRAY => "bignumeric",
-                &Type::MONEY_ARRAY => "string",
                 &Type::DATE_ARRAY => "date",
                 &Type::TIME_ARRAY => "time",
-                &Type::TIMESTAMP_ARRAY | &Type::TIMESTAMPTZ_ARRAY => "timestamp",
-                &Type::UUID_ARRAY => "string",
+                &Type::TIMESTAMP_ARRAY => "datetime",
+                &Type::TIMESTAMPTZ_ARRAY => "timestamp",
                 &Type::JSON_ARRAY | &Type::JSONB_ARRAY => "json",
                 &Type::OID_ARRAY => "int64",
                 &Type::BYTEA_ARRAY => "bytes",
@@ -1548,15 +1546,13 @@ impl BigQueryClient {
 
         match typ {
             &Type::BOOL => "bool",
-            &Type::CHAR | &Type::BPCHAR | &Type::VARCHAR | &Type::NAME | &Type::TEXT => "string",
             &Type::INT2 | &Type::INT4 | &Type::INT8 => "int64",
             &Type::FLOAT4 | &Type::FLOAT8 => "float64",
             &Type::NUMERIC => "bignumeric",
-            &Type::MONEY => "string",
             &Type::DATE => "date",
             &Type::TIME => "time",
-            &Type::TIMESTAMP | &Type::TIMESTAMPTZ => "timestamp",
-            &Type::UUID => "string",
+            &Type::TIMESTAMP => "datetime",
+            &Type::TIMESTAMPTZ => "timestamp",
             &Type::JSON | &Type::JSONB => "json",
             &Type::OID => "int64",
             &Type::BYTEA => "bytes",
@@ -1580,45 +1576,21 @@ impl BigQueryClient {
         for column_schema in replicated_table_schema.column_schemas() {
             let typ = match column_schema.typ {
                 Type::BOOL => ColumnType::Bool,
-                Type::CHAR | Type::BPCHAR | Type::VARCHAR | Type::NAME | Type::TEXT => {
-                    ColumnType::String
-                }
                 Type::INT2 => ColumnType::Int32,
                 Type::INT4 => ColumnType::Int32,
                 Type::INT8 => ColumnType::Int64,
                 Type::FLOAT4 => ColumnType::Float,
                 Type::FLOAT8 => ColumnType::Double,
-                Type::NUMERIC => ColumnType::String,
-                Type::MONEY => ColumnType::String,
-                Type::DATE => ColumnType::String,
-                Type::TIME => ColumnType::String,
-                Type::TIMESTAMP => ColumnType::String,
-                Type::TIMESTAMPTZ => ColumnType::String,
-                Type::UUID => ColumnType::String,
-                Type::JSON => ColumnType::String,
-                Type::JSONB => ColumnType::String,
+                Type::TIMESTAMPTZ => ColumnType::Int64,
                 Type::OID => ColumnType::Int32,
                 Type::BYTEA => ColumnType::Bytes,
                 Type::BOOL_ARRAY => ColumnType::Bool,
-                Type::CHAR_ARRAY
-                | Type::BPCHAR_ARRAY
-                | Type::VARCHAR_ARRAY
-                | Type::NAME_ARRAY
-                | Type::TEXT_ARRAY => ColumnType::String,
                 Type::INT2_ARRAY => ColumnType::Int32,
                 Type::INT4_ARRAY => ColumnType::Int32,
                 Type::INT8_ARRAY => ColumnType::Int64,
                 Type::FLOAT4_ARRAY => ColumnType::Float,
                 Type::FLOAT8_ARRAY => ColumnType::Double,
-                Type::NUMERIC_ARRAY => ColumnType::String,
-                Type::MONEY_ARRAY => ColumnType::String,
-                Type::DATE_ARRAY => ColumnType::String,
-                Type::TIME_ARRAY => ColumnType::String,
-                Type::TIMESTAMP_ARRAY => ColumnType::String,
-                Type::TIMESTAMPTZ_ARRAY => ColumnType::String,
-                Type::UUID_ARRAY => ColumnType::String,
-                Type::JSON_ARRAY => ColumnType::String,
-                Type::JSONB_ARRAY => ColumnType::String,
+                Type::TIMESTAMPTZ_ARRAY => ColumnType::Int64,
                 Type::OID_ARRAY => ColumnType::Int32,
                 Type::BYTEA_ARRAY => ColumnType::Bytes,
                 _ => ColumnType::String,
@@ -1775,7 +1747,12 @@ mod tests {
         assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::NUMERIC), "bignumeric");
         assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::MONEY), "string");
         assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::OID), "int64");
-        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::TIMESTAMP), "timestamp");
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::DATE), "date");
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::TIME), "time");
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::TIMETZ), "string");
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::TIMESTAMP), "datetime");
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::TIMESTAMPTZ), "timestamp");
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::INTERVAL), "string");
         assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::JSON), "json");
         assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::BYTEA), "bytes");
     }
@@ -1801,8 +1778,15 @@ mod tests {
         );
         assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::MONEY_ARRAY), "array<string>");
         assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::OID_ARRAY), "array<int64>");
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::DATE_ARRAY), "array<date>");
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::TIME_ARRAY), "array<time>");
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::TIMETZ_ARRAY), "array<string>");
         assert_eq!(
             BigQueryClient::postgres_to_bigquery_type(&Type::TIMESTAMP_ARRAY),
+            "array<datetime>"
+        );
+        assert_eq!(
+            BigQueryClient::postgres_to_bigquery_type(&Type::TIMESTAMPTZ_ARRAY),
             "array<timestamp>"
         );
         assert_eq!(
@@ -1869,11 +1853,10 @@ mod tests {
             (Type::BOOL, "'true'::text", "true"),
             (Type::MONEY, "42", "'42'"),
             (Type::DATE, "'2026-01-01'::date", "DATE '2026-01-01'"),
-            (
-                Type::TIMESTAMP,
-                "'2026-01-01 12:30:00'::timestamp",
-                "TIMESTAMP '2026-01-01 12:30:00'",
-            ),
+            (Type::TIME, "'12:30:00'::time", "TIME '12:30:00'"),
+            (Type::TIMETZ, "'12:30:00+02'::timetz", "'12:30:00+02'"),
+            (Type::INTERVAL, "'30 days'::interval", "'30 days'"),
+            (Type::TIMESTAMP, "'2026-01-01 12:30:00'::timestamp", "DATETIME '2026-01-01 12:30:00'"),
             (Type::JSONB, "'{}'::jsonb", "JSON '{}'"),
             (
                 Type::UUID,
@@ -2048,20 +2031,31 @@ mod tests {
             test_column("numeric_col", Type::NUMERIC, 4, true, None),
             test_column("date_col", Type::DATE, 5, true, None),
             test_column("time_col", Type::TIME, 6, true, None),
+            test_column("timestamp_col", Type::TIMESTAMP, 7, true, None),
+            test_column("timestamptz_col", Type::TIMESTAMPTZ, 8, true, None),
+            test_column("timestamp_array_col", Type::TIMESTAMP_ARRAY, 9, true, None),
+            test_column("timestamptz_array_col", Type::TIMESTAMPTZ_ARRAY, 10, true, None),
         ];
         let schema = test_replicated_schema(columns);
 
         let descriptor = BigQueryClient::column_schemas_to_table_descriptor(&schema, true);
 
-        assert_eq!(descriptor.field_descriptors.len(), 8); // 6 columns + CDC columns
+        assert_eq!(descriptor.field_descriptors.len(), 12); // 10 columns + CDC columns
 
-        // Check that UUID, JSON, DATE, TIME are all mapped to String in storage
+        // Check that civil temporal types are strings and instants use int64
+        // epoch microseconds in storage.
         assert!(matches!(descriptor.field_descriptors[0].typ, ColumnType::String)); // UUID
         assert!(matches!(descriptor.field_descriptors[1].typ, ColumnType::String)); // JSON
         assert!(matches!(descriptor.field_descriptors[2].typ, ColumnType::Bytes)); // BYTEA
         assert!(matches!(descriptor.field_descriptors[3].typ, ColumnType::String)); // NUMERIC
         assert!(matches!(descriptor.field_descriptors[4].typ, ColumnType::String)); // DATE
         assert!(matches!(descriptor.field_descriptors[5].typ, ColumnType::String)); // TIME
+        assert!(matches!(descriptor.field_descriptors[6].typ, ColumnType::String)); // TIMESTAMP
+        assert!(matches!(descriptor.field_descriptors[7].typ, ColumnType::Int64)); // TIMESTAMPTZ
+        assert!(matches!(descriptor.field_descriptors[8].typ, ColumnType::String)); // TIMESTAMP_ARRAY
+        assert!(matches!(descriptor.field_descriptors[8].mode, ColumnMode::Repeated));
+        assert!(matches!(descriptor.field_descriptors[9].typ, ColumnType::Int64)); // TIMESTAMPTZ_ARRAY
+        assert!(matches!(descriptor.field_descriptors[9].mode, ColumnMode::Repeated));
     }
 
     #[test]

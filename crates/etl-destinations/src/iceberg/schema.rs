@@ -9,28 +9,17 @@ use iceberg::spec::{
 fn postgres_array_type_to_iceberg_type(typ: &Type, field_id: i32) -> IcebergType {
     match typ {
         &Type::BOOL_ARRAY => create_iceberg_list_type(PrimitiveType::Boolean, field_id),
-        &Type::CHAR_ARRAY
-        | &Type::BPCHAR_ARRAY
-        | &Type::VARCHAR_ARRAY
-        | &Type::NAME_ARRAY
-        | &Type::TEXT_ARRAY => create_iceberg_list_type(PrimitiveType::String, field_id),
         &Type::INT2_ARRAY | &Type::INT4_ARRAY => {
             create_iceberg_list_type(PrimitiveType::Int, field_id)
         }
         &Type::INT8_ARRAY => create_iceberg_list_type(PrimitiveType::Long, field_id),
         &Type::FLOAT4_ARRAY => create_iceberg_list_type(PrimitiveType::Float, field_id),
         &Type::FLOAT8_ARRAY => create_iceberg_list_type(PrimitiveType::Double, field_id),
-        // numeric is mapped to string for now because decimal type in Iceberg needs scale and
-        // precision which we don't have in the Type
-        &Type::NUMERIC_ARRAY => create_iceberg_list_type(PrimitiveType::String, field_id),
         &Type::DATE_ARRAY => create_iceberg_list_type(PrimitiveType::Date, field_id),
         &Type::TIME_ARRAY => create_iceberg_list_type(PrimitiveType::Time, field_id),
         &Type::TIMESTAMP_ARRAY => create_iceberg_list_type(PrimitiveType::Timestamp, field_id),
         &Type::TIMESTAMPTZ_ARRAY => create_iceberg_list_type(PrimitiveType::Timestamptz, field_id),
         &Type::UUID_ARRAY => create_iceberg_list_type(PrimitiveType::Uuid, field_id),
-        &Type::JSON_ARRAY | &Type::JSONB_ARRAY => {
-            create_iceberg_list_type(PrimitiveType::String, field_id)
-        }
         &Type::OID_ARRAY => create_iceberg_list_type(PrimitiveType::Long, field_id),
         &Type::BYTEA_ARRAY => create_iceberg_list_type(PrimitiveType::Binary, field_id),
         _ => create_iceberg_list_type(PrimitiveType::String, field_id),
@@ -41,22 +30,15 @@ fn postgres_array_type_to_iceberg_type(typ: &Type, field_id: i32) -> IcebergType
 fn postgres_scalar_type_to_iceberg_type(typ: &Type) -> IcebergType {
     match typ {
         &Type::BOOL => IcebergType::Primitive(PrimitiveType::Boolean),
-        &Type::CHAR | &Type::BPCHAR | &Type::VARCHAR | &Type::NAME | &Type::TEXT => {
-            IcebergType::Primitive(PrimitiveType::String)
-        }
         &Type::INT2 | &Type::INT4 => IcebergType::Primitive(PrimitiveType::Int),
         &Type::INT8 => IcebergType::Primitive(PrimitiveType::Long),
         &Type::FLOAT4 => IcebergType::Primitive(PrimitiveType::Float),
         &Type::FLOAT8 => IcebergType::Primitive(PrimitiveType::Double),
-        // numeric is mapped to string for now because decimal type in Iceberg needs scale and
-        // precision which we don't have in the Type
-        &Type::NUMERIC => IcebergType::Primitive(PrimitiveType::String),
         &Type::DATE => IcebergType::Primitive(PrimitiveType::Date),
         &Type::TIME => IcebergType::Primitive(PrimitiveType::Time),
         &Type::TIMESTAMP => IcebergType::Primitive(PrimitiveType::Timestamp),
         &Type::TIMESTAMPTZ => IcebergType::Primitive(PrimitiveType::Timestamptz),
         &Type::UUID => IcebergType::Primitive(PrimitiveType::Uuid),
-        &Type::JSON | &Type::JSONB => IcebergType::Primitive(PrimitiveType::String),
         &Type::OID => IcebergType::Primitive(PrimitiveType::Long),
         &Type::BYTEA => IcebergType::Primitive(PrimitiveType::Binary),
         _ => IcebergType::Primitive(PrimitiveType::String),
@@ -207,13 +189,21 @@ mod tests {
             IcebergType::Primitive(PrimitiveType::Double)
         );
 
-        // Numeric type (mapped to string)
+        // Types mapped to string.
         assert_eq!(
             postgres_to_iceberg_type(&Type::NUMERIC),
             IcebergType::Primitive(PrimitiveType::String)
         );
+        assert_eq!(
+            postgres_to_iceberg_type(&Type::TIMETZ),
+            IcebergType::Primitive(PrimitiveType::String)
+        );
+        assert_eq!(
+            postgres_to_iceberg_type(&Type::INTERVAL),
+            IcebergType::Primitive(PrimitiveType::String)
+        );
 
-        // Date/Time types
+        // Date/time types.
         assert_eq!(
             postgres_to_iceberg_type(&Type::DATE),
             IcebergType::Primitive(PrimitiveType::Date)
@@ -284,6 +274,14 @@ mod tests {
         let varchar_array_type = postgres_to_iceberg_type(&Type::VARCHAR_ARRAY);
         assert!(matches!(varchar_array_type, IcebergType::List(_)));
         assert_list_type(varchar_array_type, PrimitiveType::String);
+
+        let timetz_array_type = postgres_to_iceberg_type(&Type::TIMETZ_ARRAY);
+        assert!(matches!(timetz_array_type, IcebergType::List(_)));
+        assert_list_type(timetz_array_type, PrimitiveType::String);
+
+        let interval_array_type = postgres_to_iceberg_type(&Type::INTERVAL_ARRAY);
+        assert!(matches!(interval_array_type, IcebergType::List(_)));
+        assert_list_type(interval_array_type, PrimitiveType::String);
 
         // Integer arrays
         let int2_array_type = postgres_to_iceberg_type(&Type::INT2_ARRAY);

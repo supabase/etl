@@ -1952,7 +1952,6 @@ dependencies = [
 name = "etl"
 version = "0.1.0"
 dependencies = [
- "byteorder",
  "bytes",
  "chrono",
  "etl-config",
@@ -2153,7 +2152,9 @@ name = "etl-postgres"
 version = "0.1.0"
 dependencies = [
  "aws-lc-rs",
+ "byteorder",
  "bytes",
+ "chrono",
  "const-oid 0.9.6",
  "etl-config",
  "futures",

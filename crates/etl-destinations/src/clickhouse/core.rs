@@ -1356,7 +1356,8 @@ fn expand_key_row(key_row: TableRow, schema: &ReplicatedTableSchema) -> EtlResul
 /// Returns a zero-value Cell for a Postgres type, used to fill non-PK columns
 /// in key-only DELETE tombstones. Array types produce empty arrays. All other
 /// non-primitive types fall through to an empty String, which is a valid zero
-/// value for every ClickHouse String-mapped type (numeric, time, json, bytea).
+/// value for every ClickHouse String-mapped type (numeric, time, timetz,
+/// interval, json, bytea).
 /// Date, Timestamp, and UUID use typed zero values because their ClickHouse
 /// wire format is not String.
 fn default_cell(typ: &Type) -> Cell {
@@ -1374,17 +1375,6 @@ fn default_cell(typ: &Type) -> Cell {
         Type::TIMESTAMP => Cell::Timestamp(chrono::DateTime::UNIX_EPOCH.naive_utc()),
         Type::TIMESTAMPTZ => Cell::TimestampTz(chrono::DateTime::UNIX_EPOCH),
         Type::UUID => Cell::Uuid(uuid::Uuid::nil()),
-        Type::CHAR
-        | Type::BPCHAR
-        | Type::VARCHAR
-        | Type::NAME
-        | Type::TEXT
-        | Type::NUMERIC
-        | Type::MONEY
-        | Type::TIME
-        | Type::JSON
-        | Type::JSONB
-        | Type::BYTEA => Cell::String(String::new()),
         Type::BOOL_ARRAY => Cell::Array(ArrayCell::Bool(Vec::new())),
         Type::INT2_ARRAY => Cell::Array(ArrayCell::I16(Vec::new())),
         Type::INT4_ARRAY => Cell::Array(ArrayCell::I32(Vec::new())),
@@ -1392,12 +1382,6 @@ fn default_cell(typ: &Type) -> Cell {
         Type::OID_ARRAY => Cell::Array(ArrayCell::U32(Vec::new())),
         Type::FLOAT4_ARRAY => Cell::Array(ArrayCell::F32(Vec::new())),
         Type::FLOAT8_ARRAY => Cell::Array(ArrayCell::F64(Vec::new())),
-        Type::TEXT_ARRAY
-        | Type::VARCHAR_ARRAY
-        | Type::CHAR_ARRAY
-        | Type::BPCHAR_ARRAY
-        | Type::NAME_ARRAY
-        | Type::MONEY_ARRAY => Cell::Array(ArrayCell::String(Vec::new())),
         Type::NUMERIC_ARRAY => Cell::Array(ArrayCell::Numeric(Vec::new())),
         Type::DATE_ARRAY => Cell::Array(ArrayCell::Date(Vec::new())),
         Type::TIME_ARRAY => Cell::Array(ArrayCell::Time(Vec::new())),
@@ -1799,9 +1783,13 @@ mod tests {
     }
 
     #[test]
-    fn default_cell_money_values_are_strings() {
+    fn default_cell_string_mapped_values_are_strings() {
         assert_eq!(default_cell(&Type::MONEY), Cell::String(String::new()));
+        assert_eq!(default_cell(&Type::TIMETZ), Cell::String(String::new()));
+        assert_eq!(default_cell(&Type::INTERVAL), Cell::String(String::new()));
         assert_eq!(default_cell(&Type::MONEY_ARRAY), Cell::Array(ArrayCell::String(Vec::new())));
+        assert_eq!(default_cell(&Type::TIMETZ_ARRAY), Cell::Array(ArrayCell::String(Vec::new())));
+        assert_eq!(default_cell(&Type::INTERVAL_ARRAY), Cell::Array(ArrayCell::String(Vec::new())));
     }
 
     #[test]

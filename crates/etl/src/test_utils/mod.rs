@@ -12,6 +12,7 @@ pub mod memory_destination;
 pub mod notify;
 pub mod notifying_store;
 pub mod pipeline;
+pub mod replication_stream;
 pub mod schema;
 pub mod test_destination_wrapper;
 pub mod test_schema;
