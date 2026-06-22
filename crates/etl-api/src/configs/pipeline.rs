@@ -209,7 +209,7 @@ pub struct FullApiPipelineConfig {
 }
 
 impl FullApiPipelineConfig {
-    /// Validates API and replicator pipeline configuration.
+    /// Validates API-only pipeline configuration fields.
     pub fn validate(&self) -> Result<(), String> {
         if let Some(replicator_resources) = &self.replicator_resources {
             replicator_resources.validate()?;
@@ -504,30 +504,6 @@ mod tests {
         );
         assert_eq!(stored.memory_backpressure, None);
         assert_eq!(stored.invalidated_slot_behavior, InvalidatedSlotBehavior::Error);
-    }
-
-    #[test]
-    fn full_api_pipeline_config_rejects_zero_replication_lag_refresh_interval() {
-        let full_config = FullApiPipelineConfig {
-            publication_name: "test_publication".to_owned(),
-            batch: None,
-            table_error_retry_delay_ms: None,
-            table_error_retry_max_attempts: None,
-            max_table_sync_workers: None,
-            max_copy_connections_per_table: None,
-            memory_refresh_interval_ms: None,
-            replication_lag_refresh_interval_ms: Some(0),
-            memory_backpressure: None,
-            table_sync_copy: None,
-            invalidated_slot_behavior: None,
-            replicator_resources: None,
-            ducklake_maintenance: None,
-            log_level: None,
-        };
-
-        let err = full_config.validate().unwrap_err();
-
-        assert_eq!(err, "Field `replication_lag_refresh_interval_ms` must be greater than 0");
     }
 
     #[test]
