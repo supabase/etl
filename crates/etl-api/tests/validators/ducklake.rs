@@ -47,7 +47,7 @@ fn create_ducklake_config(
 }
 
 #[tokio::test]
-async fn validate_destination_fails_when_ducklake_metadata_schema_already_exists() {
+async fn validate_destination_warns_when_ducklake_metadata_schema_already_exists() {
     let (ctx, pool, config) = create_validation_context_with_source().await;
     let metadata_schema = "existing_ducklake";
 
@@ -74,11 +74,13 @@ async fn validate_destination_fails_when_ducklake_metadata_schema_already_exists
     let failure = failures
         .iter()
         .find(|failure| failure.name == "DuckLake Metadata Schema Already Exists")
-        .expect("Should fail when DuckLake metadata already exists in the catalog schema");
-    assert_eq!(failure.failure_type, FailureType::Critical);
+        .expect("Should warn when DuckLake metadata schema already exists in the catalog");
+    assert_eq!(failure.failure_type, FailureType::Warning);
     assert!(failure.reason.contains(metadata_schema));
     assert!(failure.reason.contains("ducklake_snapshot"));
+    assert!(failure.reason.contains("reuse that DuckLake"));
     assert!(failure.reason.contains("choose another DuckLake metadata schema name"));
+    assert!(failure.reason.contains("drop the schema from the database"));
 
     drop(pool);
     drop_pg_database(&config).await;

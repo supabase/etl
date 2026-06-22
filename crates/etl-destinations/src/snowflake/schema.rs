@@ -143,19 +143,19 @@ fn render_snowflake_default_expression(
             matches!(typ, &Type::BOOL).then(|| expression.clone())
         }
         DefaultExpression::DateLiteral(expression) => {
-            matches!(typ, &Type::DATE).then(|| expression.clone())
+            matches!(typ, &Type::DATE).then(|| format!("DATE {expression}"))
         }
         DefaultExpression::TimeLiteral(expression) => {
-            matches!(typ, &Type::TIME).then(|| expression.clone())
+            matches!(typ, &Type::TIME).then(|| format!("TIME {expression}"))
         }
         DefaultExpression::TimeTzLiteral(expression) => {
             matches!(typ, &Type::TIMETZ).then(|| expression.clone())
         }
         DefaultExpression::TimestampLiteral(expression) => {
-            matches!(typ, &Type::TIMESTAMP).then(|| expression.clone())
+            matches!(typ, &Type::TIMESTAMP).then(|| format!("TO_TIMESTAMP_NTZ({expression})"))
         }
         DefaultExpression::TimestampTzLiteral(expression) => {
-            matches!(typ, &Type::TIMESTAMPTZ).then(|| expression.clone())
+            matches!(typ, &Type::TIMESTAMPTZ).then(|| format!("TO_TIMESTAMP_TZ({expression})"))
         }
         DefaultExpression::IntervalLiteral(expression) => {
             matches!(typ, &Type::INTERVAL).then(|| expression.clone())
@@ -303,32 +303,84 @@ mod tests {
 
     #[test]
     fn build_column_defs_output() {
-        let columns = vec![
-            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, true),
-            ColumnSchema::new("created_at".to_owned(), Type::TIMESTAMPTZ, -1, 2, true),
+        let cases = vec![
+            (ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, true), r#""id" INTEGER"#),
+            (
+                ColumnSchema::new("created_at".to_owned(), Type::TIMESTAMPTZ, -1, 2, true),
+                r#""created_at" TIMESTAMP_TZ"#,
+            ),
+            (
+                ColumnSchema::new("text_col".to_owned(), Type::TEXT, -1, 3, true)
+                    .with_default_expression("'base_text_literal'::text".to_owned()),
+                r#""text_col" VARCHAR DEFAULT 'base_text_literal'"#,
+            ),
+            (
+                ColumnSchema::new("varchar_col".to_owned(), Type::VARCHAR, 255, 4, true)
+                    .with_default_expression(
+                        "'base_varchar_literal'::character varying".to_owned(),
+                    ),
+                r#""varchar_col" VARCHAR DEFAULT 'base_varchar_literal'"#,
+            ),
+            (
+                ColumnSchema::new("smallint_col".to_owned(), Type::INT2, -1, 5, true)
+                    .with_default_expression("7".to_owned()),
+                r#""smallint_col" SMALLINT DEFAULT 7"#,
+            ),
+            (
+                ColumnSchema::new("integer_col".to_owned(), Type::INT4, -1, 6, true)
+                    .with_default_expression("42".to_owned()),
+                r#""integer_col" INTEGER DEFAULT 42"#,
+            ),
+            (
+                ColumnSchema::new("numeric_col".to_owned(), Type::NUMERIC, -1, 7, true)
+                    .with_default_expression("(10 + 5)".to_owned()),
+                r#""numeric_col" VARCHAR"#,
+            ),
+            (
+                ColumnSchema::new("boolean_col".to_owned(), Type::BOOL, -1, 8, true)
+                    .with_default_expression("false".to_owned()),
+                r#""boolean_col" BOOLEAN DEFAULT false"#,
+            ),
+            (
+                ColumnSchema::new("date_col".to_owned(), Type::DATE, -1, 9, true)
+                    .with_default_expression("'2026-01-01'::date".to_owned()),
+                r#""date_col" DATE DEFAULT DATE '2026-01-01'"#,
+            ),
+            (
+                ColumnSchema::new("timestamp_col".to_owned(), Type::TIMESTAMP, -1, 10, true)
+                    .with_default_expression("'2026-01-01 12:30:00'::timestamp".to_owned()),
+                r#""timestamp_col" TIMESTAMP_NTZ DEFAULT TO_TIMESTAMP_NTZ('2026-01-01 12:30:00')"#,
+            ),
+            (
+                ColumnSchema::new("timestamptz_col".to_owned(), Type::TIMESTAMPTZ, -1, 11, true)
+                    .with_default_expression("now()".to_owned()),
+                r#""timestamptz_col" TIMESTAMP_TZ"#,
+            ),
+            (
+                ColumnSchema::new("time_col".to_owned(), Type::TIME, -1, 12, true)
+                    .with_default_expression("'12:30:00'::time".to_owned()),
+                r#""time_col" TIME DEFAULT TIME '12:30:00'"#,
+            ),
+            (
+                ColumnSchema::new("jsonb_col".to_owned(), Type::JSONB, -1, 13, true)
+                    .with_default_expression(r#"'{"source": "base"}'::jsonb"#.to_owned()),
+                r#""jsonb_col" VARIANT DEFAULT PARSE_JSON('{"source": "base"}')"#,
+            ),
+            (
+                ColumnSchema::new("json_col".to_owned(), Type::JSON, -1, 14, true)
+                    .with_default_expression(r#"'{"source": "base"}'::json"#.to_owned()),
+                r#""json_col" VARIANT DEFAULT PARSE_JSON('{"source": "base"}')"#,
+            ),
         ];
-        let defs = build_column_defs(&columns);
-        assert_eq!(
-            defs,
-            r#""id" INTEGER, "created_at" TIMESTAMP_TZ, "_cdc_operation" VARCHAR NOT NULL, "_cdc_sequence_number" VARCHAR NOT NULL"#
-        );
-    }
-
-    #[test]
-    fn build_column_defs_includes_supported_default() {
-        let columns = vec![
-            ColumnSchema::new("status".to_owned(), Type::TEXT, -1, 1, true)
-                .with_default_expression("'pending'::text".to_owned()),
-            ColumnSchema::new("payload".to_owned(), Type::JSONB, -1, 2, true)
-                .with_default_expression("'{}'::jsonb".to_owned()),
-        ];
+        let (columns, mut expected): (Vec<_>, Vec<_>) = cases.into_iter().unzip();
+        expected.extend([
+            r#""_cdc_operation" VARCHAR NOT NULL"#,
+            r#""_cdc_sequence_number" VARCHAR NOT NULL"#,
+        ]);
 
         let defs = build_column_defs(&columns);
 
-        assert_eq!(
-            defs,
-            r#""status" VARCHAR DEFAULT 'pending', "payload" VARIANT DEFAULT PARSE_JSON('{}'), "_cdc_operation" VARCHAR NOT NULL, "_cdc_sequence_number" VARCHAR NOT NULL"#
-        );
+        assert_eq!(defs, expected.join(", "));
     }
 
     #[test]
@@ -337,13 +389,19 @@ mod tests {
             (Type::TEXT, "true", " DEFAULT 'true'"),
             (Type::BOOL, "'true'::text", " DEFAULT true"),
             (Type::NUMERIC, "42", " DEFAULT '42'"),
-            (Type::TIME, "'12:30:00'::time", " DEFAULT '12:30:00'"),
+            (Type::DATE, "'2026-01-01'::date", " DEFAULT DATE '2026-01-01'"),
+            (Type::TIME, "'12:30:00'::time", " DEFAULT TIME '12:30:00'"),
             (Type::TIMETZ, "'12:30:00+02'::timetz", " DEFAULT '12:30:00+02'"),
             (Type::INTERVAL, "'30 days'::interval", " DEFAULT '30 days'"),
             (
+                Type::TIMESTAMP,
+                "'2026-01-01 12:30:00'::timestamp",
+                " DEFAULT TO_TIMESTAMP_NTZ('2026-01-01 12:30:00')",
+            ),
+            (
                 Type::TIMESTAMPTZ,
                 "'2026-01-01 12:30:00'::timestamptz",
-                " DEFAULT '2026-01-01 12:30:00'",
+                " DEFAULT TO_TIMESTAMP_TZ('2026-01-01 12:30:00')",
             ),
             (
                 Type::UUID,

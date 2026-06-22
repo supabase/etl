@@ -162,6 +162,69 @@ async fn insert_row_omitting_status(
 
 #[tokio::test]
 #[ignore = "requires Snowflake credentials"]
+async fn create_table_with_simulator_defaults() {
+    fn make_simulator_defaults_table_schema(
+        table_id: u32,
+        schema: &str,
+        table: &str,
+    ) -> TableSchema {
+        TableSchema::new(
+            TableId::new(table_id),
+            TableName::new(schema.to_owned(), table.to_owned()),
+            vec![
+                ColumnSchema::new("text_col".to_owned(), Type::TEXT, -1, 1, true)
+                    .with_default_expression("'base_text_literal'::text".to_owned()),
+                ColumnSchema::new("varchar_col".to_owned(), Type::VARCHAR, 255, 2, true)
+                    .with_default_expression(
+                        "'base_varchar_literal'::character varying".to_owned(),
+                    ),
+                ColumnSchema::new("smallint_col".to_owned(), Type::INT2, -1, 3, true)
+                    .with_default_expression("7".to_owned()),
+                ColumnSchema::new("integer_col".to_owned(), Type::INT4, -1, 4, true)
+                    .with_default_expression("42".to_owned()),
+                ColumnSchema::new("numeric_col".to_owned(), Type::NUMERIC, -1, 5, true)
+                    .with_default_expression("(10 + 5)".to_owned()),
+                ColumnSchema::new("boolean_col".to_owned(), Type::BOOL, -1, 6, true)
+                    .with_default_expression("false".to_owned()),
+                ColumnSchema::new("date_col".to_owned(), Type::DATE, -1, 7, true)
+                    .with_default_expression("'2026-01-01'::date".to_owned()),
+                ColumnSchema::new("timestamp_col".to_owned(), Type::TIMESTAMP, -1, 8, true)
+                    .with_default_expression("'2026-01-01 12:30:00'::timestamp".to_owned()),
+                ColumnSchema::new("timestamptz_col".to_owned(), Type::TIMESTAMPTZ, -1, 9, true)
+                    .with_default_expression("now()".to_owned()),
+                ColumnSchema::new("time_col".to_owned(), Type::TIME, -1, 10, true)
+                    .with_default_expression("'12:30:00'::time".to_owned()),
+                ColumnSchema::new("jsonb_col".to_owned(), Type::JSONB, -1, 11, true)
+                    .with_default_expression(r#"'{"source": "base"}'::jsonb"#.to_owned()),
+                ColumnSchema::new("json_col".to_owned(), Type::JSON, -1, 12, true)
+                    .with_default_expression(r#"'{"source": "base"}'::json"#.to_owned()),
+            ],
+        )
+    }
+    let harness = TestHarness::new();
+    let src_table = format!("ETL_TEST_{}", uuid::Uuid::new_v4().simple()).to_uppercase();
+    let sf_table = snowflake_table_name("public", &src_table);
+
+    let table_schema = make_simulator_defaults_table_schema(1012, "public", &src_table);
+    let schema = ReplicatedTableSchema::all(Arc::new(table_schema.clone()));
+
+    harness.store.store_table_schema(table_schema).await.unwrap();
+
+    with_table_cleanup(&harness.sql, &[&sf_table], || async {
+        harness
+            .destination
+            .write_table_rows(&schema, vec![])
+            .await
+            .expect("write_table_rows with simulator defaults failed");
+
+        let exists = harness.sql.table_exists(&sf_table).await.expect("table_exists failed");
+        assert!(exists, "table with simulator defaults should have been created");
+    })
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "requires Snowflake credentials"]
 async fn write_table_rows_basic() {
     let harness = TestHarness::new();
     let src_table = format!("ETL_TEST_{}", uuid::Uuid::new_v4().simple()).to_uppercase();
