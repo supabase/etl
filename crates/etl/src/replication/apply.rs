@@ -476,6 +476,70 @@ impl ApplyLoopTasks {
         self.schema_cleanup_task = Some(cleanup_task);
     }
 
+    /// Collects a completed schema cleanup task.
+    async fn collect_finished_schema_cleanup_task(
+        &mut self,
+        worker_type: WorkerType,
+        schema_cleanup_deadline: &Arc<Mutex<Option<Instant>>>,
+    ) {
+        if self.schema_cleanup_task.as_ref().is_some_and(JoinHandle::is_finished) {
+            self.handle_schema_cleanup_task_result(worker_type, schema_cleanup_deadline).await;
+        }
+    }
+
+    /// Joins the recorded schema cleanup task and handles its result.
+    async fn handle_schema_cleanup_task_result(
+        &mut self,
+        worker_type: WorkerType,
+        schema_cleanup_deadline: &Arc<Mutex<Option<Instant>>>,
+    ) {
+        let Some(cleanup_task) = self.schema_cleanup_task.take() else {
+            return;
+        };
+
+        let Err(cleanup_task_error) = cleanup_task.await else {
+            return;
+        };
+
+        Self::reset_schema_cleanup_deadline(schema_cleanup_deadline).await;
+
+        counter!(
+            ETL_SCHEMA_CLEANUP_ERRORS_TOTAL,
+            WORKER_TYPE_LABEL => worker_type.as_str(),
+        )
+        .increment(1);
+
+        error!(
+            %worker_type,
+            error = %cleanup_task_error,
+            "schema cleanup task failed before completing"
+        );
+    }
+
+    /// Aborts and joins the replication lag sampler task.
+    async fn handle_replication_lag_sampler_task_result(&mut self) {
+        self.replication_lag_sampler_task.abort();
+
+        if let Err(err) = (&mut self.replication_lag_sampler_task).await
+            && !err.is_cancelled()
+        {
+            warn!(
+                error = %err,
+                "replication lag sampler task failed before completing"
+            );
+        }
+    }
+
+    /// Aborts interruptible tasks and joins all owned background tasks.
+    async fn teardown(
+        &mut self,
+        worker_type: WorkerType,
+        schema_cleanup_deadline: &Arc<Mutex<Option<Instant>>>,
+    ) {
+        self.handle_replication_lag_sampler_task_result().await;
+        self.handle_schema_cleanup_task_result(worker_type, schema_cleanup_deadline).await;
+    }
+
     /// Starts the replication lag sampler for an apply loop.
     fn spawn_replication_lag_sampler(
         out_of_band_source_pool: OutOfBandSourcePool,
@@ -492,24 +556,6 @@ impl ApplyLoopTasks {
             )
             .await;
         })
-    }
-
-    /// Collects a completed schema cleanup task.
-    async fn collect_finished_schema_cleanup_task(
-        &mut self,
-        worker_type: WorkerType,
-        schema_cleanup_deadline: &Arc<Mutex<Option<Instant>>>,
-    ) {
-        if self.schema_cleanup_task.as_ref().is_some_and(JoinHandle::is_finished)
-            && let Some(cleanup_task) = self.schema_cleanup_task.take()
-        {
-            Self::handle_schema_cleanup_task_result(
-                worker_type,
-                schema_cleanup_deadline,
-                cleanup_task.await,
-            )
-            .await;
-        }
     }
 
     /// Runs the best-effort replication lag sampler.
@@ -564,80 +610,10 @@ impl ApplyLoopTasks {
         })
     }
 
-    /// Aborts and joins the replication lag sampler task.
-    async fn abort_and_drain_replication_lag_sampler_task(&mut self) {
-        self.replication_lag_sampler_task.abort();
-        let sampler_result = (&mut self.replication_lag_sampler_task).await;
-        Self::handle_replication_lag_sampler_task_result(sampler_result);
-    }
-
-    /// Records the result of a completed replication lag sampler task.
-    fn handle_replication_lag_sampler_task_result(
-        sampler_result: Result<(), tokio::task::JoinError>,
-    ) {
-        if let Err(err) = sampler_result
-            && !err.is_cancelled()
-        {
-            warn!(
-                error = %err,
-                "replication lag sampler task failed before completing"
-            );
-        }
-    }
-
-    /// Joins the background schema cleanup task before the apply loop exits.
-    async fn drain_schema_cleanup_task(
-        &mut self,
-        worker_type: WorkerType,
-        schema_cleanup_deadline: &Arc<Mutex<Option<Instant>>>,
-    ) {
-        if let Some(cleanup_task) = self.schema_cleanup_task.take() {
-            Self::handle_schema_cleanup_task_result(
-                worker_type,
-                schema_cleanup_deadline,
-                cleanup_task.await,
-            )
-            .await;
-        }
-    }
-
-    /// Records the result of a completed background schema cleanup task.
-    async fn handle_schema_cleanup_task_result(
-        worker_type: WorkerType,
-        schema_cleanup_deadline: &Arc<Mutex<Option<Instant>>>,
-        cleanup_result: Result<(), tokio::task::JoinError>,
-    ) {
-        if let Err(err) = cleanup_result {
-            Self::reset_schema_cleanup_deadline(schema_cleanup_deadline).await;
-
-            counter!(
-                ETL_SCHEMA_CLEANUP_ERRORS_TOTAL,
-                WORKER_TYPE_LABEL => worker_type.as_str(),
-            )
-            .increment(1);
-
-            error!(
-                %worker_type,
-                error = %err,
-                "schema cleanup task failed before completing"
-            );
-        }
-    }
-
     /// Schedules schema cleanup again after the configured interval.
     async fn reset_schema_cleanup_deadline(schema_cleanup_deadline: &Arc<Mutex<Option<Instant>>>) {
         let mut schema_cleanup_deadline = schema_cleanup_deadline.lock().await;
         *schema_cleanup_deadline = Some(Instant::now() + SCHEMA_CLEANUP_INTERVAL);
-    }
-
-    /// Aborts interruptible tasks and joins all owned background tasks.
-    async fn teardown(
-        &mut self,
-        worker_type: WorkerType,
-        schema_cleanup_deadline: &Arc<Mutex<Option<Instant>>>,
-    ) {
-        self.abort_and_drain_replication_lag_sampler_task().await;
-        self.drain_schema_cleanup_task(worker_type, schema_cleanup_deadline).await;
     }
 }
 
