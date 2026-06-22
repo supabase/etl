@@ -267,6 +267,11 @@ impl ReplicationProgress {
         }
     }
 
+    /// Returns the highest LSN returned by Postgres.
+    fn last_source_current_lsn(&self) -> PgLsn {
+        PgLsn::from(self.inner.last_source_current_lsn.load(Ordering::Relaxed))
+    }
+
     /// Returns the highest LSN received from PostgreSQL so far.
     fn last_received_lsn(&self) -> PgLsn {
         PgLsn::from(self.inner.last_received_lsn.load(Ordering::Relaxed))
@@ -280,21 +285,35 @@ impl ReplicationProgress {
     /// Updates the last source current LSN if it advanced.
     fn update_last_source_current_lsn(&self, lsn: PgLsn) {
         Self::update_lsn(&self.inner.last_source_current_lsn, lsn);
+
+        self.assert_lsn_invariants();
     }
 
     /// Updates the last received LSN if it advanced.
     fn update_last_received_lsn(&self, lsn: PgLsn) {
-        debug_assert!(self.last_received_lsn() >= self.last_flush_lsn());
-
         Self::update_lsn(&self.inner.last_received_lsn, lsn);
+
+        self.assert_lsn_invariants();
     }
 
     /// Updates the last flush LSN if it advanced.
     fn update_last_flush_lsn(&self, lsn: PgLsn) {
-        debug_assert!(self.last_received_lsn() >= self.last_flush_lsn());
         debug_assert!(lsn <= self.last_received_lsn());
 
         Self::update_lsn(&self.inner.last_flush_lsn, lsn);
+
+        self.assert_lsn_invariants();
+    }
+
+    /// Asserts that the LSN invariants are upheld during the whole execution of
+    /// the program.
+    ///
+    /// The invariants are saying that LSNs should have the following equality:
+    /// last_source_current_lsn >= last_received_lsn >= last_flush_lsn
+    fn assert_lsn_invariants(&self) {
+        debug_assert!(self.last_source_current_lsn() >= self.last_received_lsn());
+        debug_assert!(self.last_source_current_lsn() >= self.last_flush_lsn());
+        debug_assert!(self.last_received_lsn() >= self.last_flush_lsn());
     }
 
     /// Emits lag gauges from the current atomic progress positions.
@@ -302,6 +321,7 @@ impl ReplicationProgress {
         let last_source_current_lsn = self.inner.last_source_current_lsn.load(Ordering::Relaxed);
         let last_received_lsn = self.inner.last_received_lsn.load(Ordering::Relaxed);
         let last_flush_lsn = self.inner.last_flush_lsn.load(Ordering::Relaxed);
+
         let worker_type = worker_type.as_str();
 
         gauge!(
@@ -467,34 +487,6 @@ impl ApplyLoopTasks {
         self.schema_cleanup_task = Some(cleanup_task);
     }
 
-    /// Collects a completed schema cleanup task.
-    async fn collect_finished_schema_cleanup_task(
-        &mut self,
-        worker_type: WorkerType,
-        schema_cleanup_deadline: &Arc<Mutex<Option<Instant>>>,
-    ) {
-        if self.schema_cleanup_task.as_ref().is_some_and(JoinHandle::is_finished)
-            && let Some(cleanup_task) = self.schema_cleanup_task.take()
-        {
-            Self::handle_schema_cleanup_task_result(
-                worker_type,
-                schema_cleanup_deadline,
-                cleanup_task.await,
-            )
-            .await;
-        }
-    }
-
-    /// Aborts interruptible tasks and joins all owned background tasks.
-    async fn teardown(
-        &mut self,
-        worker_type: WorkerType,
-        schema_cleanup_deadline: &Arc<Mutex<Option<Instant>>>,
-    ) {
-        self.abort_and_drain_replication_lag_sampler_task().await;
-        self.drain_schema_cleanup_task(worker_type, schema_cleanup_deadline).await;
-    }
-
     /// Starts the replication lag sampler for an apply loop.
     fn spawn_replication_lag_sampler(
         out_of_band_source_pool: OutOfBandSourcePool,
@@ -511,6 +503,24 @@ impl ApplyLoopTasks {
             )
             .await;
         })
+    }
+
+    /// Collects a completed schema cleanup task.
+    async fn collect_finished_schema_cleanup_task(
+        &mut self,
+        worker_type: WorkerType,
+        schema_cleanup_deadline: &Arc<Mutex<Option<Instant>>>,
+    ) {
+        if self.schema_cleanup_task.as_ref().is_some_and(JoinHandle::is_finished)
+            && let Some(cleanup_task) = self.schema_cleanup_task.take()
+        {
+            Self::handle_schema_cleanup_task_result(
+                worker_type,
+                schema_cleanup_deadline,
+                cleanup_task.await,
+            )
+            .await;
+        }
     }
 
     /// Runs the best-effort replication lag sampler.
@@ -629,6 +639,16 @@ impl ApplyLoopTasks {
     async fn reset_schema_cleanup_deadline(schema_cleanup_deadline: &Arc<Mutex<Option<Instant>>>) {
         let mut schema_cleanup_deadline = schema_cleanup_deadline.lock().await;
         *schema_cleanup_deadline = Some(Instant::now() + SCHEMA_CLEANUP_INTERVAL);
+    }
+
+    /// Aborts interruptible tasks and joins all owned background tasks.
+    async fn teardown(
+        &mut self,
+        worker_type: WorkerType,
+        schema_cleanup_deadline: &Arc<Mutex<Option<Instant>>>,
+    ) {
+        self.abort_and_drain_replication_lag_sampler_task().await;
+        self.drain_schema_cleanup_task(worker_type, schema_cleanup_deadline).await;
     }
 }
 
