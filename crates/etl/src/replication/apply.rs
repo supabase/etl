@@ -285,16 +285,14 @@ impl ReplicationProgress {
     /// Updates the last source current LSN if it advanced.
     fn update_last_source_current_lsn(&self, lsn: PgLsn) {
         Self::update_lsn(&self.inner.last_source_current_lsn, lsn);
-
-        debug_assert!(self.last_source_current_lsn() >= self.last_received_lsn());
-        debug_assert!(self.last_source_current_lsn() >= self.last_flush_lsn());
-        debug_assert!(self.last_received_lsn() >= self.last_flush_lsn());
     }
 
     /// Updates the last received LSN if it advanced.
     fn update_last_received_lsn(&self, lsn: PgLsn) {
         Self::update_lsn(&self.inner.last_received_lsn, lsn);
 
+        // We can do debug asserts between lsns that are not updated concurrently, but for lsns
+        // that are updated concurrently, we don't since it might cause false positives.
         debug_assert!(self.last_received_lsn() >= self.last_flush_lsn());
     }
 
@@ -302,6 +300,8 @@ impl ReplicationProgress {
     fn update_last_flush_lsn(&self, lsn: PgLsn) {
         Self::update_lsn(&self.inner.last_flush_lsn, lsn);
 
+        // We can do debug asserts between lsns that are not updated concurrently, but for lsns
+        // that are updated concurrently, we don't since it might cause false positives.
         debug_assert!(self.last_received_lsn() >= self.last_flush_lsn());
     }
 
