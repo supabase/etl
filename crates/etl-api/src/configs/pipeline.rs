@@ -1,6 +1,6 @@
 use etl_config::shared::{
     BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PgConnectionConfig,
-    PipelineConfig, TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
+    PipelineConfig, TableSyncCopyConfig,
 };
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
