@@ -286,33 +286,22 @@ impl ReplicationProgress {
     fn update_last_source_current_lsn(&self, lsn: PgLsn) {
         Self::update_lsn(&self.inner.last_source_current_lsn, lsn);
 
-        self.assert_lsn_invariants();
+        debug_assert!(self.last_source_current_lsn() >= self.last_received_lsn());
+        debug_assert!(self.last_source_current_lsn() >= self.last_flush_lsn());
+        debug_assert!(self.last_received_lsn() >= self.last_flush_lsn());
     }
 
     /// Updates the last received LSN if it advanced.
     fn update_last_received_lsn(&self, lsn: PgLsn) {
         Self::update_lsn(&self.inner.last_received_lsn, lsn);
 
-        self.assert_lsn_invariants();
+        debug_assert!(self.last_received_lsn() >= self.last_flush_lsn());
     }
 
     /// Updates the last flush LSN if it advanced.
     fn update_last_flush_lsn(&self, lsn: PgLsn) {
-        debug_assert!(lsn <= self.last_received_lsn());
-
         Self::update_lsn(&self.inner.last_flush_lsn, lsn);
 
-        self.assert_lsn_invariants();
-    }
-
-    /// Asserts that the LSN invariants are upheld during the whole execution of
-    /// the program.
-    ///
-    /// The invariants are saying that LSNs should have the following equality:
-    /// last_source_current_lsn >= last_received_lsn >= last_flush_lsn
-    fn assert_lsn_invariants(&self) {
-        debug_assert!(self.last_source_current_lsn() >= self.last_received_lsn());
-        debug_assert!(self.last_source_current_lsn() >= self.last_flush_lsn());
         debug_assert!(self.last_received_lsn() >= self.last_flush_lsn());
     }
 
