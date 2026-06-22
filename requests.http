@@ -1,0 +1,15 @@
+###
+
+POST http://host.docker.internal:7123 HTTP/1.1
+content-type: application/json
+
+{
+    "name": "sample",
+    "time": "Wed, 21 Oct 2015 18:27:50 GMT"
+}
+
+### 
+
+POST http://localhost:7123/v1/pipelines/7/restart
+Authorization: Bearer <app_secret>
+tenant_id: ucyaspzqrfwsrkwymtss
