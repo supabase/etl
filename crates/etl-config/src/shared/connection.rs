@@ -31,8 +31,8 @@ const APP_NAME_API: &str = "supabase_etl_api";
 /// Application name for ETL replicator migration connections.
 const APP_NAME_REPLICATOR_MIGRATIONS: &str = "supabase_etl_replicator_migrations";
 
-/// Application name for ETL state management connections.
-const APP_NAME_REPLICATOR_STATE: &str = "supabase_etl_replicator_state";
+/// Application name for ETL out-of-band Postgres connections.
+const APP_NAME_REPLICATOR_OUT_OF_BAND: &str = "supabase_etl_replicator_out_of_band";
 
 /// Application name for ETL logical replication streaming connections.
 const APP_NAME_REPLICATOR_STREAMING: &str = "supabase_etl_replicator_streaming";
@@ -98,11 +98,11 @@ pub static ETL_REPLICATION_OPTIONS: LazyLock<PgConnectionOptions> =
         application_name: APP_NAME_REPLICATOR_STREAMING.to_owned(),
     });
 
-/// Connection options for accessing ETL state metadata in the source database.
+/// Connection options for out-of-band ETL queries to Postgres.
 ///
-/// Applies moderate timeouts (30s statement, 10s lock, 60s idle) since metadata
-/// queries execute quickly and should not block other operations.
-pub static ETL_STATE_MANAGEMENT_OPTIONS: LazyLock<PgConnectionOptions> =
+/// Applies moderate timeouts (30s statement, 10s lock, 60s idle) since these
+/// queries should execute quickly and should not block other operations.
+pub static ETL_OUT_OF_BAND_OPTIONS: LazyLock<PgConnectionOptions> =
     LazyLock::new(|| PgConnectionOptions {
         datestyle: COMMON_DATESTYLE.to_owned(),
         intervalstyle: COMMON_INTERVALSTYLE.to_owned(),
@@ -112,7 +112,7 @@ pub static ETL_STATE_MANAGEMENT_OPTIONS: LazyLock<PgConnectionOptions> =
         statement_timeout: 30_000,
         lock_timeout: 10_000,
         idle_in_transaction_session_timeout: 60_000,
-        application_name: APP_NAME_REPLICATOR_STATE.to_owned(),
+        application_name: APP_NAME_REPLICATOR_OUT_OF_BAND.to_owned(),
     });
 
 /// Postgres server options for ETL workloads.
@@ -454,8 +454,8 @@ mod tests {
     }
 
     #[test]
-    fn state_management_options_key_value_pairs() {
-        let pairs = ETL_STATE_MANAGEMENT_OPTIONS.to_key_value_pairs();
+    fn out_of_band_options_key_value_pairs() {
+        let pairs = ETL_OUT_OF_BAND_OPTIONS.to_key_value_pairs();
 
         assert_eq!(pairs.len(), 9);
         assert!(pairs.contains(&("datestyle".to_owned(), "ISO".to_owned())));
@@ -470,7 +470,7 @@ mod tests {
         );
         assert!(pairs.contains(&(
             "application_name".to_owned(),
-            "supabase_etl_replicator_state".to_owned()
+            "supabase_etl_replicator_out_of_band".to_owned()
         )));
     }
 

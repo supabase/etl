@@ -826,6 +826,8 @@ pub fn pipeline_config(
         table_error_retry_max_attempts: PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS,
         max_table_sync_workers: tuning.max_table_sync_workers,
         memory_refresh_interval_ms: PipelineConfig::DEFAULT_MEMORY_REFRESH_INTERVAL_MS,
+        replication_lag_refresh_interval_ms:
+            PipelineConfig::DEFAULT_REPLICATION_LAG_REFRESH_INTERVAL_MS,
         memory_backpressure: if tuning.disable_memory_backpressure {
             None
         } else {

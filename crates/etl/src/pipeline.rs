@@ -4,7 +4,7 @@
 //! replication with destination systems. Manages worker lifecycles, shutdown
 //! coordination, and error handling.
 
-use std::{collections::HashSet, sync::Arc};
+use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use etl_postgres::replication::slots::EtlReplicationSlot;
 use tokio::sync::Semaphore;
@@ -19,7 +19,7 @@ use crate::{
     etl_error,
     metrics::register_metrics,
     migrations,
-    replication::{SharedTableCache, client::PgReplicationClient},
+    replication::{OutOfBandSourcePool, SharedTableCache, client::PgReplicationClient},
     state::TableState,
     store::PipelineStore,
     types::{PipelineId, TableId},
@@ -179,6 +179,13 @@ where
         // replication mask for each table.
         let shared_table_cache = SharedTableCache::new();
 
+        // We create a shared lazy pool for low-frequency, out-of-band source
+        // database queries that should not use the replication connection.
+        let out_of_band_source_pool = OutOfBandSourcePool::new(
+            &self.config.pg_connection,
+            Duration::from_millis(self.config.replication_lag_refresh_interval_ms),
+        );
+
         // We create and start the apply worker.
         let apply_worker = ApplyWorker::new(
             self.config.id,
@@ -187,6 +194,7 @@ where
             self.store.clone(),
             self.destination.clone(),
             shared_table_cache,
+            out_of_band_source_pool,
             self.shutdown_tx.subscribe(),
             table_sync_worker_permits,
             memory_monitor.clone(),

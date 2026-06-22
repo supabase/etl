@@ -198,6 +198,8 @@ where
             invalidated_slot_behavior: self.invalidated_slot_behavior,
             max_copy_connections_per_table: self.max_copy_connections_per_table,
             memory_refresh_interval_ms: self.memory_refresh_interval_ms,
+            replication_lag_refresh_interval_ms:
+                PipelineConfig::DEFAULT_REPLICATION_LAG_REFRESH_INTERVAL_MS,
             memory_backpressure: Some(self.memory_backpressure),
         };
 

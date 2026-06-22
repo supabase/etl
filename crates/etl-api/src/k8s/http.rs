@@ -2242,6 +2242,8 @@ mod tests {
                 table_error_retry_max_attempts: 3,
                 max_table_sync_workers: 4,
                 memory_refresh_interval_ms: 100,
+                replication_lag_refresh_interval_ms:
+                    PipelineConfig::DEFAULT_REPLICATION_LAG_REFRESH_INTERVAL_MS,
                 memory_backpressure: Some(MemoryBackpressureConfig {
                     activate_threshold: 1.0,
                     resume_threshold: 0.99,
