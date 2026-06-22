@@ -66,8 +66,8 @@ use crate::{
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
     metrics::{
-        ACTION_LABEL, COMMAND_TAG_LABEL, ETL_APPLY_WORKER_END_TO_END_LAG_BYTES,
-        ETL_APPLY_WORKER_FLUSH_LAG_BYTES, ETL_APPLY_WORKER_RECEIVE_LAG_BYTES,
+        ACTION_LABEL, COMMAND_TAG_LABEL, ETL_APPLY_LOOP_END_TO_END_LAG_BYTES,
+        ETL_APPLY_LOOP_FLUSH_LAG_BYTES, ETL_APPLY_LOOP_RECEIVE_LAG_BYTES,
         ETL_BATCH_ITEMS_SEND_DURATION_SECONDS, ETL_DDL_SCHEMA_CHANGE_COLUMNS,
         ETL_DDL_SCHEMA_CHANGES_TOTAL, ETL_EVENTS_PROCESSED_TOTAL, ETL_REPLICATION_MESSAGES_TOTAL,
         ETL_SCHEMA_CLEANUP_ERRORS_TOTAL, ETL_SCHEMA_CLEANUP_PRUNED_VERSIONS_TOTAL,
@@ -314,17 +314,17 @@ impl ReplicationProgress {
         let worker_type = worker_type.as_str();
 
         gauge!(
-            ETL_APPLY_WORKER_RECEIVE_LAG_BYTES,
+            ETL_APPLY_LOOP_RECEIVE_LAG_BYTES,
             WORKER_TYPE_LABEL => worker_type
         )
         .set(last_source_current_lsn.saturating_sub(last_received_lsn) as f64);
         gauge!(
-            ETL_APPLY_WORKER_FLUSH_LAG_BYTES,
+            ETL_APPLY_LOOP_FLUSH_LAG_BYTES,
             WORKER_TYPE_LABEL => worker_type
         )
         .set(last_received_lsn.saturating_sub(last_flush_lsn) as f64);
         gauge!(
-            ETL_APPLY_WORKER_END_TO_END_LAG_BYTES,
+            ETL_APPLY_LOOP_END_TO_END_LAG_BYTES,
             WORKER_TYPE_LABEL => worker_type
         )
         .set(last_source_current_lsn.saturating_sub(last_flush_lsn) as f64);

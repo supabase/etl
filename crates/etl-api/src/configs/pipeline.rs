@@ -1,6 +1,6 @@
 use etl_config::shared::{
     BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PgConnectionConfig,
-    PipelineConfig, TableSyncCopyConfig,
+    PipelineConfig, TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
 };
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -209,15 +209,12 @@ pub struct FullApiPipelineConfig {
 }
 
 impl FullApiPipelineConfig {
-    /// Validates optional pipeline-specific replicator resource requests.
+    /// Validates API and replicator pipeline configuration.
     pub fn validate(&self) -> Result<(), String> {
-        if matches!(self.replication_lag_refresh_interval_ms, Some(0)) {
-            return Err("Replication lag refresh interval must be greater than 0".to_owned());
-        }
-
         if let Some(replicator_resources) = &self.replicator_resources {
             replicator_resources.validate()?;
         }
+
         if let Some(ducklake_maintenance) = &self.ducklake_maintenance {
             ducklake_maintenance.validate()?;
         }
@@ -530,7 +527,7 @@ mod tests {
 
         let err = full_config.validate().unwrap_err();
 
-        assert_eq!(err, "Replication lag refresh interval must be greater than 0");
+        assert_eq!(err, "Field `replication_lag_refresh_interval_ms` must be greater than 0");
     }
 
     #[test]
