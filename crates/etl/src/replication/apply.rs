@@ -719,6 +719,8 @@ impl ApplyLoopState {
     /// Takes the events batch for further processing. Replacing it with a new
     /// empty batch.
     fn take_events_batch(&mut self) -> (Vec<Event>, usize) {
+        debug_assert!(self.has_pending_batch());
+
         let events_batch = std::mem::take(&mut self.events_batch);
         let events_batch_bytes = self.events_batch_bytes;
         self.events_batch_bytes = 0;
@@ -909,14 +911,21 @@ impl ApplyLoopState {
 
     /// Marks the current pending batch as paused behind an in-flight flush.
     fn pause_processing(&mut self) {
+        debug_assert!(self.has_pending_flush_result());
+        debug_assert!(self.has_pending_batch());
+
         self.processing_paused = true;
     }
 
     /// Resumes processing by clearing the existing pending flush result and
     /// enabling processing.
     fn resume_processing(&mut self) -> bool {
+        debug_assert!(self.has_pending_flush_result());
+
         let prev_processing_paused = std::mem::replace(&mut self.processing_paused, false);
         self.pending_flush_result = None;
+
+        debug_assert!(!prev_processing_paused || self.has_pending_batch());
 
         prev_processing_paused
     }
@@ -2130,11 +2139,12 @@ where
         if let Some(begin_ts) = self.state.current_tx_begin_ts.take() {
             let now = Instant::now();
             let duration_seconds = (now - begin_ts).as_secs_f64();
+
             histogram!(ETL_TRANSACTION_DURATION_SECONDS).record(duration_seconds);
-
             counter!(ETL_TRANSACTIONS_TOTAL).increment(1);
-
             histogram!(ETL_TRANSACTION_SIZE).record((self.state.current_tx_events - 1) as f64);
+
+            debug_assert!(self.state.current_tx_events > 0);
 
             self.state.current_tx_events = 0;
         }
