@@ -34,6 +34,9 @@ pub const ETL_MEMORY_BACKPRESSURE_TRANSITIONS_TOTAL: &str =
 pub const ETL_MEMORY_BACKPRESSURE_ACTIVATION_DURATION_SECONDS: &str =
     "etl_memory_backpressure_activation_duration_seconds";
 pub const ETL_IDEAL_BATCH_SIZE_BYTES: &str = "etl_ideal_batch_size_bytes";
+pub const ETL_APPLY_LOOP_RECEIVE_LAG_BYTES: &str = "etl_apply_loop_receive_lag_bytes";
+pub const ETL_APPLY_LOOP_FLUSH_LAG_BYTES: &str = "etl_apply_loop_flush_lag_bytes";
+pub const ETL_APPLY_LOOP_END_TO_END_LAG_BYTES: &str = "etl_apply_loop_end_to_end_lag_bytes";
 
 /// Label key for table state (used by table state metrics).
 pub const STATE_LABEL: &str = "state";
@@ -226,6 +229,25 @@ pub(crate) fn register_metrics() {
             ETL_IDEAL_BATCH_SIZE_BYTES,
             Unit::Bytes,
             "Current ideal batch size in bytes."
+        );
+
+        describe_gauge!(
+            ETL_APPLY_LOOP_RECEIVE_LAG_BYTES,
+            Unit::Bytes,
+            "Bytes between the current source WAL LSN and the apply loop's last received LSN."
+        );
+
+        describe_gauge!(
+            ETL_APPLY_LOOP_FLUSH_LAG_BYTES,
+            Unit::Bytes,
+            "Bytes between the apply loop's last received LSN and the apply loop's last durable \
+             flush LSN."
+        );
+
+        describe_gauge!(
+            ETL_APPLY_LOOP_END_TO_END_LAG_BYTES,
+            Unit::Bytes,
+            "Bytes between the current source WAL LSN and the apply loop's last durable flush LSN."
         );
     });
 }

@@ -226,10 +226,11 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         table_error_retry_max_attempts: 5,
         max_table_sync_workers: args.clickhouse_args.max_table_sync_workers,
         memory_refresh_interval_ms: 100,
+        replication_lag_refresh_interval_ms: 10000,
         memory_backpressure: Some(MemoryBackpressureConfig::default()),
         table_sync_copy: TableSyncCopyConfig::default(),
         invalidated_slot_behavior: InvalidatedSlotBehavior::default(),
-        max_copy_connections_per_table: PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE,
+        max_copy_connections_per_table: 2,
     };
 
     let clickhouse_destination = ClickHouseDestination::new(

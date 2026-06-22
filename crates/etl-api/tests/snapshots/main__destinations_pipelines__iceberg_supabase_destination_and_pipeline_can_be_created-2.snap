@@ -26,6 +26,9 @@ FullApiPipelineConfig {
     memory_refresh_interval_ms: Some(
         100,
     ),
+    replication_lag_refresh_interval_ms: Some(
+        10000,
+    ),
     memory_backpressure: Some(
         MemoryBackpressureConfig {
             activate_threshold: 0.85,

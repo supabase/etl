@@ -15,7 +15,7 @@ use tokio::sync::Mutex;
 use tracing::{debug, info};
 
 use crate::{
-    config::{ETL_STATE_MANAGEMENT_OPTIONS, IntoConnectOptions, PgConnectionConfig},
+    config::{ETL_OUT_OF_BAND_OPTIONS, IntoConnectOptions, PgConnectionConfig},
     error::{ErrorKind, EtlResult},
     etl_error,
     metrics::{ETL_TABLES_TOTAL, STATE_LABEL},
@@ -56,7 +56,7 @@ const MAX_CACHED_SCHEMAS_PER_TABLE: usize = 2;
 /// be open for a while and then closed when it's unnecessary since after the
 /// first table copy state, we don't update the state so often.
 fn create_database_pool(connection_config: &PgConnectionConfig) -> PgPool {
-    let options = connection_config.with_db(Some(&ETL_STATE_MANAGEMENT_OPTIONS));
+    let options = connection_config.with_db(Some(&ETL_OUT_OF_BAND_OPTIONS));
 
     PgPoolOptions::new()
         .min_connections(0)

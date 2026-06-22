@@ -8,8 +8,8 @@ pub use etl_config::{
     load_config, parse_ducklake_s3_data_path, parse_ducklake_url,
     shared::{
         BatchConfig, DestinationConfig, DestinationConfigWithoutSecrets, ETL_API_OPTIONS,
-        ETL_MIGRATION_OPTIONS, ETL_REPLICATION_OPTIONS, ETL_STATE_MANAGEMENT_OPTIONS,
-        IcebergConfig, IcebergConfigWithoutSecrets, IntoConnectOptions, InvalidatedSlotBehavior,
+        ETL_MIGRATION_OPTIONS, ETL_OUT_OF_BAND_OPTIONS, ETL_REPLICATION_OPTIONS, IcebergConfig,
+        IcebergConfigWithoutSecrets, IntoConnectOptions, InvalidatedSlotBehavior,
         MemoryBackpressureConfig, PgConnectionConfig, PgConnectionConfigWithoutSecrets,
         PgConnectionOptions, PipelineConfig, PipelineConfigWithoutSecrets, ReplicatorConfig,
         ReplicatorConfigWithoutSecrets, SentryConfig, SupabaseConfig, SupabaseConfigWithoutSecrets,
