@@ -267,11 +267,6 @@ impl ReplicationProgress {
         }
     }
 
-    /// Returns the highest LSN returned by Postgres.
-    fn last_source_current_lsn(&self) -> PgLsn {
-        PgLsn::from(self.inner.last_source_current_lsn.load(Ordering::Relaxed))
-    }
-
     /// Returns the highest LSN received from PostgreSQL so far.
     fn last_received_lsn(&self) -> PgLsn {
         PgLsn::from(self.inner.last_received_lsn.load(Ordering::Relaxed))
@@ -291,17 +286,20 @@ impl ReplicationProgress {
     fn update_last_received_lsn(&self, lsn: PgLsn) {
         Self::update_lsn(&self.inner.last_received_lsn, lsn);
 
-        // We can do debug asserts between lsns that are not updated concurrently, but for lsns
-        // that are updated concurrently, we don't since it might cause false positives.
-        debug_assert!(self.last_received_lsn() >= self.last_flush_lsn());
+        self.debug_assert_apply_loop_lsn_order();
     }
 
     /// Updates the last flush LSN if it advanced.
     fn update_last_flush_lsn(&self, lsn: PgLsn) {
         Self::update_lsn(&self.inner.last_flush_lsn, lsn);
 
-        // We can do debug asserts between lsns that are not updated concurrently, but for lsns
-        // that are updated concurrently, we don't since it might cause false positives.
+        self.debug_assert_apply_loop_lsn_order();
+    }
+
+    /// Asserts relationships between LSNs updated by the apply loop.
+    fn debug_assert_apply_loop_lsn_order(&self) {
+        // The source current LSN is sampled concurrently and can briefly lag
+        // behind received WAL, so only assert apply-loop-owned positions here.
         debug_assert!(self.last_received_lsn() >= self.last_flush_lsn());
     }
 
