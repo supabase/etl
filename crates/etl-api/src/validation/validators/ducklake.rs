@@ -106,8 +106,7 @@ impl Validator for DucklakeValidator {
         };
 
         if let Some(failure) =
-            validate_metadata_schema_is_available(&catalog_url, self.metadata_schema.as_deref())
-                .await?
+            metadata_schema_reuse_warning(&catalog_url, self.metadata_schema.as_deref()).await?
         {
             return Ok(vec![failure]);
         }
@@ -139,8 +138,8 @@ impl Validator for DucklakeValidator {
     }
 }
 
-/// Validates that the configured PostgreSQL metadata schema is not occupied.
-async fn validate_metadata_schema_is_available(
+/// Returns a warning when the configured PostgreSQL metadata schema exists.
+async fn metadata_schema_reuse_warning(
     catalog_url: &Url,
     metadata_schema: Option<&str>,
 ) -> Result<Option<ValidationFailure>, ValidationError> {
@@ -162,23 +161,50 @@ async fn validate_metadata_schema_is_available(
         return Ok(Some(ducklake_connection_failed()));
     };
 
+    let Ok(schema_exists) = metadata_schema_exists(&pool, metadata_schema).await else {
+        return Ok(Some(ducklake_connection_failed()));
+    };
+
+    if !schema_exists {
+        return Ok(None);
+    }
+
     let Ok(table_names) = existing_ducklake_metadata_tables(&pool, metadata_schema).await else {
         return Ok(Some(ducklake_connection_failed()));
     };
 
-    if table_names.is_empty() {
-        return Ok(None);
-    }
+    let table_detail = if table_names.is_empty() {
+        String::new()
+    } else {
+        format!(" Detected DuckLake metadata tables: {}.", table_names.join(", "))
+    };
 
-    Ok(Some(ValidationFailure::critical(
+    Ok(Some(ValidationFailure::warning(
         "DuckLake Metadata Schema Already Exists",
         format!(
-            "DuckLake metadata already exists in PostgreSQL schema `{metadata_schema}` (tables: \
-             {}). Drop the existing DuckLake metadata from the catalog database, or choose \
-             another DuckLake metadata schema name.",
-            table_names.join(", ")
+            "DuckLake metadata schema `{metadata_schema}` already exists in the catalog \
+             database.{table_detail} Check whether this schema is already used for a DuckLake \
+             catalog. If you intend to reuse that DuckLake, you can proceed. Otherwise, choose \
+             another DuckLake metadata schema name in the destination config or drop the schema \
+             from the database."
         ),
     )))
+}
+
+/// Returns whether a PostgreSQL schema exists in the catalog database.
+async fn metadata_schema_exists(pool: &PgPool, metadata_schema: &str) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        r#"
+        select exists (
+            select 1
+            from pg_catalog.pg_namespace
+            where nspname = $1
+        )
+        "#,
+    )
+    .bind(metadata_schema)
+    .fetch_one(pool)
+    .await
 }
 
 /// Returns existing DuckLake-owned table names in a PostgreSQL schema.
