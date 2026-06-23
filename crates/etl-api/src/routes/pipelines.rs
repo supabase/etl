@@ -1282,7 +1282,7 @@ pub(crate) async fn get_pipeline_replication_status(
     ),
     responses(
         (status = 200, description = "Table state(s) rolled back successfully", body = RollbackTablesResponse),
-        (status = 400, description = "Bad request – state not rollbackable", body = ErrorMessage),
+        (status = 400, description = "Bad request: state not rollbackable", body = ErrorMessage),
         (status = 404, description = "Pipeline or table not found", body = ErrorMessage),
         (status = 502, description = "Source database returned an invalid response", body = ErrorMessage),
         (status = 503, description = "Source database unavailable", body = ErrorMessage),

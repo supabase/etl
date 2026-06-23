@@ -251,7 +251,7 @@ fn validate_pipeline_request(
     ),
     responses(
         (status = 200, description = "Destination and pipeline created successfully", body = CreateDestinationPipelineResponse),
-        (status = 409, description = "Conflict – a pipeline already exists for this source and destination or tenant pipeline limit reached", body = ErrorMessage),
+        (status = 409, description = "Conflict: a pipeline already exists for this source and destination or tenant pipeline limit reached", body = ErrorMessage),
         (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 404, description = "Source not found", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
@@ -331,7 +331,7 @@ pub(crate) async fn create_destination_and_pipeline(
         (status = 200, description = "Destination and pipeline updated successfully"),
         (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 404, description = "Source, pipeline, destination, or destination-pipeline link not found", body = ErrorMessage),
-        (status = 409, description = "Conflict – a pipeline already exists for this source and destination", body = ErrorMessage),
+        (status = 409, description = "Conflict: a pipeline already exists for this source and destination", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
     tag = "Destinations and Pipelines"
