@@ -192,9 +192,9 @@ pub struct ValidateSourceResponse {
         (status = 200, description = "Source created successfully", body = CreateSourceResponse),
         (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 422, description = "Source profile validation failed", body = ErrorMessage),
-        (status = 502, description = "Source database returned an invalid response", body = ErrorMessage),
-        (status = 503, description = "Source database unavailable", body = ErrorMessage),
-        (status = 504, description = "Source database request timed out", body = ErrorMessage),
+        (status = 502, description = "Your source database returned an invalid response", body = ErrorMessage),
+        (status = 503, description = "Your source database is unavailable", body = ErrorMessage),
+        (status = 504, description = "Request to your source database timed out", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage),
     ),
     tag = "Sources"
@@ -243,9 +243,9 @@ pub(crate) async fn create_source(
     responses(
         (status = 200, description = "Validation completed", body = ValidateSourceResponse),
         (status = 400, description = "Bad request", body = ErrorMessage),
-        (status = 502, description = "Source database returned an invalid response", body = ErrorMessage),
-        (status = 503, description = "Source database unavailable", body = ErrorMessage),
-        (status = 504, description = "Source database request timed out", body = ErrorMessage),
+        (status = 502, description = "Your source database returned an invalid response", body = ErrorMessage),
+        (status = 503, description = "Your source database is unavailable", body = ErrorMessage),
+        (status = 504, description = "Request to your source database timed out", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
     tag = "Sources"
@@ -326,9 +326,9 @@ pub(crate) async fn read_source(
         (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 404, description = "Source not found", body = ErrorMessage),
         (status = 422, description = "Source profile validation failed", body = ErrorMessage),
-        (status = 502, description = "Source database returned an invalid response", body = ErrorMessage),
-        (status = 503, description = "Source database unavailable", body = ErrorMessage),
-        (status = 504, description = "Source database request timed out", body = ErrorMessage),
+        (status = 502, description = "Your source database returned an invalid response", body = ErrorMessage),
+        (status = 503, description = "Your source database is unavailable", body = ErrorMessage),
+        (status = 504, description = "Request to your source database timed out", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage),
     ),
     tag = "Sources"

@@ -135,9 +135,9 @@ pub struct CreateTenantSourceResponse {
         (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 409, description = "Tenant already exists", body = ErrorMessage),
         (status = 422, description = "Source profile validation failed", body = ErrorMessage),
-        (status = 502, description = "Source database returned an invalid response", body = ErrorMessage),
-        (status = 503, description = "Source database unavailable", body = ErrorMessage),
-        (status = 504, description = "Source database request timed out", body = ErrorMessage),
+        (status = 502, description = "Your source database returned an invalid response", body = ErrorMessage),
+        (status = 503, description = "Your source database is unavailable", body = ErrorMessage),
+        (status = 504, description = "Request to your source database timed out", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage),
     ),
     tag = "Tenants & Sources"

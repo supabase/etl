@@ -140,7 +140,7 @@ impl DestinationPipelineError {
             | DestinationPipelineError::K8sCore(_) => "Internal server error".to_owned(),
             DestinationPipelineError::SourceDatabase(_)
             | DestinationPipelineError::SourcePipelineState(_) => {
-                "Could not query the source database".to_owned()
+                "Could not query your source database".to_owned()
             }
             DestinationPipelineError::Validation(error) => {
                 utils::validation_error_message(error).to_owned()
@@ -415,9 +415,9 @@ pub(crate) async fn update_destination_and_pipeline(
         (status = 409, description = "Pipeline is active", body = ErrorMessage),
         (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 404, description = "Source, pipeline, destination, or destination-pipeline link not found", body = ErrorMessage),
-        (status = 502, description = "Source database returned an invalid response", body = ErrorMessage),
-        (status = 503, description = "Source database unavailable", body = ErrorMessage),
-        (status = 504, description = "Source database request timed out", body = ErrorMessage),
+        (status = 502, description = "Your source database returned an invalid response", body = ErrorMessage),
+        (status = 503, description = "Your source database is unavailable", body = ErrorMessage),
+        (status = 504, description = "Request to your source database timed out", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
     tag = "Destinations and Pipelines"

@@ -59,7 +59,7 @@ impl PublicationError {
                 "Internal server error".to_owned()
             }
             PublicationError::PublicationsDb(PublicationsDbError::Database(_))
-            | PublicationError::Database(_) => "Could not query the source database".to_owned(),
+            | PublicationError::Database(_) => "Could not query your source database".to_owned(),
             // Every other message is ok, as they do not divulge sensitive information
             e => e.to_string(),
         }
@@ -119,9 +119,9 @@ pub struct ReadPublicationsResponse {
         (status = 200, description = "Publication created successfully"),
         (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 404, description = "Source not found", body = ErrorMessage),
-        (status = 502, description = "Source database returned an invalid response", body = ErrorMessage),
-        (status = 503, description = "Source database unavailable", body = ErrorMessage),
-        (status = 504, description = "Source database request timed out", body = ErrorMessage),
+        (status = 502, description = "Your source database returned an invalid response", body = ErrorMessage),
+        (status = 503, description = "Your source database is unavailable", body = ErrorMessage),
+        (status = 504, description = "Request to your source database timed out", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     )
 )]
@@ -168,9 +168,9 @@ pub(crate) async fn create_publication(
         (status = 200, description = "Publication retrieved successfully", body = Publication),
         (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 404, description = "Source or publication not found", body = ErrorMessage),
-        (status = 502, description = "Source database returned an invalid response", body = ErrorMessage),
-        (status = 503, description = "Source database unavailable", body = ErrorMessage),
-        (status = 504, description = "Source database request timed out", body = ErrorMessage),
+        (status = 502, description = "Your source database returned an invalid response", body = ErrorMessage),
+        (status = 503, description = "Your source database is unavailable", body = ErrorMessage),
+        (status = 504, description = "Request to your source database timed out", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     )
 )]
@@ -217,9 +217,9 @@ pub(crate) async fn read_publication(
         (status = 200, description = "Publication updated successfully"),
         (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 404, description = "Source or publication not found", body = ErrorMessage),
-        (status = 502, description = "Source database returned an invalid response", body = ErrorMessage),
-        (status = 503, description = "Source database unavailable", body = ErrorMessage),
-        (status = 504, description = "Source database request timed out", body = ErrorMessage),
+        (status = 502, description = "Your source database returned an invalid response", body = ErrorMessage),
+        (status = 503, description = "Your source database is unavailable", body = ErrorMessage),
+        (status = 504, description = "Request to your source database timed out", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     )
 )]
@@ -271,9 +271,9 @@ pub(crate) async fn update_publication(
         (status = 200, description = "Publication deleted successfully"),
         (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 404, description = "Source or publication not found", body = ErrorMessage),
-        (status = 502, description = "Source database returned an invalid response", body = ErrorMessage),
-        (status = 503, description = "Source database unavailable", body = ErrorMessage),
-        (status = 504, description = "Source database request timed out", body = ErrorMessage),
+        (status = 502, description = "Your source database returned an invalid response", body = ErrorMessage),
+        (status = 503, description = "Your source database is unavailable", body = ErrorMessage),
+        (status = 504, description = "Request to your source database timed out", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     )
 )]
@@ -316,9 +316,9 @@ pub(crate) async fn delete_publication(
         (status = 200, description = "Publications listed successfully", body = ReadPublicationsResponse),
         (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 404, description = "Source not found", body = ErrorMessage),
-        (status = 502, description = "Source database returned an invalid response", body = ErrorMessage),
-        (status = 503, description = "Source database unavailable", body = ErrorMessage),
-        (status = 504, description = "Source database request timed out", body = ErrorMessage),
+        (status = 502, description = "Your source database returned an invalid response", body = ErrorMessage),
+        (status = 503, description = "Your source database is unavailable", body = ErrorMessage),
+        (status = 504, description = "Request to your source database timed out", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     )
 )]
@@ -364,9 +364,9 @@ pub(crate) async fn read_all_publications(
         (status = 200, description = "Tables added successfully"),
         (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 404, description = "Source or publication not found", body = ErrorMessage),
-        (status = 502, description = "Source database returned an invalid response", body = ErrorMessage),
-        (status = 503, description = "Source database unavailable", body = ErrorMessage),
-        (status = 504, description = "Source database request timed out", body = ErrorMessage),
+        (status = 502, description = "Your source database returned an invalid response", body = ErrorMessage),
+        (status = 503, description = "Your source database is unavailable", body = ErrorMessage),
+        (status = 504, description = "Request to your source database timed out", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     )
 )]
@@ -417,9 +417,9 @@ pub(crate) async fn add_tables_to_publication(
         (status = 200, description = "Tables removed successfully"),
         (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 404, description = "Source or publication not found", body = ErrorMessage),
-        (status = 502, description = "Source database returned an invalid response", body = ErrorMessage),
-        (status = 503, description = "Source database unavailable", body = ErrorMessage),
-        (status = 504, description = "Source database request timed out", body = ErrorMessage),
+        (status = 502, description = "Your source database returned an invalid response", body = ErrorMessage),
+        (status = 503, description = "Your source database is unavailable", body = ErrorMessage),
+        (status = 504, description = "Request to your source database timed out", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     )
 )]
@@ -470,9 +470,9 @@ pub(crate) async fn drop_tables_from_publication(
         (status = 200, description = "Tables replaced successfully"),
         (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 404, description = "Source or publication not found", body = ErrorMessage),
-        (status = 502, description = "Source database returned an invalid response", body = ErrorMessage),
-        (status = 503, description = "Source database unavailable", body = ErrorMessage),
-        (status = 504, description = "Source database request timed out", body = ErrorMessage),
+        (status = 502, description = "Your source database returned an invalid response", body = ErrorMessage),
+        (status = 503, description = "Your source database is unavailable", body = ErrorMessage),
+        (status = 504, description = "Request to your source database timed out", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     )
 )]

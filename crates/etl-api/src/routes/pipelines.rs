@@ -203,7 +203,7 @@ impl PipelineError {
             ) => "Internal server error".to_owned(),
             PipelineError::SourceDatabase(_)
             | PipelineError::SourcePipelineState(_)
-            | PipelineError::TableLookup(_) => "Could not query the source database".to_owned(),
+            | PipelineError::TableLookup(_) => "Could not query your source database".to_owned(),
             PipelineError::Validation(error) => {
                 route_utils::validation_error_message(error).to_owned()
             }
@@ -580,7 +580,7 @@ pub struct ValidatePipelineRequest {
 pub struct ValidationFailureResponse {
     #[schema(example = "Publication Not Found")]
     pub name: String,
-    #[schema(example = "Publication 'my_publication' does not exist in the source database")]
+    #[schema(example = "Publication 'my_publication' does not exist in your source database")]
     pub reason: String,
     #[schema(example = "critical")]
     pub failure_type: FailureType,
@@ -820,9 +820,9 @@ pub(crate) async fn update_pipeline(
         (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 409, description = "Pipeline is active", body = ErrorMessage),
         (status = 404, description = "Pipeline or source not found", body = ErrorMessage),
-        (status = 502, description = "Source database returned an invalid response", body = ErrorMessage),
-        (status = 503, description = "Source database unavailable", body = ErrorMessage),
-        (status = 504, description = "Source database request timed out", body = ErrorMessage),
+        (status = 502, description = "Your source database returned an invalid response", body = ErrorMessage),
+        (status = 503, description = "Your source database is unavailable", body = ErrorMessage),
+        (status = 504, description = "Request to your source database timed out", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
     tag = "Pipelines"
@@ -1178,9 +1178,9 @@ pub(crate) async fn get_pipeline_status(
         (status = 200, description = "Replication status retrieved successfully", body = GetPipelineReplicationStatusResponse),
         (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 404, description = "Pipeline not found", body = ErrorMessage),
-        (status = 502, description = "Source database returned an invalid response", body = ErrorMessage),
-        (status = 503, description = "Source database unavailable", body = ErrorMessage),
-        (status = 504, description = "Source database request timed out", body = ErrorMessage),
+        (status = 502, description = "Your source database returned an invalid response", body = ErrorMessage),
+        (status = 503, description = "Your source database is unavailable", body = ErrorMessage),
+        (status = 504, description = "Request to your source database timed out", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
     tag = "Pipelines"
@@ -1284,9 +1284,9 @@ pub(crate) async fn get_pipeline_replication_status(
         (status = 200, description = "Table state(s) rolled back successfully", body = RollbackTablesResponse),
         (status = 400, description = "Bad request: state not rollbackable", body = ErrorMessage),
         (status = 404, description = "Pipeline or table not found", body = ErrorMessage),
-        (status = 502, description = "Source database returned an invalid response", body = ErrorMessage),
-        (status = 503, description = "Source database unavailable", body = ErrorMessage),
-        (status = 504, description = "Source database request timed out", body = ErrorMessage),
+        (status = 502, description = "Your source database returned an invalid response", body = ErrorMessage),
+        (status = 503, description = "Your source database is unavailable", body = ErrorMessage),
+        (status = 504, description = "Request to your source database timed out", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
     tag = "Pipelines"
@@ -1536,7 +1536,7 @@ pub(crate) async fn update_pipeline_version(
     post,
     path = "/pipelines/validate",
     summary = "Validate pipeline configuration",
-    description = "Validates pipeline prerequisites against the source database.",
+    description = "Validates pipeline prerequisites against your source database.",
     request_body = ValidatePipelineRequest,
     params(
         ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
@@ -1545,9 +1545,9 @@ pub(crate) async fn update_pipeline_version(
         (status = 200, description = "Validation completed", body = ValidatePipelineResponse),
         (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 404, description = "Source not found", body = ErrorMessage),
-        (status = 502, description = "Source database returned an invalid response", body = ErrorMessage),
-        (status = 503, description = "Source database unavailable", body = ErrorMessage),
-        (status = 504, description = "Source database request timed out", body = ErrorMessage),
+        (status = 502, description = "Your source database returned an invalid response", body = ErrorMessage),
+        (status = 503, description = "Your source database is unavailable", body = ErrorMessage),
+        (status = 504, description = "Request to your source database timed out", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
     tag = "Pipelines"

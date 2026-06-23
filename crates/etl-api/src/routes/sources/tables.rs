@@ -55,7 +55,7 @@ impl TableError {
                 "Internal server error".to_owned()
             }
             TableError::TablesDb(TablesDbError::Database(_)) | TableError::Database(_) => {
-                "Could not query the source database".to_owned()
+                "Could not query your source database".to_owned()
             }
             // Every other message is ok, as they do not divulge sensitive information
             e => e.to_string(),
@@ -100,9 +100,9 @@ impl IntoResponse for TableError {
         (status = 200, description = "Tables listed successfully", body = ReadTablesResponse),
         (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 404, description = "Source not found", body = ErrorMessage),
-        (status = 502, description = "Source database returned an invalid response", body = ErrorMessage),
-        (status = 503, description = "Source database unavailable", body = ErrorMessage),
-        (status = 504, description = "Source database request timed out", body = ErrorMessage),
+        (status = 502, description = "Your source database returned an invalid response", body = ErrorMessage),
+        (status = 503, description = "Your source database is unavailable", body = ErrorMessage),
+        (status = 504, description = "Request to your source database timed out", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     )
 )]
