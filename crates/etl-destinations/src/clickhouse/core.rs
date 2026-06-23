@@ -439,6 +439,11 @@ where
         Ok(())
     }
 
+    // ClickHouse Cloud transparently substitutes the MergeTree family with its
+    // shared-storage variants (`ReplacingMergeTree` -> `SharedReplacingMergeTree`).
+    // These are drop-in equivalents, so `system.tables.engine` reads back the
+    // `Shared`-prefixed name even though the pipeline configured the plain one.
+
     /// Rejects writing to a pre-existing ClickHouse table whose engine does
     /// not match the configured one. No-op if the table doesn't exist yet.
     async fn ensure_engine_matches(&self, clickhouse_table_name: &str) -> EtlResult<()> {
@@ -446,7 +451,7 @@ where
             return Ok(());
         };
         let configured = self.inserter_config.engine.as_clickhouse_str();
-        if existing == configured {
+        if clickhouse_engine_matches(&existing, configured) {
             return Ok(());
         }
 
@@ -1444,6 +1449,19 @@ where
     }
 }
 
+/// Strips ClickHouse Cloud's `Shared` storage-variant prefix so the shared and
+/// non-shared MergeTree-family engines compare equal (see
+/// `ensure_engine_matches`).
+fn normalize_clickhouse_engine(engine: &str) -> &str {
+    engine.strip_prefix("Shared").unwrap_or(engine)
+}
+
+/// Whether a table's existing engine satisfies the configured one, treating the
+/// `Shared` Cloud variants as equivalent to their plain forms.
+fn clickhouse_engine_matches(existing: &str, configured: &str) -> bool {
+    normalize_clickhouse_engine(existing) == normalize_clickhouse_engine(configured)
+}
+
 #[cfg(test)]
 mod tests {
     use etl::types::{
@@ -1456,6 +1474,19 @@ mod tests {
 
     fn clickhouse_column(name: &str, type_name: &str) -> ClickHouseTableColumn {
         ClickHouseTableColumn { name: name.to_owned(), type_name: type_name.to_owned() }
+    }
+
+    #[test]
+    fn clickhouse_engine_matches_accepts_cloud_shared_variants() {
+        // --- GIVEN: ClickHouse Cloud reports `Shared`-prefixed engine names ---
+        // --- WHEN/THEN: shared variants match their plain configured forms ---
+        assert!(clickhouse_engine_matches("SharedReplacingMergeTree", "ReplacingMergeTree"));
+        assert!(clickhouse_engine_matches("SharedMergeTree", "MergeTree"));
+        assert!(clickhouse_engine_matches("ReplacingMergeTree", "ReplacingMergeTree"));
+
+        // --- THEN: genuine engine mismatches still fail ---
+        assert!(!clickhouse_engine_matches("SharedReplacingMergeTree", "MergeTree"));
+        assert!(!clickhouse_engine_matches("MergeTree", "ReplacingMergeTree"));
     }
 
     fn replicated_schema(identity_type: IdentityType) -> ReplicatedTableSchema {
