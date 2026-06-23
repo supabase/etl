@@ -47,7 +47,7 @@ const PG_SETTINGS_DEFAULT_DURATION_UNIT: &str = "ms";
 /// Application name for ETL logical replication connections.
 const APP_NAME_REPLICATOR_REPLICATION: &str = "supabase_etl_replicator_replication";
 
-/// Connection options for logical replication streams.
+/// Connection options for logical replication.
 ///
 /// Disables statement, lock, and idle-in-transaction timeouts because
 /// replication streams, slot creation, and initial table synchronization can
