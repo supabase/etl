@@ -45,7 +45,7 @@ const DELETE_SLOT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Default duration unit used when `pg_settings.unit` is empty.
 const PG_SETTINGS_DEFAULT_DURATION_UNIT: &str = "ms";
 /// Application name for ETL logical replication connections.
-const APP_NAME_REPLICATOR_STREAMING: &str = "supabase_etl_replicator_streaming";
+const APP_NAME_REPLICATOR_REPLICATION: &str = "supabase_etl_replicator_replication";
 
 /// Connection options for logical replication streams.
 ///
@@ -53,7 +53,7 @@ const APP_NAME_REPLICATOR_STREAMING: &str = "supabase_etl_replicator_streaming";
 /// replication streams, slot creation, and initial table synchronization can
 /// legitimately run for a long time.
 static REPLICATION_OPTIONS: LazyLock<PgConnectionOptions> = LazyLock::new(|| {
-    PgConnectionOptions::builder(APP_NAME_REPLICATOR_STREAMING)
+    PgConnectionOptions::builder(APP_NAME_REPLICATOR_REPLICATION)
         .statement_timeout(0)
         .lock_timeout(0)
         .idle_in_transaction_session_timeout(0)

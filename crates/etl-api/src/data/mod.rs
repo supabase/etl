@@ -27,7 +27,7 @@ const APP_NAME_API: &str = "supabase_etl_api";
 ///
 /// Uses strict timeouts to keep API requests responsive under contention.
 static API_OPTIONS: LazyLock<PgConnectionOptions> =
-    LazyLock::new(|| PgConnectionOptions::builder(APP_NAME_API).lock_timeout(5_000).build());
+    LazyLock::new(|| PgConnectionOptions::builder(APP_NAME_API).build());
 
 /// Connects to the source database with the specified configuration and default
 /// connection pool size.
