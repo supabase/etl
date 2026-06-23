@@ -29,7 +29,7 @@ use crate::{
         core::{K8sCoreError, first_active_pipeline_id},
     },
     routes::{
-        ErrorMessage, IntoInner, TenantIdError, error_response_with_internal_error,
+        ErrorMessage, IntoInner, TenantIdError, error_response_with_internal_error, utils,
         validate_tenant_id,
     },
 };
@@ -51,6 +51,12 @@ pub enum TenantError {
     #[error("Database error: {0}")]
     Database(#[from] sqlx::Error),
 
+    #[error("Source database error: {0}")]
+    SourceDatabase(sqlx::Error),
+
+    #[error("Source pipeline state operation failed: {0}")]
+    SourcePipelineState(PipelinesDbError),
+
     #[error(transparent)]
     TrustedRootCerts(#[from] TrustedRootCertsError),
 
@@ -69,11 +75,14 @@ impl TenantError {
         match self {
             // Do not expose internal database details in error messages
             TenantError::TenantsDb(TenantsDbError::Database(_))
-            | TenantError::SourcesDb(SourcesDbError::Database(_))
-            | TenantError::PipelinesDb(PipelinesDbError::Database(_))
+            | TenantError::SourcesDb(_)
+            | TenantError::PipelinesDb(_)
             | TenantError::Database(_)
             | TenantError::TrustedRootCerts(_)
             | TenantError::K8sCore(_) => "Internal server error".to_owned(),
+            TenantError::SourceDatabase(_) | TenantError::SourcePipelineState(_) => {
+                "Could not query your source database".to_owned()
+            }
             // Every other message is ok, as they do not divulge sensitive information
             e => e.to_string(),
         }
@@ -92,6 +101,13 @@ impl IntoResponse for TenantError {
             | TenantError::Database(_)
             | TenantError::TrustedRootCerts(_)
             | TenantError::K8sCore(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            TenantError::SourceDatabase(error) => utils::source_database_error_status_code(error),
+            TenantError::SourcePipelineState(error) => match error {
+                PipelinesDbError::Database(error) => {
+                    utils::source_database_error_status_code(error)
+                }
+                _ => StatusCode::BAD_GATEWAY,
+            },
             TenantError::TenantNotFound(_) => StatusCode::NOT_FOUND,
         };
 
@@ -157,6 +173,7 @@ pub struct ReadTenantsResponse {
     responses(
         (status = 200, description = "Tenant created successfully", body = CreateTenantResponse),
         (status = 400, description = "Bad request", body = ErrorMessage),
+        (status = 409, description = "Tenant already exists", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage),
     ),
     tag = "Tenants"
@@ -220,6 +237,7 @@ pub(crate) async fn create_or_update_tenant(
     ),
     responses(
         (status = 200, description = "Tenant retrieved successfully", body = ReadTenantResponse),
+        (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 404, description = "Tenant not found", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage),
     ),
@@ -253,6 +271,7 @@ pub(crate) async fn read_tenant(
     ),
     responses(
         (status = 200, description = "Tenant updated successfully"),
+        (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 404, description = "Tenant not found", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage),
     ),
@@ -286,8 +305,12 @@ pub(crate) async fn update_tenant(
     ),
     responses(
         (status = 200, description = "Tenant deleted successfully"),
+        (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 409, description = "Tenant has active pipelines or pipelines still defined", body = ErrorMessage),
         (status = 404, description = "Tenant not found", body = ErrorMessage),
+        (status = 502, description = "Your source database returned an invalid response", body = ErrorMessage),
+        (status = 503, description = "Your source database is unavailable", body = ErrorMessage),
+        (status = 504, description = "Request to your source database timed out", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage),
     ),
     tag = "Tenants"
@@ -346,20 +369,28 @@ pub(crate) async fn delete_tenant(
                 continue;
             }
         };
-        let mut source_txn = source_pool.begin().await?;
+        let mut source_txn = source_pool.begin().await.map_err(TenantError::SourceDatabase)?;
         let deleted_pipeline_ids =
-            delete_pipelines_source_state(source_txn.deref_mut(), &source_pipelines).await?;
-        data::sources::uninstall_source_installation(source_txn.deref_mut()).await?;
-        source_txn.commit().await?;
+            delete_pipelines_source_state(source_txn.deref_mut(), &source_pipelines)
+                .await
+                .map_err(TenantError::SourcePipelineState)?;
+        data::sources::uninstall_source_installation(source_txn.deref_mut())
+            .await
+            .map_err(TenantError::SourceDatabase)?;
+        source_txn.commit().await.map_err(TenantError::SourceDatabase)?;
         for pipeline_id in deleted_pipeline_ids {
-            delete_pipeline_replication_slots(&source_pool, pipeline_id).await?;
+            delete_pipeline_replication_slots(&source_pool, pipeline_id)
+                .await
+                .map_err(TenantError::SourcePipelineState)?;
         }
     }
 
     // Deleting the tenant is enough for API-side cleanup because Postgres cascades
     // tenant-owned rows in the app schema; we only clean source databases
     // manually above.
-    data::tenants::delete_tenant(&pool, &tenant_id).await?;
+    data::tenants::delete_tenant(&pool, &tenant_id)
+        .await?
+        .ok_or(TenantError::TenantNotFound(tenant_id))?;
 
     Ok(StatusCode::OK)
 }

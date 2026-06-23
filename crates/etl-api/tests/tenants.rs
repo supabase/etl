@@ -246,7 +246,7 @@ async fn an_existing_tenant_can_be_deleted() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn deleting_non_existing_tenant_returns_ok() {
+async fn deleting_non_existing_tenant_returns_not_found() {
     init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
@@ -255,7 +255,7 @@ async fn deleting_non_existing_tenant_returns_ok() {
     let response = app.delete_tenant("42").await;
 
     // Assert
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test(flavor = "multi_thread")]

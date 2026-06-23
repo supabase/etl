@@ -36,7 +36,7 @@ impl Validator for PublicationExistsValidator {
             Ok(vec![ValidationFailure::critical(
                 "Publication Not Found",
                 format!(
-                    "Publication `{}` does not exist in the source database.\n\nCreate the \
+                    "Publication `{}` does not exist in your source database.\n\nCreate the \
                      publication, or choose an existing publication for this pipeline. For \
                      example: `CREATE PUBLICATION {} FOR TABLE <table_name>, ...`.",
                     self.publication_name, self.publication_name
@@ -90,7 +90,7 @@ impl Validator for ReplicationSlotsValidator {
             Ok(vec![ValidationFailure::critical(
                 "Insufficient Replication Slots",
                 format!(
-                    "The source database has {free_slots} free replication slots, but this \
+                    "Your source database has {free_slots} free replication slots, but this \
                      pipeline can need up to {required_slots} during the initial table copy \
                      ({used_slots}/{max_slots} slots are currently in use).\n\nIncrease \
                      `max_replication_slots`, remove unused replication slots, or reduce \
@@ -125,7 +125,7 @@ impl Validator for WalLevelValidator {
             Ok(vec![ValidationFailure::critical(
                 "Invalid WAL Level",
                 format!(
-                    "The source database WAL level is `{wal_level}`, but logical replication \
+                    "Your source database WAL level is `{wal_level}`, but logical replication \
                      requires `logical`.\n\nSet `wal_level = 'logical'` in `postgresql.conf` and \
                      restart PostgreSQL."
                 ),
@@ -161,8 +161,8 @@ impl Validator for ReplicationPermissionsValidator {
         } else {
             Ok(vec![ValidationFailure::critical(
                 "Missing Replication Permission",
-                "The source database user does not have replication privileges.\n\nGrant the user \
-                 the `REPLICATION` attribute or connect with a role that already has it.",
+                "Your source database user does not have replication privileges.\n\nGrant the \
+                 user the `REPLICATION` attribute or connect with a role that already has it.",
             )])
         }
     }

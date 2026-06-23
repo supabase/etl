@@ -51,6 +51,40 @@ async fn metrics_endpoint_includes_http_request_metrics() {
     assert!(has_health_request_metric(&metrics, "http_requests_duration_seconds"));
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn unmatched_api_routes_use_bounded_metric_endpoint_label() {
+    init_test_tracing();
+    // Arrange
+    let app = spawn_test_app().await;
+
+    let client = reqwest::Client::new();
+
+    // Act
+    let missing_response = client
+        .get(local_test_url(&app.address, "/v1/not-a-real-resource/secret-ish-id"))
+        .send()
+        .await
+        .expect("Failed to execute request.");
+    let metrics = client
+        .get(local_test_url(&app.address, "/metrics"))
+        .send()
+        .await
+        .expect("Failed to execute request.")
+        .text()
+        .await
+        .expect("Failed to read metrics response.");
+
+    // Assert
+    assert_eq!(missing_response.status(), reqwest::StatusCode::NOT_FOUND);
+    assert!(metrics.lines().any(|line| {
+        line.starts_with("http_requests_total{")
+            && line.contains(r#"endpoint="/v1/__unmatched__""#)
+            && line.contains(r#"method="GET""#)
+            && line.contains(r#"status="404""#)
+    }));
+    assert!(!metrics.contains("/v1/not-a-real-resource/secret-ish-id"));
+}
+
 fn has_health_request_metric(metrics: &str, prefix: &str) -> bool {
     metrics.lines().any(|line| {
         line.starts_with(prefix)
