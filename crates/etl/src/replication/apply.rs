@@ -66,14 +66,14 @@ use crate::{
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
     metrics::{
-        ACTION_LABEL, COMMAND_TAG_LABEL, ETL_APPLY_LOOP_END_TO_END_LAG_BYTES,
-        ETL_APPLY_LOOP_FLUSH_LAG_BYTES, ETL_APPLY_LOOP_RECEIVE_LAG_BYTES,
-        ETL_BATCH_ITEMS_SEND_DURATION_SECONDS, ETL_DDL_SCHEMA_CHANGE_COLUMNS,
-        ETL_DDL_SCHEMA_CHANGES_TOTAL, ETL_EVENTS_PROCESSED_TOTAL, ETL_REPLICATION_MESSAGES_TOTAL,
-        ETL_SCHEMA_CLEANUP_ERRORS_TOTAL, ETL_SCHEMA_CLEANUP_PRUNED_VERSIONS_TOTAL,
-        ETL_SCHEMA_CLEANUP_TABLES_TOTAL, ETL_SCHEMA_CLEANUPS_TOTAL,
-        ETL_TRANSACTION_DURATION_SECONDS, ETL_TRANSACTION_SIZE, ETL_TRANSACTIONS_TOTAL,
-        OUTCOME_LABEL, WORKER_TYPE_LABEL,
+        ACTION_LABEL, COMMAND_TAG_LABEL, ETL_APPLY_LOOP_EFFECTIVE_FLUSH_LAG_BYTES,
+        ETL_APPLY_LOOP_END_TO_END_LAG_BYTES, ETL_APPLY_LOOP_FLUSH_LAG_BYTES,
+        ETL_APPLY_LOOP_RECEIVED_LAG_BYTES, ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
+        ETL_DDL_SCHEMA_CHANGE_COLUMNS, ETL_DDL_SCHEMA_CHANGES_TOTAL, ETL_EVENTS_PROCESSED_TOTAL,
+        ETL_REPLICATION_MESSAGES_TOTAL, ETL_SCHEMA_CLEANUP_ERRORS_TOTAL,
+        ETL_SCHEMA_CLEANUP_PRUNED_VERSIONS_TOTAL, ETL_SCHEMA_CLEANUP_TABLES_TOTAL,
+        ETL_SCHEMA_CLEANUPS_TOTAL, ETL_TRANSACTION_DURATION_SECONDS, ETL_TRANSACTION_SIZE,
+        ETL_TRANSACTIONS_TOTAL, OUTCOME_LABEL, WORKER_TYPE_LABEL,
     },
     replication::{
         EventsStream, OutOfBandSourcePool, SharedTableCache, StatusUpdateResult, StatusUpdateType,
@@ -236,45 +236,78 @@ impl<S, D> WorkerContext<S, D> {
 }
 
 /// Tracks the progress of logical replication from PostgreSQL.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 struct ReplicationProgress {
-    /// Shared atomic replication progress positions.
-    inner: Arc<ReplicationProgressInner>,
+    /// The highest LSN received from PostgreSQL so far.
+    last_received_lsn: PgLsn,
+    /// The highest LSN boundary that ETL has durably flushed to its store.
+    last_flush_lsn: PgLsn,
 }
 
-/// Atomic replication positions shared by the apply loop and sampler task.
+impl ReplicationProgress {
+    /// Creates replication progress initialized to the given LSN.
+    fn new(initial_lsn: PgLsn) -> Self {
+        Self { last_received_lsn: initial_lsn, last_flush_lsn: initial_lsn }
+    }
+
+    /// Returns the highest LSN received from PostgreSQL so far.
+    fn last_received_lsn(&self) -> PgLsn {
+        self.last_received_lsn
+    }
+
+    /// Returns the highest LSN boundary durably flushed to the store.
+    fn last_flush_lsn(&self) -> PgLsn {
+        self.last_flush_lsn
+    }
+
+    /// Updates the last received LSN if it advanced.
+    fn update_last_received_lsn(&mut self, lsn: PgLsn) {
+        self.last_received_lsn = self.last_received_lsn.max(lsn);
+
+        debug_assert!(self.last_received_lsn >= self.last_flush_lsn);
+    }
+
+    /// Updates the last flush LSN if it advanced.
+    fn update_last_flush_lsn(&mut self, lsn: PgLsn) {
+        self.last_flush_lsn = self.last_flush_lsn.max(lsn);
+
+        debug_assert!(self.last_received_lsn >= self.last_flush_lsn);
+    }
+}
+
+/// Tracks replication lag measurements shared with the sampler task.
+#[derive(Debug, Clone)]
+struct ReplicationLagMetrics {
+    /// Shared atomic LSN positions used for lag gauges.
+    inner: Arc<ReplicationLagMetricsInner>,
+}
+
+/// Atomic replication lag positions shared by the apply loop and sampler task.
 #[derive(Debug)]
-struct ReplicationProgressInner {
+struct ReplicationLagMetricsInner {
     /// Last source WAL LSN observed by the out-of-band sampler.
     last_source_current_lsn: AtomicU64,
     /// The highest LSN received from PostgreSQL so far.
     last_received_lsn: AtomicU64,
     /// The highest LSN boundary that ETL has durably flushed to its store.
     last_flush_lsn: AtomicU64,
+    /// The highest effective flush LSN used for PostgreSQL feedback.
+    last_effective_flush_lsn: AtomicU64,
 }
 
-impl ReplicationProgress {
-    /// Creates replication progress initialized to the given LSN.
+impl ReplicationLagMetrics {
+    /// Creates replication lag metrics initialized to the given LSN.
     fn new(initial_lsn: PgLsn) -> Self {
         let initial_lsn = u64::from(initial_lsn);
 
         Self {
-            inner: Arc::new(ReplicationProgressInner {
+            inner: Arc::new(ReplicationLagMetricsInner {
                 last_source_current_lsn: AtomicU64::new(initial_lsn),
                 last_received_lsn: AtomicU64::new(initial_lsn),
                 last_flush_lsn: AtomicU64::new(initial_lsn),
+                last_effective_flush_lsn: AtomicU64::new(initial_lsn),
             }),
         }
-    }
-
-    /// Returns the highest LSN received from PostgreSQL so far.
-    fn last_received_lsn(&self) -> PgLsn {
-        PgLsn::from(self.inner.last_received_lsn.load(Ordering::Relaxed))
-    }
-
-    /// Returns the highest LSN boundary durably flushed to the store.
-    fn last_flush_lsn(&self) -> PgLsn {
-        PgLsn::from(self.inner.last_flush_lsn.load(Ordering::Relaxed))
     }
 
     /// Updates the last source current LSN if it advanced.
@@ -282,25 +315,11 @@ impl ReplicationProgress {
         Self::update_lsn(&self.inner.last_source_current_lsn, lsn);
     }
 
-    /// Updates the last received LSN if it advanced.
-    fn update_last_received_lsn(&self, lsn: PgLsn) {
-        Self::update_lsn(&self.inner.last_received_lsn, lsn);
-
-        self.debug_assert_apply_loop_lsn_order();
-    }
-
-    /// Updates the last flush LSN if it advanced.
-    fn update_last_flush_lsn(&self, lsn: PgLsn) {
-        Self::update_lsn(&self.inner.last_flush_lsn, lsn);
-
-        self.debug_assert_apply_loop_lsn_order();
-    }
-
-    /// Asserts relationships between LSNs updated by the apply loop.
-    fn debug_assert_apply_loop_lsn_order(&self) {
-        // The source current LSN is sampled concurrently and can briefly lag
-        // behind received WAL, so only assert apply-loop-owned positions here.
-        debug_assert!(self.last_received_lsn() >= self.last_flush_lsn());
+    /// Updates lag metric positions derived from apply-loop progress.
+    fn update_from_progress(&self, progress: ReplicationProgress, effective_flush_lsn: PgLsn) {
+        Self::update_lsn(&self.inner.last_received_lsn, progress.last_received_lsn());
+        Self::update_lsn(&self.inner.last_flush_lsn, progress.last_flush_lsn());
+        Self::update_lsn(&self.inner.last_effective_flush_lsn, effective_flush_lsn);
     }
 
     /// Emits lag gauges from the current atomic progress positions.
@@ -308,14 +327,20 @@ impl ReplicationProgress {
         let last_source_current_lsn = self.inner.last_source_current_lsn.load(Ordering::Relaxed);
         let last_received_lsn = self.inner.last_received_lsn.load(Ordering::Relaxed);
         let last_flush_lsn = self.inner.last_flush_lsn.load(Ordering::Relaxed);
+        let last_effective_flush_lsn = self.inner.last_effective_flush_lsn.load(Ordering::Relaxed);
 
         let worker_type = worker_type.as_str();
 
         gauge!(
-            ETL_APPLY_LOOP_RECEIVE_LAG_BYTES,
+            ETL_APPLY_LOOP_RECEIVED_LAG_BYTES,
             WORKER_TYPE_LABEL => worker_type
         )
         .set(last_source_current_lsn.saturating_sub(last_received_lsn) as f64);
+        gauge!(
+            ETL_APPLY_LOOP_EFFECTIVE_FLUSH_LAG_BYTES,
+            WORKER_TYPE_LABEL => worker_type
+        )
+        .set(last_received_lsn.saturating_sub(last_effective_flush_lsn) as f64);
         gauge!(
             ETL_APPLY_LOOP_FLUSH_LAG_BYTES,
             WORKER_TYPE_LABEL => worker_type
@@ -325,7 +350,7 @@ impl ReplicationProgress {
             ETL_APPLY_LOOP_END_TO_END_LAG_BYTES,
             WORKER_TYPE_LABEL => worker_type
         )
-        .set(last_source_current_lsn.saturating_sub(last_flush_lsn) as f64);
+        .set(last_source_current_lsn.saturating_sub(last_effective_flush_lsn) as f64);
     }
 
     /// Updates a stored LSN monotonically.
@@ -394,13 +419,13 @@ impl ApplyLoopTasks {
     /// Creates task ownership and starts the required replication lag sampler.
     fn new(
         out_of_band_source_pool: OutOfBandSourcePool,
-        replication_progress: ReplicationProgress,
+        replication_lag_metrics: ReplicationLagMetrics,
         worker_type: WorkerType,
         replication_lag_refresh_interval: Duration,
     ) -> Self {
         let replication_lag_sampler_task = Self::spawn_replication_lag_sampler(
             out_of_band_source_pool,
-            replication_progress,
+            replication_lag_metrics,
             worker_type,
             replication_lag_refresh_interval,
         );
@@ -541,14 +566,14 @@ impl ApplyLoopTasks {
     /// Starts the replication lag sampler for an apply loop.
     fn spawn_replication_lag_sampler(
         out_of_band_source_pool: OutOfBandSourcePool,
-        replication_progress: ReplicationProgress,
+        replication_lag_metrics: ReplicationLagMetrics,
         worker_type: WorkerType,
         replication_lag_refresh_interval: Duration,
     ) -> JoinHandle<()> {
         tokio::spawn(async move {
             Self::run_replication_lag_sampler(
                 out_of_band_source_pool,
-                replication_progress,
+                replication_lag_metrics,
                 worker_type,
                 replication_lag_refresh_interval,
             )
@@ -559,7 +584,7 @@ impl ApplyLoopTasks {
     /// Runs the best-effort replication lag sampler.
     async fn run_replication_lag_sampler(
         out_of_band_source_pool: OutOfBandSourcePool,
-        replication_progress: ReplicationProgress,
+        replication_lag_metrics: ReplicationLagMetrics,
         worker_type: WorkerType,
         replication_lag_refresh_interval: Duration,
     ) {
@@ -571,8 +596,8 @@ impl ApplyLoopTasks {
 
             match Self::query_source_current_lsn(&out_of_band_source_pool).await {
                 Ok(source_current_lsn) => {
-                    replication_progress.update_last_source_current_lsn(source_current_lsn);
-                    replication_progress.emit_lag_metrics(worker_type);
+                    replication_lag_metrics.update_last_source_current_lsn(source_current_lsn);
+                    replication_lag_metrics.emit_lag_metrics(worker_type);
                 }
                 Err(err) => {
                     warn!(
@@ -627,6 +652,8 @@ struct ApplyLoopState {
     /// The current replication progress tracking received and flushed LSN
     /// positions.
     replication_progress: ReplicationProgress,
+    /// Shared replication lag metrics derived from apply-loop progress.
+    replication_lag_metrics: ReplicationLagMetrics,
     /// A batch of events to send to the destination.
     events_batch: Vec<Event>,
     /// Approximate total size in bytes of events currently in the batch.
@@ -680,6 +707,7 @@ impl ApplyLoopState {
     /// Creates a new [`ApplyLoopState`] with initial replication progress.
     fn new(
         replication_progress: ReplicationProgress,
+        replication_lag_metrics: ReplicationLagMetrics,
         keep_alive_deadline_duration: Duration,
         bootstrap_snapshot_id: SnapshotId,
         slot_name: String,
@@ -688,6 +716,7 @@ impl ApplyLoopState {
             last_commit_end_lsn: None,
             remote_final_lsn: None,
             replication_progress,
+            replication_lag_metrics,
             events_batch: Vec::new(),
             events_batch_bytes: 0,
             current_tx_begin_ts: None,
@@ -779,6 +808,25 @@ impl ApplyLoopState {
             }
             (_, None) => {}
         }
+    }
+
+    /// Updates the last received LSN and snapshots replication lag metrics.
+    fn update_last_received_lsn(&mut self, lsn: PgLsn) {
+        self.replication_progress.update_last_received_lsn(lsn);
+        self.update_replication_lag_metrics_from_progress();
+    }
+
+    /// Updates the last durable flush LSN and snapshots replication lag
+    /// metrics.
+    fn update_last_flush_lsn(&mut self, lsn: PgLsn) {
+        self.replication_progress.update_last_flush_lsn(lsn);
+        self.update_replication_lag_metrics_from_progress();
+    }
+
+    /// Snapshots apply-loop progress into the replication lag metrics.
+    fn update_replication_lag_metrics_from_progress(&self) {
+        self.replication_lag_metrics
+            .update_from_progress(self.replication_progress, self.effective_flush_lsn());
     }
 
     /// Returns the last received LSN that should be reported as written to the
@@ -1035,6 +1083,7 @@ where
         let bootstrap_snapshot_id: SnapshotId = start_lsn.into();
 
         let replication_progress = ReplicationProgress::new(start_lsn);
+        let replication_lag_metrics = ReplicationLagMetrics::new(start_lsn);
 
         let slot_name: String = worker_type.build_etl_replication_slot(pipeline_id).try_into()?;
 
@@ -1042,13 +1091,14 @@ where
             Duration::from_millis(config.replication_lag_refresh_interval_ms);
         let tasks = ApplyLoopTasks::new(
             out_of_band_source_pool,
-            replication_progress.clone(),
+            replication_lag_metrics.clone(),
             worker_type,
             replication_lag_refresh_interval,
         );
 
         let state = ApplyLoopState::new(
             replication_progress,
+            replication_lag_metrics,
             keep_alive_deadline_duration,
             bootstrap_snapshot_id,
             slot_name,
@@ -1867,10 +1917,10 @@ where
         match message {
             ReplicationMessage::XLogData(message) => {
                 let start_lsn = PgLsn::from(message.wal_start());
-                self.state.replication_progress.update_last_received_lsn(start_lsn);
+                self.state.update_last_received_lsn(start_lsn);
 
                 let end_lsn = PgLsn::from(message.wal_end());
-                self.state.replication_progress.update_last_received_lsn(end_lsn);
+                self.state.update_last_received_lsn(end_lsn);
 
                 debug!(
                     %start_lsn,
@@ -1882,7 +1932,7 @@ where
             }
             ReplicationMessage::PrimaryKeepAlive(message) => {
                 let end_lsn = PgLsn::from(message.wal_end());
-                self.state.replication_progress.update_last_received_lsn(end_lsn);
+                self.state.update_last_received_lsn(end_lsn);
 
                 debug!(
                     wal_end = %end_lsn,
@@ -2474,7 +2524,7 @@ where
         // to avoid writing to the customer database on every quiet heartbeat.
         let durable_flush_lsn =
             self.upsert_durable_replication_progress(last_commit_end_lsn).await?;
-        self.state.replication_progress.update_last_flush_lsn(durable_flush_lsn);
+        self.state.update_last_flush_lsn(durable_flush_lsn);
 
         let current_lsn = self.state.replication_progress.last_flush_lsn();
         debug!(
