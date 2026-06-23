@@ -1478,13 +1478,12 @@ mod tests {
 
     #[test]
     fn clickhouse_engine_matches_accepts_cloud_shared_variants() {
-        // --- GIVEN: ClickHouse Cloud reports `Shared`-prefixed engine names ---
-        // --- WHEN/THEN: shared variants match their plain configured forms ---
+        // Cloud `Shared` variants are equivalent to their plain configured forms.
         assert!(clickhouse_engine_matches("SharedReplacingMergeTree", "ReplacingMergeTree"));
         assert!(clickhouse_engine_matches("SharedMergeTree", "MergeTree"));
         assert!(clickhouse_engine_matches("ReplacingMergeTree", "ReplacingMergeTree"));
 
-        // --- THEN: genuine engine mismatches still fail ---
+        // Genuine engine mismatches still fail.
         assert!(!clickhouse_engine_matches("SharedReplacingMergeTree", "MergeTree"));
         assert!(!clickhouse_engine_matches("MergeTree", "ReplacingMergeTree"));
     }
