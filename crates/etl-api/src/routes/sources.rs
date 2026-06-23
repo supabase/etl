@@ -70,9 +70,9 @@ impl SourceError {
     pub fn to_message(&self) -> String {
         match self {
             // Do not expose internal database details in error messages
-            SourceError::SourcesDb(SourcesDbError::Database(_))
-            | SourceError::PipelinesDb(PipelinesDbError::Database(_))
-            | SourceError::K8sCore(_) => "Internal server error".to_owned(),
+            SourceError::SourcesDb(_) | SourceError::PipelinesDb(_) | SourceError::K8sCore(_) => {
+                "Internal server error".to_owned()
+            }
             SourceError::Validation(error) => utils::validation_error_message(error).to_owned(),
             // Every other message is ok, as they do not divulge sensitive information
             e => e.to_string(),
@@ -192,6 +192,9 @@ pub struct ValidateSourceResponse {
         (status = 200, description = "Source created successfully", body = CreateSourceResponse),
         (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 422, description = "Source profile validation failed", body = ErrorMessage),
+        (status = 502, description = "Your source database returned an invalid response", body = ErrorMessage),
+        (status = 503, description = "Your source database is unavailable", body = ErrorMessage),
+        (status = 504, description = "Request to your source database timed out", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage),
     ),
     tag = "Sources"
@@ -240,6 +243,9 @@ pub(crate) async fn create_source(
     responses(
         (status = 200, description = "Validation completed", body = ValidateSourceResponse),
         (status = 400, description = "Bad request", body = ErrorMessage),
+        (status = 502, description = "Your source database returned an invalid response", body = ErrorMessage),
+        (status = 503, description = "Your source database is unavailable", body = ErrorMessage),
+        (status = 504, description = "Request to your source database timed out", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
     tag = "Sources"
@@ -277,6 +283,7 @@ pub(crate) async fn validate_source(
     ),
     responses(
         (status = 200, description = "Source retrieved successfully", body = ReadSourceResponse),
+        (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 404, description = "Source not found", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage),
     ),
@@ -316,8 +323,12 @@ pub(crate) async fn read_source(
     ),
     responses(
         (status = 200, description = "Source updated successfully"),
+        (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 404, description = "Source not found", body = ErrorMessage),
         (status = 422, description = "Source profile validation failed", body = ErrorMessage),
+        (status = 502, description = "Your source database returned an invalid response", body = ErrorMessage),
+        (status = 503, description = "Your source database is unavailable", body = ErrorMessage),
+        (status = 504, description = "Request to your source database timed out", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage),
     ),
     tag = "Sources"
@@ -367,6 +378,7 @@ pub(crate) async fn update_source(
     ),
     responses(
         (status = 200, description = "Source deleted successfully"),
+        (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 409, description = "Source has an active pipeline or is still used by pipelines", body = ErrorMessage),
         (status = 404, description = "Source not found", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage),
@@ -419,6 +431,7 @@ pub(crate) async fn delete_source(
     ),
     responses(
         (status = 200, description = "Sources listed successfully", body = ReadSourcesResponse),
+        (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage),
     ),
     tag = "Sources"

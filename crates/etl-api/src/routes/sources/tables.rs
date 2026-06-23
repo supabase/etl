@@ -22,7 +22,7 @@ use crate::{
     k8s::{TrustedRootCertsCache, TrustedRootCertsError},
     routes::{
         ErrorMessage, IntoInner, TenantIdError, error_response_with_internal_error,
-        extract_tenant_id,
+        extract_tenant_id, utils,
     },
 };
 
@@ -51,9 +51,12 @@ impl TableError {
     fn to_message(&self) -> String {
         match self {
             // Do not expose internal database details in error messages
-            TableError::SourcesDb(SourcesDbError::Database(_))
-            | TableError::TablesDb(TablesDbError::Database(_))
-            | TableError::Database(_) => "Internal server error".to_owned(),
+            TableError::SourcesDb(_) | TableError::TrustedRootCerts(_) => {
+                "Internal server error".to_owned()
+            }
+            TableError::TablesDb(TablesDbError::Database(_)) | TableError::Database(_) => {
+                "Could not query your source database".to_owned()
+            }
             // Every other message is ok, as they do not divulge sensitive information
             e => e.to_string(),
         }
@@ -69,10 +72,12 @@ pub struct ReadTablesResponse {
 impl IntoResponse for TableError {
     fn into_response(self) -> Response {
         let status_code = match &self {
-            TableError::SourcesDb(_)
-            | TableError::TablesDb(_)
-            | TableError::Database(_)
-            | TableError::TrustedRootCerts(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            TableError::SourcesDb(_) | TableError::TrustedRootCerts(_) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+            TableError::TablesDb(TablesDbError::Database(error)) | TableError::Database(error) => {
+                utils::source_database_error_status_code(error)
+            }
             TableError::SourceNotFound(_) => StatusCode::NOT_FOUND,
             TableError::TenantId(_) => StatusCode::BAD_REQUEST,
         };
@@ -89,9 +94,15 @@ impl IntoResponse for TableError {
     tag = "Tables",
     params(
         ("source_id" = i64, Path, description = "Unique ID of the source"),
+        ("tenant_id" = String, Header, description = "Tenant ID used to scope the request"),
     ),
     responses(
         (status = 200, description = "Tables listed successfully", body = ReadTablesResponse),
+        (status = 400, description = "Bad request", body = ErrorMessage),
+        (status = 404, description = "Source not found", body = ErrorMessage),
+        (status = 502, description = "Your source database returned an invalid response", body = ErrorMessage),
+        (status = 503, description = "Your source database is unavailable", body = ErrorMessage),
+        (status = 504, description = "Request to your source database timed out", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     )
 )]
@@ -119,4 +130,26 @@ pub(crate) async fn read_table_names(
     let response = ReadTablesResponse { tables };
 
     Ok(Json(response))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_connection_timeout_is_reported_as_upstream_unavailable() {
+        let response = TableError::Database(sqlx::Error::PoolTimedOut).into_response();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn source_query_error_is_reported_as_bad_gateway() {
+        let response = TableError::TablesDb(TablesDbError::Database(sqlx::Error::Protocol(
+            "bad source response".to_owned(),
+        )))
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    }
 }

@@ -21,6 +21,10 @@ const ENDPOINT_LABEL: &str = "endpoint";
 const METHOD_LABEL: &str = "method";
 /// Response status label key.
 const STATUS_LABEL: &str = "status";
+/// Bounded label for unmatched API requests.
+const UNMATCHED_API_ENDPOINT: &str = "/v1/__unmatched__";
+/// Bounded label for unmatched non-API requests.
+const UNMATCHED_ENDPOINT: &str = "__unmatched__";
 
 /// Records request count and latency metrics for each HTTP response.
 pub(crate) async fn record_http_metrics(request: Request, next: Next) -> Response {
@@ -55,8 +59,15 @@ fn register_http_metrics() {
 
 /// Returns the low-cardinality route pattern for a request.
 fn request_endpoint(request: &Request) -> String {
-    request
-        .extensions()
-        .get::<MatchedPath>()
-        .map_or_else(|| request.uri().path().to_owned(), |path| path.as_str().to_owned())
+    request.extensions().get::<MatchedPath>().map_or_else(
+        || {
+            let path = request.uri().path();
+            if path == "/v1" || path.starts_with("/v1/") {
+                UNMATCHED_API_ENDPOINT.to_owned()
+            } else {
+                UNMATCHED_ENDPOINT.to_owned()
+            }
+        },
+        |path| path.as_str().to_owned(),
+    )
 }
