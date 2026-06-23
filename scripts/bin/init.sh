@@ -44,7 +44,7 @@ if [[ -z "${SKIP_DOCKER}" ]]
 then
   USING_DOCKER_COMPOSE=1
   echo "🐳 Starting all services with Docker Compose..."
-  
+
   # Export environment variables for docker-compose
   export POSTGRES_USER="${DB_USER}"
   export POSTGRES_PASSWORD="${DB_PASSWORD}"
@@ -149,6 +149,13 @@ psql "${DATABASE_URL}" -v ON_ERROR_STOP=1 -c "select app.update_default_image('$
 if ! kubectl config get-contexts -o name | grep -qx "orbstack"; then
   echo >&2 "❌ Error: Kubernetes context 'orbstack' not found."
   echo >&2 "Please install OrbStack (https://orbstack.dev) and enable Kubernetes in its settings."
+  exit 1
+fi
+
+# Ensure the OrbStack Kubernetes cluster is running and reachable.
+if ! kubectl --context orbstack get nodes > /dev/null 2>&1; then
+  echo >&2 "❌ Error: OrbStack Kubernetes cluster is not reachable."
+  echo >&2 "Please start OrbStack and ensure Kubernetes is enabled and running."
   exit 1
 fi
 
