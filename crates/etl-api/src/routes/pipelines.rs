@@ -259,7 +259,7 @@ impl IntoResponse for PipelineError {
                 StatusCode::BAD_REQUEST
             }
             PipelineError::InvalidPipelineRequest(_) => StatusCode::BAD_REQUEST,
-            PipelineError::PipelineLimitReached { .. } => StatusCode::UNPROCESSABLE_ENTITY,
+            PipelineError::PipelineLimitReached { .. } => StatusCode::CONFLICT,
         };
 
         error_response_with_internal_error(status_code, self.to_message(), &self)
@@ -614,8 +614,7 @@ pub struct ValidatePipelineResponse {
         (status = 200, description = "Pipeline created successfully", body = CreatePipelineResponse),
         (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 404, description = "Source or destination not found", body = ErrorMessage),
-        (status = 409, description = "Pipeline already exists for this source and destination", body = ErrorMessage),
-        (status = 422, description = "Pipeline limit reached", body = ErrorMessage),
+        (status = 409, description = "Pipeline already exists for this source and destination or tenant pipeline limit reached", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage),
     ),
     tag = "Pipelines"

@@ -182,10 +182,8 @@ impl IntoResponse for DestinationPipelineError {
             DestinationPipelineError::TenantId(_)
             | DestinationPipelineError::InvalidPipelineRequest(_) => StatusCode::BAD_REQUEST,
             DestinationPipelineError::DuplicatePipeline
-            | DestinationPipelineError::ActivePipeline(_) => StatusCode::CONFLICT,
-            DestinationPipelineError::PipelineLimitReached { .. } => {
-                StatusCode::UNPROCESSABLE_ENTITY
-            }
+            | DestinationPipelineError::ActivePipeline(_)
+            | DestinationPipelineError::PipelineLimitReached { .. } => StatusCode::CONFLICT,
         };
 
         error_response_with_internal_error(status_code, self.to_message(), &self)
@@ -253,10 +251,9 @@ fn validate_pipeline_request(
     ),
     responses(
         (status = 200, description = "Destination and pipeline created successfully", body = CreateDestinationPipelineResponse),
-        (status = 409, description = "Conflict – a pipeline already exists for this source and destination", body = ErrorMessage),
+        (status = 409, description = "Conflict – a pipeline already exists for this source and destination or tenant pipeline limit reached", body = ErrorMessage),
         (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 404, description = "Source not found", body = ErrorMessage),
-        (status = 422, description = "Pipeline limit reached", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
     tag = "Destinations and Pipelines"

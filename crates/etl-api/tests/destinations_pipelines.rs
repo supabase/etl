@@ -242,7 +242,7 @@ async fn tenant_cannot_create_more_than_max_destinations_pipelines() {
     let response = app.create_destination_pipeline(tenant_id, &destination_pipeline).await;
 
     // Assert
-    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(response.status(), StatusCode::CONFLICT);
 }
 
 #[tokio::test(flavor = "multi_thread")]
