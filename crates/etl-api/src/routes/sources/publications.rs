@@ -23,7 +23,7 @@ use crate::{
     k8s::{TrustedRootCertsCache, TrustedRootCertsError},
     routes::{
         ErrorMessage, IntoInner, TenantIdError, error_response_with_internal_error,
-        extract_tenant_id,
+        extract_tenant_id, utils,
     },
 };
 
@@ -55,9 +55,11 @@ impl PublicationError {
     fn to_message(&self) -> String {
         match self {
             // Do not expose internal database details in error messages
-            PublicationError::SourcesDb(SourcesDbError::Database(_))
-            | PublicationError::PublicationsDb(PublicationsDbError::Database(_))
-            | PublicationError::Database(_) => "Internal server error".to_owned(),
+            PublicationError::SourcesDb(SourcesDbError::Database(_)) => {
+                "Internal server error".to_owned()
+            }
+            PublicationError::PublicationsDb(PublicationsDbError::Database(_))
+            | PublicationError::Database(_) => "Could not query the source database".to_owned(),
             // Every other message is ok, as they do not divulge sensitive information
             e => e.to_string(),
         }
@@ -67,10 +69,11 @@ impl PublicationError {
 impl IntoResponse for PublicationError {
     fn into_response(self) -> Response {
         let status_code = match &self {
-            PublicationError::SourcesDb(_)
-            | PublicationError::PublicationsDb(_)
-            | PublicationError::Database(_)
-            | PublicationError::TrustedRootCerts(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            PublicationError::SourcesDb(_) | PublicationError::TrustedRootCerts(_) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+            PublicationError::PublicationsDb(PublicationsDbError::Database(error))
+            | PublicationError::Database(error) => utils::source_database_error_status_code(error),
             PublicationError::SourceNotFound(_) | PublicationError::PublicationNotFound(_) => {
                 StatusCode::NOT_FOUND
             }
@@ -460,4 +463,26 @@ pub(crate) async fn set_publication_tables(
     data::publications::update_publication(&publication, &source_pool).await?;
 
     Ok(StatusCode::OK)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_connection_timeout_is_reported_as_upstream_unavailable() {
+        let response = PublicationError::Database(sqlx::Error::PoolTimedOut).into_response();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn source_query_error_is_reported_as_bad_gateway() {
+        let response = PublicationError::PublicationsDb(PublicationsDbError::Database(
+            sqlx::Error::Protocol("bad source response".to_owned()),
+        ))
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    }
 }

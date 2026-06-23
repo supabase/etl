@@ -7,23 +7,22 @@ use crate::validation::{ValidationError, ValidationFailure};
 /// Returns the public HTTP status code for a validation execution error.
 pub fn validation_error_status_code(error: &ValidationError) -> StatusCode {
     match error {
-        ValidationError::Database { source: sqlx::Error::PoolTimedOut } => {
-            StatusCode::SERVICE_UNAVAILABLE
-        }
-        ValidationError::Database { source: sqlx::Error::PoolClosed } => {
-            StatusCode::SERVICE_UNAVAILABLE
-        }
-        ValidationError::Database { source: sqlx::Error::Io(error) }
-            if error.kind() == ErrorKind::TimedOut =>
-        {
-            StatusCode::GATEWAY_TIMEOUT
-        }
-        ValidationError::Database { .. }
-        | ValidationError::BigQuery(_)
-        | ValidationError::Iceberg(_) => StatusCode::BAD_GATEWAY,
+        ValidationError::Database { source } => source_database_error_status_code(source),
+        ValidationError::BigQuery(_) | ValidationError::Iceberg(_) => StatusCode::BAD_GATEWAY,
         ValidationError::TrustedRootCerts(_) | ValidationError::Environment(_) => {
             StatusCode::INTERNAL_SERVER_ERROR
         }
+    }
+}
+
+/// Returns the public HTTP status code for source database execution errors.
+pub fn source_database_error_status_code(error: &sqlx::Error) -> StatusCode {
+    match error {
+        sqlx::Error::PoolTimedOut | sqlx::Error::PoolClosed => StatusCode::SERVICE_UNAVAILABLE,
+        sqlx::Error::Io(error) if error.kind() == ErrorKind::TimedOut => {
+            StatusCode::GATEWAY_TIMEOUT
+        }
+        _ => StatusCode::BAD_GATEWAY,
     }
 }
 
@@ -78,5 +77,12 @@ mod tests {
         assert_eq!(validation_error_status_code(&error), StatusCode::GATEWAY_TIMEOUT);
         assert_eq!(validation_error_message(&error), "Could not reach the source database in time");
         assert_eq!(error.to_string(), "Database query failed");
+    }
+
+    #[test]
+    fn source_database_errors_are_reported_as_upstream_failures() {
+        let error = sqlx::Error::Protocol("bad source response".to_owned());
+
+        assert_eq!(source_database_error_status_code(&error), StatusCode::BAD_GATEWAY);
     }
 }
