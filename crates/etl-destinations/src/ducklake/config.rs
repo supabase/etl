@@ -9,6 +9,7 @@ use etl::{
     error::{ErrorKind, EtlResult},
     etl_error,
 };
+use etl_config::libpq_tcp_host;
 use pg_escape::{quote_identifier, quote_literal};
 use tokio_postgres::{
     Config as PgConfig,
@@ -510,13 +511,6 @@ pub(super) fn serialize_hosts(hosts: &[Host]) -> EtlResult<String> {
     }
 
     Ok(values.join(","))
-}
-
-fn libpq_tcp_host(host: &str) -> &str {
-    match host.strip_prefix('[').and_then(|host| host.strip_suffix(']')) {
-        Some(unbracketed) if unbracketed.contains(':') => unbracketed,
-        _ => host,
-    }
 }
 
 /// Adds a `key='value'` pair to a libpq conninfo string.

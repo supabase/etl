@@ -17,6 +17,7 @@ use etl::{
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
 };
+use etl_config::libpq_tcp_host;
 use metrics::{gauge, histogram};
 use pg_escape::{quote_identifier, quote_literal};
 use regex::Regex;
@@ -547,13 +548,6 @@ fn serialize_hosts(hosts: &[Host]) -> EtlResult<String> {
     }
 
     Ok(values.join(","))
-}
-
-fn libpq_tcp_host(host: &str) -> &str {
-    match host.strip_prefix('[').and_then(|host| host.strip_suffix(']')) {
-        Some(unbracketed) if unbracketed.contains(':') => unbracketed,
-        _ => host,
-    }
 }
 
 fn push_conninfo_pair(parts: &mut Vec<String>, key: &str, value: &str) {

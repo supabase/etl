@@ -49,6 +49,13 @@ pub fn parse_ducklake_url(value: &str) -> Result<Url, ParseDucklakeUrlError> {
     Url::from_file_path(&path).map_err(|_| ParseDucklakeUrlError::FilePath(path))
 }
 
+pub fn libpq_tcp_host(host: &str) -> &str {
+    match host.strip_prefix('[').and_then(|host| host.strip_suffix(']')) {
+        Some(unbracketed) if unbracketed.contains(':') => unbracketed,
+        _ => host,
+    }
+}
+
 /// Parses a DuckLake data path and requires an `s3://` URL.
 pub fn parse_ducklake_s3_data_path(value: &str) -> Result<Url, ParseDucklakeUrlError> {
     let url = parse_ducklake_url(value)?;
