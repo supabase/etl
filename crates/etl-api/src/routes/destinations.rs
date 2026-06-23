@@ -242,6 +242,7 @@ pub(crate) async fn create_destination(
     ),
     responses(
         (status = 200, description = "Destination retrieved successfully", body = ReadDestinationResponse),
+        (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 404, description = "Destination not found", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
@@ -282,6 +283,7 @@ pub(crate) async fn read_destination(
     ),
     responses(
         (status = 200, description = "Destination updated successfully"),
+        (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 404, description = "Destination not found", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
@@ -323,6 +325,7 @@ pub(crate) async fn update_destination(
     ),
     responses(
         (status = 200, description = "Destination deleted successfully"),
+        (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 409, description = "Destination has an active pipeline or is still used by pipelines", body = ErrorMessage),
         (status = 404, description = "Destination not found", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
@@ -373,6 +376,7 @@ pub(crate) async fn delete_destination(
     description = "Returns all destinations for the specified tenant.",
     responses(
         (status = 200, description = "Destinations listed successfully", body = ReadDestinationsResponse),
+        (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
     params(
@@ -417,6 +421,10 @@ pub(crate) async fn read_all_destinations(
     responses(
         (status = 200, description = "Validation completed", body = ValidateDestinationResponse),
         (status = 400, description = "Bad request", body = ErrorMessage),
+        (status = 404, description = "Source not found", body = ErrorMessage),
+        (status = 502, description = "Destination or source dependency returned an invalid response", body = ErrorMessage),
+        (status = 503, description = "Destination or source dependency unavailable", body = ErrorMessage),
+        (status = 504, description = "Destination or source dependency request timed out", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
     tag = "Destinations"

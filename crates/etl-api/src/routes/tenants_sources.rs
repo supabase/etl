@@ -47,10 +47,14 @@ impl TenantSourceError {
     fn to_message(&self) -> String {
         match self {
             // Do not expose internal database details in error messages
+            TenantSourceError::TenantSourceDb(TenantSourceDbError::Tenants(
+                TenantsDbError::Conflict(_),
+            )) => self.to_string(),
             TenantSourceError::TenantSourceDb(
                 TenantSourceDbError::Database(_)
                 | TenantSourceDbError::Sources(_)
-                | TenantSourceDbError::Tenants(_),
+                | TenantSourceDbError::Tenants(_)
+                | TenantSourceDbError::DbSerialization(_),
             )
             | TenantSourceError::Database(_) => "Internal server error".to_owned(),
             TenantSourceError::Validation(error) => {
@@ -129,7 +133,11 @@ pub struct CreateTenantSourceResponse {
     responses(
         (status = 200, description = "Tenant and source created successfully", body = CreateTenantSourceResponse),
         (status = 400, description = "Bad request", body = ErrorMessage),
+        (status = 409, description = "Tenant already exists", body = ErrorMessage),
         (status = 422, description = "Source profile validation failed", body = ErrorMessage),
+        (status = 502, description = "Source database returned an invalid response", body = ErrorMessage),
+        (status = 503, description = "Source database unavailable", body = ErrorMessage),
+        (status = 504, description = "Source database request timed out", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage),
     ),
     tag = "Tenants & Sources"

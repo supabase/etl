@@ -55,7 +55,7 @@ impl PublicationError {
     fn to_message(&self) -> String {
         match self {
             // Do not expose internal database details in error messages
-            PublicationError::SourcesDb(SourcesDbError::Database(_)) => {
+            PublicationError::SourcesDb(_) | PublicationError::TrustedRootCerts(_) => {
                 "Internal server error".to_owned()
             }
             PublicationError::PublicationsDb(PublicationsDbError::Database(_))
@@ -113,9 +113,15 @@ pub struct ReadPublicationsResponse {
     request_body = CreatePublicationRequest,
     params(
         ("source_id" = i64, Path, description = "Unique ID of the source"),
+        ("tenant_id" = String, Header, description = "Tenant ID used to scope the request"),
     ),
     responses(
         (status = 200, description = "Publication created successfully"),
+        (status = 400, description = "Bad request", body = ErrorMessage),
+        (status = 404, description = "Source not found", body = ErrorMessage),
+        (status = 502, description = "Source database returned an invalid response", body = ErrorMessage),
+        (status = 503, description = "Source database unavailable", body = ErrorMessage),
+        (status = 504, description = "Source database request timed out", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     )
 )]
@@ -156,10 +162,15 @@ pub(crate) async fn create_publication(
     params(
         ("source_id" = i64, Path, description = "Unique ID of the source"),
         ("publication_name" = String, Path, description = "Publication name within the source"),
+        ("tenant_id" = String, Header, description = "Tenant ID used to scope the request"),
     ),
     responses(
         (status = 200, description = "Publication retrieved successfully", body = Publication),
-        (status = 404, description = "Publication not found", body = ErrorMessage),
+        (status = 400, description = "Bad request", body = ErrorMessage),
+        (status = 404, description = "Source or publication not found", body = ErrorMessage),
+        (status = 502, description = "Source database returned an invalid response", body = ErrorMessage),
+        (status = 503, description = "Source database unavailable", body = ErrorMessage),
+        (status = 504, description = "Source database request timed out", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     )
 )]
@@ -200,10 +211,15 @@ pub(crate) async fn read_publication(
     params(
         ("source_id" = i64, Path, description = "Unique ID of the source"),
         ("publication_name" = String, Path, description = "Publication name within the source"),
+        ("tenant_id" = String, Header, description = "Tenant ID used to scope the request"),
     ),
     responses(
         (status = 200, description = "Publication updated successfully"),
-        (status = 404, description = "Publication not found", body = ErrorMessage),
+        (status = 400, description = "Bad request", body = ErrorMessage),
+        (status = 404, description = "Source or publication not found", body = ErrorMessage),
+        (status = 502, description = "Source database returned an invalid response", body = ErrorMessage),
+        (status = 503, description = "Source database unavailable", body = ErrorMessage),
+        (status = 504, description = "Source database request timed out", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     )
 )]
@@ -249,10 +265,15 @@ pub(crate) async fn update_publication(
     params(
         ("source_id" = i64, Path, description = "Unique ID of the source"),
         ("publication_name" = String, Path, description = "Publication name within the source"),
+        ("tenant_id" = String, Header, description = "Tenant ID used to scope the request"),
     ),
     responses(
         (status = 200, description = "Publication deleted successfully"),
-        (status = 404, description = "Publication not found", body = ErrorMessage),
+        (status = 400, description = "Bad request", body = ErrorMessage),
+        (status = 404, description = "Source or publication not found", body = ErrorMessage),
+        (status = 502, description = "Source database returned an invalid response", body = ErrorMessage),
+        (status = 503, description = "Source database unavailable", body = ErrorMessage),
+        (status = 504, description = "Source database request timed out", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     )
 )]
@@ -289,9 +310,15 @@ pub(crate) async fn delete_publication(
     tag = "Publications",
     params(
         ("source_id" = i64, Path, description = "Unique ID of the source"),
+        ("tenant_id" = String, Header, description = "Tenant ID used to scope the request"),
     ),
     responses(
         (status = 200, description = "Publications listed successfully", body = ReadPublicationsResponse),
+        (status = 400, description = "Bad request", body = ErrorMessage),
+        (status = 404, description = "Source not found", body = ErrorMessage),
+        (status = 502, description = "Source database returned an invalid response", body = ErrorMessage),
+        (status = 503, description = "Source database unavailable", body = ErrorMessage),
+        (status = 504, description = "Source database request timed out", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     )
 )]
@@ -331,10 +358,15 @@ pub(crate) async fn read_all_publications(
     params(
         ("source_id" = i64, Path, description = "Unique ID of the source"),
         ("publication_name" = String, Path, description = "Publication name within the source"),
+        ("tenant_id" = String, Header, description = "Tenant ID used to scope the request"),
     ),
     responses(
         (status = 200, description = "Tables added successfully"),
-        (status = 404, description = "Publication not found", body = ErrorMessage),
+        (status = 400, description = "Bad request", body = ErrorMessage),
+        (status = 404, description = "Source or publication not found", body = ErrorMessage),
+        (status = 502, description = "Source database returned an invalid response", body = ErrorMessage),
+        (status = 503, description = "Source database unavailable", body = ErrorMessage),
+        (status = 504, description = "Source database request timed out", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     )
 )]
@@ -379,10 +411,15 @@ pub(crate) async fn add_tables_to_publication(
     params(
         ("source_id" = i64, Path, description = "Unique ID of the source"),
         ("publication_name" = String, Path, description = "Publication name within the source"),
+        ("tenant_id" = String, Header, description = "Tenant ID used to scope the request"),
     ),
     responses(
         (status = 200, description = "Tables removed successfully"),
-        (status = 404, description = "Publication not found", body = ErrorMessage),
+        (status = 400, description = "Bad request", body = ErrorMessage),
+        (status = 404, description = "Source or publication not found", body = ErrorMessage),
+        (status = 502, description = "Source database returned an invalid response", body = ErrorMessage),
+        (status = 503, description = "Source database unavailable", body = ErrorMessage),
+        (status = 504, description = "Source database request timed out", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     )
 )]
@@ -427,10 +464,15 @@ pub(crate) async fn drop_tables_from_publication(
     params(
         ("source_id" = i64, Path, description = "Unique ID of the source"),
         ("publication_name" = String, Path, description = "Publication name within the source"),
+        ("tenant_id" = String, Header, description = "Tenant ID used to scope the request"),
     ),
     responses(
         (status = 200, description = "Tables replaced successfully"),
-        (status = 404, description = "Publication not found", body = ErrorMessage),
+        (status = 400, description = "Bad request", body = ErrorMessage),
+        (status = 404, description = "Source or publication not found", body = ErrorMessage),
+        (status = 502, description = "Source database returned an invalid response", body = ErrorMessage),
+        (status = 503, description = "Source database unavailable", body = ErrorMessage),
+        (status = 504, description = "Source database request timed out", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     )
 )]

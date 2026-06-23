@@ -1,6 +1,7 @@
 use std::io::ErrorKind;
 
 use axum::http::StatusCode;
+use sqlx::error::DatabaseError;
 
 use crate::validation::{ValidationError, ValidationFailure};
 
@@ -19,11 +20,18 @@ pub fn validation_error_status_code(error: &ValidationError) -> StatusCode {
 pub fn source_database_error_status_code(error: &sqlx::Error) -> StatusCode {
     match error {
         sqlx::Error::PoolTimedOut | sqlx::Error::PoolClosed => StatusCode::SERVICE_UNAVAILABLE,
+        sqlx::Error::Database(error) if source_database_unavailable_error(error.as_ref()) => {
+            StatusCode::SERVICE_UNAVAILABLE
+        }
         sqlx::Error::Io(error) if error.kind() == ErrorKind::TimedOut => {
             StatusCode::GATEWAY_TIMEOUT
         }
         _ => StatusCode::BAD_GATEWAY,
     }
+}
+
+fn source_database_unavailable_error(error: &dyn DatabaseError) -> bool {
+    matches!(error.code().as_deref(), Some("57P01" | "57P02" | "57P03"))
 }
 
 /// Returns the public error message for a validation execution error.
