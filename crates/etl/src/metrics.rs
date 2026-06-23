@@ -34,7 +34,9 @@ pub const ETL_MEMORY_BACKPRESSURE_TRANSITIONS_TOTAL: &str =
 pub const ETL_MEMORY_BACKPRESSURE_ACTIVATION_DURATION_SECONDS: &str =
     "etl_memory_backpressure_activation_duration_seconds";
 pub const ETL_IDEAL_BATCH_SIZE_BYTES: &str = "etl_ideal_batch_size_bytes";
-pub const ETL_APPLY_LOOP_RECEIVE_LAG_BYTES: &str = "etl_apply_loop_receive_lag_bytes";
+pub const ETL_APPLY_LOOP_RECEIVED_LAG_BYTES: &str = "etl_apply_loop_received_lag_bytes";
+pub const ETL_APPLY_LOOP_EFFECTIVE_FLUSH_LAG_BYTES: &str =
+    "etl_apply_loop_effective_flush_lag_bytes";
 pub const ETL_APPLY_LOOP_FLUSH_LAG_BYTES: &str = "etl_apply_loop_flush_lag_bytes";
 pub const ETL_APPLY_LOOP_END_TO_END_LAG_BYTES: &str = "etl_apply_loop_end_to_end_lag_bytes";
 
@@ -232,22 +234,33 @@ pub(crate) fn register_metrics() {
         );
 
         describe_gauge!(
-            ETL_APPLY_LOOP_RECEIVE_LAG_BYTES,
+            ETL_APPLY_LOOP_RECEIVED_LAG_BYTES,
             Unit::Bytes,
-            "Bytes between the current source WAL LSN and the apply loop's last received LSN."
+            "Difference between the source Postgres current WAL position and the last LSN \
+             received by ETL."
+        );
+
+        describe_gauge!(
+            ETL_APPLY_LOOP_EFFECTIVE_FLUSH_LAG_BYTES,
+            Unit::Bytes,
+            "Difference between ETL's last received LSN and effective flush LSN. The effective \
+             flush LSN is the apply-loop progress frontier; when the loop is idle and no data \
+             needs flushing, it follows the last received LSN."
         );
 
         describe_gauge!(
             ETL_APPLY_LOOP_FLUSH_LAG_BYTES,
             Unit::Bytes,
-            "Bytes between the apply loop's last received LSN and the apply loop's last durable \
-             flush LSN."
+            "Difference between ETL's last received LSN and last flush LSN. The last flush LSN is \
+             the latest LSN whose data was durably flushed to the destination; idle-only progress \
+             is not included."
         );
 
         describe_gauge!(
             ETL_APPLY_LOOP_END_TO_END_LAG_BYTES,
             Unit::Bytes,
-            "Bytes between the current source WAL LSN and the apply loop's last durable flush LSN."
+            "Difference between the source Postgres current WAL position and ETL's effective \
+             flush LSN."
         );
     });
 }
