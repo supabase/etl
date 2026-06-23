@@ -27,9 +27,8 @@ const DEFAULT_DATABASE_USERNAME: &str = "postgres";
 const DEFAULT_DATABASE_PASSWORD: &str = "postgres";
 const APP_NAME_TEST_MIGRATIONS: &str = "supabase_etl_api_test_migrations";
 
-static TEST_MIGRATION_OPTIONS: LazyLock<PgConnectionOptions> = LazyLock::new(|| {
-    PgConnectionOptions::builder(APP_NAME_TEST_MIGRATIONS).build()
-});
+static TEST_MIGRATION_OPTIONS: LazyLock<PgConnectionOptions> =
+    LazyLock::new(|| PgConnectionOptions::builder(APP_NAME_TEST_MIGRATIONS).build());
 
 /// Creates a database configuration from TESTS_DATABASE_* environment
 /// variables.

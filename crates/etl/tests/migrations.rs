@@ -23,9 +23,8 @@ const DEFAULT_DATABASE_PASSWORD: &str = "postgres";
 const POSTGRES_STORE_BASE_VERSION: i64 = 20250827000000;
 const APP_NAME_TEST_MIGRATIONS: &str = "supabase_etl_test_migrations";
 
-static TEST_MIGRATION_OPTIONS: LazyLock<PgConnectionOptions> = LazyLock::new(|| {
-    PgConnectionOptions::builder(APP_NAME_TEST_MIGRATIONS).build()
-});
+static TEST_MIGRATION_OPTIONS: LazyLock<PgConnectionOptions> =
+    LazyLock::new(|| PgConnectionOptions::builder(APP_NAME_TEST_MIGRATIONS).build());
 
 fn local_pg_connection_config() -> PgConnectionConfig {
     PgConnectionConfig {
