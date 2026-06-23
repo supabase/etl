@@ -1,4 +1,6 @@
-use etl_config::shared::{ETL_API_OPTIONS, PgConnectionConfig};
+use std::sync::LazyLock;
+
+use etl_config::shared::{PgConnectionConfig, PgConnectionOptions};
 use etl_postgres::replication::connect_to_source_database;
 use sqlx::PgPool;
 
@@ -18,6 +20,14 @@ pub mod utils;
 const MIN_POOL_CONNECTIONS: u32 = 1;
 /// Maximum number of connections for the source Postgres connection pool.
 const MAX_POOL_CONNECTIONS: u32 = 1;
+/// Application name for ETL API source database connections.
+const APP_NAME_API: &str = "supabase_etl_api";
+
+/// Connection options for API source database queries.
+///
+/// Uses strict timeouts to keep API requests responsive under contention.
+static API_OPTIONS: LazyLock<PgConnectionOptions> =
+    LazyLock::new(|| PgConnectionOptions::builder(APP_NAME_API).lock_timeout(5_000).build());
 
 /// Connects to the source database with the specified configuration and default
 /// connection pool size.
@@ -33,7 +43,7 @@ pub async fn connect_to_source_database_from_api(
         config,
         MIN_POOL_CONNECTIONS,
         MAX_POOL_CONNECTIONS,
-        Some(&ETL_API_OPTIONS),
+        Some(&API_OPTIONS),
     )
     .await
 }

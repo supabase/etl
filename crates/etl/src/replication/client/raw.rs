@@ -1,4 +1,9 @@
-use std::{fmt, num::NonZeroI32, sync::Arc, time::Duration};
+use std::{
+    fmt,
+    num::NonZeroI32,
+    sync::{Arc, LazyLock},
+    time::Duration,
+};
 
 use etl_postgres::{replication::extract_server_version, tokio::tls::MakeRustlsConnect};
 use pg_escape::{quote_identifier, quote_literal};
@@ -26,7 +31,7 @@ use super::{
 };
 use crate::{
     bail,
-    config::{ETL_REPLICATION_OPTIONS, IntoConnectOptions, PgConnectionConfig},
+    config::{IntoConnectOptions, PgConnectionConfig, PgConnectionOptions},
     error::{ErrorKind, EtlResult},
     etl_error,
     types::{PgLsn, TableId, TableName},
@@ -39,6 +44,21 @@ use crate::{
 const DELETE_SLOT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Default duration unit used when `pg_settings.unit` is empty.
 const PG_SETTINGS_DEFAULT_DURATION_UNIT: &str = "ms";
+/// Application name for ETL logical replication connections.
+const APP_NAME_REPLICATOR_STREAMING: &str = "supabase_etl_replicator_streaming";
+
+/// Connection options for logical replication streams.
+///
+/// Disables statement, lock, and idle-in-transaction timeouts because
+/// replication streams, slot creation, and initial table synchronization can
+/// legitimately run for a long time.
+static REPLICATION_OPTIONS: LazyLock<PgConnectionOptions> = LazyLock::new(|| {
+    PgConnectionOptions::builder(APP_NAME_REPLICATOR_STREAMING)
+        .statement_timeout(0)
+        .lock_timeout(0)
+        .idle_in_transaction_session_timeout(0)
+        .build()
+});
 
 /// The kind of PostgreSQL connection to create.
 #[derive(Debug, Clone, Copy)]
@@ -217,7 +237,7 @@ impl PgReplicationClient {
         kind: ConnectionKind,
     ) -> EtlResult<Self> {
         let mut config: Config =
-            connection_config.pg_connection_config().with_db(Some(&ETL_REPLICATION_OPTIONS));
+            connection_config.pg_connection_config().with_db(Some(&REPLICATION_OPTIONS));
         kind.configure(&mut config);
 
         let (client, connection) = config.connect(NoTls).await?;
@@ -238,7 +258,7 @@ impl PgReplicationClient {
         kind: ConnectionKind,
     ) -> EtlResult<Self> {
         let mut config: Config =
-            connection_config.pg_connection_config().with_db(Some(&ETL_REPLICATION_OPTIONS));
+            connection_config.pg_connection_config().with_db(Some(&REPLICATION_OPTIONS));
         kind.configure(&mut config);
 
         let tls_config = connection_config.tls_client_config().ok_or_else(|| {
