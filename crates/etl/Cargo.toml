@@ -13,6 +13,7 @@ homepage.workspace = true
 test-utils = ["etl-postgres/test-utils"]
 failpoints = ["fail/failpoints"]
 egress = []
+fuzzing = []
 default = []
 
 [dependencies]

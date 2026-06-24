@@ -9,18 +9,15 @@ use crate::{
 /// the `\x` prefix followed by hexadecimal digits. Each pair of hex digits
 /// represents one byte in the output array.
 pub(crate) fn parse_bytea_hex_string(value: &str) -> EtlResult<Vec<u8>> {
-    let value = value.as_bytes();
-    if !value.starts_with(b"\\x") {
+    let Some(value) = value.as_bytes().strip_prefix(b"\\x") else {
         bail!(
             ErrorKind::ConversionError,
             "Bytea hex string conversion failed",
             "Missing '\\x' prefix"
         );
-    }
+    };
 
-    let mut result = Vec::with_capacity((value.len() - 2) / 2);
-
-    let value = &value[2..];
+    let mut result = Vec::with_capacity(value.len() / 2);
     if !value.len().is_multiple_of(2) {
         bail!(
             ErrorKind::ConversionError,
@@ -177,6 +174,14 @@ mod tests {
 
         let result = parse_bytea_hex_string("\\xaéa");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_bytea_hex_rejects_utf8_boundary_inputs() {
+        for value in ["aé", "\\é", "\\x🤔🤔"] {
+            let result = parse_bytea_hex_string(value);
+            assert!(result.is_err());
+        }
     }
 
     #[test]
