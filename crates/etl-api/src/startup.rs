@@ -88,6 +88,12 @@ use crate::{
 /// Running API server task.
 pub type Server = tokio::task::JoinHandle<io::Result<()>>;
 
+/// Minimum number of connections for the API metadata database pool.
+///
+/// The API pool is lazy and should not keep metadata database connections open
+/// while the server is idle.
+const MIN_DATABASE_POOL_CONNECTIONS: u32 = 0;
+
 /// ETL API application server wrapper.
 ///
 /// Manages the HTTP server lifecycle including startup, migration, and
@@ -252,7 +258,9 @@ fn decode_encryption_key(
 /// Connects to the API's own metadata database using server defaults (no custom
 /// options).
 pub fn get_connection_pool(config: &PgConnectionConfig) -> PgPool {
-    PgPoolOptions::new().connect_lazy_with(config.with_db(None))
+    PgPoolOptions::new()
+        .min_connections(MIN_DATABASE_POOL_CONNECTIONS)
+        .connect_lazy_with(config.with_db(None))
 }
 
 /// Creates and configures the HTTP server with all routes and middleware.

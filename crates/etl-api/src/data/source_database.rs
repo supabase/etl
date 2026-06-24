@@ -17,8 +17,10 @@ pub(crate) enum SourceDatabaseErrorKind {
 }
 
 /// Minimum number of connections for the source Postgres connection pool.
-const MIN_POOL_CONNECTIONS: u32 = 1;
-
+///
+/// API source pools are request-scoped administrative pools, so they should not
+/// keep customer database connections open after their work is done.
+const MIN_POOL_CONNECTIONS: u32 = 0;
 /// Maximum number of connections for the source Postgres connection pool.
 const MAX_POOL_CONNECTIONS: u32 = 1;
 /// Application name for ETL API source database connections.
