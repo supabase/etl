@@ -428,9 +428,9 @@ fn wal_level_failures(wal_level: &str) -> Vec<ValidationFailure> {
         vec![ValidationFailure::critical(
             "Invalid WAL Level",
             format!(
-                "Your source database WAL level is `{wal_level}`, but logical replication \
-                 requires `logical`.\n\nSet `wal_level = 'logical'` in `postgresql.conf` and \
-                 restart PostgreSQL."
+                "Your source database has `wal_level` set to `{wal_level}`, but logical \
+                 replication requires `logical`.\n\nSet `wal_level = 'logical'` in \
+                 `postgresql.conf` and restart PostgreSQL."
             ),
         )]
     }
@@ -465,11 +465,12 @@ fn replication_slot_failures(
             "Insufficient Replication Slots",
             format!(
                 "Your source database has {free_slots} free replication slots, but this pipeline \
-                 can need up to {required_slots} during the initial table copy \
+                 may need up to {required_slots} during the initial table copy \
                  ({used_replication_slots}/{max_replication_slots} slots are currently in \
-                 use).\n\nIncrease `max_replication_slots`, remove unused replication slots, or \
-                 reduce `max_table_sync_workers`. After the initial copy, this pipeline only uses \
-                 1 slot.",
+                 use).\n\nThis includes 1 apply slot plus up to `max_table_sync_workers` table \
+                 sync slots. Increase `max_replication_slots`, remove unused replication slots, \
+                 or reduce `max_table_sync_workers`. After the initial copy, this pipeline only \
+                 uses 1 slot.",
             ),
         )]
     }
@@ -491,10 +492,11 @@ fn wal_sender_failures(
             "Insufficient WAL Senders",
             format!(
                 "Your source database has {free_wal_senders} free WAL sender processes, but this \
-                 pipeline can need up to {required_wal_senders} during the initial table copy \
+                 pipeline may need up to {required_wal_senders} during the initial table copy \
                  ({active_wal_senders}/{max_wal_senders} WAL senders are currently \
-                 active).\n\nIncrease `max_wal_senders`, stop unused replication clients, or \
-                 reduce `max_table_sync_workers`."
+                 active).\n\nEach active replication slot needs a WAL sender connection. Increase \
+                 `max_wal_senders`, stop unused replication clients, or reduce \
+                 `max_table_sync_workers`."
             ),
         ));
     }
@@ -526,24 +528,26 @@ fn slot_wal_keep_size_failures(
         -1 => failures.push(ValidationFailure::warning(
             "Unlimited Slot WAL Retention",
             "`max_slot_wal_keep_size` is unlimited.\n\nLogical replication slots can retain WAL \
-             indefinitely when ETL is paused, disconnected, or stuck on a table error. Set a \
-             bounded value large enough for your write volume and longest expected initial copy \
-             so an abandoned slot cannot fill the source database disk.",
+             indefinitely when ETL is paused, disconnected, or stuck on a table error. This does \
+             not prevent the pipeline from starting, but an abandoned or stalled slot can fill \
+             the source database disk.\n\nSet a bounded value large enough for your write volume \
+             and longest expected initial copy.",
         )),
         0 => failures.push(ValidationFailure::critical(
             "Slot WAL Retention Disabled",
-            "`max_slot_wal_keep_size` is 0 MB.\n\nA logical replication slot can be invalidated \
-             as soon as it falls behind at a checkpoint, which can force ETL to restart table \
-             copies or require slot recreation. Increase `max_slot_wal_keep_size` to leave WAL \
-             headroom for normal replication lag.",
+            "`max_slot_wal_keep_size` is 0 MB, leaving no per-slot WAL retention headroom.\n\nA \
+             logical replication slot can be invalidated as soon as it falls behind at a \
+             checkpoint, which can force ETL to restart table copies or require slot recreation. \
+             Increase `max_slot_wal_keep_size` to leave WAL headroom for normal replication lag.",
         )),
         1..MIN_SLOT_WAL_KEEP_SIZE_MB => failures.push(ValidationFailure::warning(
             "Low Slot WAL Retention",
             format!(
-                "`max_slot_wal_keep_size` is {max_slot_wal_keep_size_mb} MB.\n\nThis may be too \
-                 small for logical replication during large transactions, destination outages, or \
-                 long initial table copies. Increase it based on source write volume, available \
-                 disk, and the longest time ETL may need to catch up."
+                "`max_slot_wal_keep_size` is {max_slot_wal_keep_size_mb} MB, which is below ETL's \
+                 recommended minimum of {MIN_SLOT_WAL_KEEP_SIZE_MB} MB.\n\nThis may be too small \
+                 for logical replication during large transactions, destination outages, or long \
+                 initial table copies. Increase it based on source write volume, available disk, \
+                 and the longest time ETL may need to catch up."
             ),
         )),
         _ => {}
