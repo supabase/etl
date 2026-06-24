@@ -31,6 +31,7 @@ async-trait = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
 duckdb = { workspace = true, optional = true, features = ["bundled", "json", "parquet", "r2d2"] }
 etl = { workspace = true }
+etl-config = { workspace = true }
 kube = { workspace = true, optional = true, features = ["client", "rustls-tls"] }
 metrics = { workspace = true, optional = true }
 parse-size = { workspace = true, optional = true }
