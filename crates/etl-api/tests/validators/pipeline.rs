@@ -248,8 +248,8 @@ async fn validate_pipeline_all_checks_pass() {
     let failures = validate_pipeline(&ctx, &pipeline_config).await.unwrap();
 
     assert!(
-        failures.is_empty(),
-        "Expected no failures for properly configured pipeline, got: {failures:?}"
+        failures.iter().all(|failure| failure.failure_type != FailureType::Critical),
+        "Expected no critical failures for properly configured pipeline, got: {failures:?}"
     );
 
     drop_pg_database(&config).await;

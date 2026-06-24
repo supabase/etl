@@ -17,9 +17,9 @@ mod source;
 use async_trait::async_trait;
 pub(super) use destination::DestinationValidator;
 use pipeline::{
-    GeneratedColumnsValidator, PublicationExcludesEtlTablesValidator, PublicationExistsValidator,
-    PublicationHasTablesValidator, ReplicationPermissionsValidator, ReplicationSlotsValidator,
-    WalLevelValidator,
+    GeneratedColumnsValidator, LogicalReplicationSettingsValidator,
+    PublicationExcludesEtlTablesValidator, PublicationExistsValidator,
+    PublicationHasTablesValidator,
 };
 pub(super) use source::SourceValidator;
 
@@ -42,13 +42,11 @@ impl PipelineValidator {
         let publication_name = self.config.publication_name.clone();
 
         vec![
-            Box::new(WalLevelValidator),
-            Box::new(ReplicationPermissionsValidator),
+            Box::new(LogicalReplicationSettingsValidator::new(max_table_sync_workers)),
             Box::new(PublicationExistsValidator::new(publication_name.clone())),
             Box::new(PublicationHasTablesValidator::new(publication_name.clone())),
             Box::new(PublicationExcludesEtlTablesValidator::new(publication_name.clone())),
             Box::new(GeneratedColumnsValidator::new(publication_name)),
-            Box::new(ReplicationSlotsValidator::new(max_table_sync_workers)),
         ]
     }
 }
