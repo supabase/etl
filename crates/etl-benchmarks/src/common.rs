@@ -757,10 +757,16 @@ fn pg_connect_options(args: &PgConnectionArgs) -> PgConnectOptions {
     options
 }
 
+/// Minimum number of connections for benchmark helper Postgres pools.
+const MIN_POSTGRES_POOL_CONNECTIONS: u32 = 0;
+/// Maximum number of connections for benchmark helper Postgres pools.
+const MAX_POSTGRES_POOL_CONNECTIONS: u32 = 16;
+
 /// Opens a Postgres pool for benchmark helpers.
 pub async fn pg_pool(args: &PgConnectionArgs) -> Result<PgPool> {
     PgPoolOptions::new()
-        .max_connections(16)
+        .min_connections(MIN_POSTGRES_POOL_CONNECTIONS)
+        .max_connections(MAX_POSTGRES_POOL_CONNECTIONS)
         .connect_with(pg_connect_options(args))
         .await
         .context("failed to connect to Postgres")

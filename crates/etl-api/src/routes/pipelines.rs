@@ -21,7 +21,6 @@ use crate::{
     configs::{encryption::EncryptionKeyring, pipeline::FullApiPipelineConfig},
     data,
     data::{
-        connect_to_source_database_from_api,
         destinations::{DestinationsDbError, destination_exists},
         images::ImagesDbError,
         pipelines::{
@@ -30,6 +29,7 @@ use crate::{
             read_pipeline_components, read_pipeline_for_deletion,
         },
         replicators::ReplicatorsDbError,
+        source_database,
         sources::SourcesDbError,
     },
     feature_flags::{FeatureFlagsClient, get_max_pipelines_per_tenant},
@@ -203,7 +203,9 @@ impl PipelineError {
             ) => "Internal server error".to_owned(),
             PipelineError::SourceDatabase(_)
             | PipelineError::SourcePipelineState(_)
-            | PipelineError::TableLookup(_) => "Could not query your source database".to_owned(),
+            | PipelineError::TableLookup(_) => {
+                route_utils::source_database_query_error_message().to_owned()
+            }
             PipelineError::Validation(error) => {
                 route_utils::validation_error_message(error).to_owned()
             }
@@ -212,6 +214,7 @@ impl PipelineError {
         }
     }
 }
+
 impl IntoResponse for PipelineError {
     fn into_response(self) -> Response {
         let status_code = match &self {
@@ -856,7 +859,7 @@ pub(crate) async fn delete_pipeline(
     .await?
     .ok_or(PipelineError::SourceNotFound(pipeline.source_id))?;
 
-    let source_pool = match connect_to_source_database_from_api(
+    let source_pool = match source_database::connect(
         &source.config.into_connection_config(tls_config),
     )
     .await
@@ -1213,10 +1216,9 @@ pub(crate) async fn get_pipeline_replication_status(
 
     // Connect to the source database to read the necessary state
     let tls_config = trusted_root_certs_cache.get_tls_config(api_config.source.tls_enabled).await?;
-    let source_pool =
-        connect_to_source_database_from_api(&source.config.into_connection_config(tls_config))
-            .await
-            .map_err(PipelineError::SourceDatabase)?;
+    let source_pool = source_database::connect(&source.config.into_connection_config(tls_config))
+        .await
+        .map_err(PipelineError::SourceDatabase)?;
 
     // Start transaction for all source database operations
     let mut source_txn = source_pool.begin().await.map_err(PipelineError::SourceDatabase)?;
@@ -1321,10 +1323,9 @@ pub(crate) async fn rollback_tables(
 
     // Connect to the source database to perform rollback
     let tls_config = trusted_root_certs_cache.get_tls_config(api_config.source.tls_enabled).await?;
-    let source_pool =
-        connect_to_source_database_from_api(&source.config.into_connection_config(tls_config))
-            .await
-            .map_err(PipelineError::SourceDatabase)?;
+    let source_pool = source_database::connect(&source.config.into_connection_config(tls_config))
+        .await
+        .map_err(PipelineError::SourceDatabase)?;
 
     // Start transaction for all source database operations
     let mut source_txn = source_pool.begin().await.map_err(PipelineError::SourceDatabase)?;
