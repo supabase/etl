@@ -35,6 +35,7 @@ use crate::{
         client::{BigQueryClient, BigQueryOperationType},
         encoding::BigQueryTableRow,
         metrics::{ETL_BQ_APPEND_BATCHES_BATCH_SIZE, register_metrics},
+        schema::{column_schemas_to_table_descriptor, supports_column_default},
     },
     table_name::try_stringify_table_name,
 };
@@ -487,10 +488,8 @@ where
         // negligible compared to network I/O. If profiling shows this is a
         // bottleneck, we could wrap it in Arc here and use Arc::unwrap_or_clone
         // at the call site to avoid redundant clones.
-        let table_descriptor = BigQueryClient::column_schemas_to_table_descriptor(
-            replicated_table_schema,
-            use_cdc_sequence_column,
-        );
+        let table_descriptor =
+            column_schemas_to_table_descriptor(replicated_table_schema, use_cdc_sequence_column);
 
         Ok((sequenced_bigquery_table_id, table_descriptor))
     }
@@ -880,14 +879,11 @@ where
                     ColumnModification::Default { old_expression, new_expression } => {
                         let old_default_was_supported =
                             old_expression.as_deref().is_some_and(|default_expression| {
-                                BigQueryClient::supports_column_default(
-                                    default_expression,
-                                    &change.old_column.typ,
-                                )
+                                supports_column_default(default_expression, &change.old_column.typ)
                             });
 
                         if let Some(new_default_expression) = new_expression.as_deref() {
-                            if BigQueryClient::supports_column_default(
+                            if supports_column_default(
                                 new_default_expression,
                                 &change.new_column.typ,
                             ) {
