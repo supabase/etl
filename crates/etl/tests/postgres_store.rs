@@ -134,7 +134,7 @@ async fn state_store_rollback() {
     store.update_table_state(table_id, data_sync_state.clone()).await.unwrap();
 
     // Verify two rows exist before rollback (init + data_sync)
-    let pool = connect_to_source_database(&database.config, 1, 1, None)
+    let pool = connect_to_source_database(&database.config, 0, 1, None)
         .await
         .expect("Failed to connect to source database with sqlx");
     let count_before: i64 = sqlx::query_scalar(
@@ -562,7 +562,7 @@ async fn schema_store_prunes_obsolete_versions_from_database_and_cache() {
         store.store_table_schema(table_schema).await.unwrap();
     }
 
-    let pool = connect_to_source_database(&database.config, 1, 1, None).await.unwrap();
+    let pool = connect_to_source_database(&database.config, 0, 1, None).await.unwrap();
     let obsolete_schema_ids: Vec<i64> = sqlx::query_scalar(
         r#"
         select id
@@ -1139,7 +1139,7 @@ async fn replication_mask_loads_correctly_from_string_bytea() {
     let table_id = TableId::new(12345);
     let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
 
-    let pool = connect_to_source_database(&database.config, 1, 1, None)
+    let pool = connect_to_source_database(&database.config, 0, 1, None)
         .await
         .expect("Failed to connect to source database with sqlx");
 
@@ -1188,7 +1188,7 @@ async fn replication_mask_various_patterns() {
     let pipeline_id = 1;
     let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
 
-    let pool = connect_to_source_database(&database.config, 1, 1, None)
+    let pool = connect_to_source_database(&database.config, 0, 1, None)
         .await
         .expect("Failed to connect to source database with sqlx");
 

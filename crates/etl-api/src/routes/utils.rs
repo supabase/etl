@@ -1,9 +1,9 @@
-use std::io::ErrorKind;
-
 use axum::http::StatusCode;
-use sqlx::error::DatabaseError;
 
-use crate::validation::{ValidationError, ValidationFailure};
+use crate::{
+    data::source_database::{self, SourceDatabaseErrorKind},
+    validation::{ValidationError, ValidationFailure},
+};
 
 /// Returns the public HTTP status code for a validation execution error.
 pub fn validation_error_status_code(error: &ValidationError) -> StatusCode {
@@ -16,43 +16,43 @@ pub fn validation_error_status_code(error: &ValidationError) -> StatusCode {
     }
 }
 
-/// Returns the public HTTP status code for source database execution errors.
+/// Returns the public HTTP status code for a source database error.
 pub fn source_database_error_status_code(error: &sqlx::Error) -> StatusCode {
-    match error {
-        sqlx::Error::PoolTimedOut | sqlx::Error::PoolClosed => StatusCode::SERVICE_UNAVAILABLE,
-        sqlx::Error::Database(error) if source_database_unavailable_error(error.as_ref()) => {
-            StatusCode::SERVICE_UNAVAILABLE
-        }
-        sqlx::Error::Io(error) if error.kind() == ErrorKind::TimedOut => {
-            StatusCode::GATEWAY_TIMEOUT
-        }
-        _ => StatusCode::BAD_GATEWAY,
+    match source_database::classify_error(error) {
+        SourceDatabaseErrorKind::TimedOut => StatusCode::GATEWAY_TIMEOUT,
+        SourceDatabaseErrorKind::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+        SourceDatabaseErrorKind::Failed => StatusCode::BAD_GATEWAY,
     }
 }
 
-fn source_database_unavailable_error(error: &dyn DatabaseError) -> bool {
-    matches!(error.code().as_deref(), Some("57P01" | "57P02" | "57P03"))
+/// Returns the public error message for source database query failures.
+pub fn source_database_query_error_message() -> &'static str {
+    "Could not query your source database"
 }
 
 /// Returns the public error message for a validation execution error.
 pub fn validation_error_message(error: &ValidationError) -> &'static str {
     match error {
-        ValidationError::Database { source: sqlx::Error::PoolTimedOut } => {
-            "Could not reach your source database in time"
-        }
-        ValidationError::Database { source: sqlx::Error::PoolClosed } => {
-            "Your source database is currently unavailable"
-        }
-        ValidationError::Database { source: sqlx::Error::Io(error) }
-            if error.kind() == ErrorKind::TimedOut =>
-        {
-            "Could not reach your source database in time"
-        }
-        ValidationError::Database { .. } => "Could not validate your source database connection",
+        ValidationError::Database { source } => source_database_validation_error_message(source),
         ValidationError::BigQuery(_) => "Could not connect to BigQuery",
         ValidationError::Iceberg(_) => "Could not connect to the Iceberg endpoint",
         ValidationError::TrustedRootCerts(_) | ValidationError::Environment(_) => {
             "Internal server error"
+        }
+    }
+}
+
+/// Returns the public validation message for source database failures.
+fn source_database_validation_error_message(error: &sqlx::Error) -> &'static str {
+    match (error, source_database::classify_error(error)) {
+        (sqlx::Error::PoolTimedOut, _) | (_, SourceDatabaseErrorKind::TimedOut) => {
+            "Could not reach your source database in time"
+        }
+        (_, SourceDatabaseErrorKind::Unavailable) => {
+            "Your source database is currently unavailable"
+        }
+        (_, SourceDatabaseErrorKind::Failed) => {
+            "Could not validate your source database connection"
         }
     }
 }
@@ -64,6 +64,8 @@ pub fn format_validation_failures(failures: Vec<ValidationFailure>) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::io::ErrorKind;
+
     use super::*;
 
     #[test]
@@ -97,6 +99,9 @@ mod tests {
     fn source_database_errors_are_reported_as_upstream_failures() {
         let error = sqlx::Error::Protocol("bad source response".to_owned());
 
-        assert_eq!(source_database_error_status_code(&error), StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            validation_error_status_code(&ValidationError::from(error)),
+            StatusCode::BAD_GATEWAY
+        );
     }
 }

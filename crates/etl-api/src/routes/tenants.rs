@@ -9,6 +9,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use thiserror::Error;
+use tracing::warn;
 use utoipa::ToSchema;
 
 use crate::{
@@ -16,11 +17,11 @@ use crate::{
     configs::encryption::EncryptionKeyring,
     data,
     data::{
-        connect_to_source_database_from_api,
         pipelines::{
             PipelinesDbError, delete_pipeline_replication_slots, delete_pipelines_source_state,
             read_all_pipelines_for_deletion,
         },
+        source_database::{self, SourceDatabaseErrorKind},
         sources::SourcesDbError,
         tenants::TenantsDbError,
     },
@@ -81,10 +82,21 @@ impl TenantError {
             | TenantError::TrustedRootCerts(_)
             | TenantError::K8sCore(_) => "Internal server error".to_owned(),
             TenantError::SourceDatabase(_) | TenantError::SourcePipelineState(_) => {
-                "Could not query your source database".to_owned()
+                utils::source_database_query_error_message().to_owned()
             }
             // Every other message is ok, as they do not divulge sensitive information
             e => e.to_string(),
+        }
+    }
+
+    fn allows_best_effort_source_cleanup_to_continue(&self) -> bool {
+        match self {
+            TenantError::SourceDatabase(error)
+            | TenantError::SourcePipelineState(PipelinesDbError::Database(error)) => matches!(
+                source_database::classify_error(error),
+                SourceDatabaseErrorKind::TimedOut | SourceDatabaseErrorKind::Unavailable
+            ),
+            _ => false,
         }
     }
 }
@@ -348,18 +360,17 @@ pub(crate) async fn delete_tenant(
     // cleanup stays idempotent, so repeated passes are still safe without
     // deduplicating connection configs.
     for source in sources {
-        let source_pipelines = pipelines_by_source.remove(&source.id).unwrap_or_default();
         // If the source database is already unreachable during tenant teardown, we
         // treat it as effectively deleted and keep removing the tenant's
         // API-side state.
-        let source_pool = match connect_to_source_database_from_api(
+        let source_pool = match source_database::connect(
             &source.config.into_connection_config(tls_config.clone()),
         )
         .await
         {
             Ok(source_pool) => source_pool,
             Err(error) => {
-                tracing::warn!(
+                warn!(
                     tenant_id = %tenant_id,
                     source_id = source.id,
                     error = %error,
@@ -369,19 +380,59 @@ pub(crate) async fn delete_tenant(
                 continue;
             }
         };
-        let mut source_txn = source_pool.begin().await.map_err(TenantError::SourceDatabase)?;
-        let deleted_pipeline_ids =
-            delete_pipelines_source_state(source_txn.deref_mut(), &source_pipelines)
+
+        let source_cleanup_result = async {
+            let mut source_txn = source_pool.begin().await.map_err(TenantError::SourceDatabase)?;
+
+            let source_pipelines = pipelines_by_source.remove(&source.id).unwrap_or_default();
+            let deleted_pipeline_ids =
+                delete_pipelines_source_state(source_txn.deref_mut(), &source_pipelines)
+                    .await
+                    .map_err(TenantError::SourcePipelineState)?;
+            data::sources::uninstall_source_installation(source_txn.deref_mut())
                 .await
-                .map_err(TenantError::SourcePipelineState)?;
-        data::sources::uninstall_source_installation(source_txn.deref_mut())
-            .await
-            .map_err(TenantError::SourceDatabase)?;
-        source_txn.commit().await.map_err(TenantError::SourceDatabase)?;
+                .map_err(TenantError::SourceDatabase)?;
+
+            source_txn.commit().await.map_err(TenantError::SourceDatabase)?;
+
+            Ok::<_, TenantError>(deleted_pipeline_ids)
+        }
+        .await;
+
+        let deleted_pipeline_ids = match source_cleanup_result {
+            Ok(deleted_pipeline_ids) => deleted_pipeline_ids,
+            Err(error) if error.allows_best_effort_source_cleanup_to_continue() => {
+                warn!(
+                    tenant_id = %tenant_id,
+                    source_id = source.id,
+                    error = %error,
+                    "source database became unavailable during tenant deletion, skipping source cleanup",
+                );
+
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         for pipeline_id in deleted_pipeline_ids {
-            delete_pipeline_replication_slots(&source_pool, pipeline_id)
+            let slot_cleanup_result = delete_pipeline_replication_slots(&source_pool, pipeline_id)
                 .await
-                .map_err(TenantError::SourcePipelineState)?;
+                .map_err(TenantError::SourcePipelineState);
+
+            if let Err(error) = slot_cleanup_result {
+                if error.allows_best_effort_source_cleanup_to_continue() {
+                    warn!(
+                        tenant_id = %tenant_id,
+                        source_id = source.id,
+                        pipeline_id,
+                        error = %error,
+                        "source database became unavailable during replication slot cleanup, skipping remaining slot cleanup",
+                    );
+
+                    break;
+                }
+
+                return Err(error);
+            }
         }
     }
 

@@ -21,7 +21,7 @@ use crate::{
         destination::FullApiDestinationConfig, pipeline::FullApiPipelineConfig,
         source::StoredSourceConfig,
     },
-    data::connect_to_source_database_from_api,
+    data::source_database,
     k8s::{TrustedRootCertsCache, TrustedRootCertsError},
     validation::validators::{DestinationValidator, PipelineValidator, SourceValidator},
 };
@@ -53,8 +53,7 @@ impl ValidationContext {
         let tls_config =
             trusted_root_certs_cache.get_tls_config(api_config.source.tls_enabled).await?;
         let source_pool =
-            connect_to_source_database_from_api(&source_config.into_connection_config(tls_config))
-                .await?;
+            source_database::connect(&source_config.into_connection_config(tls_config)).await?;
         let environment = Environment::load()?;
 
         Ok(Self::builder(environment)
