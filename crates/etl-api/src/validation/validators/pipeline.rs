@@ -4,9 +4,18 @@ use sqlx::FromRow;
 
 use super::super::{ValidationContext, ValidationError, ValidationFailure, Validator};
 
+/// PostgreSQL default for `wal_level`.
+const DEFAULT_WAL_LEVEL: &str = "replica";
+/// PostgreSQL default for `max_replication_slots`.
+const DEFAULT_MAX_REPLICATION_SLOTS: i32 = 10;
+/// PostgreSQL default for `max_wal_senders`.
+const DEFAULT_MAX_WAL_SENDERS: i32 = 10;
+/// PostgreSQL default for `max_slot_wal_keep_size`.
+const DEFAULT_MAX_SLOT_WAL_KEEP_SIZE_MB: i64 = -1;
+/// PostgreSQL default for `idle_replication_slot_timeout`.
+const DEFAULT_IDLE_REPLICATION_SLOT_TIMEOUT_SECONDS: i64 = 0;
 /// Minimum practical per-slot WAL retention for logical replication.
 const MIN_SLOT_WAL_KEEP_SIZE_MB: i64 = 1024;
-
 /// Low idle replication slot timeout warning threshold in seconds.
 ///
 /// Values at or below this are too aggressive for ordinary ETL deploys,
@@ -85,8 +94,8 @@ struct LogicalReplicationSettingsAudit {
     /// Configured per-slot WAL retention limit in megabytes, or -1 for
     /// unlimited.
     max_slot_wal_keep_size_mb: i64,
-    /// Optional idle slot invalidation timeout in seconds.
-    idle_replication_slot_timeout_seconds: Option<i64>,
+    /// Idle slot invalidation timeout in seconds, or 0 when unsupported.
+    idle_replication_slot_timeout_seconds: i64,
 }
 
 #[async_trait]
@@ -103,42 +112,59 @@ impl Validator for LogicalReplicationSettingsValidator {
         let audit = sqlx::query_as::<_, LogicalReplicationSettingsAudit>(
             r#"
             select
-                current_setting('wal_level') as wal_level,
+                coalesce(current_setting('wal_level', true), $1::text) as wal_level,
                 (
                     select rolsuper or rolreplication
                     from pg_roles
                     where rolname = current_user
                 ) as has_replication_permission,
-                (
-                    select setting::int
-                    from pg_settings
-                    where name = 'max_replication_slots'
+                coalesce(
+                    (
+                        select setting::int
+                        from pg_settings
+                        where name = 'max_replication_slots'
+                    ),
+                    $2::int
                 ) as max_replication_slots,
                 (
                     select count(*)
                     from pg_replication_slots
                 ) as used_replication_slots,
-                (
-                    select setting::int
-                    from pg_settings
-                    where name = 'max_wal_senders'
+                coalesce(
+                    (
+                        select setting::int
+                        from pg_settings
+                        where name = 'max_wal_senders'
+                    ),
+                    $3::int
                 ) as max_wal_senders,
                 (
                     select count(*)
                     from pg_stat_replication
                 ) as active_wal_senders,
-                (
-                    select setting::bigint
-                    from pg_settings
-                    where name = 'max_slot_wal_keep_size'
+                coalesce(
+                    (
+                        select setting::bigint
+                        from pg_settings
+                        where name = 'max_slot_wal_keep_size'
+                    ),
+                    $4::bigint
                 ) as max_slot_wal_keep_size_mb,
-                (
-                    select setting::bigint
-                    from pg_settings
-                    where name = 'idle_replication_slot_timeout'
+                coalesce(
+                    (
+                        select setting::bigint
+                        from pg_settings
+                        where name = 'idle_replication_slot_timeout'
+                    ),
+                    $5::bigint
                 ) as idle_replication_slot_timeout_seconds
             "#,
         )
+        .bind(DEFAULT_WAL_LEVEL)
+        .bind(DEFAULT_MAX_REPLICATION_SLOTS)
+        .bind(DEFAULT_MAX_WAL_SENDERS)
+        .bind(DEFAULT_MAX_SLOT_WAL_KEEP_SIZE_MB)
+        .bind(DEFAULT_IDLE_REPLICATION_SLOT_TIMEOUT_SECONDS)
         .fetch_one(source_pool)
         .await?;
 
@@ -520,7 +546,7 @@ fn wal_sender_failures(
 /// Builds validation failures for slot WAL retention settings.
 fn slot_wal_keep_size_failures(
     max_slot_wal_keep_size_mb: i64,
-    idle_replication_slot_timeout_seconds: Option<i64>,
+    idle_replication_slot_timeout_seconds: i64,
 ) -> Vec<ValidationFailure> {
     let mut failures = Vec::new();
 
@@ -553,19 +579,19 @@ fn slot_wal_keep_size_failures(
         _ => {}
     }
 
-    if let Some(timeout_seconds) = idle_replication_slot_timeout_seconds
-        && (1..=LOW_IDLE_REPLICATION_SLOT_TIMEOUT_SECONDS).contains(&timeout_seconds)
+    if (1..=LOW_IDLE_REPLICATION_SLOT_TIMEOUT_SECONDS)
+        .contains(&idle_replication_slot_timeout_seconds)
     {
         failures.push(ValidationFailure::warning(
             "Low Idle Replication Slot Timeout",
             format!(
-                "`idle_replication_slot_timeout` is {timeout_seconds} seconds, which is below \
-                 ETL's recommended minimum of {LOW_IDLE_REPLICATION_SLOT_TIMEOUT_SECONDS} \
-                 seconds.\n\nPostgreSQL can invalidate ETL's logical replication slot after a \
-                 short deploy, maintenance window, or incident pause, with \
-                 `pg_replication_slots.invalidation_reason = 'idle_timeout'`.\n\nUse `0` to \
-                 disable idle-slot invalidation, or choose a value safely above expected ETL \
-                 downtime."
+                "`idle_replication_slot_timeout` is {idle_replication_slot_timeout_seconds} \
+                 seconds, which is below ETL's recommended minimum of \
+                 {LOW_IDLE_REPLICATION_SLOT_TIMEOUT_SECONDS} seconds.\n\nPostgreSQL can \
+                 invalidate ETL's logical replication slot after a short deploy, maintenance \
+                 window, or incident pause, with `pg_replication_slots.invalidation_reason = \
+                 'idle_timeout'`.\n\nUse `0` to disable idle-slot invalidation, or choose a value \
+                 safely above expected ETL downtime."
             ),
         ));
     }
