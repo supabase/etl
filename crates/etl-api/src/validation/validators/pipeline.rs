@@ -1,7 +1,17 @@
 use async_trait::async_trait;
 use etl_postgres::replication::catalog::ETL_SCHEMA_NAME;
+use sqlx::FromRow;
 
 use super::super::{ValidationContext, ValidationError, ValidationFailure, Validator};
+
+/// Minimum practical per-slot WAL retention for logical replication.
+const MIN_SLOT_WAL_KEEP_SIZE_MB: i64 = 1024;
+
+/// Low idle replication slot timeout warning threshold in seconds.
+///
+/// Values at or below this are too aggressive for ordinary ETL deploys,
+/// maintenance windows, and incident pauses.
+const LOW_IDLE_REPLICATION_SLOT_TIMEOUT_SECONDS: i64 = 300;
 
 /// Validates that the required publication exists in the source database.
 #[derive(Debug)]
@@ -46,20 +56,41 @@ impl Validator for PublicationExistsValidator {
     }
 }
 
-/// Validates that there are enough free replication slots for the pipeline.
+/// Validates source settings needed for reliable logical replication.
 #[derive(Debug)]
-pub(super) struct ReplicationSlotsValidator {
+pub(super) struct LogicalReplicationSettingsValidator {
     max_table_sync_workers: u16,
 }
 
-impl ReplicationSlotsValidator {
+impl LogicalReplicationSettingsValidator {
     pub(super) fn new(max_table_sync_workers: u16) -> Self {
         Self { max_table_sync_workers }
     }
 }
 
+#[derive(Debug, FromRow)]
+struct LogicalReplicationSettingsAudit {
+    /// Current WAL level.
+    wal_level: String,
+    /// Whether the connected role can use logical replication.
+    has_replication_permission: bool,
+    /// Maximum configured replication slots.
+    max_replication_slots: i32,
+    /// Currently allocated replication slots.
+    used_replication_slots: i64,
+    /// Maximum configured WAL sender processes.
+    max_wal_senders: i32,
+    /// Currently active WAL sender processes.
+    active_wal_senders: i64,
+    /// Configured per-slot WAL retention limit in megabytes, or -1 for
+    /// unlimited.
+    max_slot_wal_keep_size_mb: i64,
+    /// Optional idle slot invalidation timeout in seconds.
+    idle_replication_slot_timeout_seconds: Option<i64>,
+}
+
 #[async_trait]
-impl Validator for ReplicationSlotsValidator {
+impl Validator for LogicalReplicationSettingsValidator {
     async fn validate(
         &self,
         ctx: &ValidationContext,
@@ -67,104 +98,51 @@ impl Validator for ReplicationSlotsValidator {
         let source_pool = ctx
             .source_pool
             .as_ref()
-            .expect("source pool required for replication slots validation");
+            .expect("source pool required for logical replication settings validation");
 
-        let max_slots: i32 = sqlx::query_scalar(
-            "select setting::int from pg_settings where name = 'max_replication_slots'",
+        let audit = sqlx::query_as::<_, LogicalReplicationSettingsAudit>(
+            r#"
+            select
+                current_setting('wal_level') as wal_level,
+                (
+                    select rolsuper or rolreplication
+                    from pg_roles
+                    where rolname = current_user
+                ) as has_replication_permission,
+                (
+                    select setting::int
+                    from pg_settings
+                    where name = 'max_replication_slots'
+                ) as max_replication_slots,
+                (
+                    select count(*)
+                    from pg_replication_slots
+                ) as used_replication_slots,
+                (
+                    select setting::int
+                    from pg_settings
+                    where name = 'max_wal_senders'
+                ) as max_wal_senders,
+                (
+                    select count(*)
+                    from pg_stat_replication
+                ) as active_wal_senders,
+                (
+                    select setting::bigint
+                    from pg_settings
+                    where name = 'max_slot_wal_keep_size'
+                ) as max_slot_wal_keep_size_mb,
+                (
+                    select setting::bigint
+                    from pg_settings
+                    where name = 'idle_replication_slot_timeout'
+                ) as idle_replication_slot_timeout_seconds
+            "#,
         )
         .fetch_one(source_pool)
         .await?;
 
-        let used_slots: i64 = sqlx::query_scalar("select count(*) from pg_replication_slots")
-            .fetch_one(source_pool)
-            .await?;
-
-        let free_slots = max_slots as i64 - used_slots;
-        // We need 1 slot for the apply worker plus at most `max_table_sync_workers`
-        // other slots for table sync workers.
-        let required_slots = self.max_table_sync_workers as i64 + 1;
-
-        if required_slots <= free_slots {
-            Ok(vec![])
-        } else {
-            Ok(vec![ValidationFailure::critical(
-                "Insufficient Replication Slots",
-                format!(
-                    "Your source database has {free_slots} free replication slots, but this \
-                     pipeline can need up to {required_slots} during the initial table copy \
-                     ({used_slots}/{max_slots} slots are currently in use).\n\nIncrease \
-                     `max_replication_slots`, remove unused replication slots, or reduce \
-                     `max_table_sync_workers`. After the initial copy, this pipeline only uses 1 \
-                     slot.",
-                ),
-            )])
-        }
-    }
-}
-
-/// Validates that the WAL level is set to 'logical' for replication.
-#[derive(Debug)]
-pub(super) struct WalLevelValidator;
-
-#[async_trait]
-impl Validator for WalLevelValidator {
-    async fn validate(
-        &self,
-        ctx: &ValidationContext,
-    ) -> Result<Vec<ValidationFailure>, ValidationError> {
-        let source_pool =
-            ctx.source_pool.as_ref().expect("source pool required for WAL level validation");
-
-        let wal_level: String = sqlx::query_scalar("select current_setting('wal_level')")
-            .fetch_one(source_pool)
-            .await?;
-
-        if wal_level == "logical" {
-            Ok(vec![])
-        } else {
-            Ok(vec![ValidationFailure::critical(
-                "Invalid WAL Level",
-                format!(
-                    "Your source database WAL level is `{wal_level}`, but logical replication \
-                     requires `logical`.\n\nSet `wal_level = 'logical'` in `postgresql.conf` and \
-                     restart PostgreSQL."
-                ),
-            )])
-        }
-    }
-}
-
-/// Validates that the database user has replication permissions.
-#[derive(Debug)]
-pub(super) struct ReplicationPermissionsValidator;
-
-#[async_trait]
-impl Validator for ReplicationPermissionsValidator {
-    async fn validate(
-        &self,
-        ctx: &ValidationContext,
-    ) -> Result<Vec<ValidationFailure>, ValidationError> {
-        let source_pool = ctx
-            .source_pool
-            .as_ref()
-            .expect("source pool required for replication permissions validation");
-
-        // Check if user is superuser OR has replication privilege
-        let has_permission: bool = sqlx::query_scalar(
-            "select rolsuper or rolreplication from pg_roles where rolname = current_user",
-        )
-        .fetch_one(source_pool)
-        .await?;
-
-        if has_permission {
-            Ok(vec![])
-        } else {
-            Ok(vec![ValidationFailure::critical(
-                "Missing Replication Permission",
-                "Your source database user does not have replication privileges.\n\nGrant the \
-                 user the `REPLICATION` attribute or connect with a role that already has it.",
-            )])
-        }
+        Ok(logical_replication_settings_failures(audit, self.max_table_sync_workers))
     }
 }
 
@@ -412,4 +390,300 @@ impl Validator for GeneratedColumnsValidator {
 /// Formats validation values as inline code for UI rendering.
 fn format_code_list(values: &[String]) -> String {
     values.iter().map(|value| format!("`{value}`")).collect::<Vec<_>>().join(", ")
+}
+
+/// Builds validation failures for logical replication source settings.
+fn logical_replication_settings_failures(
+    audit: LogicalReplicationSettingsAudit,
+    max_table_sync_workers: u16,
+) -> Vec<ValidationFailure> {
+    let mut failures = Vec::new();
+
+    failures.extend(wal_level_failures(&audit.wal_level));
+    failures.extend(replication_permission_failures(audit.has_replication_permission));
+    failures.extend(replication_slot_failures(
+        audit.max_replication_slots,
+        audit.used_replication_slots,
+        max_table_sync_workers,
+    ));
+    failures.extend(wal_sender_failures(
+        audit.max_wal_senders,
+        audit.max_replication_slots,
+        audit.active_wal_senders,
+        max_table_sync_workers,
+    ));
+    failures.extend(slot_wal_keep_size_failures(
+        audit.max_slot_wal_keep_size_mb,
+        audit.idle_replication_slot_timeout_seconds,
+    ));
+
+    failures
+}
+
+/// Builds validation failures for WAL level.
+fn wal_level_failures(wal_level: &str) -> Vec<ValidationFailure> {
+    if wal_level == "logical" {
+        Vec::new()
+    } else {
+        vec![ValidationFailure::critical(
+            "Invalid WAL Level",
+            format!(
+                "Your source database WAL level is `{wal_level}`, but logical replication \
+                 requires `logical`.\n\nSet `wal_level = 'logical'` in `postgresql.conf` and \
+                 restart PostgreSQL."
+            ),
+        )]
+    }
+}
+
+/// Builds validation failures for role replication permissions.
+fn replication_permission_failures(has_replication_permission: bool) -> Vec<ValidationFailure> {
+    if has_replication_permission {
+        Vec::new()
+    } else {
+        vec![ValidationFailure::critical(
+            "Missing Replication Permission",
+            "Your source database user does not have replication privileges.\n\nGrant the user \
+             the `REPLICATION` attribute or connect with a role that already has it.",
+        )]
+    }
+}
+
+/// Builds validation failures for replication slot capacity.
+fn replication_slot_failures(
+    max_replication_slots: i32,
+    used_replication_slots: i64,
+    max_table_sync_workers: u16,
+) -> Vec<ValidationFailure> {
+    let free_slots = max_replication_slots as i64 - used_replication_slots;
+    let required_slots = max_table_sync_workers as i64 + 1;
+
+    if required_slots <= free_slots {
+        Vec::new()
+    } else {
+        vec![ValidationFailure::critical(
+            "Insufficient Replication Slots",
+            format!(
+                "Your source database has {free_slots} free replication slots, but this pipeline \
+                 can need up to {required_slots} during the initial table copy \
+                 ({used_replication_slots}/{max_replication_slots} slots are currently in \
+                 use).\n\nIncrease `max_replication_slots`, remove unused replication slots, or \
+                 reduce `max_table_sync_workers`. After the initial copy, this pipeline only uses \
+                 1 slot.",
+            ),
+        )]
+    }
+}
+
+/// Builds validation failures for WAL sender capacity.
+fn wal_sender_failures(
+    max_wal_senders: i32,
+    max_replication_slots: i32,
+    active_wal_senders: i64,
+    max_table_sync_workers: u16,
+) -> Vec<ValidationFailure> {
+    let free_wal_senders = max_wal_senders as i64 - active_wal_senders;
+    let required_wal_senders = max_table_sync_workers as i64 + 1;
+    let mut failures = Vec::new();
+
+    if required_wal_senders > free_wal_senders {
+        failures.push(ValidationFailure::critical(
+            "Insufficient WAL Senders",
+            format!(
+                "Your source database has {free_wal_senders} free WAL sender processes, but this \
+                 pipeline can need up to {required_wal_senders} during the initial table copy \
+                 ({active_wal_senders}/{max_wal_senders} WAL senders are currently \
+                 active).\n\nIncrease `max_wal_senders`, stop unused replication clients, or \
+                 reduce `max_table_sync_workers`."
+            ),
+        ));
+    }
+
+    if max_wal_senders < max_replication_slots {
+        failures.push(ValidationFailure::warning(
+            "WAL Senders Below Replication Slots",
+            format!(
+                "`max_wal_senders` is {max_wal_senders}, but `max_replication_slots` is \
+                 {max_replication_slots}.\n\nLogical replication needs a WAL sender connection \
+                 for each active slot, and PostgreSQL recommends setting `max_wal_senders` at \
+                 least as high as `max_replication_slots`, plus any physical replicas. Some \
+                 replication clients may fail to connect even when slots are available."
+            ),
+        ));
+    }
+
+    failures
+}
+
+/// Builds validation failures for slot WAL retention settings.
+fn slot_wal_keep_size_failures(
+    max_slot_wal_keep_size_mb: i64,
+    idle_replication_slot_timeout_seconds: Option<i64>,
+) -> Vec<ValidationFailure> {
+    let mut failures = Vec::new();
+
+    match max_slot_wal_keep_size_mb {
+        -1 => failures.push(ValidationFailure::warning(
+            "Unlimited Slot WAL Retention",
+            "`max_slot_wal_keep_size` is unlimited.\n\nLogical replication slots can retain WAL \
+             indefinitely when ETL is paused, disconnected, or stuck on a table error. Set a \
+             bounded value large enough for your write volume and longest expected initial copy \
+             so an abandoned slot cannot fill the source database disk.",
+        )),
+        0 => failures.push(ValidationFailure::critical(
+            "Slot WAL Retention Disabled",
+            "`max_slot_wal_keep_size` is 0 MB.\n\nA logical replication slot can be invalidated \
+             as soon as it falls behind at a checkpoint, which can force ETL to restart table \
+             copies or require slot recreation. Increase `max_slot_wal_keep_size` to leave WAL \
+             headroom for normal replication lag.",
+        )),
+        1..MIN_SLOT_WAL_KEEP_SIZE_MB => failures.push(ValidationFailure::warning(
+            "Low Slot WAL Retention",
+            format!(
+                "`max_slot_wal_keep_size` is {max_slot_wal_keep_size_mb} MB.\n\nThis may be too \
+                 small for logical replication during large transactions, destination outages, or \
+                 long initial table copies. Increase it based on source write volume, available \
+                 disk, and the longest time ETL may need to catch up."
+            ),
+        )),
+        _ => {}
+    }
+
+    if let Some(timeout_seconds) = idle_replication_slot_timeout_seconds
+        && (1..=LOW_IDLE_REPLICATION_SLOT_TIMEOUT_SECONDS).contains(&timeout_seconds)
+    {
+        failures.push(ValidationFailure::warning(
+            "Low Idle Replication Slot Timeout",
+            format!(
+                "`idle_replication_slot_timeout` is {timeout_seconds} seconds, which is below \
+                 ETL's recommended minimum of {LOW_IDLE_REPLICATION_SLOT_TIMEOUT_SECONDS} \
+                 seconds.\n\nPostgreSQL can invalidate ETL's logical replication slot after a \
+                 short deploy, maintenance window, or incident pause, with \
+                 `pg_replication_slots.invalidation_reason = 'idle_timeout'`.\n\nUse `0` to \
+                 disable idle-slot invalidation, or choose a value safely above expected ETL \
+                 downtime."
+            ),
+        ));
+    }
+
+    failures
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::validation::FailureType;
+
+    fn valid_logical_replication_settings_audit() -> LogicalReplicationSettingsAudit {
+        LogicalReplicationSettingsAudit {
+            wal_level: "logical".to_owned(),
+            has_replication_permission: true,
+            max_replication_slots: 10,
+            used_replication_slots: 0,
+            max_wal_senders: 10,
+            active_wal_senders: 0,
+            max_slot_wal_keep_size_mb: MIN_SLOT_WAL_KEEP_SIZE_MB,
+            idle_replication_slot_timeout_seconds: None,
+        }
+    }
+
+    #[test]
+    fn logical_replication_settings_failures_pass_for_good_settings() {
+        let failures =
+            logical_replication_settings_failures(valid_logical_replication_settings_audit(), 2);
+
+        assert!(failures.is_empty());
+    }
+
+    #[test]
+    fn logical_replication_settings_failures_collect_multiple_issues() {
+        let mut audit = valid_logical_replication_settings_audit();
+        audit.wal_level = "replica".to_owned();
+        audit.has_replication_permission = false;
+        audit.max_replication_slots = 2;
+        audit.used_replication_slots = 1;
+
+        let failures = logical_replication_settings_failures(audit, 2);
+
+        assert!(
+            failures.iter().any(|failure| failure.name == "Invalid WAL Level"),
+            "should report invalid WAL level"
+        );
+        assert!(
+            failures.iter().any(|failure| failure.name == "Missing Replication Permission"),
+            "should report missing replication permissions"
+        );
+        assert!(
+            failures.iter().any(|failure| failure.name == "Insufficient Replication Slots"),
+            "should report insufficient replication slots"
+        );
+    }
+
+    #[test]
+    fn replication_slot_failures_detect_insufficient_free_slots() {
+        let failures = replication_slot_failures(3, 2, 2);
+
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].name, "Insufficient Replication Slots");
+        assert_eq!(failures[0].failure_type, FailureType::Critical);
+    }
+
+    #[test]
+    fn wal_sender_failures_detect_insufficient_free_senders() {
+        let failures = wal_sender_failures(4, 4, 2, 3);
+
+        let failure = failures
+            .iter()
+            .find(|failure| failure.name == "Insufficient WAL Senders")
+            .expect("should report insufficient WAL sender capacity");
+        assert_eq!(failure.failure_type, FailureType::Critical);
+    }
+
+    #[test]
+    fn wal_sender_failures_warn_when_senders_are_below_slots() {
+        let failures = wal_sender_failures(4, 8, 0, 2);
+
+        let failure = failures
+            .iter()
+            .find(|failure| failure.name == "WAL Senders Below Replication Slots")
+            .expect("should warn when sender capacity is lower than slot capacity");
+        assert_eq!(failure.failure_type, FailureType::Warning);
+    }
+
+    #[test]
+    fn slot_wal_keep_size_failures_warn_for_unlimited_retention() {
+        let failures = slot_wal_keep_size_failures(-1, None);
+
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].name, "Unlimited Slot WAL Retention");
+        assert_eq!(failures[0].failure_type, FailureType::Warning);
+    }
+
+    #[test]
+    fn slot_wal_keep_size_failures_critical_for_zero_retention() {
+        let failures = slot_wal_keep_size_failures(0, None);
+
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].name, "Slot WAL Retention Disabled");
+        assert_eq!(failures[0].failure_type, FailureType::Critical);
+    }
+
+    #[test]
+    fn slot_wal_keep_size_failures_warn_for_low_idle_slot_timeout() {
+        let failures = slot_wal_keep_size_failures(MIN_SLOT_WAL_KEEP_SIZE_MB, Some(0));
+        assert!(failures.is_empty());
+
+        let failures = slot_wal_keep_size_failures(MIN_SLOT_WAL_KEEP_SIZE_MB, Some(300));
+
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].name, "Low Idle Replication Slot Timeout");
+        assert_eq!(failures[0].failure_type, FailureType::Warning);
+        assert!(
+            failures[0].reason.contains("recommended minimum of 300 seconds"),
+            "warning should include the recommended minimum"
+        );
+
+        let failures = slot_wal_keep_size_failures(MIN_SLOT_WAL_KEEP_SIZE_MB, Some(301));
+        assert!(failures.is_empty());
+    }
 }
