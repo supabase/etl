@@ -17,11 +17,11 @@ use crate::{
     configs::encryption::EncryptionKeyring,
     data,
     data::{
-        connect_to_source_database_from_api,
         pipelines::{
             PipelinesDbError, delete_pipeline_replication_slots, delete_pipelines_source_state,
             read_all_pipelines_for_deletion,
         },
+        source_database::{self, SourceDatabaseErrorKind},
         sources::SourcesDbError,
         tenants::TenantsDbError,
     },
@@ -72,17 +72,6 @@ pub enum TenantError {
 }
 
 impl TenantError {
-    /// Returns true when the error means source cleanup cannot continue.
-    fn is_source_database_unavailable(&self) -> bool {
-        match self {
-            Self::SourceDatabase(error) => utils::source_database_error_is_unavailable(error),
-            Self::SourcePipelineState(PipelinesDbError::Database(error)) => {
-                utils::source_database_error_is_unavailable(error)
-            }
-            _ => false,
-        }
-    }
-
     pub fn to_message(&self) -> String {
         match self {
             // Do not expose internal database details in error messages
@@ -93,10 +82,21 @@ impl TenantError {
             | TenantError::TrustedRootCerts(_)
             | TenantError::K8sCore(_) => "Internal server error".to_owned(),
             TenantError::SourceDatabase(_) | TenantError::SourcePipelineState(_) => {
-                "Could not query your source database".to_owned()
+                utils::source_database_query_error_message().to_owned()
             }
             // Every other message is ok, as they do not divulge sensitive information
             e => e.to_string(),
+        }
+    }
+
+    fn allows_best_effort_source_cleanup_to_continue(&self) -> bool {
+        match self {
+            TenantError::SourceDatabase(error)
+            | TenantError::SourcePipelineState(PipelinesDbError::Database(error)) => matches!(
+                source_database::classify_error(error),
+                SourceDatabaseErrorKind::TimedOut | SourceDatabaseErrorKind::Unavailable
+            ),
+            _ => false,
         }
     }
 }
@@ -363,7 +363,7 @@ pub(crate) async fn delete_tenant(
         // If the source database is already unreachable during tenant teardown, we
         // treat it as effectively deleted and keep removing the tenant's
         // API-side state.
-        let source_pool = match connect_to_source_database_from_api(
+        let source_pool = match source_database::connect(
             &source.config.into_connection_config(tls_config.clone()),
         )
         .await
@@ -380,7 +380,7 @@ pub(crate) async fn delete_tenant(
                 continue;
             }
         };
-        
+
         let source_cleanup_result = async {
             let mut source_txn = source_pool.begin().await.map_err(TenantError::SourceDatabase)?;
 
@@ -392,16 +392,16 @@ pub(crate) async fn delete_tenant(
             data::sources::uninstall_source_installation(source_txn.deref_mut())
                 .await
                 .map_err(TenantError::SourceDatabase)?;
-            
+
             source_txn.commit().await.map_err(TenantError::SourceDatabase)?;
 
             Ok::<_, TenantError>(deleted_pipeline_ids)
         }
         .await;
-        
+
         let deleted_pipeline_ids = match source_cleanup_result {
             Ok(deleted_pipeline_ids) => deleted_pipeline_ids,
-            Err(error) if error.is_source_database_unavailable() => {
+            Err(error) if error.allows_best_effort_source_cleanup_to_continue() => {
                 warn!(
                     tenant_id = %tenant_id,
                     source_id = source.id,
@@ -413,14 +413,13 @@ pub(crate) async fn delete_tenant(
             }
             Err(error) => return Err(error),
         };
-        
         for pipeline_id in deleted_pipeline_ids {
             let slot_cleanup_result = delete_pipeline_replication_slots(&source_pool, pipeline_id)
                 .await
                 .map_err(TenantError::SourcePipelineState);
-            
-            if let Err(error) = slot_cleanup_result && error.is_source_database_unavailable() {
-                if error.is_source_database_unavailable() {
+
+            if let Err(error) = slot_cleanup_result {
+                if error.allows_best_effort_source_cleanup_to_continue() {
                     warn!(
                         tenant_id = %tenant_id,
                         source_id = source.id,

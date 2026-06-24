@@ -23,7 +23,6 @@ use crate::{
     },
     data,
     data::{
-        connect_to_source_database_from_api,
         destinations::{DestinationsDbError, destination_exists},
         destinations_pipelines::DestinationPipelinesDbError,
         images::ImagesDbError,
@@ -33,6 +32,7 @@ use crate::{
             delete_pipeline_source_state, read_pipeline, read_pipeline_for_deletion,
             read_pipelines_for_destination_for_deletion,
         },
+        source_database,
         sources::SourcesDbError,
     },
     feature_flags::{FeatureFlagsClient, get_max_pipelines_per_tenant},
@@ -140,7 +140,7 @@ impl DestinationPipelineError {
             | DestinationPipelineError::K8sCore(_) => "Internal server error".to_owned(),
             DestinationPipelineError::SourceDatabase(_)
             | DestinationPipelineError::SourcePipelineState(_) => {
-                "Could not query your source database".to_owned()
+                utils::source_database_query_error_message().to_owned()
             }
             DestinationPipelineError::Validation(error) => {
                 utils::validation_error_message(error).to_owned()
@@ -458,7 +458,7 @@ pub(crate) async fn delete_destination_and_pipeline(
     )
     .await?
     .ok_or(DestinationPipelineError::SourceNotFound(pipeline.source_id))?;
-    let source_pool = match connect_to_source_database_from_api(
+    let source_pool = match source_database::connect(
         &source.config.into_connection_config(tls_config),
     )
     .await

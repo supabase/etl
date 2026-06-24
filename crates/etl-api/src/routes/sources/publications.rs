@@ -15,8 +15,9 @@ use crate::{
     config::ApiConfig,
     configs::encryption::EncryptionKeyring,
     data::{
-        self, connect_to_source_database_from_api,
+        self,
         publications::{Publication, PublicationsDbError},
+        source_database,
         sources::SourcesDbError,
         tables::Table,
     },
@@ -59,7 +60,9 @@ impl PublicationError {
                 "Internal server error".to_owned()
             }
             PublicationError::PublicationsDb(PublicationsDbError::Database(_))
-            | PublicationError::Database(_) => "Could not query your source database".to_owned(),
+            | PublicationError::Database(_) => {
+                utils::source_database_query_error_message().to_owned()
+            }
             // Every other message is ok, as they do not divulge sensitive information
             e => e.to_string(),
         }
@@ -144,8 +147,7 @@ pub(crate) async fn create_publication(
 
     let tls_config = trusted_root_certs_cache.get_tls_config(api_config.source.tls_enabled).await?;
     let source_pool =
-        connect_to_source_database_from_api(&source_config.into_connection_config(tls_config))
-            .await?;
+        source_database::connect(&source_config.into_connection_config(tls_config)).await?;
     let publication = publication.0;
     let publication = Publication { name: publication.name, tables: publication.tables };
     data::publications::create_publication(&publication, &source_pool).await?;
@@ -192,8 +194,7 @@ pub(crate) async fn read_publication(
 
     let tls_config = trusted_root_certs_cache.get_tls_config(api_config.source.tls_enabled).await?;
     let source_pool =
-        connect_to_source_database_from_api(&source_config.into_connection_config(tls_config))
-            .await?;
+        source_database::connect(&source_config.into_connection_config(tls_config)).await?;
     let publications = data::publications::read_publication(&publication_name, &source_pool)
         .await?
         .ok_or(PublicationError::PublicationNotFound(publication_name))?;
@@ -242,8 +243,7 @@ pub(crate) async fn update_publication(
 
     let tls_config = trusted_root_certs_cache.get_tls_config(api_config.source.tls_enabled).await?;
     let source_pool =
-        connect_to_source_database_from_api(&source_config.into_connection_config(tls_config))
-            .await?;
+        source_database::connect(&source_config.into_connection_config(tls_config)).await?;
 
     if data::publications::read_publication(&publication_name, &source_pool).await?.is_none() {
         return Err(PublicationError::PublicationNotFound(publication_name));
@@ -295,8 +295,7 @@ pub(crate) async fn delete_publication(
 
     let tls_config = trusted_root_certs_cache.get_tls_config(api_config.source.tls_enabled).await?;
     let source_pool =
-        connect_to_source_database_from_api(&source_config.into_connection_config(tls_config))
-            .await?;
+        source_database::connect(&source_config.into_connection_config(tls_config)).await?;
     data::publications::drop_publication(&publication_name, &source_pool).await?;
 
     Ok(StatusCode::OK)
@@ -340,8 +339,7 @@ pub(crate) async fn read_all_publications(
 
     let tls_config = trusted_root_certs_cache.get_tls_config(api_config.source.tls_enabled).await?;
     let source_pool =
-        connect_to_source_database_from_api(&source_config.into_connection_config(tls_config))
-            .await?;
+        source_database::connect(&source_config.into_connection_config(tls_config)).await?;
     let publications = data::publications::read_all_publications(&source_pool).await?;
     let response = ReadPublicationsResponse { publications };
 
@@ -387,8 +385,7 @@ pub(crate) async fn add_tables_to_publication(
         .ok_or(PublicationError::SourceNotFound(source_id))?;
     let tls_config = trusted_root_certs_cache.get_tls_config(api_config.source.tls_enabled).await?;
     let source_pool =
-        connect_to_source_database_from_api(&source_config.into_connection_config(tls_config))
-            .await?;
+        source_database::connect(&source_config.into_connection_config(tls_config)).await?;
 
     if data::publications::read_publication(&publication_name, &source_pool).await?.is_none() {
         return Err(PublicationError::PublicationNotFound(publication_name));
@@ -440,8 +437,7 @@ pub(crate) async fn drop_tables_from_publication(
         .ok_or(PublicationError::SourceNotFound(source_id))?;
     let tls_config = trusted_root_certs_cache.get_tls_config(api_config.source.tls_enabled).await?;
     let source_pool =
-        connect_to_source_database_from_api(&source_config.into_connection_config(tls_config))
-            .await?;
+        source_database::connect(&source_config.into_connection_config(tls_config)).await?;
 
     if data::publications::read_publication(&publication_name, &source_pool).await?.is_none() {
         return Err(PublicationError::PublicationNotFound(publication_name));
@@ -493,8 +489,7 @@ pub(crate) async fn set_publication_tables(
         .ok_or(PublicationError::SourceNotFound(source_id))?;
     let tls_config = trusted_root_certs_cache.get_tls_config(api_config.source.tls_enabled).await?;
     let source_pool =
-        connect_to_source_database_from_api(&source_config.into_connection_config(tls_config))
-            .await?;
+        source_database::connect(&source_config.into_connection_config(tls_config)).await?;
 
     if data::publications::read_publication(&publication_name, &source_pool).await?.is_none() {
         return Err(PublicationError::PublicationNotFound(publication_name));

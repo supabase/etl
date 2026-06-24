@@ -15,7 +15,7 @@ use crate::{
     config::ApiConfig,
     configs::encryption::EncryptionKeyring,
     data::{
-        self, connect_to_source_database_from_api,
+        self, source_database,
         sources::SourcesDbError,
         tables::{Table, TablesDbError},
     },
@@ -55,7 +55,7 @@ impl TableError {
                 "Internal server error".to_owned()
             }
             TableError::TablesDb(TablesDbError::Database(_)) | TableError::Database(_) => {
-                "Could not query your source database".to_owned()
+                utils::source_database_query_error_message().to_owned()
             }
             // Every other message is ok, as they do not divulge sensitive information
             e => e.to_string(),
@@ -124,8 +124,7 @@ pub(crate) async fn read_table_names(
 
     let tls_config = trusted_root_certs_cache.get_tls_config(api_config.source.tls_enabled).await?;
     let source_pool =
-        connect_to_source_database_from_api(&source_config.into_connection_config(tls_config))
-            .await?;
+        source_database::connect(&source_config.into_connection_config(tls_config)).await?;
     let tables = data::tables::get_tables(&source_pool).await?;
     let response = ReadTablesResponse { tables };
 
