@@ -1,19 +1,31 @@
 //! Database migrations required by ETL.
 
+use std::sync::LazyLock;
+
 use sqlx::{Connection, Executor, PgConnection, migrate::Migrator, postgres::PgConnectOptions};
 use tracing::debug;
 
 use crate::{
-    config::{ETL_MIGRATION_OPTIONS, IntoConnectOptions, PgConnectionConfig},
+    config::{IntoConnectOptions, PgConnectionConfig, PgConnectionOptions},
     error::{ErrorKind, EtlResult},
     etl_error,
 };
+
+/// Application name for ETL migration connections.
+const APP_NAME_REPLICATOR_MIGRATIONS: &str = "supabase_etl_replicator_migrations";
+
+/// Connection options for ETL migration queries.
+///
+/// Uses an extended statement timeout for DDL while keeping bounded lock and
+/// idle-in-transaction timeouts from the common Postgres defaults.
+static MIGRATION_OPTIONS: LazyLock<PgConnectionOptions> =
+    LazyLock::new(|| PgConnectionOptions::builder(APP_NAME_REPLICATOR_MIGRATIONS).build());
 
 /// Creates a PostgreSQL connection prepared for ETL migrations.
 async fn create_migration_connection(
     connection_config: &PgConnectionConfig,
 ) -> Result<PgConnection, sqlx::Error> {
-    let options: PgConnectOptions = connection_config.with_db(Some(&ETL_MIGRATION_OPTIONS));
+    let options: PgConnectOptions = connection_config.with_db(Some(&MIGRATION_OPTIONS));
 
     let mut conn = PgConnection::connect_with(&options).await?;
 
@@ -36,7 +48,7 @@ async fn create_migration_connection(
 async fn source_database_in_recovery(
     connection_config: &PgConnectionConfig,
 ) -> Result<bool, sqlx::Error> {
-    let options: PgConnectOptions = connection_config.with_db(Some(&ETL_MIGRATION_OPTIONS));
+    let options: PgConnectOptions = connection_config.with_db(Some(&MIGRATION_OPTIONS));
     let mut conn = PgConnection::connect_with(&options).await?;
 
     sqlx::query_scalar("select pg_is_in_recovery()").fetch_one(&mut conn).await

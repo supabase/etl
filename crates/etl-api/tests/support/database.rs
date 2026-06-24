@@ -1,12 +1,14 @@
 #![allow(dead_code)]
 
+use std::sync::LazyLock;
+
 use etl_api::{
     configs::source::FullApiSourceConfig,
     routes::sources::{CreateSourceRequest, CreateSourceResponse},
 };
 use etl_config::{
     SerializableSecretString,
-    shared::{ETL_MIGRATION_OPTIONS, IntoConnectOptions, PgConnectionConfig, TcpKeepaliveConfig},
+    shared::{IntoConnectOptions, PgConnectionConfig, PgConnectionOptions, TcpKeepaliveConfig},
 };
 use etl_postgres::{
     sqlx::test_utils::create_pg_database,
@@ -23,6 +25,11 @@ const DEFAULT_DATABASE_HOST: &str = "localhost";
 const DEFAULT_DATABASE_PORT: &str = "5430";
 const DEFAULT_DATABASE_USERNAME: &str = "postgres";
 const DEFAULT_DATABASE_PASSWORD: &str = "postgres";
+const APP_NAME_TEST_MIGRATIONS: &str = "supabase_etl_api_test_migrations";
+
+static TEST_MIGRATION_OPTIONS: LazyLock<PgConnectionOptions> =
+    LazyLock::new(|| PgConnectionOptions::builder(APP_NAME_TEST_MIGRATIONS).build());
+
 /// Creates a database configuration from TESTS_DATABASE_* environment
 /// variables.
 ///
@@ -183,7 +190,7 @@ pub(crate) async fn drop_trusted_source_database(database: TrustedSourceDatabase
 /// Panics if database connection fails, schema creation fails, or migrations
 /// fail.
 pub(crate) async fn run_etl_migrations_on_source_database(source_db_config: &PgConnectionConfig) {
-    let options = source_db_config.with_db(Some(&ETL_MIGRATION_OPTIONS));
+    let options = source_db_config.with_db(Some(&TEST_MIGRATION_OPTIONS));
     let mut connection =
         PgConnection::connect_with(&options).await.expect("failed to connect to source database");
 
