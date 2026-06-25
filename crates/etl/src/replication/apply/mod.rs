@@ -56,22 +56,24 @@ use crate::{
         ACTION_LABEL, COMMAND_TAG_LABEL, ETL_APPLY_LOOP_EFFECTIVE_FLUSH_LAG_BYTES,
         ETL_APPLY_LOOP_END_TO_END_LAG_BYTES, ETL_APPLY_LOOP_FLUSH_LAG_BYTES,
         ETL_APPLY_LOOP_RECEIVED_LAG_BYTES, ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
-        ETL_DDL_SCHEMA_CHANGE_COLUMNS, ETL_DDL_SCHEMA_CHANGES_TOTAL, ETL_EVENTS_PROCESSED_TOTAL,
-        ETL_REPLICATION_MESSAGES_TOTAL, ETL_SCHEMA_CLEANUP_ERRORS_TOTAL,
+        ETL_BYTES_PROCESSED_TOTAL, ETL_BYTES_RECEIVED_TOTAL, ETL_DDL_SCHEMA_CHANGE_COLUMNS,
+        ETL_DDL_SCHEMA_CHANGES_TOTAL, ETL_EVENTS_PROCESSED_TOTAL, ETL_EVENTS_RECEIVED_TOTAL,
+        ETL_REPLICATION_MESSAGES_TOTAL, ETL_ROW_SIZE_BYTES, ETL_SCHEMA_CLEANUP_ERRORS_TOTAL,
         ETL_SCHEMA_CLEANUP_PRUNED_VERSIONS_TOTAL, ETL_SCHEMA_CLEANUP_TABLES_TOTAL,
         ETL_SCHEMA_CLEANUPS_TOTAL, ETL_TRANSACTION_DURATION_SECONDS, ETL_TRANSACTION_SIZE,
-        ETL_TRANSACTIONS_TOTAL, OUTCOME_LABEL, WORKER_TYPE_LABEL,
+        ETL_TRANSACTIONS_TOTAL, EVENT_TYPE_LABEL, OUTCOME_LABEL, WORKER_TYPE_LABEL,
     },
     pipeline::PipelineId,
     postgres::{
         EventsStream, OutOfBandSourcePool, StatusUpdateResult, StatusUpdateType,
         client::{PgReplicationClient, PostgresConnectionUpdate},
         codec::{
-            DDL_MESSAGE_PREFIX, SchemaChangeMessage, parse_event_from_begin_message,
+            DDL_MESSAGE_PREFIX, SchemaChangeMessage, delete_message_payload_bytes,
+            insert_message_payload_bytes, parse_event_from_begin_message,
             parse_event_from_commit_message, parse_event_from_delete_message,
             parse_event_from_insert_message, parse_event_from_truncate_message,
             parse_event_from_update_message, parse_replica_identity_column_names,
-            parse_replicated_column_names,
+            parse_replicated_column_names, update_message_payload_bytes,
         },
     },
     replication::{
@@ -1962,6 +1964,7 @@ where
         message: LogicalReplicationMessage,
     ) -> EtlResult<HandleMessageResult> {
         self.state.current_tx_events += 1;
+        self.record_streaming_event_received();
 
         match &message {
             LogicalReplicationMessage::Begin(begin_body) => {
@@ -1998,6 +2001,29 @@ where
             }
             _ => Ok(HandleMessageResult::default()),
         }
+    }
+
+    /// Records a source event received by the table streaming path.
+    fn record_streaming_event_received(&self) {
+        counter!(
+            ETL_EVENTS_RECEIVED_TOTAL,
+            WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
+            ACTION_LABEL => "table_streaming",
+        )
+        .increment(1);
+    }
+
+    /// Records row payload bytes received from logical replication.
+    fn record_streaming_bytes_received(event_type: &'static str, payload_bytes: u64) {
+        counter!(ETL_BYTES_RECEIVED_TOTAL, EVENT_TYPE_LABEL => event_type).increment(payload_bytes);
+    }
+
+    /// Records row payload bytes processed after table ownership filtering.
+    fn record_streaming_bytes_processed(event_type: &'static str, payload_bytes: u64) {
+        counter!(ETL_BYTES_PROCESSED_TOTAL, EVENT_TYPE_LABEL => event_type)
+            .increment(payload_bytes);
+
+        histogram!(ETL_ROW_SIZE_BYTES, EVENT_TYPE_LABEL => event_type).record(payload_bytes as f64);
     }
 
     /// Handles Postgres MESSAGE messages (pg_logical_emit_message).
@@ -2323,12 +2349,18 @@ where
         let table_id = TableId::new(message.rel_id());
         let tx_ordinal = self.state.next_tx_ordinal();
 
+        let payload_bytes = insert_message_payload_bytes(message);
+
+        Self::record_streaming_bytes_received("insert", payload_bytes);
+
         // Exactly one worker owns protocol interpretation for a table at a time, so
         // non-owning workers skip row decoding and leave the shared table state
         // untouched.
         if !self.should_apply_changes(table_id, remote_final_lsn).await? {
             return Ok(HandleMessageResult::no_event());
         }
+
+        Self::record_streaming_bytes_processed("insert", payload_bytes);
 
         let replicated_table_schema =
             get_replicated_table_schema(&table_id, &self.shared_table_cache).await?;
@@ -2361,12 +2393,18 @@ where
         let table_id = TableId::new(message.rel_id());
         let tx_ordinal = self.state.next_tx_ordinal();
 
+        let payload_bytes = update_message_payload_bytes(message);
+
+        Self::record_streaming_bytes_received("update", payload_bytes);
+
         // Exactly one worker owns protocol interpretation for a table at a time, so
         // non-owning workers skip row decoding and leave the shared table state
         // untouched.
         if !self.should_apply_changes(table_id, remote_final_lsn).await? {
             return Ok(HandleMessageResult::no_event());
         }
+
+        Self::record_streaming_bytes_processed("update", payload_bytes);
 
         let replicated_table_schema =
             get_replicated_table_schema(&table_id, &self.shared_table_cache).await?;
@@ -2399,12 +2437,18 @@ where
         let table_id = TableId::new(message.rel_id());
         let tx_ordinal = self.state.next_tx_ordinal();
 
+        let payload_bytes = delete_message_payload_bytes(message);
+
+        Self::record_streaming_bytes_received("delete", payload_bytes);
+
         // Exactly one worker owns protocol interpretation for a table at a time, so
         // non-owning workers skip row decoding and leave the shared table state
         // untouched.
         if !self.should_apply_changes(table_id, remote_final_lsn).await? {
             return Ok(HandleMessageResult::no_event());
         }
+
+        Self::record_streaming_bytes_processed("delete", payload_bytes);
 
         let replicated_table_schema =
             get_replicated_table_schema(&table_id, &self.shared_table_cache).await?;

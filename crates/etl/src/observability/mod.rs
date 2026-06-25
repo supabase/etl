@@ -16,7 +16,9 @@ pub(crate) const ETL_PARALLEL_TABLE_COPY_TIME_IMBALANCE: &str =
     "etl_parallel_table_copy_time_imbalance";
 pub(crate) const ETL_PARALLEL_TABLE_COPY_ROWS_IMBALANCE: &str =
     "etl_parallel_table_copy_rows_imbalance";
+pub(crate) const ETL_BYTES_RECEIVED_TOTAL: &str = "etl_bytes_received_total";
 pub(crate) const ETL_BYTES_PROCESSED_TOTAL: &str = "etl_bytes_processed_total";
+pub(crate) const ETL_EVENTS_RECEIVED_TOTAL: &str = "etl_events_received_total";
 pub(crate) const ETL_EVENTS_PROCESSED_TOTAL: &str = "etl_events_processed_total";
 pub(crate) const ETL_REPLICATION_MESSAGES_TOTAL: &str = "etl_replication_messages_total";
 pub(crate) const ETL_STATUS_UPDATES_TOTAL: &str = "etl_status_updates_total";
@@ -128,6 +130,12 @@ pub(crate) fn register_metrics() {
         );
 
         describe_counter!(
+            ETL_EVENTS_RECEIVED_TOTAL,
+            Unit::Count,
+            "Total number of events received from the source, labeled by worker_type and action."
+        );
+
+        describe_counter!(
             ETL_REPLICATION_MESSAGES_TOTAL,
             Unit::Count,
             "Total number of logical replication messages received by the apply loop, labeled by \
@@ -138,6 +146,12 @@ pub(crate) fn register_metrics() {
             ETL_BYTES_PROCESSED_TOTAL,
             Unit::Bytes,
             "Total bytes processed by the pipeline, labeled by event_type."
+        );
+
+        describe_counter!(
+            ETL_BYTES_RECEIVED_TOTAL,
+            Unit::Bytes,
+            "Total bytes received from the source, labeled by event_type."
         );
 
         describe_counter!(

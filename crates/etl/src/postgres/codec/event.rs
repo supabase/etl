@@ -8,7 +8,6 @@ use etl_postgres::types::{
     ColumnSchema, IdentityMask, ReplicatedTableSchema, ReplicationMask, SnapshotId, TableId,
     TableName, TableSchema, convert_type_oid_to_type,
 };
-use metrics::{counter, histogram};
 use postgres_replication::protocol;
 use serde::Deserialize;
 use tokio_postgres::types::PgLsn;
@@ -19,7 +18,6 @@ use crate::{
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
     event::{BeginEvent, CommitEvent, DeleteEvent, InsertEvent, TruncateEvent, UpdateEvent},
-    observability::{ETL_BYTES_PROCESSED_TOTAL, ETL_ROW_SIZE_BYTES, EVENT_TYPE_LABEL},
     postgres::codec::text::parse_cell_from_postgres_text,
 };
 
@@ -257,7 +255,7 @@ pub(crate) fn build_table_schema(
 ///
 /// This is used only for coarse event-size metrics, so `NULL` and
 /// `UnchangedToast` fields contribute zero bytes.
-fn calculate_tuple_bytes(tuple_data: &[protocol::TupleData]) -> u64 {
+pub(crate) fn calculate_tuple_bytes(tuple_data: &[protocol::TupleData]) -> u64 {
     tuple_data
         .iter()
         .map(|data| match data {
@@ -267,6 +265,32 @@ fn calculate_tuple_bytes(tuple_data: &[protocol::TupleData]) -> u64 {
             }
         })
         .sum()
+}
+
+/// Calculates the payload size of an insert message.
+pub(crate) fn insert_message_payload_bytes(insert_body: &protocol::InsertBody) -> u64 {
+    calculate_tuple_bytes(insert_body.tuple().tuple_data())
+}
+
+/// Calculates the payload size of an update message.
+pub(crate) fn update_message_payload_bytes(update_body: &protocol::UpdateBody) -> u64 {
+    let new_tuple_data = update_body.new_tuple().tuple_data();
+    let mut total_bytes = calculate_tuple_bytes(new_tuple_data);
+
+    if let Some(identity) = update_body.old_tuple().or(update_body.key_tuple()) {
+        total_bytes += calculate_tuple_bytes(identity.tuple_data());
+    }
+
+    total_bytes
+}
+
+/// Calculates the payload size of a delete message.
+pub(crate) fn delete_message_payload_bytes(delete_body: &protocol::DeleteBody) -> u64 {
+    delete_body
+        .old_tuple()
+        .or(delete_body.key_tuple())
+        .map(|identity| calculate_tuple_bytes(identity.tuple_data()))
+        .unwrap_or_default()
 }
 
 /// Creates a [`BeginEvent`] from Postgres protocol data.
@@ -381,12 +405,6 @@ pub(crate) fn parse_event_from_insert_message(
     insert_body: &protocol::InsertBody,
 ) -> EtlResult<InsertEvent> {
     let tuple_data = insert_body.tuple().tuple_data();
-    let row_size_bytes = calculate_tuple_bytes(tuple_data);
-
-    counter!(ETL_BYTES_PROCESSED_TOTAL, EVENT_TYPE_LABEL => "insert").increment(row_size_bytes);
-
-    histogram!(ETL_ROW_SIZE_BYTES, EVENT_TYPE_LABEL => "insert").record(row_size_bytes as f64);
-
     let table_row = convert_tuple_to_row(replicated_table_schema.column_schemas(), tuple_data)?;
 
     Ok(InsertEvent { start_lsn, commit_lsn, tx_ordinal, replicated_table_schema, table_row })
@@ -428,14 +446,7 @@ pub(crate) fn parse_event_from_update_message(
     // row acts only as a source for resolving `UnchangedToast`.
     let is_key = update_body.old_tuple().is_none();
     let old_tuple = update_body.old_tuple().or(update_body.key_tuple());
-
-    // Calculate total bytes from both old and new tuple data.
     let new_tuple_data = update_body.new_tuple().tuple_data();
-    let mut total_bytes = calculate_tuple_bytes(new_tuple_data);
-    if let Some(identity) = &old_tuple {
-        total_bytes += calculate_tuple_bytes(identity.tuple_data());
-    }
-    counter!(ETL_BYTES_PROCESSED_TOTAL, EVENT_TYPE_LABEL => "update").increment(total_bytes);
 
     let old_table_row = match old_tuple {
         Some(identity) if is_key => Some(OldTableRow::Key(normalize_key_tuple_to_row(
@@ -458,8 +469,6 @@ pub(crate) fn parse_event_from_update_message(
         new_tuple_data,
         old_table_row.as_ref(),
     )?;
-
-    histogram!(ETL_ROW_SIZE_BYTES, EVENT_TYPE_LABEL => "update").record(total_bytes as f64);
 
     Ok(UpdateEvent {
         start_lsn,
@@ -498,14 +507,6 @@ pub(crate) fn parse_event_from_delete_message(
     // preserve that shape here.
     let is_key = delete_body.old_tuple().is_none();
     let old_tuple = delete_body.old_tuple().or(delete_body.key_tuple());
-
-    if let Some(identity) = &old_tuple {
-        let row_size_bytes = calculate_tuple_bytes(identity.tuple_data());
-
-        counter!(ETL_BYTES_PROCESSED_TOTAL, EVENT_TYPE_LABEL => "delete").increment(row_size_bytes);
-
-        histogram!(ETL_ROW_SIZE_BYTES, EVENT_TYPE_LABEL => "delete").record(row_size_bytes as f64);
-    }
 
     let old_table_row = match old_tuple {
         Some(identity) if is_key => Some(OldTableRow::Key(normalize_key_tuple_to_row(

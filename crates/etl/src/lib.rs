@@ -182,6 +182,9 @@ pub mod error;
 pub mod event;
 #[cfg(feature = "failpoints")]
 pub mod failpoints;
+#[doc(hidden)]
+#[cfg(feature = "fuzzing")]
+pub mod fuzzing;
 mod macros;
 mod observability;
 pub mod pipeline;

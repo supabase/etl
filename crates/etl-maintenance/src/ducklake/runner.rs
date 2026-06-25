@@ -17,6 +17,7 @@ use etl::{
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
 };
+use etl_config::libpq_tcp_host;
 use metrics::{gauge, histogram};
 use pg_escape::{quote_identifier, quote_literal};
 use regex::Regex;
@@ -532,7 +533,7 @@ fn serialize_hosts(hosts: &[Host]) -> EtlResult<String> {
     let mut values = Vec::with_capacity(hosts.len());
     for host in hosts {
         match host {
-            Host::Tcp(host) => values.push(host.clone()),
+            Host::Tcp(host) => values.push(libpq_tcp_host(host).to_owned()),
             #[cfg(unix)]
             Host::Unix(path) => {
                 let path = path.to_str().ok_or_else(|| {
@@ -2732,6 +2733,25 @@ mod tests {
 
         assert_eq!(options.get_host(), "2a05:dddd:c3c:b703:e52f:e170:4155:c8dd");
         assert!(matches!(options.get_ssl_mode(), PgSslMode::Prefer));
+    }
+
+    #[test]
+    fn catalog_conninfo_from_postgres_ipv6_url_uses_libpq_host_syntax() {
+        let catalog_url = Url::parse(
+            "postgres://postgres@[2406:da18:1d63:9b01:df66:7be6:5158:2151]:5432/postgres?\
+             sslmode=prefer",
+        )
+        .unwrap();
+        let conninfo = catalog_conninfo_from_url(&catalog_url).unwrap();
+        let parsed = PgConfig::from_str(conninfo.strip_prefix("postgres:").unwrap()).unwrap();
+
+        assert!(!conninfo.contains("[2406:da18"));
+        assert_eq!(
+            serialize_hosts(parsed.get_hosts()).unwrap(),
+            "2406:da18:1d63:9b01:df66:7be6:5158:2151"
+        );
+        assert_eq!(parsed.get_ports(), &[5432]);
+        assert_eq!(parsed.get_ssl_mode(), SslMode::Prefer);
     }
 
     #[tokio::test]
