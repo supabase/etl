@@ -1,4 +1,6 @@
-use etl::types::{ColumnSchema, DefaultExpression, Type, is_array_type, parse_default_expression};
+use etl::postgres::types::{
+    ColumnSchema, DefaultExpression, Type, is_array_type, parse_default_expression,
+};
 use tracing::warn;
 
 use crate::ducklake::sql::{qualified_lake_table_name, quote_identifier};

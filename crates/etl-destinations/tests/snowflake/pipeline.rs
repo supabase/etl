@@ -1,14 +1,15 @@
 use std::sync::Arc;
 
 use etl::{
-    state::TableStateType,
+    event::EventType,
+    pipeline::PipelineId,
+    store::TableStateType,
     test_utils::{
         database::{spawn_source_database, test_table_name},
         notifying_store::NotifyingStore,
         pipeline::create_pipeline,
         test_destination_wrapper::TestDestinationWrapper,
     },
-    types::{EventType, PipelineId},
 };
 use etl_destinations::snowflake::{
     AuthManager, Client, Destination, HttpExchanger, OffsetToken, SqlClient,

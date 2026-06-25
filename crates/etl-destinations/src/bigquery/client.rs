@@ -1,11 +1,13 @@
 use std::fmt;
 
 use etl::{
+    data::Cell,
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
-    types::{
-        Cell, ColumnSchema, DefaultExpression, PipelineId, ReplicatedTableSchema, Type,
-        is_array_type, parse_default_expression,
+    pipeline::PipelineId,
+    postgres::types::{
+        ColumnSchema, DefaultExpression, ReplicatedTableSchema, Type, is_array_type,
+        parse_default_expression,
     },
 };
 use gcp_bigquery_client::{
@@ -1650,7 +1652,7 @@ impl fmt::Debug for BigQueryClient {
 mod tests {
     use std::{collections::HashSet, sync::Arc};
 
-    use etl::types::{IdentityMask, ReplicationMask, TableId, TableName, TableSchema};
+    use etl::postgres::types::{IdentityMask, ReplicationMask, TableId, TableName, TableSchema};
     use gcp_bigquery_client::{
         error::{NestedResponseError, ResponseError},
         google::cloud::bigquery::storage::v1::{AppendRowsResponse, append_rows_response},

@@ -2,7 +2,7 @@ use etl::{
     bail,
     error::{ErrorKind, EtlResult},
     etl_error,
-    types::TableName,
+    postgres::types::TableName,
 };
 
 /// Converts a [`TableName`] into a single underscore-escaped identifier.

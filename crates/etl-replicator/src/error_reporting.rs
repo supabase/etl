@@ -1,18 +1,13 @@
 use std::{collections::HashMap, sync::Arc};
 
 use etl::{
+    destination::{AppliedDestinationTableMetadata, DestinationTableMetadata},
     error::{EtlError, EtlResult},
-    replication::WorkerType,
-    state::{
-        TableState,
-        destination_table_metadata::{AppliedDestinationTableMetadata, DestinationTableMetadata},
-    },
+    postgres::types::{PgLsn, SnapshotId, TableId, TableSchema},
     store::{
-        lifecycle::{TableStateLifecycleStore, TableStateOperation},
-        schema::{SchemaStore, TableSchemaRetention},
-        state::{StateStore, TableStates},
+        SchemaStore, StateStore, TableSchemaRetention, TableState, TableStateLifecycleStore,
+        TableStateOperation, TableStates, WorkerType,
     },
-    types::{PgLsn, SnapshotId, TableId, TableSchema},
 };
 use tracing::info;
 

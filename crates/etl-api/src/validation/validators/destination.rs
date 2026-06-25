@@ -1,8 +1,8 @@
 //! Destination validation dispatch.
 
 use async_trait::async_trait;
+use etl::postgres::types::IdentityType;
 use etl_config::shared::ClickHouseEngine;
-use etl_postgres::types::IdentityType;
 
 use super::{
     super::{ValidationContext, ValidationError, ValidationFailure, Validator},

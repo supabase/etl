@@ -1,0 +1,225 @@
+use std::{
+    collections::HashMap,
+    future::Future,
+    sync::atomic::{AtomicU64, Ordering},
+};
+
+use etl_postgres::types::TableId;
+use tokio::{
+    sync::{Mutex, RwLock},
+    task::JoinSet,
+};
+use tracing::{debug, warn};
+
+use crate::{
+    error::{ErrorKind, EtlResult},
+    etl_error,
+    runtime::table_sync::{TableSyncWorkerHandle, TableSyncWorkerResult, TableSyncWorkerState},
+};
+
+/// Unique identifier for a table sync worker run.
+///
+/// Each spawned worker is identified by its table ID and a monotonically
+/// increasing run ID. This allows tracking all worker runs across restarts
+/// for the same table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct TableSyncWorkerId {
+    /// Identifier of the table being synchronized by this worker.
+    pub(crate) table_id: TableId,
+    /// Monotonically increasing identifier distinguishing individual worker
+    /// runs for the same table.
+    pub(crate) run_id: u64,
+}
+
+impl std::fmt::Display for TableSyncWorkerId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.table_id, self.run_id)
+    }
+}
+
+/// Pool for managing multiple table synchronization workers.
+///
+/// [`TableSyncWorkerPool`] coordinates the execution of multiple table sync
+/// workers that run in parallel during the initial synchronization stage of ETL
+/// pipelines. It provides methods for spawning workers, tracking their
+/// progress, and waiting for completion of all synchronization operations.
+///
+/// The pool uses a two-lock design:
+/// - A [`Mutex`] protects the [`JoinSet`] for task spawning and waiting.
+/// - An [`RwLock`] protects the workers map for cheap read access to worker
+///   state.
+///
+/// Locking order during spawn is: workers_join_set lock -> workers write lock.
+/// This ensures that [`wait_all`] (which holds the workers_join_set lock)
+/// blocks any new spawns until all existing workers have completed.
+#[derive(Debug)]
+pub(crate) struct TableSyncWorkerPool {
+    /// Monotonically increasing counter for generating unique run IDs.
+    next_run_id: AtomicU64,
+    /// Owns all spawned worker tasks. Locked first during spawn operations.
+    workers_join_set: Mutex<JoinSet<(TableSyncWorkerId, EtlResult<TableSyncWorkerResult>)>>,
+    /// Last known worker handle per table. Uses RwLock for cheap read access.
+    workers: RwLock<HashMap<TableId, TableSyncWorkerHandle>>,
+}
+
+impl TableSyncWorkerPool {
+    /// Creates a new empty table sync worker pool.
+    pub(crate) fn new() -> Self {
+        Self {
+            next_run_id: AtomicU64::new(0),
+            workers_join_set: Mutex::new(JoinSet::new()),
+            workers: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Spawns a new worker into the pool if no active worker exists for the
+    /// table.
+    ///
+    /// If a worker for the given table already exists and is still running,
+    /// logs a warning and skips spawning. If no worker exists or the
+    /// previous worker has finished, spawns a new worker with a unique run
+    /// ID.
+    ///
+    /// The locking order is: workers_join_set -> workers (write). This ensures
+    /// that if [`wait_all`] is in progress, this method blocks until it
+    /// completes.
+    pub(crate) async fn spawn<F>(&self, table_id: TableId, state: TableSyncWorkerState, future: F)
+    where
+        F: Future<Output = EtlResult<TableSyncWorkerResult>> + Send + 'static,
+    {
+        // Lock workers_join_set first to ensure we block if wait_all is in progress.
+        let mut workers_join_set = self.workers_join_set.lock().await;
+        let mut workers = self.workers.write().await;
+
+        // Check if a worker already exists and is still running.
+        if let Some(handle) = workers.get(&table_id)
+            && !handle.is_finished()
+        {
+            warn!(
+                table_id = table_id.0,
+                "table sync worker already exists in pool and is still running"
+            );
+
+            return;
+        }
+
+        // Generate a unique run ID for this worker.
+        let run_id = self.next_run_id.fetch_add(1, Ordering::Relaxed);
+        let worker_id = TableSyncWorkerId { table_id, run_id };
+
+        // Spawn the worker task.
+        let abort_handle = workers_join_set.spawn(async move {
+            let result = future.await;
+            (worker_id, result)
+        });
+
+        // Create and store the handle.
+        let handle = TableSyncWorkerHandle::new(worker_id, state, abort_handle);
+        workers.insert(table_id, handle);
+
+        debug!(%worker_id, "spawned table sync worker in pool");
+    }
+
+    /// Retrieves the state handle for an active worker by table ID.
+    ///
+    /// Returns `None` if no worker exists for the table or if the worker has
+    /// finished. This method only acquires a read lock on the workers map.
+    pub(crate) async fn get_active_worker_state(
+        &self,
+        table_id: TableId,
+    ) -> Option<TableSyncWorkerState> {
+        let workers = self.workers.read().await;
+        let handle = workers.get(&table_id)?;
+
+        // Check if the worker is still running.
+        if handle.is_finished() {
+            return None;
+        }
+
+        debug!(table_id = table_id.0, "retrieved active table sync worker state");
+
+        Some(handle.state())
+    }
+
+    /// Waits for all workers in the pool to complete.
+    ///
+    /// This method holds the workers_join_set lock while draining all tasks,
+    /// which blocks any new spawn attempts. For each completed task, it
+    /// briefly acquires a write lock on the workers map to remove the entry
+    /// only if the worker_id matches.
+    ///
+    /// If any workers encounter supervision errors, those errors are collected
+    /// and returned.
+    pub(crate) async fn wait_all(&self) -> EtlResult<()> {
+        let mut errors = Vec::new();
+        let mut workers_join_set = self.workers_join_set.lock().await;
+
+        while let Some(result) = workers_join_set.join_next().await {
+            match result {
+                Ok((worker_id, worker_result)) => {
+                    // Only remove from workers map if the worker_id matches.
+                    // A new worker with the same table_id but different run_id
+                    // may have been spawned, so we must not remove it.
+                    //
+                    // We lock only after the join was completed, since we want to allow the active
+                    // workers to be read while waiting for all to complete.
+                    {
+                        let mut workers = self.workers.write().await;
+                        if let Some(handle) = workers.get(&worker_id.table_id)
+                            && handle.worker_id() == worker_id
+                        {
+                            workers.remove(&worker_id.table_id);
+                        }
+                    }
+
+                    match worker_result {
+                        Ok(TableSyncWorkerResult::Completed) => {
+                            debug!(%worker_id, "table sync worker completed successfully");
+                        }
+                        Ok(TableSyncWorkerResult::Shutdown) => {
+                            debug!(%worker_id, "table sync worker completed after shutdown");
+                        }
+                        Ok(TableSyncWorkerResult::Errored) => {
+                            // The worker must persist the table error before returning this result.
+                            // Waiting on the pool happens after the apply worker completes, so
+                            // `wait_all` cannot be the first place that releases apply-side
+                            // waiters.
+                            debug!(
+                                %worker_id,
+                                "table sync worker completed after persisting error state"
+                            );
+                        }
+                        Err(err) => {
+                            debug!(
+                                %worker_id,
+                                error = %err,
+                                "table sync worker completed with error"
+                            );
+
+                            errors.push(err);
+                        }
+                    }
+                }
+                Err(err) => {
+                    if err.is_cancelled() {
+                        debug!("table sync worker task was cancelled");
+                    } else {
+                        errors.push(etl_error!(
+                            ErrorKind::TableSyncWorkerPanic,
+                            "Table sync worker panicked",
+                            err
+                        ));
+                    }
+                }
+            }
+        }
+
+        if errors.is_empty() { Ok(()) } else { Err(errors.into()) }
+    }
+}
+
+impl Default for TableSyncWorkerPool {
+    fn default() -> Self {
+        Self::new()
+    }
+}

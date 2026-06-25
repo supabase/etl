@@ -5,32 +5,37 @@ use std::{
     time::Duration,
 };
 
-use etl_postgres::replication::{
-    destination_table_metadata as pg_destination_table_metadata, progress, schema,
-    table_state as pg_table_state,
+use etl_postgres::{
+    replication::{
+        destination_table_metadata as pg_destination_table_metadata, progress, schema,
+        table_state as pg_table_state,
+    },
+    types::{ReplicationMask, SnapshotId, TableId, TableSchema},
 };
 use metrics::gauge;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use tokio::sync::Mutex;
+use tokio_postgres::types::PgLsn;
 use tracing::{debug, info};
 
 use crate::{
     config::{IntoConnectOptions, PgConnectionConfig, PgConnectionOptions},
+    destination::{
+        AppliedDestinationTableMetadata, DestinationTableMetadata, DestinationTableSchemaStatus,
+    },
     error::{ErrorKind, EtlResult},
     etl_error,
-    metrics::{ETL_TABLES_TOTAL, STATE_LABEL},
-    migrations,
-    replication::WorkerType,
-    state::{
-        AppliedDestinationTableMetadata, DestinationTableMetadata, DestinationTableSchemaStatus,
-        TableState, TableStateType,
+    observability::{ETL_TABLES_TOTAL, STATE_LABEL},
+    pipeline::PipelineId,
+    postgres::migrations,
+    replication::{
+        WorkerType,
+        table_state::{TableState, TableStateType},
     },
     store::{
-        lifecycle::{TableStateLifecycleStore, TableStateOperation},
-        schema::{SchemaStore, TableSchemaRetention, TableSchemaSnapshots},
-        state::{DestinationTablesMetadata, StateStore, TableStates},
+        DestinationTablesMetadata, SchemaStore, StateStore, TableSchemaRetention,
+        TableSchemaSnapshots, TableStateLifecycleStore, TableStateOperation, TableStates,
     },
-    types::{PgLsn, PipelineId, ReplicationMask, SnapshotId, TableId, TableSchema},
 };
 
 /// Maximum number of connections in the pool.
@@ -178,9 +183,10 @@ pub struct PostgresStore {
 impl PostgresStore {
     /// Creates a new Postgres-backed store for the given pipeline.
     ///
-    /// Runs the Postgres store migrations, then creates a lazily-connected pool
-    /// with automatic idle timeout. Connections are established on first use
-    /// and automatically closed after `IDLE_TIMEOUT` of inactivity.
+    /// Runs the Postgres store postgres::migrations, then creates a
+    /// lazily-connected pool with automatic idle timeout. Connections are
+    /// established on first use and automatically closed after
+    /// `IDLE_TIMEOUT` of inactivity.
     pub async fn new(
         pipeline_id: PipelineId,
         connection_config: PgConnectionConfig,

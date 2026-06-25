@@ -10,11 +10,12 @@ use tokio_postgres::{
 };
 
 use crate::{
+    data::{Cell, OldTableRow, PartialTableRow, TableRow, UpdatedTableRow},
+    event::{Event, InsertEvent},
     test_utils::{
         database::{TEST_DATABASE_SCHEMA, test_table_name},
         test_destination_wrapper::TestDestinationWrapper,
     },
-    types::{Cell, Event, InsertEvent, OldTableRow, PartialTableRow, TableRow, UpdatedTableRow},
 };
 
 /// Creates a test column schema with sensible defaults.

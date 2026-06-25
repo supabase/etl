@@ -3,18 +3,18 @@ use std::{str::FromStr, sync::Once, time::Duration};
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use etl::{
     config::BatchConfig,
+    data::{Cell, OldTableRow, TableRow, UpdatedTableRow},
     error::ErrorKind,
-    state::{TableState, TableStateType},
-    store::state::StateStore,
+    event::{Event, EventType},
+    pipeline::PipelineId,
+    postgres::types::PgNumeric,
+    store::{StateStore, TableState, TableStateType},
     test_utils::{
         database::{spawn_source_database, test_table_name},
         notifying_store::NotifyingStore,
         pipeline::{create_pipeline, create_pipeline_with_batch_config},
         test_destination_wrapper::TestDestinationWrapper,
         test_schema::{TableSelection, insert_mock_data, setup_test_database_schema},
-    },
-    types::{
-        Cell, Event, EventType, OldTableRow, PgNumeric, PipelineId, TableRow, UpdatedTableRow,
     },
 };
 use etl_destinations::bigquery::test_utils::{
@@ -56,7 +56,7 @@ fn data_events(events: Vec<Event>) -> Vec<Event> {
         .collect()
 }
 
-fn find_update_event(events: &[Event], update_index: usize) -> &etl::types::UpdateEvent {
+fn find_update_event(events: &[Event], update_index: usize) -> &etl::event::UpdateEvent {
     events
         .iter()
         .filter_map(|event| match event {
@@ -67,7 +67,7 @@ fn find_update_event(events: &[Event], update_index: usize) -> &etl::types::Upda
         .expect("expected update event")
 }
 
-fn find_delete_event(events: &[Event]) -> &etl::types::DeleteEvent {
+fn find_delete_event(events: &[Event]) -> &etl::event::DeleteEvent {
     events
         .iter()
         .find_map(|event| match event {

@@ -4,9 +4,9 @@ use etl_postgres::types::ColumnSchema;
 use postgres_replication::protocol::TupleData;
 
 use crate::{
-    conversions::{convert_tuple_to_row, parse_table_row_from_postgres_copy_bytes},
+    data::TableRow,
     error::EtlResult,
-    types::TableRow,
+    postgres::codec::{convert_tuple_to_row, parse_table_row_from_postgres_copy_bytes},
 };
 
 /// Parses a raw Postgres COPY row with the production conversion path.

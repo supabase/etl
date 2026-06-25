@@ -12,8 +12,8 @@ use uuid::Uuid;
 
 use crate::{
     destination::PipelineDestination,
-    pipeline::Pipeline,
-    state::TableStateType,
+    pipeline::{Pipeline, PipelineId},
+    replication::table_state::TableStateType,
     store::PipelineStore,
     test_utils::{
         database::{spawn_source_database, test_table_name},
@@ -21,7 +21,6 @@ use crate::{
         notifying_store::NotifyingStore,
         test_destination_wrapper::TestDestinationWrapper,
     },
-    types::PipelineId,
 };
 
 /// Generates a test-specific replication slot name with a random component.

@@ -1,18 +1,19 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use etl::{
+    data::{Cell, OldTableRow, TableRow, UpdatedTableRow},
     destination::{
-        Destination,
-        async_result::{DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult},
+        Destination, DestinationTableMetadata, DestinationTableSchemaStatus,
+        DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult,
     },
     error::{ErrorKind, EtlResult},
     etl_error,
-    state::destination_table_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus},
-    store::{schema::SchemaStore, state::StateStore},
-    types::{
-        Cell, ColumnModification, Event, EventSequenceKey, IdentityType, OldTableRow, PgLsn,
-        ReplicatedTableSchema, SchemaDiff, TableId, TableRow, Type, UpdatedTableRow, is_array_type,
+    event::{Event, EventSequenceKey},
+    postgres::types::{
+        ColumnModification, IdentityType, PgLsn, ReplicatedTableSchema, SchemaDiff, TableId, Type,
+        is_array_type,
     },
+    store::{SchemaStore, StateStore},
 };
 use etl_config::shared::ClickHouseEngine;
 use parking_lot::RwLock;
@@ -422,8 +423,8 @@ where
         table_id: TableId,
         clickhouse_table_name: &str,
         schema: &ReplicatedTableSchema,
-        snapshot_id: etl::types::SnapshotId,
-        replication_mask: etl::types::ReplicationMask,
+        snapshot_id: etl::postgres::types::SnapshotId,
+        replication_mask: etl::postgres::types::ReplicationMask,
     ) -> EtlResult<()> {
         let metadata = DestinationTableMetadata::new_applying(
             clickhouse_table_name.to_owned(),
@@ -1366,7 +1367,7 @@ fn expand_key_row(key_row: TableRow, schema: &ReplicatedTableSchema) -> EtlResul
 /// Date, Timestamp, and UUID use typed zero values because their ClickHouse
 /// wire format is not String.
 fn default_cell(typ: &Type) -> Cell {
-    use etl::types::ArrayCell;
+    use etl::data::ArrayCell;
 
     match *typ {
         Type::BOOL => Cell::Bool(false),
@@ -1464,9 +1465,9 @@ fn clickhouse_engine_matches(existing: &str, configured: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use etl::types::{
-        ArrayCell, ColumnSchema, IdentityMask, PartialTableRow, ReplicationMask, TableName,
-        TableSchema,
+    use etl::{
+        data::{ArrayCell, PartialTableRow},
+        postgres::types::{ColumnSchema, IdentityMask, ReplicationMask, TableName, TableSchema},
     };
 
     use super::*;
@@ -1694,8 +1695,8 @@ mod tests {
         old_name: &str,
         new_name: &str,
         ordinal_position: i32,
-    ) -> etl::types::ColumnChange {
-        etl::types::ColumnChange {
+    ) -> etl::postgres::types::ColumnChange {
+        etl::postgres::types::ColumnChange {
             ordinal_position,
             old_column: ColumnSchema::new(
                 old_name.to_owned(),
@@ -1711,7 +1712,7 @@ mod tests {
                 ordinal_position,
                 true,
             ),
-            modifications: vec![etl::types::ColumnModification::Rename {
+            modifications: vec![etl::postgres::types::ColumnModification::Rename {
                 old_name: old_name.to_owned(),
                 new_name: new_name.to_owned(),
             }],

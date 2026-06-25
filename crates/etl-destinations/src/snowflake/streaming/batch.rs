@@ -1,7 +1,7 @@
 use std::{io::Write, mem};
 
 use bytes::Bytes;
-use etl::types::{ColumnSchema, TableRow};
+use etl::{data::TableRow, postgres::types::ColumnSchema};
 use zstd::stream::Encoder;
 
 use crate::snowflake::{
@@ -200,7 +200,7 @@ fn new_encoder() -> Encoder<'static, Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use etl::types::{Cell, Type};
+    use etl::{data::Cell, postgres::types::Type};
 
     use super::*;
     use crate::snowflake::encoding::{CdcMeta, CdcOperation};

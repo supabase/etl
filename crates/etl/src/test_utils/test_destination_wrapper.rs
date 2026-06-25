@@ -12,20 +12,18 @@ use tokio::{
 };
 
 use crate::{
-    concurrency::TaskSet,
+    data::TableRow,
     destination::{
-        Destination, PipelineDestination,
-        async_result::{
-            ApplyLoopAsyncResultMetadata, DispatchMetrics, DropTableForCopyResult,
-            WriteEventsResult, WriteTableRowsResult,
-        },
+        ApplyLoopAsyncResultMetadata, Destination, DispatchMetrics, DropTableForCopyResult,
+        PipelineDestination, WriteEventsResult, WriteTableRowsResult,
     },
     error::EtlResult,
+    event::{Event, EventType},
+    runtime::concurrency::TaskSet,
     test_utils::{
         event::{EventCondition, check_all_events_count, group_events_by_type},
         notify::TimedNotify,
     },
-    types::{Event, EventType, TableRow},
 };
 
 type EventCheckFn = Box<dyn Fn(&[Event]) -> bool + Send + Sync>;

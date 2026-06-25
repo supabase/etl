@@ -6,7 +6,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
-use etl::state::{TableRetryPolicy, TableState};
+use etl::store::{TableRetryPolicy, TableState};
 use etl_postgres::{
     replication::{TableLookupError, get_table_names_from_table_ids, health, lag, table_state},
     types::TableId,

@@ -3,15 +3,12 @@
 use std::collections::HashMap;
 
 use etl::{
+    destination::DestinationTableMetadata,
     error::ErrorKind,
     etl_error,
-    replication::WorkerType,
-    state::{TableRetryPolicy, TableState, destination_table_metadata::DestinationTableMetadata},
     store::{
-        TableStateLifecycleStore,
-        both::postgres::PostgresStore,
-        schema::{SchemaStore, TableSchemaRetention},
-        state::StateStore,
+        PostgresStore, SchemaStore, StateStore, TableRetryPolicy, TableSchemaRetention, TableState,
+        TableStateLifecycleStore, WorkerType,
     },
     test_utils::database::spawn_source_database,
 };

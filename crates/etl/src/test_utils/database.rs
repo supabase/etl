@@ -28,7 +28,7 @@ use pg_escape::quote_identifier;
 use tokio_postgres::Client;
 use uuid::Uuid;
 
-use crate::migrations;
+use crate::postgres::migrations;
 
 /// The schema name used for organizing test tables.
 ///
@@ -112,15 +112,17 @@ pub fn local_pg_read_replica_connection_config(
     replica_config
 }
 
-/// Creates a new test database instance with a unique name and runs migrations.
+/// Creates a new test database instance with a unique name and runs
+/// postgres::migrations.
 ///
 /// This function spawns a new Postgres database with a random UUID as its name,
 /// using default credentials and disabled SSL. It automatically creates the
-/// test schema for organizing test tables and runs all ETL migrations.
+/// test schema for organizing test tables and runs all ETL
+/// postgres::migrations.
 ///
 /// # Panics
 ///
-/// Panics if the test schema cannot be created or migrations fail.
+/// Panics if the test schema cannot be created or postgres::migrations fail.
 pub async fn spawn_source_database() -> PgDatabase<Client> {
     // We create the database via tokio postgres.
     let config = local_pg_connection_config();

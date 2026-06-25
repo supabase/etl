@@ -7,20 +7,19 @@ use std::{
 };
 
 use etl::{
-    concurrency::TaskSet,
+    data::{OldTableRow, PartialTableRow, TableRow, UpdatedTableRow},
     destination::{
-        Destination,
-        async_result::{DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult},
+        Destination, DestinationTableMetadata, DestinationTableSchemaStatus,
+        DropTableForCopyResult, TaskSet, WriteEventsResult, WriteTableRowsResult,
     },
     error::{ErrorKind, EtlResult},
     etl_error,
-    state::destination_table_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus},
-    store::DestinationStore,
-    types::{
-        ColumnModification, ColumnSchema, Event, EventSequenceKey, OldTableRow, PartialTableRow,
-        ReplicatedTableSchema, ReplicationMask, SchemaDiff, SnapshotId, TableId, TableName,
-        TableRow, TableSchema, UpdatedTableRow,
+    event::{Event, EventSequenceKey},
+    postgres::types::{
+        ColumnModification, ColumnSchema, ReplicatedTableSchema, ReplicationMask, SchemaDiff,
+        SnapshotId, TableId, TableName, TableSchema,
     },
+    store::DestinationStore,
 };
 use metrics::gauge;
 use parking_lot::Mutex;
@@ -2658,11 +2657,12 @@ mod tests {
     use duckdb::{Config, Connection};
     use etl::{
         config::{PgConnectionConfig, TcpKeepaliveConfig},
-        store::{both::memory::MemoryStore, schema::SchemaStore},
-        types::{
-            Cell, ColumnChange, ColumnModification, ColumnSchema, IdentityMask, PartialTableRow,
-            ReplicationMask, SchemaDiff, SnapshotId, TableRow, TableSchema, Type as PgType,
+        data::{Cell, PartialTableRow, TableRow},
+        postgres::types::{
+            ColumnChange, ColumnModification, ColumnSchema, IdentityMask, ReplicationMask,
+            SchemaDiff, SnapshotId, TableSchema, Type as PgType,
         },
+        store::{MemoryStore, SchemaStore},
     };
     use etl_maintenance::ducklake::flush_table_inlined_data;
     use etl_postgres::{test_utils::local_tls_config_from_env, tokio::test_utils::PgDatabase};

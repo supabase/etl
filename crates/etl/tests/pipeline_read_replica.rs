@@ -4,7 +4,9 @@ use std::{
 };
 
 use etl::{
-    state::TableStateType,
+    event::EventType,
+    pipeline::PipelineId,
+    store::TableStateType,
     test_utils::{
         database::{
             local_pg_read_replica_connection_config, spawn_source_database, test_table_name,
@@ -16,7 +18,6 @@ use etl::{
         test_destination_wrapper::TestDestinationWrapper,
         test_schema::{TableSelection, insert_users_data, setup_test_database_schema},
     },
-    types::{EventType, PipelineId},
 };
 use etl_config::shared::PgConnectionConfig;
 use etl_postgres::{

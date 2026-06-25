@@ -21,12 +21,11 @@ use std::{
 };
 
 use etl::{
+    data::{Cell, OldTableRow, PartialTableRow, TableRow, UpdatedTableRow},
     error::{ErrorKind, EtlResult},
     etl_error,
-    types::{
-        Cell, EventSequenceKey, OldTableRow, PartialTableRow, ReplicatedTableSchema, TableRow,
-        UpdatedTableRow,
-    },
+    event::EventSequenceKey,
+    postgres::types::ReplicatedTableSchema,
 };
 use metrics::{counter, histogram};
 #[cfg(feature = "test-utils")]
@@ -2202,9 +2201,12 @@ fn maybe_fail_after_copy_batch_commit_for_tests(table_name: &str) -> EtlResult<(
 mod tests {
     use std::error::Error as _;
 
-    use etl::types::{
-        ColumnSchema, IdentityMask, OldTableRow, PartialTableRow, ReplicatedTableSchema,
-        ReplicationMask, TableId, TableName, TableSchema, Type as PgType, UpdatedTableRow,
+    use etl::{
+        data::{OldTableRow, PartialTableRow, UpdatedTableRow},
+        postgres::types::{
+            ColumnSchema, IdentityMask, ReplicatedTableSchema, ReplicationMask, TableId, TableName,
+            TableSchema, Type as PgType,
+        },
     };
 
     use super::*;

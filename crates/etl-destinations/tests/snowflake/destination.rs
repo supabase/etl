@@ -1,14 +1,16 @@
 use std::{sync::Arc, time::Duration};
 
 use etl::{
-    state::destination_table_metadata::DestinationTableMetadata,
-    store::{schema::SchemaStore, state::StateStore},
-    test_utils::notifying_store::NotifyingStore,
-    types::{
-        Cell, ColumnSchema, DeleteEvent, Event, InsertEvent, OldTableRow, PgLsn, PipelineId,
-        RelationEvent, ReplicatedTableSchema, SnapshotId, TableId, TableName, TableRow,
-        TableSchema, Type, UpdateEvent, UpdatedTableRow,
+    data::{Cell, OldTableRow, TableRow, UpdatedTableRow},
+    destination::DestinationTableMetadata,
+    event::{DeleteEvent, Event, InsertEvent, RelationEvent, UpdateEvent},
+    pipeline::PipelineId,
+    postgres::types::{
+        ColumnSchema, PgLsn, ReplicatedTableSchema, SnapshotId, TableId, TableName, TableSchema,
+        Type,
     },
+    store::{SchemaStore, StateStore},
+    test_utils::notifying_store::NotifyingStore,
 };
 use etl_destinations::snowflake::{
     AuthManager, Client, Config, Destination, HttpExchanger, OffsetToken, RestStreamClient,

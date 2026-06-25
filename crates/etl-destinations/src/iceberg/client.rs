@@ -1,10 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use arrow::array::RecordBatch;
-use etl::{
-    error::EtlResult,
-    types::{ColumnSchema, TableRow},
-};
+use etl::{data::TableRow, error::EtlResult, postgres::types::ColumnSchema};
 use etl_config::shared::validate_supabase_project_ref;
 use iceberg::{
     Catalog, CatalogBuilder, ErrorKind, NamespaceIdent, TableCreation, TableIdent,

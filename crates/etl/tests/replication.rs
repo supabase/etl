@@ -2,7 +2,7 @@ use std::{collections::HashSet, time::Duration};
 
 use etl::{
     error::ErrorKind,
-    replication::client::{CtidPartition, PgReplicationClient, SlotState},
+    postgres::client::{CtidPartition, PgReplicationClient, SlotState},
     test_utils::{
         database::{spawn_source_database, test_table_name},
         pipeline::test_slot_name,

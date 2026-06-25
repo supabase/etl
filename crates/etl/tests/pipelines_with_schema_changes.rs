@@ -1,7 +1,10 @@
 #![cfg(feature = "test-utils")]
 
 use etl::{
-    state::TableStateType,
+    data::{ArrayCell, Cell},
+    event::{Event, EventType},
+    pipeline::PipelineId,
+    store::TableStateType,
     test_utils::{
         database::{spawn_source_database, test_table_name},
         event::{group_events_by_type, group_events_by_type_and_table_id},
@@ -15,7 +18,6 @@ use etl::{
         test_destination_wrapper::TestDestinationWrapper,
         test_schema::create_partitioned_table,
     },
-    types::{ArrayCell, Cell, Event, EventType, PipelineId, Type},
 };
 use etl_postgres::{
     tokio::test_utils::TableModification,
@@ -23,6 +25,7 @@ use etl_postgres::{
 };
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
+use tokio_postgres::types::Type;
 
 fn get_last_relation_event(events: &[Event], table_id: TableId) -> &Event {
     events

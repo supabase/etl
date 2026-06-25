@@ -15,4 +15,5 @@ pub use time::{
     DATE_FORMAT, POSTGRES_EPOCH, ParseTimeError, PgTimeTz, TIME_FORMAT, TIMESTAMP_FORMAT,
     TIMESTAMPTZ_FORMAT_HH_MM, parse_postgres_utc_offset,
 };
+pub use tokio_postgres::types::{PgLsn, ToSql, Type};
 pub use utils::{convert_type_oid_to_type, generate_sequence_number, is_array_type};

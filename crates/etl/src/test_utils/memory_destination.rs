@@ -1,17 +1,18 @@
 use std::{collections::HashMap, sync::Arc};
 
+use etl_postgres::types::{ReplicatedTableSchema, TableId};
 use tokio::sync::Mutex;
 use tracing::info;
 
 use crate::{
+    data::TableRow,
     destination::{
-        Destination,
-        async_result::{DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult},
+        Destination, DestinationTableMetadata, DestinationTableSchemaStatus,
+        DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult,
     },
     error::EtlResult,
-    state::destination_table_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus},
+    event::Event,
     store::SharedStateStore,
-    types::{Event, ReplicatedTableSchema, TableId, TableRow},
 };
 
 #[derive(Debug)]

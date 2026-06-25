@@ -42,11 +42,11 @@
 //! operations. These stores are critical to a pipeline's operation, as they
 //! allow it to be safely paused and resumed.
 //!
-//! The [`store::state::StateStore`] trait handles table states,
+//! The [`store::StateStore`] trait handles table states,
 //! durable replication progress, and destination table metadata, providing a
 //! single interface for all state-related storage operations.
 //!
-//! The [`store::schema::SchemaStore`] trait handles versioned table schemas,
+//! The [`store::SchemaStore`] trait handles versioned table schemas,
 //! and [`store::TableStateLifecycleStore`] handles table-scoped preparation,
 //! reset, and deletion operations that must update state, schema, and metadata
 //! consistently.
@@ -72,13 +72,15 @@
 //!         BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PgConnectionConfig,
 //!         PipelineConfig, TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
 //!     },
+//!     data::TableRow,
 //!     destination::{
 //!         Destination, DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult,
 //!     },
 //!     error::EtlResult,
+//!     event::Event,
 //!     pipeline::Pipeline,
+//!     postgres::types::ReplicatedTableSchema,
 //!     store::MemoryStore,
-//!     types::{Event, ReplicatedTableSchema, TableRow},
 //! };
 //!
 //! #[derive(Clone)]
@@ -171,24 +173,21 @@
 //! - `test-utils`: Enable testing utilities and mock implementations
 //! - `failpoints`: Enable fault injection for testing error scenarios
 
-pub mod concurrency;
 pub mod config;
-mod conversions;
+pub mod data;
 pub mod destination;
 #[cfg(feature = "egress")]
-pub mod egress;
+mod egress;
 pub mod error;
+pub mod event;
 #[cfg(feature = "failpoints")]
 pub mod failpoints;
 mod macros;
-pub mod metrics;
-pub mod migrations;
+mod observability;
 pub mod pipeline;
-pub mod replication;
-pub mod state;
+pub mod postgres;
+mod replication;
+mod runtime;
 pub mod store;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
-pub mod types;
-mod utils;
-mod workers;

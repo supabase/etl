@@ -7,7 +7,9 @@
 
 use std::future::Future;
 
-use crate::{error::EtlResult, types::TableId};
+use etl_postgres::types::TableId;
+
+use crate::error::EtlResult;
 
 /// Lifecycle operation for ETL table state.
 ///
@@ -35,11 +37,11 @@ pub enum TableStateOperation {
     },
     /// Reset current table states for a fresh synchronization pass.
     ///
-    /// Resets every current table state to
-    /// [`crate::state::TableState::Init`] and deletes durable apply-worker
-    /// progress. Preserves table schemas, destination table metadata, and
-    /// durable table-sync progress so each restarted table sync can drop any
-    /// existing destination object before clearing its own copy state.
+    /// Resets every current table state to [`crate::store::TableState::Init`]
+    /// and deletes durable apply-worker progress. Preserves table schemas,
+    /// destination table metadata, and durable table-sync progress so each
+    /// restarted table sync can drop any existing destination object before
+    /// clearing its own copy state.
     ResetForResync,
     /// Delete all ETL-owned state for a table removed from the publication.
     ///
@@ -93,8 +95,8 @@ pub trait TableStateLifecycleStore: Sync {
         }
     }
 
-    /// Resets all current table states to [`crate::state::TableState::Init`]
-    /// for resync.
+    /// Resets all current table states to
+    /// [`crate::store::TableState::Init`] for resync.
     ///
     /// Deletes durable apply-worker progress because the apply slot lineage is
     /// being replaced. Preserves table schemas, destination table metadata, and

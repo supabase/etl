@@ -1,7 +1,7 @@
 //! Test utilities for ClickHouse destinations.
 
 use clickhouse::Client;
-use etl::store::{schema::SchemaStore, state::StateStore};
+use etl::store::{SchemaStore, StateStore};
 use tokio::runtime::Handle;
 use url::Url;
 use uuid::Uuid;

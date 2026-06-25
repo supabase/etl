@@ -6,9 +6,11 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use etl::{pipeline::Pipeline, state::TableStateType, test_utils::notifying_store::NotifyingStore};
+use etl::{
+    pipeline::Pipeline, postgres::types::TableId, store::TableStateType,
+    test_utils::notifying_store::NotifyingStore,
+};
 use etl_config::shared::TableSyncCopyConfig;
-use etl_postgres::types::TableId;
 use serde::Serialize;
 use tokio::task::JoinSet;
 use tracing::info;

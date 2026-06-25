@@ -13,7 +13,7 @@ use std::{
     sync::Arc,
 };
 
-use etl_postgres::types::{ParseNumericError, ParseTimeError};
+use etl_postgres::types::{ParseNumericError, ParseTimeError, SchemaError};
 
 const MAX_SCHEMA_ERROR_COLUMN_NAMES: usize = 12;
 
@@ -1014,23 +1014,21 @@ impl From<etl_postgres::replication::slots::EtlReplicationSlotError> for EtlErro
     }
 }
 
-/// Converts [`crate::types::SchemaError`] to [`EtlError`] with
+/// Converts [`SchemaError`] to [`EtlError`] with
 /// [`ErrorKind::CorruptedTableSchema`].
-impl From<crate::types::SchemaError> for EtlError {
+impl From<SchemaError> for EtlError {
     #[track_caller]
-    fn from(err: crate::types::SchemaError) -> EtlError {
+    fn from(err: SchemaError) -> EtlError {
         match err {
-            crate::types::SchemaError::UnknownReplicatedColumns(columns) => {
-                EtlError::from_components(
-                    ErrorKind::CorruptedTableSchema,
-                    Cow::Borrowed(
-                        "Replication stream contains columns missing from the stored table schema",
-                    ),
-                    Some(Cow::Owned(unknown_replicated_columns_detail(&columns))),
-                    None,
-                )
-            }
-            crate::types::SchemaError::InvalidSnapshotId(lsn_str) => EtlError::from_components(
+            SchemaError::UnknownReplicatedColumns(columns) => EtlError::from_components(
+                ErrorKind::CorruptedTableSchema,
+                Cow::Borrowed(
+                    "Replication stream contains columns missing from the stored table schema",
+                ),
+                Some(Cow::Owned(unknown_replicated_columns_detail(&columns))),
+                None,
+            ),
+            SchemaError::InvalidSnapshotId(lsn_str) => EtlError::from_components(
                 ErrorKind::CorruptedTableSchema,
                 Cow::Borrowed("Invalid snapshot id"),
                 Some(Cow::Owned(format!("Failed to parse snapshot '{lsn_str}' as PgLsn."))),
@@ -1104,7 +1102,7 @@ mod tests {
 
     #[test]
     fn unknown_replicated_columns_error_is_readable() {
-        let err = EtlError::from(crate::types::SchemaError::UnknownReplicatedColumns(vec![
+        let err = EtlError::from(SchemaError::UnknownReplicatedColumns(vec![
             "extra_id".to_owned(),
             "extra_name".to_owned(),
         ]));
@@ -1127,7 +1125,7 @@ mod tests {
     fn unknown_replicated_columns_error_caps_long_column_lists() {
         let columns = (1..=13).map(|index| format!("column_{index}")).collect();
 
-        let err = EtlError::from(crate::types::SchemaError::UnknownReplicatedColumns(columns));
+        let err = EtlError::from(SchemaError::UnknownReplicatedColumns(columns));
 
         assert_eq!(
             err.detail(),

@@ -1,13 +1,14 @@
 #![cfg(all(feature = "test-utils", feature = "failpoints"))]
 
 use etl::{
+    event::{Event, EventType, InsertEvent},
     failpoints::{
         FORCE_SCHEMA_CLEANUP_FP, SEND_STATUS_UPDATE_FP, START_TABLE_SYNC_AFTER_FINISHED_COPY_FP,
         START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP, START_TABLE_SYNC_DURING_DATA_SYNC_FP,
         STORE_REPLICATION_PROGRESS_FP, TABLE_SYNC_WORKER_BEFORE_STREAMING_FP,
     },
-    state::{TableRetryPolicy, TableState, TableStateType},
-    store::state::StateStore,
+    pipeline::PipelineId,
+    store::{StateStore, TableRetryPolicy, TableState, TableStateType},
     test_utils::{
         database::{spawn_source_database, test_table_name},
         event::{EventCondition, group_events_by_type_and_table_id},
@@ -24,17 +25,17 @@ use etl::{
             setup_test_database_schema,
         },
     },
-    types::{Event, EventType, InsertEvent, PipelineId, TableId, Type},
 };
 use etl_postgres::{
     below_version,
     tokio::test_utils::TableModification,
-    types::{SnapshotId, TableSchema},
+    types::{SnapshotId, TableId, TableSchema},
     version::POSTGRES_15,
 };
 use etl_telemetry::tracing::init_test_tracing;
 use fail::FailScenario;
 use rand::random;
+use tokio_postgres::types::Type;
 
 enum ExpectedReplicatedEvent<'a> {
     Relation(&'a [(&'static str, Type)]),

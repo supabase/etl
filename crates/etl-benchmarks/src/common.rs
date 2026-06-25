@@ -13,13 +13,15 @@ use std::{
 use anyhow::{Context, Result, bail};
 use clap::{Args, ValueEnum};
 use etl::{
+    data::{SizeHint, TableRow},
     destination::{
-        Destination, PipelineDestination,
-        async_result::{DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult},
+        Destination, DropTableForCopyResult, PipelineDestination, WriteEventsResult,
+        WriteTableRowsResult,
     },
     error::EtlResult,
+    event::Event,
+    postgres::types::ReplicatedTableSchema,
     test_utils::notifying_store::NotifyingStore,
-    types::{Event, ReplicatedTableSchema, SizeHint, TableRow},
 };
 use etl_config::{
     Environment,

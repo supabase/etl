@@ -3,22 +3,19 @@ use std::{
     sync::Arc,
 };
 
+use etl_postgres::types::{SnapshotId, TableId, TableSchema};
 use tokio::sync::Mutex;
+use tokio_postgres::types::PgLsn;
 
 use crate::{
+    destination::{AppliedDestinationTableMetadata, DestinationTableMetadata},
     error::{ErrorKind, EtlResult},
     etl_error,
-    replication::WorkerType,
-    state::{
-        TableState,
-        destination_table_metadata::{AppliedDestinationTableMetadata, DestinationTableMetadata},
-    },
+    replication::{WorkerType, table_state::TableState},
     store::{
-        lifecycle::{TableStateLifecycleStore, TableStateOperation},
-        schema::{SchemaStore, TableSchemaRetention, TableSchemaSnapshots},
-        state::{DestinationTablesMetadata, StateStore, TableStates},
+        DestinationTablesMetadata, SchemaStore, StateStore, TableSchemaRetention,
+        TableSchemaSnapshots, TableStateLifecycleStore, TableStateOperation, TableStates,
     },
-    types::{PgLsn, SnapshotId, TableId, TableSchema},
 };
 
 /// Inner state of [`MemoryStore`].

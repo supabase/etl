@@ -1,6 +1,9 @@
 use std::{collections::HashMap, sync::Arc};
 
-use etl::types::{ColumnChange, ColumnModification, ColumnSchema, PipelineId, SchemaDiff, TableId};
+use etl::{
+    pipeline::PipelineId,
+    postgres::types::{ColumnChange, ColumnModification, ColumnSchema, SchemaDiff, TableId},
+};
 use reqwest::StatusCode;
 use tokio::sync::{Mutex, RwLock};
 use tracing::warn;
