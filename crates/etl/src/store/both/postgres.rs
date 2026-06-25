@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, HashMap},
     ops::DerefMut,
-    sync::Arc,
+    sync::{Arc, LazyLock},
     time::Duration,
 };
 
@@ -15,7 +15,7 @@ use tokio::sync::Mutex;
 use tracing::{debug, info};
 
 use crate::{
-    config::{ETL_OUT_OF_BAND_OPTIONS, IntoConnectOptions, PgConnectionConfig},
+    config::{IntoConnectOptions, PgConnectionConfig, PgConnectionOptions},
     error::{ErrorKind, EtlResult},
     etl_error,
     metrics::{ETL_TABLES_TOTAL, STATE_LABEL},
@@ -39,6 +39,16 @@ const MAX_POOL_CONNECTIONS: u32 = 2;
 /// Duration after which idle connections are closed.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Application name for Postgres state store connections.
+const APP_NAME_REPLICATOR_STORE: &str = "supabase_etl_replicator_store";
+
+/// Connection options for Postgres state store queries.
+///
+/// These settings intentionally mirror out-of-band query timeouts while using a
+/// store-specific application name for clearer database observability.
+static POSTGRES_STORE_OPTIONS: LazyLock<PgConnectionOptions> =
+    LazyLock::new(|| PgConnectionOptions::builder(APP_NAME_REPLICATOR_STORE).build());
+
 /// Maximum number of schema snapshots to keep cached per table.
 ///
 /// This limits memory usage by evicting older snapshots when new ones are
@@ -56,7 +66,7 @@ const MAX_CACHED_SCHEMAS_PER_TABLE: usize = 2;
 /// be open for a while and then closed when it's unnecessary since after the
 /// first table copy state, we don't update the state so often.
 fn create_database_pool(connection_config: &PgConnectionConfig) -> PgPool {
-    let options = connection_config.with_db(Some(&ETL_OUT_OF_BAND_OPTIONS));
+    let options = connection_config.with_db(Some(&POSTGRES_STORE_OPTIONS));
 
     PgPoolOptions::new()
         .min_connections(0)

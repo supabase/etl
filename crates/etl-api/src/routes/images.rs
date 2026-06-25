@@ -38,7 +38,7 @@ impl ImageError {
 impl IntoResponse for ImageError {
     fn into_response(self) -> Response {
         let status_code = match &self {
-            ImageError::ImagesDb(ImagesDbError::CannotDeleteDefault) => StatusCode::BAD_REQUEST,
+            ImageError::ImagesDb(ImagesDbError::CannotDeleteDefault) => StatusCode::CONFLICT,
             ImageError::ImagesDb(_) => StatusCode::INTERNAL_SERVER_ERROR,
             ImageError::ImageNotFound(_) => StatusCode::NOT_FOUND,
         };
@@ -182,6 +182,7 @@ pub(crate) async fn update_image(
     ),
     responses(
         (status = 200, description = "Image deleted successfully"),
+        (status = 409, description = "Image is the current default", body = ErrorMessage),
         (status = 404, description = "Image not found", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage),
     ),

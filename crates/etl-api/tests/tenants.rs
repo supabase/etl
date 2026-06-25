@@ -246,7 +246,7 @@ async fn an_existing_tenant_can_be_deleted() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn deleting_non_existing_tenant_returns_ok() {
+async fn deleting_non_existing_tenant_returns_not_found() {
     init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
@@ -255,7 +255,7 @@ async fn deleting_non_existing_tenant_returns_ok() {
     let response = app.delete_tenant("42").await;
 
     // Assert
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -405,6 +405,81 @@ async fn tenant_with_unreachable_source_can_still_be_deleted() {
 
     let pipeline_response = app.read_pipeline(tenant_id, pipeline_id).await;
     assert_eq!(pipeline_response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tenant_with_source_terminated_during_cleanup_can_still_be_deleted() {
+    init_test_tracing();
+
+    let trusted_source = create_trusted_source_database().await;
+    let app =
+        spawn_test_app_with_trusted_username(Some(trusted_source.trusted_username.clone())).await;
+    let tenant_id = &create_tenant(&app).await;
+
+    let source = CreateSourceRequest {
+        name: "Test Source".to_owned(),
+        config: FullApiSourceConfig {
+            host: trusted_source.trusted_config.host.clone(),
+            hostaddr: trusted_source.trusted_config.hostaddr,
+            port: trusted_source.trusted_config.port,
+            name: trusted_source.trusted_config.name.clone(),
+            username: trusted_source.trusted_config.username.clone(),
+            password: trusted_source.trusted_config.password.as_ref().map(|password| {
+                SerializableSecretString::from(password.expose_secret().to_owned())
+            }),
+        },
+    };
+    let response = app.create_source(tenant_id, &source).await;
+    assert!(response.status().is_success());
+    let response: etl_api::routes::sources::CreateSourceResponse =
+        response.json().await.expect("failed to deserialize response");
+    let source_id = response.id;
+
+    run_etl_migrations_on_source_database(&trusted_source.trusted_config).await;
+
+    sqlx::query(
+        r#"
+        create or replace function public.kill_tenant_delete_backend()
+        returns event_trigger
+        language plpgsql
+        as $$
+        begin
+            perform pg_terminate_backend(pg_backend_pid());
+        end;
+        $$;
+        "#,
+    )
+    .execute(&trusted_source.admin_pool)
+    .await
+    .expect("failed to install backend termination function");
+    sqlx::query(
+        r#"
+        create event trigger tenant_delete_kill_backend
+        on ddl_command_start
+        when tag in ('DROP SCHEMA')
+        execute function public.kill_tenant_delete_backend();
+        "#,
+    )
+    .execute(&trusted_source.admin_pool)
+    .await
+    .expect("failed to install backend termination trigger");
+
+    create_default_image(&app).await;
+    let destination_id = create_destination(&app, tenant_id).await;
+    let pipeline_id = create_pipeline_for_source(&app, tenant_id, source_id, destination_id).await;
+
+    app.k8s_state.set_pod_status(PodStatus::Stopped).await;
+
+    let response = app.delete_tenant(tenant_id).await;
+    assert!(response.status().is_success());
+
+    let tenant_response = app.read_tenant(tenant_id).await;
+    assert_eq!(tenant_response.status(), StatusCode::NOT_FOUND);
+
+    let pipeline_response = app.read_pipeline(tenant_id, pipeline_id).await;
+    assert_eq!(pipeline_response.status(), StatusCode::NOT_FOUND);
+
+    drop_trusted_source_database(trusted_source).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -216,7 +216,7 @@ async fn cannot_delete_default_image() {
     let response = app.delete_image(image_id).await;
 
     // Assert - Should fail with 400 Bad Request
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), StatusCode::CONFLICT);
 
     // Verify the image still exists
     let response = app.read_image(image_id).await;
