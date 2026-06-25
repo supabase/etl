@@ -180,6 +180,9 @@ pub mod egress;
 pub mod error;
 #[cfg(feature = "failpoints")]
 pub mod failpoints;
+#[doc(hidden)]
+#[cfg(feature = "fuzzing")]
+pub mod fuzzing;
 mod macros;
 pub mod metrics;
 pub mod migrations;
