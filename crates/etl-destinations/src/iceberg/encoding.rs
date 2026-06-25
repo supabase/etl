@@ -12,10 +12,7 @@ use arrow::{
     error::ArrowError,
 };
 use chrono::{NaiveDate, NaiveTime};
-use etl::{
-    data::{ArrayCell, Cell, TableRow},
-    postgres::types::{DATE_FORMAT, TIME_FORMAT, TIMESTAMP_FORMAT},
-};
+use etl::data::{ArrayCell, Cell, DATE_FORMAT, TIME_FORMAT, TIMESTAMP_FORMAT, TableRow};
 
 pub const UNIX_EPOCH: NaiveDate =
     NaiveDate::from_ymd_opt(1970, 1, 1).expect("unix epoch is a valid date");
@@ -1936,7 +1933,7 @@ mod tests {
     #[test]
     fn build_string_list_array_fn() {
         use arrow::{array::ListArray, datatypes::Field};
-        use etl::postgres::types::PgNumeric;
+        use etl::data::PgNumeric;
 
         let field = Field::new("items", DataType::Utf8, true);
         let field_ref = Arc::new(field);
@@ -2359,7 +2356,7 @@ mod tests {
     fn build_list_array_for_strings_fn() {
         use arrow::{array::ListArray, datatypes::Field};
         use chrono::{DateTime, NaiveDate, NaiveTime};
-        use etl::postgres::types::PgNumeric;
+        use etl::data::PgNumeric;
         use uuid::Uuid;
 
         let field = Field::new("items", DataType::Utf8, true);
@@ -2510,7 +2507,7 @@ mod tests {
     fn append_array_cell_as_strings_comprehensive() {
         use arrow::array::ListBuilder;
         use chrono::{DateTime, NaiveDate, NaiveTime};
-        use etl::postgres::types::PgNumeric;
+        use etl::data::PgNumeric;
         use uuid::Uuid;
 
         let test_uuid = Uuid::new_v4();

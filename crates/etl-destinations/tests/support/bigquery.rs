@@ -5,8 +5,8 @@ use std::{fmt, str::FromStr};
 
 use base64::{Engine, prelude::BASE64_STANDARD};
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
+use etl::data::PgNumeric;
 use etl_destinations::bigquery::test_utils::parse_table_cell;
-use etl_postgres::types::PgNumeric;
 use gcp_bigquery_client::model::{table_cell::TableCell, table_row::TableRow};
 use uuid::Uuid;
 

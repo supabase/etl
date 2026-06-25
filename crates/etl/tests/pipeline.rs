@@ -4,6 +4,7 @@ use etl::{
     error::ErrorKind,
     event::{Event, EventType, InsertEvent},
     pipeline::PipelineId,
+    schema::{ColumnSchema, TableId},
     store::{SchemaStore, TableState, TableStateType},
     test_utils::{
         database::{spawn_source_database, test_table_name},
@@ -26,9 +27,8 @@ use etl::{
 use etl_config::shared::{BatchConfig, InvalidatedSlotBehavior, TableSyncCopyConfig};
 use etl_postgres::{
     below_version,
-    replication::slots::EtlReplicationSlot,
+    slots::EtlReplicationSlot,
     tokio::test_utils::{ReplicationSlotState, id_column_schema},
-    types::{ColumnSchema, TableId},
     version::POSTGRES_15,
 };
 use etl_telemetry::tracing::init_test_tracing;
@@ -1841,7 +1841,7 @@ async fn table_sync_drops_destination_table_after_state_reset() {
         .filter(|schema| schema.id == database_schema.users_schema().id)
         .collect::<Vec<_>>();
     assert_eq!(user_schemas.len(), 1);
-    assert_eq!(user_schemas[0].snapshot_id, etl_postgres::types::SnapshotId::initial());
+    assert_eq!(user_schemas[0].snapshot_id, etl::schema::SnapshotId::initial());
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -3,7 +3,6 @@ use std::{
     sync::Arc,
 };
 
-use etl_postgres::types::{SnapshotId, TableId, TableSchema};
 use tokio::sync::Mutex;
 use tokio_postgres::types::PgLsn;
 
@@ -12,6 +11,7 @@ use crate::{
     error::{ErrorKind, EtlResult},
     etl_error,
     replication::{WorkerType, table_state::TableState},
+    schema::{SnapshotId, TableId, TableSchema},
     store::{
         DestinationTablesMetadata, SchemaStore, StateStore, TableSchemaRetention,
         TableSchemaSnapshots, TableStateLifecycleStore, TableStateOperation, TableStates,

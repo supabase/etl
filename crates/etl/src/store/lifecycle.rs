@@ -7,7 +7,7 @@
 
 use std::future::Future;
 
-use crate::{error::EtlResult, postgres::types::TableId};
+use crate::{error::EtlResult, schema::TableId};
 
 /// Lifecycle operation for ETL table state.
 ///

@@ -1,4 +1,3 @@
-use etl_postgres::types::TableId;
 use pg_escape::quote_identifier;
 use tokio_postgres::{Client, SimpleQueryMessage, Transaction, error::SqlState, types::PgLsn};
 
@@ -10,6 +9,7 @@ use crate::{
     bail,
     error::{ErrorKind, EtlResult},
     etl_error,
+    schema::TableId,
 };
 
 /// Private executor for query helpers shared by clients and open transactions.

@@ -11,11 +11,6 @@ pub(crate) mod client;
 pub(crate) mod codec;
 pub mod migrations;
 
-/// Postgres schema, type, and identifier model used by ETL.
-pub mod types {
-    pub use etl_postgres::types::*;
-}
-
 pub(crate) use replication_stream::{
     EventsStream, StatusUpdateResult, StatusUpdateType, TableCopyStream,
 };

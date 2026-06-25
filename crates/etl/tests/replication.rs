@@ -3,6 +3,7 @@ use std::{collections::HashSet, time::Duration};
 use etl::{
     error::ErrorKind,
     postgres::client::{CtidPartition, PgReplicationClient, SlotState},
+    schema::ColumnSchema,
     test_utils::{
         database::{spawn_source_database, test_table_name},
         pipeline::test_slot_name,
@@ -13,7 +14,7 @@ use etl::{
 use etl_postgres::{
     below_version,
     tokio::test_utils::{TableModification, id_column_schema},
-    types::{ColumnSchema, convert_type_oid_to_type},
+    type_utils::convert_type_oid_to_type,
     version::POSTGRES_15,
 };
 use etl_telemetry::tracing::init_test_tracing;

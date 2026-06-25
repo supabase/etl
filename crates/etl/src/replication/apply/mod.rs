@@ -20,9 +20,6 @@ use std::{
 };
 
 use etl_config::shared::PipelineConfig;
-use etl_postgres::types::{
-    IdentityMask, ReplicatedTableSchema, ReplicationMask, SnapshotId, TableId, TableSchema,
-};
 use futures::StreamExt;
 use metrics::{counter, gauge, histogram};
 use postgres_replication::{
@@ -87,6 +84,9 @@ use crate::{
             ShutdownResult, ShutdownRx, apply_worker_apply_stream_id,
             table_sync_worker_apply_stream_id,
         },
+    },
+    schema::{
+        IdentityMask, ReplicatedTableSchema, ReplicationMask, SnapshotId, TableId, TableSchema,
     },
     store::{PipelineStore, SchemaStore, SharedStateStore, StateStore, TableSchemaRetention},
 };

@@ -4,6 +4,7 @@ use etl::{
     data::{ArrayCell, Cell},
     event::{Event, EventType},
     pipeline::PipelineId,
+    schema::{ColumnSchema, TableId},
     store::TableStateType,
     test_utils::{
         database::{spawn_source_database, test_table_name},
@@ -19,10 +20,7 @@ use etl::{
         test_schema::create_partitioned_table,
     },
 };
-use etl_postgres::{
-    tokio::test_utils::TableModification,
-    types::{ColumnSchema, TableId},
-};
+use etl_postgres::tokio::test_utils::TableModification;
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
 use tokio_postgres::types::Type;
@@ -43,7 +41,7 @@ fn get_last_insert_event(events: &[Event], table_id: TableId) -> &Event {
         .expect("no insert events for table")
 }
 
-fn schema_columns(schema: &etl_postgres::types::TableSchema) -> Vec<(String, Type)> {
+fn schema_columns(schema: &etl::schema::TableSchema) -> Vec<(String, Type)> {
     schema.column_schemas.iter().map(|column| (column.name.clone(), column.typ.clone())).collect()
 }
 
@@ -72,7 +70,7 @@ fn assert_column_default_contains<'a>(
 }
 
 fn find_snapshot_index_after(
-    snapshots: &[(etl_postgres::types::SnapshotId, etl_postgres::types::TableSchema)],
+    snapshots: &[(etl::schema::SnapshotId, etl::schema::TableSchema)],
     start_index: usize,
     expected: &[(&str, Type)],
 ) -> usize {

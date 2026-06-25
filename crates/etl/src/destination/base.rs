@@ -5,7 +5,7 @@ use crate::{
     destination::{DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult},
     error::EtlResult,
     event::Event,
-    postgres::types::ReplicatedTableSchema,
+    schema::ReplicatedTableSchema,
 };
 
 /// Trait for systems that can receive replicated data from ETL pipelines.

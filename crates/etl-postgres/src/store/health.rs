@@ -1,6 +1,6 @@
 use sqlx::PgExecutor;
 
-use super::catalog::{ETL_CORE_STATE_TABLES, EtlTable};
+use crate::store::catalog::{ETL_CORE_STATE_TABLES, EtlTable};
 
 /// Returns true if all required ETL tables exist in the source database.
 ///

@@ -2,14 +2,14 @@ use std::collections::HashMap;
 
 use sqlx::{PgExecutor, PgPool, Row, Type, postgres::types::Oid as SqlxTableId};
 
-use crate::types::{SnapshotId, TableId};
+use crate::schema::{SnapshotId, TableId};
 
 /// Database enum type for destination table schema status.
 ///
 /// Maps to the `etl.destination_table_schema_status` PostgreSQL enum type.
 #[derive(Debug, Clone, Copy, Type, PartialEq, Eq)]
 #[sqlx(type_name = "etl.destination_table_schema_status", rename_all = "snake_case")]
-pub enum DestinationTableSchemaStatus {
+pub enum StoredDestinationTableSchemaStatus {
     /// A schema change is currently being applied.
     Applying,
     /// The schema has been successfully applied.
@@ -35,13 +35,13 @@ fn parse_snapshot_ids(
 
 /// Database row representation of destination table metadata.
 #[derive(Debug, Clone)]
-pub struct DestinationTableMetadataRow {
+pub struct StoredDestinationTableMetadataRow {
     pub table_id: TableId,
     pub destination_table_id: String,
     pub snapshot_id: SnapshotId,
     /// The schema version before the current change. None for initial schemas.
     pub previous_snapshot_id: Option<SnapshotId>,
-    pub schema_status: DestinationTableSchemaStatus,
+    pub schema_status: StoredDestinationTableSchemaStatus,
     pub replication_mask: Vec<u8>,
 }
 
@@ -58,7 +58,7 @@ pub async fn store_destination_table_metadata(
     destination_table_id: &str,
     snapshot_id: SnapshotId,
     previous_snapshot_id: Option<SnapshotId>,
-    schema_status: DestinationTableSchemaStatus,
+    schema_status: StoredDestinationTableSchemaStatus,
     replication_mask: &[u8],
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
@@ -96,7 +96,7 @@ pub async fn store_destination_table_metadata(
 pub async fn load_destination_tables_metadata(
     pool: &PgPool,
     pipeline_id: i64,
-) -> Result<HashMap<TableId, DestinationTableMetadataRow>, sqlx::Error> {
+) -> Result<HashMap<TableId, StoredDestinationTableMetadataRow>, sqlx::Error> {
     let rows = sqlx::query(
         r#"
         select table_id, destination_table_id, snapshot_id::text as snapshot_id,
@@ -120,7 +120,7 @@ pub async fn load_destination_tables_metadata(
 
         metadata.insert(
             table_id,
-            DestinationTableMetadataRow {
+            StoredDestinationTableMetadataRow {
                 table_id,
                 destination_table_id: row.get("destination_table_id"),
                 snapshot_id,
@@ -139,7 +139,7 @@ pub async fn get_destination_table_metadata(
     pool: &PgPool,
     pipeline_id: i64,
     table_id: TableId,
-) -> Result<Option<DestinationTableMetadataRow>, sqlx::Error> {
+) -> Result<Option<StoredDestinationTableMetadataRow>, sqlx::Error> {
     let row = sqlx::query(
         r#"
         select table_id, destination_table_id, snapshot_id::text as snapshot_id,
@@ -161,7 +161,7 @@ pub async fn get_destination_table_metadata(
             let (snapshot_id, previous_snapshot_id) =
                 parse_snapshot_ids(&snapshot_id_str, previous_snapshot_id_str)?;
 
-            Ok(Some(DestinationTableMetadataRow {
+            Ok(Some(StoredDestinationTableMetadataRow {
                 table_id: TableId::new(table_id.0),
                 destination_table_id: r.get("destination_table_id"),
                 snapshot_id,

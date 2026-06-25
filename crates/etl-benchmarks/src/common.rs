@@ -20,7 +20,7 @@ use etl::{
     },
     error::EtlResult,
     event::Event,
-    postgres::types::ReplicatedTableSchema,
+    schema::ReplicatedTableSchema,
     test_utils::notifying_store::NotifyingStore,
 };
 use etl_config::{

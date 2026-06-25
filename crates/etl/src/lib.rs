@@ -79,7 +79,7 @@
 //!     error::EtlResult,
 //!     event::Event,
 //!     pipeline::Pipeline,
-//!     postgres::types::ReplicatedTableSchema,
+//!     schema::ReplicatedTableSchema,
 //!     store::MemoryStore,
 //! };
 //!
@@ -191,6 +191,7 @@ pub mod pipeline;
 pub mod postgres;
 mod replication;
 mod runtime;
+pub mod schema;
 pub mod store;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;

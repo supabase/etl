@@ -1,6 +1,4 @@
-use etl_postgres::types::TableId;
-
-use crate::{data::TableRow, event::Event};
+use crate::{data::TableRow, event::Event, schema::TableId};
 
 /// Trait for converting a TableRow into a domain-specific struct
 pub trait FromTableRow: Sized {

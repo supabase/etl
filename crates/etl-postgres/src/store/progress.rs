@@ -3,7 +3,7 @@ use std::str::FromStr;
 use sqlx::{PgExecutor, postgres::types::Oid as SqlxTableId};
 use tokio_postgres::types::PgLsn;
 
-use crate::types::TableId;
+use crate::schema::TableId;
 
 /// Parses a `pg_lsn` string returned by SQLx.
 fn parse_lsn(lsn: &str) -> sqlx::Result<PgLsn> {

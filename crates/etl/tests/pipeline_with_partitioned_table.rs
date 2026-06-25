@@ -4,6 +4,7 @@ use etl::{
     data::TableRow,
     event::EventType,
     pipeline::PipelineId,
+    schema::{TableId, TableName},
     store::TableStateType,
     test_utils::{
         database::{spawn_source_database, test_table_name},
@@ -15,11 +16,7 @@ use etl::{
         test_schema::create_partitioned_table,
     },
 };
-use etl_postgres::{
-    below_version,
-    types::{TableId, TableName},
-    version::POSTGRES_15,
-};
+use etl_postgres::{below_version, version::POSTGRES_15};
 use etl_telemetry::tracing::init_test_tracing;
 use pg_escape::quote_identifier;
 use rand::random;

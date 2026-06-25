@@ -1,6 +1,6 @@
 use std::{fmt, str::FromStr};
 
-use etl::postgres::types::PgLsn;
+use etl::schema::PgLsn;
 
 use crate::snowflake::{Error, Result};
 

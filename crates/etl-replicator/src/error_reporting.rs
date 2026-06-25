@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Arc};
 use etl::{
     destination::{AppliedDestinationTableMetadata, DestinationTableMetadata},
     error::{EtlError, EtlResult},
-    postgres::types::{PgLsn, SnapshotId, TableId, TableSchema},
+    schema::{PgLsn, SnapshotId, TableId, TableSchema},
     store::{
         SchemaStore, StateStore, TableSchemaRetention, TableState, TableStateLifecycleStore,
         TableStateOperation, TableStates, WorkerType,

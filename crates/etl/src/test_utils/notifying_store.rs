@@ -4,7 +4,6 @@ use std::{
     sync::Arc,
 };
 
-use etl_postgres::types::{SnapshotId, TableId, TableSchema};
 use tokio::sync::{Notify, RwLock};
 use tokio_postgres::types::PgLsn;
 
@@ -16,6 +15,7 @@ use crate::{
         WorkerType,
         table_state::{TableState, TableStateType},
     },
+    schema::{SnapshotId, TableId, TableSchema},
     store::{
         DestinationTablesMetadata, SchemaStore, StateStore, TableSchemaRetention,
         TableSchemaSnapshots, TableStateLifecycleStore, TableStateOperation, TableStates,

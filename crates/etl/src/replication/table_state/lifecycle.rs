@@ -1,6 +1,6 @@
 use std::fmt;
 
-use etl_postgres::replication::table_state::{StoredTableStateType, TableStateRow};
+use etl_postgres::store::table_state::{StoredTableStateRow, StoredTableStateType};
 use serde::{Deserialize, Serialize};
 use tokio_postgres::types::PgLsn;
 
@@ -138,7 +138,7 @@ impl TableState {
 
     /// Deserializes a [`TableState`] from a state store row's
     /// metadata.
-    pub(crate) fn from_state_row(row: TableStateRow) -> EtlResult<Self> {
+    pub(crate) fn from_state_row(row: StoredTableStateRow) -> EtlResult<Self> {
         let Some(metadata) = row.metadata else {
             bail!(
                 ErrorKind::InvalidState,
@@ -317,7 +317,7 @@ mod lsn_serde {
 
 #[cfg(test)]
 mod tests {
-    use etl_postgres::replication::table_state;
+    use etl_postgres::store::table_state;
     use tokio_postgres::types::PgLsn;
 
     use crate::{
@@ -399,7 +399,7 @@ mod tests {
 
     #[test]
     fn from_state_row_fails_on_missing_metadata() {
-        let row = table_state::TableStateRow {
+        let row = table_state::StoredTableStateRow {
             id: 1,
             pipeline_id: 1,
             table_id: sqlx::postgres::types::Oid(42),
@@ -413,7 +413,7 @@ mod tests {
 
     #[test]
     fn from_state_row_fails_on_invalid_json() {
-        let row = table_state::TableStateRow {
+        let row = table_state::StoredTableStateRow {
             id: 1,
             pipeline_id: 1,
             table_id: sqlx::postgres::types::Oid(42),
@@ -443,7 +443,7 @@ mod tests {
 
         for state in states {
             let (state_type, metadata) = state.to_storage_format().unwrap();
-            let row = table_state::TableStateRow {
+            let row = table_state::StoredTableStateRow {
                 id: 1,
                 pipeline_id: 1,
                 table_id: sqlx::postgres::types::Oid(42),

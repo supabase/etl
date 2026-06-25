@@ -1,7 +1,10 @@
 use core::str;
 
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
-use etl_postgres::types::{DATE_FORMAT, TIME_FORMAT, TIMESTAMP_FORMAT, is_array_type};
+use etl_postgres::{
+    time::{DATE_FORMAT, TIME_FORMAT, TIMESTAMP_FORMAT},
+    type_utils::is_array_type,
+};
 use tokio_postgres::types::Type;
 use uuid::Uuid;
 
@@ -236,7 +239,7 @@ where
 #[cfg(test)]
 mod tests {
     use chrono::{Datelike, Timelike};
-    use etl_postgres::types::PgNumeric;
+    use etl_postgres::numeric::PgNumeric;
 
     use super::*;
 

@@ -5,7 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use etl_postgres::types::{ColumnSchema, POSTGRES_EPOCH};
+use etl_postgres::time::POSTGRES_EPOCH;
 use futures::{Stream, ready};
 use metrics::{counter, histogram};
 use pin_project_lite::pin_project;
@@ -31,6 +31,7 @@ use crate::{
         STATUS_UPDATE_TYPE_LABEL, WORKER_TYPE_LABEL,
     },
     postgres::codec::parse_table_row_from_postgres_copy_bytes,
+    schema::ColumnSchema,
 };
 
 /// The amount of milliseconds between two consecutive status updates in case no

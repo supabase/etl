@@ -4,10 +4,7 @@ mod copy;
 
 pub(crate) use copy::{TableCopyResult, table_copy};
 use etl_config::shared::PipelineConfig;
-use etl_postgres::{
-    replication::slots::EtlReplicationSlot,
-    types::{ReplicatedTableSchema, ReplicationMask, SchemaError, TableId},
-};
+use etl_postgres::slots::EtlReplicationSlot;
 #[cfg(feature = "failpoints")]
 use fail::fail_point;
 use metrics::histogram;
@@ -37,6 +34,7 @@ use crate::{
         TableSyncWorkerState,
         concurrency::{BatchBudgetController, MemoryMonitor, ShutdownRx},
     },
+    schema::{ReplicatedTableSchema, ReplicationMask, SchemaError, TableId},
     store::{PipelineStore, SchemaStore, StateStore},
 };
 

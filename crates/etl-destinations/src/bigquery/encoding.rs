@@ -1,8 +1,10 @@
 use etl::{
-    data::{ArrayCellNonOptional, Cell, CellNonOptional, TableRow},
+    data::{
+        ArrayCellNonOptional, Cell, CellNonOptional, DATE_FORMAT, TIME_FORMAT, TIMESTAMP_FORMAT,
+        TableRow,
+    },
     error::EtlError,
     etl_error,
-    postgres::types::{DATE_FORMAT, TIME_FORMAT, TIMESTAMP_FORMAT},
 };
 use prost::bytes;
 
@@ -417,7 +419,10 @@ mod tests {
     use std::str::FromStr;
 
     use chrono::{NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
-    use etl::{data::Cell, error::ErrorKind, postgres::types::PgNumeric};
+    use etl::{
+        data::{Cell, PgNumeric},
+        error::ErrorKind,
+    };
     use prost::Message;
 
     use super::*;

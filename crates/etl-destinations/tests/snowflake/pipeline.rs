@@ -3,6 +3,7 @@ use std::sync::Arc;
 use etl::{
     event::EventType,
     pipeline::PipelineId,
+    schema::TableName,
     store::TableStateType,
     test_utils::{
         database::{spawn_source_database, test_table_name},
@@ -15,7 +16,7 @@ use etl_destinations::snowflake::{
     AuthManager, Client, Destination, HttpExchanger, OffsetToken, SqlClient,
     test_utils::{load_test_config, query_rows},
 };
-use etl_postgres::{tokio::test_utils::TableModification, types::TableName};
+use etl_postgres::tokio::test_utils::TableModification;
 use rand::random;
 use serde_json::Value;
 use tokio::time::{Duration, sleep};

@@ -1,6 +1,5 @@
 use std::{collections::HashMap, sync::Arc};
 
-use etl_postgres::types::{ReplicatedTableSchema, TableId};
 use tokio::sync::Mutex;
 use tracing::info;
 
@@ -12,6 +11,7 @@ use crate::{
     },
     error::EtlResult,
     event::Event,
+    schema::{ReplicatedTableSchema, TableId},
     store::SharedStateStore,
 };
 

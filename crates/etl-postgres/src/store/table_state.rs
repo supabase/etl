@@ -1,6 +1,6 @@
 use sqlx::{PgExecutor, Type, postgres::types::Oid as SqlxTableId, prelude::FromRow};
 
-use crate::types::TableId;
+use crate::schema::TableId;
 
 /// Database enum type for table states.
 #[derive(Debug, Clone, Copy, Type, PartialEq)]
@@ -16,7 +16,7 @@ pub enum StoredTableStateType {
 
 /// Database row representation of table state.
 #[derive(Debug, FromRow)]
-pub struct TableStateRow {
+pub struct StoredTableStateRow {
     pub id: i64,
     pub pipeline_id: i64,
     pub table_id: SqlxTableId,
@@ -26,7 +26,7 @@ pub struct TableStateRow {
     pub is_current: bool,
 }
 
-impl TableStateRow {
+impl StoredTableStateRow {
     /// Returns the state type without deserializing metadata.
     pub fn state_type(&self) -> StoredTableStateType {
         self.state
@@ -39,11 +39,11 @@ impl TableStateRow {
 pub async fn get_table_state_rows<'c, E>(
     executor: E,
     pipeline_id: i64,
-) -> sqlx::Result<Vec<TableStateRow>>
+) -> sqlx::Result<Vec<StoredTableStateRow>>
 where
     E: PgExecutor<'c>,
 {
-    let states: Vec<TableStateRow> = sqlx::query_as(
+    let states: Vec<StoredTableStateRow> = sqlx::query_as(
         r#"
         select id, pipeline_id, table_id, state, metadata, prev, is_current
         from etl.replication_state
@@ -103,7 +103,7 @@ pub async fn rollback_table_state(
     conn: &mut sqlx::PgConnection,
     pipeline_id: i64,
     table_id: TableId,
-) -> sqlx::Result<Option<TableStateRow>> {
+) -> sqlx::Result<Option<StoredTableStateRow>> {
     // Get current row and its prev id
     let current_row: Option<(i64, Option<i64>)> = sqlx::query_as(
         r#"
@@ -144,7 +144,7 @@ pub async fn rollback_table_state(
         .await?;
 
         // Fetch the restored row
-        let restored_row: TableStateRow = sqlx::query_as(
+        let restored_row: StoredTableStateRow = sqlx::query_as(
             r#"
             select id, pipeline_id, table_id, state, metadata, prev, is_current
             from etl.replication_state
@@ -170,7 +170,7 @@ pub async fn reset_table_state(
     conn: &mut sqlx::PgConnection,
     pipeline_id: i64,
     table_id: TableId,
-) -> sqlx::Result<TableStateRow> {
+) -> sqlx::Result<StoredTableStateRow> {
     // Delete all existing entries for this pipeline and table
     sqlx::query(
         r#"
@@ -185,7 +185,7 @@ pub async fn reset_table_state(
 
     // Insert a new `Init` state entry and return it
     let metadata = serde_json::json!({"type": "init"});
-    let row: TableStateRow = sqlx::query_as(
+    let row: StoredTableStateRow = sqlx::query_as(
         r#"
         insert into etl.replication_state (pipeline_id, table_id, state, metadata, prev, is_current)
         values ($1, $2, $3, $4, null, true)

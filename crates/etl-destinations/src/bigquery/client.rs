@@ -5,7 +5,7 @@ use etl::{
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
     pipeline::PipelineId,
-    postgres::types::{ColumnSchema, ReplicatedTableSchema, Type},
+    schema::{ColumnSchema, ReplicatedTableSchema, Type},
 };
 use gcp_bigquery_client::{
     Client,

@@ -1,15 +1,15 @@
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Timelike, Utc};
 use etl::{
-    data::{ArrayCell, Cell, TableRow},
+    data::{ArrayCell, Cell, PgNumeric, PgTimeTz, TableRow},
     error::EtlResult,
     postgres::client::PgReplicationClient,
+    schema::ColumnSchema,
     test_utils::{
         database::{spawn_source_database, test_table_name},
         pipeline::test_slot_name,
         replication_stream::{parse_copy_row, parse_tuple},
     },
 };
-use etl_postgres::types::{ColumnSchema, PgNumeric, PgTimeTz};
 use etl_telemetry::tracing::init_test_tracing;
 use futures::StreamExt;
 use postgres_replication::{
@@ -184,7 +184,7 @@ fn unsupported_parser_cases() -> &'static [UnsupportedParserCase] {
 async fn create_type_matrix_table_in(
     database: &etl_postgres::tokio::test_utils::PgDatabase<tokio_postgres::Client>,
     test_name: &str,
-) -> (etl_postgres::types::TableName, etl_postgres::types::TableId) {
+) -> (etl::schema::TableName, etl::schema::TableId) {
     let table_name = test_table_name(test_name);
     let table_id = database
         .create_table(
@@ -268,7 +268,7 @@ async fn create_single_value_table_in(
     database: &etl_postgres::tokio::test_utils::PgDatabase<tokio_postgres::Client>,
     test_name: &str,
     data_type: &str,
-) -> (etl_postgres::types::TableName, etl_postgres::types::TableId) {
+) -> (etl::schema::TableName, etl::schema::TableId) {
     let table_name = test_table_name(test_name);
     let value_column_type = format!("{data_type} not null");
     let table_id = database
@@ -285,7 +285,7 @@ async fn create_single_value_table_in(
 
 async fn insert_single_value_row(
     database: &etl_postgres::tokio::test_utils::PgDatabase<tokio_postgres::Client>,
-    table_name: &etl_postgres::types::TableName,
+    table_name: &etl::schema::TableName,
     expression: &str,
 ) {
     database
@@ -299,7 +299,7 @@ async fn insert_single_value_row(
 
 async fn insert_type_matrix_row(
     database: &etl_postgres::tokio::test_utils::PgDatabase<tokio_postgres::Client>,
-    table_name: &etl_postgres::types::TableName,
+    table_name: &etl::schema::TableName,
 ) {
     database
         .run_sql(&format!(

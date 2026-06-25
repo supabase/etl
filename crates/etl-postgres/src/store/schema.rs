@@ -6,7 +6,7 @@ use sqlx::{
 };
 use tokio_postgres::types::{PgLsn, Type as PgType};
 
-use crate::types::{ColumnSchema, SnapshotId, TableId, TableName, TableSchema};
+use crate::schema::{ColumnSchema, SnapshotId, TableId, TableName, TableSchema};
 
 macro_rules! define_type_mappings {
     (

@@ -1,9 +1,6 @@
 use std::{ops::RangeInclusive, sync::Arc};
 
-use etl_postgres::{
-    tokio::test_utils::{PgDatabase, id_column_schema},
-    types::{ColumnSchema, ReplicatedTableSchema, TableId, TableName, TableSchema},
-};
+use etl_postgres::tokio::test_utils::{PgDatabase, id_column_schema};
 use tokio_postgres::{
     Client, GenericClient,
     types::{PgLsn, Type},
@@ -12,6 +9,7 @@ use tokio_postgres::{
 use crate::{
     data::{Cell, OldTableRow, PartialTableRow, TableRow, UpdatedTableRow},
     event::{Event, InsertEvent},
+    schema::{ColumnSchema, ReplicatedTableSchema, TableId, TableName, TableSchema},
     test_utils::{
         database::{TEST_DATABASE_SCHEMA, test_table_name},
         test_destination_wrapper::TestDestinationWrapper,

@@ -2,12 +2,9 @@ use std::mem::size_of;
 
 use tracing::warn;
 
-use crate::{
-    data::{
-        SizeHint,
-        cell::{ArrayCell, Cell},
-    },
-    postgres::types::{PgNumeric, PgTimeTz},
+use crate::data::{
+    PgNumeric, PgTimeTz, SizeHint,
+    cell::{ArrayCell, Cell},
 };
 
 /// Represents a complete row of data from a database table.

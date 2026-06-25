@@ -1,16 +1,22 @@
-//! Postgres database connection utilities for all crates.
+//! Reusable Postgres integration primitives for ETL crates.
 //!
-//! This crate provides database connection options and utilities for working
-//! with Postgres. It supports both the [`sqlx`] and [`tokio-postgres`] crates
-//! through feature flags.
+//! This crate owns Postgres-specific helpers that need to be shared across
+//! crates: source database access, replication slot naming, ETL metadata-store
+//! queries, schema primitives, value wrappers, and codec support types.
 
-#[cfg(feature = "replication")]
-pub mod replication;
+pub mod default_expression;
+pub mod lag;
+pub mod numeric;
+pub mod schema;
+pub mod slots;
+pub mod source;
 #[cfg(feature = "sqlx")]
 pub mod sqlx;
+pub mod store;
 #[cfg(feature = "test-utils")]
 pub mod test_utils;
+pub mod time;
 #[cfg(feature = "tokio")]
 pub mod tokio;
-pub mod types;
+pub mod type_utils;
 pub mod version;

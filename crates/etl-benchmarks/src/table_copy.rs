@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use etl::{
     pipeline::Pipeline,
-    postgres::types::TableId,
+    schema::TableId,
     store::TableStateType,
     test_utils::{notify::TimedNotify, notifying_store::NotifyingStore},
 };

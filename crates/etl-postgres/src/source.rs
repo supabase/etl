@@ -4,7 +4,7 @@ use etl_config::shared::{IntoConnectOptions, PgConnectionConfig, PgConnectionOpt
 use sqlx::{PgExecutor, PgPool, Row, postgres::PgPoolOptions};
 use thiserror::Error;
 
-use crate::types::{TableId, TableName};
+use crate::schema::{TableId, TableName};
 
 /// Errors that can occur during table lookups.
 #[derive(Debug, Error)]
@@ -24,7 +24,6 @@ pub enum TableLookupError {
 /// The `options` parameter allows specifying connection-specific Postgres
 /// settings. Pass `None` to use server defaults, or `Some(&options)` to apply
 /// custom settings.
-#[cfg(feature = "replication")]
 pub async fn connect_to_source_database(
     config: &PgConnectionConfig,
     min_connections: u32,

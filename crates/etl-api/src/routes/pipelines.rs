@@ -6,10 +6,14 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
-use etl::store::{TableRetryPolicy, TableState};
+use etl::{
+    schema::TableId,
+    store::{TableRetryPolicy, TableState},
+};
 use etl_postgres::{
-    replication::{TableLookupError, get_table_names_from_table_ids, health, lag, table_state},
-    types::TableId,
+    lag,
+    source::{TableLookupError, get_table_names_from_table_ids},
+    store::{health, table_state},
 };
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;

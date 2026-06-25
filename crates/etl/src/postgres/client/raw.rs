@@ -5,11 +5,7 @@ use std::{
     time::Duration,
 };
 
-use etl_postgres::{
-    replication::extract_server_version,
-    tokio::tls::MakeRustlsConnect,
-    types::{TableId, TableName},
-};
+use etl_postgres::{source::extract_server_version, tokio::tls::MakeRustlsConnect};
 use pg_escape::{quote_identifier, quote_literal};
 use postgres_replication::LogicalReplicationStream;
 use rustls::{
@@ -38,6 +34,7 @@ use crate::{
     config::{IntoConnectOptions, PgConnectionConfig, PgConnectionOptions},
     error::{ErrorKind, EtlResult},
     etl_error,
+    schema::{TableId, TableName},
 };
 
 /// Maximum time to wait for a replication slot deletion to complete.

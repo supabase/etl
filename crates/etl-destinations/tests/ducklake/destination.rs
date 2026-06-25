@@ -31,7 +31,7 @@ use etl::{
     destination::{Destination, DestinationTableMetadata, DestinationTableSchemaStatus},
     error::ErrorKind,
     event::{DeleteEvent, Event},
-    postgres::types::{
+    schema::{
         ColumnSchema, IdentityMask, PgLsn, ReplicatedTableSchema, ReplicationMask, SnapshotId,
         TableId, TableName, TableSchema, Type as PgType,
     },
@@ -967,7 +967,7 @@ async fn truncate_clears_copy_markers_for_recopy() {
 async fn write_events() {
     use etl::{
         event::{DeleteEvent, InsertEvent, UpdateEvent},
-        postgres::types::PgLsn,
+        schema::PgLsn,
     };
     let lake = create_test_lake("write_events").await;
     let catalog_url = lake.catalog_url.clone();
@@ -1058,7 +1058,7 @@ async fn write_events() {
 /// contains DML for multiple schema versions of the same table.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_splits_same_table_batch_by_replicated_schema() {
-    use etl::{event::InsertEvent, postgres::types::PgLsn};
+    use etl::{event::InsertEvent, schema::PgLsn};
 
     let lake = create_test_lake("write_events_splits_same_table_batch_by_replicated_schema").await;
     let catalog_url = lake.catalog_url.clone();
@@ -2204,7 +2204,7 @@ async fn startup_after_restart_recovers_initial_applying_metadata() {
 /// Small CDC batches should remain inlined after the caller returns.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_small_batch_stays_inlined_after_return() {
-    use etl::{event::InsertEvent, postgres::types::PgLsn};
+    use etl::{event::InsertEvent, schema::PgLsn};
     let lake = create_test_lake("write_events_small_batch_stays_inlined_after_return").await;
     let catalog_url = lake.catalog_url.clone();
     let data_url = lake.data_url.clone();
@@ -2259,7 +2259,7 @@ async fn write_events_small_batch_stays_inlined_after_return() {
 async fn write_events_with_old_row_update() {
     use etl::{
         event::{InsertEvent, UpdateEvent},
-        postgres::types::PgLsn,
+        schema::PgLsn,
     };
     let lake = create_test_lake("write_events_with_old_row_update").await;
     let catalog_url = lake.catalog_url.clone();
@@ -2516,7 +2516,7 @@ async fn write_events_without_replica_identity_rejects_mutations() {
 async fn write_events_replay_is_idempotent() {
     use etl::{
         event::{InsertEvent, UpdateEvent},
-        postgres::types::PgLsn,
+        schema::PgLsn,
     };
 
     let lake = create_test_lake("write_events_replay_is_idempotent").await;
@@ -2939,7 +2939,7 @@ async fn applied_batches_table_uses_data_inlining() {
 async fn write_events_mixed_multi_table_batches() {
     use etl::{
         event::{DeleteEvent, InsertEvent, UpdateEvent},
-        postgres::types::PgLsn,
+        schema::PgLsn,
     };
     let lake = create_test_lake("write_events_mixed_multi_table_batches").await;
     let catalog_url = lake.catalog_url.clone();
@@ -3074,7 +3074,7 @@ async fn write_events_mixed_multi_table_batches() {
 async fn write_events_truncate_retry_after_post_commit_failure_is_idempotent() {
     use etl::{
         event::{InsertEvent, TruncateEvent},
-        postgres::types::PgLsn,
+        schema::PgLsn,
     };
 
     let _test_hook_guard = acquire_ducklake_test_hook_guard().await;
@@ -3173,7 +3173,7 @@ async fn write_events_truncate_retry_after_post_commit_failure_is_idempotent() {
 async fn write_events_retry_after_post_commit_failure_is_idempotent() {
     use etl::{
         event::{DeleteEvent, InsertEvent, UpdateEvent},
-        postgres::types::PgLsn,
+        schema::PgLsn,
     };
 
     let _test_hook_guard = acquire_ducklake_test_hook_guard().await;

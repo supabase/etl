@@ -5,7 +5,7 @@ use thiserror::Error;
 use tokio_postgres::types::Oid;
 use tracing::{debug, warn};
 
-use crate::types::TableId;
+use crate::schema::TableId;
 
 /// Maximum length for a Postgres replication slot name in bytes.
 const MAX_SLOT_NAME_LENGTH: usize = 63;

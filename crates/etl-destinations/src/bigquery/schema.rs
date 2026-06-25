@@ -1,6 +1,6 @@
 use etl::{
     error::EtlResult,
-    postgres::types::{
+    schema::{
         ColumnSchema, DefaultExpression, ReplicatedTableSchema, Type, is_array_type,
         parse_default_expression,
     },
@@ -310,7 +310,7 @@ pub(crate) fn column_schemas_to_table_descriptor(
 mod tests {
     use std::{collections::HashSet, sync::Arc};
 
-    use etl::postgres::types::{
+    use etl::schema::{
         ColumnSchema, IdentityMask, ReplicatedTableSchema, ReplicationMask, TableId, TableName,
         TableSchema, Type,
     };

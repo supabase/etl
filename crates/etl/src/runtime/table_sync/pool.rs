@@ -4,7 +4,6 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use etl_postgres::types::TableId;
 use tokio::{
     sync::{Mutex, RwLock},
     task::JoinSet,
@@ -15,6 +14,7 @@ use crate::{
     error::{ErrorKind, EtlResult},
     etl_error,
     runtime::table_sync::{TableSyncWorkerHandle, TableSyncWorkerResult, TableSyncWorkerState},
+    schema::TableId,
 };
 
 /// Unique identifier for a table sync worker run.

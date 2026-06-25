@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use etl::{
     data::{Cell, TableRow},
-    postgres::types::{ColumnSchema, Type},
+    schema::{ColumnSchema, Type},
 };
 use etl_destinations::snowflake::{
     AuthManager, CdcMeta, CdcOperation, Config, HttpExchanger, OffsetToken, RestStreamClient,

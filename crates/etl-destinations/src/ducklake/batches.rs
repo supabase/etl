@@ -25,7 +25,7 @@ use etl::{
     error::{ErrorKind, EtlResult},
     etl_error,
     event::EventSequenceKey,
-    postgres::types::ReplicatedTableSchema,
+    schema::ReplicatedTableSchema,
 };
 use metrics::{counter, histogram};
 #[cfg(feature = "test-utils")]
@@ -2203,7 +2203,7 @@ mod tests {
 
     use etl::{
         data::{OldTableRow, PartialTableRow, UpdatedTableRow},
-        postgres::types::{
+        schema::{
             ColumnSchema, IdentityMask, ReplicatedTableSchema, ReplicationMask, TableId, TableName,
             TableSchema, Type as PgType,
         },

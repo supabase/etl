@@ -1,7 +1,7 @@
 //! Date and time conversion helpers for Postgres text output.
 
 use chrono::{DateTime, FixedOffset, NaiveDateTime, TimeZone};
-use etl_postgres::types::{ParseTimeError, PgTimeTz, TIMESTAMP_FORMAT, parse_postgres_utc_offset};
+use etl_postgres::time::{ParseTimeError, PgTimeTz, TIMESTAMP_FORMAT, parse_postgres_utc_offset};
 
 /// Minimum byte index after `YYYY-MM-DD` where a UTC offset sign can appear.
 const MIN_TIMESTAMP_OFFSET_INDEX: usize = 10;

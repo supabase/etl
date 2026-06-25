@@ -31,7 +31,7 @@ pub async fn with_table_cleanup<F, Fut>(
 
 pub async fn poll_destination_offset<S, T, C>(
     destination: &Destination<S, T, C>,
-    table_id: etl_postgres::types::TableId,
+    table_id: etl::schema::TableId,
     expected: &OffsetToken,
     interval: std::time::Duration,
     max_attempts: usize,

@@ -2,10 +2,7 @@ use etl_config::shared::{
     BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PgConnectionConfig,
     PipelineConfig, TableSyncCopyConfig,
 };
-use etl_postgres::{
-    tokio::test_utils::PgDatabase,
-    types::{TableId, TableName},
-};
+use etl_postgres::tokio::test_utils::PgDatabase;
 use rand::random;
 use tokio_postgres::Client;
 use uuid::Uuid;
@@ -14,6 +11,7 @@ use crate::{
     destination::PipelineDestination,
     pipeline::{Pipeline, PipelineId},
     replication::table_state::TableStateType,
+    schema::{TableId, TableName},
     store::PipelineStore,
     test_utils::{
         database::{spawn_source_database, test_table_name},

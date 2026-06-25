@@ -1,6 +1,6 @@
 use crate::{
     error::{ErrorKind, EtlResult},
-    postgres::types::{ReplicationMask, SnapshotId},
+    schema::{ReplicationMask, SnapshotId},
 };
 
 /// Status of the schema at a destination.

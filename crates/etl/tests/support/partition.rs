@@ -1,7 +1,5 @@
-use etl_postgres::{
-    tokio::test_utils::PgDatabase,
-    types::{TableId, TableName},
-};
+use etl::schema::{TableId, TableName};
+use etl_postgres::tokio::test_utils::PgDatabase;
 use tokio_postgres::Client;
 
 #[derive(Debug)]

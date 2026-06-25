@@ -1,6 +1,5 @@
 use core::str;
 
-use etl_postgres::types::ColumnSchema;
 use tracing::error;
 
 use crate::{
@@ -8,6 +7,7 @@ use crate::{
     data::{Cell, TableRow},
     error::{ErrorKind, EtlResult},
     postgres::codec::text::parse_cell_from_postgres_text,
+    schema::ColumnSchema,
 };
 
 /// Converts raw Postgres COPY format data into a typed table row.
@@ -171,11 +171,10 @@ pub(crate) fn parse_table_row_from_postgres_copy_bytes<'a>(
 
 #[cfg(test)]
 mod tests {
-    use etl_postgres::types::ColumnSchema;
     use tokio_postgres::types::Type;
 
     use super::*;
-    use crate::error::ErrorKind;
+    use crate::{error::ErrorKind, schema::ColumnSchema};
 
     /// Creates a test column schema with sensible defaults.
     fn test_column(

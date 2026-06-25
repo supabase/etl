@@ -13,7 +13,9 @@ use std::{
     sync::Arc,
 };
 
-use crate::postgres::types::{ParseNumericError, ParseTimeError, SchemaError};
+use etl_postgres::{numeric::ParseNumericError, time::ParseTimeError};
+
+use crate::schema::SchemaError;
 
 const MAX_SCHEMA_ERROR_COLUMN_NAMES: usize = 12;
 
@@ -989,27 +991,27 @@ impl From<sqlx::Error> for EtlError {
     }
 }
 
-/// Converts [`etl_postgres::replication::slots::EtlReplicationSlotError`] to
+/// Converts [`etl_postgres::slots::EtlReplicationSlotError`] to
 /// [`EtlError`] with appropriate error kind.
-impl From<etl_postgres::replication::slots::EtlReplicationSlotError> for EtlError {
-    fn from(err: etl_postgres::replication::slots::EtlReplicationSlotError) -> EtlError {
+impl From<etl_postgres::slots::EtlReplicationSlotError> for EtlError {
+    fn from(err: etl_postgres::slots::EtlReplicationSlotError) -> EtlError {
         match err {
-            etl_postgres::replication::slots::EtlReplicationSlotError::InvalidSlotNameLength(
-                slot_name,
-            ) => EtlError::from_components(
-                ErrorKind::ValidationError,
-                Cow::Borrowed("Replication slot name exceeds maximum length"),
-                Some(Cow::Owned(slot_name)),
-                None,
-            ),
-            etl_postgres::replication::slots::EtlReplicationSlotError::InvalidSlotName(
-                slot_name,
-            ) => EtlError::from_components(
-                ErrorKind::ValidationError,
-                Cow::Borrowed("Replication slot name is invalid"),
-                Some(Cow::Owned(slot_name)),
-                None,
-            ),
+            etl_postgres::slots::EtlReplicationSlotError::InvalidSlotNameLength(slot_name) => {
+                EtlError::from_components(
+                    ErrorKind::ValidationError,
+                    Cow::Borrowed("Replication slot name exceeds maximum length"),
+                    Some(Cow::Owned(slot_name)),
+                    None,
+                )
+            }
+            etl_postgres::slots::EtlReplicationSlotError::InvalidSlotName(slot_name) => {
+                EtlError::from_components(
+                    ErrorKind::ValidationError,
+                    Cow::Borrowed("Replication slot name is invalid"),
+                    Some(Cow::Owned(slot_name)),
+                    None,
+                )
+            }
         }
     }
 }

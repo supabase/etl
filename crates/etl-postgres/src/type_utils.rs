@@ -1,4 +1,4 @@
-use tokio_postgres::types::{Kind, PgLsn, Type};
+use tokio_postgres::types::{Kind, Type};
 
 /// Converts a Postgres type OID to a [`Type`] instance.
 ///
@@ -13,30 +13,6 @@ pub fn is_array_type(typ: &Type) -> bool {
     // `int2vector` and `oidvector` have array kind, but they are not regular
     // PostgreSQL array types and do not use underscore-prefixed array names.
     matches!(typ.kind(), Kind::Array(_)) && typ.name().starts_with('_')
-}
-
-/// Creates a hex-encoded sequence number from Postgres LSNs to ensure correct
-/// event ordering.
-///
-/// Creates a hex-encoded sequence number that ensures events are processed in
-/// the correct order even when they have the same system time. The format is
-/// compatible with BigQuery's `_CHANGE_SEQUENCE_NUMBER` column requirements.
-///
-/// The rationale for using the LSN is that downstream systems will preserve the
-/// highest sequence number in case of equal primary key, which is what we want
-/// since in case of updates, we want the latest update in Postgres order to be
-/// the winner. We have first the `commit_lsn` in the key so that operations are
-/// first ordered based on the LSN at which the transaction committed,
-/// and if two operations belong to the same transaction (meaning they have the
-/// same `commit_lsn`), the `start_lsn` will be used as a tiebreaker. We first
-/// order by `commit_lsn` to preserve the order in which operations are received
-/// by the pipeline since transactions are ordered by commit time
-/// and not interleaved.
-pub fn generate_sequence_number(start_lsn: PgLsn, commit_lsn: PgLsn) -> String {
-    let start_lsn = u64::from(start_lsn);
-    let commit_lsn = u64::from(commit_lsn);
-
-    format!("{commit_lsn:016x}/{start_lsn:016x}")
 }
 
 #[cfg(test)]
@@ -113,29 +89,5 @@ mod tests {
         assert!(!is_array_type(&Type::INT2_VECTOR));
         assert!(!is_array_type(&Type::OID_VECTOR));
         assert!(!is_array_type(&Type::ANYARRAY));
-    }
-
-    #[test]
-    fn generate_sequence_number_fn() {
-        assert_eq!(
-            generate_sequence_number(PgLsn::from(0), PgLsn::from(0)),
-            "0000000000000000/0000000000000000"
-        );
-        assert_eq!(
-            generate_sequence_number(PgLsn::from(1), PgLsn::from(0)),
-            "0000000000000000/0000000000000001"
-        );
-        assert_eq!(
-            generate_sequence_number(PgLsn::from(255), PgLsn::from(0)),
-            "0000000000000000/00000000000000ff"
-        );
-        assert_eq!(
-            generate_sequence_number(PgLsn::from(65535), PgLsn::from(0)),
-            "0000000000000000/000000000000ffff"
-        );
-        assert_eq!(
-            generate_sequence_number(PgLsn::from(u64::MAX), PgLsn::from(0)),
-            "0000000000000000/ffffffffffffffff"
-        );
     }
 }

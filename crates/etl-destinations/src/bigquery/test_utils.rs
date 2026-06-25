@@ -5,7 +5,7 @@
 
 use std::{fmt, future::Future, path::Path, str::FromStr, time::Duration};
 
-use etl::{pipeline::PipelineId, postgres::types::TableName, store::DestinationStore};
+use etl::{pipeline::PipelineId, schema::TableName, store::DestinationStore};
 use gcp_bigquery_client::{
     Client,
     client_builder::ClientBuilder,

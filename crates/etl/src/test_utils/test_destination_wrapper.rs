@@ -5,7 +5,6 @@ use std::{
     time::Instant,
 };
 
-use etl_postgres::types::{ReplicatedTableSchema, TableId};
 use tokio::{
     runtime::Handle,
     sync::{Notify, RwLock},
@@ -20,6 +19,7 @@ use crate::{
     error::EtlResult,
     event::{Event, EventType},
     runtime::concurrency::TaskSet,
+    schema::{ReplicatedTableSchema, TableId},
     test_utils::{
         event::{EventCondition, check_all_events_count, group_events_by_type},
         notify::TimedNotify,

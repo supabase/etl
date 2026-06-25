@@ -9,7 +9,7 @@ use etl::{
     error::{ErrorKind, EtlResult},
     etl_error,
     event::{Event, EventSequenceKey},
-    postgres::types::{
+    schema::{
         ColumnModification, IdentityType, PgLsn, ReplicatedTableSchema, SchemaDiff, TableId, Type,
         is_array_type,
     },
@@ -423,8 +423,8 @@ where
         table_id: TableId,
         clickhouse_table_name: &str,
         schema: &ReplicatedTableSchema,
-        snapshot_id: etl::postgres::types::SnapshotId,
-        replication_mask: etl::postgres::types::ReplicationMask,
+        snapshot_id: etl::schema::SnapshotId,
+        replication_mask: etl::schema::ReplicationMask,
     ) -> EtlResult<()> {
         let metadata = DestinationTableMetadata::new_applying(
             clickhouse_table_name.to_owned(),
@@ -1467,7 +1467,7 @@ fn clickhouse_engine_matches(existing: &str, configured: &str) -> bool {
 mod tests {
     use etl::{
         data::{ArrayCell, PartialTableRow},
-        postgres::types::{ColumnSchema, IdentityMask, ReplicationMask, TableName, TableSchema},
+        schema::{ColumnSchema, IdentityMask, ReplicationMask, TableName, TableSchema},
     };
 
     use super::*;
@@ -1695,8 +1695,8 @@ mod tests {
         old_name: &str,
         new_name: &str,
         ordinal_position: i32,
-    ) -> etl::postgres::types::ColumnChange {
-        etl::postgres::types::ColumnChange {
+    ) -> etl::schema::ColumnChange {
+        etl::schema::ColumnChange {
             ordinal_position,
             old_column: ColumnSchema::new(
                 old_name.to_owned(),
@@ -1712,7 +1712,7 @@ mod tests {
                 ordinal_position,
                 true,
             ),
-            modifications: vec![etl::postgres::types::ColumnModification::Rename {
+            modifications: vec![etl::schema::ColumnModification::Rename {
                 old_name: old_name.to_owned(),
                 new_name: new_name.to_owned(),
             }],

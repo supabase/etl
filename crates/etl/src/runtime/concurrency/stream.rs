@@ -5,7 +5,6 @@ use core::{
 use std::time::Duration;
 
 use etl_config::shared::BatchConfig;
-use etl_postgres::types::TableId;
 use futures::{Stream, ready};
 use pin_project_lite::pin_project;
 use tracing::info;
@@ -15,6 +14,7 @@ use crate::{
     runtime::concurrency::{
         batch_budget::CachedBatchBudget, memory_monitor::MemoryMonitorSubscription,
     },
+    schema::TableId,
 };
 
 /// Builds the stream id for a table sync worker's initial table-copy stream.
@@ -326,7 +326,6 @@ where
 mod tests {
     use core::task::Poll;
 
-    use etl_postgres::types::TableId;
     use futures::{StreamExt, future::poll_fn};
     use pin_project_lite::pin_project;
 
@@ -336,6 +335,7 @@ mod tests {
         runtime::concurrency::{
             batch_budget::BatchBudgetController, memory_monitor::MemoryMonitor,
         },
+        schema::TableId,
     };
 
     pin_project! {

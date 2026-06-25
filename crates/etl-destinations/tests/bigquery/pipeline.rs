@@ -3,11 +3,10 @@ use std::{str::FromStr, sync::Once, time::Duration};
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use etl::{
     config::BatchConfig,
-    data::{Cell, OldTableRow, TableRow, UpdatedTableRow},
+    data::{Cell, OldTableRow, PgNumeric, TableRow, UpdatedTableRow},
     error::ErrorKind,
     event::{Event, EventType},
     pipeline::PipelineId,
-    postgres::types::PgNumeric,
     store::{StateStore, TableState, TableStateType},
     test_utils::{
         database::{spawn_source_database, test_table_name},

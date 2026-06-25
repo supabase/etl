@@ -8,6 +8,7 @@ use etl::{
         STORE_REPLICATION_PROGRESS_FP, TABLE_SYNC_WORKER_BEFORE_STREAMING_FP,
     },
     pipeline::PipelineId,
+    schema::{SnapshotId, TableId, TableSchema},
     store::{StateStore, TableRetryPolicy, TableState, TableStateType},
     test_utils::{
         database::{spawn_source_database, test_table_name},
@@ -26,12 +27,7 @@ use etl::{
         },
     },
 };
-use etl_postgres::{
-    below_version,
-    tokio::test_utils::TableModification,
-    types::{SnapshotId, TableId, TableSchema},
-    version::POSTGRES_15,
-};
+use etl_postgres::{below_version, tokio::test_utils::TableModification, version::POSTGRES_15};
 use etl_telemetry::tracing::init_test_tracing;
 use fail::FailScenario;
 use rand::random;

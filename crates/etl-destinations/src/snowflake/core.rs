@@ -10,7 +10,7 @@ use etl::{
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
     event::{DeleteEvent, Event, InsertEvent, UpdateEvent},
-    postgres::types::{ColumnSchema, ReplicatedTableSchema, TableId},
+    schema::{ColumnSchema, ReplicatedTableSchema, TableId},
     store::DestinationStore,
 };
 use tracing::{info, warn};
@@ -517,7 +517,7 @@ mod tests {
 
     use etl::{
         data::{Cell, PartialTableRow},
-        postgres::types::{IdentityMask, ReplicationMask, TableName, TableSchema, Type},
+        schema::{IdentityMask, ReplicationMask, TableName, TableSchema, Type},
     };
 
     use super::*;

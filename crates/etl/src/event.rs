@@ -2,7 +2,7 @@ use std::{fmt, mem::size_of};
 
 use crate::{
     data::{OldTableRow, SizeHint, TableRow, UpdatedTableRow},
-    postgres::types::{PgLsn, ReplicatedTableSchema, TableId},
+    schema::{PgLsn, ReplicatedTableSchema, TableId},
 };
 
 /// Transaction begin event from Postgres logical replication.
@@ -343,6 +343,30 @@ impl fmt::Display for EventSequenceKey {
     }
 }
 
+/// Creates a hex-encoded sequence number from Postgres LSNs to ensure correct
+/// event ordering.
+///
+/// Creates a hex-encoded sequence number that ensures events are processed in
+/// the correct order even when they have the same system time. The format is
+/// compatible with BigQuery's `_CHANGE_SEQUENCE_NUMBER` column requirements.
+///
+/// The rationale for using the LSN is that downstream systems will preserve the
+/// highest sequence number in case of equal primary key, which is what we want
+/// since in case of updates, we want the latest update in Postgres order to be
+/// the winner. We have first the `commit_lsn` in the key so that operations are
+/// first ordered based on the LSN at which the transaction committed,
+/// and if two operations belong to the same transaction (meaning they have the
+/// same `commit_lsn`), the `start_lsn` will be used as a tiebreaker. We first
+/// order by `commit_lsn` to preserve the order in which operations are received
+/// by the pipeline since transactions are ordered by commit time
+/// and not interleaved.
+pub fn generate_sequence_number(start_lsn: PgLsn, commit_lsn: PgLsn) -> String {
+    let start_lsn = u64::from(start_lsn);
+    let commit_lsn = u64::from(commit_lsn);
+
+    format!("{commit_lsn:016x}/{start_lsn:016x}")
+}
+
 /// Classification of Postgres replication event types.
 ///
 /// [`EventType`] provides a lightweight enumeration of possible replication
@@ -401,5 +425,34 @@ impl From<&Event> for EventType {
 impl From<Event> for EventType {
     fn from(event: Event) -> Self {
         (&event).into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generate_sequence_number_fn() {
+        assert_eq!(
+            generate_sequence_number(PgLsn::from(0), PgLsn::from(0)),
+            "0000000000000000/0000000000000000"
+        );
+        assert_eq!(
+            generate_sequence_number(PgLsn::from(1), PgLsn::from(0)),
+            "0000000000000000/0000000000000001"
+        );
+        assert_eq!(
+            generate_sequence_number(PgLsn::from(255), PgLsn::from(0)),
+            "0000000000000000/00000000000000ff"
+        );
+        assert_eq!(
+            generate_sequence_number(PgLsn::from(65535), PgLsn::from(0)),
+            "0000000000000000/000000000000ffff"
+        );
+        assert_eq!(
+            generate_sequence_number(PgLsn::from(u64::MAX), PgLsn::from(0)),
+            "0000000000000000/ffffffffffffffff"
+        );
     }
 }

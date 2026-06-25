@@ -1,6 +1,4 @@
-use etl::postgres::types::{
-    ColumnSchema, DefaultExpression, Type, is_array_type, parse_default_expression,
-};
+use etl::schema::{ColumnSchema, DefaultExpression, Type, is_array_type, parse_default_expression};
 use tracing::warn;
 
 use crate::snowflake::{Error, Result, sql::quote_identifier};

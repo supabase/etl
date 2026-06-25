@@ -1,9 +1,7 @@
 use etl::{
     error::{ErrorKind, EtlResult},
     etl_error,
-    postgres::types::{
-        ColumnSchema, DefaultExpression, Type, is_array_type, parse_default_expression,
-    },
+    schema::{ColumnSchema, DefaultExpression, Type, is_array_type, parse_default_expression},
 };
 use etl_config::shared::ClickHouseEngine;
 use tracing::warn;

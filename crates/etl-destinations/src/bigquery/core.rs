@@ -16,7 +16,7 @@ use etl::{
     etl_error,
     event::{Event, EventSequenceKey},
     pipeline::PipelineId,
-    postgres::types::{
+    schema::{
         ColumnModification, IdentityType, ReplicatedTableSchema, SchemaDiff, TableId, TableName,
     },
     store::DestinationStore,
@@ -1832,7 +1832,7 @@ mod tests {
 
     use etl::{
         data::CellNonOptional,
-        postgres::types::{ColumnSchema, IdentityMask, PgLsn, TableId, TableSchema, Type},
+        schema::{ColumnSchema, IdentityMask, PgLsn, TableId, TableSchema, Type},
     };
     use prost::Message;
 
@@ -1847,7 +1847,7 @@ mod tests {
                 ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true),
             ],
         ));
-        let replication_mask = etl::postgres::types::ReplicationMask::all(&table_schema);
+        let replication_mask = etl::schema::ReplicationMask::all(&table_schema);
         let identity_mask = match identity_type {
             IdentityType::Full => IdentityMask::from_bytes(vec![1, 1]),
             IdentityType::PrimaryKey => IdentityMask::from_bytes(vec![1, 0]),
@@ -1869,7 +1869,7 @@ mod tests {
                 ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 3, true),
             ],
         ));
-        let replication_mask = etl::postgres::types::ReplicationMask::from_bytes(vec![0, 1, 1]);
+        let replication_mask = etl::schema::ReplicationMask::from_bytes(vec![0, 1, 1]);
         let identity_mask = IdentityMask::from_bytes(vec![0, 1, 0]);
 
         ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask)
@@ -2425,7 +2425,7 @@ mod tests {
         ));
         let replicated_table_schema = ReplicatedTableSchema::from_masks(
             table_schema,
-            etl::postgres::types::ReplicationMask::from_bytes(vec![1, 1, 1]),
+            etl::schema::ReplicationMask::from_bytes(vec![1, 1, 1]),
             IdentityMask::from_bytes(vec![1, 0, 0]),
         );
 
@@ -2469,7 +2469,7 @@ mod tests {
         ));
         let replicated_table_schema = ReplicatedTableSchema::from_masks(
             table_schema,
-            etl::postgres::types::ReplicationMask::from_bytes(vec![1, 1, 1]),
+            etl::schema::ReplicationMask::from_bytes(vec![1, 1, 1]),
             IdentityMask::from_bytes(vec![1, 1, 1]),
         );
 

@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, future::Future, sync::Arc};
 use crate::{
     destination::{AppliedDestinationTableMetadata, DestinationTableMetadata},
     error::EtlResult,
-    postgres::types::{PgLsn, TableId},
+    schema::{PgLsn, TableId},
     store::{TableState, WorkerType},
 };
 

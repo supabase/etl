@@ -1,7 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
 use etl_config::shared::{InvalidatedSlotBehavior, PipelineConfig};
-use etl_postgres::replication::slots::EtlReplicationSlot;
+use etl_postgres::slots::EtlReplicationSlot;
 use metrics::counter;
 use tokio::{sync::Semaphore, task::JoinHandle};
 use tokio_postgres::types::PgLsn;

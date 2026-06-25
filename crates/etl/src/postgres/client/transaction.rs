@@ -1,10 +1,6 @@
 use std::{collections::HashSet, fmt, num::NonZeroI32};
 
-use etl_postgres::{
-    below_version,
-    types::{ColumnSchema, SnapshotId, TableId, TableName, TableSchema},
-    version::POSTGRES_15,
-};
+use etl_postgres::{below_version, version::POSTGRES_15};
 use pg_escape::{quote_identifier, quote_literal};
 use tokio::sync::watch;
 use tokio_postgres::{CopyOutStream, SimpleQueryMessage, Transaction};
@@ -22,6 +18,7 @@ use crate::{
     error::{ErrorKind, EtlResult},
     etl_error,
     postgres::codec::{ColumnSchemaMessage, IdentityMessage, build_table_schema},
+    schema::{ColumnSchema, SnapshotId, TableId, TableName, TableSchema},
 };
 
 /// Builds a `COPY ... TO STDOUT` query that selects rows within a ctid range.
@@ -820,9 +817,8 @@ impl<'a> PgChildReplicationTransaction<'a> {
 
 #[cfg(test)]
 mod tests {
-    use etl_postgres::types::TableName;
-
     use super::{CtidPartition, build_ctid_copy_query};
+    use crate::schema::TableName;
 
     #[test]
     fn build_ctid_copy_query_quotes_mixed_case_table_names() {

@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use sqlx::{FromRow, PgExecutor};
 
 use crate::{
-    replication::slots::{EtlReplicationSlot, table_sync_like_pattern},
-    types::TableId,
+    schema::TableId,
+    slots::{EtlReplicationSlot, table_sync_like_pattern},
 };
 
 /// Lag metrics associated with a logical replication slot.

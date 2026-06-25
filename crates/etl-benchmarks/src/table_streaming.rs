@@ -7,7 +7,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use etl::{
-    pipeline::Pipeline, postgres::types::TableId, store::TableStateType,
+    pipeline::Pipeline, schema::TableId, store::TableStateType,
     test_utils::notifying_store::NotifyingStore,
 };
 use etl_config::shared::TableSyncCopyConfig;

@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Arc};
 use super::table::TableSchemaRetention;
 use crate::{
     error::EtlResult,
-    postgres::types::{SnapshotId, TableId, TableSchema},
+    schema::{SnapshotId, TableId, TableSchema},
 };
 
 /// Trait for storing and retrieving database table schema information.

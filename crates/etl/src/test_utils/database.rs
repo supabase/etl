@@ -21,14 +21,12 @@
 //! configuration.
 
 use etl_config::shared::{PgConnectionConfig, TcpKeepaliveConfig};
-use etl_postgres::{
-    test_utils::local_tls_config_from_env, tokio::test_utils::PgDatabase, types::TableName,
-};
+use etl_postgres::{test_utils::local_tls_config_from_env, tokio::test_utils::PgDatabase};
 use pg_escape::quote_identifier;
 use tokio_postgres::Client;
 use uuid::Uuid;
 
-use crate::postgres::migrations;
+use crate::{postgres::migrations, schema::TableName};
 
 /// The schema name used for organizing test tables.
 ///

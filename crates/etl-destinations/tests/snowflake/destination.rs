@@ -5,7 +5,7 @@ use etl::{
     destination::DestinationTableMetadata,
     event::{DeleteEvent, Event, InsertEvent, RelationEvent, UpdateEvent},
     pipeline::PipelineId,
-    postgres::types::{
+    schema::{
         ColumnSchema, PgLsn, ReplicatedTableSchema, SnapshotId, TableId, TableName, TableSchema,
         Type,
     },

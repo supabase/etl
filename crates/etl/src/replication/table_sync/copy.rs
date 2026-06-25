@@ -1,7 +1,6 @@
 use std::{pin::Pin, sync::Arc, time::Instant};
 
 use etl_config::shared::BatchConfig;
-use etl_postgres::types::{ReplicatedTableSchema, TableId};
 use futures::{Stream, StreamExt};
 use metrics::histogram;
 use tokio::{
@@ -34,6 +33,7 @@ use crate::{
         BatchBudgetController, MemoryMonitor, ShutdownResult, ShutdownRx,
         TryBatchBackpressureStream, table_sync_worker_copy_stream_id,
     },
+    schema::{ReplicatedTableSchema, TableId},
 };
 
 /// Calculates Load Imbalance Factor (LIF) for a set of values.

@@ -4,10 +4,7 @@ use std::{
     str::FromStr,
 };
 
-use etl_postgres::types::{
-    ColumnSchema, IdentityMask, ReplicatedTableSchema, ReplicationMask, SnapshotId, TableId,
-    TableName, TableSchema, convert_type_oid_to_type,
-};
+use etl_postgres::type_utils::convert_type_oid_to_type;
 use postgres_replication::protocol;
 use serde::Deserialize;
 use tokio_postgres::types::PgLsn;
@@ -19,6 +16,10 @@ use crate::{
     etl_error,
     event::{BeginEvent, CommitEvent, DeleteEvent, InsertEvent, TruncateEvent, UpdateEvent},
     postgres::codec::text::parse_cell_from_postgres_text,
+    schema::{
+        ColumnSchema, IdentityMask, ReplicatedTableSchema, ReplicationMask, SnapshotId, TableId,
+        TableName, TableSchema,
+    },
 };
 
 /// The prefix used for DDL schema change messages emitted by the
@@ -984,10 +985,6 @@ mod tests {
     use std::sync::Arc;
 
     use bytes::Bytes;
-    use etl_postgres::types::{
-        ColumnSchema, IdentityType, ReplicatedTableSchema, ReplicationMask, TableId, TableName,
-        TableSchema,
-    };
     use postgres_replication::protocol::{LogicalReplicationMessage, TupleData};
     use tokio_postgres::types::{PgLsn, Type};
 
@@ -1000,6 +997,10 @@ mod tests {
         data::{Cell, OldTableRow, PartialTableRow, TableRow, UpdatedTableRow},
         error::ErrorKind,
         event::{DeleteEvent, UpdateEvent},
+        schema::{
+            ColumnSchema, IdentityType, ReplicatedTableSchema, ReplicationMask, TableId, TableName,
+            TableSchema,
+        },
     };
 
     #[derive(Clone, Copy)]
@@ -1045,7 +1046,7 @@ mod tests {
         ReplicatedTableSchema::from_masks(
             Arc::clone(&table_schema),
             ReplicationMask::all(&table_schema),
-            etl_postgres::types::IdentityMask::from_bytes(vec![0, 1, 1, 0]),
+            crate::schema::IdentityMask::from_bytes(vec![0, 1, 1, 0]),
         )
     }
 
@@ -1065,7 +1066,7 @@ mod tests {
         ReplicatedTableSchema::from_masks(
             Arc::clone(&table_schema),
             ReplicationMask::all(&table_schema),
-            etl_postgres::types::IdentityMask::from_bytes(vec![1, 1, 1, 1]),
+            crate::schema::IdentityMask::from_bytes(vec![1, 1, 1, 1]),
         )
     }
 
@@ -1406,7 +1407,7 @@ mod tests {
         let replicated_table_schema = ReplicatedTableSchema::from_masks(
             Arc::clone(&table_schema),
             ReplicatedTableSchema::all(Arc::clone(&table_schema)).replication_mask().clone(),
-            etl_postgres::types::IdentityMask::from_bytes(vec![1, 0, 1, 0]),
+            crate::schema::IdentityMask::from_bytes(vec![1, 0, 1, 0]),
         );
         let tuple_data = [
             TupleData::Text(b"1".to_vec().into()),
@@ -1436,7 +1437,7 @@ mod tests {
         let replicated_table_schema = ReplicatedTableSchema::from_masks(
             Arc::clone(&table_schema),
             ReplicatedTableSchema::all(Arc::clone(&table_schema)).replication_mask().clone(),
-            etl_postgres::types::IdentityMask::from_bytes(vec![1, 0, 1, 0]),
+            crate::schema::IdentityMask::from_bytes(vec![1, 0, 1, 0]),
         );
         let tuple_data =
             [TupleData::Text(b"1".to_vec().into()), TupleData::Text(b"smith".to_vec().into())];

@@ -11,7 +11,7 @@
 use etl::{
     event::EventType,
     pipeline::PipelineId,
-    postgres::types::TableName,
+    schema::TableName,
     store::TableStateType,
     test_utils::{
         database::{spawn_source_database, test_table_name},

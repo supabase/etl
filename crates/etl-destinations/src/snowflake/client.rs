@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use etl::{
     pipeline::PipelineId,
-    postgres::types::{ColumnChange, ColumnModification, ColumnSchema, SchemaDiff, TableId},
+    schema::{ColumnChange, ColumnModification, ColumnSchema, SchemaDiff, TableId},
 };
 use reqwest::StatusCode;
 use tokio::sync::{Mutex, RwLock};

@@ -12,10 +12,8 @@ use etl::{
     },
     error::{ErrorKind, EtlResult},
     etl_error,
-    event::Event,
-    postgres::types::{
-        ColumnSchema, ReplicatedTableSchema, TableId, TableName, Type, generate_sequence_number,
-    },
+    event::{Event, generate_sequence_number},
+    schema::{ColumnSchema, ReplicatedTableSchema, TableId, TableName, Type},
     store::SharedStateStore,
 };
 use tokio::{sync::Mutex, task::JoinSet};
@@ -761,7 +759,7 @@ mod tests {
     use etl::{
         data::{Cell, OldTableRow, PartialTableRow, TableRow, UpdatedTableRow},
         error::ErrorKind,
-        postgres::types::{
+        schema::{
             ColumnSchema, IdentityMask, ReplicatedTableSchema, ReplicationMask, TableId, TableName,
             TableSchema, Type,
         },

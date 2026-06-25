@@ -501,7 +501,7 @@ struct BulkStatusChannel {
 mod tests {
     use etl::{
         data::{Cell, TableRow},
-        postgres::types::{ColumnSchema, Type},
+        schema::{ColumnSchema, Type},
     };
 
     use super::*;

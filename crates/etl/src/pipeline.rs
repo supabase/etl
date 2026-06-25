@@ -6,7 +6,7 @@
 
 use std::{collections::HashSet, sync::Arc, time::Duration};
 
-use etl_postgres::{replication::slots::EtlReplicationSlot, types::TableId};
+use etl_postgres::slots::EtlReplicationSlot;
 use tokio::sync::Semaphore;
 use tracing::{error, info, warn};
 
@@ -24,6 +24,7 @@ use crate::{
         ApplyWorker, ApplyWorkerHandle, TableSyncWorkerPool,
         concurrency::{MemoryMonitor, create_shutdown_channel},
     },
+    schema::TableId,
     store::PipelineStore,
 };
 

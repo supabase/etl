@@ -15,7 +15,7 @@ use etl::{
     error::{ErrorKind, EtlResult},
     etl_error,
     event::{Event, EventSequenceKey},
-    postgres::types::{
+    schema::{
         ColumnModification, ColumnSchema, ReplicatedTableSchema, ReplicationMask, SchemaDiff,
         SnapshotId, TableId, TableName, TableSchema,
     },
@@ -2658,7 +2658,7 @@ mod tests {
     use etl::{
         config::{PgConnectionConfig, TcpKeepaliveConfig},
         data::{Cell, PartialTableRow, TableRow},
-        postgres::types::{
+        schema::{
             ColumnChange, ColumnModification, ColumnSchema, IdentityMask, ReplicationMask,
             SchemaDiff, SnapshotId, TableSchema, Type as PgType,
         },

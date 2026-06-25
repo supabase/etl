@@ -22,7 +22,7 @@ use etl::{
 use etl_config::shared::PgConnectionConfig;
 use etl_postgres::{
     below_version,
-    replication::slots::EtlReplicationSlot,
+    slots::EtlReplicationSlot,
     tokio::test_utils::{PgDatabase, try_connect_to_pg_database},
     version::POSTGRES_16,
 };

@@ -1,5 +1,6 @@
-use etl_postgres::types::{ColumnSchema, ReplicatedTableSchema, SnapshotId, TableSchema};
 use tokio_postgres::types::Type;
+
+use crate::schema::{ColumnSchema, ReplicatedTableSchema, SnapshotId, TableSchema};
 
 /// Asserts that two column schemas are equal.
 pub fn assert_column_schema_eq(actual: &ColumnSchema, expected: &ColumnSchema) {
