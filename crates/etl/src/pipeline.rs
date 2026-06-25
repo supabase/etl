@@ -69,7 +69,7 @@ enum PipelineState {
 ///    log
 ///
 /// Multiple table sync workers run in parallel during the initial stage, while
-/// a single apply worker processes the replication stream of table that were
+/// a single apply worker processes replication streams for tables that were
 /// already copied.
 #[derive(Debug)]
 pub struct Pipeline<S, D> {

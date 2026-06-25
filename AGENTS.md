@@ -94,6 +94,9 @@
   `impl`, then trait impls. Within inherent impls, put constructors first,
   externally visible methods next, and private helpers last.
 - Do not add `#[must_use]` attributes unless the user explicitly asks for one.
+- Put rustdoc comments above all attributes on the item they document,
+  including `#[derive(...)]`, `#[serde(...)]`, `#[cfg_attr(...)]`, and macro
+  attributes such as `#[macro_export]`.
 - Default to private visibility and only widen when a real caller requires it.
 - Prefer the narrowest working visibility in this order: private, `pub(super)`, `pub(crate)`, then `pub`.
 - Use `pub` only for intentional crate APIs consumed by other crates, integration tests, examples, or documented user-facing entrypoints.

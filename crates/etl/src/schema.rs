@@ -15,7 +15,7 @@ pub use etl_postgres::{
     schema::{ColumnSchema, SchemaError, SnapshotId, TableId, TableName, TableSchema},
     type_utils::is_array_type,
 };
-pub use tokio_postgres::types::{PgLsn, ToSql, Type};
+pub use tokio_postgres::types::{PgLsn, Type};
 use tracing::warn;
 
 /// Validates that all named columns exist in the supplied [`TableSchema`].

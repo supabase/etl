@@ -2,9 +2,6 @@
 //!   <img src="https://raw.githubusercontent.com/supabase/supabase/master/packages/common/assets/images/supabase-logo-wordmark--light.svg" alt="Supabase" width="480">
 //! </p>
 //!
-//! ⚠️ **Warning:** These docs are a work in progress, for this reason they may
-//! be incomplete.
-//!
 //! This crate provides a high-performance, streaming ETL (Extract, Transform,
 //! Load) system built on Postgres logical replication. It enables real-time
 //! data synchronization from Postgres databases to various destinations with
@@ -170,6 +167,7 @@
 //!
 //! # Feature Flags
 //!
+//! - `egress`: Enable structured egress logging helpers
 //! - `test-utils`: Enable testing utilities and mock implementations
 //! - `failpoints`: Enable fault injection for testing error scenarios
 
@@ -180,6 +178,7 @@ pub mod destination;
 mod egress;
 pub mod error;
 pub mod event;
+#[doc(hidden)]
 #[cfg(feature = "failpoints")]
 pub mod failpoints;
 #[doc(hidden)]
@@ -188,10 +187,15 @@ pub mod fuzzing;
 mod macros;
 mod observability;
 pub mod pipeline;
+#[doc(hidden)]
+#[cfg(any(test, feature = "test-utils"))]
 pub mod postgres;
+#[cfg(not(any(test, feature = "test-utils")))]
+mod postgres;
 mod replication;
 mod runtime;
 pub mod schema;
 pub mod store;
+#[doc(hidden)]
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;

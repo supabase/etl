@@ -193,24 +193,43 @@ impl ArrayCell {
 #[derive(Debug, PartialEq)]
 #[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 pub enum CellNonOptional {
+    /// SQL NULL value.
     Null,
+    /// Boolean value.
     Bool(bool),
+    /// Text value.
     String(String),
+    /// 16-bit signed integer value.
     I16(i16),
+    /// 32-bit signed integer value.
     I32(i32),
+    /// 32-bit unsigned integer value.
     U32(u32),
+    /// 64-bit signed integer value.
     I64(i64),
+    /// 32-bit floating-point value.
     F32(f32),
+    /// 64-bit floating-point value.
     F64(f64),
+    /// Arbitrary precision numeric value.
     Numeric(PgNumeric),
+    /// Calendar date value.
     Date(NaiveDate),
+    /// Time-of-day value without time zone.
     Time(NaiveTime),
+    /// Time-of-day value with time zone offset.
     TimeTz(PgTimeTz),
+    /// Timestamp value without time zone.
     Timestamp(NaiveDateTime),
+    /// Timestamp value with time zone.
     TimestampTz(DateTime<Utc>),
+    /// UUID value.
     Uuid(Uuid),
+    /// JSON value.
     Json(serde_json::Value),
+    /// Binary value.
     Bytes(Vec<u8>),
+    /// Array value whose elements are all non-null.
     Array(ArrayCellNonOptional),
 }
 
@@ -287,22 +306,39 @@ impl CellNonOptional {
 #[derive(Debug, PartialEq)]
 #[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 pub enum ArrayCellNonOptional {
+    /// Boolean array.
     Bool(Vec<bool>),
+    /// Text array.
     String(Vec<String>),
+    /// 16-bit signed integer array.
     I16(Vec<i16>),
+    /// 32-bit signed integer array.
     I32(Vec<i32>),
+    /// 32-bit unsigned integer array.
     U32(Vec<u32>),
+    /// 64-bit signed integer array.
     I64(Vec<i64>),
+    /// 32-bit floating-point array.
     F32(Vec<f32>),
+    /// 64-bit floating-point array.
     F64(Vec<f64>),
+    /// Arbitrary precision numeric array.
     Numeric(Vec<PgNumeric>),
+    /// Calendar date array.
     Date(Vec<NaiveDate>),
+    /// Time-of-day array without time zone.
     Time(Vec<NaiveTime>),
+    /// Time-of-day array with time zone offsets.
     TimeTz(Vec<PgTimeTz>),
+    /// Timestamp array without time zone.
     Timestamp(Vec<NaiveDateTime>),
+    /// Timestamp array with time zone.
     TimestampTz(Vec<DateTime<Utc>>),
+    /// UUID array.
     Uuid(Vec<Uuid>),
+    /// JSON array.
     Json(Vec<serde_json::Value>),
+    /// Binary array.
     Bytes(Vec<Vec<u8>>),
 }
 

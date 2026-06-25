@@ -1,3 +1,10 @@
+//! Replication events emitted by the ETL pipeline.
+//!
+//! This module contains transaction, row, truncate, and relation events passed
+//! to destinations during streaming replication. Each data-bearing event
+//! carries the [`crate::schema::ReplicatedTableSchema`] needed to interpret its
+//! row payload.
+
 use std::{fmt, mem::size_of};
 
 use crate::{

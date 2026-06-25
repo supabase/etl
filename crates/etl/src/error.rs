@@ -84,84 +84,137 @@ enum ErrorRepr {
 #[non_exhaustive]
 pub enum ErrorKind {
     // Connection Errors
+    /// The source database connection could not be established or maintained.
     SourceConnectionFailed,
+    /// The destination connection could not be established or maintained.
     DestinationConnectionFailed,
 
     // Query & Execution Errors
+    /// A query against the source database failed.
     SourceQueryFailed,
+    /// A query or write against the destination failed.
     DestinationQueryFailed,
+    /// A destination atomic batch failed with a retryable error.
     DestinationAtomicBatchRetryable,
+    /// A source query failed because a lock could not be acquired in time.
     SourceLockTimeout,
+    /// A destination operation exceeded its timeout.
     DestinationTimeout,
+    /// A source operation was canceled by Postgres.
     SourceOperationCanceled,
 
     // Schema Errors
+    /// The source schema could not be read or interpreted.
     SourceSchemaError,
+    /// A required table schema was missing from state.
     MissingTableSchema,
+    /// A stored table schema was invalid or inconsistent.
     CorruptedTableSchema,
+    /// A destination table name was invalid.
     DestinationTableNameInvalid,
+    /// The destination namespace already exists.
     DestinationNamespaceAlreadyExists,
+    /// The destination table already exists.
     DestinationTableAlreadyExists,
+    /// The destination namespace does not exist.
     DestinationNamespaceMissing,
+    /// The destination table does not exist.
     DestinationTableMissing,
 
     // Data & Transformation Errors
+    /// A value could not be converted between source and destination formats.
     ConversionError,
+    /// Source or destination data was invalid.
     InvalidData,
+    /// Configuration or data validation failed.
     ValidationError,
+    /// A destination does not support null values inside arrays.
     NullValuesNotSupportedInArrayInDestination,
+    /// A destination does not support a source value.
     UnsupportedValueInDestination,
 
     // Configuration & Limit Errors
+    /// Pipeline or destination configuration was invalid.
     ConfigError,
+    /// The source database exceeded a configured or supported limit.
     SourceConfigurationLimitExceeded,
 
     // IO & Serialization Errors
+    /// A generic I/O operation failed.
     IoError,
+    /// A source-side I/O operation failed.
     SourceIoError,
+    /// A destination-side I/O operation failed.
     DestinationIoError,
+    /// A value could not be serialized.
     SerializationError,
+    /// A value could not be deserialized.
     DeserializationError,
 
     // Security & Authentication Errors
+    /// Encryption or decryption failed.
     EncryptionError,
+    /// Source authentication failed.
     SourceAuthenticationError,
+    /// Destination authentication failed.
     DestinationAuthenticationError,
+    /// The caller does not have permission for the requested operation.
     PermissionDenied,
 
     // State & Workflow Errors
+    /// Pipeline state violated an expected invariant.
     InvalidState,
+    /// The apply worker task panicked.
     ApplyWorkerPanic,
+    /// The apply worker task was canceled.
     ApplyWorkerCancelled,
+    /// A table sync worker task panicked.
     TableSyncWorkerPanic,
+    /// A table sync worker task was canceled.
     TableSyncWorkerCancelled,
+    /// Table state rollback failed.
     StateRollbackError,
 
     // Replication Errors
+    /// A required replication slot was not found.
     ReplicationSlotNotFound,
+    /// A replication slot already exists.
     ReplicationSlotAlreadyExists,
+    /// A replication slot could not be created.
     ReplicationSlotNotCreated,
+    /// A replication slot was invalidated by Postgres.
     ReplicationSlotInvalidated,
+    /// Replication slot deletion did not complete before timeout.
     ReplicationSlotDeletionTimeout,
+    /// A source table replica identity cannot support requested replication.
     SourceReplicaIdentityError,
+    /// The requested source snapshot is too old.
     SourceSnapshotTooOld,
+    /// The source database is in recovery and cannot serve the operation.
     SourceDatabaseInRecovery,
+    /// The source database is shutting down.
     SourceDatabaseShutdown,
 
     // General Errors
+    /// A generic source-side error occurred.
     SourceError,
+    /// A generic destination-side error occurred.
     DestinationError,
 
     // Unknown / Uncategorized
+    /// The error could not be classified more specifically.
     Unknown,
 
     // Special error kinds used for tests that trigger specific retry behaviors via fault
     // injection.
     #[cfg(feature = "failpoints")]
+    /// Fault-injection error that should not be retried.
     WithNoRetry,
     #[cfg(feature = "failpoints")]
+    /// Fault-injection error that requires manual retry.
     WithManualRetry,
     #[cfg(feature = "failpoints")]
+    /// Fault-injection error that should be retried after a delay.
     WithTimedRetry,
 }
 
@@ -896,7 +949,7 @@ impl From<rustls::Error> for EtlError {
     }
 }
 
-/// Converts [`rustls::pki_types::pem::Error`] to [`EtlError`] with
+/// Converts `rustls::pki_types::pem::Error` to [`EtlError`] with
 /// [`ErrorKind::ConfigError`].
 impl From<rustls::pki_types::pem::Error> for EtlError {
     fn from(err: rustls::pki_types::pem::Error) -> EtlError {

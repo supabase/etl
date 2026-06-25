@@ -11,6 +11,12 @@ use crate::{
     replication::table_state::{TableError, TableRetryPolicy},
 };
 
+/// Replication lifecycle state for a source table.
+///
+/// Table states coordinate initial table copy, catch-up, steady-state
+/// streaming, and per-table errors. Some states are durable and stored in the
+/// configured [`crate::store::StateStore`], while transitional coordination
+/// states are memory-only.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TableState {
@@ -189,13 +195,21 @@ impl From<TableError> for TableState {
 /// current state of a table without having to pattern match on the data fields.
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub enum TableStateType {
+    /// Table has been discovered but no copy work has started.
     Init,
+    /// Table is currently being copied by a table sync worker.
     DataSync,
+    /// Initial table copy completed.
     FinishedCopy,
+    /// Table sync is waiting for the apply worker to pause.
     SyncWait,
+    /// Apply worker is paused while the table sync worker catches up.
     Catchup,
+    /// Table sync worker caught up to the handoff LSN.
     SyncDone,
+    /// Table is ready for steady-state apply-worker replication.
     Ready,
+    /// Table replication is stopped on an error.
     Errored,
 }
 
