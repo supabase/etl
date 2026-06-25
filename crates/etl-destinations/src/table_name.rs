@@ -2,7 +2,7 @@ use etl::{
     bail,
     error::{ErrorKind, EtlResult},
     etl_error,
-    types::TableName,
+    schema::TableName,
 };
 
 /// Converts a [`TableName`] into a single underscore-escaped identifier.

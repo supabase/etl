@@ -5,8 +5,8 @@ use etl::{
         BatchConfig, IntoConnectOptions, InvalidatedSlotBehavior, MemoryBackpressureConfig,
         PgConnectionConfig, PgConnectionOptions, PipelineConfig, TableSyncCopyConfig,
     },
-    migrations::run_source_migrations,
     pipeline::Pipeline,
+    postgres::migrations::run_source_migrations,
     store::{MemoryStore, PostgresStore},
     test_utils::memory_destination::MemoryDestination,
 };

@@ -1,9 +1,11 @@
 use std::future::Future;
 
 use crate::{
-    destination::async_result::{DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult},
+    data::TableRow,
+    destination::{DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult},
     error::EtlResult,
-    types::{Event, ReplicatedTableSchema, TableRow},
+    event::Event,
+    schema::ReplicatedTableSchema,
 };
 
 /// Trait for systems that can receive replicated data from ETL pipelines.

@@ -1,13 +1,13 @@
 use etl::{
-    state::TableStateType,
-    store::StateStore,
+    event::EventType,
+    pipeline::PipelineId,
+    store::{StateStore, TableStateType},
     test_utils::{
         database::{spawn_source_database, test_table_name},
         notifying_store::NotifyingStore,
         pipeline::create_pipeline,
         test_destination_wrapper::TestDestinationWrapper,
     },
-    types::{EventType, PipelineId},
 };
 use etl_config::shared::ClickHouseEngine;
 use etl_destinations::clickhouse::{

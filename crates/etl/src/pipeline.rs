@@ -6,25 +6,35 @@
 
 use std::{collections::HashSet, sync::Arc, time::Duration};
 
-use etl_postgres::replication::slots::EtlReplicationSlot;
+use etl_postgres::slots::EtlReplicationSlot;
 use tokio::sync::Semaphore;
 use tracing::{error, info, warn};
 
+pub use crate::runtime::concurrency::ShutdownTx;
 use crate::{
     bail,
-    concurrency::{MemoryMonitor, ShutdownTx, create_shutdown_channel},
     config::PipelineConfig,
     destination::PipelineDestination,
     error::{ErrorKind, EtlResult},
     etl_error,
-    metrics::register_metrics,
-    migrations,
-    replication::{OutOfBandSourcePool, SharedTableCache, client::PgReplicationClient},
-    state::TableState,
+    observability::register_metrics,
+    postgres::{OutOfBandSourcePool, client::PgReplicationClient, migrations},
+    replication::{SharedTableCache, table_state::TableState},
+    runtime::{
+        ApplyWorker, ApplyWorkerHandle, TableSyncWorkerPool,
+        concurrency::{MemoryMonitor, create_shutdown_channel},
+    },
+    schema::TableId,
     store::PipelineStore,
-    types::{PipelineId, TableId},
-    workers::{ApplyWorker, ApplyWorkerHandle, TableSyncWorkerPool},
 };
+
+/// Unique identifier for an ETL pipeline instance.
+///
+/// [`PipelineId`] provides a simple numeric identifier to distinguish between
+/// multiple pipeline instances running concurrently. This ID is used for
+/// logging, monitoring, and coordinating shutdown operations across pipeline
+/// components.
+pub type PipelineId = u64;
 
 /// Internal state tracking for pipeline lifecycle.
 ///
@@ -59,7 +69,7 @@ enum PipelineState {
 ///    log
 ///
 /// Multiple table sync workers run in parallel during the initial stage, while
-/// a single apply worker processes the replication stream of table that were
+/// a single apply worker processes replication streams for tables that were
 /// already copied.
 #[derive(Debug)]
 pub struct Pipeline<S, D> {

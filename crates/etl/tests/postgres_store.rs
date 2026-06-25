@@ -3,22 +3,17 @@
 use std::collections::HashMap;
 
 use etl::{
+    destination::DestinationTableMetadata,
     error::ErrorKind,
     etl_error,
-    replication::WorkerType,
-    state::{TableRetryPolicy, TableState, destination_table_metadata::DestinationTableMetadata},
+    schema::{ColumnSchema, ReplicationMask, SnapshotId, TableId, TableName, TableSchema},
     store::{
-        TableStateLifecycleStore,
-        both::postgres::PostgresStore,
-        schema::{SchemaStore, TableSchemaRetention},
-        state::StateStore,
+        PostgresStore, SchemaStore, StateStore, TableRetryPolicy, TableSchemaRetention, TableState,
+        TableStateLifecycleStore, WorkerType,
     },
     test_utils::database::spawn_source_database,
 };
-use etl_postgres::{
-    replication::connect_to_source_database,
-    types::{ColumnSchema, ReplicationMask, SnapshotId, TableId, TableName, TableSchema},
-};
+use etl_postgres::source::connect_to_source_database;
 use etl_telemetry::tracing::init_test_tracing;
 use sqlx::postgres::types::Oid as SqlxTableId;
 use tokio_postgres::types::{PgLsn, Type as PgType};

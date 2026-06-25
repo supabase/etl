@@ -5,19 +5,16 @@ use std::{
 };
 
 use etl::{
-    concurrency::TaskSet,
+    data::{Cell, OldTableRow, TableRow, UpdatedTableRow},
     destination::{
-        Destination,
-        async_result::{DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult},
+        Destination, DestinationTableMetadata, DropTableForCopyResult, TaskSet, WriteEventsResult,
+        WriteTableRowsResult,
     },
     error::{ErrorKind, EtlResult},
     etl_error,
-    state::destination_table_metadata::DestinationTableMetadata,
+    event::{Event, generate_sequence_number},
+    schema::{ColumnSchema, ReplicatedTableSchema, TableId, TableName, Type},
     store::SharedStateStore,
-    types::{
-        Cell, ColumnSchema, Event, OldTableRow, ReplicatedTableSchema, TableId, TableName,
-        TableRow, Type, UpdatedTableRow, generate_sequence_number,
-    },
 };
 use tokio::{sync::Mutex, task::JoinSet};
 use tracing::{debug, warn};
@@ -760,10 +757,11 @@ mod tests {
     use std::sync::Arc;
 
     use etl::{
+        data::{Cell, OldTableRow, PartialTableRow, TableRow, UpdatedTableRow},
         error::ErrorKind,
-        types::{
-            Cell, ColumnSchema, IdentityMask, OldTableRow, PartialTableRow, ReplicatedTableSchema,
-            ReplicationMask, TableId, TableName, TableRow, TableSchema, Type, UpdatedTableRow,
+        schema::{
+            ColumnSchema, IdentityMask, ReplicatedTableSchema, ReplicationMask, TableId, TableName,
+            TableSchema, Type,
         },
     };
 

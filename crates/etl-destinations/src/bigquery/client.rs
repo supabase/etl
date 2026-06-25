@@ -1,9 +1,11 @@
 use std::fmt;
 
 use etl::{
+    data::Cell,
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
-    types::{Cell, ColumnSchema, PipelineId, ReplicatedTableSchema, Type},
+    pipeline::PipelineId,
+    schema::{ColumnSchema, ReplicatedTableSchema, Type},
 };
 use gcp_bigquery_client::{
     Client,

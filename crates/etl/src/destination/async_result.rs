@@ -7,12 +7,12 @@ use std::{
 
 use pin_project_lite::pin_project;
 use tokio::sync::oneshot;
+use tokio_postgres::types::PgLsn;
 use tracing::warn;
 
 use crate::{
     error::{ErrorKind, EtlResult},
     etl_error,
-    types::PgLsn,
 };
 
 /// Async completion handle used for

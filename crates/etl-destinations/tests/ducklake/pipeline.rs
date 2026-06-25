@@ -5,8 +5,9 @@
 
 use duckdb::Connection;
 use etl::{
-    state::TableStateType,
-    store::state::StateStore,
+    event::EventType,
+    pipeline::PipelineId,
+    store::{StateStore, TableStateType},
     test_utils::{
         database::{spawn_source_database, test_table_name},
         notifying_store::NotifyingStore,
@@ -14,7 +15,6 @@ use etl::{
         test_destination_wrapper::TestDestinationWrapper,
         test_schema::{TableSelection, insert_mock_data, setup_test_database_schema},
     },
-    types::{EventType, PipelineId},
 };
 use etl_destinations::ducklake::{DuckLakeDestination, table_name_to_ducklake_table_name};
 use etl_postgres::tokio::test_utils::TableModification;

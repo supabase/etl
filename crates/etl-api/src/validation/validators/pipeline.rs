@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use etl_postgres::replication::catalog::ETL_SCHEMA_NAME;
+use etl_postgres::store::catalog::ETL_SCHEMA_NAME;
 use sqlx::FromRow;
 
 use super::super::{ValidationContext, ValidationError, ValidationFailure, Validator};

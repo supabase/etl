@@ -75,14 +75,15 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::info;
 
+use etl::destination::{AppliedDestinationTableMetadata, DestinationTableMetadata};
 use etl::error::EtlResult;
-use etl::replication::WorkerType;
-use etl::state::{AppliedDestinationTableMetadata, DestinationTableMetadata, TableState};
+use etl::store::WorkerType;
+use etl::store::TableState;
 use etl::store::{
     SchemaStore, StateStore, TableStateLifecycleStore, TableStateOperation, TableStates,
 };
-use etl::store::schema::TableSchemaRetention;
-use etl::types::{PgLsn, SnapshotId, TableId, TableSchema};
+use etl::store::TableSchemaRetention;
+use etl::postgres::types::{PgLsn, SnapshotId, TableId, TableSchema};
 
 #[derive(Debug, Clone, Default)]
 struct TableEntry {
@@ -351,7 +352,7 @@ use etl::destination::{
     Destination, DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult,
 };
 use etl::error::{ErrorKind, EtlResult};
-use etl::types::{Event, ReplicatedTableSchema, TableRow};
+use etl::{data::TableRow, event::Event, postgres::types::ReplicatedTableSchema};
 use etl::{bail, etl_error};
 
 #[derive(Debug, Clone)]

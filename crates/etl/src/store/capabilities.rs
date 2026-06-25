@@ -5,7 +5,7 @@
 //! depend on [`StateStore`], [`SchemaStore`], or [`TableStateLifecycleStore`]
 //! directly.
 
-use crate::store::{lifecycle::TableStateLifecycleStore, schema::SchemaStore, state::StateStore};
+use crate::store::{SchemaStore, StateStore, TableStateLifecycleStore};
 
 /// Store capabilities required by state-only worker code.
 pub trait SharedStateStore: StateStore + Clone + Send + Sync + 'static {}

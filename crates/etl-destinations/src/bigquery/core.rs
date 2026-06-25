@@ -7,19 +7,19 @@ use std::{
 
 use etl::{
     bail,
-    concurrency::TaskSet,
+    data::{Cell, OldTableRow, TableRow, UpdatedTableRow},
     destination::{
-        Destination,
-        async_result::{DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult},
+        Destination, DestinationTableMetadata, DestinationTableSchemaStatus,
+        DropTableForCopyResult, TaskSet, WriteEventsResult, WriteTableRowsResult,
     },
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
-    state::destination_table_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus},
-    store::DestinationStore,
-    types::{
-        Cell, ColumnModification, Event, EventSequenceKey, IdentityType, OldTableRow, PipelineId,
-        ReplicatedTableSchema, SchemaDiff, TableId, TableName, TableRow, UpdatedTableRow,
+    event::{Event, EventSequenceKey},
+    pipeline::PipelineId,
+    schema::{
+        ColumnModification, IdentityType, ReplicatedTableSchema, SchemaDiff, TableId, TableName,
     },
+    store::DestinationStore,
 };
 use gcp_bigquery_client::storage::{MAX_BATCH_SIZE_BYTES, TableDescriptor};
 use metrics::histogram;
@@ -1830,8 +1830,9 @@ fn split_table_rows(
 mod tests {
     use std::sync::Arc;
 
-    use etl::types::{
-        CellNonOptional, ColumnSchema, IdentityMask, PgLsn, TableId, TableSchema, Type,
+    use etl::{
+        data::CellNonOptional,
+        schema::{ColumnSchema, IdentityMask, PgLsn, TableId, TableSchema, Type},
     };
     use prost::Message;
 
@@ -1846,7 +1847,7 @@ mod tests {
                 ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true),
             ],
         ));
-        let replication_mask = etl::types::ReplicationMask::all(&table_schema);
+        let replication_mask = etl::schema::ReplicationMask::all(&table_schema);
         let identity_mask = match identity_type {
             IdentityType::Full => IdentityMask::from_bytes(vec![1, 1]),
             IdentityType::PrimaryKey => IdentityMask::from_bytes(vec![1, 0]),
@@ -1868,7 +1869,7 @@ mod tests {
                 ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 3, true),
             ],
         ));
-        let replication_mask = etl::types::ReplicationMask::from_bytes(vec![0, 1, 1]);
+        let replication_mask = etl::schema::ReplicationMask::from_bytes(vec![0, 1, 1]);
         let identity_mask = IdentityMask::from_bytes(vec![0, 1, 0]);
 
         ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask)
@@ -2099,7 +2100,7 @@ mod tests {
     fn bigquery_update_new_row_rejects_partial_rows() {
         let replicated_table_schema = replicated_schema(IdentityType::PrimaryKey);
         let partial_row =
-            etl::types::PartialTableRow::new(2, TableRow::new(vec![Cell::I32(1)]), vec![1]);
+            etl::data::PartialTableRow::new(2, TableRow::new(vec![Cell::I32(1)]), vec![1]);
 
         let error = bigquery_update_new_row(
             &replicated_table_schema,
@@ -2424,7 +2425,7 @@ mod tests {
         ));
         let replicated_table_schema = ReplicatedTableSchema::from_masks(
             table_schema,
-            etl::types::ReplicationMask::from_bytes(vec![1, 1, 1]),
+            etl::schema::ReplicationMask::from_bytes(vec![1, 1, 1]),
             IdentityMask::from_bytes(vec![1, 0, 0]),
         );
 
@@ -2468,7 +2469,7 @@ mod tests {
         ));
         let replicated_table_schema = ReplicatedTableSchema::from_masks(
             table_schema,
-            etl::types::ReplicationMask::from_bytes(vec![1, 1, 1]),
+            etl::schema::ReplicationMask::from_bytes(vec![1, 1, 1]),
             IdentityMask::from_bytes(vec![1, 1, 1]),
         );
 

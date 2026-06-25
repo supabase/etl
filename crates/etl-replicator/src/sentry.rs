@@ -1,6 +1,6 @@
 use std::backtrace::BacktraceStatus;
 
-use etl::{error::EtlError, types::TableId};
+use etl::{error::EtlError, schema::TableId};
 use sentry::{
     protocol::{Event, Exception, Stacktrace, Value},
     types::Uuid,

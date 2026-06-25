@@ -1,8 +1,8 @@
 use etl::{
     bail,
+    data::{ArrayCellNonOptional, CellNonOptional, PgNumeric},
     error::{ErrorKind, EtlResult},
     etl_error,
-    types::{ArrayCellNonOptional, CellNonOptional, PgNumeric},
 };
 
 /// BigQuery BIGNUMERIC maximum decimal places.

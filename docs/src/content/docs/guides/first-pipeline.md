@@ -79,7 +79,9 @@ use etl::{
     error::EtlResult,
     pipeline::Pipeline,
     store::MemoryStore,
-    types::{Event, ReplicatedTableSchema, TableRow},
+    data::{TableRow},
+    event::{Event},
+    postgres::types::{ReplicatedTableSchema},
 };
 use std::error::Error;
 

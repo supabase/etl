@@ -1,2 +1,2 @@
-pub mod memory;
-pub mod postgres;
+pub(super) mod memory;
+pub(super) mod postgres;

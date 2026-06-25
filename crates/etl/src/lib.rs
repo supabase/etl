@@ -2,9 +2,6 @@
 //!   <img src="https://raw.githubusercontent.com/supabase/supabase/master/packages/common/assets/images/supabase-logo-wordmark--light.svg" alt="Supabase" width="480">
 //! </p>
 //!
-//! ⚠️ **Warning:** These docs are a work in progress, for this reason they may
-//! be incomplete.
-//!
 //! This crate provides a high-performance, streaming ETL (Extract, Transform,
 //! Load) system built on Postgres logical replication. It enables real-time
 //! data synchronization from Postgres databases to various destinations with
@@ -42,11 +39,11 @@
 //! operations. These stores are critical to a pipeline's operation, as they
 //! allow it to be safely paused and resumed.
 //!
-//! The [`store::state::StateStore`] trait handles table states,
+//! The [`store::StateStore`] trait handles table states,
 //! durable replication progress, and destination table metadata, providing a
 //! single interface for all state-related storage operations.
 //!
-//! The [`store::schema::SchemaStore`] trait handles versioned table schemas,
+//! The [`store::SchemaStore`] trait handles versioned table schemas,
 //! and [`store::TableStateLifecycleStore`] handles table-scoped preparation,
 //! reset, and deletion operations that must update state, schema, and metadata
 //! consistently.
@@ -72,13 +69,15 @@
 //!         BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PgConnectionConfig,
 //!         PipelineConfig, TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
 //!     },
+//!     data::TableRow,
 //!     destination::{
 //!         Destination, DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult,
 //!     },
 //!     error::EtlResult,
+//!     event::Event,
 //!     pipeline::Pipeline,
+//!     schema::ReplicatedTableSchema,
 //!     store::MemoryStore,
-//!     types::{Event, ReplicatedTableSchema, TableRow},
 //! };
 //!
 //! #[derive(Clone)]
@@ -168,30 +167,35 @@
 //!
 //! # Feature Flags
 //!
+//! - `egress`: Enable structured egress logging helpers
 //! - `test-utils`: Enable testing utilities and mock implementations
 //! - `failpoints`: Enable fault injection for testing error scenarios
 
-pub mod concurrency;
 pub mod config;
-mod conversions;
+pub mod data;
 pub mod destination;
 #[cfg(feature = "egress")]
-pub mod egress;
+mod egress;
 pub mod error;
+pub mod event;
+#[doc(hidden)]
 #[cfg(feature = "failpoints")]
 pub mod failpoints;
 #[doc(hidden)]
 #[cfg(feature = "fuzzing")]
 pub mod fuzzing;
 mod macros;
-pub mod metrics;
-pub mod migrations;
+mod observability;
 pub mod pipeline;
-pub mod replication;
-pub mod state;
+#[doc(hidden)]
+#[cfg(any(test, feature = "test-utils"))]
+pub mod postgres;
+#[cfg(not(any(test, feature = "test-utils")))]
+mod postgres;
+mod replication;
+mod runtime;
+pub mod schema;
 pub mod store;
+#[doc(hidden)]
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
-pub mod types;
-mod utils;
-mod workers;

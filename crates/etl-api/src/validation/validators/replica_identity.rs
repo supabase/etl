@@ -4,7 +4,7 @@
 //! types so destinations can declare the row identities they can safely apply.
 
 use async_trait::async_trait;
-use etl_postgres::types::IdentityType;
+use etl::schema::IdentityType;
 use sqlx::FromRow;
 
 use crate::validation::{ValidationContext, ValidationError, ValidationFailure, Validator};
