@@ -1,9 +1,9 @@
 use std::{fmt, mem::size_of};
 
-use etl_postgres::types::{ReplicatedTableSchema, TableId};
-use tokio_postgres::types::PgLsn;
-
-use crate::data::{OldTableRow, SizeHint, TableRow, UpdatedTableRow};
+use crate::{
+    data::{OldTableRow, SizeHint, TableRow, UpdatedTableRow},
+    postgres::types::{PgLsn, ReplicatedTableSchema, TableId},
+};
 
 /// Transaction begin event from Postgres logical replication.
 ///

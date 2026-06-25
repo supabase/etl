@@ -1,9 +1,10 @@
 use std::{collections::HashMap, sync::Arc};
 
-use etl_postgres::types::{SnapshotId, TableId, TableSchema};
-
 use super::table::TableSchemaRetention;
-use crate::error::EtlResult;
+use crate::{
+    error::EtlResult,
+    postgres::types::{SnapshotId, TableId, TableSchema},
+};
 
 /// Trait for storing and retrieving database table schema information.
 ///

@@ -1,6 +1,7 @@
-use etl_postgres::types::{ReplicationMask, SnapshotId};
-
-use crate::error::{ErrorKind, EtlResult};
+use crate::{
+    error::{ErrorKind, EtlResult},
+    postgres::types::{ReplicationMask, SnapshotId},
+};
 
 /// Status of the schema at a destination.
 ///

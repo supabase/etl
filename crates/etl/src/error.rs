@@ -13,7 +13,7 @@ use std::{
     sync::Arc,
 };
 
-use etl_postgres::types::{ParseNumericError, ParseTimeError, SchemaError};
+use crate::postgres::types::{ParseNumericError, ParseTimeError, SchemaError};
 
 const MAX_SCHEMA_ERROR_COLUMN_NAMES: usize = 12;
 

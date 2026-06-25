@@ -114,7 +114,7 @@ impl TableState {
     /// Returns the state type enum and serialized JSON metadata for persisting
     /// to the state store. Returns an error for in-memory-only states that
     /// cannot be persisted.
-    pub fn to_storage_format(&self) -> EtlResult<(StoredTableStateType, serde_json::Value)> {
+    pub(crate) fn to_storage_format(&self) -> EtlResult<(StoredTableStateType, serde_json::Value)> {
         let state_type = self.as_type();
         if !state_type.should_store() {
             bail!(
@@ -124,7 +124,7 @@ impl TableState {
             );
         }
 
-        let state_type: StoredTableStateType = state_type.try_into()?;
+        let state_type = state_type.to_storage_type()?;
         let metadata = serde_json::to_value(self).map_err(|err| {
             etl_error!(
                 ErrorKind::SerializationError,
@@ -138,7 +138,7 @@ impl TableState {
 
     /// Deserializes a [`TableState`] from a state store row's
     /// metadata.
-    pub fn from_state_row(row: TableStateRow) -> EtlResult<Self> {
+    pub(crate) fn from_state_row(row: TableStateRow) -> EtlResult<Self> {
         let Some(metadata) = row.metadata else {
             bail!(
                 ErrorKind::InvalidState,
@@ -238,6 +238,23 @@ impl TableStateType {
     pub fn is_errored(&self) -> bool {
         matches!(self, Self::Errored)
     }
+
+    /// Converts this public state type to its persistent storage enum.
+    pub(crate) fn to_storage_type(self) -> EtlResult<StoredTableStateType> {
+        match self {
+            Self::Init => Ok(StoredTableStateType::Init),
+            Self::DataSync => Ok(StoredTableStateType::DataSync),
+            Self::FinishedCopy => Ok(StoredTableStateType::FinishedCopy),
+            Self::SyncDone => Ok(StoredTableStateType::SyncDone),
+            Self::Ready => Ok(StoredTableStateType::Ready),
+            Self::Errored => Ok(StoredTableStateType::Errored),
+            Self::SyncWait | Self::Catchup => Err(etl_error!(
+                ErrorKind::InvalidState,
+                "In-memory table state cannot be converted to storage state",
+                "In-memory table states (SyncWait, Catchup) cannot be saved to state store"
+            )),
+        }
+    }
 }
 
 impl From<TableStateType> for &'static str {
@@ -251,26 +268,6 @@ impl From<TableStateType> for &'static str {
             TableStateType::SyncDone => "sync_done",
             TableStateType::Ready => "ready",
             TableStateType::Errored => "errored",
-        }
-    }
-}
-
-impl TryFrom<TableStateType> for StoredTableStateType {
-    type Error = EtlError;
-
-    fn try_from(value: TableStateType) -> Result<Self, Self::Error> {
-        match value {
-            TableStateType::Init => Ok(Self::Init),
-            TableStateType::DataSync => Ok(Self::DataSync),
-            TableStateType::FinishedCopy => Ok(Self::FinishedCopy),
-            TableStateType::SyncDone => Ok(Self::SyncDone),
-            TableStateType::Ready => Ok(Self::Ready),
-            TableStateType::Errored => Ok(Self::Errored),
-            TableStateType::SyncWait | TableStateType::Catchup => Err(etl_error!(
-                ErrorKind::InvalidState,
-                "In-memory table state cannot be converted to storage state",
-                "In-memory table states (SyncWait, Catchup) cannot be saved to state store"
-            )),
         }
     }
 }
@@ -395,7 +392,7 @@ mod tests {
     #[test]
     fn state_type_converts_to_postgres_state_type() {
         let state_type: table_state::StoredTableStateType =
-            TableStateType::Ready.try_into().unwrap();
+            TableStateType::Ready.to_storage_type().unwrap();
 
         assert_eq!(state_type, table_state::StoredTableStateType::Ready);
     }

@@ -5,7 +5,7 @@
 
 pub use etl_config::{
     Config, Environment, LoadConfigError, ParseDucklakeUrlError, SerializableSecretString,
-    load_config, parse_ducklake_s3_data_path, parse_ducklake_url,
+    libpq_tcp_host, load_config, parse_ducklake_s3_data_path, parse_ducklake_url,
     shared::{
         BatchConfig, DestinationConfig, DestinationConfigWithoutSecrets, IcebergConfig,
         IcebergConfigWithoutSecrets, IntoConnectOptions, InvalidatedSlotBehavior,

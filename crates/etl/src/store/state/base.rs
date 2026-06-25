@@ -1,11 +1,9 @@
 use std::{collections::BTreeMap, future::Future, sync::Arc};
 
-use etl_postgres::types::TableId;
-use tokio_postgres::types::PgLsn;
-
 use crate::{
     destination::{AppliedDestinationTableMetadata, DestinationTableMetadata},
     error::EtlResult,
+    postgres::types::{PgLsn, TableId},
     store::{TableState, WorkerType},
 };
 

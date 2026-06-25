@@ -1,12 +1,11 @@
 use std::future::Future;
 
-use etl_postgres::types::ReplicatedTableSchema;
-
 use crate::{
     data::TableRow,
     destination::{DropTableForCopyResult, WriteEventsResult, WriteTableRowsResult},
     error::EtlResult,
     event::Event,
+    postgres::types::ReplicatedTableSchema,
 };
 
 /// Trait for systems that can receive replicated data from ETL pipelines.

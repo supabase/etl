@@ -1,10 +1,10 @@
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
-use etl_postgres::types::{PgNumeric, PgTimeTz};
 use uuid::Uuid;
 
 use crate::{
     bail,
     error::{ErrorKind, EtlError},
+    postgres::types::{PgNumeric, PgTimeTz},
 };
 
 macro_rules! convert_array_variant {
@@ -32,7 +32,7 @@ macro_rules! convert_array_variant {
 /// processing. It represents the ergonomic Rust value shape passed to
 /// destinations, not the source database schema type. The original Postgres
 /// type remains available on the corresponding
-/// [`etl_postgres::types::ColumnSchema`], so values without specialized Rust
+/// [`crate::postgres::types::ColumnSchema`], so values without specialized Rust
 /// semantics can be preserved as [`Cell::String`] while destinations still know
 /// the source column type.
 ///
