@@ -3,7 +3,7 @@ use std::{pin::Pin, sync::Arc, time::Instant};
 use etl_config::shared::BatchConfig;
 use etl_postgres::types::TableId;
 use futures::{Stream, StreamExt};
-use metrics::{counter, histogram};
+use metrics::histogram;
 use tokio::{
     pin,
     sync::{Semaphore, watch},
@@ -22,7 +22,7 @@ use crate::{
     error::{ErrorKind, EtlResult},
     etl_error,
     metrics::{
-        ACTION_LABEL, ETL_BATCH_ITEMS_SEND_DURATION_SECONDS, ETL_EVENTS_PROCESSED_TOTAL,
+        ACTION_LABEL, ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
         ETL_PARALLEL_TABLE_COPY_ROWS_IMBALANCE, ETL_PARALLEL_TABLE_COPY_TIME_IMBALANCE,
         ETL_TABLE_COPY_ROWS, PARTITIONING_LABEL, WORKER_TYPE_LABEL,
     },
@@ -148,13 +148,6 @@ where
                     .write_table_rows(&replicated_table_schema, table_rows, flush_result)
                     .await?;
                 pending_flush_result.await.into_result()?;
-
-                counter!(
-                    ETL_EVENTS_PROCESSED_TOTAL,
-                    WORKER_TYPE_LABEL => "table_sync",
-                    ACTION_LABEL => "table_copy",
-                )
-                .increment(batch_size);
 
                 let send_duration_seconds = before_sending.elapsed().as_secs_f64();
                 histogram!(
