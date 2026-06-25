@@ -47,8 +47,9 @@
 //! single interface for all state-related storage operations.
 //!
 //! The [`store::schema::SchemaStore`] trait handles versioned table schemas,
-//! and [`store::TableLifecycleStore`] handles table-scoped reset and removal
-//! operations that must update state, schema, and metadata consistently.
+//! and [`store::TableStateLifecycleStore`] handles table-scoped preparation,
+//! reset, and deletion operations that must update state, schema, and metadata
+//! consistently.
 //! [`store::SharedStateStore`], [`store::DestinationStore`], and
 //! [`store::PipelineStore`] are facade traits for code that needs common
 //! combinations of these capabilities.
@@ -137,6 +138,7 @@
 //!         id: 1,
 //!         publication_name: "my_publication".to_string(),
 //!         pg_connection: pg_config,
+//!         store_pg_connection: None,
 //!         batch: BatchConfig {
 //!             max_fill_ms: 5000,
 //!             memory_budget_ratio: 0.2,
@@ -147,6 +149,7 @@
 //!         max_table_sync_workers: 4,
 //!         max_copy_connections_per_table: 1,
 //!         memory_refresh_interval_ms: 100,
+//!         replication_lag_refresh_interval_ms: 10_000,
 //!         memory_backpressure: Some(MemoryBackpressureConfig::default()),
 //!         table_sync_copy: TableSyncCopyConfig::IncludeAllTables,
 //!         invalidated_slot_behavior: InvalidatedSlotBehavior::Error,
@@ -178,6 +181,9 @@ pub mod egress;
 pub mod error;
 #[cfg(feature = "failpoints")]
 pub mod failpoints;
+#[doc(hidden)]
+#[cfg(feature = "fuzzing")]
+pub mod fuzzing;
 mod macros;
 pub mod metrics;
 pub mod migrations;

@@ -98,8 +98,12 @@ pub fn extract_server_version(server_version_str: impl AsRef<str>) -> Option<Non
     let major = version_components.first().and_then(|v| v.parse::<i32>().ok()).unwrap_or(0);
     let minor = version_components.get(1).and_then(|v| v.parse::<i32>().ok()).unwrap_or(0);
     let patch = version_components.get(2).and_then(|v| v.parse::<i32>().ok()).unwrap_or(0);
+    if major < 0 || minor < 0 || patch < 0 {
+        return None;
+    }
 
-    let version = major * 10000 + minor * 100 + patch;
+    let version =
+        major.checked_mul(10_000)?.checked_add(minor.checked_mul(100)?)?.checked_add(patch)?;
 
     NonZeroI32::new(version)
 }
@@ -149,6 +153,7 @@ mod tests {
     fn extract_server_version_zero_versions() {
         assert_eq!(extract_server_version("0.0.0"), None);
         assert_eq!(extract_server_version("0.0"), None);
+        assert_eq!(extract_server_version("-1.0"), None);
     }
 
     #[test]
@@ -156,5 +161,10 @@ mod tests {
         assert_eq!(extract_server_version("  15.5  "), NonZeroI32::new(150500));
         assert_eq!(extract_server_version("15.5\t(Homebrew)"), NonZeroI32::new(150500));
         assert_eq!(extract_server_version("15.5\n"), NonZeroI32::new(150500));
+    }
+
+    #[test]
+    fn extract_server_version_overflow_returns_none() {
+        assert_eq!(extract_server_version("999999999.999999999.999999999"), None);
     }
 }

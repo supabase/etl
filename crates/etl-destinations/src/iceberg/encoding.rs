@@ -129,15 +129,15 @@ impl_array_builder!(build_boolean_array, BooleanBuilder, cell_to_bool);
 impl_array_builder!(build_string_array, StringBuilder, cell_to_string);
 impl_array_builder!(build_binary_array, LargeBinaryBuilder, cell_to_bytes);
 
-/// Builds a timezone-aware timestamp array from [`TableRow`]s.
+/// Builds a time zone aware timestamp array from [`TableRow`]s.
 ///
 /// This function creates an Arrow timestamp array with microsecond precision
-/// and a specified timezone. It processes [`Cell::TimestampTz`] values and
+/// and a specified time zone. It processes [`Cell::TimestampTz`] values and
 /// converts them to microseconds since the Unix epoch while preserving
-/// timezone information in the array metadata.
+/// time zone information in the array metadata.
 ///
-/// Returns an [`ArrayRef`] containing a timestamp array with timezone metadata.
-/// Non-timestamp cells become null entries in the resulting array.
+/// Returns an [`ArrayRef`] containing a timestamp array with time zone
+/// metadata. Non-timestamp cells become null entries in the resulting array.
 fn build_timestamptz_array(rows: &[TableRow], field_idx: usize, tz: &str) -> ArrayRef {
     let mut builder = TimestampMicrosecondBuilder::new().with_timezone(tz);
 
@@ -289,11 +289,11 @@ fn cell_to_timestamp(cell: &Cell) -> Option<i64> {
     }
 }
 
-/// Converts a [`Cell`] to a timezone-aware timestamp value (microseconds since
+/// Converts a [`Cell`] to a time zone aware timestamp value (microseconds since
 /// Unix epoch).
 ///
-/// Transforms timezone-aware [`Cell::TimestampTz`] values into microseconds
-/// since the Unix epoch, preserving the timezone information in the timestamp.
+/// Transforms time zone aware [`Cell::TimestampTz`] values into microseconds
+/// since the Unix epoch, preserving the time zone information in the timestamp.
 /// Returns [`None`] for non-timestamptz cell types.
 fn cell_to_timestamptz(cell: &Cell) -> Option<i64> {
     match cell {
@@ -327,9 +327,9 @@ fn cell_to_uuid(cell: &Cell) -> Option<&[u8; UUID_BYTE_WIDTH as usize]> {
 /// - [`Cell::Null`] becomes [`None`]
 /// - Primitive types use their standard string representation
 /// - Dates, times, and timestamps use predefined format strings
-/// - Timezone-aware timestamps use RFC3339 format
+/// - Time zone aware timestamps use RFC3339 format
 /// - Binary data is Base64-encoded
-/// - JSON values use their serialized string form
+/// - Offset-bearing times and JSON values use their serialized string form
 /// - Arrays use debug formatting
 ///
 /// Returns [`Some`] with the string representation for non-null values,
@@ -349,6 +349,7 @@ fn cell_to_string(cell: &Cell) -> Option<String> {
         Cell::Numeric(n) => Some(n.to_string()),
         Cell::Date(_) => None,
         Cell::Time(_) => None,
+        Cell::TimeTz(t) => Some(t.to_string()),
         Cell::Timestamp(_) => None,
         Cell::TimestampTz(_) => None,
         Cell::Uuid(_) => None,
@@ -582,6 +583,15 @@ fn build_string_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef)
                     }
                     list_builder.append(true);
                 }
+                ArrayCell::TimeTz(vec) => {
+                    for item in vec {
+                        match item {
+                            Some(t) => list_builder.values().append_value(t.to_string()),
+                            None => list_builder.values().append_null(),
+                        }
+                    }
+                    list_builder.append(true);
+                }
                 _ => {
                     return build_list_array_for_strings(rows, field_idx, field);
                 }
@@ -709,7 +719,7 @@ fn build_timestamp_list_array(rows: &[TableRow], field_idx: usize, field: FieldR
 
 /// Builds a list array for TimestampTz elements.
 fn build_timestamptz_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef) -> ArrayRef {
-    // Extract timezone from the field's data type
+    // Extract the time zone from the field's data type.
     let tz = if let DataType::Timestamp(TimeUnit::Microsecond, Some(tz_str)) = field.data_type() {
         Arc::clone(tz_str)
     } else {
@@ -913,6 +923,14 @@ fn append_array_cell_as_strings(
                     Some(t) => {
                         list_builder.values().append_value(t.format(TIME_FORMAT).to_string());
                     }
+                    None => list_builder.values().append_null(),
+                }
+            }
+        }
+        ArrayCell::TimeTz(vec) => {
+            for item in vec {
+                match item {
+                    Some(t) => list_builder.values().append_value(t.to_string()),
                     None => list_builder.values().append_null(),
                 }
             }
@@ -2259,7 +2277,7 @@ mod tests {
         assert_eq!(ts_array.value(1), test_ts_2.timestamp_micros());
         assert!(ts_array.is_null(2));
 
-        // Verify timezone is preserved
+        // Verify the time zone is preserved.
         assert!(ts_array.timezone().is_some());
 
         // Second row: Single timestamptz

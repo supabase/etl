@@ -3,7 +3,7 @@
 use std::{env, error::Error, process::ExitCode};
 
 use etl_config::{
-    load_config, parse_ducklake_url,
+    load_config, parse_ducklake_s3_data_path, parse_ducklake_url,
     shared::{DestinationConfig, ReplicatorConfig},
 };
 use etl_maintenance::ducklake::{
@@ -44,7 +44,6 @@ async fn run(config: ReplicatorConfig) -> MaintenanceResult<()> {
     let DestinationConfig::Ducklake {
         catalog_url,
         data_path,
-        pool_size,
         s3_access_key_id,
         s3_secret_access_key,
         s3_region,
@@ -52,7 +51,6 @@ async fn run(config: ReplicatorConfig) -> MaintenanceResult<()> {
         s3_url_style,
         s3_use_ssl,
         metadata_schema,
-        duckdb_memory_cache_limit,
         maintenance_target_file_size,
         expire_snapshots_older_than,
         ..
@@ -79,12 +77,10 @@ async fn run(config: ReplicatorConfig) -> MaintenanceResult<()> {
     };
 
     let maintenance_config = DuckLakeMaintenanceConfig {
-        catalog_url: parse_ducklake_url(&catalog_url)?,
-        data_path: parse_ducklake_url(&data_path)?,
-        pool_size,
+        catalog_url: parse_ducklake_url(catalog_url.expose_secret())?,
+        data_path: parse_ducklake_s3_data_path(&data_path)?,
         s3,
         metadata_schema,
-        duckdb_memory_cache_limit,
         maintenance_target_file_size,
         inline_flush: InlineFlushMaintenanceConfig {
             enabled: env_bool("ETL_DUCKLAKE_MAINTENANCE__INLINE_FLUSH__ENABLED", true),
@@ -97,7 +93,7 @@ async fn run(config: ReplicatorConfig) -> MaintenanceResult<()> {
             enabled: env_bool("ETL_DUCKLAKE_MAINTENANCE__MERGE_ADJACENT_FILES__ENABLED", true),
             max_compacted_files: env_u32(
                 "ETL_DUCKLAKE_MAINTENANCE__MERGE_ADJACENT_FILES__MAX_COMPACTED_FILES",
-                32,
+                40,
             )?,
             max_tables_per_run: env_u32(
                 "ETL_DUCKLAKE_MAINTENANCE__MERGE_ADJACENT_FILES__MAX_TABLES_PER_RUN",
@@ -106,7 +102,7 @@ async fn run(config: ReplicatorConfig) -> MaintenanceResult<()> {
             target_file_size: env::var(
                 "ETL_DUCKLAKE_MAINTENANCE__MERGE_ADJACENT_FILES__TARGET_FILE_SIZE",
             )
-            .unwrap_or_else(|_| "10MB".to_owned()),
+            .unwrap_or_else(|_| "500MB".to_owned()),
         },
         rewrite_data_files: RewriteDataFilesMaintenanceConfig {
             enabled: env_bool("ETL_DUCKLAKE_MAINTENANCE__REWRITE_DATA_FILES__ENABLED", true),
@@ -120,12 +116,11 @@ async fn run(config: ReplicatorConfig) -> MaintenanceResult<()> {
             )?,
         },
         expire_snapshots: ExpireSnapshotsMaintenanceConfig {
-            enabled: env_bool("ETL_DUCKLAKE_MAINTENANCE__EXPIRE_SNAPSHOTS__ENABLED", false),
-            older_than: expire_snapshots_older_than.clone().unwrap_or_else(|| "7 days".to_owned()),
+            enabled: env_bool("ETL_DUCKLAKE_MAINTENANCE__EXPIRE_SNAPSHOTS__ENABLED", true),
+            older_than: expire_snapshots_older_than.unwrap_or_else(|| "7 days".to_owned()),
         },
         cleanup_old_files: CleanupOldFilesMaintenanceConfig {
             enabled: env_bool("ETL_DUCKLAKE_MAINTENANCE__CLEANUP_OLD_FILES__ENABLED", true),
-            older_than: expire_snapshots_older_than.unwrap_or_else(|| "7 days".to_owned()),
         },
     };
 
@@ -146,7 +141,6 @@ async fn run(config: ReplicatorConfig) -> MaintenanceResult<()> {
         expire_snapshots_enabled = maintenance_config.expire_snapshots.enabled,
         expire_snapshots_older_than = %maintenance_config.expire_snapshots.older_than,
         cleanup_old_files_enabled = maintenance_config.cleanup_old_files.enabled,
-        cleanup_old_files_older_than = %maintenance_config.cleanup_old_files.older_than,
         "ducklake external maintenance job starting"
     );
 

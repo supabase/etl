@@ -281,7 +281,7 @@ async fn tenant_cannot_create_more_than_max_pipelines() {
         CreatePipelineRequest { source_id, destination_id, config: new_pipeline_config() };
     let response = app.create_pipeline(tenant_id, &pipeline).await;
 
-    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(response.status(), StatusCode::CONFLICT);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1654,6 +1654,20 @@ async fn pipeline_version_includes_new_default_version_when_available() {
     let new_version = version.new_version.expect("expected new_version to be present");
     assert_eq!(new_version.id, default_image_id);
     assert_eq!(new_version.name, "1.3.0");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pipeline_version_returns_not_found_for_missing_pipeline() {
+    init_test_tracing();
+    // Arrange
+    let app = spawn_test_app().await;
+    let tenant_id = create_tenant(&app).await;
+
+    // Act
+    let response = app.get_pipeline_version(&tenant_id, 42).await;
+
+    // Assert
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test(flavor = "multi_thread")]

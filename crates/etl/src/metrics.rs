@@ -13,7 +13,9 @@ pub const ETL_TABLE_COPY_DURATION_SECONDS: &str = "etl_table_copy_duration_secon
 pub const ETL_TABLE_COPY_ROWS: &str = "etl_table_copy_rows";
 pub const ETL_PARALLEL_TABLE_COPY_TIME_IMBALANCE: &str = "etl_parallel_table_copy_time_imbalance";
 pub const ETL_PARALLEL_TABLE_COPY_ROWS_IMBALANCE: &str = "etl_parallel_table_copy_rows_imbalance";
+pub const ETL_BYTES_RECEIVED_TOTAL: &str = "etl_bytes_received_total";
 pub const ETL_BYTES_PROCESSED_TOTAL: &str = "etl_bytes_processed_total";
+pub const ETL_EVENTS_RECEIVED_TOTAL: &str = "etl_events_received_total";
 pub const ETL_EVENTS_PROCESSED_TOTAL: &str = "etl_events_processed_total";
 pub const ETL_REPLICATION_MESSAGES_TOTAL: &str = "etl_replication_messages_total";
 pub const ETL_STATUS_UPDATES_TOTAL: &str = "etl_status_updates_total";
@@ -34,6 +36,11 @@ pub const ETL_MEMORY_BACKPRESSURE_TRANSITIONS_TOTAL: &str =
 pub const ETL_MEMORY_BACKPRESSURE_ACTIVATION_DURATION_SECONDS: &str =
     "etl_memory_backpressure_activation_duration_seconds";
 pub const ETL_IDEAL_BATCH_SIZE_BYTES: &str = "etl_ideal_batch_size_bytes";
+pub const ETL_APPLY_LOOP_RECEIVED_LAG_BYTES: &str = "etl_apply_loop_received_lag_bytes";
+pub const ETL_APPLY_LOOP_EFFECTIVE_FLUSH_LAG_BYTES: &str =
+    "etl_apply_loop_effective_flush_lag_bytes";
+pub const ETL_APPLY_LOOP_FLUSH_LAG_BYTES: &str = "etl_apply_loop_flush_lag_bytes";
+pub const ETL_APPLY_LOOP_END_TO_END_LAG_BYTES: &str = "etl_apply_loop_end_to_end_lag_bytes";
 
 /// Label key for table state (used by table state metrics).
 pub const STATE_LABEL: &str = "state";
@@ -120,6 +127,12 @@ pub(crate) fn register_metrics() {
         );
 
         describe_counter!(
+            ETL_EVENTS_RECEIVED_TOTAL,
+            Unit::Count,
+            "Total number of events received from the source, labeled by worker_type and action."
+        );
+
+        describe_counter!(
             ETL_REPLICATION_MESSAGES_TOTAL,
             Unit::Count,
             "Total number of logical replication messages received by the apply loop, labeled by \
@@ -130,6 +143,12 @@ pub(crate) fn register_metrics() {
             ETL_BYTES_PROCESSED_TOTAL,
             Unit::Bytes,
             "Total bytes processed by the pipeline, labeled by event_type."
+        );
+
+        describe_counter!(
+            ETL_BYTES_RECEIVED_TOTAL,
+            Unit::Bytes,
+            "Total bytes received from the source, labeled by event_type."
         );
 
         describe_counter!(
@@ -226,6 +245,36 @@ pub(crate) fn register_metrics() {
             ETL_IDEAL_BATCH_SIZE_BYTES,
             Unit::Bytes,
             "Current ideal batch size in bytes."
+        );
+
+        describe_gauge!(
+            ETL_APPLY_LOOP_RECEIVED_LAG_BYTES,
+            Unit::Bytes,
+            "Difference between the source Postgres current WAL position and the last LSN \
+             received by ETL."
+        );
+
+        describe_gauge!(
+            ETL_APPLY_LOOP_EFFECTIVE_FLUSH_LAG_BYTES,
+            Unit::Bytes,
+            "Difference between ETL's last received LSN and effective flush LSN. The effective \
+             flush LSN is the apply-loop progress frontier; when the loop is idle and no data \
+             needs flushing, it follows the last received LSN."
+        );
+
+        describe_gauge!(
+            ETL_APPLY_LOOP_FLUSH_LAG_BYTES,
+            Unit::Bytes,
+            "Difference between ETL's last received LSN and last flush LSN. The last flush LSN is \
+             the latest LSN whose data was durably flushed to the destination; idle-only progress \
+             is not included."
+        );
+
+        describe_gauge!(
+            ETL_APPLY_LOOP_END_TO_END_LAG_BYTES,
+            Unit::Bytes,
+            "Difference between the source Postgres current WAL position and ETL's effective \
+             flush LSN."
         );
     });
 }

@@ -17,10 +17,14 @@ use etl::{
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
 };
+use etl_config::libpq_tcp_host;
 use metrics::{gauge, histogram};
 use pg_escape::{quote_identifier, quote_literal};
 use regex::Regex;
-use sqlx::{AssertSqlSafe, PgPool, postgres::PgPoolOptions};
+use sqlx::{
+    AssertSqlSafe, PgPool,
+    postgres::{PgConnectOptions, PgPoolOptions, PgSslMode},
+};
 use tokio::{
     sync::{Semaphore, oneshot},
     task::JoinHandle,
@@ -37,20 +41,25 @@ const LAKE_CATALOG: &str = "lake";
 const ATTACH_DATA_INLINING_ROW_LIMIT: u64 = 10_000;
 const DUCKDB_EXTENSION_ROOT_ENV_VAR: &str = "ETL_DUCKDB_EXTENSION_ROOT";
 const CONTAINER_DUCKDB_EXTENSION_ROOT: &str = "/app/duckdb_extensions";
-const DUCKDB_EXTENSION_VERSION: &str = "1.5.2";
+const DUCKDB_EXTENSION_VERSION: &str = "1.5.3";
 const DUCKLAKE_EXTENSION_FILE: &str = "ducklake.duckdb_extension";
 const HTTPFS_EXTENSION_FILE: &str = "httpfs.duckdb_extension";
 const POSTGRES_SCANNER_EXTENSION_FILE: &str = "postgres_scanner.duckdb_extension";
 const TARGET_FILE_SIZE_OPTION_NAME: &str = "target_file_size";
-const MAINTENANCE_TARGET_FILE_SIZE: &str = "10MB";
+const MAINTENANCE_TARGET_FILE_SIZE: &str = "500MB";
+/// Minimum snapshot-retention interval accepted by the maintenance runner.
+const MIN_EXPIRE_SNAPSHOTS_OLDER_THAN: &str = "1 day";
+/// Minimum old-file cleanup grace window used by DuckLake cleanup.
+const CLEANUP_OLD_FILES_OLDER_THAN: &str = "1 hour";
 const PARQUET_COMPRESSION_OPTION_NAME: &str = "parquet_compression";
 const PARQUET_COMPRESSION_OPTION_VALUE: &str = "zstd";
 const PARQUET_ROW_GROUP_SIZE_BYTES_OPTION_NAME: &str = "parquet_row_group_size_bytes";
-const PARQUET_ROW_GROUP_SIZE_BYTES_OPTION_VALUE: &str = "10MB";
+const PARQUET_ROW_GROUP_SIZE_BYTES_OPTION_VALUE: &str = "20MB";
 const PARQUET_VERSION_OPTION_NAME: &str = "parquet_version";
 const PARQUET_VERSION_OPTION_VALUE: u8 = 2;
 const PRESERVE_INSERTION_ORDER_OPTION_NAME: &str = "preserve_insertion_order";
 const MAINTENANCE_QUERY_TIMEOUT: Duration = Duration::from_secs(6 * 60);
+const MAINTENANCE_DUCKDB_POOL_SIZE: u32 = 1;
 const BLOCKING_ABORT_GRACE: Duration = Duration::from_secs(30);
 const DUCKDB_MAINTENANCE_OPERATION_KIND: &str = "maintenance";
 const ETL_DUCKLAKE_INLINE_FLUSH_ROWS: &str = "etl_ducklake_inline_flush_rows";
@@ -288,7 +297,7 @@ fn ensure_vendored_extension_dir(directory: &Path) -> EtlResult<()> {
 }
 
 fn vendored_extension_path(extension_dir: &Path, filename: &str) -> EtlResult<String> {
-    extension_dir.join(filename).to_str().map(std::string::ToString::to_string).ok_or_else(|| {
+    extension_dir.join(filename).to_str().map(str::to_owned).ok_or_else(|| {
         etl_error!(
             ErrorKind::ConfigError,
             "Vendored DuckDB extension path contains non-utf8 characters",
@@ -468,11 +477,63 @@ fn catalog_attach_target(catalog_url: &Url) -> EtlResult<String> {
     }
 }
 
+/// Builds sqlx connection options for DuckLake metadata catalog queries.
+fn catalog_metadata_connect_options(catalog_url: &Url) -> EtlResult<PgConnectOptions> {
+    let config = PgConfig::from_str(catalog_url.as_str()).map_err(|source| {
+        etl_error!(
+            ErrorKind::ConfigError,
+            "Invalid DuckLake PostgreSQL catalog URL",
+            source: source
+        )
+    })?;
+    let mut options = PgConnectOptions::from_str(catalog_url.as_str()).map_err(|source| {
+        etl_error!(
+            ErrorKind::ConfigError,
+            "Invalid DuckLake PostgreSQL catalog URL",
+            source: source
+        )
+    })?;
+
+    if let Some(hostaddr) = config.get_hostaddrs().first() {
+        options = options.host(&hostaddr.to_string());
+    } else if let Some(host) = catalog_url.host_str() {
+        options = options.host(unbracket_ipv6_literal(host));
+    }
+
+    options = options.ssl_mode(sqlx_ssl_mode(config.get_ssl_mode(), config.get_hostaddrs())?);
+
+    Ok(options)
+}
+
+/// Removes URL brackets from an IPv6 literal host.
+fn unbracket_ipv6_literal(host: &str) -> &str {
+    host.strip_prefix('[').and_then(|host| host.strip_suffix(']')).unwrap_or(host)
+}
+
+/// Maps libpq-style SSL modes onto sqlx's Postgres SSL modes.
+fn sqlx_ssl_mode(ssl_mode: SslMode, hostaddrs: &[std::net::IpAddr]) -> EtlResult<PgSslMode> {
+    match ssl_mode {
+        SslMode::Disable => Ok(PgSslMode::Disable),
+        SslMode::Prefer => Ok(PgSslMode::Prefer),
+        SslMode::Require => Ok(PgSslMode::Require),
+        SslMode::VerifyCa => Ok(PgSslMode::VerifyCa),
+        SslMode::VerifyFull if hostaddrs.is_empty() => Ok(PgSslMode::VerifyFull),
+        // sqlx does not expose libpq's separate hostaddr field. When dialing a
+        // numeric address, verify the CA but avoid hostname verification
+        // against the IP literal.
+        SslMode::VerifyFull => Ok(PgSslMode::VerifyCa),
+        _ => Err(etl_error!(
+            ErrorKind::ConfigError,
+            "DuckLake PostgreSQL catalog URL uses an unsupported sslmode"
+        )),
+    }
+}
+
 fn serialize_hosts(hosts: &[Host]) -> EtlResult<String> {
     let mut values = Vec::with_capacity(hosts.len());
     for host in hosts {
         match host {
-            Host::Tcp(host) => values.push(host.clone()),
+            Host::Tcp(host) => values.push(libpq_tcp_host(host).to_owned()),
             #[cfg(unix)]
             Host::Unix(path) => {
                 let path = path.to_str().ok_or_else(|| {
@@ -1372,11 +1433,10 @@ impl DuckDbMaintenanceExecutor {
 
 async fn build_warm_ducklake_pool(
     manager: DuckLakeConnectionManager,
-    pool_size: u32,
 ) -> EtlResult<r2d2::Pool<DuckLakeConnectionManager>> {
     tokio::task::spawn_blocking(move || -> EtlResult<_> {
         let pool = r2d2::Pool::builder()
-            .max_size(pool_size)
+            .max_size(MAINTENANCE_DUCKDB_POOL_SIZE)
             .min_idle(Some(0))
             .connection_timeout(Duration::from_secs(4 * 60))
             .test_on_check_out(true)
@@ -1390,8 +1450,8 @@ async fn build_warm_ducklake_pool(
                 )
             })?;
 
-        let mut warmed_connections = Vec::with_capacity(pool_size as usize);
-        for _ in 0..pool_size {
+        let mut warmed_connections = Vec::with_capacity(MAINTENANCE_DUCKDB_POOL_SIZE as usize);
+        for _ in 0..MAINTENANCE_DUCKDB_POOL_SIZE {
             warmed_connections.push(pool.get().map_err(|source| {
                 etl_error!(
                     ErrorKind::DestinationConnectionFailed,
@@ -1402,7 +1462,10 @@ async fn build_warm_ducklake_pool(
         }
         drop(warmed_connections);
 
-        trace!(pool_size, "ducklake maintenance connection pool warmed");
+        trace!(
+            pool_size = MAINTENANCE_DUCKDB_POOL_SIZE,
+            "ducklake maintenance connection pool warmed"
+        );
         Ok(pool)
     })
     .await
@@ -1430,14 +1493,10 @@ pub struct DuckLakeMaintenanceConfig {
     pub catalog_url: Url,
     /// DuckLake data path.
     pub data_path: Url,
-    /// DuckDB connection pool size for the one-shot runner.
-    pub pool_size: u32,
     /// Optional S3-compatible storage config.
     pub s3: Option<S3Config>,
     /// Optional DuckLake metadata schema.
     pub metadata_schema: Option<String>,
-    /// Optional DuckDB memory cache limit retained for config compatibility.
-    pub duckdb_memory_cache_limit: Option<String>,
     /// DuckLake `target_file_size` used by compaction.
     pub maintenance_target_file_size: Option<String>,
     /// Inline flush operation config.
@@ -1499,8 +1558,6 @@ pub struct ExpireSnapshotsMaintenanceConfig {
 pub struct CleanupOldFilesMaintenanceConfig {
     /// Whether old-file cleanup is enabled.
     pub enabled: bool,
-    /// Retention window passed to DuckLake.
-    pub older_than: String,
 }
 
 /// Structured outcome for one external maintenance run.
@@ -1545,7 +1602,7 @@ pub async fn run_maintenance_once(
         config.cleanup_old_files.enabled || config.rewrite_data_files.enabled;
 
     info!(
-        pool_size = config.pool_size,
+        pool_size = MAINTENANCE_DUCKDB_POOL_SIZE,
         metadata_schema = config.metadata_schema.as_deref(),
         inline_flush_enabled = config.inline_flush.enabled,
         inline_flush_min_inlined_bytes = config.inline_flush.min_inlined_bytes,
@@ -1560,11 +1617,13 @@ pub async fn run_maintenance_once(
         expire_snapshots_older_than = %config.expire_snapshots.older_than,
         cleanup_old_files_enabled,
         cleanup_old_files_explicitly_enabled = config.cleanup_old_files.enabled,
-        cleanup_old_files_older_than = %config.cleanup_old_files.older_than,
         "ducklake external maintenance runner configured"
     );
 
     let duckdb = open_maintenance_executor(&config).await?;
+    if config.expire_snapshots.enabled {
+        validate_expire_snapshots_older_than(&duckdb, &config.expire_snapshots.older_than).await?;
+    }
     let metadata_schema = match config.metadata_schema.clone() {
         Some(metadata_schema) => metadata_schema,
         None => resolve_metadata_schema(&duckdb).await?,
@@ -1575,14 +1634,7 @@ pub async fn run_maintenance_once(
     );
     let metadata_pg_pool = PgPoolOptions::new()
         .max_connections(1)
-        .connect_lazy(config.catalog_url.as_str())
-        .map_err(|source| {
-            etl_error!(
-                ErrorKind::DestinationConnectionFailed,
-                "DuckLake catalog metadata pool configuration failed",
-                source: source
-            )
-        })?;
+        .connect_lazy_with(catalog_metadata_connect_options(&config.catalog_url)?);
     let table_names = list_ducklake_tables(&metadata_pg_pool, &metadata_schema).await?;
     info!(
         table_count = table_names.len(),
@@ -1633,7 +1685,7 @@ pub async fn run_maintenance_once(
     }
 
     if cleanup_old_files_enabled {
-        run_cleanup_old_files(&duckdb, &config.cleanup_old_files, &mut outcome).await?;
+        run_cleanup_old_files(&duckdb, &mut outcome).await?;
     }
 
     info!(outcome = ?outcome, applied = outcome.applied(), "ducklake external maintenance completed");
@@ -1649,13 +1701,45 @@ fn validate_config(config: &DuckLakeMaintenanceConfig) -> EtlResult<()> {
             format!("unsupported catalog URL scheme `{}`", config.catalog_url.scheme())
         ));
     }
-    if config.pool_size == 0 {
-        return Err(etl_error!(
-            ErrorKind::ConfigError,
-            "DuckLake external maintenance pool size must be greater than zero"
-        ));
-    }
     Ok(())
+}
+
+/// Validates the configured snapshot-retention interval on DuckDB.
+async fn validate_expire_snapshots_older_than(
+    duckdb: &DuckDbMaintenanceExecutor,
+    older_than: &str,
+) -> EtlResult<()> {
+    let sql = format!(
+        "SELECT CAST({} AS INTERVAL) >= CAST({} AS INTERVAL);",
+        quote_literal(older_than),
+        quote_literal(MIN_EXPIRE_SNAPSHOTS_OLDER_THAN),
+    );
+    let older_than_for_error = older_than.to_owned();
+    let retention_is_safe = duckdb
+        .run(move |conn| -> EtlResult<bool> {
+            conn.query_row(&sql, [], |row| row.get(0)).map_err(|source| {
+                etl_error!(
+                    ErrorKind::ConfigError,
+                    "DuckLake expire_snapshots_older_than configuration failed",
+                    format!("Invalid expire_snapshots_older_than value `{older_than_for_error}`"),
+                    source: source
+                )
+            })
+        })
+        .await?;
+
+    if retention_is_safe {
+        return Ok(());
+    }
+
+    Err(etl_error!(
+        ErrorKind::ConfigError,
+        "DuckLake expire_snapshots_older_than configuration failed",
+        format!(
+            "Snapshot retention must be at least {}, got `{}`",
+            MIN_EXPIRE_SNAPSHOTS_OLDER_THAN, older_than
+        )
+    ))
 }
 
 /// Opens initialized DuckDB connections for maintenance.
@@ -1679,8 +1763,8 @@ async fn open_maintenance_executor(
         setup_plan,
         disable_extension_autoload: extension_strategy.disables_autoload(),
     };
-    let pool = Arc::new(build_warm_ducklake_pool(manager, config.pool_size).await?);
-    let blocking_slots = Arc::new(Semaphore::new(config.pool_size as usize));
+    let pool = Arc::new(build_warm_ducklake_pool(manager).await?);
+    let blocking_slots = Arc::new(Semaphore::new(MAINTENANCE_DUCKDB_POOL_SIZE as usize));
     let executor = DuckDbMaintenanceExecutor { pool, blocking_slots };
     let sql = maintenance_target_file_size_sql(Some(target_file_size));
     executor
@@ -1791,13 +1875,23 @@ async fn run_merge_adjacent_files(
     info!(
         max_compacted_files = config.max_compacted_files,
         max_tables_per_run = config.max_tables_per_run,
+        target_file_size = %config.target_file_size,
         table_count = table_names.len(),
         "ducklake merge-adjacent-files evaluation started"
     );
+    let target_file_size_bytes = parse_size_bytes(&config.target_file_size);
+    if target_file_size_bytes.is_none() {
+        warn!(
+            target_file_size = %config.target_file_size,
+            "ducklake merge-adjacent-files target file size could not be parsed for selection; \
+             falling back to small-file ratio"
+        );
+    }
     let selected = select_merge_tables(
         metadata_pg_pool,
         metadata_schema,
         table_names,
+        target_file_size_bytes,
         config.max_tables_per_run,
     )
     .await?;
@@ -1925,20 +2019,14 @@ async fn run_expire_snapshots(
 /// Runs DuckLake old-file cleanup.
 async fn run_cleanup_old_files(
     duckdb: &DuckDbMaintenanceExecutor,
-    config: &CleanupOldFilesMaintenanceConfig,
     outcome: &mut DuckLakeMaintenanceOutcome,
 ) -> EtlResult<()> {
-    info!(
-        older_than = %config.older_than,
-        "ducklake cleanup-old-files executing"
-    );
-    let older_than = config.older_than.clone();
-    let cleaned_up_files = duckdb.run(move |conn| cleanup_old_files(conn, &older_than)).await?;
+    info!(older_than = CLEANUP_OLD_FILES_OLDER_THAN, "ducklake cleanup-old-files executing");
+    let cleaned_up_files = duckdb.run(cleanup_old_files).await?;
     outcome.cleaned_up_files = outcome.cleaned_up_files.saturating_add(cleaned_up_files);
     info!(
-        older_than = %config.older_than,
-        cleaned_up_files,
-        "ducklake cleanup-old-files completed"
+        older_than = CLEANUP_OLD_FILES_OLDER_THAN,
+        cleaned_up_files, "ducklake cleanup-old-files completed"
     );
     Ok(())
 }
@@ -1948,6 +2036,7 @@ async fn select_merge_tables(
     metadata_pg_pool: &PgPool,
     metadata_schema: &str,
     table_names: &[String],
+    target_file_size_bytes: Option<i64>,
     max_tables_per_run: u32,
 ) -> EtlResult<Vec<String>> {
     let mut selected = Vec::new();
@@ -1962,11 +2051,13 @@ async fn select_merge_tables(
 
         let metrics =
             query_table_storage_metrics(metadata_pg_pool, metadata_schema, table_name).await?;
-        if metrics.active_data_files > 1 && metrics.small_file_ratio() > 0.0 {
+        if should_merge(&metrics, target_file_size_bytes) {
             info!(
                 table = %table_name,
                 active_data_files = metrics.active_data_files,
+                active_data_file_avg_size_bytes = metrics.average_data_file_size_bytes(),
                 small_file_ratio = metrics.small_file_ratio(),
+                target_file_size_bytes,
                 "ducklake merge-adjacent-files table selected"
             );
             selected.push(table_name.clone());
@@ -1974,7 +2065,9 @@ async fn select_merge_tables(
             info!(
                 table = %table_name,
                 active_data_files = metrics.active_data_files,
+                active_data_file_avg_size_bytes = metrics.average_data_file_size_bytes(),
                 small_file_ratio = metrics.small_file_ratio(),
+                target_file_size_bytes,
                 "ducklake merge-adjacent-files table skipped"
             );
         }
@@ -1983,6 +2076,23 @@ async fn select_merge_tables(
         }
     }
     Ok(selected)
+}
+
+fn should_merge(
+    metrics: &DuckLakeTableStorageMetrics,
+    target_file_size_bytes: Option<i64>,
+) -> bool {
+    if metrics.active_data_files <= 1 {
+        return false;
+    }
+
+    if metrics.small_file_ratio() > 0.0 {
+        return true;
+    }
+
+    target_file_size_bytes.is_some_and(|target_file_size_bytes| {
+        metrics.average_data_file_size_bytes() < target_file_size_bytes as f64
+    })
 }
 
 /// Selects tables with delete pressure for rewrite-data-files.
@@ -2133,14 +2243,19 @@ fn expire_snapshots(conn: &duckdb::Connection, older_than: &str) -> EtlResult<u6
 }
 
 /// Calls DuckLake old-file cleanup.
-fn cleanup_old_files(conn: &duckdb::Connection, older_than: &str) -> EtlResult<u64> {
-    let sql = format!(
+fn cleanup_old_files(conn: &duckdb::Connection) -> EtlResult<u64> {
+    let sql = cleanup_old_files_sql();
+    count_maintenance_rows(conn, &sql, "DuckLake cleanup old files failed")
+}
+
+/// Builds DuckLake old-file cleanup SQL.
+fn cleanup_old_files_sql() -> String {
+    format!(
         "CALL ducklake_cleanup_old_files({}, older_than => CAST(now() AS TIMESTAMP) - CAST({} AS \
          INTERVAL));",
         quote_literal(LAKE_CATALOG),
-        quote_literal(older_than),
-    );
-    count_maintenance_rows(conn, &sql, "DuckLake cleanup old files failed")
+        quote_literal(CLEANUP_OLD_FILES_OLDER_THAN),
+    )
 }
 
 /// Counts rows returned by one DuckLake maintenance call.
@@ -2295,6 +2410,7 @@ fn pending_inline_data_bytes_query(metadata_schema: &str) -> String {
 #[derive(Clone, Debug)]
 struct DuckLakeTableStorageMetrics {
     active_data_files: i64,
+    active_data_bytes: i64,
     small_data_files: i64,
     active_data_rows: i64,
     active_delete_files: i64,
@@ -2302,6 +2418,14 @@ struct DuckLakeTableStorageMetrics {
 }
 
 impl DuckLakeTableStorageMetrics {
+    fn average_data_file_size_bytes(&self) -> f64 {
+        if self.active_data_files > 0 {
+            self.active_data_bytes.max(0) as f64 / self.active_data_files as f64
+        } else {
+            0.0
+        }
+    }
+
     fn small_file_ratio(&self) -> f64 {
         if self.active_data_files > 0 {
             self.small_data_files.max(0) as f64 / self.active_data_files as f64
@@ -2327,7 +2451,7 @@ async fn query_table_storage_metrics(
     let sql = table_storage_metrics_query(metadata_schema);
     let (
         active_data_files,
-        _active_data_bytes,
+        active_data_bytes,
         small_data_files,
         active_data_rows,
         active_delete_files,
@@ -2348,11 +2472,19 @@ async fn query_table_storage_metrics(
 
     Ok(DuckLakeTableStorageMetrics {
         active_data_files,
+        active_data_bytes,
         small_data_files,
         active_data_rows,
         active_delete_files,
         deleted_rows,
     })
+}
+
+fn parse_size_bytes(value: &str) -> Option<i64> {
+    parse_size::parse_size(value)
+        .ok()
+        .filter(|bytes| *bytes > 0)
+        .and_then(|bytes| i64::try_from(bytes).ok())
 }
 
 fn table_storage_metrics_query(metadata_schema: &str) -> String {
@@ -2438,10 +2570,26 @@ mod tests {
     ) -> DuckLakeTableStorageMetrics {
         DuckLakeTableStorageMetrics {
             active_data_files,
+            active_data_bytes: active_data_files.saturating_mul(10 * 1024 * 1024),
             small_data_files: 0,
             active_data_rows: 100,
             active_delete_files,
             deleted_rows,
+        }
+    }
+
+    fn merge_metrics(
+        active_data_files: i64,
+        active_data_bytes: i64,
+        small_data_files: i64,
+    ) -> DuckLakeTableStorageMetrics {
+        DuckLakeTableStorageMetrics {
+            active_data_files,
+            active_data_bytes,
+            small_data_files,
+            active_data_rows: 100,
+            active_delete_files: 0,
+            deleted_rows: 0,
         }
     }
 
@@ -2470,6 +2618,24 @@ mod tests {
         assert!(!should_rewrite(&metrics(39, 1, 50), 40));
         assert!(!should_rewrite(&metrics(40, 1, 50), 40));
         assert!(should_rewrite(&metrics(41, 0, 0), 40));
+    }
+
+    #[test]
+    fn should_merge_uses_small_file_pressure_or_target_size() {
+        assert!(should_merge(&merge_metrics(2, 1_000_000_000, 1), Some(500_000_000)));
+        assert!(should_merge(&merge_metrics(2, 800_000_000, 0), Some(500_000_000)));
+        assert!(!should_merge(&merge_metrics(2, 1_000_000_000, 0), Some(500_000_000)));
+        assert!(!should_merge(&merge_metrics(2, 800_000_000, 0), None));
+        assert!(!should_merge(&merge_metrics(1, 100_000_000, 1), Some(500_000_000)));
+    }
+
+    #[test]
+    fn parse_size_bytes_supports_common_duckdb_size_units() {
+        assert_eq!(parse_size_bytes("500MB"), Some(500_000_000));
+        assert_eq!(parse_size_bytes("20 MiB"), Some(20 * 1024 * 1024));
+        assert_eq!(parse_size_bytes("0.5GB"), Some(500_000_000));
+        assert_eq!(parse_size_bytes("4096"), Some(4096));
+        assert_eq!(parse_size_bytes("not-a-size"), None);
     }
 
     #[test]
@@ -2505,13 +2671,122 @@ mod tests {
         );
     }
 
+    #[test]
+    fn cleanup_old_files_sql_uses_one_hour_retention() {
+        assert_eq!(
+            cleanup_old_files_sql(),
+            "CALL ducklake_cleanup_old_files('lake', older_than => CAST(now() AS TIMESTAMP) - \
+             CAST('1 hour' AS INTERVAL));"
+        );
+    }
+
+    #[test]
+    fn catalog_metadata_connect_options_uses_catalog_host_without_hostaddr() {
+        let catalog_url = Url::parse(
+            "postgres://user:password@catalog.example.test:5432/ducklake?sslmode=verify-full",
+        )
+        .unwrap();
+
+        let options = catalog_metadata_connect_options(&catalog_url).unwrap();
+
+        assert_eq!(options.get_host(), "catalog.example.test");
+        assert!(matches!(options.get_ssl_mode(), PgSslMode::VerifyFull));
+    }
+
+    #[test]
+    fn catalog_metadata_connect_options_uses_ipv4_hostaddr_as_network_target() {
+        let catalog_url = Url::parse(
+            "postgres://user:password@catalog.example.test:5432/ducklake?hostaddr=192.0.2.10&\
+             sslmode=verify-full",
+        )
+        .unwrap();
+
+        let options = catalog_metadata_connect_options(&catalog_url).unwrap();
+
+        assert_eq!(options.get_host(), "192.0.2.10");
+        assert!(matches!(options.get_ssl_mode(), PgSslMode::VerifyCa));
+    }
+
+    #[test]
+    fn catalog_metadata_connect_options_uses_ipv6_hostaddr_as_network_target() {
+        let catalog_url = Url::parse(
+            "postgres://user:password@catalog.example.test:5432/ducklake?hostaddr=2001:db8::10&\
+             sslmode=verify-full",
+        )
+        .unwrap();
+
+        let options = catalog_metadata_connect_options(&catalog_url).unwrap();
+
+        assert_eq!(options.get_host(), "2001:db8::10");
+        assert!(matches!(options.get_ssl_mode(), PgSslMode::VerifyCa));
+    }
+
+    #[test]
+    fn catalog_metadata_connect_options_supports_ipv6_literal_host() {
+        let catalog_url = Url::parse(
+            "postgres://postgres:FAKE_SECRET@[2a05:dddd:c3c:b703:e52f:e170:4155:c8dd]:5432/\
+             postgres?sslmode=prefer",
+        )
+        .unwrap();
+
+        let options = catalog_metadata_connect_options(&catalog_url).unwrap();
+
+        assert_eq!(options.get_host(), "2a05:dddd:c3c:b703:e52f:e170:4155:c8dd");
+        assert!(matches!(options.get_ssl_mode(), PgSslMode::Prefer));
+    }
+
+    #[test]
+    fn catalog_conninfo_from_postgres_ipv6_url_uses_libpq_host_syntax() {
+        let catalog_url = Url::parse(
+            "postgres://postgres@[2406:da18:1d63:9b01:df66:7be6:5158:2151]:5432/postgres?\
+             sslmode=prefer",
+        )
+        .unwrap();
+        let conninfo = catalog_conninfo_from_url(&catalog_url).unwrap();
+        let parsed = PgConfig::from_str(conninfo.strip_prefix("postgres:").unwrap()).unwrap();
+
+        assert!(!conninfo.contains("[2406:da18"));
+        assert_eq!(
+            serialize_hosts(parsed.get_hosts()).unwrap(),
+            "2406:da18:1d63:9b01:df66:7be6:5158:2151"
+        );
+        assert_eq!(parsed.get_ports(), &[5432]);
+        assert_eq!(parsed.get_ssl_mode(), SslMode::Prefer);
+    }
+
+    #[tokio::test]
+    async fn validate_expire_snapshots_older_than_enforces_minimum_retention() {
+        let executor = make_maintenance_test_executor();
+
+        validate_expire_snapshots_older_than(&executor, "1 day").await.unwrap();
+        validate_expire_snapshots_older_than(&executor, "7 days").await.unwrap();
+
+        for older_than in ["0 seconds", "-1 day", "23 hours"] {
+            let error = validate_expire_snapshots_older_than(&executor, older_than)
+                .await
+                .expect_err("unsafe retention should fail");
+
+            assert_eq!(error.kind(), ErrorKind::ConfigError);
+            assert_eq!(
+                error.description(),
+                Some("DuckLake expire_snapshots_older_than configuration failed")
+            );
+        }
+    }
+
     #[tokio::test]
     async fn maintenance_executor_timeout_releases_resources_for_follow_up_queries() {
         let executor = make_maintenance_test_executor();
 
+        // Run a long DuckDB query so the watchdog's interrupt handle aborts it
+        // at the deadline. This avoids racing `thread::sleep` against the
+        // watchdog's scheduler time, which was flaky under CI load.
         let error = executor
-            .run_with_timeout(Duration::from_millis(50), |_conn| -> EtlResult<()> {
-                std::thread::sleep(Duration::from_millis(100));
+            .run_with_timeout(Duration::from_millis(50), |conn| -> EtlResult<()> {
+                let _ =
+                    conn.query_row("SELECT COUNT(*) FROM range(0, 10_000_000_000)", [], |row| {
+                        row.get::<_, i64>(0)
+                    });
                 Ok(())
             })
             .await

@@ -3,17 +3,20 @@ use etl_api::{
     validation::{FailureType, validate_destination},
 };
 use etl_config::SerializableSecretString;
+use etl_destinations::snowflake::Config;
+use secrecy::ExposeSecret;
 
 use super::create_validation_context;
 
 fn skip_if_missing_snowflake_env_vars() -> bool {
-    std::env::var("TESTS_SNOWFLAKE_ACCOUNT").is_err()
+    std::env::var(Config::TESTS_CONNECTION_ENV).is_err()
 }
 
 struct SnowflakeTestEnv {
-    account_id: String,
+    account: String,
     user: String,
     private_key: String,
+    private_key_passphrase: Option<String>,
     database: String,
     schema: String,
     role: Option<String>,
@@ -21,28 +24,26 @@ struct SnowflakeTestEnv {
 
 impl SnowflakeTestEnv {
     fn load() -> Self {
+        let config = Config::require_tests_env().unwrap_or_else(|error| panic!("{error}"));
         Self {
-            account_id: std::env::var("TESTS_SNOWFLAKE_ACCOUNT")
-                .expect("TESTS_SNOWFLAKE_ACCOUNT must be set"),
-            user: std::env::var("TESTS_SNOWFLAKE_USER").expect("TESTS_SNOWFLAKE_USER must be set"),
-            private_key: std::fs::read_to_string(
-                std::env::var("TESTS_SNOWFLAKE_PRIVATE_KEY_PATH")
-                    .expect("TESTS_SNOWFLAKE_PRIVATE_KEY_PATH must be set"),
-            )
-            .expect("failed to read private key file"),
-            database: std::env::var("TESTS_SNOWFLAKE_DATABASE")
-                .unwrap_or_else(|_| "ETL_DEV".to_owned()),
-            schema: std::env::var("TESTS_SNOWFLAKE_SCHEMA").unwrap_or_else(|_| "PUBLIC".to_owned()),
-            role: std::env::var("TESTS_SNOWFLAKE_ROLE").ok(),
+            account: config.account().to_owned(),
+            user: config.user().to_owned(),
+            private_key: config.private_key().expect("private key").expose_secret().to_owned(),
+            private_key_passphrase: config
+                .private_key_passphrase()
+                .map(|passphrase| passphrase.expose_secret().to_owned()),
+            database: config.database().to_owned(),
+            schema: config.schema().to_owned(),
+            role: config.role().map(str::to_owned),
         }
     }
 
     fn config(&self, database: &str, schema: &str) -> FullApiDestinationConfig {
         create_snowflake_config(
-            &self.account_id,
+            &self.account,
             &self.user,
             &self.private_key,
-            None,
+            self.private_key_passphrase.as_deref(),
             database,
             schema,
             self.role.as_deref(),
@@ -75,7 +76,7 @@ fn create_snowflake_config(
 async fn validate_snowflake_empty_account_id() {
     let ctx = create_validation_context();
     let config = create_snowflake_config("", "ETL_USER", "fake-key", None, "DB", "PUBLIC", None);
-    let failures = validate_destination(&ctx, &config).await.unwrap();
+    let failures = validate_destination(&ctx, &config, None).await.unwrap();
 
     assert!(!failures.is_empty(), "Expected validation failure");
     assert_eq!(failures[0].name, "Snowflake Account ID Required");
@@ -86,7 +87,7 @@ async fn validate_snowflake_empty_account_id() {
 async fn validate_snowflake_empty_user() {
     let ctx = create_validation_context();
     let config = create_snowflake_config("ORG-ACCT", "", "fake-key", None, "DB", "PUBLIC", None);
-    let failures = validate_destination(&ctx, &config).await.unwrap();
+    let failures = validate_destination(&ctx, &config, None).await.unwrap();
 
     assert!(!failures.is_empty(), "Expected validation failure");
     assert_eq!(failures[0].name, "Snowflake User Required");
@@ -105,7 +106,7 @@ async fn validate_snowflake_invalid_private_key() {
         "PUBLIC",
         None,
     );
-    let failures = validate_destination(&ctx, &config).await.unwrap();
+    let failures = validate_destination(&ctx, &config, None).await.unwrap();
 
     assert!(!failures.is_empty(), "Expected validation failure");
     assert_eq!(failures[0].name, "Snowflake Authentication Failed");
@@ -121,7 +122,7 @@ async fn validate_snowflake_connection_success() {
     let env = SnowflakeTestEnv::load();
     let ctx = create_validation_context();
     let config = env.config(&env.database, &env.schema);
-    let failures = validate_destination(&ctx, &config).await.unwrap();
+    let failures = validate_destination(&ctx, &config, None).await.unwrap();
 
     assert!(failures.is_empty(), "Expected no validation failures, got: {failures:?}");
 }
@@ -135,7 +136,7 @@ async fn validate_snowflake_wrong_database() {
     let env = SnowflakeTestEnv::load();
     let ctx = create_validation_context();
     let config = env.config("NONEXISTENT_DB_12345", &env.schema);
-    let failures = validate_destination(&ctx, &config).await.unwrap();
+    let failures = validate_destination(&ctx, &config, None).await.unwrap();
 
     assert!(!failures.is_empty(), "Expected validation failure");
     assert_eq!(failures[0].name, "Snowflake Database Not Found");
@@ -151,7 +152,7 @@ async fn validate_snowflake_wrong_schema() {
     let env = SnowflakeTestEnv::load();
     let ctx = create_validation_context();
     let config = env.config(&env.database, "NONEXISTENT_SCHEMA_12345");
-    let failures = validate_destination(&ctx, &config).await.unwrap();
+    let failures = validate_destination(&ctx, &config, None).await.unwrap();
 
     assert!(!failures.is_empty(), "Expected validation failure");
     assert_eq!(failures[0].name, "Snowflake Schema Not Found");
@@ -167,7 +168,7 @@ async fn validate_snowflake_empty_database() {
     let env = SnowflakeTestEnv::load();
     let ctx = create_validation_context();
     let config = env.config("", &env.schema);
-    let failures = validate_destination(&ctx, &config).await.unwrap();
+    let failures = validate_destination(&ctx, &config, None).await.unwrap();
 
     assert!(!failures.is_empty(), "Expected validation failure");
     assert_eq!(failures[0].name, "Snowflake Database Required");

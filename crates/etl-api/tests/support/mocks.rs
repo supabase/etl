@@ -72,7 +72,9 @@ pub(crate) mod destinations {
     /// Returns a default DuckLake destination config.
     pub(crate) fn new_ducklake_destination_config() -> FullApiDestinationConfig {
         FullApiDestinationConfig::Ducklake {
-            catalog_url: "postgres://postgres:postgres@localhost:5432/postgres".to_owned(),
+            catalog_url: SerializableSecretString::from(
+                "postgres://postgres:postgres@localhost:5432/postgres".to_owned(),
+            ),
             data_path: "s3://ducklake/".to_owned(),
             pool_size: Some(1),
             s3_access_key_id: Some(SerializableSecretString::from("access-key-id".to_owned())),
@@ -84,7 +86,6 @@ pub(crate) mod destinations {
             s3_url_style: Some("path".to_owned()),
             s3_use_ssl: Some(false),
             metadata_schema: Some("ducklake".to_owned()),
-            duckdb_memory_cache_limit: None,
             maintenance_target_file_size: Some("10MB".to_owned()),
             expire_snapshots_older_than: Some("7 days".to_owned()),
             maintenance_mode: DuckLakeMaintenanceMode::Kubernetes,
@@ -301,6 +302,7 @@ pub(crate) mod pipelines {
             table_error_retry_max_attempts: Some(5),
             max_table_sync_workers: Some(2),
             memory_refresh_interval_ms: Some(100),
+            replication_lag_refresh_interval_ms: None,
             max_copy_connections_per_table: Some(2),
             memory_backpressure: Some(MemoryBackpressureConfig::default()),
             table_sync_copy: Some(TableSyncCopyConfig::IncludeAllTables),
@@ -324,6 +326,7 @@ pub(crate) mod pipelines {
             table_error_retry_max_attempts: Some(10),
             max_table_sync_workers: Some(4),
             memory_refresh_interval_ms: Some(100),
+            replication_lag_refresh_interval_ms: None,
             max_copy_connections_per_table: Some(8),
             memory_backpressure: Some(MemoryBackpressureConfig::default()),
             table_sync_copy: Some(TableSyncCopyConfig::IncludeAllTables),

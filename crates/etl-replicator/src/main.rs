@@ -59,6 +59,7 @@ mod error;
 mod error_notification;
 mod error_reporting;
 mod init;
+#[cfg(feature = "any-destination")]
 mod metrics;
 mod sentry;
 

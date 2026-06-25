@@ -1,7 +1,10 @@
-use actix_web::{
-    HttpRequest, HttpResponse, Responder, ResponseError, get,
-    http::{StatusCode, header::ContentType},
-    web::{Data, Json, Path},
+use std::sync::Arc;
+
+use axum::{
+    Extension, Json,
+    extract::Path,
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -12,16 +15,19 @@ use crate::{
     config::ApiConfig,
     configs::encryption::EncryptionKeyring,
     data::{
-        self, connect_to_source_database_from_api,
+        self, source_database,
         sources::SourcesDbError,
         tables::{Table, TablesDbError},
     },
     k8s::{TrustedRootCertsCache, TrustedRootCertsError},
-    routes::{ErrorMessage, TenantIdError, extract_tenant_id},
+    routes::{
+        ErrorMessage, IntoInner, TenantIdError, error_response_with_internal_error,
+        extract_tenant_id, utils,
+    },
 };
 
 #[derive(Debug, Error)]
-enum TableError {
+pub(crate) enum TableError {
     #[error("The source with id {0} was not found")]
     SourceNotFound(i64),
 
@@ -45,9 +51,12 @@ impl TableError {
     fn to_message(&self) -> String {
         match self {
             // Do not expose internal database details in error messages
-            TableError::SourcesDb(SourcesDbError::Database(_))
-            | TableError::TablesDb(TablesDbError::Database(_))
-            | TableError::Database(_) => "Internal server error".to_owned(),
+            TableError::SourcesDb(_) | TableError::TrustedRootCerts(_) => {
+                "Internal server error".to_owned()
+            }
+            TableError::TablesDb(TablesDbError::Database(_)) | TableError::Database(_) => {
+                utils::source_database_query_error_message().to_owned()
+            }
             // Every other message is ok, as they do not divulge sensitive information
             e => e.to_string(),
         }
@@ -60,61 +69,86 @@ pub struct ReadTablesResponse {
     pub tables: Vec<Table>,
 }
 
-impl ResponseError for TableError {
-    fn status_code(&self) -> StatusCode {
-        match self {
-            TableError::SourcesDb(_)
-            | TableError::TablesDb(_)
-            | TableError::Database(_)
-            | TableError::TrustedRootCerts(_) => StatusCode::INTERNAL_SERVER_ERROR,
+impl IntoResponse for TableError {
+    fn into_response(self) -> Response {
+        let status_code = match &self {
+            TableError::SourcesDb(_) | TableError::TrustedRootCerts(_) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+            TableError::TablesDb(TablesDbError::Database(error)) | TableError::Database(error) => {
+                utils::source_database_error_status_code(error)
+            }
             TableError::SourceNotFound(_) => StatusCode::NOT_FOUND,
             TableError::TenantId(_) => StatusCode::BAD_REQUEST,
-        }
-    }
+        };
 
-    fn error_response(&self) -> HttpResponse {
-        let error_message = ErrorMessage { message: self.to_message() };
-        let body =
-            serde_json::to_string(&error_message).expect("failed to serialize error message");
-        HttpResponse::build(self.status_code()).insert_header(ContentType::json()).body(body)
+        error_response_with_internal_error(status_code, self.to_message(), &self)
     }
 }
 
 #[utoipa::path(
+    get,
+    path = "/sources/{source_id}/tables",
     summary = "List source tables",
     description = "Returns all tables discovered for the specified source.",
     tag = "Tables",
     params(
         ("source_id" = i64, Path, description = "Unique ID of the source"),
+        ("tenant_id" = String, Header, description = "Tenant ID used to scope the request"),
     ),
     responses(
         (status = 200, description = "Tables listed successfully", body = ReadTablesResponse),
+        (status = 400, description = "Bad request", body = ErrorMessage),
+        (status = 404, description = "Source not found", body = ErrorMessage),
+        (status = 502, description = "Your source database returned an invalid response", body = ErrorMessage),
+        (status = 503, description = "Your source database is unavailable", body = ErrorMessage),
+        (status = 504, description = "Request to your source database timed out", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     )
 )]
-#[get("/sources/{source_id}/tables")]
 pub(crate) async fn read_table_names(
-    req: HttpRequest,
-    pool: Data<PgPool>,
-    api_config: Data<ApiConfig>,
-    encryption_key: Data<EncryptionKeyring>,
-    trusted_root_certs_cache: Data<TrustedRootCertsCache>,
+    headers: HeaderMap,
+    Extension(pool): Extension<PgPool>,
+    Extension(api_config): Extension<Arc<ApiConfig>>,
+    Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
+    Extension(trusted_root_certs_cache): Extension<Arc<TrustedRootCertsCache>>,
     source_id: Path<i64>,
-) -> Result<impl Responder, TableError> {
-    let tenant_id = extract_tenant_id(&req)?;
+) -> Result<impl IntoResponse, TableError> {
+    let tenant_id = extract_tenant_id(&headers)?;
     let source_id = source_id.into_inner();
 
-    let source_config = data::sources::read_source(&**pool, tenant_id, source_id, &encryption_key)
+    let source_config = data::sources::read_source(&pool, tenant_id, source_id, &encryption_key)
         .await?
         .map(|s| s.config)
         .ok_or(TableError::SourceNotFound(source_id))?;
 
     let tls_config = trusted_root_certs_cache.get_tls_config(api_config.source.tls_enabled).await?;
     let source_pool =
-        connect_to_source_database_from_api(&source_config.into_connection_config(tls_config))
-            .await?;
+        source_database::connect(&source_config.into_connection_config(tls_config)).await?;
     let tables = data::tables::get_tables(&source_pool).await?;
     let response = ReadTablesResponse { tables };
 
     Ok(Json(response))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_connection_timeout_is_reported_as_upstream_unavailable() {
+        let response = TableError::Database(sqlx::Error::PoolTimedOut).into_response();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn source_query_error_is_reported_as_bad_gateway() {
+        let response = TableError::TablesDb(TablesDbError::Database(sqlx::Error::Protocol(
+            "bad source response".to_owned(),
+        )))
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    }
 }

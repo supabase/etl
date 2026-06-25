@@ -7,8 +7,7 @@ const DEFAULT_DATABASE_TLS_ROOT_CERT: &str = "target/postgres-tls/root.crt";
 /// Returns whether test database clients should require TLS.
 pub fn test_tls_enabled_from_env() -> bool {
     std::env::var("TESTS_DATABASE_TLS_ENABLED")
-        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "on"))
-        .unwrap_or(false)
+        .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "on"))
 }
 
 /// Returns TLS settings for local test database clients.

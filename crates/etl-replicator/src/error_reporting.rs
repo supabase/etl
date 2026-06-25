@@ -8,7 +8,7 @@ use etl::{
         destination_table_metadata::{AppliedDestinationTableMetadata, DestinationTableMetadata},
     },
     store::{
-        lifecycle::TableLifecycleStore,
+        lifecycle::{TableStateLifecycleStore, TableStateOperation},
         schema::{SchemaStore, TableSchemaRetention},
         state::{StateStore, TableStates},
     },
@@ -186,15 +186,22 @@ where
     }
 }
 
-impl<S> TableLifecycleStore for ErrorReportingStateStore<S>
+impl<S> TableStateLifecycleStore for ErrorReportingStateStore<S>
 where
-    S: TableLifecycleStore + Send + Sync,
+    S: TableStateLifecycleStore + Send + Sync,
 {
-    async fn clear_table_copy_state(&self, table_id: TableId) -> EtlResult<()> {
-        self.inner.clear_table_copy_state(table_id).await
+    async fn apply_table_state_operation(
+        &self,
+        operation: TableStateOperation,
+    ) -> EtlResult<usize> {
+        self.inner.apply_table_state_operation(operation).await
     }
 
-    async fn delete_table_pipeline_state(&self, table_id: TableId) -> EtlResult<()> {
-        self.inner.delete_table_pipeline_state(table_id).await
+    async fn prepare_table_state_for_copy(&self, table_id: TableId) -> EtlResult<()> {
+        self.inner.prepare_table_state_for_copy(table_id).await
+    }
+
+    async fn delete_table_state(&self, table_id: TableId) -> EtlResult<()> {
+        self.inner.delete_table_state(table_id).await
     }
 }

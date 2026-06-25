@@ -92,6 +92,11 @@
   `format!("{error}")` into the message or detail. Keep detail fields for
   contextual data we own, such as operation names, table names, IDs, counts, or
   SQL statements.
+- Prefer preserving lower-level failures in the error source chain so display,
+  logging, and Sentry formatting can decide how much of the chain to show. Only
+  copy an underlying error message into a description or detail when that is
+  intentionally safer or clearer, such as replacing a sensitive internal error
+  with a sanitized customer-facing explanation.
 - Do not leak Postgres, SQLx, or other database errors from `etl-api` HTTP
   responses. Keep the original error in the internal chain and logs, but return
   a generic customer-facing message for database failures.
@@ -103,6 +108,30 @@
 - Reserve panics for programmer errors or violated invariants.
 - Use `debug_assert!` and `unreachable!` where they make internal invariants explicit, but prefer typed errors for runtime failures that can be triggered by external input or system state.
 - Only document `# Panics` when a function can actually panic.
+
+### Parser Safety
+- Parser entrypoints and helpers that consume external input should not panic
+  for malformed input. Return a typed parse error, `EtlError`, `Option::None`,
+  or another explicit failure value that matches the surrounding API.
+- Treat unexpected end of input, malformed tokens, invalid byte sequences,
+  invalid numeric or temporal ranges, and unsupported syntax as recoverable
+  parser failures, not internal invariants.
+- Prefer checked access such as `slice.get(index)`, `str::get(range)`,
+  iterator methods, or byte-slice parsing when input controls indexes or
+  ranges. Convert `None` into the parser's error type.
+- Direct indexing with `[]` is acceptable only when the invariant is local and
+  obvious, such as `bytes[index]` inside `while index < bytes.len()` or fixed
+  chunk indexes after `chunks_exact`. Use bytes rather than `str` byte ranges
+  when parsing ASCII protocols so non-ASCII malformed input cannot panic on a
+  UTF-8 boundary.
+- `expect`, `panic!`, and `unreachable!` in parser internals are reserved for
+  broken programmer invariants that prior code has guaranteed. The message
+  should state the invariant, for example `expect("validated token index should
+  be in bounds")`.
+- Add regression tests for malformed inputs that exercise boundary cases:
+  empty input, unterminated quotes or escapes, invalid UTF-8-adjacent text,
+  non-ASCII bytes in ASCII formats, overflow, underflow, and unsupported
+  syntax.
 
 ## Unsafe And Concurrency
 - Avoid `unsafe` unless it is necessary.
@@ -160,6 +189,10 @@
 - Verify that expected tests actually ran, not just that Cargo exited successfully.
 - Prefer running `cargo nextest list` before using filters or crate-specific commands if there is any doubt.
 - When fixing a specific crate, run the narrowest relevant tests first, then broaden if needed.
+- When a test failure needs deeper debugging, rerun the targeted test with
+  `ENABLE_TRACING=1`; set a focused `RUST_LOG` filter when needed, such as
+  `RUST_LOG=etl::replication::apply=debug,etl_destinations::bigquery=debug`,
+  to make the relevant pipeline or destination logs visible.
 - Add or update tests when behavior changes, regressions are possible, or new logic is introduced.
 - Prefer existing test utilities and fixtures over custom test plumbing. Before adding bespoke
   setup, waits, assertions, or database helpers, check nearby tests and `crates/etl/src/test_utils/` for

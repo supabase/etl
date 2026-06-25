@@ -11,6 +11,8 @@ use tokio::{
 };
 use tracing::{Instrument, debug, error, info, warn};
 
+#[cfg(feature = "failpoints")]
+use crate::failpoints::{TABLE_SYNC_WORKER_BEFORE_STREAMING_FP, etl_fail_point};
 use crate::{
     bail,
     concurrency::{BatchBudgetController, MemoryMonitor, ShutdownResult, ShutdownRx},
@@ -19,8 +21,9 @@ use crate::{
     etl_error,
     metrics::{ERROR_TYPE_LABEL, ETL_WORKER_ERRORS_TOTAL, WORKER_TYPE_LABEL},
     replication::{
-        ApplyLoop, ApplyLoopResult, SharedTableCache, TableSyncResult, TableSyncWorkerContext,
-        WorkerContext, WorkerType, client::PgReplicationClient, start_table_sync,
+        ApplyLoop, ApplyLoopResult, OutOfBandSourcePool, SharedTableCache, TableSyncResult,
+        TableSyncWorkerContext, WorkerContext, WorkerType, client::PgReplicationClient,
+        start_table_sync,
     },
     state::{TableError, TableRetryPolicy, TableState, TableStateType},
     store::{PipelineStore, state::StateStore},
@@ -332,6 +335,7 @@ pub(crate) struct TableSyncWorker<S, D> {
     store: S,
     destination: D,
     shared_table_cache: SharedTableCache,
+    out_of_band_source_pool: OutOfBandSourcePool,
     shutdown_rx: ShutdownRx,
     run_permit: Arc<Semaphore>,
     memory_monitor: MemoryMonitor,
@@ -355,6 +359,7 @@ impl<S, D> TableSyncWorker<S, D> {
         store: S,
         destination: D,
         shared_table_cache: SharedTableCache,
+        out_of_band_source_pool: OutOfBandSourcePool,
         shutdown_rx: ShutdownRx,
         run_permit: Arc<Semaphore>,
         memory_monitor: MemoryMonitor,
@@ -368,6 +373,7 @@ impl<S, D> TableSyncWorker<S, D> {
             store,
             destination,
             shared_table_cache,
+            out_of_band_source_pool,
             shutdown_rx,
             run_permit,
             memory_monitor,
@@ -639,6 +645,7 @@ where
                 store: store.clone(),
                 destination: destination.clone(),
                 shared_table_cache: shared_table_cache.clone(),
+                out_of_band_source_pool: self.out_of_band_source_pool.clone(),
                 shutdown_rx: shutdown_rx.clone(),
                 run_permit: Arc::clone(&run_permit),
                 memory_monitor: self.memory_monitor.clone(),
@@ -762,6 +769,11 @@ where
             }
         };
 
+        // Let tests fail after the apply worker has entered `Catchup`, so they
+        // cover the apply worker unblocking on `Errored`.
+        #[cfg(feature = "failpoints")]
+        etl_fail_point(TABLE_SYNC_WORKER_BEFORE_STREAMING_FP)?;
+
         let worker_context = WorkerContext::TableSync(TableSyncWorkerContext {
             table_id: self.table_id,
             table_sync_worker_state: state,
@@ -777,6 +789,7 @@ where
             self.store.clone(),
             self.destination.clone(),
             self.shared_table_cache.clone(),
+            self.out_of_band_source_pool.clone(),
             worker_context,
             self.shutdown_rx.clone(),
             self.memory_monitor.clone(),

@@ -62,6 +62,34 @@ pub enum DuckLakeMaintenanceMode {
     Postgres,
 }
 
+/// Supported product destination kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DestinationKind {
+    /// Google BigQuery destination.
+    BigQuery,
+    /// ClickHouse destination.
+    ClickHouse,
+    /// DuckLake destination.
+    Ducklake,
+    /// Iceberg destination.
+    Iceberg,
+    /// Snowflake destination.
+    Snowflake,
+}
+
+impl DestinationKind {
+    /// Returns the stable destination name used in metrics and tags.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            DestinationKind::BigQuery => "bigquery",
+            DestinationKind::ClickHouse => "clickhouse",
+            DestinationKind::Ducklake => "ducklake",
+            DestinationKind::Iceberg => "iceberg",
+            DestinationKind::Snowflake => "snowflake",
+        }
+    }
+}
+
 /// Configuration for supported ETL data destinations.
 ///
 /// Specifies the destination type and its associated configuration parameters.
@@ -122,7 +150,7 @@ pub enum DestinationConfig {
     },
     Ducklake {
         /// DuckLake catalog URL.
-        catalog_url: String,
+        catalog_url: SecretString,
         /// DuckLake data path.
         data_path: String,
         /// Size of the DuckDB connection pool.
@@ -142,8 +170,6 @@ pub enum DestinationConfig {
         s3_use_ssl: Option<bool>,
         /// Optional metadata schema for DuckLake metadata tables.
         metadata_schema: Option<String>,
-        /// Optional DuckDB memory limit for each DuckLake connection.
-        duckdb_memory_cache_limit: Option<String>,
         /// Optional DuckLake maintenance target file size.
         maintenance_target_file_size: Option<String>,
         /// Optional DuckLake snapshot-retention interval.
@@ -175,6 +201,17 @@ impl DestinationConfig {
     pub const DEFAULT_CONNECTION_POOL_SIZE: usize = 4;
     /// Default connection pool size for DuckLake destinations.
     pub const DEFAULT_DUCKLAKE_POOL_SIZE: u32 = 4;
+
+    /// Returns the destination kind represented by this config.
+    pub fn kind(&self) -> DestinationKind {
+        match self {
+            DestinationConfig::BigQuery { .. } => DestinationKind::BigQuery,
+            DestinationConfig::ClickHouse { .. } => DestinationKind::ClickHouse,
+            DestinationConfig::Iceberg { .. } => DestinationKind::Iceberg,
+            DestinationConfig::Ducklake { .. } => DestinationKind::Ducklake,
+            DestinationConfig::Snowflake { .. } => DestinationKind::Snowflake,
+        }
+    }
 }
 
 /// Configuration for the iceberg destination with two variants
@@ -339,8 +376,6 @@ pub enum DestinationConfigWithoutSecrets {
         config: IcebergConfigWithoutSecrets,
     },
     Ducklake {
-        /// DuckLake catalog URL.
-        catalog_url: String,
         /// DuckLake data path.
         data_path: String,
         /// Size of the DuckDB connection pool.
@@ -356,8 +391,6 @@ pub enum DestinationConfigWithoutSecrets {
         s3_use_ssl: Option<bool>,
         /// Optional metadata schema for DuckLake metadata tables.
         metadata_schema: Option<String>,
-        /// Optional DuckDB memory limit for each DuckLake connection.
-        duckdb_memory_cache_limit: Option<String>,
         /// Optional DuckLake maintenance target file size.
         maintenance_target_file_size: Option<String>,
         /// Optional DuckLake snapshot-retention interval.
@@ -403,7 +436,7 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
                 DestinationConfigWithoutSecrets::Iceberg { config: config.into() }
             }
             DestinationConfig::Ducklake {
-                catalog_url,
+                catalog_url: _,
                 data_path,
                 pool_size,
                 s3_access_key_id: _,
@@ -413,12 +446,10 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
                 s3_url_style,
                 s3_use_ssl,
                 metadata_schema,
-                duckdb_memory_cache_limit,
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
                 maintenance_mode,
             } => DestinationConfigWithoutSecrets::Ducklake {
-                catalog_url,
                 data_path,
                 pool_size,
                 s3_region,
@@ -426,7 +457,6 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
                 s3_url_style,
                 s3_use_ssl,
                 metadata_schema,
-                duckdb_memory_cache_limit,
                 maintenance_target_file_size,
                 expire_snapshots_older_than,
                 maintenance_mode,
@@ -447,5 +477,45 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
                 role,
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ducklake_without_secrets_omits_catalog_url() {
+        let config = DestinationConfig::Ducklake {
+            catalog_url: "postgres://user:pass@localhost:5432/ducklake_catalog".to_owned().into(),
+            data_path: "s3://bucket/path".to_owned(),
+            pool_size: 4,
+            s3_access_key_id: None,
+            s3_secret_access_key: None,
+            s3_region: None,
+            s3_endpoint: None,
+            s3_url_style: None,
+            s3_use_ssl: None,
+            metadata_schema: None,
+            maintenance_target_file_size: None,
+            expire_snapshots_older_than: None,
+            maintenance_mode: DuckLakeMaintenanceMode::Kubernetes,
+        };
+
+        let without_secrets = DestinationConfigWithoutSecrets::from(config);
+        let json = serde_json::to_value(without_secrets).unwrap();
+        let serialized = json.to_string();
+
+        assert!(!serialized.contains("catalog_url"));
+        assert!(!serialized.contains("user:pass"));
+    }
+
+    #[test]
+    fn destination_kind_names_match_metrics_labels() {
+        assert_eq!(DestinationKind::BigQuery.as_str(), "bigquery");
+        assert_eq!(DestinationKind::ClickHouse.as_str(), "clickhouse");
+        assert_eq!(DestinationKind::Ducklake.as_str(), "ducklake");
+        assert_eq!(DestinationKind::Iceberg.as_str(), "iceberg");
+        assert_eq!(DestinationKind::Snowflake.as_str(), "snowflake");
     }
 }

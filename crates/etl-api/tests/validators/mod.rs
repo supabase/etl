@@ -1,6 +1,12 @@
+#[cfg(feature = "bigquery")]
 mod bigquery;
+mod destination;
+#[cfg(feature = "ducklake")]
+mod ducklake;
+#[cfg(feature = "iceberg")]
 mod iceberg;
 mod pipeline;
+#[cfg(feature = "snowflake")]
 mod snowflake;
 
 use etl_api::{configs::pipeline::FullApiPipelineConfig, validation::ValidationContext};
@@ -9,6 +15,7 @@ use etl_postgres::sqlx::test_utils::create_pg_database;
 
 use crate::support::database::get_test_db_config;
 
+#[cfg(any(feature = "bigquery", feature = "iceberg", feature = "snowflake"))]
 pub(super) fn create_validation_context() -> ValidationContext {
     let environment = Environment::load().expect("Failed to load environment");
     ValidationContext::builder(environment).build()
@@ -37,6 +44,7 @@ pub(super) fn create_pipeline_config(publication_name: &str) -> FullApiPipelineC
         table_error_retry_max_attempts: None,
         max_table_sync_workers: Some(2),
         memory_refresh_interval_ms: Some(100),
+        replication_lag_refresh_interval_ms: None,
         max_copy_connections_per_table: None,
         memory_backpressure: None,
         table_sync_copy: None,

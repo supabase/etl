@@ -66,6 +66,7 @@ fn cell_to_sql_literal(cell: Cell) -> String {
         Cell::Numeric(n) => quote_literal(&n.to_string()),
         Cell::Date(d) => format!("DATE '{}'", d.format("%Y-%m-%d")),
         Cell::Time(t) => format!("TIME '{}'", t.format("%H:%M:%S%.6f")),
+        Cell::TimeTz(t) => quote_literal(&t.to_string()),
         Cell::Timestamp(dt) => {
             format!("TIMESTAMP '{}'", dt.format("%Y-%m-%d %H:%M:%S%.6f"))
         }
@@ -94,6 +95,7 @@ fn cell_to_owned(cell: &Cell) -> Cell {
         Cell::Numeric(value) => Cell::Numeric(value.clone()),
         Cell::Date(value) => Cell::Date(*value),
         Cell::Time(value) => Cell::Time(*value),
+        Cell::TimeTz(value) => Cell::TimeTz(*value),
         Cell::Timestamp(value) => Cell::Timestamp(*value),
         Cell::TimestampTz(value) => Cell::TimestampTz(*value),
         Cell::Uuid(value) => Cell::Uuid(*value),
@@ -117,6 +119,7 @@ fn array_cell_to_owned(cell: &ArrayCell) -> ArrayCell {
         ArrayCell::Numeric(values) => ArrayCell::Numeric(values.clone()),
         ArrayCell::Date(values) => ArrayCell::Date(values.clone()),
         ArrayCell::Time(values) => ArrayCell::Time(values.clone()),
+        ArrayCell::TimeTz(values) => ArrayCell::TimeTz(values.clone()),
         ArrayCell::Timestamp(values) => ArrayCell::Timestamp(values.clone()),
         ArrayCell::TimestampTz(values) => ArrayCell::TimestampTz(values.clone()),
         ArrayCell::Uuid(values) => ArrayCell::Uuid(values.clone()),
@@ -188,6 +191,10 @@ fn array_cell_to_sql_literal(arr: ArrayCell) -> String {
                     |value| format!("TIME '{}'", value.format("%H:%M:%S%.6f")),
                 )
             })
+            .collect(),
+        ArrayCell::TimeTz(v) => v
+            .into_iter()
+            .map(|o| o.map_or_else(|| "NULL".to_owned(), |value| quote_literal(&value.to_string())))
             .collect(),
         ArrayCell::Timestamp(v) => v
             .into_iter()
@@ -294,6 +301,7 @@ fn cell_to_value(cell: Cell) -> Value {
             let micros = t.signed_duration_since(epoch_time).num_microseconds().unwrap_or(0);
             Value::Time64(TimeUnit::Microsecond, micros)
         }
+        Cell::TimeTz(t) => Value::Text(t.to_string()),
         Cell::Timestamp(dt) => {
             Value::Timestamp(TimeUnit::Microsecond, dt.and_utc().timestamp_micros())
         }
@@ -346,6 +354,9 @@ fn array_cell_to_value(arr: ArrayCell) -> Value {
                     })
                 })
                 .collect()
+        }
+        ArrayCell::TimeTz(v) => {
+            v.into_iter().map(|o| o.map_or(Value::Null, |t| Value::Text(t.to_string()))).collect()
         }
         ArrayCell::Timestamp(v) => v
             .into_iter()

@@ -1,19 +1,31 @@
 //! Database migrations required by ETL.
 
+use std::sync::LazyLock;
+
 use sqlx::{Connection, Executor, PgConnection, migrate::Migrator, postgres::PgConnectOptions};
 use tracing::debug;
 
 use crate::{
-    config::{ETL_MIGRATION_OPTIONS, IntoConnectOptions, PgConnectionConfig},
+    config::{IntoConnectOptions, PgConnectionConfig, PgConnectionOptions},
     error::{ErrorKind, EtlResult},
     etl_error,
 };
+
+/// Application name for ETL migration connections.
+const APP_NAME_REPLICATOR_MIGRATIONS: &str = "supabase_etl_replicator_migrations";
+
+/// Connection options for ETL migration queries.
+///
+/// Uses an extended statement timeout for DDL while keeping bounded lock and
+/// idle-in-transaction timeouts from the common Postgres defaults.
+static MIGRATION_OPTIONS: LazyLock<PgConnectionOptions> =
+    LazyLock::new(|| PgConnectionOptions::builder(APP_NAME_REPLICATOR_MIGRATIONS).build());
 
 /// Creates a PostgreSQL connection prepared for ETL migrations.
 async fn create_migration_connection(
     connection_config: &PgConnectionConfig,
 ) -> Result<PgConnection, sqlx::Error> {
-    let options: PgConnectOptions = connection_config.with_db(Some(&ETL_MIGRATION_OPTIONS));
+    let options: PgConnectOptions = connection_config.with_db(Some(&MIGRATION_OPTIONS));
 
     let mut conn = PgConnection::connect_with(&options).await?;
 
@@ -30,6 +42,16 @@ async fn create_migration_connection(
     conn.execute("set search_path = 'etl';").await?;
 
     Ok(conn)
+}
+
+/// Returns whether the source database is currently a physical standby.
+async fn source_database_in_recovery(
+    connection_config: &PgConnectionConfig,
+) -> Result<bool, sqlx::Error> {
+    let options: PgConnectOptions = connection_config.with_db(Some(&MIGRATION_OPTIONS));
+    let mut conn = PgConnection::connect_with(&options).await?;
+
+    sqlx::query_scalar("select pg_is_in_recovery()").fetch_one(&mut conn).await
 }
 
 /// Returns the migrator for source-side replication helpers.
@@ -59,7 +81,7 @@ async fn run_migration_set(
     let mut conn = create_migration_connection(connection_config).await?;
 
     debug!(migration_set = label, "applying ETL migrations");
-    migrator.run_direct(None, &mut conn).await?;
+    migrator.run_direct(None, &mut conn, false).await?;
     debug!(migration_set = label, "ETL migrations successfully applied");
 
     Ok(())
@@ -69,11 +91,29 @@ async fn run_migration_set(
 ///
 /// These migrations install the `etl` schema, schema snapshot helper
 /// functions, and the DDL event trigger used by replication.
+/// When the configured source is a physical standby, this function skips
+/// migration execution because standby connections are read-only. In that
+/// setup, source-side migrations must be applied on the primary and then
+/// replayed to the standby before the pipeline starts.
 ///
 /// [`crate::pipeline::Pipeline::start`] runs these migrations automatically.
 /// This function is public for applications that want to preflight or
 /// pre-apply the source-side setup.
 pub async fn run_source_migrations(source_config: &PgConnectionConfig) -> EtlResult<()> {
+    let in_recovery = source_database_in_recovery(source_config).await.map_err(|err| {
+        etl_error!(
+            ErrorKind::SourceConnectionFailed,
+            "Failed to inspect source database recovery state",
+            source: err
+        )
+    })?;
+
+    if in_recovery {
+        debug!("skipping etl source migrations on standby source database");
+
+        return Ok(());
+    }
+
     run_migration_set(source_config, source_migrator(), "source")
         .await
         .map_err(|err| {

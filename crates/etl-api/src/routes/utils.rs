@@ -1,51 +1,58 @@
-use std::io::ErrorKind;
+use axum::http::StatusCode;
 
-use actix_web::http::StatusCode;
-
-use crate::validation::{ValidationError, ValidationFailure};
+use crate::{
+    data::source_database::{self, SourceDatabaseErrorKind},
+    validation::{ValidationError, ValidationFailure},
+};
 
 /// Returns the public HTTP status code for a validation execution error.
 pub fn validation_error_status_code(error: &ValidationError) -> StatusCode {
     match error {
-        ValidationError::Database { source: sqlx::Error::PoolTimedOut } => {
-            StatusCode::SERVICE_UNAVAILABLE
-        }
-        ValidationError::Database { source: sqlx::Error::PoolClosed } => {
-            StatusCode::SERVICE_UNAVAILABLE
-        }
-        ValidationError::Database { source: sqlx::Error::Io(error) }
-            if error.kind() == ErrorKind::TimedOut =>
-        {
-            StatusCode::GATEWAY_TIMEOUT
-        }
-        ValidationError::Database { .. }
-        | ValidationError::BigQuery(_)
-        | ValidationError::Iceberg(_) => StatusCode::BAD_GATEWAY,
+        ValidationError::Database { source } => source_database_error_status_code(source),
+        ValidationError::BigQuery(_) | ValidationError::Iceberg(_) => StatusCode::BAD_GATEWAY,
         ValidationError::TrustedRootCerts(_) | ValidationError::Environment(_) => {
             StatusCode::INTERNAL_SERVER_ERROR
         }
     }
 }
 
+/// Returns the public HTTP status code for a source database error.
+pub fn source_database_error_status_code(error: &sqlx::Error) -> StatusCode {
+    match source_database::classify_error(error) {
+        SourceDatabaseErrorKind::TimedOut => StatusCode::GATEWAY_TIMEOUT,
+        SourceDatabaseErrorKind::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+        SourceDatabaseErrorKind::Failed => StatusCode::BAD_GATEWAY,
+    }
+}
+
+/// Returns the public error message for source database query failures.
+pub fn source_database_query_error_message() -> &'static str {
+    "Could not query your source database"
+}
+
 /// Returns the public error message for a validation execution error.
 pub fn validation_error_message(error: &ValidationError) -> &'static str {
     match error {
-        ValidationError::Database { source: sqlx::Error::PoolTimedOut } => {
-            "Could not reach the source database in time"
-        }
-        ValidationError::Database { source: sqlx::Error::PoolClosed } => {
-            "The source database is currently unavailable"
-        }
-        ValidationError::Database { source: sqlx::Error::Io(error) }
-            if error.kind() == ErrorKind::TimedOut =>
-        {
-            "Could not reach the source database in time"
-        }
-        ValidationError::Database { .. } => "Could not validate the source database connection",
+        ValidationError::Database { source } => source_database_validation_error_message(source),
         ValidationError::BigQuery(_) => "Could not connect to BigQuery",
         ValidationError::Iceberg(_) => "Could not connect to the Iceberg endpoint",
         ValidationError::TrustedRootCerts(_) | ValidationError::Environment(_) => {
             "Internal server error"
+        }
+    }
+}
+
+/// Returns the public validation message for source database failures.
+fn source_database_validation_error_message(error: &sqlx::Error) -> &'static str {
+    match (error, source_database::classify_error(error)) {
+        (sqlx::Error::PoolTimedOut, _) | (_, SourceDatabaseErrorKind::TimedOut) => {
+            "Could not reach your source database in time"
+        }
+        (_, SourceDatabaseErrorKind::Unavailable) => {
+            "Your source database is currently unavailable"
+        }
+        (_, SourceDatabaseErrorKind::Failed) => {
+            "Could not validate your source database connection"
         }
     }
 }
@@ -57,6 +64,8 @@ pub fn format_validation_failures(failures: Vec<ValidationFailure>) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::io::ErrorKind;
+
     use super::*;
 
     #[test]
@@ -64,7 +73,10 @@ mod tests {
         let error = ValidationError::from(sqlx::Error::PoolTimedOut);
 
         assert_eq!(validation_error_status_code(&error), StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(validation_error_message(&error), "Could not reach the source database in time");
+        assert_eq!(
+            validation_error_message(&error),
+            "Could not reach your source database in time"
+        );
         assert_eq!(error.to_string(), "Database query failed");
     }
 
@@ -76,7 +88,20 @@ mod tests {
         )));
 
         assert_eq!(validation_error_status_code(&error), StatusCode::GATEWAY_TIMEOUT);
-        assert_eq!(validation_error_message(&error), "Could not reach the source database in time");
+        assert_eq!(
+            validation_error_message(&error),
+            "Could not reach your source database in time"
+        );
         assert_eq!(error.to_string(), "Database query failed");
+    }
+
+    #[test]
+    fn source_database_errors_are_reported_as_upstream_failures() {
+        let error = sqlx::Error::Protocol("bad source response".to_owned());
+
+        assert_eq!(
+            validation_error_status_code(&ValidationError::from(error)),
+            StatusCode::BAD_GATEWAY
+        );
     }
 }

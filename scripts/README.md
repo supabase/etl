@@ -8,10 +8,19 @@ New development commands should be added as xtask commands in `crates/xtask/src/
 
 | Script                                | xtask command             |
 | ------------------------------------- | ------------------------- |
-| `fmt` / `fmt-check`                   | `cargo x fmt [--check]`   |
-| `check_msrv_sync.sh`                  | `cargo x msrv`            |
-| `init.sh`                             | `cargo x init`            |
-| `run_migrations.sh`                   | `cargo x migrate`         |
-| `deploy-local-replicator-orbstack.sh` | `cargo x deploy-local`    |
-| `test-clickhouse.sh`                  | `cargo x test-clickhouse` |
-| `vendor_duckdb_extensions.sh`         | `cargo x vendor-duckdb`   |
+| `bin/fmt.sh` / `bin/fmt-check.sh`     | `cargo x fmt [--check]`   |
+| `bin/check-msrv-sync.sh`              | `cargo x msrv`            |
+| `bin/init.sh`                         | `cargo x init`            |
+| `bin/run-migrations.sh`               | `cargo x migrate`         |
+| `bin/deploy-local-replicator-orbstack.sh` | `cargo x deploy-local` |
+| `bin/test-clickhouse.sh`              | `cargo x test-clickhouse` |
+| `bin/vendor-duckdb-extensions.sh`     | `cargo x vendor-duckdb`   |
+
+## Directory layout
+
+| Directory | Purpose |
+| --------- | ------- |
+| `bin/` | Executable development scripts. |
+| `docker/` | Docker Compose file and resources mounted by the local stack. |
+| `docs/` | Documentation utility scripts. |
+| `k8s/local/` | Pre-defined Kubernetes resources for local OrbStack development. |

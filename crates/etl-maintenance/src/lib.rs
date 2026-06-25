@@ -11,10 +11,10 @@ pub use coordination::KubernetesExternalMaintenanceStore;
 pub use coordination::{
     ExternalMaintenanceOperationHistory, ExternalMaintenanceOperationPolicy,
     ExternalMaintenanceOperationRequest, ExternalMaintenanceOperationRun,
-    ExternalMaintenanceOperations, ExternalMaintenancePause, ExternalMaintenanceReplicatorState,
-    ExternalMaintenanceReplicatorStatus, ExternalMaintenanceRequestOutcome, ExternalMaintenanceRun,
-    ExternalMaintenanceState, ExternalMaintenanceStore, ExternalMaintenanceWatcherConfig,
-    PostgresExternalMaintenanceStore,
+    ExternalMaintenanceOperations, ExternalMaintenancePause, ExternalMaintenancePausePolicy,
+    ExternalMaintenanceReplicatorState, ExternalMaintenanceReplicatorStatus,
+    ExternalMaintenanceRequestOutcome, ExternalMaintenanceRun, ExternalMaintenanceState,
+    ExternalMaintenanceStore, ExternalMaintenanceWatcherConfig, PostgresExternalMaintenanceStore,
 };
 pub use materialization::{
     DisabledMaintenanceMaterializer, DuckLakeMaintenanceMaterialization, DuckLakeMaintenancePolicy,

@@ -135,7 +135,6 @@ zstd = { workspace = true, optional = true }
 base64 = { workspace = true }
 
 chrono = { workspace = true }
-duckdb = { workspace = true, features = ["bundled", "json", "parquet"] }
 etl = { workspace = true, features = ["test-utils"] }
 etl-postgres = { workspace = true, features = ["test-utils", "tokio"] }
 etl-telemetry = { workspace = true }

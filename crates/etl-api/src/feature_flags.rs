@@ -1,6 +1,5 @@
 use std::{ops::Deref, sync::Arc};
 
-use actix_web::web::Data;
 use tracing::info;
 
 /// Shared ConfigCat client handle used across the API and Kubernetes client.
@@ -49,7 +48,7 @@ pub fn init_feature_flags(
 /// Checks the `maximumPipelinesPerTenant` feature flag and falls back to
 /// the default if the flag is not set or the client is unavailable.
 pub async fn get_max_pipelines_per_tenant(
-    client: Option<&Data<FeatureFlagsClient>>,
+    client: Option<&FeatureFlagsClient>,
     tenant_id: &str,
     default_value: i64,
 ) -> i64 {

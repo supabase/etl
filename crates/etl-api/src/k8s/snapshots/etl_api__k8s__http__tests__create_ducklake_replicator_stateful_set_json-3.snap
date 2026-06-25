@@ -87,12 +87,20 @@ expression: "serde_json :: to_string_pretty(& stateful_set_json).unwrap()"
                 }
               },
               {
+                "name": "APP_DESTINATION__DUCKLAKE__CATALOG_URL",
+                "valueFrom": {
+                  "secretKeyRef": {
+                    "key": "catalog-url",
+                    "name": "abcdefghijklmnopqrst-42-ducklake"
+                  }
+                }
+              },
+              {
                 "name": "APP_DESTINATION__DUCKLAKE__S3_ACCESS_KEY_ID",
                 "valueFrom": {
                   "secretKeyRef": {
                     "key": "s3-access-key-id",
-                    "name": "abcdefghijklmnopqrst-42-ducklake",
-                    "optional": true
+                    "name": "abcdefghijklmnopqrst-42-ducklake"
                   }
                 }
               },
@@ -101,8 +109,7 @@ expression: "serde_json :: to_string_pretty(& stateful_set_json).unwrap()"
                 "valueFrom": {
                   "secretKeyRef": {
                     "key": "s3-secret-access-key",
-                    "name": "abcdefghijklmnopqrst-42-ducklake",
-                    "optional": true
+                    "name": "abcdefghijklmnopqrst-42-ducklake"
                   }
                 }
               }

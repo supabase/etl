@@ -15,9 +15,12 @@ use etl::{
         test_destination_wrapper::TestDestinationWrapper,
         test_schema::create_partitioned_table,
     },
-    types::{Event, EventType, PipelineId, Type},
+    types::{ArrayCell, Cell, Event, EventType, PipelineId, Type},
 };
-use etl_postgres::{tokio::test_utils::TableModification, types::TableId};
+use etl_postgres::{
+    tokio::test_utils::TableModification,
+    types::{ColumnSchema, TableId},
+};
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
 
@@ -39,6 +42,30 @@ fn get_last_insert_event(events: &[Event], table_id: TableId) -> &Event {
 
 fn schema_columns(schema: &etl_postgres::types::TableSchema) -> Vec<(String, Type)> {
     schema.column_schemas.iter().map(|column| (column.name.clone(), column.typ.clone())).collect()
+}
+
+fn assert_column_default_contains<'a>(
+    columns: impl IntoIterator<Item = &'a ColumnSchema>,
+    column_name: &str,
+    fragments: &[&str],
+) {
+    let column = columns
+        .into_iter()
+        .find(|column| column.name == column_name)
+        .unwrap_or_else(|| panic!("expected column {column_name}"));
+    let expression = column
+        .default_expression
+        .as_deref()
+        .unwrap_or_else(|| panic!("expected default expression for column {column_name}"));
+    let expression = expression.to_ascii_lowercase();
+
+    for fragment in fragments {
+        assert!(
+            expression.contains(&fragment.to_ascii_lowercase()),
+            "expected default expression for column {column_name} to contain {fragment:?}: \
+             {expression}"
+        );
+    }
 }
 
 fn find_snapshot_index_after(
@@ -430,6 +457,12 @@ async fn alter_table_without_dml_stores_schema_snapshot() {
         &r.replicated_table_schema,
         &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4), ("email", Type::TEXT)],
     );
+    let relation_email_column =
+        r.replicated_table_schema.column_schemas().find(|column| column.name == "email").unwrap();
+    assert_eq!(
+        relation_email_column.default_expression.as_deref(),
+        Some("'unknown@example.com'::text")
+    );
 
     let Event::Insert(i) = get_last_insert_event(&events, table_id) else {
         panic!("expected insert event");
@@ -451,6 +484,231 @@ async fn alter_table_without_dml_stores_schema_snapshot() {
     assert_table_schema_column_names_types(
         second_schema,
         &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4), ("email", Type::TEXT)],
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn default_expressions_round_trip_through_schema_changes_and_defaulted_insert() {
+    init_test_tracing();
+
+    let (database, table_name, table_id, store, destination, pipeline, _pipeline_id, _publication) =
+        create_database_and_ready_pipeline_with_table(
+            "schema_default_shapes",
+            &[("name", "text not null")],
+        )
+        .await;
+
+    let events_received = destination
+        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+        .await;
+
+    database
+        .alter_table(
+            table_name.clone(),
+            &[
+                TableModification::AddColumn {
+                    name: "status_text",
+                    data_type: "text not null default 'pending'::text",
+                },
+                TableModification::AddColumn {
+                    name: "score",
+                    data_type: "integer not null default (10 + 5)",
+                },
+                TableModification::AddColumn {
+                    name: "active",
+                    data_type: "boolean not null default true",
+                },
+                TableModification::AddColumn {
+                    name: "created_at",
+                    data_type: "timestamptz not null default now()",
+                },
+                TableModification::AddColumn {
+                    name: "created_on",
+                    data_type: "date not null default date '2026-01-01'",
+                },
+                TableModification::AddColumn {
+                    name: "payload",
+                    data_type: "jsonb not null default jsonb_build_object('source', 'api')",
+                },
+                TableModification::AddColumn {
+                    name: "lower_name",
+                    data_type: "text not null default lower('USER'::text)",
+                },
+                TableModification::AddColumn {
+                    name: "label",
+                    data_type: "text not null default coalesce(null::text, 'fallback'::text)",
+                },
+                TableModification::AddColumn {
+                    name: "tags",
+                    data_type: "text[] not null default array['alpha'::text, 'beta'::text]",
+                },
+                TableModification::AddColumn {
+                    name: "fixed_uuid",
+                    data_type: "uuid not null default '00000000-0000-0000-0000-000000000001'::uuid",
+                },
+                TableModification::AddColumn {
+                    name: "expires_at",
+                    data_type: "timestamptz not null default (now() + interval '30 days')",
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+    database
+        .run_sql(&format!(
+            "insert into {} (name) values ('Alice')",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    events_received.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let events = destination.get_events().await;
+    let grouped = group_events_by_type_and_table_id(&events);
+    assert_eq!(grouped.get(&(EventType::Relation, table_id)).unwrap().len(), 1);
+    assert_eq!(grouped.get(&(EventType::Insert, table_id)).unwrap().len(), 1);
+
+    let Event::Relation(relation) = get_last_relation_event(&events, table_id) else {
+        panic!("expected relation event");
+    };
+    assert_replicated_schema_column_names_types(
+        &relation.replicated_table_schema,
+        &[
+            ("id", Type::INT8),
+            ("name", Type::TEXT),
+            ("status_text", Type::TEXT),
+            ("score", Type::INT4),
+            ("active", Type::BOOL),
+            ("created_at", Type::TIMESTAMPTZ),
+            ("created_on", Type::DATE),
+            ("payload", Type::JSONB),
+            ("lower_name", Type::TEXT),
+            ("label", Type::TEXT),
+            ("tags", Type::TEXT_ARRAY),
+            ("fixed_uuid", Type::UUID),
+            ("expires_at", Type::TIMESTAMPTZ),
+        ],
+    );
+
+    let relation_columns = relation.replicated_table_schema.column_schemas().collect::<Vec<_>>();
+    assert_column_default_contains(relation_columns.iter().copied(), "status_text", &["pending"]);
+    assert_column_default_contains(relation_columns.iter().copied(), "score", &["10", "5"]);
+    assert_column_default_contains(relation_columns.iter().copied(), "active", &["true"]);
+    assert_column_default_contains(relation_columns.iter().copied(), "created_at", &["now"]);
+    assert_column_default_contains(relation_columns.iter().copied(), "created_on", &["2026-01-01"]);
+    assert_column_default_contains(
+        relation_columns.iter().copied(),
+        "payload",
+        &["jsonb_build_object", "source", "api"],
+    );
+    assert_column_default_contains(
+        relation_columns.iter().copied(),
+        "lower_name",
+        &["lower", "user"],
+    );
+    assert_column_default_contains(
+        relation_columns.iter().copied(),
+        "label",
+        &["coalesce", "fallback"],
+    );
+    assert_column_default_contains(
+        relation_columns.iter().copied(),
+        "tags",
+        &["array", "alpha", "beta"],
+    );
+    assert_column_default_contains(
+        relation_columns.iter().copied(),
+        "fixed_uuid",
+        &["00000000-0000-0000-0000-000000000001"],
+    );
+    assert_column_default_contains(
+        relation_columns.iter().copied(),
+        "expires_at",
+        &["now", "30 days"],
+    );
+
+    let Event::Insert(insert) = get_last_insert_event(&events, table_id) else {
+        panic!("expected insert event");
+    };
+    let values = insert.table_row.values();
+    assert_eq!(values.len(), 13);
+    assert!(matches!(values[0], Cell::I64(_)));
+    assert_eq!(values[1], Cell::String("Alice".to_owned()));
+    assert_eq!(values[2], Cell::String("pending".to_owned()));
+    assert_eq!(values[3], Cell::I32(15));
+    assert_eq!(values[4], Cell::Bool(true));
+    assert!(matches!(values[5], Cell::TimestampTz(_)));
+    assert!(matches!(&values[6], Cell::Date(date) if date.to_string() == "2026-01-01"));
+    assert_eq!(values[7], Cell::Json(serde_json::json!({ "source": "api" })));
+    assert_eq!(values[8], Cell::String("user".to_owned()));
+    assert_eq!(values[9], Cell::String("fallback".to_owned()));
+    assert_eq!(
+        values[10],
+        Cell::Array(ArrayCell::String(vec![Some("alpha".to_owned()), Some("beta".to_owned())]))
+    );
+    assert!(
+        matches!(&values[11], Cell::Uuid(uuid) if uuid.to_string() == "00000000-0000-0000-0000-000000000001")
+    );
+    assert!(matches!(values[12], Cell::TimestampTz(_)));
+
+    let table_schemas = store.get_table_schemas().await;
+    let snapshots = table_schemas.get(&table_id).unwrap();
+    assert_eq!(snapshots.len(), 2);
+    assert_schema_snapshots_ordering(snapshots, true);
+
+    let (_, second_schema) = &snapshots[1];
+    assert_table_schema_column_names_types(
+        second_schema,
+        &[
+            ("id", Type::INT8),
+            ("name", Type::TEXT),
+            ("status_text", Type::TEXT),
+            ("score", Type::INT4),
+            ("active", Type::BOOL),
+            ("created_at", Type::TIMESTAMPTZ),
+            ("created_on", Type::DATE),
+            ("payload", Type::JSONB),
+            ("lower_name", Type::TEXT),
+            ("label", Type::TEXT),
+            ("tags", Type::TEXT_ARRAY),
+            ("fixed_uuid", Type::UUID),
+            ("expires_at", Type::TIMESTAMPTZ),
+        ],
+    );
+    assert_column_default_contains(&second_schema.column_schemas, "status_text", &["pending"]);
+    assert_column_default_contains(&second_schema.column_schemas, "score", &["10", "5"]);
+    assert_column_default_contains(&second_schema.column_schemas, "active", &["true"]);
+    assert_column_default_contains(&second_schema.column_schemas, "created_at", &["now"]);
+    assert_column_default_contains(&second_schema.column_schemas, "created_on", &["2026-01-01"]);
+    assert_column_default_contains(
+        &second_schema.column_schemas,
+        "payload",
+        &["jsonb_build_object", "source", "api"],
+    );
+    assert_column_default_contains(&second_schema.column_schemas, "lower_name", &["lower", "user"]);
+    assert_column_default_contains(
+        &second_schema.column_schemas,
+        "label",
+        &["coalesce", "fallback"],
+    );
+    assert_column_default_contains(
+        &second_schema.column_schemas,
+        "tags",
+        &["array", "alpha", "beta"],
+    );
+    assert_column_default_contains(
+        &second_schema.column_schemas,
+        "fixed_uuid",
+        &["00000000-0000-0000-0000-000000000001"],
+    );
+    assert_column_default_contains(
+        &second_schema.column_schemas,
+        "expires_at",
+        &["now", "30 days"],
     );
 }
 

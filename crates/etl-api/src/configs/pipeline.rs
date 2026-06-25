@@ -27,6 +27,10 @@ const fn default_memory_refresh_interval_ms() -> u64 {
     PipelineConfig::DEFAULT_MEMORY_REFRESH_INTERVAL_MS
 }
 
+const fn default_replication_lag_refresh_interval_ms() -> u64 {
+    PipelineConfig::DEFAULT_REPLICATION_LAG_REFRESH_INTERVAL_MS
+}
+
 fn default_memory_backpressure() -> Option<MemoryBackpressureConfig> {
     Some(MemoryBackpressureConfig::default())
 }
@@ -77,7 +81,7 @@ pub struct DuckLakeMaintenanceConfig {
     #[serde(default = "default_ducklake_maintenance_min_inlined_bytes")]
     pub min_inlined_bytes: u64,
     /// Maximum number of adjacent files compacted by one merge operation.
-    #[schema(example = 32)]
+    #[schema(example = 40)]
     #[serde(default = "default_ducklake_maintenance_max_compacted_files")]
     pub max_compacted_files: u32,
     /// Maximum number of tables processed by each operation in one run.
@@ -85,7 +89,7 @@ pub struct DuckLakeMaintenanceConfig {
     #[serde(default = "default_ducklake_maintenance_max_tables_per_run")]
     pub max_tables_per_run: u32,
     /// DuckLake target file size used for compaction.
-    #[schema(example = "10MB")]
+    #[schema(example = "500MB")]
     #[serde(default = "default_ducklake_maintenance_target_file_size")]
     pub target_file_size: String,
     /// Deleted-row fraction that triggers data file rewrite.
@@ -188,6 +192,9 @@ pub struct FullApiPipelineConfig {
     #[schema(example = 100)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory_refresh_interval_ms: Option<u64>,
+    #[schema(example = 10000)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replication_lag_refresh_interval_ms: Option<u64>,
     #[serde(default = "default_memory_backpressure", skip_serializing_if = "Option::is_none")]
     pub memory_backpressure: Option<MemoryBackpressureConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -202,11 +209,12 @@ pub struct FullApiPipelineConfig {
 }
 
 impl FullApiPipelineConfig {
-    /// Validates optional pipeline-specific replicator resource requests.
+    /// Validates API-only pipeline configuration fields.
     pub fn validate(&self) -> Result<(), String> {
         if let Some(replicator_resources) = &self.replicator_resources {
             replicator_resources.validate()?;
         }
+
         if let Some(ducklake_maintenance) = &self.ducklake_maintenance {
             ducklake_maintenance.validate()?;
         }
@@ -225,6 +233,7 @@ impl From<StoredPipelineConfig> for FullApiPipelineConfig {
             max_table_sync_workers: Some(value.max_table_sync_workers),
             max_copy_connections_per_table: Some(value.max_copy_connections_per_table),
             memory_refresh_interval_ms: Some(value.memory_refresh_interval_ms),
+            replication_lag_refresh_interval_ms: Some(value.replication_lag_refresh_interval_ms),
             memory_backpressure: value.memory_backpressure,
             table_sync_copy: Some(value.table_sync_copy),
             invalidated_slot_behavior: Some(value.invalidated_slot_behavior),
@@ -250,6 +259,8 @@ pub struct StoredPipelineConfig {
     pub max_copy_connections_per_table: u16,
     #[serde(default = "default_memory_refresh_interval_ms")]
     pub memory_refresh_interval_ms: u64,
+    #[serde(default = "default_replication_lag_refresh_interval_ms")]
+    pub replication_lag_refresh_interval_ms: u64,
     #[serde(default = "default_memory_backpressure")]
     pub memory_backpressure: Option<MemoryBackpressureConfig>,
     #[serde(default)]
@@ -273,11 +284,13 @@ impl StoredPipelineConfig {
             id: pipeline_id,
             publication_name: self.publication_name,
             pg_connection: pg_connection_config,
+            store_pg_connection: None,
             batch: self.batch,
             table_error_retry_delay_ms: self.table_error_retry_delay_ms,
             table_error_retry_max_attempts: self.table_error_retry_max_attempts,
             max_table_sync_workers: self.max_table_sync_workers,
             memory_refresh_interval_ms: self.memory_refresh_interval_ms,
+            replication_lag_refresh_interval_ms: self.replication_lag_refresh_interval_ms,
             memory_backpressure: self.memory_backpressure,
             table_sync_copy: self.table_sync_copy,
             invalidated_slot_behavior: self.invalidated_slot_behavior,
@@ -313,6 +326,9 @@ impl From<FullApiPipelineConfig> for StoredPipelineConfig {
             memory_refresh_interval_ms: value
                 .memory_refresh_interval_ms
                 .unwrap_or(PipelineConfig::DEFAULT_MEMORY_REFRESH_INTERVAL_MS),
+            replication_lag_refresh_interval_ms: value
+                .replication_lag_refresh_interval_ms
+                .unwrap_or(PipelineConfig::DEFAULT_REPLICATION_LAG_REFRESH_INTERVAL_MS),
             memory_backpressure: value.memory_backpressure,
             table_sync_copy: value.table_sync_copy.unwrap_or_default(),
             invalidated_slot_behavior: value.invalidated_slot_behavior.unwrap_or_default(),
@@ -336,7 +352,7 @@ fn default_ducklake_maintenance_min_inlined_bytes() -> u64 {
 }
 
 fn default_ducklake_maintenance_max_compacted_files() -> u32 {
-    32
+    40
 }
 
 fn default_ducklake_maintenance_max_tables_per_run() -> u32 {
@@ -344,7 +360,7 @@ fn default_ducklake_maintenance_max_tables_per_run() -> u32 {
 }
 
 fn default_ducklake_maintenance_target_file_size() -> String {
-    "10MB".to_owned()
+    "500MB".to_owned()
 }
 
 fn default_ducklake_maintenance_delete_threshold() -> f64 {
@@ -387,6 +403,7 @@ mod tests {
             max_table_sync_workers: 4,
             max_copy_connections_per_table: 8,
             memory_refresh_interval_ms: 100,
+            replication_lag_refresh_interval_ms: 10_000,
             memory_backpressure: Some(MemoryBackpressureConfig {
                 activate_threshold: 0.8,
                 resume_threshold: 0.7,
@@ -427,6 +444,7 @@ mod tests {
             max_table_sync_workers: None,
             max_copy_connections_per_table: None,
             memory_refresh_interval_ms: None,
+            replication_lag_refresh_interval_ms: None,
             memory_backpressure: None,
             table_sync_copy: None,
             invalidated_slot_behavior: None,
@@ -454,6 +472,7 @@ mod tests {
             max_table_sync_workers: None,
             max_copy_connections_per_table: None,
             memory_refresh_interval_ms: None,
+            replication_lag_refresh_interval_ms: None,
             memory_backpressure: None,
             table_sync_copy: None,
             invalidated_slot_behavior: None,
@@ -482,6 +501,10 @@ mod tests {
             stored.memory_refresh_interval_ms,
             PipelineConfig::DEFAULT_MEMORY_REFRESH_INTERVAL_MS
         );
+        assert_eq!(
+            stored.replication_lag_refresh_interval_ms,
+            PipelineConfig::DEFAULT_REPLICATION_LAG_REFRESH_INTERVAL_MS
+        );
         assert_eq!(stored.memory_backpressure, None);
         assert_eq!(stored.invalidated_slot_behavior, InvalidatedSlotBehavior::Error);
     }
@@ -500,6 +523,7 @@ mod tests {
             max_table_sync_workers: 4,
             max_copy_connections_per_table: 8,
             memory_refresh_interval_ms: 100,
+            replication_lag_refresh_interval_ms: 10_000,
             memory_backpressure: Some(MemoryBackpressureConfig {
                 activate_threshold: 0.8,
                 resume_threshold: 0.7,

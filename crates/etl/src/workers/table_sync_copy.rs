@@ -3,7 +3,7 @@ use std::{pin::Pin, sync::Arc, time::Instant};
 use etl_config::shared::BatchConfig;
 use etl_postgres::types::TableId;
 use futures::{Stream, StreamExt};
-use metrics::{counter, histogram};
+use metrics::histogram;
 use tokio::{
     pin,
     sync::{Semaphore, watch},
@@ -22,7 +22,7 @@ use crate::{
     error::{ErrorKind, EtlResult},
     etl_error,
     metrics::{
-        ACTION_LABEL, ETL_BATCH_ITEMS_SEND_DURATION_SECONDS, ETL_EVENTS_PROCESSED_TOTAL,
+        ACTION_LABEL, ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
         ETL_PARALLEL_TABLE_COPY_ROWS_IMBALANCE, ETL_PARALLEL_TABLE_COPY_TIME_IMBALANCE,
         ETL_TABLE_COPY_ROWS, PARTITIONING_LABEL, WORKER_TYPE_LABEL,
     },
@@ -149,13 +149,6 @@ where
                     .await?;
                 pending_flush_result.await.into_result()?;
 
-                counter!(
-                    ETL_EVENTS_PROCESSED_TOTAL,
-                    WORKER_TYPE_LABEL => "table_sync",
-                    ACTION_LABEL => "table_copy",
-                )
-                .increment(batch_size);
-
                 let send_duration_seconds = before_sending.elapsed().as_secs_f64();
                 histogram!(
                     ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
@@ -238,6 +231,9 @@ pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
 
 /// Copies a table serially using a single COPY stream from the slot
 /// transaction.
+///
+/// The tracked table is both the physical copy source and the publication
+/// row-filter lookup table.
 #[expect(clippy::too_many_arguments)]
 async fn serial_table_copy<D: Destination + Clone + Send + 'static>(
     replication_transaction: &PgReplicationTransaction<'_>,
@@ -493,7 +489,8 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
 ///
 /// The child transaction is already pinned to the exported snapshot. Depending
 /// on the [`CopyPartition`] variant, streams rows from either a ctid range or
-/// an entire leaf partition. All rows are written under the parent `table_id`.
+/// an entire leaf partition. All rows are written under the tracked
+/// `table_id`.
 #[expect(clippy::too_many_arguments)]
 async fn copy_partition<D>(
     child_replication_transaction: PgChildReplicationTransaction<'_>,
@@ -561,8 +558,9 @@ where
         }
         CopyPartition::LeafPartition { leaf_table_id } => {
             child_replication_transaction
-                .get_table_copy_stream(
+                .get_table_copy_stream_with_filter_table(
                     *leaf_table_id,
+                    table_id,
                     &replicated_column_schemas,
                     publication_name.as_ref().map(Arc::as_ref),
                 )

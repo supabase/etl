@@ -77,7 +77,7 @@ ALTER USER my_user REPLICATION;
 The fastest way to get a seeded database with a publication is via the xtask:
 
 ```bash
-# Start the dev Postgres (port 5430, wal_level=logical)
+# Start the dev Postgres primary (port 5430) and read replica (port 6430)
 cargo x init
 
 # Create and seed a database with 3 tables (users, orders, events) and a publication
@@ -142,7 +142,7 @@ consistent and queryable at all times.
 2. A **data directory** (local) or an S3 / S3-compatible bucket where Parquet
    files will be written.
 
-### Run (local data)
+### Run
 
 ```bash
 cargo run --bin ducklake -p etl-examples --features ducklake -- \
@@ -152,12 +152,11 @@ cargo run --bin ducklake -p etl-examples --features ducklake -- \
     --db-username postgres \
     --db-password mypassword \
     --catalog-url postgres://user:pass@localhost:5432/ducklake_catalog \
-    --data-path file:///absolute/path/to/lake_data \
-    --publication my_pub
+    --data-path s3://bucket/lake_data \
+    --publication my_pub \
+    --s3-access-key-id my-access-key \
+    --s3-secret-access-key my-secret-key
 ```
-
-The CLI also accepts plain local paths such as `./lake_data/` and normalizes
-them to absolute `file://` URLs before constructing the destination.
 
 ## ClickHouse Setup
 
@@ -264,7 +263,7 @@ authentication.
 
 ### Example configuration
 
-This is a fuller local example that also enables a dedicated DuckDB log dump on
+This is a fuller example that also enables a dedicated DuckDB log dump on
 shutdown:
 
 ```bash
@@ -275,8 +274,10 @@ cargo run --bin ducklake -p etl-examples --features ducklake -- \
     --db-username postgres \
     --db-password password \
     --catalog-url "postgres://postgres:password@postgres.etl-data-plane.svc.cluster.local:5432/mydb?sslmode=disable" \
-    --data-path /Users/bnj/misc/parquet_files \
+    --data-path s3://bucket/lake_data \
     --publication my_pub \
+    --s3-access-key-id my-access-key \
+    --s3-secret-access-key my-secret-key \
     --metadata-schema ducklake \
     --pool-size 4 \
     --max-batch-fill-duration-ms 5000 \
@@ -288,7 +289,7 @@ cargo run --bin ducklake -p etl-examples --features ducklake -- \
 In this example:
 
 - `--catalog-url` points to the PostgreSQL database that stores DuckLake metadata.
-- `--data-path` is a plain local path and will be normalized to a `file://` URL.
+- `--data-path` points to the S3 / S3-compatible location for Parquet files.
 - `--metadata-schema ducklake` keeps DuckLake metadata tables in a dedicated Postgres schema.
 - `--duckdb-log-storage-path` enables `CALL enable_logging(storage_path = ...)` for each DuckDB connection.
 - `--duckdb-log-dump-path` writes a CSV dump of `SELECT * FROM duckdb_logs` during graceful shutdown.
@@ -328,9 +329,8 @@ cargo run --bin ducklake -p etl-examples --features ducklake -- \
     --metadata-schema <schema-name>
 ```
 
-The example CLI exposes S3 / S3-compatible cloud credentials today. For
-`s3://` data paths, the destination loads DuckDB's `httpfs` extension during
-connection setup.
+The example CLI requires S3 / S3-compatible cloud credentials. The destination
+loads DuckDB's `httpfs` extension during connection setup.
 
 ### All flags
 
@@ -342,13 +342,13 @@ connection setup.
 | `--db-username`                | _(required)_ | Postgres user (must have REPLICATION)                             |
 | `--db-password`                | —            | Postgres password (omit for trust auth)                           |
 | `--catalog-url`                | _(required)_ | DuckLake catalog URL (`postgres://...` or `file://...`)           |
-| `--data-path`                  | _(required)_ | Local path / `file://` URL or `s3://` URI for Parquet files       |
+| `--data-path`                  | _(required)_ | `s3://` URI for Parquet files                                     |
 | `--pool-size`                  | `4`          | DuckDB connection pool size                                       |
 | `--max-batch-fill-duration-ms` | `5000`       | Max time to wait before flushing a batch                          |
 | `--max-table-sync-workers`     | `4`          | Concurrent workers during initial copy                            |
 | `--publication`                | _(required)_ | Postgres publication name                                         |
-| `--s3-access-key-id`           | —            | S3 access key ID (required for private S3 buckets)                |
-| `--s3-secret-access-key`       | —            | S3 secret access key                                              |
+| `--s3-access-key-id`           | _(required)_ | S3 access key ID                                                  |
+| `--s3-secret-access-key`       | _(required)_ | S3 secret access key                                              |
 | `--s3-region`                  | `us-east-1`  | S3 region                                                         |
 | `--s3-endpoint`                | —            | Custom S3 endpoint, e.g. `127.0.0.1:5000/s3` for Supabase Storage |
 | `--s3-url-style`               | `path`       | URL style: `path` (MinIO/Supabase) or `vhost` (AWS)               |
@@ -366,7 +366,7 @@ lake at any time — even while the pipeline is running:
 duckdb :memory: -c "
   INSTALL ducklake; LOAD ducklake;
   ATTACH 'ducklake:postgres:host=''localhost'' port=''5432'' dbname=''ducklake_catalog'' user=''user'' password=''pass'''
-    AS lake (DATA_PATH 'file:///absolute/path/to/lake_data');
+    AS lake (DATA_PATH 's3://bucket/lake_data');
   SELECT * FROM lake.public_orders;
   SELECT COUNT(*) FROM lake.public_customers;
 "
@@ -433,49 +433,37 @@ Replicates a Postgres publication to a Snowflake database via Snowpipe Streaming
 ### Prerequisites
 
 1. A Snowflake account with a user configured for **key-pair authentication**.
-2. An RSA private key file (`.p8`) with the public key registered on the Snowflake user.
+2. `TESTS_SNOWFLAKE_CONNECTION` set with the Snowflake JSON connection string.
 3. A target database and schema created in Snowflake.
 4. A role with USAGE on warehouse/database/schema and CREATE TABLE, CREATE STAGE,
    CREATE PIPE on the schema.
 
-See `.env.example` for detailed setup instructions and SQL commands for each step.
+See `crates/etl-destinations/src/snowflake/README.md` for setup instructions and SQL commands.
 
 ### Run
 
 ```bash
+source .env
 cargo run --bin snowflake -p etl-examples --features snowflake -- \
     --db-host localhost \
     --db-port 5430 \
     --db-name etl_testdata \
     --db-username postgres \
     --db-password postgres \
-    --snowflake-account ORG-ACCOUNT \
-    --snowflake-user myuser \
-    --snowflake-private-key-path /path/to/rsa_key.p8 \
-    --snowflake-database MY_DATABASE \
-    --snowflake-role my_role \
     --publication seed_pub
 ```
 
-Snowflake args can also be set via `SNOWFLAKE_*` environment variables (e.g.
-`SNOWFLAKE_ACCOUNT`, `SNOWFLAKE_USER`, etc.) instead of CLI flags.
+The Snowflake example reads credentials from `TESTS_SNOWFLAKE_CONNECTION` only. The JSON object must contain `account`, `user`, `database`, `schema`, and `private_key`; `role` and `private_key_passphrase` are optional. Put `private_key` last so the target account details remain easy to inspect before the secret material.
 
 ### All flags
 
-| Flag                                 | Default      | Description                                       |
-| ------------------------------------ | ------------ | ------------------------------------------------- |
-| `--db-host`                          | _(required)_ | Postgres host                                     |
-| `--db-port`                          | _(required)_ | Postgres port                                     |
-| `--db-name`                          | _(required)_ | Postgres database name                            |
-| `--db-username`                      | _(required)_ | Postgres user                                     |
-| `--db-password`                      | --           | Postgres password                                 |
-| `--snowflake-account`                | _(required)_ | Snowflake account identifier (ORG-ACCOUNT format) |
-| `--snowflake-user`                   | _(required)_ | Snowflake user for key-pair auth                  |
-| `--snowflake-private-key-path`       | _(required)_ | Path to RSA private key file (.p8)                |
-| `--snowflake-private-key-passphrase` | --           | Passphrase if the key is encrypted                |
-| `--snowflake-database`               | _(required)_ | Snowflake target database                         |
-| `--snowflake-schema`                 | `PUBLIC`     | Snowflake target schema                           |
-| `--snowflake-role`                   | --           | Snowflake role (uses user default if omitted)     |
-| `--max-batch-fill-duration-ms`       | `5000`       | Max time to wait before flushing a batch          |
-| `--max-table-sync-workers`           | `4`          | Concurrent workers during initial copy            |
-| `--publication`                      | _(required)_ | Postgres publication name                         |
+| Flag                           | Default      | Description                              |
+| ------------------------------ | ------------ | ---------------------------------------- |
+| `--db-host`                    | _(required)_ | Postgres host                            |
+| `--db-port`                    | _(required)_ | Postgres port                            |
+| `--db-name`                    | _(required)_ | Postgres database name                   |
+| `--db-username`                | _(required)_ | Postgres user                            |
+| `--db-password`                | --           | Postgres password                        |
+| `--max-batch-fill-duration-ms` | `5000`       | Max time to wait before flushing a batch |
+| `--max-table-sync-workers`     | `4`          | Concurrent workers during initial copy   |
+| `--publication`                | _(required)_ | Postgres publication name                |

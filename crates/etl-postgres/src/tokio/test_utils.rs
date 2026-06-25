@@ -124,7 +124,7 @@ impl<G: GenericClient> PgDatabase<G> {
         let quoted_publication_name = quote_identifier(publication_name);
 
         if requires_version!(self.server_version, POSTGRES_15) {
-            // PostgreSQL 15+ supports FOR ALL TABLES IN SCHEMA syntax
+            // PostgreSQL 15+ supports FOR TABLES IN SCHEMA syntax.
             let create_publication_query = match schema {
                 Some(schema_name) => format!(
                     "create publication {quoted_publication_name} for tables in schema {} with \
@@ -670,7 +670,7 @@ impl<G> Drop for PgDatabase<G> {
 /// Creates a [`ColumnSchema`] for a non-nullable, primary key column named "id"
 /// of type `INT8` that is added by default to tables created by [`PgDatabase`].
 pub fn id_column_schema() -> ColumnSchema {
-    ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, Some(1), false)
+    ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false).with_primary_key(1)
 }
 
 /// Connects with the TLS mode described by the test database configuration.
@@ -767,6 +767,17 @@ pub async fn connect_to_pg_database(config: &PgConnectionConfig) -> (Client, Opt
     // Create a new client connected to the created database
     let database_config: tokio_postgres::Config = config.with_db(None);
     connect_with_config(database_config, config).await
+}
+
+/// Tries to connect to an existing Postgres database.
+///
+/// Establishes a client connection to the database specified in the
+/// configuration. Assumes the database already exists.
+pub async fn try_connect_to_pg_database(
+    config: &PgConnectionConfig,
+) -> Result<(Client, Option<NonZeroI32>), String> {
+    let database_config: tokio_postgres::Config = config.with_db(None);
+    try_connect_with_config(database_config, config).await
 }
 
 /// Drops a Postgres database and cleans up all resources.
